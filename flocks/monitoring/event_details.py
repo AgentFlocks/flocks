@@ -338,6 +338,45 @@ def _text(value, limit=800):
     return _clip(value, limit)[0]
 
 
+def brief_values(value, noun='项', limit=2):
+    values = value if isinstance(value, list) else [value]
+    values = [str(item) for item in values if type(item) in (str, int, float) and str(item)]
+    selected = list(dict.fromkeys(values))
+    text = '、'.join(_readable_text(item, 70) for item in selected[:limit])
+    return text + (f'等{len(selected)}个{noun}' if len(selected) > limit else '')
+
+
+def behavior_description(record, fallback=None):
+    """Describe source observations; never assert successful exploitation."""
+    fallback = fallback if isinstance(fallback, dict) else {}
+    name = _readable_text(record.get('name') or record.get('virus_name') or fallback.get('name') or '安全事件', 80)
+    host = brief_values(record.get('host') or fallback.get('host'), '主机')
+    src, dst = brief_values(record.get('src_ip'), '源地址'), brief_values(record.get('dst_ip'), '目标地址')
+    port = brief_values(record.get('dst_port'), '端口')
+    if src and dst:
+        single = not isinstance(record.get('dst_ip'), list) or len(record['dst_ip']) == 1
+        endpoint = dst + (':' + port if port and single else f'（目的端口{port}）' if port else '')
+        dns = port == '53'
+        content = f'{src}向{endpoint}发起' + ('DNS查询' if dns else '访问')
+        domain = brief_values(record.get('domain'), '域名')
+        if domain:
+            content += '，涉及域名' + domain
+        return _readable_text(content + f'，来源检测为「{name}」。', 240)
+    if record.get('file_path') or record.get('file_name'):
+        content = f'主机{host}记录文件' if host else '来源记录文件'
+        content += brief_values(record.get('file_path') or record.get('file_name'), '文件')
+        return _readable_text(content + f'，检测为「{name}」。', 200)
+    if record.get('process_name') or record.get('command_line'):
+        content = f'主机{host}记录进程' if host else '来源记录进程'
+        content += brief_values(record.get('process_name') or record.get('command_line'), '进程')
+        return _readable_text(content + f'，关联「{name}」告警。', 200)
+    if record.get('url'):
+        return _readable_text(f'主机{host}的访问记录涉及{brief_values(record["url"], "地址")}，检测为「{name}」。', 200)
+    if record.get('domain'):
+        return _readable_text(f'来源记录关联域名{brief_values(record["domain"], "域名")}，检测为「{name}」。', 200)
+    return _readable_text((f'主机{host}出现' if host else '来源检测到') + f'「{name}」告警。', 180)
+
+
 def build_story(event, evidence, result=None, *, canonical=None):
     """Build an evidence-linked story, keeping collection and event times apart."""
     event = event if isinstance(event, dict) else {}
@@ -372,16 +411,23 @@ def build_story(event, evidence, result=None, *, canonical=None):
             else:
                 story['key_evidence'].append(item)
 
-    def timeline(time_value, text, ref):
-        marker = (str(time_value), text, ref)
-        if _when(time_value) is not None and marker not in timeline_seen and len(story['timeline']) < 40:
+    def timeline(time_value, text, ref, phase='', detailed=False):
+        stamp = _when(time_value)
+        marker = (stamp, text, phase)
+        if stamp is None or marker in timeline_seen:
+            return
+        if detailed and phase:
+            story['timeline'][:] = [entry for entry in story['timeline'] if not (
+                _when(entry['time']) == stamp and entry.get('phase') == phase and entry['evidence_id'] == '事件基础信息')]
+        if len(story['timeline']) < 40:
             timeline_seen.add(marker)
-            story['timeline'].append({'time': time_value, 'text': _text(text), 'evidence_id': ref})
+            story['timeline'].append({'time': time_value, 'text': _text(text), 'evidence_id': ref, 'phase': phase})
 
+    base_description = behavior_description(basics)
     if basics.get('start_time') is not None:
-        timeline(basics['start_time'], 'XDR 记录事件首次发生', '事件基础信息')
+        timeline(basics['start_time'], '首次检出：' + base_description, '事件基础信息', 'first')
     if basics.get('end_time') is not None and basics.get('end_time') != basics.get('start_time'):
-        timeline(basics['end_time'], 'XDR 记录事件最近发生', '事件基础信息')
+        timeline(basics['end_time'], '最近检出：' + base_description, '事件基础信息', 'latest')
     for proof in evidence[:24]:
         if not isinstance(proof, dict):
             continue
@@ -422,10 +468,15 @@ def build_story(event, evidence, result=None, *, canonical=None):
                 key_fact(ref, source + '；' + '；'.join(details))
             if record.get('file_created_at') is not None:
                 timeline(record['file_created_at'], f'{source}：来源记录文件创建，文件 {_text(record.get("file_path") or record.get("file_name") or "标识未提供", 300)}（不等于告警发生时间）', ref)
-            if record.get('alert_time') is not None:
-                description = record.get('name') or row.get('description') or row.get('title')
-                if description:
-                    timeline(record['alert_time'], f'{source}：{description}', ref)
+            description = behavior_description(record, basics)
+            prefix = source + '关联记录：' if proof.get('device') != event.get('device') else ''
+            for time_key, phase, title in (('start_time', 'first', '首次检出：'), ('end_time', 'latest', '最近检出：')):
+                if record.get(time_key) is not None:
+                    if time_key == 'end_time' and record.get('end_time') == record.get('start_time'):
+                        continue
+                    timeline(record[time_key], prefix + title + description, ref, phase, detailed=True)
+            if record.get('alert_time') is not None and record['alert_time'] not in (record.get('start_time'), record.get('end_time')):
+                timeline(record['alert_time'], prefix + '检测记录：' + description, ref, detailed=True)
             for canonical, aliases in PACKET_FIELDS.items():
                 supplied = next((key for key in aliases if key in row), None)
                 if not supplied:
@@ -608,19 +659,16 @@ def readable_story(story):
         if text and marker not in seen:
             seen.add(marker)
             timeline.append({'time': entry.get('time'), 'text': text})
-    for record in story.get('alert_details', []):
+    legacy_alerts = [] if any(entry.get('phase') for entry in story.get('timeline', []) if isinstance(entry, dict)) else story.get('alert_details', [])
+    for record in legacy_alerts:
         if not isinstance(record, dict):
             continue
-        source = record.get('src_ip') or record.get('host')
-        destination = record.get('dst_ip')
-        name = _readable_text(record.get('name') or '关联行为', 160)
-        endpoint = str(destination) if destination else ''
-        if endpoint and record.get('dst_port') is not None:
-            endpoint += ':' + str(record['dst_port'])
-        detail = f'{source} 向 {endpoint} 发起访问；{name}' if source and endpoint else name
-        for key, phase in (('start_time', '来源记录该行为首次出现'), ('end_time', '来源记录该行为最近出现')):
+        detail = behavior_description(record, basics)
+        for key, phase in (('start_time', '首次检出：'), ('end_time', '最近检出：')):
             when = record.get(key)
-            text = phase + '：' + detail
+            if key == 'end_time' and when == record.get('start_time'):
+                continue
+            text = phase + detail
             marker = (str(when), text)
             if _when(when) is not None and marker not in seen:
                 seen.add(marker)

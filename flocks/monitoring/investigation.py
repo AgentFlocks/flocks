@@ -339,6 +339,19 @@ def issue(field, code):
     return {'field': field, 'code': code}
 
 
+def prior_query(data, source, entity, alert_id=''):
+    key = query_key(source, entity, alert_id)
+    return [proof for proof in data.get('evidence', [])
+            if isinstance(proof, dict) and proof.get('query_key') == key]
+
+
+def query_blocked(data, source, entity, alert_id=''):
+    prior = prior_query(data, source, entity, alert_id)
+    return bool(prior and (prior[-1].get('success') or
+        sum(not proof.get('success') and proof.get('attempt_id') == data.get('attempt_id')
+            for proof in prior) >= 2))
+
+
 def validate_choice(choice, data):
     """Runtime contract complements the prompt/schema, including mocked providers."""
     if choice.action == 'query' and 'capabilities' in data:
@@ -355,12 +368,14 @@ def validate_choice(choice, data):
             raise InvestigationError('告警编号不属于原事件，未执行操作', 'model_format', [issue('alert_id', 'unbound_alert')])
         if choice.alert_id and choice.entity != 'alert_proof':
             raise InvestigationError('此查询不能指定告警编号', 'model_format', [issue('alert_id', 'unsupported_target')])
-        key = query_key(source, choice.entity, choice.alert_id)
-        prior = [proof for proof in data.get('evidence', []) if proof['query_key'] == key]
-        if prior and (prior[-1]['success'] or sum(not proof['success'] and proof.get('attempt_id') == data.get('attempt_id') for proof in prior) >= 2):
-            raise InvestigationError('相同查询已有结果或本轮已重试，请采用已有证据或选择其他查询',
-                                     'model_format' if prior[-1]['success'] else 'query_transient',
-                                     [issue('capability', 'duplicate_query')])
+        prior = prior_query(data, source, choice.entity, choice.alert_id)
+        if query_blocked(data, source, choice.entity, choice.alert_id):
+            raise InvestigationError('相同查询已有结果或本轮已达到重试上限，请使用已有证据或选择其他查询',
+                'model_format' if prior[-1]['success'] else 'query_transient',
+                [issue('capability', 'duplicate_query')], details={'rejected_action': {
+                    'capability': source.id, 'entity': choice.entity, 'alert_id': choice.alert_id},
+                    'existing_evidence_ids': [proof['id'] for proof in prior],
+                    'partial': bool(prior[-1].get('partial'))})
     if choice.action == 'consult' and 'agents' in data and choice.agent not in {agent['name'] for agent in data['agents']}:
         raise InvestigationError('协作对象不在本轮授权目录，未执行操作', 'model_format', [issue('agent', 'unknown_agent')])
     if choice.action == 'finish' and 'evidence' in data:
@@ -377,15 +392,25 @@ def decision_schema(data):
     schema = Choice.model_json_schema()
     # Enumerate the actual bound ID/action pairs, rather than only saying "use
     # a capability" and asking a model to infer the private identifier scheme.
-    query_options = []
+    query_options, existing_results = [], []
     for cap in data.get('capabilities', []):
+        source = capabilities.Capability(**{key: cap[key] for key in
+            ('id', 'device', 'tool', 'kind', 'name', 'status')}, skill=cap.get('skill', ''))
         for entity in cap.get('entities', []):
-            if entity == 'alert_proof':
-                query_options.extend({'capability': cap['id'], 'entity': entity, 'alert_id': identifier}
-                    for identifier in data.get('event', {}).get('alertIds', [])[:200])
-            elif entity != 'alerts' or data.get('event', {}).get('alertIds'):
-                query_options.append({'capability': cap['id'], 'entity': entity})
-    return {'schema': schema, 'query_options': query_options,
+            targets = data.get('event', {}).get('alertIds', [])[:200] if entity == 'alert_proof' else ['']
+            if entity == 'alerts' and not data.get('event', {}).get('alertIds'):
+                continue
+            for alert_id in targets:
+                option = {'capability': cap['id'], 'entity': entity}
+                if alert_id:
+                    option['alert_id'] = alert_id
+                if query_blocked(data, source, entity, alert_id):
+                    prior = prior_query(data, source, entity, alert_id)
+                    existing_results.append({**option, 'evidence_ids': [proof['id'] for proof in prior],
+                        'partial': bool(prior[-1].get('partial')), 'success': bool(prior[-1].get('success'))})
+                else:
+                    query_options.append(option)
+    return {'schema': schema, 'query_options': query_options, 'existing_results': existing_results,
             'consult_agents': [a['name'] for a in data.get('agents', [])],
             'finish_evidence_ids': [proof['id'] for proof in data.get('evidence', []) if proof['success']]}
 
@@ -502,7 +527,9 @@ async def choose(agent_name, data):
         if correction:
             # Give safe field errors, never replay untrusted output/hidden reasoning.
             messages.append(ChatMessage(role='user', content=encode({'correction': previous.issues,
-                'instruction': '上一个决策未通过校验且未执行。仅纠正这些字段，输出一个简短完整 JSON；不要重复已成功查询。'})))
+                'rejected_action': previous.details.get('rejected_action'),
+                'existing_evidence_ids': previous.details.get('existing_evidence_ids', []),
+                'instruction': '上一个决策未通过校验且未执行。只从query_options选未完成的动作；已有部分结果请结合其他实体、告警举证或其他来源补查，不重复原查询。也可引用已有证据完成谨慎判断。输出一个简短完整 JSON。'})))
         active_budget = _MODEL_BUDGET.get()
         budget = active_budget[0] if active_budget else None
         if active_budget and budget.models >= active_budget[1]:
@@ -592,7 +619,8 @@ async def choose(agent_name, data):
         except InvestigationError as exc:
             for failure in exc.issues:
                 diag.event('investigation.validation', error_kind=exc.kind, validation_field=failure['field'],
-                           validation_code=failure['code'], validation_count=len(exc.issues), correction_attempt=correction)
+                           validation_code=failure['code'], validation_count=len(exc.issues), correction_attempt=correction,
+                           entity_type=exc.details.get('rejected_action', {}).get('entity'))
             if correction or exc.kind not in {'model_format', 'model_truncated'}:
                 raise
             previous = exc
@@ -741,10 +769,12 @@ class Investigator:
             raise InvestigationError('本事件没有可用的受控查询来源，请恢复设备、工具或技能配置', 'dependency')
         if not depth:
             await self.prime(allowed_catalog)
+        action_conflicts, action_feedback = 0, None
         for _ in range(4 if depth else self.policy.investigation_calls + 3):
             if self.budget.models >= self.policy.investigation_calls * 2 + 3:
                 raise InvestigationError('本轮模型决策预算已用完，已保存证据，下一轮继续', 'budget')
             async def think(_):
+                nonlocal action_conflicts, action_feedback
                 bounded_evidence = model_evidence(self.event, self.evidence)
                 self.context_incomplete = self.context_incomplete or any(p.get('context_excerpt') for p in bounded_evidence)
                 data = {
@@ -755,6 +785,7 @@ class Investigator:
                     'evidence': bounded_evidence, 'remaining_calls': self.policy.investigation_calls - self.budget.calls,
                     'specialist_assessments': self.advice,
                     'purpose': '真实事件调查', 'attempt_id': self.attempt_id,
+                    'action_feedback': action_feedback,
                 }
                 before = self.budget.models
                 token = _MODEL_BUDGET.set((self.budget, self.policy.investigation_calls * 2 + 3))
@@ -763,7 +794,18 @@ class Investigator:
                     choice = validate_choice(await choose(agent_name, data), data)
                 except InvestigationError as exc:
                     count_fallback = exc.kind not in {'model_cooldown', 'budget'}
-                    raise
+                    if not any(item.get('code') == 'duplicate_query' for item in exc.issues):
+                        raise
+                    action_conflicts += 1
+                    action_feedback = {**exc.details, 'code': 'duplicate_query',
+                        'instruction': '该动作没有重复执行。使用已有结果，或选择其他未完成查询补查关键缺口；不得把不完整结果判为安全。'}
+                    diag.event('investigation.replan', validation_code='duplicate_query', validation_count=action_conflicts,
+                               entity_type=exc.details.get('rejected_action', {}).get('entity'))
+                    return None, {'state': 'replanning', 'conflicts': action_conflicts}, Summary(
+                        '重复查询已跳过，智能体继续调整调查方法。', sections=[
+                            {'label': '已有依据', 'text': '已保存的成功查询和部分结果继续保留，不重复调用相同工具动作。'},
+                            {'label': '下一步', 'text': '根据已有证据选择其他实体、关联告警或受控来源补查；仍受本轮次数和时间限制。'},
+                        ])
                 finally:
                     _MODEL_BUDGET.reset(token)
                     if count_fallback and self.budget.models == before:
@@ -780,6 +822,10 @@ class Investigator:
                     ])
             choice = await self.recorder.call('协作智能体分析' if depth else '监测运营智能体：选择下一步',
                                                {'event': self.event['id'], 'agent': agent_name}, think)
+            if choice is None:
+                if action_conflicts >= 3:
+                    raise InvestigationError('本轮累计三次选择重复查询，已保存证据，下一轮重新规划调查', 'budget')
+                continue
             if choice.action == 'finish':
                 known = {e['id']: e for e in self.evidence}
                 if not choice.evidence_ids or any(ref not in known or not known[ref]['success'] for ref in choice.evidence_ids):

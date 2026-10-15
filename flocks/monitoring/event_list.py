@@ -680,6 +680,8 @@ def _detail(owner, scope, event_key):
                         investigation['result'] if isinstance(investigation['result'], dict) else {}, canonical=canonical)
     overview = readable_story({**story, 'verdict': summary['assessment']['verdict'],
         'conclusion': summary['assessment']['reason'], 'gaps': summary['assessment']['gaps']})
+    from .case_overview import operator_overview
+    overview.update(operator_overview(event, investigation, summary['assessment'], story, current_proofs))
     output = {'event': event, 'overview': overview, 'story': story, 'investigation': investigation, 'dispositions': dispositions, 'notice': notice,
         'observations': [{k: v for k, v in row.items() if k not in {'data', 'data_truncated'}} for row in observations],
         'timezone': str(tz), 'truncated': truncated, 'warnings': list(dict.fromkeys(warnings))}

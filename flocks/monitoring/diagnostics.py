@@ -37,6 +37,7 @@ MAX_ERRORS = 20
 # recovery so the cause survives even in a busy round.
 MAX_INVESTIGATION_SIGNALS = 96
 INVESTIGATION_SIGNALS = {'investigation.model', 'investigation.recovery',
+                         'investigation.validation', 'investigation.replan',
                          'investigation.failure', 'investigation.model_gate', 'query.time_validation'}
 HEARTBEAT_SECONDS = 30
 _current = ContextVar('monitor_diagnostics', default=None)
@@ -105,7 +106,7 @@ _ENUMS = {
     'event': {'trace.start', 'trace.end', 'progress', 'stage.start', 'stage.end', 'query.window',
               'tool.raw', 'tool.normalized', 'adapter.result', 'adapter.structured', 'adapter.decoded', 'adapter.failure',
               'mail.received', 'mail.result', 'mail.interpreted', 'mail.analyzed', 'mail.evidence', 'investigation.query', 'investigation.model', 'investigation.validation', 'investigation.recovery', 'query.sample', 'page.validated', 'source.membership', 'run.result', 'dispatch.result', 'background.result', 'control.result', 'control.lock'} | INFRASTRUCTURE_EVENTS | INVESTIGATION_SIGNALS,
-    'entity_type': {'host', 'file', 'process', 'ip', 'innerip', 'dns'},
+    'entity_type': {'host', 'file', 'process', 'ip', 'innerip', 'dns', 'proof', 'alerts', 'alert_proof', 'related'},
     'stage': {'dispatch', 'run', 'session.prepare', 'query.device', 'query.events', 'query.entities',
               'correlate', 'tool.execute', 'tool.handler', 'tool.normalize', 'report.export', 'step.other',
               'disposition.confirm', 'disposition.recheck', 'automatic.mark', 'mail.configure', 'mail.send', 'mail.receive', 'mail.interpret', 'mail.resolve', 'mail.mark', 'mail.manual.mark', 'mail.retry', 'mail.readback',

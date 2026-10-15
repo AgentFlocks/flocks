@@ -1,7 +1,12 @@
 import client from "./client";
 import { MONITOR_API } from "./securityMonitoring";
 
-export type EventHandling = "open" | "closed" | "ignored" | "contained" | "ended";
+export type EventHandling =
+  | "open"
+  | "closed"
+  | "ignored"
+  | "contained"
+  | "ended";
 export type EventAssessmentStatus =
   | "risk_open"
   | "risk_closed"
@@ -151,7 +156,12 @@ export interface EventEvidenceCard {
   partial?: boolean;
   boundary?: string;
   fields?: { key: string; label: string; value: unknown }[];
-  packets?: { field: string; label: string; text: string; truncated?: boolean }[];
+  packets?: {
+    field: string;
+    label: string;
+    text: string;
+    truncated?: boolean;
+  }[];
   query?: unknown;
   raw?: unknown;
   evidence_id?: string;
@@ -161,6 +171,9 @@ export interface EventDetailResponse {
   overview?: {
     basics?: Record<string, unknown>;
     conclusion?: string;
+    summary?: string;
+    findings?: string[];
+    missing_evidence?: string[];
     operator_summary?: string;
     operator_explanation?: string[];
     verdict?: string;

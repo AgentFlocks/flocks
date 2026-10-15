@@ -157,24 +157,39 @@ function responseError(error: unknown, fallback: string) {
   return typeof payload.detail === "string" ? payload.detail : fallback;
 }
 const monitoringEnded = (member: EventMember) =>
-  member.assessment?.lifecycle === "monitoring_ended" || member.handling === "ended";
-const eventEnded = (member: EventMember) => monitoringEnded(member) || member.assessment?.ended === true;
-const memberLabel = (member: EventMember) => monitoringEnded(member)
-  ? "已归档" : member.assessment?.label;
-const memberTime = (member?: EventMember) => member?.occurrence_time_unknown === true
-  ? null : member?.occurrence_at ?? member?.event_end_at ?? member?.event_at;
+  member.assessment?.lifecycle === "monitoring_ended" ||
+  member.handling === "ended";
+const eventEnded = (member: EventMember) =>
+  monitoringEnded(member) || member.assessment?.ended === true;
+const memberLabel = (member: EventMember) =>
+  monitoringEnded(member) ? "已归档" : member.assessment?.label;
+const memberTime = (member?: EventMember) =>
+  member?.occurrence_time_unknown === true
+    ? null
+    : (member?.occurrence_at ?? member?.event_end_at ?? member?.event_at);
 function occurrenceTimestamp(value: unknown) {
   if (value == null || value === "") return -Infinity;
-  const numeric = typeof value === "number" || (typeof value === "string" && /^\d{10,13}$/.test(value));
-  const source = numeric ? Number(value) * (Number(value) < 1e11 ? 1000 : 1) : String(value);
+  const numeric =
+    typeof value === "number" ||
+    (typeof value === "string" && /^\d{10,13}$/.test(value));
+  const source = numeric
+    ? Number(value) * (Number(value) < 1e11 ? 1000 : 1)
+    : String(value);
   const parsed = new Date(source).getTime();
   return Number.isFinite(parsed) ? parsed : -Infinity;
 }
 function latestMembers(row: EventListRow) {
-  return [...row.members].sort((left, right) => occurrenceTimestamp(memberTime(right)) - occurrenceTimestamp(memberTime(left)) || 0);
+  return [...row.members].sort(
+    (left, right) =>
+      occurrenceTimestamp(memberTime(right)) -
+        occurrenceTimestamp(memberTime(left)) || 0,
+  );
 }
 function primaryMember(row: EventListRow) {
-  return row.members.find((member) => member.key === row.primary_event_key) || latestMembers(row)[0];
+  return (
+    row.members.find((member) => member.key === row.primary_event_key) ||
+    latestMembers(row)[0]
+  );
 }
 function MemberConclusion({ member }: { member: EventMember }) {
   if (monitoringEnded(member)) return <span>XDR 本轮未再返回</span>;
@@ -264,11 +279,33 @@ function StoryDetails({
   const explanation =
     readableEvidence(text(overview.conclusion, originalExplanation)) ||
     "尚未形成可读的调查结论。";
-  const canShowOperatorCopy = state === "ready" && !historical && result.confidence === "high" &&
-    detail.event.assessment?.is_current === true && detail.event.assessment?.evidence_supported === true &&
+  const canShowOperatorCopy =
+    state === "ready" &&
+    !historical &&
+    result.confidence === "high" &&
+    detail.event.assessment?.is_current === true &&
+    detail.event.assessment?.evidence_supported === true &&
     detail.event.assessment.verdict !== "unknown";
-  const operatorSummary = canShowOperatorCopy ? readableEvidence(text(overview.operator_summary || story.operator_summary, "")) : "";
-  const operatorExplanation = canShowOperatorCopy ? strings(overview.operator_explanation || story.operator_explanation).map(readableEvidence).filter(Boolean).slice(0, 3) : [];
+  const operatorSummary = canShowOperatorCopy
+    ? readableEvidence(
+        text(overview.operator_summary || story.operator_summary, ""),
+      )
+    : "";
+  const operatorExplanation = canShowOperatorCopy
+    ? strings(overview.operator_explanation || story.operator_explanation)
+        .map(readableEvidence)
+        .filter(Boolean)
+        .slice(0, 3)
+    : [];
+  const conciseSummary = readableEvidence(text(overview.summary, ""));
+  const findings = strings(overview.findings)
+    .map(readableEvidence)
+    .filter(Boolean)
+    .slice(0, 2);
+  const missingEvidence = strings(overview.missing_evidence)
+    .map(readableEvidence)
+    .filter(Boolean)
+    .slice(0, 3);
   return (
     <div className="space-y-5">
       <section className="rounded-xl border border-sky-100 bg-sky-50/60 p-4 dark:border-sky-900 dark:bg-sky-950/30">
@@ -277,33 +314,72 @@ function StoryDetails({
           调查结论
         </h3>
         <p className="mb-2 text-xs font-medium text-sky-700 dark:text-sky-300">
-          {monitoringEnded(detail.event) ? "已归档"
-            : historical ? investigationLabels.stale
-            : investigationLabels[state] || "尚无调查结论"}
+          {monitoringEnded(detail.event)
+            ? "已归档"
+            : historical
+              ? investigationLabels.stale
+              : investigationLabels[state] || "尚无调查结论"}
         </p>
         <div className="mb-3">
           <AssessmentBadge
             status={assessmentStatus(detail.event)}
             label={memberLabel(detail.event)}
           />
-          {!eventEnded(detail.event) && !!detail.event.assessment?.observation_rounds && (
-            <span className="ml-2 text-xs text-slate-500">
-              已观察 {detail.event.assessment.observation_rounds} 轮
-            </span>
-          )}
-          {!eventEnded(detail.event) && assessmentStatus(detail.event) === "insufficient" && (
-            <p className="mt-2 text-xs text-slate-500">
-              暂不通知责任人，尚未排除风险。
-            </p>
-          )}
+          {!eventEnded(detail.event) &&
+            !!detail.event.assessment?.observation_rounds && (
+              <span className="ml-2 text-xs text-slate-500">
+                已观察 {detail.event.assessment.observation_rounds} 轮
+              </span>
+            )}
         </div>
-        {operatorSummary ? (
+        {conciseSummary ? (
+          <div className="space-y-3">
+            <p className="break-words text-sm font-semibold leading-7">
+              {conciseSummary}
+            </p>
+            {!!findings.length && (
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                  已有证据
+                </p>
+                {findings.map((line, index) => (
+                  <p key={index} className="break-words text-sm leading-6">
+                    {line}
+                  </p>
+                ))}
+              </div>
+            )}
+            {!!missingEvidence.length && (
+              <div className="space-y-1.5 border-t border-sky-100 pt-3 dark:border-sky-900">
+                <p className="text-xs font-medium text-sky-700 dark:text-sky-300">
+                  关键缺口
+                </p>
+                {missingEvidence.map((line, index) => (
+                  <p
+                    key={index}
+                    className="break-words text-sm leading-6 text-slate-600 dark:text-slate-300"
+                  >
+                    {line}
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : operatorSummary ? (
           <div className="space-y-2">
-            <p className="break-words text-sm font-semibold leading-7">{operatorSummary}</p>
-            {operatorExplanation.map((line, index) => <p key={index} className="break-words text-sm leading-7">{line}</p>)}
+            <p className="break-words text-sm font-semibold leading-7">
+              {operatorSummary}
+            </p>
+            {operatorExplanation.map((line, index) => (
+              <p key={index} className="break-words text-sm leading-7">
+                {line}
+              </p>
+            ))}
           </div>
         ) : (
-          <p className="whitespace-pre-wrap break-words text-sm leading-7">{explanation}</p>
+          <p className="whitespace-pre-wrap break-words text-sm leading-7">
+            {explanation}
+          </p>
         )}
       </section>
       {historical && Object.keys(history).length > 0 && (
@@ -841,7 +917,9 @@ export default function EventList({
   }, []);
   const openRow = (row: EventListRow, member?: EventMember) => {
     setSelected(row);
-    setMemberKey(member?.key || primaryMember(row)?.key || row.event_keys[0] || "");
+    setMemberKey(
+      member?.key || primaryMember(row)?.key || row.event_keys[0] || "",
+    );
   };
   const closeDetail = () => {
     setSelected(null);
@@ -852,9 +930,19 @@ export default function EventList({
   );
   const sourceTimezone = data?.timezone || calendarTimezone;
   const metrics = data?.metrics;
-  const displayedRows = useMemo(() => [...(data?.items || [])].sort((left, right) =>
-    occurrenceTimestamp(right.last_event_at ?? memberTime(primaryMember(right))) -
-    occurrenceTimestamp(left.last_event_at ?? memberTime(primaryMember(left))) || 0), [data]);
+  const displayedRows = useMemo(
+    () =>
+      [...(data?.items || [])].sort(
+        (left, right) =>
+          occurrenceTimestamp(
+            right.last_event_at ?? memberTime(primaryMember(right)),
+          ) -
+            occurrenceTimestamp(
+              left.last_event_at ?? memberTime(primaryMember(left)),
+            ) || 0,
+      ),
+    [data],
+  );
   const totalPages = data ? Math.max(1, Math.ceil(data.total / limit)) : 1;
   const activeFilters = !!device || !!assessment || !!search;
   const openRound = (
@@ -1146,17 +1234,18 @@ export default function EventList({
             ...Object.entries(assessmentLabels).map(([status, label]) => ({
               label,
               value:
-                metrics?.assessment_counts?.[status as EventAssessmentStatus] ?? (status === "ended" ? metrics?.ended : undefined),
+                metrics?.assessment_counts?.[status as EventAssessmentStatus] ??
+                (status === "ended" ? metrics?.ended : undefined),
               hint:
                 status === "ended"
                   ? "监测范围中已不再返回，保留历史记录"
                   : status === "insufficient"
-                  ? "未排除风险，暂不通知"
-                  : status === "benign"
-                    ? "有依据排除风险"
-                    : status === "risk_closed"
-                      ? "按已保存处置事实"
-                      : "已证实风险，等待处置闭环",
+                    ? "未排除风险，暂不通知"
+                    : status === "benign"
+                      ? "有依据排除风险"
+                      : status === "risk_closed"
+                        ? "按已保存处置事实"
+                        : "已证实风险，等待处置闭环",
               icon: <CircleDot size={17} />,
             })),
           ].map((item) => (
@@ -1182,9 +1271,7 @@ export default function EventList({
         <div className="overflow-hidden rounded-xl border border-sky-100 bg-white dark:border-slate-800 dark:bg-slate-900">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3 dark:border-slate-800">
             <h3 className="text-sm font-semibold">事件跟踪记录</h3>
-            <span className="text-xs text-slate-500">
-              按事件发生时间倒序
-            </span>
+            <span className="text-xs text-slate-500">按事件发生时间倒序</span>
           </div>
           {loading && !data ? (
             <div
@@ -1243,7 +1330,11 @@ export default function EventList({
                         <tr className="align-top transition-colors hover:bg-sky-50/50 dark:hover:bg-sky-950/20">
                           <td className="whitespace-nowrap px-4 py-4">
                             <p className="text-xs font-medium">
-                              {formatTime(row.last_event_at ?? (latest && memberTime(latest)), sourceTimezone)}
+                              {formatTime(
+                                row.last_event_at ??
+                                  (latest && memberTime(latest)),
+                                sourceTimezone,
+                              )}
                             </p>
                           </td>
                           <td className="max-w-48 break-words px-4 py-4 font-medium">
@@ -1315,8 +1406,20 @@ export default function EventList({
                           <td className="px-4 py-4">
                             <div className="space-y-2">
                               <AssessmentBadge
-                                status={latest ? assessmentStatus(latest) : row.assessment_status === "mixed" ? "insufficient" : row.assessment_status || "insufficient"}
-                                label={latest ? memberLabel(latest) : row.assessment_status === "mixed" ? undefined : row.assessment_label}
+                                status={
+                                  latest
+                                    ? assessmentStatus(latest)
+                                    : row.assessment_status === "mixed"
+                                      ? "insufficient"
+                                      : row.assessment_status || "insufficient"
+                                }
+                                label={
+                                  latest
+                                    ? memberLabel(latest)
+                                    : row.assessment_status === "mixed"
+                                      ? undefined
+                                      : row.assessment_label
+                                }
                               />
                             </div>
                             {latest && monitoringEnded(latest) && (
@@ -1324,22 +1427,25 @@ export default function EventList({
                                 XDR 本轮未再返回
                               </p>
                             )}
-                            {latest && !eventEnded(latest) && assessmentStatus(latest) === "insufficient" && (
-                              <p className="mt-2 text-xs text-slate-500">
-                                尚未排除风险
-                              </p>
-                            )}
-                            {latest && !eventEnded(latest) &&
+                            {latest &&
+                              !eventEnded(latest) &&
+                              assessmentStatus(latest) === "insufficient" && (
+                                <p className="mt-2 text-xs text-slate-500">
+                                  尚未排除风险
+                                </p>
+                              )}
+                            {latest &&
+                              !eventEnded(latest) &&
                               [
                                 "running",
                                 "pending",
                                 "deferred",
                                 "system_wait",
                               ].includes(latest.investigation?.state || "") && (
-                              <p className="mt-2 text-xs text-sky-700 dark:text-sky-300">
-                                最新事件待研判
-                              </p>
-                            )}
+                                <p className="mt-2 text-xs text-sky-700 dark:text-sky-300">
+                                  最新事件待研判
+                                </p>
+                              )}
                           </td>
                           <td className="px-4 py-4">
                             <button
@@ -1388,17 +1494,18 @@ export default function EventList({
                                             XDR 本轮未再返回
                                           </span>
                                         )}
-                                        {!eventEnded(member) && !!member.assessment
-                                          ?.observation_rounds && (
-                                          <span className="text-xs text-slate-500">
-                                            已观察{" "}
-                                            {
-                                              member.assessment
-                                                .observation_rounds
-                                            }{" "}
-                                            轮
-                                          </span>
-                                        )}
+                                        {!eventEnded(member) &&
+                                          !!member.assessment
+                                            ?.observation_rounds && (
+                                            <span className="text-xs text-slate-500">
+                                              已观察{" "}
+                                              {
+                                                member.assessment
+                                                  .observation_rounds
+                                              }{" "}
+                                              轮
+                                            </span>
+                                          )}
                                         <button
                                           aria-label={`查看子事件详情：${member.id}`}
                                           onClick={() => openRow(row, member)}
@@ -1477,7 +1584,9 @@ export default function EventList({
               </p>
               {selected.ioc_matches.length > 0 && (
                 <details className="mt-3 rounded-lg bg-sky-50 p-3 text-xs leading-6 dark:bg-sky-950/30">
-                  <summary className="cursor-pointer font-medium text-sky-800 dark:text-sky-200">关联线索</summary>
+                  <summary className="cursor-pointer font-medium text-sky-800 dark:text-sky-200">
+                    关联线索
+                  </summary>
                   <p className="break-all">
                     {selected.ioc_matches
                       .map((ioc) => `${ioc.type}: ${ioc.value}`)
@@ -1501,21 +1610,19 @@ export default function EventList({
                         {member.host || "主机未提供"} · {member.name}
                       </p>
                       <p className="mt-1 break-all text-xs text-slate-500">
-                        {formatTime(
-                          memberTime(member),
-                          sourceTimezone,
-                        )}
+                        {formatTime(memberTime(member), sourceTimezone)}
                       </p>
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         <AssessmentBadge
                           status={assessmentStatus(member)}
                           label={memberLabel(member)}
                         />
-                        {!eventEnded(member) && !!member.assessment?.observation_rounds && (
-                          <span className="text-xs text-slate-500">
-                            已观察 {member.assessment.observation_rounds} 轮
-                          </span>
-                        )}
+                        {!eventEnded(member) &&
+                          !!member.assessment?.observation_rounds && (
+                            <span className="text-xs text-slate-500">
+                              已观察 {member.assessment.observation_rounds} 轮
+                            </span>
+                          )}
                         <span className="text-xs text-slate-500">
                           <MemberConclusion member={member} />
                         </span>
@@ -1538,17 +1645,18 @@ export default function EventList({
                     status={assessmentStatus(detail?.event || currentMember)}
                     label={memberLabel(detail?.event || currentMember)}
                   />
-                  {!eventEnded(detail?.event || currentMember) && !!(detail?.event || currentMember).assessment
-                    ?.observation_rounds && (
-                    <span className="text-xs text-slate-500">
-                      已观察{" "}
-                      {
-                        (detail?.event || currentMember).assessment
-                          ?.observation_rounds
-                      }{" "}
-                      轮
-                    </span>
-                  )}
+                  {!eventEnded(detail?.event || currentMember) &&
+                    !!(detail?.event || currentMember).assessment
+                      ?.observation_rounds && (
+                      <span className="text-xs text-slate-500">
+                        已观察{" "}
+                        {
+                          (detail?.event || currentMember).assessment
+                            ?.observation_rounds
+                        }{" "}
+                        轮
+                      </span>
+                    )}
                   <span className="text-xs text-slate-500">
                     XDR 状态：
                     {xdrLabels[
@@ -1556,11 +1664,16 @@ export default function EventList({
                         detail?.event.deal_status ?? currentMember.deal_status,
                       )
                     ] ||
-                      (monitoringEnded(detail?.event || currentMember) ? "当前未核验" : undefined) ||
+                      (monitoringEnded(detail?.event || currentMember)
+                        ? "当前未核验"
+                        : undefined) ||
                       handlingLabels[
                         detail?.event.handling || currentMember.handling
                       ]}
-                    {monitoringEnded(detail?.event || currentMember) && (detail?.event.deal_status ?? currentMember.deal_status) != null && "（历史记录，当前未核验）"}
+                    {monitoringEnded(detail?.event || currentMember) &&
+                      (detail?.event.deal_status ??
+                        currentMember.deal_status) != null &&
+                      "（历史记录，当前未核验）"}
                   </span>
                   <span className="text-xs text-slate-500">
                     <MemberConclusion member={detail?.event || currentMember} />
@@ -1570,16 +1683,20 @@ export default function EventList({
                   {monitoringEnded(detail?.event || currentMember)
                     ? "XDR本轮查询未返回此事件，保留原研判和历史记录，不再自动观察或跟进。"
                     : (detail?.event.handling_source ||
-                    currentMember.handling_source) === "monitor_verified"
-                    ? "处置来源：套件写回并回查确认"
-                    : (detail
-                          ? detail.event.deal_status
-                          : currentMember.deal_status) == null
-                      ? "尚未取得 XDR 处置状态，按未闭环跟踪。"
-                      : "处置来源：最近保存的 XDR 状态，非套件执行修复"}
+                          currentMember.handling_source) === "monitor_verified"
+                      ? "处置来源：套件写回并回查确认"
+                      : (detail
+                            ? detail.event.deal_status
+                            : currentMember.deal_status) == null
+                        ? "尚未取得 XDR 处置状态，按未闭环跟踪。"
+                        : "处置来源：最近保存的 XDR 状态，非套件执行修复"}
                 </p>
                 <p className="mt-2 text-xs text-slate-500">
-                  发生时间：{formatTime(memberTime(detail?.event || currentMember), sourceTimezone)}
+                  发生时间：
+                  {formatTime(
+                    memberTime(detail?.event || currentMember),
+                    sourceTimezone,
+                  )}
                 </p>
               </section>
             )}
@@ -1630,8 +1747,19 @@ export default function EventList({
                         监测跟踪记录
                       </summary>
                       <p className="my-3 text-xs leading-6 text-slate-500">
-                        首次记录：{formatTime(detail.event.first_seen_at || currentMember?.first_seen_at, sourceTimezone)}
-                        <br />最近记录：{formatTime(detail.event.last_seen_at || currentMember?.last_seen_at, sourceTimezone)}
+                        首次记录：
+                        {formatTime(
+                          detail.event.first_seen_at ||
+                            currentMember?.first_seen_at,
+                          sourceTimezone,
+                        )}
+                        <br />
+                        最近记录：
+                        {formatTime(
+                          detail.event.last_seen_at ||
+                            currentMember?.last_seen_at,
+                          sourceTimezone,
+                        )}
                       </p>
                       <ol className="space-y-2">
                         {detail.observations.map((observation, index) => (

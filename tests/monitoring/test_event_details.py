@@ -334,3 +334,29 @@ def test_business_overview_omits_bookkeeping_and_keeps_source_timeline_and_origi
     assert [item['time'] for item in overview['timeline']] == [1791860154, 1791860390]
     assert '223.5.5.5:53' in overview['timeline'][0]['text']
     assert story['key_evidence'][0]['evidence_id'] == 'evidence-2'
+
+
+def test_timeline_describes_behavior_and_compacts_address_lists_without_duplicate_endpoints():
+    from flocks.monitoring.event_details import readable_story
+    original = {'id': 'incident-example', 'device': 'xdr-a', 'name': '通用系统命令注入攻击',
+                'host': '192.0.2.23', 'startTime': 1791870000, 'endTime': 1791960000}
+    data = {'data': {'item': [{'alertId': 'alert-1', 'name': '通用系统命令注入攻击',
+             'firstTime': 1791870000, 'lastTime': 1791960000,
+             'srcIp': ['192.0.2.73', '192.0.2.77', '192.0.2.79'],
+             'dstIp': ['192.0.2.23', '192.0.2.24', '192.0.2.25'], 'dstPort': [80]}]}}
+    record = proof(data, kind='alerts')
+    story = build_story(original, [record])
+    overview = readable_story(story)
+    assert len(story['timeline']) == len(overview['timeline']) == 2
+    for entry in overview['timeline']:
+        assert '命令注入攻击' in entry['text'] and '发起访问' in entry['text']
+        assert '等3个源地址' in entry['text'] and '等3个目标地址' in entry['text']
+        assert "['" not in entry['text'] and len(entry['text']) <= 240
+    assert record['facts']['data']['item'][0]['srcIp'] == data['data']['item'][0]['srcIp']
+
+
+def test_timeline_without_proof_names_the_detected_host_and_event_without_claiming_success():
+    story = build_story({'id': 'incident-1', 'name': '命令注入攻击', 'host': '192.0.2.23',
+                         'startTime': 1791870000, 'endTime': 1791960000}, [])
+    assert all('192.0.2.23' in entry['text'] and '命令注入攻击' in entry['text'] for entry in story['timeline'])
+    assert all('成功' not in entry['text'] and '失陷' not in entry['text'] for entry in story['timeline'])

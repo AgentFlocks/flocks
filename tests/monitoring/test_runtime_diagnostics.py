@@ -412,3 +412,20 @@ def test_provider_failure_properties_and_unknown_status_are_not_trusted():
         'error_type': 'BrokenMetadata', 'model_failure': 'other'}
     assert diag.safe_record({'http_status': 9999, 'request_id_hash': 'SECRET',
                              'model_failure': 'SECRET', 'cause_error_type': 'SECRET TOKEN'}) == {}
+
+
+async def test_action_conflict_diagnostics_survive_history_queries_filling_trace_budget(captured):
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
+        for _ in range(diag.MAX_EVENTS + 20):
+            diag.event('adapter.result', **diag.shape('safe'))
+        diag.event('investigation.validation', error_kind='model_format',
+                   validation_field='capability', validation_code='duplicate_query',
+                   validation_count=1, correction_attempt=1, entity_type='alert_proof')
+        diag.event('investigation.replan', validation_code='duplicate_query', validation_count=1,
+                   entity_type='alert_proof')
+        diag.result('completed')
+    validation = next(r for r in captured if r.get('event') == 'investigation.validation')
+    recovery = next(r for r in captured if r.get('event') == 'investigation.replan')
+    assert validation['entity_type'] == recovery['entity_type'] == 'alert_proof'
+    assert captured[-1]['outcome'] == 'completed'
+    assert captured[-1]['suppressed'] > 0

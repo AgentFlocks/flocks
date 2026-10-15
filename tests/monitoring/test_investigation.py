@@ -738,3 +738,69 @@ async def test_status_only_update_keeps_confirmed_evidence_but_new_activity_reop
     saved = (await rows('SELECT * FROM monitor_investigations'))[0]
     assert saved['state'] == 'pending' and saved['evidence'] == '[]'
     assert len(await rows('SELECT * FROM monitor_investigation_versions')) == 1
+
+
+async def test_duplicate_action_after_provider_correction_replans_and_uses_saved_evidence(case, configured_model):
+    _, diagnostics = configured_model
+    chat = i.Provider.get('fixture').chat
+    original = i.Choice(action='query', capability='cap-1', entity='host', reason='取得主机证据')
+    finish = i.Choice(action='finish', verdict='unknown', evidence_ids=['evidence-1'],
+                      blocking_gaps=['尚缺少进程执行记录'], reason='已有主机记录，执行情况仍需核对')
+    def response(choice):
+        return SimpleNamespace(tool_calls=[], finish_reason='stop', content=choice.model_dump_json())
+    chat.side_effect = [response(original), response(original), response(original), response(finish)]
+    await i.investigate(case.policy, case.event, case.recorder)
+    assert case.query.await_count == 1 and chat.await_count == 4
+    assert case.event['investigation']['state'] == 'ready'
+    assert case.event['assessment']['verdict'] == 'unknown'
+    assert not case.event['assessment']['notify_eligible']
+    assert any(record['stage'] == 'investigation.replan' for record in diagnostics)
+    assert not await rows('SELECT * FROM monitor_dispositions')
+    assert not await rows('SELECT * FROM monitor_mail_notices')
+
+
+async def test_partial_success_is_reused_while_agent_supplements_another_entity(case, monkeypatch):
+    case.query.side_effect = [
+        ({'data': {'item': [{'hostIp': case.event['host']}], 'partial': True}}, {}),
+        ({'data': {'item': [{'fileName': 'suspicious.exe', 'virusName': 'Trojan'}]}}, {}),
+    ]
+    choices = [i.Choice(action='query', capability='cap-1', entity='host', reason='主机'),
+               i.Choice(action='query', capability='cap-1', entity='host', reason='补主机'),
+               i.Choice(action='query', capability='cap-1', entity='file', reason='改查文件'),
+               i.Choice(action='finish', verdict='risk', confidence='high', risk_confirmed=True,
+                        evidence_ids=['evidence-2'], blocking_gaps=[], reason='已取得恶意文件记录')]
+    planner = AsyncMock(side_effect=choices)
+    monkeypatch.setattr(i, 'choose', planner)
+    await i.investigate(case.policy, case.event, case.recorder)
+    assert case.query.await_count == 2
+    assert case.event['investigation']['state'] == 'ready'
+    saved = (await rows('SELECT evidence FROM monitor_investigations'))[0]
+    evidence = json.loads(saved['evidence'])
+    assert evidence[0]['partial'] and evidence[0]['success']
+    assert [p['kind'] for p in evidence] == ['host', 'file']
+    assert planner.await_args_list[2].args[1]['action_feedback']['code'] == 'duplicate_query'
+    assert planner.await_args_list[2].args[1]['action_feedback']['existing_evidence_ids'] == ['evidence-1']
+
+
+async def test_continuous_duplicate_suggestions_are_bounded_and_defer_without_system_failure(case, monkeypatch):
+    planner = AsyncMock(return_value=i.Choice(action='query', capability='cap-1', entity='host', reason='重复主机'))
+    monkeypatch.setattr(i, 'choose', planner)
+    await i.investigate(case.policy, case.event, case.recorder)
+    assert case.query.await_count == 1 and planner.await_count == 4
+    saved = (await rows('SELECT * FROM monitor_investigations'))[0]
+    assert saved['state'] == 'deferred' and saved['error_kind'] == 'budget'
+    assert saved['failure_count'] == 0 and not saved['retry_exhausted']
+    assert saved['next_retry_at'] and len(json.loads(saved['evidence'])) == 1
+
+
+def test_query_options_exclude_successful_partial_and_exhausted_queries_but_allow_other_alerts():
+    cap = c.Capability('cap-alerts', 'xdr', 'sangfor_xdr_alerts', 'xdr_alerts', 'XDR告警', 'ok')
+    data = {'event': {'device': 'xdr', 'alertIds': ['alert-1', 'alert-2']},
+            'capabilities': [cap.json()], 'evidence': [{
+                'id': 'evidence-1', 'query_key': i.query_key(cap, 'alert_proof', 'alert-1'),
+                'success': True, 'partial': True}], 'agents': []}
+    schema = i.decision_schema(data)
+    assert {'capability': cap.id, 'entity': 'alert_proof', 'alert_id': 'alert-1'} not in schema['query_options']
+    assert {'capability': cap.id, 'entity': 'alert_proof', 'alert_id': 'alert-2'} in schema['query_options']
+    assert schema['existing_results'][0]['partial']
+    assert schema['existing_results'][0]['evidence_ids'] == ['evidence-1']

@@ -542,10 +542,16 @@ it("pauses background refresh in hidden tabs and updates both list and open deta
             closure_counts: { open: 0, closed: 2, ignored: 0, contained: 0 },
             handling: "closed",
             assessment_counts: { risk_closed: 2 },
-            members: row().members.map((item) => ({ ...item, assessment: {
-              status: "risk_closed", label: "有风险 · 已处置", verdict: "risk",
-              reason: "负责人反馈已核验", notify_eligible: false,
-            } })),
+            members: row().members.map((item) => ({
+              ...item,
+              assessment: {
+                status: "risk_closed",
+                label: "有风险 · 已处置",
+                verdict: "risk",
+                reason: "负责人反馈已核验",
+                notify_eligible: false,
+              },
+            })),
           }),
         ],
       }) as never,
@@ -669,7 +675,9 @@ it("explains independent records and keeps a missing XDR disposition explicitly 
   expect(
     await within(dialog).findByText("尚未取得 XDR 处置状态，按未闭环跟踪。"),
   ).toBeInTheDocument();
-  expect(within(dialog).queryByText(`关联说明：${reason}`)).not.toBeInTheDocument();
+  expect(
+    within(dialog).queryByText(`关联说明：${reason}`),
+  ).not.toBeInTheDocument();
   expect(
     within(dialog).getAllByText("证据不足 · 暂忽略").length,
   ).toBeGreaterThan(0);
@@ -821,7 +829,9 @@ it("shows the latest member conclusion in the group and retains all member outco
   expect(aggregate.queryByText("无风险 · 已忽略")).not.toBeInTheDocument();
   expect(aggregate.queryByText("证据不足 · 暂忽略")).not.toBeInTheDocument();
   expect(aggregate.getByText("4 台主机")).toBeInTheDocument();
-  fireEvent.click(aggregate.getByRole("button", { name: "展开子事件：group-a" }));
+  fireEvent.click(
+    aggregate.getByRole("button", { name: "展开子事件：group-a" }),
+  );
   const expanded = within(screen.getAllByRole("row")[2]);
   expect(expanded.getByText("有风险 · 已处置")).toBeInTheDocument();
   expect(expanded.getByText("无风险 · 已忽略")).toBeInTheDocument();
@@ -853,76 +863,194 @@ it("clamps event paging after the total shrinks and keeps page size at ten", asy
   expect(screen.getByRole("button", { name: "事件上一页" })).toBeDisabled();
 });
 
-it.each([true, false])("orders rows and members by source occurrence and uses the latest assessment (primary key supplied: %s)", async (primaryKey) => {
-  const old = member({ id: "old-event", key: "old-key", event_end_at: "2026-10-12T01:00:00Z",
-    last_seen_at: "2026-10-14T09:00:00Z" });
-  const latest = member({ id: "latest-event", key: "latest-key", event_end_at: "2026-10-13T02:00:00Z",
-    last_seen_at: "2026-10-13T02:01:00Z", assessment: { status: "benign", label: "无风险 · 已忽略",
-      verdict: "benign", reason: "业务活动已证实", notify_eligible: false } });
-  vi.mocked(monitoringEventsApi.list).mockResolvedValue(response({ items: [
-    row({ id: "old-row", name: "来源发生较早", grouped: false, member_count: 1, members: [old],
-      last_event_at: old.event_end_at, last_seen_at: old.last_seen_at }),
-    row({ id: "latest-group", name: "来源最新聚合", members: [old, latest], last_event_at: latest.event_end_at,
-      primary_event_key: primaryKey ? latest.key : undefined, assessment_status: "mixed", assessment_label: "包含不同跟进状态" }),
-  ] }) as never);
-  renderPage();
-  await screen.findByRole("button", { name: "来源最新聚合" });
-  const rows = screen.getAllByRole("row");
-  expect(within(rows[1]).getByRole("button", { name: "来源最新聚合" })).toBeInTheDocument();
-  expect(within(rows[2]).getByRole("button", { name: "来源发生较早" })).toBeInTheDocument();
-  expect(screen.getByRole("columnheader", { name: "发生时间" })).toBeInTheDocument();
-  expect(screen.queryByRole("columnheader", { name: "最近观察 / 发生" })).not.toBeInTheDocument();
-  expect(rows[1]).toHaveTextContent("2026/10/13 10:00:00");
-  expect(rows[1]).not.toHaveTextContent("2026/10/14");
-  expect(within(rows[1]).getByText("无风险 · 已忽略")).toBeInTheDocument();
-  expect(within(rows[1]).queryByText("包含不同跟进状态")).not.toBeInTheDocument();
-  fireEvent.click(within(rows[1]).getByRole("button", { name: "展开子事件：latest-group" }));
-  const children = within(screen.getAllByRole("row")[2]).getAllByRole("listitem");
-  expect(children[0]).toHaveTextContent("latest-event");
-  expect(children[1]).toHaveTextContent("old-event");
-  fireEvent.click(within(rows[1]).getByRole("button", { name: "查看事件详情：latest-group" }));
-  await waitFor(() => expect(monitoringEventsApi.detail).toHaveBeenCalledWith("latest-key", expect.any(AbortSignal)));
-  expect(screen.queryByText(/可跨主机聚合|聚合规则：|聚合只整理展示|同类聚合便于浏览/)).not.toBeInTheDocument();
-});
+it.each([true, false])(
+  "orders rows and members by source occurrence and uses the latest assessment (primary key supplied: %s)",
+  async (primaryKey) => {
+    const old = member({
+      id: "old-event",
+      key: "old-key",
+      event_end_at: "2026-10-12T01:00:00Z",
+      last_seen_at: "2026-10-14T09:00:00Z",
+    });
+    const latest = member({
+      id: "latest-event",
+      key: "latest-key",
+      event_end_at: "2026-10-13T02:00:00Z",
+      last_seen_at: "2026-10-13T02:01:00Z",
+      assessment: {
+        status: "benign",
+        label: "无风险 · 已忽略",
+        verdict: "benign",
+        reason: "业务活动已证实",
+        notify_eligible: false,
+      },
+    });
+    vi.mocked(monitoringEventsApi.list).mockResolvedValue(
+      response({
+        items: [
+          row({
+            id: "old-row",
+            name: "来源发生较早",
+            grouped: false,
+            member_count: 1,
+            members: [old],
+            last_event_at: old.event_end_at,
+            last_seen_at: old.last_seen_at,
+          }),
+          row({
+            id: "latest-group",
+            name: "来源最新聚合",
+            members: [old, latest],
+            last_event_at: latest.event_end_at,
+            primary_event_key: primaryKey ? latest.key : undefined,
+            assessment_status: "mixed",
+            assessment_label: "包含不同跟进状态",
+          }),
+        ],
+      }) as never,
+    );
+    renderPage();
+    await screen.findByRole("button", { name: "来源最新聚合" });
+    const rows = screen.getAllByRole("row");
+    expect(
+      within(rows[1]).getByRole("button", { name: "来源最新聚合" }),
+    ).toBeInTheDocument();
+    expect(
+      within(rows[2]).getByRole("button", { name: "来源发生较早" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("columnheader", { name: "发生时间" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "最近观察 / 发生" }),
+    ).not.toBeInTheDocument();
+    expect(rows[1]).toHaveTextContent("2026/10/13 10:00:00");
+    expect(rows[1]).not.toHaveTextContent("2026/10/14");
+    expect(within(rows[1]).getByText("无风险 · 已忽略")).toBeInTheDocument();
+    expect(
+      within(rows[1]).queryByText("包含不同跟进状态"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      within(rows[1]).getByRole("button", { name: "展开子事件：latest-group" }),
+    );
+    const children = within(screen.getAllByRole("row")[2]).getAllByRole(
+      "listitem",
+    );
+    expect(children[0]).toHaveTextContent("latest-event");
+    expect(children[1]).toHaveTextContent("old-event");
+    fireEvent.click(
+      within(rows[1]).getByRole("button", {
+        name: "查看事件详情：latest-group",
+      }),
+    );
+    await waitFor(() =>
+      expect(monitoringEventsApi.detail).toHaveBeenCalledWith(
+        "latest-key",
+        expect.any(AbortSignal),
+      ),
+    );
+    expect(
+      screen.queryByText(
+        /可跨主机聚合|聚合规则：|聚合只整理展示|同类聚合便于浏览/,
+      ),
+    ).not.toBeInTheDocument();
+  },
+);
 
 it("shows locally ended events as ended without pending observation or a claim of verified external handling", async () => {
-  const ended = member({ deal_status: 0, handling: "ended", handling_source: "monitoring", assessment: {
-    status: "ended", label: "已归档", lifecycle: "monitoring_ended", ended: true,
-    observation_rounds: 6, verdict: "unknown", notify_eligible: false,
-    reason: "本轮完整监测范围未返回，未确认人工处置或风险消除",
-  } });
-  vi.mocked(monitoringEventsApi.list).mockResolvedValue(response({ items: [row({ grouped: false, member_count: 1,
-    members: [ended], assessment_status: "ended", assessment_label: ended.assessment?.label })],
-    metrics: { ...response().data.metrics, assessment_counts: { insufficient: 0, ended: 1 }, ended: 1 },
-  }) as never);
-  vi.mocked(monitoringEventsApi.detail).mockResolvedValue(detail({ event: ended }) as never);
+  const ended = member({
+    deal_status: 0,
+    handling: "ended",
+    handling_source: "monitoring",
+    assessment: {
+      status: "ended",
+      label: "已归档",
+      lifecycle: "monitoring_ended",
+      ended: true,
+      observation_rounds: 6,
+      verdict: "unknown",
+      notify_eligible: false,
+      reason: "本轮完整监测范围未返回，未确认人工处置或风险消除",
+    },
+  });
+  vi.mocked(monitoringEventsApi.list).mockResolvedValue(
+    response({
+      items: [
+        row({
+          grouped: false,
+          member_count: 1,
+          members: [ended],
+          assessment_status: "ended",
+          assessment_label: ended.assessment?.label,
+        }),
+      ],
+      metrics: {
+        ...response().data.metrics,
+        assessment_counts: { insufficient: 0, ended: 1 },
+        ended: 1,
+      },
+    }) as never,
+  );
+  vi.mocked(monitoringEventsApi.detail).mockResolvedValue(
+    detail({ event: ended }) as never,
+  );
   renderPage();
   await screen.findByText("独立事件");
   const item = within(screen.getAllByRole("row")[1]);
   expect(item.getByText("已归档")).toBeInTheDocument();
   expect(item.getByText("XDR 本轮未再返回")).toBeInTheDocument();
-  expect(item.queryByText(/待观察|待研判|已观察|尚未排除风险/)).not.toBeInTheDocument();
+  expect(
+    item.queryByText(/待观察|待研判|已观察|尚未排除风险/),
+  ).not.toBeInTheDocument();
   fireEvent.click(item.getByRole("button", { name: "查看事件详情：group-a" }));
   const dialog = screen.getByRole("dialog");
-  await within(dialog).findByText("XDR本轮查询未返回此事件，保留原研判和历史记录，不再自动观察或跟进。");
-  expect(within(dialog).queryByText(/待观察|等待调查|已观察 6 轮|暂不通知责任人，尚未排除风险/)).not.toBeInTheDocument();
+  await within(dialog).findByText(
+    "XDR本轮查询未返回此事件，保留原研判和历史记录，不再自动观察或跟进。",
+  );
+  expect(
+    within(dialog).queryByText(
+      /待观察|等待调查|已观察 6 轮|暂不通知责任人，尚未排除风险/,
+    ),
+  ).not.toBeInTheDocument();
   expect(dialog).toHaveTextContent("待处置（历史记录，当前未核验）");
-  expect(within(dialog).queryByText("已由他人处置 · 已结束")).not.toBeInTheDocument();
+  expect(
+    within(dialog).queryByText("已由他人处置 · 已结束"),
+  ).not.toBeInTheDocument();
   expect(item.queryByText(/已结束|其他人员处置/)).not.toBeInTheDocument();
-  expect(within(dialog).queryByText(/已结束|其他人员处置/)).not.toBeInTheDocument();
+  expect(
+    within(dialog).queryByText(/已结束|其他人员处置/),
+  ).not.toBeInTheDocument();
   const audit = within(dialog).getByText("监测跟踪记录").closest("details")!;
   expect(audit).not.toHaveAttribute("open");
   expect(within(audit).getByText(/首次记录：/)).toBeInTheDocument();
 });
 
 it("keeps missing source times last and never substitutes an observation timestamp", async () => {
-  const missing = member({ key: "time-missing", event_at: null, event_end_at: "INVALID_SOURCE_TIME",
-    occurrence_at: null, occurrence_time_unknown: true, last_seen_at: "2030-01-01T12:00:00Z" });
-  vi.mocked(monitoringEventsApi.list).mockResolvedValue(response({ items: [
-    row({ id: "unknown-time", name: "发生时间未知", grouped: false, member_count: 1,
-      last_event_at: null, first_event_at: null, members: [missing], last_seen_at: missing.last_seen_at }),
-    row({ id: "known-time", name: "发生时间明确" }),
-  ] }) as never);
+  const missing = member({
+    key: "time-missing",
+    event_at: null,
+    event_end_at: "INVALID_SOURCE_TIME",
+    occurrence_at: null,
+    occurrence_time_unknown: true,
+    last_seen_at: "2030-01-01T12:00:00Z",
+  });
+  vi.mocked(monitoringEventsApi.list).mockResolvedValue(
+    response({
+      items: [
+        row({
+          id: "unknown-time",
+          name: "发生时间未知",
+          grouped: false,
+          member_count: 1,
+          last_event_at: null,
+          first_event_at: null,
+          members: [missing],
+          last_seen_at: missing.last_seen_at,
+        }),
+        row({ id: "known-time", name: "发生时间明确" }),
+      ],
+    }) as never,
+  );
   renderPage();
   await screen.findByRole("button", { name: "发生时间未知" });
   const rows = screen.getAllByRole("row");
@@ -934,17 +1062,30 @@ it("keeps missing source times last and never substitutes an observation timesta
 });
 
 it("includes an ended count and filter separately from insufficient evidence awaiting observation", async () => {
-  vi.mocked(monitoringEventsApi.list).mockResolvedValue(response({
-    metrics: { ...response().data.metrics, assessment_counts: { insufficient: 1, ended: 4 }, ended: 4 },
-  }) as never);
+  vi.mocked(monitoringEventsApi.list).mockResolvedValue(
+    response({
+      metrics: {
+        ...response().data.metrics,
+        assessment_counts: { insufficient: 1, ended: 4 },
+        ended: 4,
+      },
+    }) as never,
+  );
   renderPage();
   const stats = screen.getByLabelText("事件统计");
   await within(stats).findByText("4");
-  expect(within(stats).getByText("已归档").closest(".rounded-xl")).toHaveTextContent("4");
-  fireEvent.change(screen.getByRole("combobox", { name: "研判结果筛选" }), { target: { value: "ended" } });
-  await waitFor(() => expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
-    expect.objectContaining({ assessment: "ended", offset: 0 }), expect.any(AbortSignal),
-  ));
+  expect(
+    within(stats).getByText("已归档").closest(".rounded-xl"),
+  ).toHaveTextContent("4");
+  fireEvent.change(screen.getByRole("combobox", { name: "研判结果筛选" }), {
+    target: { value: "ended" },
+  });
+  await waitFor(() =>
+    expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ assessment: "ended", offset: 0 }),
+      expect.any(AbortSignal),
+    ),
+  );
 });
 
 it("puts opaque evidence identifiers in collapsed technical details while retaining clear facts", async () => {
@@ -1228,3 +1369,76 @@ it.each([
     ).not.toBeInTheDocument();
   },
 );
+
+it("explains available evidence and concrete gaps for an unfinished investigation", async () => {
+  const value = detail({
+    overview: {
+      summary: "XDR检出主机192.0.2.23的命令注入告警，当前仍需补证核对。",
+      findings: ["XDR记录：192.0.2.73访问192.0.2.23:80，来源检测为命令注入。"],
+      missing_evidence: [
+        "实际攻击请求内容，尚不能核对攻击语句。",
+        "服务端响应或主机执行结果，尚不能确认利用效果。",
+      ],
+      conclusion:
+        "证据不足，暂不通知责任人；尚未排除风险。调查尚未形成最终结论。",
+    },
+  });
+  value.data.event.assessment = {
+    status: "insufficient",
+    label: "高风险存疑 · 证据不足 · 待观察",
+    verdict: "unknown",
+    notify_eligible: false,
+    reason: "调查尚未完成",
+  };
+  value.data.event.investigation = { state: "system_wait", is_current: true };
+  vi.mocked(monitoringEventsApi.detail).mockResolvedValue(value as never);
+  renderPage();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+  );
+  const dialog = screen.getByRole("dialog");
+  const card = (
+    await within(dialog).findByRole("heading", { name: "调查结论" })
+  ).closest("section")!;
+  expect(
+    await within(card).findByText(value.data.overview!.summary!),
+  ).toBeInTheDocument();
+  expect(within(card).getByText("已有证据")).toBeInTheDocument();
+  expect(
+    within(card).getByText(value.data.overview!.findings![0]),
+  ).toBeInTheDocument();
+  expect(within(card).getByText("关键缺口")).toBeInTheDocument();
+  expect(
+    within(card).getByText(value.data.overview!.missing_evidence![1]),
+  ).toBeInTheDocument();
+  expect(
+    within(card).queryByText(value.data.overview!.conclusion!),
+  ).not.toBeInTheDocument();
+});
+
+it("describes the verified malicious behavior for a confirmed risk without a generic evidence warning", async () => {
+  const value = detail({
+    overview: {
+      summary: "已确认主机收到恶意命令注入请求，需要处置。",
+      findings: ["请求参数包含命令执行内容，关联主机为192.0.2.23。"],
+      missing_evidence: [],
+    },
+  });
+  vi.mocked(monitoringEventsApi.detail).mockResolvedValue(value as never);
+  renderPage();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+  );
+  const card = (
+    await within(screen.getByRole("dialog")).findByRole("heading", {
+      name: "调查结论",
+    })
+  ).closest("section")!;
+  expect(
+    await within(card).findByText(value.data.overview!.summary!),
+  ).toBeInTheDocument();
+  expect(
+    within(card).getByText(value.data.overview!.findings![0]),
+  ).toBeInTheDocument();
+  expect(within(card).queryByText("关键缺口")).not.toBeInTheDocument();
+});
