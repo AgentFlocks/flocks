@@ -24,6 +24,13 @@ import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
 import DelegateTaskCard, { extractDelegateInfo, isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
+import { ReaToolPart } from '@/features/rea/ReaCards';
+import {
+  ReaChatContext,
+  findLatestReaCardPartId,
+  isReaCardPart,
+  type ReaChatContextValue,
+} from '@/features/rea/reaChat';
 import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
 import { TodoList, buildTodoSummary, pickTodoEntries } from './TodoList';
@@ -302,6 +309,11 @@ export interface SessionChatProps {
    * true = allow images; false = block images with a UI warning; null/undefined = allow (unknown).
    */
   supportsVision?: boolean | null;
+  /**
+   * Attach files of any type, not only documents and images (reverse-engineering
+   * samples once the REA plugin is installed; the server applies the same rule).
+   */
+  allowAnyUpload?: boolean;
 }
 
 type AttachmentStatus = 'uploading' | 'success' | 'error';
@@ -1909,6 +1921,7 @@ export default function SessionChat({
   onOpenContextFile,
   onOpenContext,
   supportsVision,
+  allowAnyUpload = false,
   toolbarSlot,
   composerAddMenuSlot,
   onComposerAddMenuOpenChange,
@@ -3529,7 +3542,7 @@ export default function SessionChat({
         return;
       }
 
-      if (!isAllowedUploadFile(file)) {
+      if (!allowAnyUpload && !isAllowedUploadFile(file)) {
         invalidAttachments.push({
           id,
           file,
@@ -3595,7 +3608,7 @@ export default function SessionChat({
           });
       });
     }
-  }, [t, toast, uploadSelectedFiles, supportsVision, setAttachments]);
+  }, [t, toast, uploadSelectedFiles, supportsVision, setAttachments, allowAnyUpload]);
 
   const handleFileSelection = useCallback((fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
@@ -4582,6 +4595,24 @@ export default function SessionChat({
     writeDismissedGoalKey(sessionId, goalKey);
     setDismissedGoalKey(goalKey);
   }, [sessionId, visibleGoalBanner]);
+  const latestReaCardPartId = useMemo(() => findLatestReaCardPartId(messages), [messages]);
+  const reaSubmitRef = useRef<(text: string) => Promise<void>>(async () => {});
+  reaSubmitRef.current = async (text: string) => {
+    if (!sessionId || transport) return;
+    // Sent as the user's own message, the same as typing it into the composer.
+    if (isStreaming) {
+      await enqueueText(text, []);
+      return;
+    }
+    await sendText(text, [], agentName);
+  };
+  const submitReaPrompt = useCallback((text: string) => reaSubmitRef.current(text), []);
+  const reaChatContext = useMemo<ReaChatContextValue>(() => ({
+    sessionId: sessionId ?? null,
+    readOnly: hideInput || Boolean(transport) || !sessionId,
+    latestCardPartId: latestReaCardPartId,
+    submitPrompt: submitReaPrompt,
+  }), [hideInput, latestReaCardPartId, sessionId, submitReaPrompt, transport]);
   const stopButton = canStop && (
     <button
       onClick={handleAbort}
@@ -4593,6 +4624,7 @@ export default function SessionChat({
   );
 
   return (
+    <ReaChatContext.Provider value={reaChatContext}>
     <div className={`flex flex-col min-h-0 ${className}`}>
       {/* Messages area */}
       <div
@@ -4927,7 +4959,7 @@ export default function SessionChat({
               ref={fileInputRef}
               type="file"
               className="hidden"
-              accept={FILE_INPUT_ACCEPT_ALL}
+              accept={allowAnyUpload ? undefined : FILE_INPUT_ACCEPT_ALL}
               multiple
               onChange={(event) => {
                 handleFileSelection(event.target.files);
@@ -4964,7 +4996,8 @@ export default function SessionChat({
                     : isStreaming
                       ? 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/70'
                       : pageCanvas && !compact
-                        ? 'border-black/[0.09] bg-zinc-50 hover:border-black/[0.14] focus-within:border-black/[0.14] focus-within:bg-white focus-within:ring-4 focus-within:ring-black/[0.025] dark:border-white/[0.10] dark:bg-[#303842] dark:hover:border-white/[0.16] dark:focus-within:border-white/[0.16] dark:focus-within:bg-[#343d48] dark:focus-within:ring-white/[0.03]'
+                        // Focus is one red border, no second ring (REA V30 / Flocks UI); it also wins over hover.
+                        ? 'border-black/[0.09] bg-zinc-50 hover:border-black/[0.14] focus-within:!border-[#DC2626] focus-within:bg-white dark:border-white/[0.10] dark:bg-[#303842] dark:hover:border-white/[0.16] dark:focus-within:!border-[#DC2626] dark:focus-within:bg-[#343d48]'
                         : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
               }`}
             >
@@ -5326,6 +5359,7 @@ export default function SessionChat({
         />
       )}
     </div>
+    </ReaChatContext.Provider>
   );
 }
 
@@ -5792,6 +5826,8 @@ function ChatMessageBubbleInner({
             }
             if (part.type !== 'tool') return false;
             if (isPendingQuestionToolPart(part)) return false;
+            // REA status, install and report cards stay visible between process groups.
+            if (isReaCardPart(part)) return false;
             return true;
           };
           const isRenderableTextPart = (part: MessagePart): boolean => (
@@ -6071,7 +6107,7 @@ function ChatMessageBubbleInner({
                 else pendingTiming.push(part);
               }
               if (!isRenderableDisplayPart(part)) return;
-              if (isPendingQuestionToolPart(part) || isRenderableTextPart(part)) {
+              if (isPendingQuestionToolPart(part) || isRenderableTextPart(part) || isReaCardPart(part)) {
                 flushProcessGroup();
               }
               if (isPendingQuestionToolPart(part)) {
@@ -6867,6 +6903,9 @@ export function ChatToolPart({
   // `category` field (for example wecom_mcp category="doc").
   if (shouldRenderDelegateTaskCard(part)) {
     return <DelegateTaskCard part={part} processStep={processStep} />;
+  }
+  if (isReaCardPart(part)) {
+    return <ReaToolPart part={part} />;
   }
 
   const state: Partial<ToolState> = part.state || {};

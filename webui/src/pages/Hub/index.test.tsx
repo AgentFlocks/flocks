@@ -1,6 +1,6 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import HubPage from './index';
@@ -25,6 +25,17 @@ const { hubAPI, toastError } = vi.hoisted(() => ({
 }));
 
 vi.mock('@/api/hub', () => ({ hubAPI }));
+const reaApi = vi.hoisted(() => ({
+  status: vi.fn(),
+  reserveInstallSession: vi.fn(),
+  recordInstallSession: vi.fn(),
+  uninstallPreview: vi.fn(),
+  uninstall: vi.fn(),
+}));
+vi.mock('@/api/rea', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/api/rea')>();
+  return { ...actual, reaApi };
+});
 vi.mock('@/hooks/useDebouncedValue', () => ({
   useDebouncedValue: <T,>(value: T) => value,
 }));
@@ -159,6 +170,411 @@ describe('HubPage catalog loading', () => {
       expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument();
     },
   );
+
+  describe('REA entry', () => {
+    const reaEntry = {
+      ...catalogEntry('rea', 'REA Reverse Engineering'),
+      type: 'skill' as const,
+      guidedInstall: { kind: 'rea', title: 'REA 逆向分析' },
+    };
+    const reaStatus = (overrides: Record<string, unknown> = {}) => ({
+      package: 'rea-agents', version: '6.4.0', state: 'not_installed', installed: false, tier: null,
+      canInstall: true, badge: true, firstInstallCompleted: false, installSessionId: null, removable: false,
+      degradedProblems: [], verification: null, environment: { ok: true, nodeRequirement: '', checks: [] },
+      job: null, uninstallJob: null, ...overrides,
+    });
+
+    function SessionsProbe() {
+      const location = useLocation();
+      return <output data-testid="sessions-route">{JSON.stringify(location.state)}</output>;
+    }
+
+    function renderWithSessions() {
+      hubAPI.catalogPage.mockResolvedValue(catalogPage([reaEntry]));
+      return render(
+        <MemoryRouter initialEntries={['/hub']}>
+          <Routes>
+            <Route path="/hub" element={<HubPage />} />
+            <Route path="/sessions" element={<SessionsProbe />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    }
+
+    beforeEach(async () => {
+      const { __resetReaStateForTesting } = await import('@/features/rea/useRea');
+      __resetReaStateForTesting();
+      Object.values(reaApi).forEach((fn) => fn.mockReset());
+    });
+
+    it('installs in a Rex session instead of copying files', async () => {
+      const user = userEvent.setup();
+      reaApi.status.mockResolvedValue(reaStatus());
+      renderWithSessions();
+      expect(await screen.findByTestId('rea-hub-state')).toHaveTextContent('Not installed');
+      const install = await screen.findByRole('button', { name: 'Install' });
+      expect(install).toHaveAttribute('title', 'Installs and validates REA in a Rex session following the REA install guide');
+      await user.click(install);
+      expect(await screen.findByTestId('sessions-route')).toHaveTextContent(
+        JSON.stringify({ skipLastSelectedSessionRestore: true, reaEntry: 'install' }),
+      );
+      expect(hubAPI.previewUpdate).not.toHaveBeenCalled();
+      expect(hubAPI.install).not.toHaveBeenCalled();
+    });
+
+    it('offers 使用 and 卸载 once REA is ready', async () => {
+      const user = userEvent.setup();
+      reaApi.status.mockResolvedValue(reaStatus({ state: 'ready', installed: true, badge: false }));
+      renderWithSessions();
+      expect(await screen.findByTestId('rea-hub-state')).toHaveTextContent('Ready');
+      expect(await screen.findByRole('button', { name: 'Uninstall' })).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Use' }));
+      expect(await screen.findByTestId('sessions-route')).toHaveTextContent('"reaEntry":"use"');
+    });
+
+    it.each([
+      ['install_failed', { removable: true }, ['Troubleshoot and repair', 'Uninstall installed parts', 'View details']],
+      ['install_failed', { removable: false }, ['Troubleshoot and repair', 'View details']],
+      ['degraded', {}, ['Troubleshoot and repair', 'Uninstall', 'View details']],
+      ['installing', {}, ['View progress']],
+      ['uninstalling', {}, ['View progress']],
+      ['uninstall_failed', {}, ['Retry uninstall', 'View details']],
+    ])('state %s offers its actions', async (state, overrides, names) => {
+      reaApi.status.mockResolvedValue(reaStatus({ state, ...overrides }));
+      renderWithSessions();
+      const actions = await screen.findByTestId('rea-hub-actions');
+      await waitFor(() => expect(actions).toHaveAttribute('data-rea-state', state));
+      expect(Array.from(actions.querySelectorAll('button')).map((button) => button.getAttribute('aria-label'))).toEqual(names);
+    });
+
+    it('shows administrators the full diagnostics that conversations keep as <path>', async () => {
+      const user = userEvent.setup();
+      reaApi.status.mockResolvedValue(reaStatus({
+        state: 'install_failed',
+        job: {
+          id: 'j', status: 'failed', stage: 'components', progress: 30, tier: 'full', startedAt: 1, errorCode: 'blocked',
+          errorDetail: 'ghidra: /srv/tools/ghidra exists',
+          blockers: [{ code: 'ghidra_dir_occupied', path: '/srv/tools/ghidra', env: 'FLOCKS_REA_GHIDRA_DIR' }],
+          components: { ghidra: { status: 'blocked', detail: '/srv/tools/ghidra' }, skill: { status: 'reused' } },
+          validation: {},
+        },
+      }));
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'View details' }));
+      const diagnostics = await screen.findByTestId('rea-install-diagnostics');
+      expect(diagnostics).toHaveTextContent('Stage: Installing missing components');
+      expect(diagnostics).toHaveTextContent('Cause: Needs your action');
+      expect(diagnostics).toHaveTextContent(
+        '/srv/tools/ghidra already exists and is not a complete Ghidra 12.1.4: move it away, or set FLOCKS_REA_GHIDRA_DIR to another directory, then retry.',
+      );
+      expect(diagnostics).toHaveTextContent('Ghidra 12.1.4: needs your action; /srv/tools/ghidra');
+      expect(diagnostics).not.toHaveTextContent('skill reverse-engineer-anything');  // only what failed
+    });
+
+    it('names what a degraded install lacks, with its path, in the diagnostics', async () => {
+      const user = userEvent.setup();
+      reaApi.status.mockResolvedValue(reaStatus({
+        state: 'degraded',
+        degradedProblems: [{ code: 'jdk_missing', path: '/srv/jdk-21' }, { code: 'ghidra_decompiler_missing', platform: 'linux_arm_64' }],
+      }));
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'View details' }));
+      const diagnostics = await screen.findByTestId('rea-install-diagnostics');
+      expect(diagnostics).toHaveTextContent('JDK 21 of the full tier missing (/srv/jdk-21)');
+      expect(diagnostics).toHaveTextContent('Ghidra decompiler for this host missing (linux_arm_64)');
+    });
+
+    it('offers the diagnostics while REA works but its last install (an upgrade) did not pass', async () => {
+      const user = userEvent.setup();
+      reaApi.status.mockResolvedValue(reaStatus({
+        state: 'ready', installed: true, tier: 'light',
+        job: {
+          id: 'j', status: 'failed', stage: 'components', progress: 30, tier: 'full', startedAt: 1, errorCode: 'blocked',
+          blockers: [{ code: 'ghidra_dir_occupied', path: '/srv/tools/ghidra', env: 'FLOCKS_REA_GHIDRA_DIR' }],
+          components: {}, validation: {},
+        },
+      }));
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'View details' }));
+      expect(await screen.findByTestId('rea-install-diagnostics')).toHaveTextContent('/srv/tools/ghidra already exists');
+    });
+
+    it('shows the recorded failed checks when the job is gone after a restart', async () => {
+      const user = userEvent.setup();
+      reaApi.status.mockResolvedValue(reaStatus({
+        state: 'install_failed', job: null,
+        verification: { ok: false, tier: 'full', capabilities: {
+          native: { status: 'failed', static: 'failed', runtime: 'incomplete', notes: ['provider_unavailable at /srv/ghidra'] },
+          javascript: { status: 'passed', static: 'passed', runtime: 'passed', notes: [] },
+        } },
+      }));
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'View details' }));
+      const diagnostics = await screen.findByTestId('rea-install-diagnostics');
+      expect(diagnostics).toHaveTextContent('native decompilation: failed / incomplete; provider_unavailable at /srv/ghidra');
+      expect(diagnostics).not.toHaveTextContent('No further diagnostics.');
+      expect(diagnostics).not.toHaveTextContent('JavaScript');
+    });
+
+    it('offers what conversations leave out even when every check passed', async () => {
+      const user = userEvent.setup();
+      reaApi.status.mockResolvedValue(reaStatus({
+        state: 'ready', installed: true, tier: 'light', badge: false,
+        verification: { ok: true, tier: 'light', capabilities: {
+          javascript: {
+            status: 'passed', static: 'passed', runtime: 'passed', actual: '22',
+            notes: ['REA 定位 calc 于 /srv/app/index.js:2-4'], hiddenDetails: 1,
+          },
+          dotnet: { status: 'passed', static: 'passed', runtime: 'passed', notes: [], hiddenDetails: 0 },
+        } },
+      }));
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'View details' }));
+      const diagnostics = await screen.findByTestId('rea-install-diagnostics');
+      expect(diagnostics).toHaveTextContent('JavaScript: passed / passed; REA 定位 calc 于 /srv/app/index.js:2-4; Actual output: 22');
+      expect(diagnostics).not.toHaveTextContent('.NET');
+    });
+
+    it('shows the output and what failed REA calls returned for a failed check', async () => {
+      const user = userEvent.setup();
+      reaApi.status.mockResolvedValue(reaStatus({
+        state: 'install_failed',
+        job: {
+          id: 'j', status: 'failed', stage: 'validate', progress: 90, tier: 'light', startedAt: 1, errorCode: 'validation_failed',
+          blockers: [], components: {},
+          validation: {
+            javascript: {
+              status: 'failed', static: 'failed', runtime: 'failed', notes: [],
+              actual: "Error: Cannot find module '/srv/rea/index.js'", hiddenDetails: 2,
+              calls: [
+                { tool: 'rea_analyze_javascript_application', ok: false, summary: 'provider_unavailable at /srv/rea' },
+                { tool: 'rea_close_binary', ok: true, summary: '{}' },
+              ],
+            },
+          },
+        },
+      }));
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'View details' }));
+      const diagnostics = await screen.findByTestId('rea-install-diagnostics');
+      expect(diagnostics).toHaveTextContent("Actual output: Error: Cannot find module '/srv/rea/index.js'");
+      expect(diagnostics).toHaveTextContent('rea_analyze_javascript_application: provider_unavailable at /srv/rea');
+      expect(diagnostics).not.toHaveTextContent('rea_close_binary');
+    });
+
+    it('keeps the recorded checks in view when an upgrade fails before validating', async () => {
+      const user = userEvent.setup();
+      reaApi.status.mockResolvedValue(reaStatus({
+        state: 'ready', installed: true, tier: 'light', badge: false,
+        verification: { ok: true, tier: 'light', capabilities: {
+          javascript: { status: 'passed', static: 'passed', runtime: 'passed', notes: ['REA 定位 calc 于 /srv/app/index.js:2-4'], hiddenDetails: 1 },
+        } },
+        job: {
+          id: 'j', status: 'failed', stage: 'components', progress: 30, tier: 'full', startedAt: 1, errorCode: 'blocked',
+          blockers: [{ code: 'ghidra_dir_occupied', path: '/srv/tools/ghidra', env: 'FLOCKS_REA_GHIDRA_DIR' }],
+          components: {}, validation: {},
+        },
+      }));
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'View details' }));
+      const diagnostics = await screen.findByTestId('rea-install-diagnostics');
+      expect(diagnostics).toHaveTextContent('/srv/tools/ghidra already exists');
+      expect(diagnostics).toHaveTextContent('Recorded checks');
+      expect(diagnostics).toHaveTextContent('JavaScript: passed / passed; REA 定位 calc 于 /srv/app/index.js:2-4');
+      expect(diagnostics).not.toHaveTextContent('Checks of this install attempt');
+    });
+
+    it('lists the failed attempt and the earlier record apart, and the same checks once', async () => {
+      const user = userEvent.setup();
+      const failedNative = {
+        status: 'failed', static: 'failed', runtime: 'incomplete', notes: [], hiddenDetails: 1,
+        calls: [{ tool: 'rea_procedure_pseudo_code', ok: false, summary: 'provider_unavailable at /srv/ghidra' }],
+      };
+      const recordedJs = { status: 'passed', static: 'passed', runtime: 'passed', notes: ['note at /srv/app'], hiddenDetails: 1 };
+      // The attempt could not write its record: the earlier one is still what REA runs on.
+      reaApi.status.mockResolvedValue(reaStatus({
+        state: 'ready', installed: true, tier: 'light', badge: false,
+        verification: { ok: true, tier: 'light', capabilities: { javascript: recordedJs } },
+        job: {
+          id: 'j', status: 'failed', stage: 'validate', progress: 90, tier: 'full', startedAt: 1, errorCode: 'install_failed',
+          blockers: [], components: {}, validation: { native: failedNative },
+        },
+      }));
+      const { unmount } = renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'View details' }));
+      let diagnostics = await screen.findByTestId('rea-install-diagnostics');
+      expect(diagnostics).toHaveTextContent('Checks of this install attempt');
+      expect(diagnostics).toHaveTextContent('native decompilation: failed / incomplete; rea_procedure_pseudo_code: provider_unavailable at /srv/ghidra');
+      expect(diagnostics).toHaveTextContent('Recorded checks');
+      expect(diagnostics).toHaveTextContent('JavaScript: passed / passed; note at /srv/app');
+      unmount();
+
+      // A failed validation writes its own record: shown once.
+      const { __resetReaStateForTesting } = await import('@/features/rea/useRea');
+      __resetReaStateForTesting();
+      reaApi.status.mockResolvedValue(reaStatus({
+        state: 'install_failed',
+        verification: { ok: false, tier: 'full', capabilities: { native: failedNative } },
+        job: {
+          id: 'j', status: 'failed', stage: 'validate', progress: 90, tier: 'full', startedAt: 1, errorCode: 'validation_failed',
+          blockers: [], components: {}, validation: { native: failedNative },
+        },
+      }));
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'View details' }));
+      diagnostics = await screen.findByTestId('rea-install-diagnostics');
+      expect(diagnostics).not.toHaveTextContent('Checks of this install attempt');
+      expect(within(diagnostics).getAllByText(/rea_procedure_pseudo_code: provider_unavailable/)).toHaveLength(1);
+    });
+
+    it('offers members no diagnostics', async () => {
+      reaApi.status.mockResolvedValue(reaStatus({ state: 'install_failed', canInstall: false }));
+      renderWithSessions();
+      const actions = await screen.findByTestId('rea-hub-actions');
+      await waitFor(() => expect(actions).toHaveAttribute('data-rea-state', 'install_failed'));
+      expect(screen.queryByRole('button', { name: 'View details' })).not.toBeInTheDocument();
+    });
+
+    it('says why REA needs repair under its state', async () => {
+      reaApi.status.mockResolvedValue(reaStatus({
+        state: 'degraded',
+        degradedProblems: [{ code: 'service_down', status: 'failed', error: 'boom' }, { code: 'skill_missing' }],
+      }));
+      renderWithSessions();
+      expect(await screen.findByTestId('rea-hub-state-reason')).toHaveTextContent('MCP service rea not running; Skill missing');
+      expect(screen.getByTestId('rea-hub-state')).toHaveTextContent('Needs repair');
+    });
+
+    it('names the failed step of an install that did not pass', async () => {
+      reaApi.status.mockResolvedValue(reaStatus({
+        state: 'install_failed',
+        job: { id: 'j', status: 'failed', stage: 'components', progress: 10, tier: 'light', startedAt: 1, errorCode: 'component_failed' },
+      }));
+      renderWithSessions();
+      expect(await screen.findByTestId('rea-hub-state-reason')).toHaveTextContent('A component failed');
+    });
+
+    it('asks before stopping related tasks, then uninstalls and shows the result', async () => {
+      const user = userEvent.setup();
+      const current = { value: reaStatus({ state: 'ready', installed: true }) };
+      reaApi.status.mockImplementation(() => Promise.resolve(current.value));
+      reaApi.uninstallPreview.mockResolvedValue({
+        state: 'ready',
+        removes: ['MCP 服务 rea 的配置和运行中的服务', '技能 reverse-engineer-anything'],
+        keeps: ['JDK 21', '/opt/ghidra_*', '/root/.npm/_npx'],
+        tasks: [{ kind: 'session', id: 'ses_a', title: '分析样本 A' }],
+      });
+      reaApi.uninstall.mockImplementation(async () => {
+        current.value = reaStatus({
+          state: 'not_installed', badge: false,
+          uninstallJob: {
+            id: 'u1', status: 'succeeded', removed: ['MCP 服务 rea 的配置'], kept: ['/opt/ghidra_*'], residues: [],
+            stoppedTasks: [{ kind: 'session', id: 'ses_a', title: '分析样本 A' }], startedAt: 1, finishedAt: 2,
+          },
+        });
+        return current.value;
+      });
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'Uninstall' }));
+      const dialog = await screen.findByTestId('rea-hub-dialog');
+      expect(await screen.findByTestId('rea-uninstall-tasks')).toHaveTextContent('分析样本 A');
+      expect(dialog).toHaveTextContent('/root/.npm/_npx');
+      await user.click(within(dialog).getByRole('button', { name: 'Stop the tasks and uninstall' }));
+      expect(reaApi.uninstall).toHaveBeenCalledWith(true);
+      expect(await screen.findByTestId('rea-uninstall-result')).toHaveAttribute('data-result', 'succeeded');
+      expect(screen.getByTestId('rea-hub-dialog')).toHaveTextContent('Stopped tasks');
+    });
+
+    it('cancelling stops nothing and uninstalls nothing', async () => {
+      const user = userEvent.setup();
+      reaApi.status.mockResolvedValue(reaStatus({ state: 'ready', installed: true }));
+      reaApi.uninstallPreview.mockResolvedValue({ state: 'ready', removes: ['x'], keeps: ['y'], tasks: [{ kind: 'install', id: 'j', title: '' }] });
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'Uninstall' }));
+      expect(await screen.findByTestId('rea-uninstall-tasks')).toHaveTextContent('REA install and validation');
+      await user.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(screen.queryByTestId('rea-hub-dialog')).not.toBeInTheDocument();
+      expect(reaApi.uninstall).not.toHaveBeenCalled();
+    });
+
+    it('asks again when tasks started after the preview', async () => {
+      const user = userEvent.setup();
+      const { ReaApiError } = await import('@/api/rea');
+      reaApi.status.mockResolvedValue(reaStatus({ state: 'ready', installed: true }));
+      reaApi.uninstallPreview.mockResolvedValue({ state: 'ready', removes: ['x'], keeps: ['y'], tasks: [] });
+      reaApi.uninstall.mockRejectedValueOnce(new ReaApiError('confirm', 'tasks_running', 409, {
+        tasks: [{ kind: 'session', id: 'ses_b', title: '新任务' }],
+      }));
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'Uninstall' }));
+      const dialog = await screen.findByTestId('rea-hub-dialog');
+      const confirm = within(dialog).getByRole('button', { name: 'Uninstall' });
+      await waitFor(() => expect(confirm).toBeEnabled());
+      await user.click(confirm);
+      expect(reaApi.uninstall).toHaveBeenCalledWith(false);
+      expect(await screen.findByTestId('rea-uninstall-tasks')).toHaveTextContent('新任务');
+      expect(screen.getByRole('button', { name: 'Stop the tasks and uninstall' })).toBeEnabled();
+    });
+
+    it('retries in the same dialog after the uninstall failed in the background', async () => {
+      const user = userEvent.setup();
+      const failed = reaStatus({
+        state: 'uninstall_failed',
+        uninstallJob: {
+          id: 'u1', status: 'failed', removed: [], kept: [], residues: ['技能 reverse-engineer-anything'],
+          stoppedTasks: [], errorDetail: 'Permission denied', startedAt: 1, finishedAt: 2,
+        },
+      });
+      const current = { value: reaStatus({ state: 'ready', installed: true }) };
+      reaApi.status.mockImplementation(() => Promise.resolve(current.value));
+      reaApi.uninstallPreview.mockResolvedValue({ state: 'ready', removes: ['x'], keeps: ['y'], tasks: [] });
+      reaApi.uninstall.mockImplementation(async () => {
+        current.value = failed;
+        return current.value;
+      });
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'Uninstall' }));
+      const dialog = await screen.findByTestId('rea-hub-dialog');
+      const confirm = within(dialog).getByRole('button', { name: 'Uninstall' });
+      await waitFor(() => expect(confirm).toBeEnabled());
+      await user.click(confirm);
+      expect(await screen.findByTestId('rea-uninstall-result')).toHaveAttribute('data-result', 'failed');
+      await user.click(within(screen.getByTestId('rea-hub-dialog')).getByRole('button', { name: 'Retry uninstall' }));
+      const again = within(screen.getByTestId('rea-hub-dialog')).getByRole('button', { name: 'Uninstall' });
+      await waitFor(() => expect(again).toBeEnabled());
+      await user.click(again);
+      await waitFor(() => expect(reaApi.uninstall).toHaveBeenCalledTimes(2));
+    });
+
+    it('shows what a failed uninstall left behind', async () => {
+      const user = userEvent.setup();
+      reaApi.status.mockResolvedValue(reaStatus({
+        state: 'uninstall_failed',
+        uninstallJob: {
+          id: 'u1', status: 'failed', removed: ['MCP 服务 rea 的配置'], kept: [], residues: ['技能 reverse-engineer-anything'],
+          stoppedTasks: [], errorDetail: 'Permission denied', startedAt: 1, finishedAt: 2,
+        },
+      }));
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'View details' }));
+      expect(await screen.findByTestId('rea-uninstall-result')).toHaveAttribute('data-result', 'failed');
+      const dialog = screen.getByTestId('rea-hub-dialog');
+      expect(dialog).toHaveTextContent('技能 reverse-engineer-anything');
+      expect(dialog).toHaveTextContent('Permission denied');
+      expect(within(dialog).getByRole('button', { name: 'Retry uninstall' })).toBeInTheDocument();
+    });
+
+    it('shows install progress with the stage', async () => {
+      const user = userEvent.setup();
+      reaApi.status.mockResolvedValue(reaStatus({
+        state: 'installing',
+        job: { id: 'j', status: 'running', stage: 'components', progress: 10, tier: 'full', startedAt: 1 },
+      }));
+      renderWithSessions();
+      await user.click(await screen.findByRole('button', { name: 'View progress' }));
+      expect(await screen.findByTestId('rea-hub-dialog')).toHaveTextContent('full tier · Installing missing components · 10%');
+    });
+  });
 
   it('lets the user cancel a customized component update from the plaza', async () => {
     const entry = { ...catalogEntry('soc_ui', 'SOC Pages'), type: 'webui' as const, state: 'updateAvailable' as const };

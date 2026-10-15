@@ -1070,6 +1070,11 @@ class SessionRunner:
         # LLM as plain text and explode the prompt token count. Also clamp the
         # placeholder to a hard byte cap as a belt-and-braces measure.
         MAX_PLACEHOLDER_CHARS = 200
+        # A local file URL is the model's only way to reach a binary
+        # attachment (a sample to reverse engineer, an archive), so it is
+        # kept whole; only an overlong display name is shortened.
+        MAX_LOCAL_URL_CHARS = 4096
+        MAX_FILENAME_CHARS = 120
         if is_image:
             placeholder = (
                 f"[Image: {filename} — model does not support image input; "
@@ -1083,6 +1088,13 @@ class SessionRunner:
             })
         else:
             safe_url = url if url and not url.startswith("data:") else ""
+            if safe_url.startswith("file:") and len(safe_url) <= MAX_LOCAL_URL_CHARS:
+                # The filename is optional on file parts.
+                name = filename or "file"
+                if len(name) > MAX_FILENAME_CHARS:
+                    name = name[:MAX_FILENAME_CHARS] + "…"
+                text_fallbacks.append(f"[File: {name}]({safe_url})")
+                return
             placeholder = (
                 f"[File: {filename}]({safe_url})" if safe_url else f"[File: {filename}]"
             )

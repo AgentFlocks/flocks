@@ -423,7 +423,10 @@
         "sendMessage": "Send message",
         "useWeCom": "Use WeCom",
         "listWeComTools": "List WeCom tools",
-        "getTime": "Get current time"
+        "getTime": "Get current time",
+        "reaStatus": "REA reverse analysis",
+        "reaReport": "Submit analysis report",
+        "reaInstall": "Install the REA plugin"
       },
       "todoUpdated": "Todos updated",
       "inputParams": "Input Parameters",
@@ -634,5 +637,213 @@
     "newSession": "New conversation",
     "sessions": "Conversations",
     "session": "Conversation"
+  },
+  "rea": {
+    "sessionTitle": "REA reverse analysis",
+    "installPrompt": "REA installation guide\nPrinciple: install only the missing components; run everything that can run in parallel at the same time instead of waiting step by step.\n\n1. Choose the install tier\nLight tier: for JavaScript / .NET / archive analysis only. It does not install JDK or Ghidra, which saves about 1.2 GB of disk space and about 4 minutes of install time.\nFull tier: for decompiling native ELF / PE. It adds JDK 21 and Ghidra 12.1.4 on top of the light tier.\n2. Install the missing components in parallel (the three items below run at the same time)\nSkill: source github:zouineoualid/rea-reverse-engineering/reverse-engineer-anything; the source is intermittently unreachable, so retry it as is when it fails.\nJDK 21: run dnf install -y java-21-openjdk-devel.\nGhidra 12.1.4: download through the https://ghfast.top/ mirror (the official host runs at about 30 KB/s, about 4 hours); verify the official SHA-256 (ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db) after downloading, discard and download again if it does not match, and unpack to /opt once it matches.\n3. Register the MCP service only once\nService name rea, start command npx -y rea-agents@6.4.0 --mcp (the version must stay pinned to 6.4.0); set the environment variables GHIDRA_INSTALL_DIR=/opt/ghidra_12.1.4_PUBLIC and JAVA_HOME=/usr/lib/jvm/java-21-openjdk. The light tier writes no environment variables.\nDo not register it once before and once after installing, which only adds service reconnects.\n\n4. Validate that it really works\nValidate according to the chosen tier; a started service or the tool count (170) alone does not prove it is usable.\nLight tier: no JDK/Ghidra. Use a minimal JavaScript file, a .NET managed assembly and a ZIP archive generated locally, or from a known source with their source code, and validate them with real tool calls; no analysis material from the user is needed. The JavaScript and .NET samples each contain a checkable calculation with a fixed input and output: recover the logic with the actual tools and, where possible, run it in the matching runtime; the ZIP sample contains known folders and files: list, extract and check its contents with the actual tools. Use tool names from the real MCP tool list. Report passed, failed and unfinished items one by one; some capabilities passing does not mean all of them work.\nFull tier: first complete the light-tier validation, then a real native decompilation. Compile a C program of about 10 lines with a separate calculation function, call open_binary and then procedure_pseudo_code, check that the recovered logic matches the source, and run the original program to check the fixed input and output. The tool count (170) alone does not prove native decompilation works.\n\n5. Other requirements\nReuse components that already exist; /opt/ghidra_* and /root/.npm/_npx are caches, do not delete them; keeping them cuts a repeated install from about 6 minutes to about 30 seconds.\nAsk for confirmation before installing system packages or writing platform configuration.",
+    "usePrompt": "Use the REA reverse-engineering tools to analyse [target file, download link or website URL], focusing on [the question you want answered]. Reuse the existing setup, check and add the tools the target needs, recover the key logic, algorithm or API flow, and verify the results against the original program or runtime where possible. Give a brief conclusion, the key principle, verifiable evidence and how it was verified, and keep verified facts, inferences and open items apart.",
+    "repairPrompt": "Keep troubleshooting the REA install or validation, fix it, validate the same tier again and tell me the result.",
+    "confirm": {
+      "light": "Light tier: I confirm installing the missing components and writing the Flocks configuration.",
+      "full": "Full tier: I confirm installing the missing components (including the JDK 21 system package and Ghidra 12.1.4) and writing the Flocks configuration."
+    },
+    "stop": {
+      "light": "Stop the conversations using REA, and I confirm installing the missing components of the light tier and writing the Flocks configuration.",
+      "full": "Stop the conversations using REA, and I confirm installing the missing components of the full tier (including the JDK 21 system package and Ghidra 12.1.4) and writing the Flocks configuration."
+    },
+    "tasks": {
+      "title": "These conversations are using REA",
+      "subtitle": "Validating REA again would interrupt their analysis.",
+      "impact": "Continuing first stops the replies running in these conversations (conversations, materials and reports are kept), then installs and validates the {{tier}}. To avoid interrupting them, try again after they finish.",
+      "stop": "Stop them and continue",
+      "older": "Conversations were using REA",
+      "oneOther": "One other conversation",
+      "others": "{{count}} other conversations",
+      "oneUnknown": "A busy conversation whose state could not be read",
+      "unknowns": "{{count}} busy conversations whose state could not be read",
+      "notStopped": "Did not stop",
+      "stillBusy": "Still running",
+      "separator": ", "
+    },
+    "listSeparator": "; ",
+    "colon": ": ",
+    "entry": {
+      "label": "REA Reverse Analysis",
+      "badge": "New",
+      "badgeLabel": "New plugin",
+      "memberInstall": "The REA plugin is not installed yet; an administrator has to install it.",
+      "memberRepair": "The REA plugin is not usable right now; an administrator has to repair it.",
+      "installing": "REA is being installed ({{stage}}, {{progress}}%). Click the shortcut again once it is done.",
+      "uninstalling": "REA is being uninstalled; no analysis can start until it is done.",
+      "uninstallFailed": "The last REA uninstall did not finish and left {{count}} items behind. Retry it or view the details in the plugin square.",
+      "pending": "The install conversation is being created in another tab; try again in a moment.",
+      "statusFailed": "Could not read the REA plugin status: {{message}}"
+    },
+    "state": {
+      "not_installed": "Not installed",
+      "installing": "Installing",
+      "validating": "Validating",
+      "ready": "Ready",
+      "install_failed": "Install failed",
+      "degraded": "Needs repair",
+      "uninstalling": "Uninstalling",
+      "uninstall_failed": "Uninstall failed"
+    },
+    "tier": {
+      "light": "light tier",
+      "full": "full tier"
+    },
+    "tierHint": {
+      "light": "JavaScript / .NET / archive analysis; no JDK, no Ghidra",
+      "full": "adds JDK 21 and Ghidra 12.1.4 to decompile native ELF / PE"
+    },
+    "stage": {
+      "check": "Checking the host",
+      "components": "Installing missing components",
+      "register": "Registering the MCP service",
+      "validate": "Validating",
+      "done": "Done",
+      "unknown": "Unknown stage"
+    },
+    "component": {
+      "skill": "Skill reverse-engineer-anything",
+      "rea": "REA 6.4.0 (npx cache)",
+      "jdk": "JDK 21",
+      "ghidra": "Ghidra 12.1.4"
+    },
+    "componentStatus": {
+      "reused": "reused",
+      "installed": "installed",
+      "failed": "failed",
+      "blocked": "needs action",
+      "pending": "in progress"
+    },
+    "planAction": {
+      "reuse": "reuse",
+      "install": "install",
+      "download": "download",
+      "blocked": "cannot install automatically"
+    },
+    "registration": {
+      "reuse": "reuse the existing registration, nothing written",
+      "write": "register once in the Flocks configuration",
+      "replace": "replace the existing different registration in the Flocks configuration",
+      "written": "registered (written once)",
+      "reused": "existing registration reused"
+    },
+    "capability": {
+      "javascript": "JavaScript",
+      "dotnet": ".NET",
+      "archive": "Archive",
+      "native": "Native decompilation"
+    },
+    "check": {
+      "passed": "passed",
+      "failed": "failed",
+      "incomplete": "unfinished",
+      "not_applicable": "n/a"
+    },
+    "blocker": {
+      "jdk_no_dnf": "This host has no dnf: install JDK 21 and make it available to the Flocks service at {{javaHome}} (or set {{env}}), then retry.",
+      "jdk_needs_root": "Root is required: run {{command}} as root, then retry.",
+      "ghidra_dir_not_writable": "The Flocks service cannot write {{path}}: grant write access, or set {{env}} to a writable directory, then retry.",
+      "ghidra_decompiler_missing": "The Ghidra release has no native decompiler for this host ({{platform}}): run {{command}} (needs a C/C++ compiler and network access for Gradle), then retry.",
+      "ghidra_dir_occupied": "{{path}} already exists and is not a complete Ghidra 12.1.4: move it away, or set {{env}} to another directory, then retry.",
+      "unknown": "Needs manual action: {{code}}"
+    },
+    "problem": {
+      "skill_missing": "The skill reverse-engineer-anything is missing",
+      "mcp_not_registered": "The MCP service rea is not enabled in the Flocks configuration",
+      "service_down": "The MCP service rea is not running normally ({{status}})",
+      "validation_failed": "The last validation did not pass",
+      "jdk_missing": "The JDK 21 of the full tier is missing",
+      "ghidra_missing": "The Ghidra 12.1.4 of the full tier is missing",
+      "ghidra_decompiler_missing": "Ghidra has no decompiler for this host ({{platform}})"
+    },
+    "error": {
+      "environment": "The host does not meet the requirements (Node.js version, npx or a writable data directory)",
+      "blocked": "Something needs your action first",
+      "component_failed": "A component could not be installed (network problems are retried as is)",
+      "service_failed": "Flocks could not start the REA MCP service, or it listed no tools",
+      "validation_failed": "The validation did not fully pass",
+      "install_failed": "The install failed unexpectedly",
+      "interrupted": "The install was interrupted (service restart or stopped by an uninstall)",
+      "uninstalling": "REA is being uninstalled; install it after the uninstall finished",
+      "forbidden": "Only administrators can install the REA plugin. Ask an administrator.",
+      "plan_mode": "Plan mode cannot install. Switch to Build mode and send the request again.",
+      "tasks_running": "Some conversations did not stop; REA was not changed",
+      "tasks_unreadable": "A busy conversation could not be read, so it can be neither confirmed nor stopped; REA was not changed. Retry when it finished",
+      "unknown": "Unknown cause"
+    },
+    "card": {
+      "older": "REA plugin status (see the latest card below)",
+      "unavailable": "Could not read the REA plugin status: {{message}}",
+      "retryLoad": "Reload",
+      "notInstalled": "This task needs the REA reverse-analysis plugin, which is not installed yet.",
+      "installFailed": "This task needs the REA reverse-analysis plugin; its last install or validation did not pass.",
+      "degraded": "The REA plugin is not usable right now (service or configuration problem); Rex checks and repairs it first.",
+      "memberNotice": "This task needs the REA reverse-analysis plugin; installing and repairing it needs an administrator.",
+      "installing": "The REA plugin is being installed; this task can continue once it is done.",
+      "uninstalling": "The REA plugin is being uninstalled; no analysis can start meanwhile.",
+      "uninstallFailed": "The last REA uninstall did not finish. Retry it or view the details in the plugin square.",
+      "readyNow": "The REA plugin passed its validation; this task can continue.",
+      "install": "Install",
+      "repair": "Troubleshoot and repair",
+      "sent": "Sent",
+      "sendFailed": "Could not send: {{message}}",
+      "diagnosticsHint": "Conversations show verdicts and fixed texts only: host paths show as <path>, error output and validation notes are left out. The full diagnostics are in the plugin square → REA Reverse Analysis → View details (administrators)."
+    },
+    "plan": {
+      "title": "Choose the REA install tier",
+      "subtitle": "Existing components are reused and only the missing ones of the chosen tier are installed; system packages and Flocks configuration are written only after you confirm.",
+      "service": "MCP service rea",
+      "choose": "Install the {{tier}}",
+      "blockedNote": "One item needs your action first. This tier installs what it can and then tells you exactly what to do.",
+      "nothingToWrite": "Everything this tier needs is in place; nothing will be written.",
+      "older": "Install plan (see the latest card below)"
+    },
+    "install": {
+      "runningTitle": "Installing REA ({{tier}})",
+      "runningHint": "Existing components are reused; afterwards local samples are checked with real tool calls.",
+      "preparing": "Checking the existing setup…",
+      "progressLabel": "REA install progress",
+      "doneTitle": "REA is installed and the {{tier}} validation passed",
+      "doneHint": "Rex will now ask for the file, link or website to analyse and what you want to find out.",
+      "failedTitle": "The REA install did not pass",
+      "failedHint": "Fix the items below and retry in this conversation; installed components are reused.",
+      "stageLabel": "Stage",
+      "causeLabel": "Cause",
+      "blockersTitle": "Needs your action",
+      "componentsTitle": "Components",
+      "registrationLabel": "MCP service rea",
+      "serviceTitle": "Service check",
+      "serviceLine": "rea-agents {{version}} started, {{observed}}/{{expected}} tools listed, real call {{tool}} {{result}}",
+      "callOk": "succeeded",
+      "callFailed": "failed",
+      "capabilitiesTitle": "Capabilities (real tool calls)",
+      "staticLabel": "Static analysis",
+      "runtimeLabel": "Runtime check",
+      "evidence": "expected {{expected}}, actual {{actual}}",
+      "tools": "Calls: {{tools}}",
+      "sample": "Sample {{name}}{{format}}, SHA-256 {{sha}}",
+      "sampleFormat": " ({{format}})",
+      "hiddenDetails": "{{count}} more detail(s) only in the plugin square",
+      "sha256Verified": "Official SHA-256 verified ({{source}}): {{sha}}",
+      "sourceMirror": "via the mirror",
+      "sourceOfficial": "from the official host",
+      "unverifiedTitle": "Not verified",
+      "unverifiedNative": "Native ELF / PE decompilation (not part of the light tier)",
+      "unverifiedRuntime": "{{capability}} runtime check (no runtime on this host)",
+      "scopeNote": "A passed validation does not mean every analysis capability is verified; target-specific capabilities are checked per target.",
+      "retry": "Retry the install"
+    },
+    "report": {
+      "title": "Reverse-analysis result",
+      "conclusion": "Conclusion",
+      "labelSeparator": ": ",
+      "facts": "Verified facts",
+      "inferences": "Inferences",
+      "openItems": "Open items"
+    }
   }
 }

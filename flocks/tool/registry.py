@@ -917,7 +917,8 @@ class ToolRegistry:
         # web/ — internet access
         ("flocks.tool.web", ["webfetch", "websearch"]),
         # Owner-scoped, read-only Knowledgebase retrieval (connection is lazy).
-        ("flocks.tool", ["knowledgebase"]),
+        # REA reverse-analysis cards and task progress (rea_analysis).
+        ("flocks.tool", ["knowledgebase", "rea"]),
         # agent/ — agent delegation/coordination
         ("flocks.tool.agent", ["delegate_task", "task", "communication"]),
         # task/ — task/workflow

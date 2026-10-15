@@ -424,7 +424,10 @@
         "sendMessage": "发送消息",
         "useWeCom": "操作企业微信",
         "listWeComTools": "查看企业微信工具",
-        "getTime": "获取当前时间"
+        "getTime": "获取当前时间",
+        "reaStatus": "REA 逆向分析",
+        "reaReport": "提交分析报告",
+        "reaInstall": "安装 REA 插件"
       },
       "todoUpdated": "已更新待办",
       "inputParams": "输入参数",
@@ -635,5 +638,213 @@
     "newSession": "新建会话",
     "sessions": "会话列表",
     "session": "会话"
+  },
+  "rea": {
+    "sessionTitle": "REA 逆向分析",
+    "installPrompt": "REA 安装指引\n安装原则：仅安装缺失组件；凡可并行执行的操作一律并行，避免串行等待。\n\n一、选择安装档位\n轻量档——仅需 JavaScript / .NET / 压缩包分析时选用，不安装 JDK 与 Ghidra，可节省约 1.2GB 磁盘空间与约 4 分钟安装时间。\n完整档——需反编译原生 ELF / PE 时选用，在轻量档基础上增装 JDK 21 与 Ghidra 12.1.4。\n二、并行安装缺失组件（以下三项应同时执行）\n技能组件：来源为 github:zouineoualid/rea-reverse-engineering/reverse-engineer-anything；该源存在间歇性不可达，安装失败时原样重试。\nJDK 21：执行 dnf install -y java-21-openjdk-devel。\nGhidra 12.1.4：经 https://ghfast.top/ 镜像下载（官方直连速率约 30KB/s，预计耗时 4 小时）；下载后必须校验官方 SHA-256（ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db），校验不通过须丢弃并重新下载；校验通过后解包至 /opt。\n三、MCP 服务仅注册一次\n服务名为 rea，启动命令为 npx -y rea-agents@6.4.0 --mcp（版本必须锁定 6.4.0）；写入环境变量 GHIDRA_INSTALL_DIR=/opt/ghidra_12.1.4_PUBLIC 与 JAVA_HOME=/usr/lib/jvm/java-21-openjdk。轻量档无需写入环境变量。\n不得在安装前后各注册一次，以免产生额外的服务重连开销。\n\n四、执行有效性验证\n按所选安装档位执行真实验证，不得仅以服务启动成功或工具数量（170）作为可用性依据。\n轻量档：不安装 JDK/Ghidra。使用本地生成或来源明确且附源码的最小 JavaScript 文件、.NET 托管程序集和 ZIP 压缩包进行真实工具调用验证，无需用户提供分析材料。JavaScript 和 .NET 样例均包含一个可核对的计算函数及固定输入输出，须通过实际工具还原逻辑，并尽可能在相应运行环境执行核对；ZIP 样例包含已知目录和文件，须通过实际工具列出、提取并核对内容。工具名称以真实 MCP 工具清单为准。逐项报告通过、失败与未完成，不将部分能力通过等同于全部能力可用。\n完整档：先完成轻量档验证，再完成真实原生反编译验证。编译一个约 10 行、包含独立计算函数的 C 程序，依次调用 open_binary 与 procedure_pseudo_code，核对还原逻辑与源码一致，并运行原程序核对固定输入输出。仅确认工具数量（170）不足以证明原生反编译能力可用。\n\n五、其他要求\n组件已存在时应直接复用；/opt/ghidra_* 与 /root/.npm/_npx 为缓存目录，请勿删除——保留缓存可将重复安装耗时由约 6 分钟降至约 30 秒。\n执行系统软件包安装或平台配置写入前，须先取得确认。",
+    "usePrompt": "使用 REA 逆向分析工具，分析【目标文件、下载链接或网站 URL】，重点解决【希望了解的问题】。复用已有配置，按目标检查并补齐所需工具，还原关键逻辑、算法或接口流程，并尽可能使用原程序或原运行环境核对结果。请给出简明结论、关键原理、可复核证据和验证情况，明确区分已验证事实、推断与未完成项。",
+    "repairPrompt": "继续排查 REA 插件的安装或验证问题，修复后按原档位重新验证，再告诉我结果。",
+    "confirm": {
+      "light": "选择轻量档：确认安装缺失组件并写入 Flocks 配置。",
+      "full": "选择完整档：确认安装缺失组件（含 JDK 21 系统软件包和 Ghidra 12.1.4）并写入 Flocks 配置。"
+    },
+    "stop": {
+      "light": "停止正在使用 REA 的会话，确认按轻量档安装缺失组件并写入 Flocks 配置。",
+      "full": "停止正在使用 REA 的会话，确认按完整档安装缺失组件（含 JDK 21 系统软件包和 Ghidra 12.1.4）并写入 Flocks 配置。"
+    },
+    "tasks": {
+      "title": "这些会话正在使用 REA",
+      "subtitle": "重新验证 REA 会打断它们正在进行的分析。",
+      "impact": "继续会先停止这些会话里正在进行的回复（会话、材料和报告都保留），再按{{tier}}安装和验证。不想打断，就等它们结束后再试。",
+      "stop": "停止这些会话并继续",
+      "older": "当时有会话正在使用 REA",
+      "oneOther": "另一个会话",
+      "others": "另外 {{count}} 个会话",
+      "oneUnknown": "一个读不到状态的忙碌会话",
+      "unknowns": "{{count}} 个读不到状态的忙碌会话",
+      "notStopped": "没停下的会话",
+      "stillBusy": "仍在运行的会话",
+      "separator": "、"
+    },
+    "listSeparator": "；",
+    "colon": "：",
+    "entry": {
+      "label": "REA 逆向分析",
+      "badge": "新",
+      "badgeLabel": "新插件",
+      "memberInstall": "REA 逆向分析插件还没有安装，需要管理员安装。",
+      "memberRepair": "REA 逆向分析插件当前不可用，需要管理员修复。",
+      "installing": "REA 正在安装（{{stage}}，{{progress}}%），完成后再点入口即可使用。",
+      "uninstalling": "REA 正在卸载，卸载完成前不能开始分析。",
+      "uninstallFailed": "REA 上次卸载没有完成，还有 {{count}} 项残留。请到插件广场重试卸载或查看详情。",
+      "pending": "安装会话正在另一个页面创建，请稍候再试。",
+      "statusFailed": "暂时读不到 REA 插件状态：{{message}}"
+    },
+    "state": {
+      "not_installed": "未安装",
+      "installing": "安装中",
+      "validating": "验证中",
+      "ready": "基础可用",
+      "install_failed": "安装失败",
+      "degraded": "已安装异常",
+      "uninstalling": "卸载中",
+      "uninstall_failed": "卸载失败"
+    },
+    "tier": {
+      "light": "轻量档",
+      "full": "完整档"
+    },
+    "tierHint": {
+      "light": "JavaScript / .NET / 压缩包分析，不装 JDK 和 Ghidra",
+      "full": "再装 JDK 21 和 Ghidra 12.1.4，可反编译原生 ELF / PE"
+    },
+    "stage": {
+      "check": "检查运行环境",
+      "components": "安装缺失组件",
+      "register": "注册 MCP 服务",
+      "validate": "可用性验证",
+      "done": "完成",
+      "unknown": "未知阶段"
+    },
+    "component": {
+      "skill": "技能 reverse-engineer-anything",
+      "rea": "REA 6.4.0（npx 缓存）",
+      "jdk": "JDK 21",
+      "ghidra": "Ghidra 12.1.4"
+    },
+    "componentStatus": {
+      "reused": "复用",
+      "installed": "新安装",
+      "failed": "失败",
+      "blocked": "需要处理",
+      "pending": "进行中"
+    },
+    "planAction": {
+      "reuse": "复用",
+      "install": "安装",
+      "download": "下载",
+      "blocked": "无法自动安装"
+    },
+    "registration": {
+      "reuse": "复用现有注册，不重复写入",
+      "write": "注册一次，写入 Flocks 配置",
+      "replace": "替换现有的不同注册，写入 Flocks 配置",
+      "written": "已注册（只写入一次）",
+      "reused": "复用现有注册"
+    },
+    "capability": {
+      "javascript": "JavaScript",
+      "dotnet": ".NET",
+      "archive": "压缩包",
+      "native": "原生反编译"
+    },
+    "check": {
+      "passed": "通过",
+      "failed": "失败",
+      "incomplete": "未完成",
+      "not_applicable": "不适用"
+    },
+    "blocker": {
+      "jdk_no_dnf": "这台主机没有 dnf：请安装 JDK 21，并让 Flocks 服务能在 {{javaHome}} 找到它（或设置环境变量 {{env}}），然后重试。",
+      "jdk_needs_root": "需要 root 权限：请用 root 执行 {{command}}，然后重试。",
+      "ghidra_dir_not_writable": "Flocks 服务没有 {{path}} 的写权限：请授予写权限，或用环境变量 {{env}} 指定可写目录，然后重试。",
+      "ghidra_decompiler_missing": "这台主机（{{platform}}）的 Ghidra 发行包没有预编译的反编译器：请执行 {{command}}（需要 C/C++ 编译工具，并能联网下载 Gradle），然后重试。",
+      "ghidra_dir_occupied": "{{path}} 已经存在，而且不是完整的 Ghidra 12.1.4：请把它挪走，或用环境变量 {{env}} 指定别的目录，然后重试。",
+      "unknown": "需要人工处理：{{code}}"
+    },
+    "problem": {
+      "skill_missing": "技能 reverse-engineer-anything 不在了",
+      "mcp_not_registered": "Flocks 配置里没有启用的 MCP 服务 rea",
+      "service_down": "MCP 服务 rea 没有正常运行（{{status}}）",
+      "validation_failed": "上次验证没有通过",
+      "jdk_missing": "完整档用的 JDK 21 不在了",
+      "ghidra_missing": "完整档用的 Ghidra 12.1.4 不在了",
+      "ghidra_decompiler_missing": "Ghidra 缺少这台主机（{{platform}}）的反编译器"
+    },
+    "error": {
+      "environment": "运行环境不满足要求（Node.js 版本、npx 或数据目录写权限）",
+      "blocked": "有需要你先处理的事项",
+      "component_failed": "有组件没能安装（网络问题会原样重试）",
+      "service_failed": "Flocks 没能启动 REA MCP 服务，或服务没有列出工具",
+      "validation_failed": "可用性验证没有全部通过",
+      "install_failed": "安装过程出错",
+      "interrupted": "安装被中断（服务重启或被卸载停止）",
+      "uninstalling": "REA 正在卸载，卸载完成后再安装",
+      "forbidden": "只有管理员可以安装 REA 插件，请联系管理员。",
+      "plan_mode": "计划模式下不能安装，请切到 Build 模式后重新发送。",
+      "tasks_running": "有会话没能停下来，REA 没有改动",
+      "tasks_unreadable": "有忙碌的会话读不到状态，没法确认也没法替你停下，REA 没有改动；等它结束后再重试",
+      "unknown": "未知原因"
+    },
+    "card": {
+      "older": "REA 插件状态（以下方最新卡片为准）",
+      "unavailable": "暂时读不到 REA 插件状态：{{message}}",
+      "retryLoad": "重新读取",
+      "notInstalled": "这项任务需要 REA 逆向分析插件，当前还没有安装。",
+      "installFailed": "这项任务需要 REA 逆向分析插件，上次安装或验证没有通过。",
+      "degraded": "REA 逆向分析插件当前不可用（服务或配置异常），Rex 会先检查并修复。",
+      "memberNotice": "这项任务需要 REA 逆向分析插件，安装和修复需要管理员权限，请联系管理员。",
+      "installing": "REA 逆向分析插件正在安装，完成后即可继续这项任务。",
+      "uninstalling": "REA 逆向分析插件正在卸载，卸载期间不能开始分析。",
+      "uninstallFailed": "REA 上次卸载没有完成，请到插件广场重试卸载或查看详情。",
+      "readyNow": "REA 逆向分析插件已通过可用性验证，可以继续这项任务。",
+      "install": "开始安装",
+      "repair": "排查并修复",
+      "sent": "已发送",
+      "sendFailed": "发送失败：{{message}}",
+      "diagnosticsHint": "对话里只显示结论和固定说明：主机路径显示为 <path>，报错原文和验证备注不在这里显示。完整诊断在插件广场 → REA 逆向分析 →「查看详情」（仅管理员）。"
+    },
+    "plan": {
+      "title": "选择 REA 安装档位",
+      "subtitle": "已有组件直接复用，只装所选档位缺的部分；安装系统软件包、写入 Flocks 配置前需要你确认。",
+      "service": "MCP 服务 rea",
+      "choose": "安装{{tier}}",
+      "blockedNote": "有一项需要你先处理。选这一档会先装好能装的部分，再告诉你具体要做什么。",
+      "nothingToWrite": "所需组件都已就绪，不会写入任何东西。",
+      "older": "安装方案（以下方最新卡片为准）"
+    },
+    "install": {
+      "runningTitle": "正在安装 REA（{{tier}}）",
+      "runningHint": "已有组件直接复用；装好后用本地样例做真实工具调用验证。",
+      "preparing": "正在检查已有配置…",
+      "progressLabel": "REA 安装进度",
+      "doneTitle": "REA 已安装，{{tier}}验证通过",
+      "doneHint": "接下来 Rex 会询问要分析的文件、链接或网址，以及想解决的问题。",
+      "failedTitle": "REA 安装没有通过",
+      "failedHint": "处理好下面的问题后可以在本会话重试，已装好的组件会直接复用。",
+      "stageLabel": "阶段",
+      "causeLabel": "原因",
+      "blockersTitle": "需要你处理",
+      "componentsTitle": "组件",
+      "registrationLabel": "MCP 服务 rea",
+      "serviceTitle": "服务检查",
+      "serviceLine": "rea-agents {{version}} 已启动，读取到 {{observed}}/{{expected}} 个工具，真实调用 {{tool}} {{result}}",
+      "callOk": "成功",
+      "callFailed": "失败",
+      "capabilitiesTitle": "能力验证（真实工具调用）",
+      "staticLabel": "静态分析",
+      "runtimeLabel": "运行核对",
+      "evidence": "预期 {{expected}}，实际 {{actual}}",
+      "tools": "调用：{{tools}}",
+      "sample": "样例 {{name}}{{format}}，SHA-256 {{sha}}",
+      "sampleFormat": "（{{format}}）",
+      "hiddenDetails": "另有 {{count}} 条详情只在插件广场显示",
+      "sha256Verified": "官方 SHA-256 校验通过（{{source}}）：{{sha}}",
+      "sourceMirror": "经镜像下载",
+      "sourceOfficial": "官方直连下载",
+      "unverifiedTitle": "未验证",
+      "unverifiedNative": "原生 ELF / PE 反编译（轻量档不含）",
+      "unverifiedRuntime": "{{capability}} 运行核对（缺少运行环境）",
+      "scopeNote": "可用性验证通过不代表所有专项能力都已验证，具体能力会按分析目标另行检查。",
+      "retry": "重试安装"
+    },
+    "report": {
+      "title": "逆向分析结果",
+      "conclusion": "结论",
+      "labelSeparator": "：",
+      "facts": "已验证事实",
+      "inferences": "推断",
+      "openItems": "未完成项"
+    }
   }
 }

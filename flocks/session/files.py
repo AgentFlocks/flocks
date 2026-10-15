@@ -192,9 +192,11 @@ def resolve_chat_upload(session_id: str, owner_id: str, upload_id: str) -> Path:
 
     safe_id = _safe_upload_id(upload_id)
     destination_root = session_uploads_dir(session_id)
+    # Files without an extension (samples for reverse engineering) keep the bare id.
+    candidates = [destination_root / safe_id, *destination_root.glob(f"{safe_id}.*")]
     existing = [
         entry.resolve(strict=True)
-        for entry in destination_root.glob(f"{safe_id}.*")
+        for entry in candidates
         if entry.is_file() and not entry.is_symlink()
     ]
     if len(existing) > 1:
