@@ -7,6 +7,32 @@
   },
   "plugins": [
     {
+      "id": "rea",
+      "type": "skill",
+      "name": "REA Reverse Engineering",
+      "nameCn": "REA 逆向分析",
+      "description": "Reverse analysis tool based on Reverse Engineer Anything that helps recover key logic, algorithms or API flows.",
+      "descriptionCn": "基于 Reverse Engineer Anything 的逆向分析工具，帮助还原关键逻辑、算法或接口流程。",
+      "version": "6.4.0",
+      "category": "devtools",
+      "tags": [
+        "linux",
+        "windows",
+        "integration"
+      ],
+      "useCases": [
+        "endpoint-forensics",
+        "incident-response"
+      ],
+      "trust": "official",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/skills/rea/manifest.json",
+      "guidedInstall": {
+        "kind": "rea",
+        "title": "REA 逆向分析"
+      }
+    },
+    {
       "id": "ndr-alert-analysis",
       "type": "skill",
       "name": "NDR Alert Analysis",
@@ -23,6 +49,29 @@
       "trust": "official",
       "riskLevel": "low",
       "manifestPath": "plugins/skills/ndr-alert-analysis/manifest.json"
+    },
+    {
+      "id": "cloudflare-security-audit",
+      "type": "skill",
+      "name": "Cloudflare Security Audit",
+      "nameCn": "Cloudflare 代码安全审计",
+      "description": "Source-first security review with independent verification, coverage tracking, and JSON validators. Full audits require macOS/Linux and Node.js.",
+      "descriptionCn": "Cloudflare 源码安全审计：覆盖 AI/LLM、MCP、发布供应链、租户隔离与资源耗尽，含独立复核、覆盖台账及 JSON 校验。完整审计需 macOS/Linux + Node.js，执行目标代码须具备隔离沙箱。",
+      "version": "1.0.0",
+      "category": "devtools",
+      "tags": [
+        "vulnerability",
+        "api-security",
+        "web-security"
+      ],
+      "useCases": [
+        "vulnerability-management",
+        "security-reporting"
+      ],
+      "trust": "community",
+      "riskLevel": "medium",
+      "edition": "oss",
+      "manifestPath": "plugins/skills/cloudflare-security-audit/manifest.json"
     },
     {
       "id": "ad-attacker",

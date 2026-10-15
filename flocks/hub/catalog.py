@@ -14,7 +14,15 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from flocks.hub import local, tool_tree
-from flocks.hub.models import HubCatalogEntry, HubIndex, HubIndexEntry, HubPluginManifest, HubTaxonomy, PluginType
+from flocks.hub.models import (
+    HubCatalogEntry,
+    HubGuidedInstall,
+    HubIndex,
+    HubIndexEntry,
+    HubPluginManifest,
+    HubTaxonomy,
+    PluginType,
+)
 from flocks.hub.paths import extension_hub_roots, get_bundled_hub_root, owning_hub_root
 from flocks.utils.log import Log
 
@@ -1029,6 +1037,39 @@ def _os_compatible(manifest: HubPluginManifest) -> bool:
     return aliases.get(current, current) in allowed or current in allowed
 
 
+def _guided_install_state(guided: HubGuidedInstall) -> Optional[tuple[str, Optional[str]]]:
+    """State of an entry installed through a Rex conversation, from the product's own readiness."""
+
+    if guided.kind != "rea":
+        return None
+    from flocks.rea import runtime
+
+    try:
+        ready = runtime.is_ready()
+    except Exception as exc:
+        log.debug("hub.guided_install.state_failed", {"kind": guided.kind, "error": str(exc)})
+        ready = False
+    return ("installed", runtime.installed_version()) if ready else ("available", None)
+
+
+def _with_guided_install_state(entries: Iterable[HubCatalogEntry]) -> list[HubCatalogEntry]:
+    """Read guided entries' state per request.
+
+    The catalog snapshot is keyed on the files the Hub copies; REA readiness
+    lives in its install record and the MCP configuration instead, so a
+    cached state would go stale. Snapshot entries are shared and only copied.
+    """
+
+    result: list[HubCatalogEntry] = []
+    for entry in entries:
+        if entry.guidedInstall is not None and entry.state != "incompatible":
+            live = _guided_install_state(entry.guidedInstall)
+            if live is not None and live != (entry.state, entry.installedVersion):
+                entry = entry.model_copy(update={"state": live[0], "installedVersion": live[1]})
+        result.append(entry)
+    return result
+
+
 def _entry_from_manifest(manifest: HubPluginManifest) -> HubCatalogEntry:
     record = local.get_record(manifest.type, manifest.id)
     install_path, record = _resolve_install_path(
@@ -1069,6 +1110,7 @@ def _entry_from_manifest(manifest: HubPluginManifest) -> HubCatalogEntry:
         manifestPath=manifest_relative_path(manifest.type, manifest.id),
         installPath=str(install_path) if install_path else None,
         native=False,
+        guidedInstall=manifest.guidedInstall,
     )
 
 
@@ -1137,6 +1179,7 @@ def _entry_from_index(
         manifestPath=item.manifestPath,
         installPath=str(install_path) if install_path else None,
         native=False,
+        guidedInstall=item.guidedInstall,
     )
 
 
@@ -1335,7 +1378,7 @@ def list_catalog(
     q: Optional[str] = None,
 ) -> list[HubCatalogEntry]:
     return filter_catalog_entries(
-        _catalog_entries_snapshot(),
+        _with_guided_install_state(_catalog_entries_snapshot()),
         plugin_type=plugin_type,
         category=category,
         tags=tags,

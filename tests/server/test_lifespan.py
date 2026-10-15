@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import types
 from types import SimpleNamespace
@@ -169,10 +170,18 @@ async def test_lifespan_cleans_replaced_files_without_upgrade_recovery(
     import flocks.extensions as extensions
 
     monkeypatch.setattr(extensions, "_shutdown_hooks", [])
+    monkeypatch.setattr(extensions, "_startup_hooks", [])
     extensions.register_shutdown_hook("test.extension", lambda: dream_scheduler_events.append("extension"))
+    extension_started = asyncio.Event()
+
+    async def start_extension() -> None:
+        extension_started.set()
+
+    extensions.register_startup_hook("test.extension", start_extension)
 
     async with app_module.lifespan(SimpleNamespace()):
-        pass
+        # Extension services start on the server's loop once startup is ready.
+        await asyncio.wait_for(extension_started.wait(), timeout=2)
 
     assert events == ["cleanup_replaced_files"]
     # Extension services stop before the runtime services they depend on.
