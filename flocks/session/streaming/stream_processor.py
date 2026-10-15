@@ -58,6 +58,8 @@ from flocks.session.core.defaults import DOOM_LOOP_THRESHOLD
 
 log = Log.create(service="session.stream_processor")
 
+SANDBOX_AWARE_TOOLS = frozenset({"bash", "read", "write", "edit", "run_workflow"})
+
 # Holds the token of the StreamProcessor whose sibling ``delegate_task`` task
 # we are running inside. Tasks copy the context at creation, so a child
 # session's own runner inherits this value -- storing the owner instead of a
@@ -1560,7 +1562,7 @@ class StreamProcessor:
 
             # Sandbox metadata is needed for sandbox-aware tools, including workflow
             # entrypoint so workflow runtime can execute python nodes in sandbox.
-            if tool_name not in {"bash", "read", "write", "edit", "run_workflow"}:
+            if tool_name not in SANDBOX_AWARE_TOOLS:
                 return result
 
             if not self._sandbox_context_resolved:
@@ -1575,6 +1577,8 @@ class StreamProcessor:
                 self._sandbox_context_resolved = True
             sandbox_ctx = self._sandbox_context_cache
             if not sandbox_ctx:
+                result["blocked"] = True
+                result["error"] = "Sandbox is required for this tool, but no sandbox context is available."
                 return result
 
             sandbox = BashSandboxConfig(
@@ -1598,6 +1602,9 @@ class StreamProcessor:
             return result
         except Exception as e:
             log.warn("stream.sandbox.resolve_failed", {"tool": tool_name, "error": str(e)})
+            if tool_name in SANDBOX_AWARE_TOOLS:
+                result["blocked"] = True
+                result["error"] = "Sandbox initialization failed; host execution was blocked."
             return result
     
     async def _handle_text_start(self, event: TextStartEvent) -> None:
