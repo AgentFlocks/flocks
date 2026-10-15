@@ -245,3 +245,44 @@ def test_health_answers_head_requests():
         assert response.status_code == 200, path
         assert response.content == b"", path
         assert client.get(path).json()["status"] == "healthy"
+
+
+@pytest.fixture
+def client_with_both_routers() -> TestClient:
+    from flocks.server.routes.health import public_router
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api")
+    app.include_router(public_router)
+    app.state.critical_plugin_entrypoint_failures = ()
+    return TestClient(app, raise_server_exceptions=True)
+
+
+@pytest.mark.parametrize("path", ["/ready", "/api/ready"])
+def test_an_upgrade_learns_whether_the_release_it_started_answers(client_with_both_routers, monkeypatch, path):
+    """A release upgrade asks for its release; a different one on the port answers "other" with 503."""
+    monkeypatch.delenv(ENV_REQUIRED_PLUGINS, raising=False)
+    monkeypatch.setenv("FLOCKS_RELEASE_TAG", "3f2a9c41d7e0b6a58c1f2e3d4b5a6978")
+    monkeypatch.setenv("FLOCKS_RELEASE_STARTED_AT", "1792000000500")
+    client = client_with_both_routers
+
+    same = client.get(path, params={"release": "3f2a9c41d7e0b6a58c1f2e3d4b5a6978", "started_after": 1792000000000})
+    assert (same.status_code, same.json()) == (200, {"ready": True, "release": "match"})
+
+    other = client.get(path, params={"release": "0" * 32})
+    assert (other.status_code, other.json()) == (503, {"ready": False, "release": "other"})
+
+    earlier = client.get(path, params={"release": "3f2a9c41d7e0b6a58c1f2e3d4b5a6978", "started_after": 1792000009000})
+    assert (earlier.status_code, earlier.json()["release"]) == (503, "other"), "started before the restart"
+
+    assert set(client.get(path).json()) == {"ready"}, "without the question the body stays just the flag"
+
+
+def test_a_process_started_from_no_release_ignores_the_question(client, monkeypatch):
+    monkeypatch.delenv(ENV_REQUIRED_PLUGINS, raising=False)
+    monkeypatch.delenv("FLOCKS_RELEASE_TAG", raising=False)
+
+    response = client.get("/ready", params={"release": "3f2a9c41d7e0b6a58c1f2e3d4b5a6978"})
+
+    assert (response.status_code, response.json()) == (200, {"ready": True})
+    assert client.get("/ready", params={"started_after": -1}).status_code == 422

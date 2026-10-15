@@ -77,6 +77,24 @@ def _response_transform_registered() -> bool:
     return response_transform_active()
 
 
+def _stage_handled(stage: str) -> bool:
+    from flocks.hooks.pipeline import HookPipeline
+
+    return bool(HookPipeline.registered_stage_handlers(stage))
+
+
+def _llm_request_hook_registered() -> bool:
+    from flocks.hooks.pipeline import HookStage
+
+    return _stage_handled(HookStage.LLM_BEFORE)
+
+
+def _tool_gate_hook_registered() -> bool:
+    from flocks.hooks.pipeline import HookStage
+
+    return _stage_handled(HookStage.TOOL_BEFORE)
+
+
 #: Capability name -> probe answering "is a non-default implementation installed?"
 CAPABILITY_PROBES: Dict[str, Callable[[], bool]] = {
     "auth_backend": _auth_backend_replaced,
@@ -84,6 +102,10 @@ CAPABILITY_PROBES: Dict[str, Callable[[], bool]] = {
     "license_checker": _license_checker_replaced,
     "content_source": _content_source_added,
     "response_transform": _response_transform_registered,
+    # Something processes every outgoing model request (``llm.before``) /
+    # decides on every tool call before it runs (``tool.execute.before``).
+    "llm_request_hook": _llm_request_hook_registered,
+    "tool_gate_hook": _tool_gate_hook_registered,
 }
 
 
@@ -121,7 +143,55 @@ class StartupRequirements:
             plugins.update(plugins_from_file)
             capabilities.update(caps_from_file)
 
+        plugins_declared, caps_declared = cls._read_descriptor_requirements(env)
+        plugins.update(plugins_declared)
+        capabilities.update(caps_declared)
+
         return cls(plugins=frozenset(plugins), capabilities=frozenset(capabilities))
+
+    @staticmethod
+    def _read_descriptor_requirements(env: Dict[str, str]) -> tuple[List[str], List[str]]:
+        """Requirements the deployment descriptor declares.
+
+        A supervisor that starts the runtime writes ``requirements`` into
+        ``<FLOCKS_ROOT>/config/deployment.json`` as well as into the
+        environment of the process it starts.  A process started some other way
+        -- by hand, from a shell on the same host -- reads the same list from
+        the descriptor, so it cannot come up without the extensions the
+        deployment depends on just because it was not given the variable.
+
+        No descriptor, or one without ``requirements``, declares nothing.  One
+        that cannot be read or parsed raises, like a requirements manifest.
+        """
+
+        root = (env.get("FLOCKS_ROOT") or "").strip()
+        base = Path(root).expanduser() if root else Path.home() / ".flocks"
+        path = base / "config" / "deployment.json"
+        if not path.exists():
+            return [], []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"部署描述文件无法解析: {path}: {exc}") from exc
+        if not isinstance(raw, dict):
+            raise RuntimeError(f"部署描述文件格式错误: {path}")
+        requirements = raw.get("requirements")
+        if requirements is None:
+            return [], []
+        if not isinstance(requirements, dict):
+            raise RuntimeError(f"部署描述文件的 requirements 必须是对象: {path}")
+        return (
+            StartupRequirements._string_list(requirements.get("plugins"), "requirements.plugins", path),
+            StartupRequirements._string_list(requirements.get("capabilities"), "requirements.capabilities", path),
+        )
+
+    @staticmethod
+    def _string_list(value: Any, key: str, path: Path) -> List[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise RuntimeError(f"必需扩展清单字段 {key} 必须是字符串列表: {path}")
+        return [item.strip() for item in value if item.strip()]
 
     @staticmethod
     def _read_manifest(path: Path) -> tuple[List[str], List[str]]:

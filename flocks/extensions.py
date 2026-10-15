@@ -412,6 +412,53 @@ async def run_shutdown_hooks() -> None:
             log.warning("extensions.shutdown_hook.failed", {"name": name, "error": str(task.exception())})
 
 
+_startup_hooks: list[tuple[str, Callable[[], Any], float]] = []
+
+
+def register_startup_hook(
+    name: str,
+    hook: Callable[[], Any],
+    *,
+    timeout_seconds: float = 30.0,
+) -> None:
+    """Run ``hook`` once the server has started -- storage and managed content
+    are up -- before it reports ready.  Re-registering a name replaces it.
+
+    For work an extension has to resume after a restart (replaying what a
+    previous process left unfinished, starting a background loop).  Same
+    calling rules as :func:`register_shutdown_hook`; a hook that fails or
+    times out is logged and startup carries on.
+    """
+    _startup_hooks[:] = [entry for entry in _startup_hooks if entry[0] != name]
+    _startup_hooks.append((name, hook, timeout_seconds))
+
+
+async def run_startup_hooks() -> None:
+    """Called by the server lifespan (and the workflow service runtime)."""
+    import asyncio
+
+    from flocks.utils.log import Log
+
+    log = Log.create(service="extensions")
+    for name, hook, timeout_seconds in list(_startup_hooks):
+        task = asyncio.ensure_future(_call_shutdown_hook(hook))
+        try:
+            done, _pending = await asyncio.wait({task}, timeout=timeout_seconds)
+        except asyncio.CancelledError:
+            # Startup itself was cancelled: the hook does not run on alone.
+            task.cancel()
+            task.add_done_callback(_retrieve_late_outcome)
+            raise
+        if not done:
+            task.cancel()
+            task.add_done_callback(_retrieve_late_outcome)
+            log.warning("extensions.startup_hook.timeout", {"name": name, "timeout_seconds": timeout_seconds})
+        elif task.cancelled():
+            log.warning("extensions.startup_hook.cancelled", {"name": name})
+        elif task.exception() is not None:
+            log.warning("extensions.startup_hook.failed", {"name": name, "error": str(task.exception())})
+
+
 __all__ = [
     "ExtensionOptions",
     "FailPolicy",
@@ -436,6 +483,8 @@ __all__ = [
     "register_event_hook",
     "register_public_path",
     "register_shutdown_hook",
+    "register_startup_hook",
+    "run_startup_hooks",
     "run_shutdown_hooks",
     "unregister_hub_root",
 ]

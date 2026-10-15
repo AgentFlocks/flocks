@@ -8,11 +8,27 @@ def test_legacy_tool_permission_prompts_are_disabled_by_default() -> None:
     assert legacy_tool_permission_prompt_required() is False
 
 
-def test_auto_approve_enabled_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auto_approve_enabled_reads_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.delenv("FLOCKS_DEPLOY_MODE", raising=False)
     monkeypatch.delenv("FLOCKS_AUTO_APPROVE", raising=False)
     assert auto_approve_enabled() is False
     monkeypatch.setenv("FLOCKS_AUTO_APPROVE", "true")
     assert auto_approve_enabled() is True
+
+
+@pytest.mark.parametrize("declared_by", ["environment", "descriptor"])
+def test_a_managed_install_does_not_auto_approve(monkeypatch: pytest.MonkeyPatch, tmp_path, declared_by) -> None:
+    """The supervisor's confirmations are not answered by an environment switch."""
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLOCKS_AUTO_APPROVE", "true")
+    if declared_by == "environment":
+        monkeypatch.setenv("FLOCKS_DEPLOY_MODE", "managed")
+    else:
+        monkeypatch.delenv("FLOCKS_DEPLOY_MODE", raising=False)
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / "deployment.json").write_text('{"mode": "managed", "managed_by": "flockspro-go"}')
+    assert auto_approve_enabled() is False
 
 
 @pytest.mark.asyncio

@@ -33,7 +33,7 @@ describe('default WebUI extension registry', () => {
     expect(relative.external).toBe(false);
   });
 
-  it('omits the edition query parameter when the registry sets no updateChannel', async () => {
+  it('omits the channel query parameter when the registry sets no updateChannel', async () => {
     const client = await import('../api/client');
     const get = vi.spyOn(client.default, 'get').mockResolvedValue({ data: {} } as never);
     const { checkUpdate } = await import('../api/update');
@@ -41,11 +41,11 @@ describe('default WebUI extension registry', () => {
     await checkUpdate('zh-CN', registry.updateChannel);
     expect(get).toHaveBeenCalledTimes(1);
     const [, config] = get.mock.calls[0];
-    expect((config as { params: Record<string, unknown> }).params).not.toHaveProperty('edition');
+    expect((config as { params: Record<string, unknown> }).params).not.toHaveProperty('channel');
 
     await checkUpdate('zh-CN', 'private-channel');
     const [, custom] = get.mock.calls[1];
-    expect((custom as { params: Record<string, unknown> }).params).toMatchObject({ edition: 'private-channel' });
+    expect((custom as { params: Record<string, unknown> }).params).toMatchObject({ channel: 'private-channel' });
     get.mockRestore();
   });
 });

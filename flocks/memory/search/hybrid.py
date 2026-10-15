@@ -211,8 +211,10 @@ class HybridSearch:
                 raise RuntimeError("Embedding provider is not configured")
 
             # Generate query embedding
-            query_embedding = await Provider.embed(
-                text=query,
+            from flocks.memory.embedding import embed_one
+
+            query_embedding = await embed_one(
+                query,
                 provider_id=self.provider_id,
                 model=self.embedding_model,
             )

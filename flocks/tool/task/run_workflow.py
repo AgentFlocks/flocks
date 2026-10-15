@@ -517,8 +517,19 @@ async def run_workflow_tool(
                 )
         elif parsed is None:
             # json.loads raised JSONDecodeError — raw is not JSON.
+            # A managed workflow is listed with its content:// locator; it is
+            # addressed by id (flocks.content.managed).
+            from flocks.content.managed import parse_managed_location
+
+            managed_ref = parse_managed_location(raw)
+            if managed_ref is not None and managed_ref[0] == "workflow":
+                raw = managed_ref[1]
             # First try to resolve as a registered workflow ID, then fall back to file path.
             existing_workflow = read_workflow_from_fs(raw)
+            from flocks.workflow.fs_store import is_managed_workflow
+
+            if existing_workflow is None and is_managed_workflow(raw):
+                return ToolResult(success=False, error=f"Workflow {raw} is unavailable from its managed source")
             if existing_workflow is not None:
                 workflow_source = dict(existing_workflow["workflowJson"])
                 registered_workflow_id = str(existing_workflow["id"])
@@ -551,6 +562,28 @@ async def run_workflow_tool(
         return ToolResult(
             success=False, error=f"workflow must be a dictionary or string, got {type(workflow).__name__}"
         )
+
+    if isinstance(workflow_source, dict) and registered_workflow_id is None:
+        # An inline definition may not claim a managed id: it runs as the
+        # ad-hoc workflow it is, never recorded as the deployment's one.
+        from flocks.workflow.fs_store import is_managed_workflow
+
+        claimed = workflow_source.get("id")
+        if isinstance(claimed, str) and is_managed_workflow(claimed.strip()):
+            workflow_source = {key: value for key, value in workflow_source.items() if key != "id"}
+
+    if isinstance(workflow_source, Path):
+        # A file inside a managed workflow's directory is a local copy of it:
+        # run the deployment's definition, not the copy (flocks.content.managed).
+        from flocks.workflow.fs_store import managed_workflow_id_for_path
+
+        managed_id = managed_workflow_id_for_path(workflow_source)
+        if managed_id is not None:
+            managed = read_workflow_from_fs(managed_id)
+            if managed is None:
+                return ToolResult(success=False, error=f"Workflow {managed_id} is unavailable from its managed source")
+            workflow_source = {**dict(managed["workflowJson"]), "id": managed_id}
+            registered_workflow_id = managed_id
 
     # Sanity-check dict workflows: must have at least a `start` field so we
     # surface a clear error instead of a confusing Pydantic validation message.

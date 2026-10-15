@@ -1268,6 +1268,15 @@ class SkillInstaller:
                 error=f"Invalid skill name: {name!r}. Must match [a-z0-9]+(-[a-z0-9]+)*",
             )
 
+        from flocks.content.managed import managed_ids
+
+        if name in managed_ids("skill"):
+            # The deployment serves this name (flocks.content.managed); a local
+            # copy would never load, so installing one would only mislead.
+            return SkillInstallResult(
+                success=False,
+                error=f"Skill already exists: {name} is managed by the deployment and cannot be replaced.",
+            )
         skill_dir = _resolve_install_root(scope) / name
         skill_path = skill_dir / "SKILL.md"
         if skill_path.exists() and not _OVERWRITE_ALLOWED.get():

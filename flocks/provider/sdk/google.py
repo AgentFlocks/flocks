@@ -157,9 +157,12 @@ class GoogleProvider(BaseProvider):
                         elif p.type == "file":
                             mime = getattr(p, "mime", "")
                             if mime.startswith("image/"):
+                                from flocks.session.files import local_file_part_url
                                 from flocks.session.utils.file_extractor import read_file_part_bytes
 
-                                data = read_file_part_bytes(getattr(p, "url", ""))
+                                data = read_file_part_bytes(
+                                    local_file_part_url(str(getattr(p, "sessionID", "") or ""), p)
+                                )
                                 if data:
                                     parts.append({
                                         "inline_data": {

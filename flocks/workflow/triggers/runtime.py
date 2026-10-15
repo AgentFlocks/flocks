@@ -22,7 +22,7 @@ from flocks.workflow.execution_store import (
     record_execution_result,
     resolve_execution_outcome,
 )
-from flocks.workflow.fs_store import read_workflow_dir, workflow_scan_dirs
+from flocks.workflow.fs_store import overlay_managed_workflows, read_workflow_dir, workflow_scan_dirs
 from flocks.workflow._async_runtime import register_primary_loop
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
@@ -77,6 +77,11 @@ class TriggerRuntime:
         self._custom_adapters: Dict[tuple[str, str], Any] = {}
         self._custom_status: Dict[tuple[str, str], Dict[str, Any]] = {}
         self._custom_adapter_signatures: Dict[tuple[str, str], str] = {}
+        # Managed workflows whose consumers still have to be rebuilt.
+        self._managed_pending: set[str] = set()
+        # Of those, the consumers (syslog, kafka, schedule, custom_adapter)
+        # that did not start on the current definition; only they are retried.
+        self._managed_failed: Dict[str, set[str]] = {}
 
     def _iter_workflows(self) -> List[Dict[str, Any]]:
         merged: Dict[str, Dict[str, Any]] = {}
@@ -89,6 +94,8 @@ class TriggerRuntime:
                 data = read_workflow_dir(entry, entry.name, source)
                 if data is not None:
                     merged[entry.name] = data
+        # A managed workflow's own definition, never a local copy of it.
+        overlay_managed_workflows(merged)
         return list(merged.values())
 
     async def _write_disabled_legacy_configs(self, workflow_id: str) -> None:
@@ -151,7 +158,112 @@ class TriggerRuntime:
             )
         return triggers
 
+    async def _on_managed_content_changed(self, changed) -> None:
+        """Rebuild the consumers of a managed workflow whose definition changed or went away.
+
+        Kafka, syslog, poller and custom-adapter consumers plan from the
+        definition they started with; without this they would keep running a
+        withdrawn or superseded version (flocks.content.managed).  They are
+        stopped first, so a rebuild that fails leaves nothing running the old
+        plan; a failed rebuild stays pending and is retried after every
+        refresh until it succeeds.
+        """
+        changed_ids = {workflow_id for kind, workflow_id in changed if kind == "workflow"}
+        for workflow_id in changed_ids:
+            # A new definition (or none): everything is rebuilt from it.
+            self._managed_failed.pop(workflow_id, None)
+        self._managed_pending.update(changed_ids)
+        for workflow_id in sorted(self._managed_pending):
+            if await self._rebuild_managed_workflow(workflow_id):
+                self._managed_pending.discard(workflow_id)
+
+    async def _rebuild_managed_workflow(self, workflow_id: str) -> bool:
+        """Start the consumers of *workflow_id*'s current definition; whether all of them started.
+
+        The first attempt stops every consumer and restarts them all.  A
+        consumer that did not start -- an exception, or a manager answering
+        ``state: failed`` (say, a syslog worker of the old plan still
+        draining) -- keeps the workflow pending; the retries after later
+        refreshes restart only those consumers, not the ones already running.
+        """
+        from flocks.ingest.kafka.manager import default_manager as kafka_manager
+        from flocks.ingest.syslog.manager import default_manager as syslog_manager
+        from flocks.workflow.fs_store import read_workflow_from_fs
+        from flocks.workflow.poller_manager import default_manager as poller_manager
+
+        retry = self._managed_failed.get(workflow_id)
+        try:
+            data = read_workflow_from_fs(workflow_id)
+            workflow_json = (data or {}).get("workflowJson") or {}
+            if retry is None:
+                # Nothing may keep receiving new executions on the old plan --
+                # also if what follows fails.
+                for active_workflow_id, trigger_id in list(self._custom_adapter_tasks.keys()):
+                    if active_workflow_id == workflow_id:
+                        await self._stop_custom_adapter(active_workflow_id, trigger_id)
+                await syslog_manager.stop_workflow(workflow_id)
+                await kafka_manager.stop_workflow(workflow_id)
+                await poller_manager.stop_workflow(workflow_id)
+                statuses = await self.restart_workflow(workflow_id, workflow_json)
+            else:
+                managers = {"syslog": syslog_manager, "kafka": kafka_manager, "schedule": poller_manager}
+                statuses = {
+                    name: await managers[name].restart_workflow(workflow_id)
+                    for name in sorted(retry)
+                    if name in managers
+                }
+                if "custom_adapter" in retry:
+                    # A failed adapter's task is still registered: clear it,
+                    # or starting would take it for one already running.
+                    for key, adapter_task in list(self._custom_adapter_tasks.items()):
+                        if key[0] == workflow_id and self._adapter_gave_up(key, adapter_task):
+                            await self._stop_custom_adapter(*key)
+                    await self._start_custom_adapters_for_workflow(workflow_id, workflow_json)
+        except Exception as exc:
+            log.warning("trigger.managed_restart.failed", {"workflow_id": workflow_id, "error": str(exc)})
+            return False
+        failed = self._consumers_not_started(workflow_id, workflow_json, statuses)
+        if failed:
+            self._managed_failed[workflow_id] = failed
+            log.warning("trigger.managed_restart.incomplete", {"workflow_id": workflow_id, "failed": sorted(failed)})
+            return False
+        self._managed_failed.pop(workflow_id, None)
+        return True
+
+    def _consumers_not_started(
+        self, workflow_id: str, workflow_json: Dict[str, Any], statuses: Optional[Dict[str, Any]],
+    ) -> set[str]:
+        failed = {
+            name
+            for name, status in (statuses or {}).items()
+            if isinstance(status, dict) and status.get("state") == "failed"
+        }
+        for trigger in workflow_trigger_definitions_from_json(workflow_json):
+            if trigger.type != "custom_adapter" or not trigger.enabled:
+                continue
+            key = (workflow_id, trigger.id or "")
+            adapter_task = self._custom_adapter_tasks.get(key)
+            if adapter_task is None or self._adapter_gave_up(key, adapter_task):
+                failed.add("custom_adapter")
+        return failed
+
+    def _adapter_gave_up(self, key: tuple[str, str], adapter_task: "asyncio.Task[Any]") -> bool:
+        # An adapter whose start() returns (it registered callbacks) is done
+        # and still running; one whose start() raised is done and failed.
+        return adapter_task.done() and (self._custom_status.get(key) or {}).get("state") == "failed"
+
+    def _adapter_failed_to_start(self, workflow_id: str) -> None:
+        """A managed workflow's adapter gave up after starting: rebuild it on the next refresh."""
+        from flocks.content.managed import managed_ids
+
+        if workflow_id in managed_ids("workflow"):
+            self._managed_pending.add(workflow_id)
+            self._managed_failed.setdefault(workflow_id, set()).add("custom_adapter")
+
     async def start_all(self) -> None:
+        from flocks.content.managed import ManagedContent
+
+        ManagedContent.add_change_listener(self._on_managed_content_changed)
         for workflow in self._iter_workflows():
             try:
                 await self._sync_legacy_configs_from_workflow(workflow["id"], workflow.get("workflowJson") or {})
@@ -170,6 +282,9 @@ class TriggerRuntime:
             await self._start_custom_adapters_for_workflow(workflow["id"], workflow.get("workflowJson") or {})
 
     async def stop_all(self) -> None:
+        from flocks.content.managed import ManagedContent
+
+        ManagedContent.remove_change_listener(self._on_managed_content_changed)
         from flocks.ingest.syslog.manager import default_manager as syslog_manager
         from flocks.ingest.kafka.manager import default_manager as kafka_manager
         from flocks.workflow.poller_manager import default_manager as poller_manager
@@ -607,6 +722,7 @@ class TriggerRuntime:
                         "error": str(exc),
                         "pluginId": plugin_id,
                     }
+                    self._adapter_failed_to_start(workflow_id)
 
             self._custom_adapters[key] = adapter
             self._custom_adapter_signatures[key] = trigger_signature

@@ -57,7 +57,7 @@ export const checkUpdate = async (
   const response = await client.get<VersionInfo>('/api/update/check', {
     params: {
       ...(locale ? { locale } : {}),
-      ...(channel && channel !== DEFAULT_UPDATE_CHANNEL ? { edition: channel } : {}),
+      ...(channel && channel !== DEFAULT_UPDATE_CHANNEL ? { channel } : {}),
       ...(force ? { force: true } : {}),
     },
   });
@@ -100,7 +100,7 @@ export const applyUpdate = async (
 ): Promise<void> => {
   const params = new URLSearchParams({ target_version: targetVersion });
   if (locale) params.set('locale', locale);
-  if (channel && channel !== DEFAULT_UPDATE_CHANNEL) params.set('edition', channel);
+  if (channel && channel !== DEFAULT_UPDATE_CHANNEL) params.set('channel', channel);
   const url = `/api/update/apply?${params.toString()}`;
   const controller = new AbortController();
   // Long-running updates may take many minutes, but each silent wait is bounded.

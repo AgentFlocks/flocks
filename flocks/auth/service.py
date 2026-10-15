@@ -742,7 +742,7 @@ class AuthService(metaclass=_AuthServiceFacadeMeta):
     """
     Authentication facade.
 
-    The OSS default backend is ``LocalAuthBackend``. Flocks Pro packages can
+    The default backend is ``LocalAuthBackend``. An installed extension can
     swap in a compatible backend via ``register_backend``.
     """
 

@@ -435,11 +435,6 @@ class EnterpriseConfig(BaseModel):
     """Enterprise configuration"""
 
 
-class FlocksProConfig(BaseModel):
-    """Flocks Pro configuration"""
-    url: Optional[str] = None
-
-
 class UIConfig(BaseModel):
     """WebUI display preferences."""
 
@@ -921,7 +916,6 @@ class ConfigInfo(BaseModel):
             return _canonicalize_permission_dict(value)
         return value
     agent_logic: Optional[Literal["base", "rex"]] = Field(None, alias="agentLogic")
-    flockspro: Optional[FlocksProConfig] = None
     ui: Optional[UIConfig] = None
     compaction: Optional[CompactionConfig] = None
     tool_output: Optional[ToolOutputConfig] = Field(

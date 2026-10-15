@@ -4,10 +4,12 @@ from collections import deque
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from contextvars import copy_context
+import copy
 from dataclasses import dataclass, field
 import hashlib
 from itertools import islice
 import logging
+import os
 import threading
 import time
 import traceback
@@ -201,11 +203,13 @@ def _default_workflow_loader(workflow_id: str) -> "Workflow":
     import asyncio
 
     async def _load():
-        from flocks.workflow.fs_store import read_workflow_from_fs
+        from flocks.workflow.fs_store import is_managed_workflow, read_workflow_from_fs
         from flocks.storage.storage import Storage
 
         data = read_workflow_from_fs(workflow_id)
-        if data is None:
+        if data is None and not is_managed_workflow(workflow_id):
+            # Legacy records are for local workflows only: one must not stand
+            # in for a managed workflow whose definition is unusable.
             data = await Storage.read(f"workflow/{workflow_id}")
         if data is None:
             raise NodeExecutionError(
@@ -242,6 +246,46 @@ _HTTP_REQUEST_TOOL_SCHEMA: Dict[str, Any] = {
     },
     "required": ["url", "method"],
 }
+
+#: Python and logic nodes run code the engine executes itself, outside the tool
+#: registry.  They go through the same gate as a tool under this name, with the
+#: code as the argument a policy can look at.
+WORKFLOW_CODE_TOOL_NAME = "workflow_python"
+
+_WORKFLOW_CODE_TOOL_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "code": {"type": "string"},
+        "code_sha256": {"type": "string"},
+        "node_type": {"type": "string"},
+    },
+    "required": ["code", "code_sha256", "node_type"],
+}
+
+
+def _workflow_code_input(code: str, node: Node) -> Dict[str, Any]:
+    """The gate input for a python or logic node's code."""
+    return {
+        "code": code,
+        "code_sha256": hashlib.sha256(code.encode("utf-8")).hexdigest(),
+        "node_type": str(node.type),
+    }
+
+
+def _with_validated_input(payload: Dict[str, Any], validated_input: Dict[str, Any]) -> Dict[str, Any]:
+    """``payload`` with the input that actually runs once a policy patched it.
+
+    ``raw_input`` keeps what was asked for; ``validated_input`` -- what the
+    outcome is reported against -- becomes what ran, as the tool registry
+    does for a patched tool call.
+    """
+    from flocks.hooks.contracts import redact_sensitive
+
+    execution = dict(payload.get("tool_execution") or {})
+    tool = dict(execution.get("tool") or {})
+    tool["validated_input"] = redact_sensitive(dict(validated_input))
+    execution["tool"] = tool
+    return {**payload, "tool_execution": execution}
 
 
 @dataclass
@@ -1036,13 +1080,13 @@ class WorkflowEngine:
                     rpc_max_response_bytes=_rt.isolated_rpc_max_response_bytes,
                     rpc_max_workers=_rt.isolated_rpc_max_workers,
                 )
-            return _rt.execute(node.code, inputs)
+            return self._run_code_node(node, node.code, inputs, _rt)
         if node.type == "logic":
             assert self.code_gen is not None
             code = node.code
             if code is None or not str(code).strip():
                 try:
-                    code = self.code_gen.generate(node)
+                    code = self._generate_logic_code(node, _rt)
                 except Exception as gen_error:
                     raise NodeExecutionError(
                         node_id=node_id,
@@ -1061,7 +1105,7 @@ class WorkflowEngine:
                     rpc_max_response_bytes=_rt.isolated_rpc_max_response_bytes,
                     rpc_max_workers=_rt.isolated_rpc_max_workers,
                 )
-            return _rt.execute(code, inputs)
+            return self._run_code_node(node, code, inputs, _rt)
         if node.type in {"branch", "loop"}:
             return {}, ""
         if node.type == "tool":
@@ -1150,23 +1194,38 @@ class WorkflowEngine:
         output_k = node.output_key or "result"
         return {output_k: text}, ""
 
-    def _gate_http_request(self, node: Node, *, url: str, method: str) -> None:
-        """Pass the outbound request through the tool-execution gate.
+    def _gate_engine_operation(
+        self,
+        node: Node,
+        *,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_schema: Dict[str, Any],
+        tool_category: str,
+        call_prefix: str,
+        blocked_label: str,
+        applicable_patch_keys: frozenset[str] = frozenset(),
+        runtime: Optional[Runtime] = None,
+    ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Pass work the engine does itself through the tool-execution gate.
 
-        The engine has no network policy of its own; ``tool.execute.before``
-        handlers (e.g. the commercial network policy) decide whether the
-        target is allowed. Without handlers the request proceeds unchanged.
+        The engine has no policy of its own; ``tool.execute.before`` handlers
+        decide.  Returns the payload the outcome is reported against and the
+        argument patch the handlers attached to their allow, or ``None`` when
+        no handler is registered (the work proceeds unchanged).  Anything but
+        an allow stops the node: a headless run has nobody to answer a
+        confirmation.  So does a patch naming an argument outside
+        ``applicable_patch_keys``: the handlers authorised the patched call,
+        and running the unpatched one instead would run something nobody
+        authorised.
         """
         from flocks.hooks.pipeline import HookPipeline, HookStage
         from flocks.workflow._async_runtime import run_sync as _run_sync_on_shared_loop
 
-        registry = getattr(self.runtime, "tool_registry", None)
-        tool_input = {"url": url, "method": method}
+        registry = getattr(runtime or self.runtime, "tool_registry", None)
 
         async def _gate():
-            if not await HookPipeline.has_stage_handlers(HookStage.TOOL_BEFORE, {"tool": {"name": "http_request"}}):
-                return None
-            from flocks.hooks.tool_gate import run_tool_gate
+            from flocks.hooks.tool_gate import ToolGateVerdict, run_tool_gate
             from flocks.session.tool_execution import build_session_tool_execution_payload
             from flocks.tool import ToolContext
 
@@ -1179,38 +1238,194 @@ class WorkflowEngine:
                     ctx = None
             if ctx is None:
                 ctx = ToolContext(session_id="workflow", message_id="workflow")
+            # Which project's hooks apply: the same workspace and session the
+            # workflow's model calls name (see llm_hook_context_from_registry),
+            # on the probe and on both stage payloads alike.  Without them the
+            # pipeline falls back to the server's working directory and a
+            # project that registered its own gate would not be asked.
+            location: Dict[str, Any] = {"sessionID": ctx.session_id}
+            workspace = (ctx.extra or {}).get("workspace_dir") or os.getcwd()
+            if isinstance(workspace, str) and workspace.strip():
+                location["workspace"] = workspace
+            probe = {"tool": {"name": tool_name}, **location}
+            gates = await HookPipeline.has_stage_handlers(HookStage.TOOL_BEFORE, probe)
+            reports = await HookPipeline.has_stage_handlers(HookStage.TOOL_AFTER, probe)
+            if not gates and not reports:
+                return None
             # Audit sinks record the attempt under the call id; give this
-            # request one of its own like any tool invocation.
-            call_id = getattr(ctx, "call_id", None) or f"wf-http-{uuid.uuid4().hex}"
+            # operation one of its own like any tool invocation.
+            call_id = getattr(ctx, "call_id", None) or f"{call_prefix}-{uuid.uuid4().hex}"
             payload = await build_session_tool_execution_payload(
                 session_id=ctx.session_id,
                 message_id=ctx.message_id,
                 agent=ctx.agent or "workflow",
-                tool_name="http_request",
+                tool_name=tool_name,
                 tool_input=tool_input,
-                tool_schema=_HTTP_REQUEST_TOOL_SCHEMA,
+                tool_schema=tool_schema,
                 tool_context_extra={
                     **dict(ctx.extra or {}),
                     "tool_call_id": call_id,
                     "tool_source": "workflow",
-                    "tool_category": "network",
+                    "tool_category": tool_category,
                     "workflow_node_id": node.id,
                 },
                 validated_input=tool_input,
             )
-            return await run_tool_gate(payload, call_id=call_id, tool_input=tool_input)
+            payload = {**payload, **location}
+            if not gates:
+                # Only observers: nothing decides, the outcome is still reported.
+                from flocks.hooks.contracts import ToolDecision
 
-        verdict = _run_sync_on_shared_loop(_gate())
-        if verdict is None or verdict.allowed:
-            return
-        reason = verdict.reason or ("tool-before hook failed" if verdict.stage_failed else "denied by policy")
+                return payload, ToolGateVerdict(decision=ToolDecision(), call_id=call_id)
+            return payload, await run_tool_gate(payload, call_id=call_id, tool_input=tool_input)
+
+        gated = _run_sync_on_shared_loop(_gate())
+        if gated is None:
+            return None
+        payload, verdict = gated
+        patch = dict(verdict.decision.validated_input_patch or {})
+        unapplicable = sorted(key for key in patch if key not in applicable_patch_keys)
+        if verdict.allowed and not unapplicable:
+            return payload, patch
+        if verdict.allowed:
+            reason = f"policy changed arguments the workflow engine cannot apply: {', '.join(unapplicable)}"
+        else:
+            reason = verdict.reason or ("tool-before hook failed" if verdict.stage_failed else "denied by policy")
         if verdict.needs_confirmation:
             reason = reason or "requires confirmation"
             reason = f"requires confirmation, which a headless workflow cannot grant: {reason}"
+        # The refusal is an outcome too: whoever recorded the attempt gets told
+        # it never ran.
+        self._report_engine_operation(
+            payload,
+            status="confirm" if verdict.needs_confirmation else "deny",
+            started=time.perf_counter(),
+            error=None,
+        )
         raise NodeExecutionError(
             node_id=node.id,
-            message=f"HTTP request blocked by policy: {reason}",
+            message=f"{blocked_label} blocked by policy: {reason}",
         )
+
+    def _report_engine_operation(
+        self,
+        payload: Dict[str, Any],
+        *,
+        status: str,
+        started: float,
+        error: Optional[BaseException],
+    ) -> None:
+        """Fire ``tool.execute.after`` for a gated engine operation.
+
+        Observational: a failing after-stage is logged, never allowed to
+        replace the node's own result.
+        """
+        from flocks.hooks.contracts import ToolExecutionOutcome
+        from flocks.hooks.pipeline import HookPipeline
+        from flocks.workflow._async_runtime import run_sync as _run_sync_on_shared_loop
+
+        outcome = ToolExecutionOutcome(
+            status=status,
+            duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
+            error_type=type(error).__name__ if error is not None else None,
+            error_message=str(error) if error is not None else None,
+        )
+        try:
+            _run_sync_on_shared_loop(
+                HookPipeline.run_tool_after({**payload, "outcome": outcome.model_dump(mode="json")})
+            )
+        except Exception as exc:
+            _logger.warning("workflow.engine.tool_after_failed status=%s error=%s", status, exc)
+
+    def _gate_http_request(
+        self, node: Node, *, url: str, method: str
+    ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Pass the outbound request through the tool-execution gate."""
+        return self._gate_engine_operation(
+            node,
+            tool_name="http_request",
+            tool_input={"url": url, "method": method},
+            tool_schema=_HTTP_REQUEST_TOOL_SCHEMA,
+            tool_category="network",
+            call_prefix="wf-http",
+            blocked_label="HTTP request",
+            applicable_patch_keys=frozenset({"url", "method"}),
+        )
+
+    def _generate_logic_code(self, node: Node, runtime: Runtime) -> str:
+        """Generate a logic node's code with a model call that names this run.
+
+        A shared generator would call the model under whatever context its
+        client was built with -- by default no session, the system caller --
+        whoever's run it is, and parallel branches would share one client.
+        Each generation gets a client of its own carrying the run's hook
+        context instead.  An explicit client keeps its model and settings: it
+        is copied and only the run-identifying context is replaced, so the
+        client the generator holds is never modified.
+        """
+        generator = self.code_gen
+        assert generator is not None
+        if isinstance(generator, LLMCodeGen):
+            from dataclasses import replace
+
+            from .llm import LLMClient, get_llm_client, llm_hook_context_from_registry
+
+            run_context = llm_hook_context_from_registry(getattr(runtime, "tool_registry", None))
+            client = generator.client
+            if client is None:
+                client = get_llm_client(hook_context=run_context)
+            elif isinstance(client, LLMClient):
+                client = copy.copy(client)
+                client.hook_context = {**(client.hook_context or {}), **run_context}
+            generator = replace(generator, client=client)
+        return generator.generate(node)
+
+    def _run_code_node(self, node: Node, code: str, inputs: Dict[str, Any], runtime: Runtime) -> Any:
+        """Run a python or logic node's code behind the tool-execution gate.
+
+        The code is arbitrary Python -- for a logic node possibly written by a
+        model -- so it is held to the same policy and audit as a tool that
+        would do the same thing, rather than assumed to pass through one.
+        """
+        gated = self._gate_engine_operation(
+            node,
+            tool_name=WORKFLOW_CODE_TOOL_NAME,
+            tool_input=_workflow_code_input(code, node),
+            tool_schema=_WORKFLOW_CODE_TOOL_SCHEMA,
+            tool_category="code",
+            call_prefix="wf-code",
+            blocked_label="Workflow code",
+            applicable_patch_keys=frozenset({"code"}),
+            runtime=runtime,
+        )
+        if gated is None:
+            return runtime.execute(code, inputs)
+        payload, patch = gated
+        if "code" in patch:
+            if not isinstance(patch["code"], str):
+                self._report_engine_operation(payload, status="deny", started=time.perf_counter(), error=None)
+                raise NodeExecutionError(
+                    node_id=node.id,
+                    message="Workflow code blocked by policy: the policy's replacement code is not text",
+                )
+            # Run what the handlers authorised: their patch, not the original.
+            code = patch["code"]
+            payload = _with_validated_input(payload, _workflow_code_input(code, node))
+        started = time.perf_counter()
+        status = "error"
+        error: Optional[BaseException] = None
+        try:
+            result = runtime.execute(code, inputs)
+            status = "success"
+            return result
+        except RunCancelledError as exc:
+            status, error = "cancelled", exc
+            raise
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            self._report_engine_operation(payload, status=status, started=started, error=error)
 
     def _execute_http_request_node(self, node: Node, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         """Execute an HTTP request node using httpx (synchronous)."""
@@ -1231,7 +1446,22 @@ class WorkflowEngine:
                 node_id=node.id,
                 message=f"HTTP request template render failed: {type(e).__name__}: {e}",
             ) from e
-        self._gate_http_request(node, url=url, method=method)
+        gated = self._gate_http_request(node, url=url, method=method)
+        gate_payload, patch = gated if gated is not None else (None, {})
+        if patch:
+            patched_url, patched_method = patch.get("url", url), patch.get("method", method)
+            if not isinstance(patched_url, str) or not isinstance(patched_method, str):
+                self._report_engine_operation(gate_payload, status="deny", started=time.perf_counter(), error=None)
+                raise NodeExecutionError(
+                    node_id=node.id,
+                    message="HTTP request blocked by policy: the policy's replacement arguments are not text",
+                )
+            # Send what the handlers authorised: their patch, not the original.
+            url, method = patched_url, patched_method.upper()
+            gate_payload = _with_validated_input(gate_payload, {"url": url, "method": method})
+        started = time.perf_counter()
+        status = "error"
+        failure: Optional[BaseException] = None
         try:
 
             with sync_client(timeout=30.0) as client:
@@ -1245,11 +1475,16 @@ class WorkflowEngine:
                 resp_data: Any = resp.json()
             except Exception:
                 resp_data = resp.text
+            status = "success"
         except Exception as e:
+            failure = e
             raise NodeExecutionError(
                 node_id=node.id,
                 message=f"HTTP request failed: {type(e).__name__}: {e}",
             ) from e
+        finally:
+            if gate_payload is not None:
+                self._report_engine_operation(gate_payload, status=status, started=started, error=failure)
         response_k = node.response_key or "response"
         return {
             response_k: resp_data,

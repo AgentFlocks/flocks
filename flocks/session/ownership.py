@@ -21,7 +21,32 @@ CREATE TABLE IF NOT EXISTS session_execution_leases (
     expires_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_session_execution_expiry ON session_execution_leases(expires_at);
+ALTER TABLE session_execution_leases ADD COLUMN IF NOT EXISTS abort_requested BOOLEAN NOT NULL DEFAULT FALSE;
 """
+
+#: How often a running session looks for an abort asked for on another node.
+ABORT_POLL_INTERVAL_S = 1.0
+
+# Called with a session id when another node asked to abort a session this
+# process runs; the server installs its own abort path (see set_abort_handler).
+_abort_handler: Any = None
+
+
+def set_abort_handler(handler: Any) -> None:
+    """Install what runs when another node asks this one to abort a session."""
+    global _abort_handler
+    _abort_handler = handler
+
+
+async def request_abort(session_id: str) -> bool:
+    """Ask whichever node runs *session_id* to abort it.  True when one is running it."""
+    async with Storage.transaction() as db:
+        row = await db.fetch_one(
+            "UPDATE session_execution_leases SET abort_requested = TRUE "
+            "WHERE session_id = ? AND expires_at > clock_timestamp() RETURNING owner_id",
+            (session_id,),
+        )
+    return row is not None
 
 
 class SessionOwnershipLost(RuntimeError):
@@ -40,6 +65,7 @@ class SessionExecutionLease:
     deadline: float
     lost: bool = False
     released: bool = False
+    abort_handled: bool = False
     _renewal: asyncio.Task | None = field(default=None, repr=False)
     _owner_task: asyncio.Task | None = field(default=None, repr=False)
     _context_token: Any = field(default=None, repr=False)
@@ -56,7 +82,8 @@ class SessionExecutionLease:
                 VALUES (?, ?, 1, clock_timestamp() + (? * interval '1 second'))
                 ON CONFLICT (session_id) DO UPDATE SET owner_id = EXCLUDED.owner_id,
                     generation = session_execution_leases.generation + 1,
-                    expires_at = EXCLUDED.expires_at
+                    expires_at = EXCLUDED.expires_at,
+                    abort_requested = FALSE
                 WHERE session_execution_leases.expires_at <= clock_timestamp()
                 RETURNING generation""",
                 (session_id, owner, duration),
@@ -95,14 +122,54 @@ class SessionExecutionLease:
             )
         return row is not None
 
+    async def _abort_requested(self) -> bool:
+        async with Storage.transaction() as db:
+            row = await db.fetch_one(
+                "SELECT abort_requested FROM session_execution_leases "
+                "WHERE session_id = ? AND owner_id = ? AND generation = ?",
+                (self.session_id, self.owner_id, self.generation),
+            )
+        return bool(row is not None and row[0])
+
+    async def _handle_abort_request(self) -> None:
+        """Another node asked to abort this session: abort it here, where it runs."""
+        self.abort_handled = True
+        handler = _abort_handler
+        if handler is not None:
+            try:
+                outcome = handler(self.session_id)
+                if asyncio.iscoroutine(outcome):
+                    await outcome
+                return
+            except Exception:
+                pass
+        # No abort path installed (or it failed): stop the run outright.
+        if self._owner_task is not None and not self._owner_task.done():
+            self._owner_task.cancel()
+
     async def _renew(self) -> None:
+        last_renewal = time.monotonic()
         try:
             while True:
-                await asyncio.sleep(min(self.duration / 3, max(0.01, self.deadline - time.monotonic())))
+                remaining = self.deadline - time.monotonic()
+                await asyncio.sleep(min(ABORT_POLL_INTERVAL_S, self.duration / 3, max(0.01, remaining)))
                 remaining = self.deadline - time.monotonic()
                 if remaining <= 0:
                     break
+                if not self.abort_handled:
+                    try:
+                        if await asyncio.wait_for(self._abort_requested(), timeout=remaining):
+                            await self._handle_abort_request()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass  # the next poll asks again
+                if time.monotonic() - last_renewal < self.duration / 3:
+                    continue
                 started = time.monotonic()
+                remaining = self.deadline - started
+                if remaining <= 0:
+                    break
                 try:
                     if not await asyncio.wait_for(self._renew_once(), timeout=remaining):
                         break
@@ -113,6 +180,7 @@ class SessionExecutionLease:
                     # failures, including a stalled pool acquisition.
                     continue
                 self.deadline = started + self.duration
+                last_renewal = started
         except asyncio.CancelledError:
             raise
         self.lost = True

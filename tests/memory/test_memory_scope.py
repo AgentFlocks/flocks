@@ -242,6 +242,17 @@ async def test_indexer_scans_global_and_all_projects(
     ) in identities
 
 
+def _refuse_reading(note: Path, message: str):
+    real_read_text = Path.read_text
+
+    def read_text(self, *args, **kwargs):
+        if self == note:
+            raise AssertionError(message)
+        return real_read_text(self, *args, **kwargs)
+
+    return read_text
+
+
 @pytest.mark.asyncio
 async def test_indexer_does_not_read_unchanged_files(
     tmp_path: Path,
@@ -262,11 +273,8 @@ async def test_indexer_does_not_read_unchanged_files(
 
     with patch("flocks.config.Config.get_data_path", return_value=tmp_path):
         initial = await indexer.sync()
-        with patch.object(
-            Path,
-            "read_text",
-            side_effect=AssertionError("unchanged Memory file was read"),
-        ):
+        # Only the note itself: the memory store's sync reads its own record.
+        with patch.object(Path, "read_text", _refuse_reading(memory_file, "unchanged Memory file was read")):
             unchanged = await indexer.sync()
 
     assert initial["files_indexed"] == 1
@@ -306,11 +314,7 @@ async def test_indexer_refreshes_metadata_without_reindexing_unchanged_content(
         ) as index_file:
             touched = await indexer.sync()
         indexed_files = await indexer._get_indexed_files()
-        with patch.object(
-            Path,
-            "read_text",
-            side_effect=AssertionError("refreshed Memory file was read again"),
-        ):
+        with patch.object(Path, "read_text", _refuse_reading(memory_file, "refreshed Memory file was read again")):
             unchanged = await indexer.sync()
 
     indexed = indexed_files[("global", "", "MEMORY.md")]

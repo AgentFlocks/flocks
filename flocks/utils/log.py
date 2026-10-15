@@ -8,6 +8,7 @@ for file output and is done by CLI or by server lifespan when run standalone.
 """
 
 import os
+import re
 import sys
 import time
 import threading
@@ -21,6 +22,69 @@ import glob as file_glob
 
 _DEFAULT_LOG_RETENTION_DAYS = 30
 _DEFAULT_LOG_VALUE_MAX_CHARS = 8 * 1024
+#: A log file is rotated (``flocks.log.1`` ...) once it reaches this size,
+#: keeping this many rotations; the whole log directory is then held under a
+#: total size by dropping the oldest days.  FLOCKS_LOG_MAX_FILE_MB,
+#: FLOCKS_LOG_KEEP_ROTATIONS and FLOCKS_LOG_MAX_TOTAL_MB override; 0 disables.
+_DEFAULT_LOG_MAX_FILE_MB = 100
+_DEFAULT_LOG_KEEP_ROTATIONS = 5
+_DEFAULT_LOG_MAX_TOTAL_MB = 2048
+
+# Credentials never reach a log line (V1.2: runtime logs are cleaned before
+# they are written).  Keyed values whose name says what they are, and the
+# shapes credentials have wherever they appear in free text.
+_SENSITIVE_KEY = (
+    r"(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|"
+    r"authorization|cookies?|credentials?|dsn)"
+)
+_REDACTED = "[REDACTED]"
+_SENSITIVE_KEY_NAME = re.compile(r"(?i)^[\w.-]*?" + _SENSITIVE_KEY + r"$")
+_SCRUB_PATTERNS = (
+    # Schemes first, so a key=value pass after them does not split "Bearer <token>".
+    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 " + _REDACTED),
+    # A cookie header carries several credentials in one value: all of it
+    # goes.  A value that opens with a quote sits in a container (JSON, a dict
+    # repr): the whole quoted value.  A header value never opens with a quote
+    # (it starts with a cookie name), and quotes inside it belong to cookie
+    # values: up to the end of the line.  Never only the blank after the colon.
+    (
+        re.compile(r'(?i)\b((?:set-)?cookie)(["\']?\s*[=:]\s*)(["\'])(?!' + re.escape(_REDACTED) + r')(?:\\.|(?!\3).)*\3'),
+        r"\1\2\3" + _REDACTED + r"\3",
+    ),
+    (re.compile(r'(?i)\b((?:set-)?cookie)(["\']?\s*[=:]\s*)(?![\s"\']|' + re.escape(_REDACTED) + r')[^\r\n]+'), r"\1\2" + _REDACTED),
+    # key="quoted value", "key": "value with spaces": the whole quoted value.
+    (
+        re.compile(r'(?i)(?<![\w.-])([\w.-]*?' + _SENSITIVE_KEY + r')(["\']?\s*[=:]\s*)(["\'])(?!' + re.escape(_REDACTED) + r')(?:\\.|(?!\3).)*\3'),
+        r"\1\2\3" + _REDACTED + r"\3",
+    ),
+    # key=value, key: value -- the key *ends* with the sensitive word
+    # (auth_token, x-api-key), so counts such as max_tokens=, tokens= or
+    # token_count= stay readable.
+    (
+        re.compile(r'(?i)(?<![\w.-])([\w.-]*?' + _SENSITIVE_KEY + r')(["\']?\s*[=:]\s*)(?!["\']|' + re.escape(_REDACTED) + r')([^\s"\',;&}]+)'),
+        r"\1\2" + _REDACTED,
+    ),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), _REDACTED),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), _REDACTED),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), _REDACTED),
+    (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b"), _REDACTED),
+    # Passwords in URLs: scheme://user:password@host
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^:/@\s]+):([^@/\s]+)@"), r"\1:" + _REDACTED + "@"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)", re.S), _REDACTED),
+)
+
+
+def scrub_credentials(text: str) -> str:
+    """*text* with anything that looks like a credential replaced."""
+    for pattern, replacement in _SCRUB_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _node_tag() -> Optional[str]:
+    """The node this process runs on, when the deployment names its nodes (FLOCKS_NODE_ID)."""
+    value = (os.getenv("FLOCKS_NODE_ID") or "").strip()
+    return value or None
 _MAX_STRUCTURED_ITEMS = 50
 _MAX_STRUCTURED_DEPTH = 4
 
@@ -63,17 +127,48 @@ class _AppendTextWriter:
         self.path = path
         self._handle: Optional[TextIO] = None
         self._lock = threading.RLock()
+        self._size = 0
         self._open()
 
     def _open(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = open(self.path, "a", buffering=1, encoding="utf-8")
+        try:
+            self._size = self.path.stat().st_size
+        except OSError:
+            self._size = 0
+
+    def _rotate(self) -> None:
+        """``flocks.log`` -> ``flocks.log.1`` -> ... keeping the configured number."""
+        keep = _env_int("FLOCKS_LOG_KEEP_ROTATIONS", _DEFAULT_LOG_KEEP_ROTATIONS)
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+        if keep <= 0:
+            self.path.unlink(missing_ok=True)
+        else:
+            self.path.with_name(f"{self.path.name}.{keep}").unlink(missing_ok=True)
+            for index in range(keep - 1, 0, -1):
+                older = self.path.with_name(f"{self.path.name}.{index}")
+                if older.exists():
+                    older.replace(self.path.with_name(f"{self.path.name}.{index + 1}"))
+            if self.path.exists():
+                self.path.replace(self.path.with_name(f"{self.path.name}.1"))
+        self._open()
 
     def write(self, message: str) -> int:
         with self._lock:
             if self._handle is None:
                 self._open()
-            return self._handle.write(message)
+            limit_mb = _env_int("FLOCKS_LOG_MAX_FILE_MB", _DEFAULT_LOG_MAX_FILE_MB)
+            if limit_mb > 0 and self._size >= limit_mb * 1024 * 1024:
+                try:
+                    self._rotate()
+                except OSError:
+                    pass
+            written = self._handle.write(message)
+            self._size += len(message.encode("utf-8", errors="replace"))
+            return written
 
     def flush(self) -> None:
         with self._lock:
@@ -115,6 +210,10 @@ def _prepare_json_value(value: Any, *, depth: int = 0, seen: Optional[set[int]] 
                 prepared["__truncated__"] = f"{len(value) - _MAX_STRUCTURED_ITEMS} more keys"
                 break
             prepared_key = key if key is None or isinstance(key, (str, int, float, bool)) else _truncate_for_log(str(key))
+            if isinstance(key, str) and _SENSITIVE_KEY_NAME.match(key) and item is not None:
+                # Masked by name before it is serialized, whatever its shape.
+                prepared[prepared_key] = _REDACTED
+                continue
             prepared[prepared_key] = _prepare_json_value(item, depth=depth + 1, seen=seen)
         seen.remove(value_id)
         return prepared
@@ -154,7 +253,7 @@ def append_upgrade_text_log(message: str) -> None:
         day_dir.mkdir(parents=True, exist_ok=True)
         path = day_dir / "errors.log"
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        normalized = message.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = scrub_credentials(message).replace("\r\n", "\n").replace("\r", "\n")
         with path.open("a", encoding="utf-8") as handle:
             for segment in normalized.split("\n"):
                 handle.write(f"{stamp} | {segment}\n")
@@ -207,10 +306,16 @@ class Logger:
         
         # Filter out None/null values
         all_tags = {k: v for k, v in all_tags.items() if v is not None}
+        node = _node_tag()
+        if node and "node" not in all_tags:
+            all_tags = {"node": node, **all_tags}
         
         # Build prefix (key=value pairs)
         prefix_parts = []
         for key, value in all_tags.items():
+            if isinstance(key, str) and _SENSITIVE_KEY_NAME.match(key):
+                prefix_parts.append(f"{key}={_REDACTED}")
+                continue
             prefix_parts.append(f"{key}={_format_log_value(value)}")
         
         prefix = " ".join(prefix_parts)
@@ -351,6 +456,7 @@ class Log:
     def _write(cls, message: str, *, error: bool = False) -> int:
         """Write log message to file and/or stderr"""
         try:
+            message = scrub_credentials(message)
             with cls._state_lock:
                 cls._ensure_current_day()
                 if cls._writer:
@@ -479,6 +585,8 @@ class Log:
         """Clean up date directories and legacy timestamp logs by age."""
         days = get_log_retention_days() if retention_days is None else retention_days
         if days <= 0:
+            # Age-based cleanup is off; the total-size cap is a separate limit.
+            cls._cap_total_size(log_dir)
             return
         cutoff = datetime.now() - timedelta(days=days)
 
@@ -534,6 +642,39 @@ class Log:
                         pass
         except Exception:
             pass  # Silently ignore cleanup errors
+        cls._cap_total_size(log_dir)
+
+    @classmethod
+    def _cap_total_size(cls, log_dir: Path) -> None:
+        """Drop the oldest day directories until the logs fit FLOCKS_LOG_MAX_TOTAL_MB.
+
+        Today's directory is never dropped: it is being written.
+        """
+        limit_mb = _env_int("FLOCKS_LOG_MAX_TOTAL_MB", _DEFAULT_LOG_MAX_TOTAL_MB)
+        if limit_mb <= 0:
+            return
+        try:
+            days = sorted(
+                path for path in log_dir.iterdir()
+                if path.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", path.name)
+            )
+
+            def _size(path: Path) -> int:
+                return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+            sizes = {path: _size(path) for path in days}
+            total = sum(sizes.values())
+            today = date.today().isoformat()
+            for path in days:
+                if total <= limit_mb * 1024 * 1024 or path.name == today:
+                    break
+                try:
+                    shutil.rmtree(path)
+                    total -= sizes[path]
+                except Exception:
+                    pass
+        except Exception:
+            pass
     
     @classmethod
     def create(cls, service: str = None, **tags) -> Logger:

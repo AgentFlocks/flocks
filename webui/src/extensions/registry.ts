@@ -73,13 +73,35 @@ export interface ExtensionSettingsSection {
 }
 
 export type SlotName =
+  /** The session composer's toolbar; context `{ sessionId, onSessionStart }`, see SessionSettingsSlotContext. */
   | 'session.settings'
   | 'channel.settings'
   | 'layout.version'
   | 'layout.notifications'
   | 'chat.composer'
   /** Replaces the account list on the account-management settings page. */
-  | 'settings.account';
+  | 'settings.account'
+  /** Action on a scene suite that is locked; context `{ suiteId, reason: 'edition' | 'license' }`. */
+  | 'sceneSuites.lockedAction';
+
+/**
+ * Work a `session.settings` component needs done on a new session before its
+ * first prompt. It is called the moment that first message is sent, before
+ * the session exists, so it can take what the sender had picked then; the
+ * function it returns runs once the session is created (even if the page has
+ * moved on meanwhile), and a rejection stops the prompt from being sent.
+ */
+export type SessionStartHook = () => ((sessionId: string) => Promise<void>) | void;
+
+/**
+ * What the session page hands to `session.settings` components. A component
+ * registers its SessionStartHook through `onSessionStart` and calls the
+ * returned function to withdraw it.
+ */
+export interface SessionSettingsSlotContext extends Record<string, unknown> {
+  sessionId: string | null;
+  onSessionStart: (hook: SessionStartHook) => () => void;
+}
 
 /** Optional composer tools can hold the draft while an asynchronous input is active. */
 export interface ChatComposerSlotContext extends Record<string, unknown> {

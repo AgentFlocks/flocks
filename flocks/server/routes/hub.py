@@ -24,7 +24,7 @@ from flocks.hub.suite_license import (
     clear_page_suite_cache,
     edition_status,
     install_decision,
-    is_open_edition,
+    pro_platform_active,
     suite_license,
 )
 from flocks.hub.update_protection import UpdateConfirmationRequired, public_plan
@@ -260,6 +260,10 @@ class SceneSuiteEntry(BaseModel):
     licensed: Optional[bool] = None
     licenseState: Optional[str] = None
     licenseExpiresAt: Optional[int] = None  # epoch ms; None when it does not expire
+    # A pro-edition suite while the platform licence does not grant that
+    # edition: it is listed but cannot be installed (install_decision refuses
+    # it with "edition_required"). None for an open-edition suite.
+    editionLocked: Optional[bool] = None
 
 
 def _suite_workspace_id(plugin_id: str) -> Optional[str]:
@@ -281,14 +285,22 @@ async def hub_scene_suites(_user: object = Depends(require_user)):
 
 
 async def _attach_suite_licenses(suites: list[SceneSuiteEntry]) -> list[SceneSuiteEntry]:
-    """Fill in each pro-edition suite's own licence verdict."""
+    """Fill in each pro-edition suite's edition lock and its own licence verdict."""
     pro = [suite for suite in suites if suite.edition == "pro"]
-    if not pro or is_open_edition(await edition_status()):
+    if not pro:
         return suites
+    if not pro_platform_active(await edition_status()):
+        # The same test install_decision applies: without the edition no pro
+        # suite installs, whatever its own licence says.
+        return [
+            suite.model_copy(update={"editionLocked": True}) if suite.edition == "pro" else suite
+            for suite in suites
+        ]
     verdicts = await asyncio.gather(*(suite_license(suite.id) for suite in pro))
     by_id = {suite.id: verdict for suite, verdict in zip(pro, verdicts)}
     return [
         suite.model_copy(update={
+            "editionLocked": False,
             "licensed": by_id[suite.id].licensed,
             "licenseState": by_id[suite.id].state,
             "licenseExpiresAt": by_id[suite.id].expires_at,
@@ -369,7 +381,7 @@ async def _assert_edition_allowed(plugin_type: PluginType, plugin_id: str) -> No
     if decision.reason == "edition_required":
         raise HTTPException(
             status_code=403,
-            detail="该套件需要 Flocks Pro 授权后才能安装，请先在系统设置中升级。",
+            detail="该套件需要授权后才能安装，请先在系统设置中完成授权。",
         )
     raise HTTPException(status_code=403, detail=decision.message)
 

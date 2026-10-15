@@ -2512,7 +2512,25 @@ async def abort_session(sessionID: str, http_request: Request = None) -> bool:
                 detail=f"Session {sessionID} not found",
             )
         _require_session_write_access(session, current_user)
-    return await _abort_session_processing(sessionID)
+    aborted = await _abort_session_processing(sessionID)
+    # The run may be on another node; whoever holds its lease aborts it there.
+    try:
+        from flocks.session.ownership import request_abort
+
+        await request_abort(sessionID)
+    except Exception as exc:
+        log.warn("session.abort.remote_request_failed", {"session_id": sessionID, "error": str(exc)})
+    return aborted
+
+
+def _install_remote_abort_handler() -> None:
+    """Abort sessions this process runs when another node asks (flocks.session.ownership)."""
+    from flocks.session.ownership import set_abort_handler
+
+    set_abort_handler(_abort_session_processing)
+
+
+_install_remote_abort_handler()
 
 
 class ForkRequest(BaseModel):
@@ -4304,8 +4322,8 @@ def _check_session_aborted(sessionID: str, checkpoint: str, step: int, **extra_c
     return False
 
 
-def _validate_chat_upload_parts(session_id: str, owner_id: Optional[str], parts: List[Dict[str, Any]]) -> None:
-    from flocks.session.files import resolve_chat_upload
+async def _validate_chat_upload_parts(session_id: str, owner_id: Optional[str], parts: List[Dict[str, Any]]) -> None:
+    from flocks.session.files import resolve_chat_upload, restore_chat_upload_source
 
     for part in parts:
         upload_id = str(part.get("uploadID") or "").strip()
@@ -4316,6 +4334,8 @@ def _validate_chat_upload_parts(session_id: str, owner_id: Optional[str], parts:
         if part.get("type") != "file" or not isinstance(part.get("mime"), str) or not part["mime"]:
             raise HTTPException(status_code=400, detail="Chat upload requires a file part and MIME type")
         try:
+            # The upload may have been staged through another instance.
+            await restore_chat_upload_source(session_id, owner_id, upload_id)
             resolve_chat_upload(session_id, owner_id, upload_id)
         except (FileNotFoundError, OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4332,7 +4352,7 @@ async def _process_session_message(
 ):
     from flocks.session.interaction_queue import InteractionQueue
 
-    _validate_chat_upload_parts(sessionID, uploader_user_id, request.parts or [])
+    await _validate_chat_upload_parts(sessionID, uploader_user_id, request.parts or [])
     hold = InteractionQueue.hold_uploads(sessionID, uploader_user_id or "", request.parts or [])
     try:
         return await _process_session_message_impl(
@@ -4579,17 +4599,27 @@ async def _process_session_message_impl(
                     raw_part.get("filename"),
                     failure_event="session.message.file_part.materialize_failed",
                 )
+                await _store_materialized_part(url)
             file_part_id = raw_part.get("id") or upload_id or Identifier.create("part")
             async def persist_file_part():
                 nonlocal url, source
-                from flocks.session.files import bind_staged_chat_upload, resolve_chat_upload, restore_chat_upload
+                from flocks.session.files import (
+                    bind_staged_chat_upload,
+                    move_stored_upload,
+                    resolve_chat_upload,
+                    restore_chat_upload,
+                    restore_chat_upload_source,
+                )
 
                 original = None
                 target = None
                 try:
                     if upload_id:
+                        await restore_chat_upload_source(sessionID, uploader_user_id or "", upload_id)
                         original = resolve_chat_upload(sessionID, uploader_user_id or "", upload_id)
                         target = bind_staged_chat_upload(sessionID, uploader_user_id or "", upload_id)
+                        if original != target:
+                            await move_stored_upload(original, target)
                         url = target.as_uri()
                         source = {"root": "session-upload", "path": target.name}
                     file_part = FilePart(
@@ -4613,6 +4643,13 @@ async def _process_session_message_impl(
                         )
                         if not referenced:
                             restore_chat_upload(original, target)
+                            try:
+                                await move_stored_upload(target, original)
+                            except Exception as exc:
+                                log.warn("session.upload.store_restore_failed", {
+                                    "sessionID": sessionID,
+                                    "error_type": type(exc).__name__,
+                                })
                     raise
 
             try:
@@ -5116,6 +5153,16 @@ async def _publish_prompt_queue(session_id: str) -> None:
     })
 
 
+async def _store_materialized_part(url: str) -> None:
+    """Keep a data URL that was written to the uploads directory in the database too."""
+    if not url.startswith("file:"):
+        return
+    from flocks.session.files import store_upload
+    from flocks.session.utils.file_extractor import file_url_to_path
+
+    await store_upload(Path(file_url_to_path(url)))
+
+
 def _materialize_queued_parts(session_id: str, parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Persist queued data URLs so large base64 payloads do not sit in memory."""
     prepared: List[Dict[str, Any]] = []
@@ -5557,14 +5604,18 @@ async def _enqueue_prompt_request(
     from flocks.hooks.execution import current_execution_context
 
     _validate_execution_mode_request(request)
-    _validate_chat_upload_parts(session_id, uploader_user_id, request.parts)
+    await _validate_chat_upload_parts(session_id, uploader_user_id, request.parts)
     hold = InteractionQueue.hold_uploads(session_id, uploader_user_id or "", request.parts)
     try:
         if expected_generation is None:
             expected_generation = Session.lifecycle_generation(session_id)
         await _require_agent_usable_for_chat(request.agent)
         model = request.model.model_dump(by_alias=True) if request.model else None
-        parts = _materialize_queued_parts(session_id, [dict(part) for part in request.parts])
+        originals = [dict(part) for part in request.parts]
+        parts = _materialize_queued_parts(session_id, originals)
+        for original, part in zip(originals, parts):
+            if str(original.get("url") or "").startswith("data:"):
+                await _store_materialized_part(str(part.get("url") or ""))
         execution_context = current_execution_context()
         if uploader_user_id:
             execution_context = {**execution_context, "_uploaderUserID": uploader_user_id}
@@ -5700,9 +5751,9 @@ async def remove_prompt_queue_item(
         else ""
     )
     if uploader_user_id:
-        from flocks.session.files import remove_staged_chat_uploads_from_parts
+        from flocks.session.files import discard_staged_chat_uploads_from_parts
 
-        remove_staged_chat_uploads_from_parts(
+        await discard_staged_chat_uploads_from_parts(
             uploader_user_id,
             removed_item.parts,
         )
@@ -5823,7 +5874,7 @@ async def send_session_message_async(
         working_directory=working_directory,
     )
 
-    _validate_chat_upload_parts(sessionID, uploader_user_id, request.parts)
+    await _validate_chat_upload_parts(sessionID, uploader_user_id, request.parts)
     hold = InteractionQueue.hold_uploads(sessionID, uploader_user_id or "", request.parts)
     try:
         existing_queue = await InteractionQueue.list(sessionID)

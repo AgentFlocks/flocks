@@ -52,7 +52,8 @@ def test_ensure_config_files_creates_from_examples(tmp_path, monkeypatch):
     assert set(config_data["memory"]) == {"dream", "search"}
     embedding_config = config_data["memory"]["search"]["embedding"]
     assert set(embedding_config) == {"enabled", "model", "provider"}
-    assert embedding_config["provider"] == "auto"
+    # V1.2: embeddings default to an enterprise-local model, never an outside API.
+    assert embedding_config["provider"] == "local"
     assert embedding_config["enabled"] is False
     assert config_data["memory"]["dream"]["enabled"] is True
     assert set(config_data["memory"]["dream"]) == {

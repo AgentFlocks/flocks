@@ -79,7 +79,21 @@ def create_service_app(
     async def lifespan(_app: FastAPI):
         _app.state.mcp_ready = False
         _app.state.mcp_error = None
+        refresher: Optional[asyncio.Task] = None
         critical_plugin_error = _load_runtime_plugins()
+        if critical_plugin_error is None:
+            # Sub-workflows resolve by id: managed ones must be in place
+            # before a local copy could answer for them.
+            from flocks.content.managed import ManagedContent, run_refresher
+
+            if ManagedContent.active():
+                try:
+                    await ManagedContent.ensure_loaded()
+                except Exception as exc:
+                    critical_plugin_error = f"managed content unavailable: {exc}"
+                    log.error("workflow_service.content.load_failed", {"error": str(exc)})
+                else:
+                    refresher = asyncio.create_task(run_refresher())
         if critical_plugin_error is not None:
             _app.state.mcp_error = critical_plugin_error
         else:
@@ -90,9 +104,17 @@ def create_service_app(
                 log.warning("workflow_service.mcp.init_failed", {"error": str(exc)})
             else:
                 _app.state.mcp_ready = True
+            from flocks.extensions import run_startup_hooks
+
+            await run_startup_hooks()
         try:
             yield
         finally:
+            if refresher is not None:
+                refresher.cancel()
+            from flocks.extensions import run_shutdown_hooks
+
+            await run_shutdown_hooks()
             try:
                 await get_manager().shutdown()
             except Exception as exc:

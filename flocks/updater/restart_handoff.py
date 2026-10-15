@@ -211,9 +211,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--current-version", required=True)
     parser.add_argument("--uv-default-index")
     parser.add_argument("--npm-registry")
-    parser.add_argument("--pro-wheel-path")
-    parser.add_argument("--pro-bundle-manifest-path")
-    parser.add_argument("--bundle-sha256")
+    # Installed after the dependency sync; given by an update channel's plan.
+    parser.add_argument("--extra-wheel", action="append", default=[])
+    # JSON ``[staged, destination]``: put in place once the install succeeded.
+    parser.add_argument("--success-file", action="append", default=[])
     parser.add_argument("--cleanup-dir")
     parser.add_argument("--prebuilt", action="store_true")
     parser.add_argument("--dependency-wheels-dir")
@@ -234,11 +235,8 @@ def _run_upgrade_tasks(args: argparse.Namespace) -> str | None:
                 version=args.version,
                 uv_default_index=args.uv_default_index,
                 npm_registry=args.npm_registry,
-                pro_wheel_path=Path(args.pro_wheel_path) if args.pro_wheel_path else None,
-                pro_bundle_manifest_path=(
-                    Path(args.pro_bundle_manifest_path) if args.pro_bundle_manifest_path else None
-                ),
-                bundle_sha256=args.bundle_sha256,
+                extra_wheels=[Path(path) for path in getattr(args, "extra_wheel", None) or []],
+                success_files=_success_files(args),
                 sync_timeout=args.sync_timeout,
                 prebuilt=bool(getattr(args, "prebuilt", False)),
                 dependency_wheels_dir=(
@@ -430,20 +428,12 @@ def _write_upgrade_result(
             pass
 
 
-def _report_pending_pro_bundle_install_receipt(args: argparse.Namespace) -> None:
-    if not args.pro_bundle_manifest_path:
-        return
-    try:
-        from flocks.console.login import ConsoleLoginService
-
-        reported = asyncio.run(ConsoleLoginService.report_pending_pro_bundle_install_receipt())
-    except Exception as exc:
-        _record_handoff_log(f"install_receipt_report_failed error={exc}")
-        return
-    if reported:
-        _record_handoff_log("install_receipt_reported")
-    else:
-        _record_handoff_log("install_receipt_report_skipped")
+def _success_files(args: argparse.Namespace) -> list[tuple[Path, Path]]:
+    pairs: list[tuple[Path, Path]] = []
+    for raw in getattr(args, "success_file", None) or []:
+        staged, destination = json.loads(raw)
+        pairs.append((Path(staged), Path(destination)))
+    return pairs
 
 
 def _run_simple_upgrade(args: argparse.Namespace) -> int:
@@ -520,7 +510,6 @@ def _run_simple_upgrade(args: argparse.Namespace) -> int:
         )
         return 1
 
-    _report_pending_pro_bundle_install_receipt(args)
     started, stdout, stderr = _start_service_after_upgrade(args)
     if not started:
         error = "service restart failed"
@@ -738,13 +727,15 @@ def run(argv: Sequence[str] | None = None) -> int:
                 _record_handoff_log("legacy_handover_stop_timeout")
                 _cleanup_dir(args.cleanup_dir)
                 return 1
-    elif args.pro_wheel_path or args.pro_bundle_manifest_path:
+    elif getattr(args, "extra_wheel", None) or getattr(args, "success_file", None):
+        # A change that keeps the local source (an extension's component): the
+        # service still has to be down while its runtime changes under it.
         supervisor_stopped = _stop_supervisor_before_restart(
             backend_port=args.backend_port,
             service_ports=(args.frontend_port,),
         )
         if not supervisor_stopped:
-            _record_handoff_log("pro_handover_stop_timeout")
+            _record_handoff_log("component_handover_stop_timeout")
             _cleanup_dir(args.cleanup_dir)
             return 1
         if not _ensure_backend_port_free(args.backend_port):
@@ -764,7 +755,6 @@ def run(argv: Sequence[str] | None = None) -> int:
         _record_handoff_log(f"upgrade_tasks_failed error={task_error}")
         _cleanup_dir(args.cleanup_dir)
         return 1
-    _report_pending_pro_bundle_install_receipt(args)
 
     uses_legacy_protocol = bool(args.backup_path or args.prepare_handover or args.backend_pid_file)
     if uses_legacy_protocol and not _cleanup_legacy_upgrade_handover(args):

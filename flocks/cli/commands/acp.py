@@ -298,6 +298,12 @@ def acp_command(
           }
         }
     """
+    from flocks.cli.managed import refuse_local_runtime_when_managed
+
+    # ACP runs a server of its own in this process; in a managed install the
+    # runtime is the supervised service and nothing starts beside it.
+    refuse_local_runtime_when_managed("flocks acp")
+
     if cwd is None:
         cwd = os.getcwd()
     

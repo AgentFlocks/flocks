@@ -121,3 +121,42 @@ async def test_static_webui_does_not_fallback_for_non_get(monkeypatch, tmp_path:
         response = await client.post("/session/abc", headers={"Accept": "text/html"})
 
     assert response.status_code == 404
+
+
+# --- a deployment that pins its UI directory -------------------------------
+
+def test_pinned_ui_directory_is_served_and_nothing_else(monkeypatch, tmp_path: Path) -> None:
+    from flocks.server.static_webui import enforce_pinned_webui_dist, resolve_webui_dist_dir
+
+    pinned = _write_dist(tmp_path / "pinned")
+    monkeypatch.setenv("FLOCKS_WEBUI_DIST_DIR", str(pinned))
+    monkeypatch.setenv("FLOCKS_WEBUI_DIST_STRICT", "1")
+
+    assert resolve_webui_dist_dir() == pinned.resolve()
+    enforce_pinned_webui_dist()  # present: no error
+
+
+def test_pinned_ui_directory_missing_is_a_failed_start(monkeypatch, tmp_path: Path) -> None:
+    from flocks.server import static_webui
+
+    # Another build is available; a pinned deployment must not fall back to it.
+    fallback = _write_dist(tmp_path / "fallback")
+    monkeypatch.setattr(static_webui, "source_webui_dist_dir", lambda: fallback)
+    monkeypatch.setenv("FLOCKS_WEBUI_DIST_DIR", str(tmp_path / "missing"))
+    monkeypatch.setenv("FLOCKS_WEBUI_DIST_STRICT", "true")
+
+    assert static_webui.resolve_webui_dist_dir() is None
+    with pytest.raises(static_webui.WebUIDistMissingError, match="FLOCKS_WEBUI_DIST_STRICT"):
+        static_webui.enforce_pinned_webui_dist()
+
+
+def test_unpinned_resolution_still_falls_back(monkeypatch, tmp_path: Path) -> None:
+    from flocks.server import static_webui
+
+    fallback = _write_dist(tmp_path / "fallback")
+    monkeypatch.setattr(static_webui, "source_webui_dist_dir", lambda: fallback)
+    monkeypatch.setenv("FLOCKS_WEBUI_DIST_DIR", str(tmp_path / "missing"))
+    monkeypatch.delenv("FLOCKS_WEBUI_DIST_STRICT", raising=False)
+
+    assert static_webui.resolve_webui_dist_dir() == fallback.resolve()
+    static_webui.enforce_pinned_webui_dist()  # nothing pinned: never raises

@@ -780,44 +780,21 @@ class TaskManager:
                 continue
 
     async def _recover_orphaned_executions(self) -> int:
-        """Requeue expired work, leaving every live lease alone.
+        """Settle expired work at startup, leaving every live lease alone.
 
         Every ``running`` execution used to be treated as this node's leftover.
         With two instances on one database that is wrong in the dangerous
         direction: restarting one node put the other node's in-progress
         executions back in the queue, and the same task ran twice. Only expiry
         or an old unclaimed row is evidence that execution was abandoned.
-        """
 
-        node_id = process_owner_id()
-        orphans = await TaskStore.list_reclaimable_executions(
-            node_id=node_id,
-            # A peer may have dequeued a row and not claimed it yet. Startup
-            # obeys the same grace period as periodic recovery.
-            stale_before=datetime.now(timezone.utc) - timedelta(seconds=_RUNNING_RECOVERY_TIMEOUT_S),
-            include_own_live=False,
-        )
-        recovered = 0
-        for execution in orphans:
-            claimed = await TaskStore.claim_execution(
-                execution.id, node_id=node_id, lease_seconds=lease_seconds(),
-                expected_generation=execution.owner_generation,
-            )
-            if claimed is None:
-                continue
-            try:
-                await self._requeue_execution(
-                    claimed, expected_generation=claimed.owner_generation,
-                    expected_status=TaskStatus.RUNNING,
-                )
-                recovered += 1
-            except ExecutionOwnershipError:
-                continue
-            finally:
-                await TaskStore.release_execution_lease(
-                    claimed.id, node_id=node_id, expected_generation=claimed.owner_generation,
-                )
-        return recovered
+        An abandoned execution is failed, not run again from the start: it may
+        have done part of its work (sent a message, written a record), and
+        whether it did is unknown. Running it again is a decision for its
+        retry policy (the retry queue honours one) or for a person -- the same
+        outcome the periodic recovery reaches for the same evidence.
+        """
+        return await self._recover_stale_active_executions()
 
     async def _recover_orphaned_queued_executions(self) -> int:
         orphans = await TaskStore.list_orphaned_queued_executions()

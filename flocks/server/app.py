@@ -204,6 +204,23 @@ async def lifespan(app: FastAPI):
     
     # Initialize storage
     await _run_startup_phase(log, "storage.init", Storage.init)
+    # /ready answers for the database too: a node whose database is gone or
+    # has turned into a standby keeps running but cannot save anything.
+    from flocks.db.health import DATABASE_PROBE, database_ready
+    from flocks.plugin.readiness import register_readiness_probe
+
+    register_readiness_probe(DATABASE_PROBE, database_ready)
+
+    # Content the deployment manages (flocks.content.managed): loaded before
+    # anything reads agents, skills or workflows -- a start that cannot list
+    # it fails rather than serve local copies in its place -- then kept current.
+    from flocks.content.managed import ManagedContent, run_refresher
+
+    if ManagedContent.active():
+        await _run_startup_phase(log, "content.managed.load", ManagedContent.ensure_loaded)
+        app.state.startup_background_tasks.append(
+            asyncio.create_task(run_refresher(), name="content.managed.refresher")
+        )
     from flocks.notifications.token_policy import TokenPolicyService
 
     try:
@@ -515,6 +532,15 @@ async def lifespan(app: FastAPI):
         log.info("knowledgebase.integration.start", {"status": knowledgebase_status.get("status", "disabled")})
     except Exception as exc:
         log.warning("knowledgebase.integration.start_failed", {"error_type": type(exc).__name__})
+
+    # Extensions resume what an earlier process left unfinished (a spool of
+    # unreported results, say) once storage and managed content are up.
+    try:
+        from flocks.extensions import run_startup_hooks
+
+        await run_startup_hooks()
+    except Exception as exc:
+        log.warning("extensions.startup_hooks_failed", {"error": str(exc)})
 
     blocking_startup_ms = int((time.perf_counter() - startup_started_at) * 1000)
     log.info("server.startup.ready", {
@@ -1246,6 +1272,15 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     )
 
 
+from flocks.workflow.fs_store import ManagedWorkflowReadOnly  # noqa: E402
+
+
+@app.exception_handler(ManagedWorkflowReadOnly)
+async def managed_workflow_read_only_handler(request: Request, exc: ManagedWorkflowReadOnly):
+    """A write aimed at a workflow the deployment manages is refused, not a server error."""
+    return JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content={"detail": str(exc)})
+
+
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     """Handle all other exceptions"""
@@ -1333,7 +1368,6 @@ from flocks.server.routes.auth import router as auth_router
 from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
 from flocks.server.routes.device import router as device_router
-from flocks.server.routes.console_upgrade import router as console_upgrade_router
 from flocks.server.routes.license import router as license_router
 from flocks.server.routes.webui import router as webui_pages_router
 from flocks.server.routes.contracts import router as contracts_router
@@ -1401,7 +1435,6 @@ app.include_router(admin_users_router, prefix="/api/admin", tags=["Admin"])
 app.include_router(notifications_router, prefix="/api/notifications", tags=["Notifications"])
 # Device integration (named instances, SQL-backed)
 app.include_router(device_router, prefix="/api/devices", tags=["Device"])
-app.include_router(console_upgrade_router, prefix="/api/console", tags=["ConsoleUpgrade"])
 app.include_router(webui_pages_router, prefix="/api", tags=["WebUI"])
 app.include_router(contracts_router, prefix="/api", tags=["AccessContracts"])
 app.include_router(voice_router, prefix="/api/voice", tags=["Voice"])
@@ -1536,6 +1569,10 @@ def _enforce_startup_requirements() -> None:
     )
     app.state.startup_readiness = report
     enforce_startup_readiness(report)
+
+    from flocks.server.static_webui import enforce_pinned_webui_dist
+
+    enforce_pinned_webui_dist()
 
 
 def _route_registered(path: str, method: str) -> bool:

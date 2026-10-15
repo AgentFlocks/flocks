@@ -245,6 +245,19 @@ class HookPipeline:
             return [h.name for h in cls._hooks]
 
     @classmethod
+    def registered_stage_handlers(cls, stage: str) -> List[str]:
+        """Names of registered hooks that handle ``stage``.
+
+        Only hooks registered in this process (extensions, built-ins); project
+        hook files are loaded per workspace and are not part of the answer.
+        Synchronous, for checks that run outside an event loop such as startup
+        readiness.
+        """
+        with cls._registry_lock:
+            entries = list(cls._hooks)
+        return [entry.name for entry in entries if cls._resolve_handler(entry.hook, stage) is not None]
+
+    @classmethod
     def reset(cls) -> None:
         """Reset pipeline state (primarily for tests)."""
         with cls._registry_lock:

@@ -209,6 +209,29 @@ async def test_scene_suites_carry_their_own_licence(client: AsyncClient):
     assert suites["soc-workspace"]["licensed"] is None
 
 
+@pytest.mark.asyncio
+async def test_scene_suites_say_which_need_an_edition_the_install_lacks(client: AsyncClient):
+    """The lock the scene manager shows is the one install_decision enforces,
+    so the page needs no licence call of its own."""
+    resp = await client.get("/api/hub/scene-suites")
+    suites = {item["id"]: item for item in resp.json()}
+    assert suites["code-audit-workspace"]["editionLocked"] is True
+    assert suites["ai-redteam-workspace"]["editionLocked"] is True
+    assert suites["soc-workspace"]["editionLocked"] is None
+    decision = await suite_license_mod.install_decision("component", "code-audit-workspace")
+    assert (decision.allowed, decision.reason) == (False, "edition_required")
+
+    with registered_pro_checker() as checker:
+        checker.licensed = {"code-audit-workspace"}
+        resp = await client.get("/api/hub/scene-suites")
+    suites = {item["id"]: item for item in resp.json()}
+    assert suites["code-audit-workspace"]["editionLocked"] is False
+    # Unlocked by the edition, still waiting for its own licence.
+    assert suites["ai-redteam-workspace"]["editionLocked"] is False
+    assert suites["ai-redteam-workspace"]["licensed"] is False
+    assert suites["soc-workspace"]["editionLocked"] is None
+
+
 # SR6
 @pytest.mark.asyncio
 async def test_unanswerable_licence_check_refuses(client: AsyncClient, suite_pages):

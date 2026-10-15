@@ -31,7 +31,7 @@ MANAGED_UPGRADE_REFUSAL = (
 )
 OFFLINE_UPGRADE_REFUSAL = (
     "此实例由离线安装包部署，不支持联网就地升级：核心升级请用新版 flocks-offline.run 覆盖安装，"
-    "Pro 组件从包内 /opt/flocks/bundle 安装（FLOCKS_PRO_BUNDLE_DIR）。"
+    "安装包自带的组件从包内的目录安装。"
 )
 
 
@@ -114,8 +114,8 @@ def detect_deploy_mode() -> DeployMode:
          process (managed distribution; evaluated live).
 
     ``offline`` behaves like ``source`` everywhere except that network-based
-    upgrades are refused: the Pro component comes from the bundled local bundle
-    and core upgrades come from a newer ``flocks-offline.run``.
+    upgrades are refused: a component the package ships comes from its local
+    copy and core upgrades come from a newer ``flocks-offline.run``.
     """
     static = _static_deploy_mode()
     if static is not None:
@@ -133,12 +133,30 @@ def is_managed_deployment() -> bool:
     return detect_deploy_mode() == "managed"
 
 
+def declared_managed() -> bool:
+    """Either explicit signal says a supervisor owns this installation.
+
+    ``FLOCKS_DEPLOY_MODE=managed`` in the environment, or a descriptor in the
+    runtime root saying ``managed``.  Not the license-extension inference
+    :func:`detect_deploy_mode` falls back to, and -- unlike that function --
+    not cancelled by a later override: ``FLOCKS_DEPLOY_MODE=source`` or
+    ``FLOCKS_OFFLINE_INSTALL`` set in a shell does not talk a managed install
+    out of its supervisor.  This is the question a security check asks before
+    letting a command run its own copy of the runtime beside the supervised
+    one; :func:`detect_deploy_mode` answers the different question of how
+    upgrades are delivered, where an explicit override is the point.
+    """
+    if os.environ.get("FLOCKS_DEPLOY_MODE", "").strip().lower() == "managed":
+        return True
+    return _descriptor_mode() == "managed"
+
+
 def update_allowed_for_mode(mode: str) -> bool:
     """Whether the built-in updater may fetch and apply a release in *mode*.
 
-    ``offline`` still installs the Pro bundle shipped with the package (see
-    ``perform_update(local_bundle_path=...)``); only network-based upgrades are
-    refused, which is what this flag reports.
+    ``offline`` still installs a release shipped with the package (see
+    ``perform_update(release=...)`` with a local archive); only network-based
+    upgrades are refused, which is what this flag reports.
     """
     return mode not in ("docker", "managed", "offline")
 
@@ -149,8 +167,8 @@ def install_modification_refusal(mode: str | None = None) -> str | None:
     Docker images are replaced by pulling a new image and managed release
     packages are upgraded by the commercial core; ``uv sync`` / source
     replacement from inside the runtime would corrupt either. An offline
-    installation is *not* in this set: its Pro bundle is installed from disk by
-    the same code paths, only network-based upgrades are refused
+    installation is *not* in this set: a release shipped with it is installed
+    from disk by the same code paths, only network-based upgrades are refused
     (``update_refusal_reason``).
     """
     current = mode or detect_deploy_mode()
