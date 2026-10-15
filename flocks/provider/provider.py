@@ -197,7 +197,8 @@ class ChatResponse(BaseModel):
     model: str
     content: str
     finish_reason: str
-    usage: Dict[str, int]
+    # Token usage in the flocks.provider.token_usage shape.
+    usage: Dict[str, Any]
     tool_calls: Optional[List[Dict[str, Any]]] = None
     reasoning: Optional[str] = None
 
@@ -225,7 +226,7 @@ class StreamChunk(BaseModel):
     reasoning: Optional[str] = None  # Reasoning/thinking content
     tool_input: Optional[Dict[str, Any]] = None  # Incremental tool input
     metadata: Optional[Dict[str, Any]] = None  # Provider-specific metadata
-    usage: Optional[Dict[str, int]] = None  # Token usage from provider (prompt_tokens, completion_tokens, total_tokens)
+    usage: Optional[Dict[str, Any]] = None  # Token usage from provider, flocks.provider.token_usage shape
 
 
 class Provider:

@@ -155,7 +155,7 @@ def token_usage_to_dict(tokens: Any) -> Dict[str, Any]:
     elif not isinstance(cache, dict):
         cache = dict(getattr(cache, "__dict__", {}) or {})
 
-    return {
+    result = {
         "input": _coerce_int(data.get("input")),
         "output": _coerce_int(data.get("output")),
         "reasoning": _coerce_int(data.get("reasoning")),
@@ -164,6 +164,10 @@ def token_usage_to_dict(tokens: Any) -> Dict[str, Any]:
             "write": _coerce_int(cache.get("write")),
         },
     }
+    # Unknown cache usage stays distinguishable from a reported zero.
+    if isinstance(cache.get("reported"), bool):
+        result["cache"]["reported"] = cache["reported"]
+    return result
 
 
 async def build_context_usage_snapshot(

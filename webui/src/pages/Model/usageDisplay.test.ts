@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   convertCurrencyAmount,
+  formatCacheHitRate,
+  formatTokenCount,
   formatTokenMillions,
+  getCacheUsageSummary,
   getConvertedTotalCost,
   getDefaultDashboardCurrency,
   toggleDashboardCurrency,
@@ -51,5 +54,56 @@ describe('usageDisplay helpers', () => {
   it('toggles dashboard currency', () => {
     expect(toggleDashboardCurrency('USD')).toBe('CNY');
     expect(toggleDashboardCurrency('CNY')).toBe('USD');
+  });
+
+  it('formats token counts compactly', () => {
+    expect(formatTokenCount(812)).toBe('812');
+    expect(formatTokenCount(8_192)).toBe('8.2K');
+    expect(formatTokenCount(3_240_000)).toBe('3.24M');
+  });
+
+  it('reports cache usage as unknown when no call reported it', () => {
+    expect(getCacheUsageSummary(null)).toEqual({ state: 'none' });
+    expect(getCacheUsageSummary(usageStats)).toEqual({ state: 'unreported', totalRequests: 2 });
+    expect(getCacheUsageSummary({
+      ...usageStats,
+      summary: { ...usageStats.summary, cache_reported_requests: 0, total_cache_read_tokens: 0 },
+    })).toEqual({ state: 'unreported', totalRequests: 2 });
+  });
+
+  it('shows pre-upgrade cache reads without a hit rate', () => {
+    expect(getCacheUsageSummary({
+      ...usageStats,
+      summary: {
+        ...usageStats.summary,
+        total_cache_read_tokens: 800,
+        cache_reported_requests: 0,
+        cache_reported_read_tokens: 0,
+        cache_reported_input_tokens: 0,
+      },
+    })).toEqual({ state: 'legacy', cacheRead: 800, totalRequests: 2 });
+  });
+
+  it('computes the hit rate over the calls that reported cache usage', () => {
+    const summary = getCacheUsageSummary({
+      ...usageStats,
+      summary: {
+        ...usageStats.summary,
+        // 900 more cache reads come from a record made before the upgrade.
+        total_cache_read_tokens: 9_092,
+        cache_reported_requests: 1,
+        cache_reported_read_tokens: 8_192,
+        cache_reported_input_tokens: 10_000,
+      },
+    });
+
+    expect(summary).toEqual({
+      state: 'reported',
+      cacheRead: 8_192,
+      hitRate: 0.8192,
+      reportedRequests: 1,
+      totalRequests: 2,
+    });
+    expect(formatCacheHitRate(0.8192)).toBe('81.9%');
   });
 });

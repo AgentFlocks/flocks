@@ -241,11 +241,7 @@ class OpenAICompatibleProvider(BaseProvider):
             model=response.model,
             content=msg.content or "",
             finish_reason=choice.finish_reason,
-            usage={
-                "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-                "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-                "total_tokens": response.usage.total_tokens if response.usage else 0,
-            }
+            usage=_normalize_stream_usage(response.usage, response_id=response.id) or {},
         )
     
     async def chat_stream(
@@ -333,7 +329,10 @@ class OpenAICompatibleProvider(BaseProvider):
         usage_emitted = False
 
         async for chunk in stream:
-            normalized_usage = _normalize_stream_usage(getattr(chunk, "usage", None))
+            normalized_usage = _normalize_stream_usage(
+                getattr(chunk, "usage", None),
+                response_id=getattr(chunk, "id", None),
+            )
             if normalized_usage:
                 stream_usage = normalized_usage
             if chunk.choices:

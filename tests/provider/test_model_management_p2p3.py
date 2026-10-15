@@ -404,13 +404,14 @@ class TestCostCalculator:
         )
 
         cost = CostCalculator.calculate(
-            input_tokens=10000,
+            input_tokens=12000,
             output_tokens=1000,
             pricing=pricing,
             cached_tokens=8000,
             cache_write_tokens=2000,
         )
-        # Billable input: 10000 - 8000 = 2000 => 0.006
+        # input_tokens is the whole prompt, cache reads and writes included.
+        # Billable input: 12000 - 8000 - 2000 = 2000 => 0.006
         # output: 1000 / 1M * 15.0 = 0.015
         # cache read: 8000 / 1M * 0.3 = 0.0024
         # cache write: 2000 / 1M * 3.75 = 0.0075
@@ -429,8 +430,10 @@ class TestCostCalculator:
         from flocks.provider.cost_calculator import CostCalculator
         pricing = PriceConfig(input=3.0, output=15.0)
         cost = CostCalculator.calculate(1000, 1000, pricing, cached_tokens=500)
-        # cache_read is None, so no cache cost
-        assert cost.cache_cost == 0.0
+        # cache_read is None: the cached part is charged the input price, not
+        # treated as free.
+        assert abs(cost.cache_cost - 0.0015) < 1e-9
+        assert abs(cost.input_cost + cost.cache_cost - 0.003) < 1e-9
 
 
 # ==================== usage.py (recording & stats — SQLite dynamic data) ====================
@@ -457,10 +460,11 @@ class TestUsageTracking:
     def test_record_usage_with_pricing(self, setup_storage):
         from flocks.server.routes.usage import RecordUsageRequest, record_usage
 
+        # 5000 uncached + 5000 cache reads + 1000 cache writes
         req = RecordUsageRequest(
             provider_id="anthropic",
             model_id="claude-sonnet-4-20250514",
-            input_tokens=10000,
+            input_tokens=11000,
             output_tokens=2000,
             cached_tokens=5000,
             cache_write_tokens=1000,

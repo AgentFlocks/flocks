@@ -82,6 +82,13 @@ class TokenCache(BaseModel):
     """Token cache information"""
     read: int = Field(0, description="Cache read tokens")
     write: int = Field(0, description="Cache write tokens")
+    reported: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether the provider reported cache usage. False: read and write "
+            "are unknown, not zero. None: recorded before this was tracked."
+        ),
+    )
 
 
 class TokenUsage(BaseModel):
@@ -935,6 +942,7 @@ class Message:
                 normalized["cache"] = {
                     "read": cache_raw.get("read", 0),
                     "write": cache_raw.get("write", 0),
+                    "reported": cache_raw.get("reported"),
                 }
             return normalized
         return defaults
