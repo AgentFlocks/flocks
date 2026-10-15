@@ -89,6 +89,24 @@ async def test_benign_only_writes_on_a_different_round_and_audits_original_versi
     assert len(mutations(case)) == 1
 
 
+async def test_retained_confirmed_risk_invalidates_old_uncertainty_ignore_intent(case):
+    from flocks.monitoring.conclusions import capture_case
+    await decision(case, 'unknown')
+    for index in range(6):
+        await f.observe(case.policy, case.event, f'round-{index}')
+    assert (await f.snapshot(case.policy))[case.event['key']]['state'] == 'queued'
+    await decision(case, 'risk')
+    saved = (await rows('SELECT * FROM monitor_investigations'))[0]
+    snapshot = capture_case(saved)
+    await write('UPDATE monitor_investigations SET state=?,result=?,evidence=?,confirmed_risk=?',
+                ('deferred', encode({'verdict': 'unknown', 'reason': '补查模型暂不可用'}), '[]', encode(snapshot)))
+    case.event['investigation'] = {'state': 'deferred'}
+    await consume(case, 'next')
+    assert not mutations(case)
+    item = await f.observe(case.policy, case.event, 'after-recheck')
+    assert item['state'] == 'risk_open' and item['target_status'] is None
+
+
 async def test_watch_default_six_distinct_complete_rounds_then_following_round(case):
     assert case.policy.observation_rounds == 6
     await decision(case)

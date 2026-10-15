@@ -102,9 +102,12 @@ async def event_list(
     include_backlog: bool = True,
     device: str | None = Query(default=None, max_length=200),
     risk: Literal['risk', 'unknown', 'ignored', 'benign'] | None = None,
-    handling: Literal['open', 'closed', 'ignored', 'contained'] | None = None,
-    assessment: Literal['risk_open', 'risk_closed', 'benign', 'insufficient'] | None = None,
+    handling: Literal['open', 'closed', 'ignored', 'contained', 'ended'] | None = None,
+    assessment: Literal['risk_open', 'risk_closed', 'benign', 'insufficient', 'ended', 'source_closed_risk', 'source_closed_benign', 'source_closed_unknown'] | None = None,
     search: str | None = Query(default=None, max_length=200),
+    sort_by: Literal['first_seen_at', 'last_processed_at'] = 'first_seen_at',
+    sort_order: Literal['asc', 'desc'] = 'desc',
+    shape: Literal['grouped', 'ungrouped'] | None = None,
     offset: int = Query(default=0, ge=0, le=1000),
     limit: int = Query(default=10, ge=1, le=100),
     user=Depends(require_user),
@@ -113,7 +116,8 @@ async def event_list(
     return await _event_list_read(list_events(user.id, COMPONENT_ID,
         start_date=start_date, end_date=end_date, window_hours=window_hours,
         group=group, include_backlog=include_backlog, device=device, risk=risk,
-        handling=handling, assessment=assessment, search=search, offset=offset, limit=limit))
+        handling=handling, assessment=assessment, search=search, offset=offset, limit=limit,
+        sort_by=sort_by, sort_order=sort_order, shape=shape))
 
 
 @router.get('/events/detail')

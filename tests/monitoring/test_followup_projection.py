@@ -1,6 +1,5 @@
 """The UI and reports distinguish scheduled decisions from verified source facts."""
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 from flocks.monitoring import event_list, followup
 from flocks.monitoring.assessment import assess_event, apply_followup
@@ -20,8 +19,8 @@ async def ledger(case):
 
 
 async def member(case):
-    # The ledger's observation day is independent from the source event date.
-    day = datetime.fromtimestamp(case.event['endTime'], ZoneInfo(case.policy.timezone)).date().isoformat()
+    # The list period follows first monitor detection, never source activity.
+    day = datetime.now(timezone.utc).date().isoformat()
     data = await event_list.list_events(case.policy.owner, case.policy.scope, start_date=day, end_date=day)
     return data['items'][0]['members'][0]
 
@@ -64,7 +63,7 @@ async def test_external_end_never_becomes_a_benign_verdict(case):
     raw = {**case.raw, 'dealStatus': 40}
     await followup.reconcile_external(case.policy, case.event, raw, 'round', query_by_id=True)
     assessment = (await member(case))['assessment']
-    assert assessment['label'] == '已确认外部处置'
+    assert assessment['label'] == '源端关闭'
     assert assessment['external'] and assessment['ended']
     assert assessment['verdict'] == 'unknown' and not assessment['risk_excluded']
     detail = await event_list.detail(case.policy.owner, case.policy.scope, case.event['key'])

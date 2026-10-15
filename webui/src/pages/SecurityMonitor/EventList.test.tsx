@@ -41,6 +41,7 @@ const member = (overrides: Partial<EventMember> = {}): EventMember => ({
   handling_source: "xdr",
   first_seen_at: "2026-10-12T01:00:00Z",
   last_seen_at: "2026-10-12T02:00:00Z",
+  last_processed_at: "2026-10-12T02:10:00Z",
   event_at: "2026-10-12T00:50:00Z",
   event_end_at: "2026-10-12T01:50:00Z",
   investigation: { state: "pending" },
@@ -68,6 +69,7 @@ const row = (overrides: Partial<EventListRow> = {}): EventListRow => ({
   last_event_at: "2026-10-12T01:50:00Z",
   first_seen_at: "2026-10-12T01:00:00Z",
   last_seen_at: "2026-10-12T02:00:00Z",
+  last_processed_at: "2026-10-12T02:10:00Z",
   risk: "risk",
   handling: "open",
   mail: { sent: 2, replied: 1, failed: 0 },
@@ -257,7 +259,9 @@ it("defaults to this week and 24-hour aggregation with ten rows and the latest e
     }),
     expect.any(AbortSignal),
   );
-  expect(screen.getByText("期间事件 1 · 此前跟进 1")).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "原始事件 2 全部事件" }),
+  ).toHaveAttribute("aria-pressed", "true");
   const aggregate = within(screen.getAllByRole("row")[1]);
   expect(aggregate.getByText("证据不足 · 暂忽略")).toBeInTheDocument();
   expect(aggregate.queryByText("有风险 · 已处置")).not.toBeInTheDocument();
@@ -864,18 +868,20 @@ it("clamps event paging after the total shrinks and keeps page size at ten", asy
 });
 
 it.each([true, false])(
-  "orders rows and members by source occurrence and uses the latest assessment (primary key supplied: %s)",
+  "preserves server order and uses the latest detected member assessment (primary key supplied: %s)",
   async (primaryKey) => {
     const old = member({
       id: "old-event",
       key: "old-key",
       event_end_at: "2026-10-12T01:00:00Z",
+      first_seen_at: "2026-10-12T01:00:00Z",
       last_seen_at: "2026-10-14T09:00:00Z",
     });
     const latest = member({
       id: "latest-event",
       key: "latest-key",
       event_end_at: "2026-10-13T02:00:00Z",
+      first_seen_at: "2026-10-13T02:01:00Z",
       last_seen_at: "2026-10-13T02:01:00Z",
       assessment: {
         status: "benign",
@@ -889,6 +895,17 @@ it.each([true, false])(
       response({
         items: [
           row({
+            id: "latest-group",
+            name: "来源最新聚合",
+            members: [old, latest],
+            last_event_at: latest.event_end_at,
+            first_seen_at: latest.first_seen_at,
+            last_processed_at: "2026-10-14T09:30:00Z",
+            primary_event_key: primaryKey ? latest.key : undefined,
+            assessment_status: "mixed",
+            assessment_label: "包含不同跟进状态",
+          }),
+          row({
             id: "old-row",
             name: "来源发生较早",
             grouped: false,
@@ -896,15 +913,6 @@ it.each([true, false])(
             members: [old],
             last_event_at: old.event_end_at,
             last_seen_at: old.last_seen_at,
-          }),
-          row({
-            id: "latest-group",
-            name: "来源最新聚合",
-            members: [old, latest],
-            last_event_at: latest.event_end_at,
-            primary_event_key: primaryKey ? latest.key : undefined,
-            assessment_status: "mixed",
-            assessment_label: "包含不同跟进状态",
           }),
         ],
       }) as never,
@@ -919,13 +927,13 @@ it.each([true, false])(
       within(rows[2]).getByRole("button", { name: "来源发生较早" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("columnheader", { name: "发生时间" }),
+      screen.getByRole("columnheader", { name: "首次检出时间" }),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("columnheader", { name: "最近观察 / 发生" }),
     ).not.toBeInTheDocument();
-    expect(rows[1]).toHaveTextContent("2026/10/13 10:00:00");
-    expect(rows[1]).not.toHaveTextContent("2026/10/14");
+    expect(rows[1]).toHaveTextContent("2026/10/13 10:01:00");
+    expect(rows[1]).toHaveTextContent("2026/10/14 17:30:00");
     expect(within(rows[1]).getByText("无风险 · 已忽略")).toBeInTheDocument();
     expect(
       within(rows[1]).queryByText("包含不同跟进状态"),
@@ -964,7 +972,7 @@ it("shows locally ended events as ended without pending observation or a claim o
     handling_source: "monitoring",
     assessment: {
       status: "ended",
-      label: "已归档",
+      label: "源端关闭",
       lifecycle: "monitoring_ended",
       ended: true,
       observation_rounds: 6,
@@ -997,7 +1005,7 @@ it("shows locally ended events as ended without pending observation or a claim o
   renderPage();
   await screen.findByText("独立事件");
   const item = within(screen.getAllByRole("row")[1]);
-  expect(item.getByText("已归档")).toBeInTheDocument();
+  expect(item.getByText("源端关闭")).toBeInTheDocument();
   expect(item.getByText("XDR 本轮未再返回")).toBeInTheDocument();
   expect(
     item.queryByText(/待观察|待研判|已观察|尚未排除风险/),
@@ -1025,7 +1033,7 @@ it("shows locally ended events as ended without pending observation or a claim o
   expect(within(audit).getByText(/首次记录：/)).toBeInTheDocument();
 });
 
-it("keeps missing source times last and never substitutes an observation timestamp", async () => {
+it("shows monitor detection and processing times even when the source occurrence is missing", async () => {
   const missing = member({
     key: "time-missing",
     event_at: null,
@@ -1054,11 +1062,12 @@ it("keeps missing source times last and never substitutes an observation timesta
   renderPage();
   await screen.findByRole("button", { name: "发生时间未知" });
   const rows = screen.getAllByRole("row");
-  expect(rows[1]).toHaveTextContent("发生时间明确");
-  expect(rows[2]).toHaveTextContent("发生时间未知");
-  expect(rows[2]).toHaveTextContent("时间未提供");
-  expect(rows[2]).not.toHaveTextContent("INVALID_SOURCE_TIME");
-  expect(rows[2]).not.toHaveTextContent("2030");
+  expect(rows[1]).toHaveTextContent("发生时间未知");
+  expect(rows[2]).toHaveTextContent("发生时间明确");
+  expect(rows[1]).toHaveTextContent("2026/10/12 09:00:00");
+  expect(rows[1]).toHaveTextContent("2026/10/12 10:10:00");
+  expect(rows[1]).not.toHaveTextContent("INVALID_SOURCE_TIME");
+  expect(rows[1]).not.toHaveTextContent("2030");
 });
 
 it("includes an ended count and filter separately from insufficient evidence awaiting observation", async () => {
@@ -1075,7 +1084,7 @@ it("includes an ended count and filter separately from insufficient evidence awa
   const stats = screen.getByLabelText("事件统计");
   await within(stats).findByText("4");
   expect(
-    within(stats).getByText("已归档").closest(".rounded-xl"),
+    within(stats).getByText("源端关闭").closest(".rounded-xl"),
   ).toHaveTextContent("4");
   fireEvent.change(screen.getByRole("combobox", { name: "研判结果筛选" }), {
     target: { value: "ended" },
@@ -1441,4 +1450,435 @@ it("describes the verified malicious behavior for a confirmed risk without a gen
     within(card).getByText(value.data.overview!.findings![0]),
   ).toBeInTheDocument();
   expect(within(card).queryByText("关键缺口")).not.toBeInTheDocument();
+});
+
+it("filters from every summary card while preserving the overview totals and selection", async () => {
+  const summary = {
+    ...response().data.metrics,
+    events: 54,
+    groups: 4,
+    ungrouped: 45,
+    ended: 53,
+    assessment_counts: {
+      risk_open: 1,
+      risk_closed: 2,
+      benign: 3,
+      insufficient: 4,
+      ended: 53,
+    },
+    source_closed_counts: { risk: 5, benign: 6, unknown: 42 },
+  };
+  vi.mocked(monitoringEventsApi.list).mockResolvedValue(
+    response({
+      summary_metrics: summary,
+      metrics: { ...response().data.metrics, events: 1 },
+    }) as never,
+  );
+  renderPage();
+  const stats = screen.getByLabelText("事件统计");
+  await within(stats).findByText("54");
+  for (const [name, assessment] of [
+    [/有风险 · 处置中 1/, "risk_open"],
+    [/有风险 · 已处置 2/, "risk_closed"],
+    [/无风险 · 待忽略 3/, "benign"],
+    [/证据不足 · 待观察 4/, "insufficient"],
+    [/^源端关闭 53$/, "ended"],
+    [/^曾确认风险 5$/, "source_closed_risk"],
+    [/^无风险 6$/, "source_closed_benign"],
+    [/^未定性 42$/, "source_closed_unknown"],
+  ] as const) {
+    const card = within(stats).getByRole("button", { name });
+    fireEvent.click(card);
+    await waitFor(() =>
+      expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
+        expect.objectContaining({ assessment, offset: 0 }),
+        expect.any(AbortSignal),
+      ),
+    );
+    expect(card).toHaveAttribute("aria-pressed", "true");
+    expect(within(stats).getByText("54")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "研判结果筛选" })).toHaveValue(
+      assessment,
+    );
+  }
+  fireEvent.click(
+    within(stats).getByRole("button", { name: "原始事件 54 全部事件" }),
+  );
+  await waitFor(() => {
+    const query = vi.mocked(monitoringEventsApi.list).mock.lastCall![0];
+    expect(query).not.toHaveProperty("assessment");
+    expect(query).not.toHaveProperty("shape");
+  });
+  expect(
+    within(stats).getByRole("button", { name: "原始事件 54 全部事件" }),
+  ).toHaveAttribute("aria-pressed", "true");
+});
+
+it("filters grouped and independent rows separately and clears the selection", async () => {
+  renderPage();
+  const stats = screen.getByLabelText("事件统计");
+  await screen.findByText("同类事件聚合");
+  for (const [name, shape] of [
+    ["1 关联组", "grouped"],
+    ["0 独立事件", "ungrouped"],
+  ] as const) {
+    fireEvent.click(within(stats).getByRole("button", { name }));
+    await waitFor(() =>
+      expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
+        expect.objectContaining({ shape, group: true, offset: 0 }),
+        expect.any(AbortSignal),
+      ),
+    );
+    expect(within(stats).getByRole("button", { name })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  }
+  fireEvent.click(screen.getByRole("button", { name: "清除筛选" }));
+  await waitFor(() =>
+    expect(
+      vi.mocked(monitoringEventsApi.list).mock.lastCall![0],
+    ).not.toHaveProperty("shape"),
+  );
+});
+
+it("sends both chronological sort directions to the server and resets pagination", async () => {
+  vi.mocked(monitoringEventsApi.list).mockResolvedValue(
+    response({ total: 23, has_more: true }) as never,
+  );
+  renderPage();
+  await screen.findByText("同类事件聚合");
+  expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
+    expect.objectContaining({ sort_by: "first_seen_at", sort_order: "desc" }),
+    expect.any(AbortSignal),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "事件下一页" }));
+  await waitFor(() =>
+    expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ offset: 10 }),
+      expect.any(AbortSignal),
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "首次检出时间，降序" }));
+  await waitFor(() =>
+    expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sort_by: "first_seen_at",
+        sort_order: "asc",
+        offset: 0,
+      }),
+      expect.any(AbortSignal),
+    ),
+  );
+  expect(
+    screen.getByRole("columnheader", { name: "首次检出时间" }),
+  ).toHaveAttribute("aria-sort", "ascending");
+  fireEvent.click(screen.getByRole("button", { name: "最近处理时间，未排序" }));
+  await waitFor(() =>
+    expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sort_by: "last_processed_at",
+        sort_order: "desc",
+        offset: 0,
+      }),
+      expect.any(AbortSignal),
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "最近处理时间，降序" }));
+  await waitFor(() =>
+    expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sort_by: "last_processed_at",
+        sort_order: "asc",
+      }),
+      expect.any(AbortSignal),
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "最近处理时间，升序" }));
+  await waitFor(() =>
+    expect(monitoringEventsApi.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sort_by: "last_processed_at",
+        sort_order: "desc",
+      }),
+      expect.any(AbortSignal),
+    ),
+  );
+});
+
+it("highlights source-closed confirmed risks without suggesting they are safe or still under observation", async () => {
+  const closedRisk = member({
+    handling: "ended",
+    source_closed: true,
+    source_closed_verdict: "risk",
+    assessment: {
+      status: "ended",
+      label: "源端关闭",
+      verdict: "risk",
+      notify_eligible: false,
+      reason: "保留原风险事实",
+      source_closed: true,
+      source_closed_verdict: "risk",
+      source_closure_basis: "source_status",
+      historical_verdict: "risk",
+    },
+    investigation: { state: "system_wait" },
+  });
+  vi.mocked(monitoringEventsApi.list).mockResolvedValue(
+    response({
+      items: [row({ grouped: false, members: [closedRisk], member_count: 1 })],
+    }) as never,
+  );
+  renderPage();
+  await screen.findByText("独立事件");
+  const event = within(screen.getAllByRole("row")[1]);
+  const badge = event.getByText("源端关闭 · 曾确认风险");
+  expect(badge).toHaveClass("text-amber-800");
+  expect(event.getByText("XDR 状态已关闭")).toBeInTheDocument();
+  expect(
+    event.queryByText(/待观察|已安全|威胁消除|最新事件待研判/),
+  ).not.toBeInTheDocument();
+});
+
+it("retains confirmed risk findings while separating a failed recheck and concrete remaining gaps", async () => {
+  const fact = "已确认异常文件上传和路径穿越写入，需要处置。";
+  const value = detail({
+    event: member({
+      investigation: { state: "system_wait", is_current: false },
+      assessment: {
+        status: "risk_open",
+        label: "有风险 · 处置中",
+        verdict: "risk",
+        reason: fact,
+        evidence_supported: true,
+        is_current: false,
+        notify_eligible: true,
+        confirmed_risk_retained: true,
+        risk_scope: "current",
+        recheck_state: "system_wait",
+        recheck_reason: "模型暂时不可用",
+      },
+    }),
+    investigation: {
+      state: "system_wait",
+      result: {},
+      historical_result: { reason: fact },
+    },
+    overview: {
+      confirmed_risk_retained: true,
+      summary: fact,
+      findings: ["上传接口接受了含父目录跳转的文件路径。"],
+      missing_evidence: ["缺少文件落地位置和后续执行记录。"],
+      gaps: ["调查尚未形成最终结论。"],
+      recheck_state: "system_wait",
+      recheck_reason: "模型暂时不可用",
+    },
+  });
+  vi.mocked(monitoringEventsApi.detail).mockResolvedValue(value as never);
+  renderPage();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+  );
+  const dialog = screen.getByRole("dialog");
+  await within(dialog).findByText(fact);
+  expect(
+    within(dialog).getByText("补充核查 · 等待服务恢复"),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getAllByText("缺少文件落地位置和后续执行记录。").length,
+  ).toBeGreaterThan(0);
+  expect(
+    within(dialog).queryByText("调查尚未形成最终结论。"),
+  ).not.toBeInTheDocument();
+  expect(
+    within(dialog).queryByText("查看历史调查结论（仅供参考）"),
+  ).not.toBeInTheDocument();
+});
+
+it.each(["member", "row"] as const)(
+  "labels retained risk rechecks separately from a new unknown investigation (%s flag)",
+  async (flagSource) => {
+    const riskAssessment = {
+      status: "risk_open" as const,
+      label: "有风险 · 处置中",
+      verdict: "risk" as const,
+      notify_eligible: true,
+      reason: "已确认异常写入",
+      evidence_supported: true,
+      ...(flagSource === "member" && { confirmed_risk_retained: true }),
+    };
+    const known = member({
+      investigation: { state: "deferred" },
+      assessment: riskAssessment,
+    });
+    const unknown = member({
+      key: "unknown-event",
+      id: "unknown-event",
+      investigation: { state: "pending" },
+    });
+    vi.mocked(monitoringEventsApi.list).mockResolvedValue(
+      response({
+        items: [
+          row({
+            id: "retained-risk",
+            name: "已确认写入",
+            grouped: false,
+            member_count: 1,
+            members: [known],
+            assessment: {
+              ...riskAssessment,
+              ...(flagSource === "row" && { confirmed_risk_retained: true }),
+            },
+          }),
+          row({
+            id: "unknown-row",
+            name: "新查询事件",
+            grouped: false,
+            member_count: 1,
+            members: [unknown],
+          }),
+        ],
+      }) as never,
+    );
+    renderPage();
+    await screen.findByRole("button", { name: "已确认写入" });
+    const rows = screen.getAllByRole("row");
+    expect(within(rows[1]).getByText("有风险 · 处置中")).toBeInTheDocument();
+    expect(within(rows[1]).getByText("补充核查待续查")).toBeInTheDocument();
+    expect(
+      within(rows[1]).queryByText("最新事件待研判"),
+    ).not.toBeInTheDocument();
+    expect(within(rows[2]).getByText("最新事件待研判")).toBeInTheDocument();
+    expect(
+      within(rows[2]).queryByText("补充核查待续查"),
+    ).not.toBeInTheDocument();
+  },
+);
+
+it.each(["current_activity", "previous_activity"] as const)(
+  "shows the retained confirmation's original evidence with its historical boundary (%s)",
+  async (scope) => {
+    const value = detail({
+      event: member({
+        investigation: { state: "deferred", is_current: false },
+        assessment: {
+          status: "risk_open",
+          label: "有风险 · 处置中",
+          verdict: "risk",
+          reason: "确认异常上传",
+          notify_eligible: true,
+          confirmed_risk_retained: true,
+          risk_scope:
+            scope === "previous_activity" ? "previous_activity" : "current",
+        },
+      }),
+      investigation: { state: "deferred", result: {} },
+      overview: {
+        confirmed_risk_retained: true,
+        summary: "已确认上传接口接受了异常文件写入。",
+        evidence_cards: [],
+      },
+      confirmed_evidence_scope: scope,
+      confirmed_at: "2026-10-12T02:00:00Z",
+      confirmed_story: {
+        evidence_cards: [
+          {
+            id: "confirmed-write",
+            summary: "上传响应确认服务器接受了带父目录跳转的文件路径。",
+            source: "股份 XDR",
+            kind: "request",
+            packets: [
+              {
+                field: "response",
+                label: "原始上传响应",
+                text: "stored=/uploads/../example.jsp",
+              },
+            ],
+            query: { alert_id: "alert-original" },
+            raw: { responseStatus: 200, storedFile: "../example.jsp" },
+          },
+        ],
+      },
+    });
+    vi.mocked(monitoringEventsApi.detail).mockResolvedValue(value as never);
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    const section = await within(dialog).findByLabelText("此前确认风险的证据");
+    expect(
+      within(section).getByText(
+        "上传响应确认服务器接受了带父目录跳转的文件路径。",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(section).queryByText(/尚未取得.*具体行为证据/),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByText(
+        "此记录尚无可展开的关键证据或事件时间线。可打开关联监测对话，查看当时查询结果与缺口。",
+      ),
+    ).not.toBeInTheDocument();
+    if (scope === "previous_activity")
+      expect(
+        within(section).getByText(
+          "以下为此前活动的取证，不代表新增活动已核查。",
+        ),
+      ).toBeInTheDocument();
+    const synopsis = within(section)
+      .getByText("上传响应确认服务器接受了带父目录跳转的文件路径。")
+      .closest("summary")!;
+    fireEvent.click(synopsis);
+    expect(
+      within(section).getByText("stored=/uploads/../example.jsp"),
+    ).toBeInTheDocument();
+    const technical = within(dialog)
+      .getByText("技术明细与原始依据")
+      .closest("details")!;
+    expect(technical).toHaveTextContent('"confirmed_story"');
+    expect(technical).toHaveTextContent('"storedFile": "../example.jsp"');
+    expect(technical).toHaveTextContent(
+      `"confirmed_evidence_scope": "${scope}"`,
+    );
+  },
+);
+
+it("explains unavailable original confirmation details without implying that no evidence was ever obtained", async () => {
+  vi.mocked(monitoringEventsApi.detail).mockResolvedValue(
+    detail({
+      event: member({
+        assessment: {
+          status: "risk_open",
+          label: "有风险 · 处置中",
+          verdict: "risk",
+          reason: "确认异常写入",
+          notify_eligible: true,
+          confirmed_risk_retained: true,
+        },
+      }),
+      investigation: { state: "deferred", result: {} },
+      overview: {
+        confirmed_risk_retained: true,
+        summary: "此前已确认异常写入。",
+        evidence_cards: [],
+      },
+      confirmed_story: { evidence_cards: [] },
+    }) as never,
+  );
+  renderPage();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+  );
+  const section = await within(screen.getByRole("dialog")).findByLabelText(
+    "此前确认风险的证据",
+  );
+  expect(
+    within(section).getByText(
+      "此前确认风险的结论已保留，原取证明细暂不可读取。",
+    ),
+  ).toBeInTheDocument();
+  expect(
+    within(section).queryByText(/尚未取得.*具体行为证据/),
+  ).not.toBeInTheDocument();
 });

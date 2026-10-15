@@ -542,6 +542,35 @@ async def test_stale_or_updated_event_evidence_is_archived_and_requeried(case, m
     assert all(json.loads(record['evidence'])[0]['event_revision'] == i.fingerprint(case.event) for record in archived)
 
 
+async def test_confirmed_risk_survives_ttl_expiry_and_model_cooldown_without_reauthorizing_mail(case, monkeypatch):
+    clock = [i.now()]
+    monkeypatch.setattr(i, 'now', lambda: clock[0])
+    case.query.return_value = ({'data': {'item': [{'requestBody': 'filename=../../shell.jsp'}]}}, {})
+    async def risk(agent, data):
+        if not data['evidence']:
+            return i.Choice(action='query', capability='cap-1', entity='host', reason='核查行为')
+        return i.Choice(action='finish', verdict='risk', confidence='high', risk_confirmed=True,
+                        evidence_ids=['evidence-1'], reason='请求确认异常文件写入，需要处置。',
+                        gaps=['尚缺后续执行日志。'])
+    monkeypatch.setattr(i, 'choose', risk)
+    await i.investigate(case.policy, case.event, case.recorder)
+    assert case.event['assessment']['notify_eligible']
+    clock[0] += timedelta(minutes=31)
+    retry = (clock[0] + timedelta(minutes=10)).isoformat()
+    model = AsyncMock(side_effect=i.InvestigationError('模型恢复等待期', 'model_cooldown', next_retry_at=retry))
+    monkeypatch.setattr(i, 'choose', model)
+    await i.investigate(case.policy, case.event, case.recorder)
+    assessed = case.event['assessment']
+    assert assessed['verdict'] == 'risk' and assessed['confirmed_risk_retained']
+    assert assessed['recheck_state'] == 'deferred' and assessed['recheck_reason'] == '模型恢复等待期'
+    assert not assessed['notify_eligible'] and not assessed['risk_excluded']
+    saved = (await rows('SELECT * FROM monitor_investigations'))[0]
+    assert json.loads(saved['confirmed_risk'])['result']['reason'] == '请求确认异常文件写入，需要处置。'
+    assert saved['failure_count'] == 0 and saved['next_retry_at'] == retry
+    assert not await rows('SELECT * FROM monitor_mail_notices')
+    assert not await rows('SELECT * FROM monitor_dispositions')
+
+
 async def test_exhausted_round_budget_defers_without_consuming_recovery_attempt(case, monkeypatch):
     monkeypatch.setattr(i, 'choose', decide)
     budget = i.Budget()

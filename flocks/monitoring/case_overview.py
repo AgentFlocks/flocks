@@ -1,14 +1,61 @@
 """Concise operator copy from current, event-bound evidence, without new verdicts."""
+import json
 import re
 
 from .assessment import fact_fields
 from .event_details import _readable_text, behavior_description, brief_values
 
-_GENERIC_GAP = re.compile(r'调查尚未|尚未形成|置信度|高置信|版本不一致|结论缺少与|未明确证实|系统故障|查询未完成|仅取得部分事实|存在查询失败的来源')
+_GENERIC_GAP = re.compile(r'调查尚未|尚未形成|置信度|高置信|版本不一致|结论缺少与|未明确证实|系统故障|查询未完成|仅取得部分事实|存在查询失败的来源|模型.*(?:超时|退避|冷却|不可用)|关联告警举证覆盖|事实列表已截断|evidence-\d+.*(?:查询|部分事实)')
 
+
+
+def _concrete_gaps(items):
+    gaps = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, str) or _GENERIC_GAP.search(item):
+            continue
+        text = _readable_text(item, 180)
+        if text and text not in gaps:
+            gaps.append(text)
+    return gaps[:3]
+
+
+def _retained_overview(case, assessment):
+    """Use validated retained facts, never a refresh error as the risk reason."""
+    snapshot = case.get('confirmed_risk', {})
+    if isinstance(snapshot, str):
+        try:
+            snapshot = json.loads(snapshot)
+        except (ValueError, TypeError):
+            snapshot = {}
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    prior = snapshot.get('result', {})
+    prior = prior if isinstance(prior, dict) else {}
+    summary = _readable_text(assessment.get('risk_fact_summary') or assessment.get('confirmed_reason'), 240)
+    if not summary:
+        summary = '此前已核实存在风险，原有调查结论保留。'
+    historical = assessment.get('risk_scope') == 'previous_activity'
+    if assessment.get('source_closed'):
+        summary = '关闭前已确认风险：' + summary
+    elif historical:
+        summary = '此前活动已确认风险：' + summary
+    finding_source = assessment.get('risk_fact_findings') or prior.get('operator_explanation')
+    findings = [_readable_text(item, 260) for item in finding_source[:2] if isinstance(item, str)] if isinstance(finding_source, list) else []
+    findings = [line for line in findings if line]
+    if historical:
+        findings = ['此前活动依据：' + line for line in findings]
+    missing = _concrete_gaps(assessment.get('risk_fact_gaps') or assessment.get('gaps') or prior.get('gaps'))
+    value = {'summary': summary, 'findings': findings, 'missing_evidence': missing,
+             'confirmed_risk_retained': True}
+    if not assessment.get('ended') and not assessment.get('source_closed'):
+        value.update(recheck_state=assessment.get('recheck_state'),
+                     recheck_reason=_readable_text(assessment.get('recheck_reason'), 240))
+    return value
 
 def operator_overview(event, case, assessment, story, proofs):
     """Presentation only: input proofs were filtered by bound_evidence."""
+    if assessment.get('confirmed_risk_retained'):
+        return _retained_overview(case, assessment)
     result = case.get('result') if isinstance(case.get('result'), dict) else {}
     cards = story.get('evidence_cards', [])
     rank = {'request': 0, 'process': 1, 'file': 2, 'network': 3, 'domain': 4}
@@ -69,8 +116,10 @@ def operator_overview(event, case, assessment, story, proofs):
             add('当前活动版本对应的取证，历史证据仅供参考。')
         if not missing:
             add('现有行为的完整核对及实际影响依据，当前尚未形成可靠判断。')
+    if verdict == 'risk':
+        missing = _concrete_gaps(result.get('gaps'))
     if assessment.get('ended') and verdict == 'unknown':
-        summary = f'当前状态：{assessment.get("label") or "已归档"}；保留此前证据与研判记录。'
+        summary = f'当前状态：{assessment.get("label") or "源端关闭"}；保留此前证据与研判记录。'
     elif verdict in {'risk', 'benign'}:
         summary = _readable_text(result.get('operator_summary') or result.get('reason'), 200)
         if re.search(r'cap-\d+|\b\d{10,13}\b|attackState|attackResult|gptResult', summary):
@@ -79,4 +128,6 @@ def operator_overview(event, case, assessment, story, proofs):
             summary = ('已确认风险：' if verdict == 'risk' else '已核实无风险：') + findings[0]
     else:
         summary = f'XDR检出{("主机" + host) if host else "本事件"}的「{name}」告警，当前仍需补证核对。'
+    if assessment.get('source_closed') and verdict in {'risk', 'benign'}:
+        summary = ('关闭前已确认风险：' if verdict == 'risk' else '关闭前已核实无风险：') + summary
     return {'summary': summary, 'findings': findings, 'missing_evidence': missing[:3]}

@@ -213,6 +213,10 @@ def fresh_evidence(evidence, event, at=None):
 
 
 async def archive(db, policy, case, stamp):
+    from .conclusions import restore_case_snapshot
+    snapshot = await restore_case_snapshot(db, policy.owner, policy.project, case)
+    await db.execute('UPDATE monitor_investigations SET confirmed_risk=? WHERE owner=? AND project=? AND event_key=?',
+                     (encode(snapshot), policy.owner, policy.project, case['event_key']))
     await db.execute('INSERT OR IGNORE INTO monitor_investigation_versions '
         '(owner,project,event_key,revision,event,evidence,result,state,attempts,archived_at) '
         'VALUES(?,?,?,?,?,?,?,?,?,?)', (policy.owner, policy.project, case['event_key'], case['revision'],
@@ -889,6 +893,11 @@ async def investigate(policy, event, recorder, budget=None):
     if not stored:
         raise ContractError('事件尚未持久化，不能开始调查')
     case = stored[0]
+    from .conclusions import decoded, restore_confirmed_risks, capture_case
+    confirmed_risk = decoded(case.get('confirmed_risk'), {})
+    if case.get('confirmed_risk') is None:
+        confirmed_risk = (await restore_confirmed_risks(policy.owner, policy.project, [event['key']])).get(event['key'], {})
+        case['confirmed_risk'] = encode(confirmed_risk)
     revision = case['revision']
     canonical = json.loads(case['event'])
     # Observation query windows can move even when the underlying event has not
@@ -936,15 +945,18 @@ async def investigate(policy, event, recorder, budget=None):
                     (encode(evidence), encode(result), new_state, now().isoformat(),
                      policy.owner, policy.project, event['key']))
     async def save_recovery():
+        nonlocal confirmed_risk
         # Result and its recovery schedule are one fact. A crash must never
         # leave a system failure without backoff, or ready without its result.
         result['evidence_schema'] = EVIDENCE_SCHEMA
         result['story'] = build_story({**event, 'alertIds': trusted_alert_ids(event, evidence)}, evidence, result)
+        confirmed_risk = capture_case({'event': canonical, 'evidence': evidence, 'result': result,
+            'state': state, 'revision': revision, 'updated_at': now().isoformat()}, confirmed_risk)
         await write('UPDATE monitor_investigations SET evidence=?,result=?,state=?,updated_at=?, '
-                    'failure_count=?,next_retry_at=?,error_kind=?,retry_exhausted=? '
+                    'failure_count=?,next_retry_at=?,error_kind=?,retry_exhausted=?,confirmed_risk=? '
                     'WHERE owner=? AND project=? AND event_key=?',
                     (encode(evidence), encode(result), state, now().isoformat(), failures,
-                     next_retry_at, error_kind, int(exhausted), policy.owner, policy.project, event['key']))
+                     next_retry_at, error_kind, int(exhausted), encode(confirmed_risk), policy.owner, policy.project, event['key']))
         diag.event('investigation.recovery', investigation_state=state, error_kind=error_kind or 'system',
                    failure_count=failures, retry_exhausted=exhausted, revision=revision,
                    **{key: result[key] for key in ('failure_stage', 'model_failure', 'http_status', 'error_type',
@@ -974,6 +986,7 @@ async def investigate(policy, event, recorder, budget=None):
                       'specialists': worker.advice}
             await save_recovery()
             event['investigation'] = {'engine': ENGINE, 'state': state, **result,
+                'confirmed_risk': confirmed_risk,
                 'attempted_this_round': attempted_this_round,
                 'evidence_count': len(evidence), 'next_retry_at': next_retry_at,
                 'error_kind': error_kind, 'retry_exhausted': exhausted, 'revision': revision}
@@ -1020,6 +1033,7 @@ async def investigate(policy, event, recorder, budget=None):
         finally:
             _MODEL_SCOPE.reset(scope_token)
     event['investigation'] = {'engine': ENGINE, 'state': state, **result,
+        'confirmed_risk': confirmed_risk,
         'attempted_this_round': attempted_this_round,
         'evidence_count': len(evidence), 'next_retry_at': next_retry_at,
         'error_kind': error_kind, 'retry_exhausted': exhausted, 'revision': revision}
@@ -1028,7 +1042,7 @@ async def investigate(policy, event, recorder, budget=None):
     from .assessment import assess_event
     event['investigation']['event_revision'] = fingerprint(event)
     event['assessment'] = assess_event(event, {'event': canonical, 'result': result,
-        'evidence': evidence, 'state': state})
+        'evidence': evidence, 'state': state, 'confirmed_risk': confirmed_risk})
     event['risk'] = event['assessment']['verdict']
     event['reason'] = event['assessment']['reason']
     next_step = recovery_next_step(state, next_retry_at, exhausted)
@@ -1039,9 +1053,17 @@ async def investigate(policy, event, recorder, budget=None):
             if event['assessment']['notify_eligible'] else
             '已证实无风险，不发送邮件；已保存忽略意图，下一轮核对原事件后标记忽略并回查。' if event['assessment']['risk_excluded'] else
             f'当前证据不足，保留待观察，不发送邮件；中低风险完成{policy.observation_rounds}轮有效观察后安排下一轮忽略，高风险或风险存疑持续保留。' if policy.observation_rounds else '当前证据不足，持续保留待观察，不自动忽略。')
+    retained = event['assessment'].get('confirmed_risk_retained', False)
+    if retained:
+        next_step = ('此前已确认风险继续跟进，新增活动尚待核实；不据旧证据为新增活动通知或修改状态。'
+                     if event['assessment'].get('risk_scope') == 'previous_activity' else
+                     '此前已确认风险继续跟进；本轮补查不撤销原风险事实，通知及状态变更仍须按当前有效依据核验。') + (
+                         recovery_next_step(state, next_retry_at, exhausted) if state != 'ready' else '后续按已记录的证据缺口补充核实。')
     event['investigation']['next_step'] = next_step
     event['story'] = build_story({**event, 'alertIds': trusted_alert_ids(event, evidence)}, evidence, result)
     summary = f"{event_label(event)}：{result.get('reason', '尚未形成调查结论')}。"
+    if retained:
+        summary = f"{event_label(event)}：此前已确认风险，{event['assessment']['reason']}本轮补查：{result.get('reason', '等待补充核实')}。"
     waiting = not attempted_this_round and state in {'system_wait', 'pending', 'deferred', 'needs_review'}
     if waiting:
         summary = '本轮未执行此事件调查，保留已有状态。' + summary
@@ -1053,7 +1075,7 @@ async def investigate(policy, event, recorder, budget=None):
         return None, event['investigation'], Summary(summary, story_text({**event['story'], 'packets': []}), success=state == 'ready' or not attempted_this_round, packets=event['story']['packets'], sections=[
             *story_sections(event['story']),
             *([{'label': '未完成原因', 'text': investigation_failure_summary(event['investigation'])}] if state != 'ready' else []),
-            {'label': '调查状态', 'text': f"{'已形成调查结论' if state == 'ready' else '调查尚未完成'}；保存 {len(evidence)} 项查询记录，其中 {sum(bool(e['success']) for e in evidence)} 项返回成功。"},
+            {'label': '调查状态', 'text': f"{'此前风险结论保留；' if retained else ''}{'本轮补查已完成' if retained and state == 'ready' else '本轮补查尚未完成' if retained else '已形成调查结论' if state == 'ready' else '调查尚未完成'}；保存 {len(evidence)} 项查询记录，其中 {sum(bool(e['success']) for e in evidence)} 项返回成功。"},
             {'label': '下一步', 'text': next_step},
         ])
     title = ('调查等待人工核对' if state == 'needs_review' else

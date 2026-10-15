@@ -95,3 +95,41 @@ def test_candidate_request_keeps_its_correlation_boundary():
     assert result['findings'][0].count('示例关联源') == 1
     assert any('实际攻击请求' in line for line in result['missing_evidence'])
     assert any('服务端响应' in line for line in result['missing_evidence'])
+
+
+def test_retained_risk_uses_confirmed_facts_and_separates_refresh_failure():
+    event, case = example()
+    case['result']['reason'] = '模型请求超时，调查尚未形成最终结论'
+    case['confirmed_risk'] = {'result': {'operator_explanation': ['上传请求与响应确认文件写入。']}}
+    assessment = {'verdict': 'risk', 'confirmed_risk_retained': True, 'risk_scope': 'current',
+                  'risk_fact_summary': '已证实上传接口允许异常文件写入，需要处置。',
+                  'gaps': ['未确认该文件是否被服务端执行。', '调查尚未形成最终结论'],
+                  'recheck_state': 'deferred', 'recheck_reason': '模型退避中，等待恢复'}
+    result = operator_overview(event, case, assessment, {}, [])
+    assert result['summary'] == assessment['risk_fact_summary']
+    assert result['findings'] == ['上传请求与响应确认文件写入。']
+    assert result['missing_evidence'] == ['未确认该文件是否被服务端执行。']
+    assert result['recheck_state'] == 'deferred'
+    assert '超时' not in result['summary']
+
+
+def test_previous_activity_risk_keeps_its_boundary_and_source_closed_hides_refresh():
+    event, case = example()
+    assessment = {'verdict': 'risk', 'confirmed_risk_retained': True, 'risk_scope': 'previous_activity',
+                  'risk_fact_summary': '已证实异常文件写入。', 'risk_fact_findings': ['响应中返回写入路径。'],
+                  'risk_fact_gaps': ['缺少文件后续执行记录。'], 'source_closed': True,
+                  'recheck_state': 'system_wait', 'recheck_reason': '模型暂不可用'}
+    result = operator_overview(event, case, assessment, {}, [])
+    assert result['summary'].startswith('关闭前已确认风险：')
+    assert result['findings'][0].startswith('此前活动依据：')
+    assert 'recheck_state' not in result
+    assert result['missing_evidence'] == ['缺少文件后续执行记录。']
+
+
+def test_confirmed_risk_reports_specific_supplementary_gaps_without_retracting_verdict():
+    event, case = example()
+    case['result'] = {'operator_summary': '已确认存在异常上传风险。',
+                      'gaps': ['主机侧缺少后续执行记录。', '关联告警举证覆盖2/47条，未取全', '调查尚未完成']}
+    result = operator_overview(event, case, {'verdict': 'risk'}, {}, [])
+    assert result['summary'] == '已确认存在异常上传风险。'
+    assert result['missing_evidence'] == ['主机侧缺少后续执行记录。']

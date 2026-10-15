@@ -9,6 +9,9 @@ import {
 import { Link } from "react-router-dom";
 import {
   ArrowDownRight,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   ArrowUpRight,
   CalendarDays,
   ChevronDown,
@@ -64,7 +67,7 @@ const handlingLabels: Record<string, string> = {
   closed: "已处置",
   ignored: "已忽略",
   contained: "已遏制 · 需跟进",
-  ended: "已归档",
+  ended: "源端关闭",
 };
 const investigationLabels: Record<string, string> = {
   stale: "历史版本待核对",
@@ -91,7 +94,7 @@ const mailLabels: Record<string, string> = {
   writing: "正在写回",
   unhandled: "未处置",
   handled: "已处置",
-  monitoring_ended: "已归档",
+  monitoring_ended: "源端关闭",
 };
 const xdrLabels: Record<string, string> = {
   "0": "待处置",
@@ -157,12 +160,22 @@ function responseError(error: unknown, fallback: string) {
   return typeof payload.detail === "string" ? payload.detail : fallback;
 }
 const monitoringEnded = (member: EventMember) =>
+  member.source_closed === true ||
+  member.assessment?.source_closed === true ||
   member.assessment?.lifecycle === "monitoring_ended" ||
   member.handling === "ended";
+const sourceClosureText = (member: EventMember) =>
+  member.assessment?.source_closure_basis === "source_status"
+    ? "XDR 状态已关闭"
+    : "XDR 本轮未再返回";
 const eventEnded = (member: EventMember) =>
   monitoringEnded(member) || member.assessment?.ended === true;
 const memberLabel = (member: EventMember) =>
-  monitoringEnded(member) ? "已归档" : member.assessment?.label;
+  monitoringEnded(member)
+    ? assessmentLabels[assessmentStatus(member)].startsWith("源端关闭")
+      ? assessmentLabels[assessmentStatus(member)]
+      : "源端关闭"
+    : member.assessment?.label;
 const memberTime = (member?: EventMember) =>
   member?.occurrence_time_unknown === true
     ? null
@@ -181,8 +194,8 @@ function occurrenceTimestamp(value: unknown) {
 function latestMembers(row: EventListRow) {
   return [...row.members].sort(
     (left, right) =>
-      occurrenceTimestamp(memberTime(right)) -
-        occurrenceTimestamp(memberTime(left)) || 0,
+      occurrenceTimestamp(right.first_seen_at) -
+        occurrenceTimestamp(left.first_seen_at) || 0,
   );
 }
 function primaryMember(row: EventListRow) {
@@ -192,7 +205,9 @@ function primaryMember(row: EventListRow) {
   );
 }
 function MemberConclusion({ member }: { member: EventMember }) {
-  if (monitoringEnded(member)) return <span>XDR 本轮未再返回</span>;
+  if (monitoringEnded(member)) return <span>{sourceClosureText(member)}</span>;
+  if (member.assessment?.confirmed_risk_retained)
+    return <span>已确认风险 · 补充核查中</span>;
   if (
     member.investigation?.is_current === false &&
     member.investigation.state &&
@@ -219,11 +234,19 @@ function StoryDetails({
   const result = record(detail.investigation?.result);
   const state =
     detail.event.investigation?.state || detail.investigation?.state || "";
+  const retainedRisk =
+    detail.event.assessment?.confirmed_risk_retained === true ||
+    detail.overview?.confirmed_risk_retained === true;
+  const confirmedRisk =
+    retainedRisk ||
+    (detail.event.assessment?.verdict === "risk" &&
+      detail.event.assessment?.evidence_supported === true);
   const historical =
-    state === "stale" ||
-    (detail.event.investigation?.is_current === false &&
-      state !== "pending" &&
-      Object.keys(result).length > 0);
+    !retainedRisk &&
+    (state === "stale" ||
+      (detail.event.investigation?.is_current === false &&
+        state !== "pending" &&
+        Object.keys(result).length > 0));
   const history = record(
     detail.investigation?.historical_result ||
       (historical && detail.investigation?.state !== "stale" ? result : null),
@@ -260,15 +283,39 @@ function StoryDetails({
   const timeline = records(overview.timeline || story.timeline);
   const evidence = records(overview.evidence || story.key_evidence);
   const packets = records(story.packets);
-  const hasEvidenceCards =
-    Array.isArray(overview.evidence_cards) ||
-    Array.isArray(story.evidence_cards);
-  const evidenceCards = records(
+  const confirmedStory = retainedRisk ? record(detail.confirmed_story) : {};
+  const historicalEvidenceCards = records(
+    confirmedStory.evidence_cards,
+  ) as unknown as EventEvidenceCard[];
+  const currentEvidenceCards = records(
     overview.evidence_cards || story.evidence_cards,
   ) as unknown as EventEvidenceCard[];
-  const gaps = Array.isArray(overview.gaps)
+  const hasEvidenceCards =
+    retainedRisk ||
+    Array.isArray(overview.evidence_cards) ||
+    Array.isArray(story.evidence_cards);
+  const evidenceCards = retainedRisk
+    ? historicalEvidenceCards
+    : currentEvidenceCards;
+  const originalGaps = Array.isArray(overview.gaps)
     ? strings(overview.gaps)
     : [...strings(story.gaps), ...strings(result.gaps)];
+  const gaps = [
+    ...new Set(
+      (retainedRisk ? strings(overview.missing_evidence) : originalGaps).filter(
+        (gap) =>
+          !confirmedRisk ||
+          !/调查尚未形成最终结论|尚未形成.*结论|调查未完成/.test(gap),
+      ),
+    ),
+  ];
+  const recheckState = !eventEnded(detail.event)
+    ? text(overview.recheck_state || detail.event.assessment?.recheck_state, "")
+    : "";
+  const recheckReason = text(
+    overview.recheck_reason || detail.event.assessment?.recheck_reason,
+    "",
+  );
   const originalExplanation = text(
     historical
       ? detail.event.investigation?.reason ||
@@ -315,11 +362,23 @@ function StoryDetails({
         </h3>
         <p className="mb-2 text-xs font-medium text-sky-700 dark:text-sky-300">
           {monitoringEnded(detail.event)
-            ? "已归档"
-            : historical
-              ? investigationLabels.stale
-              : investigationLabels[state] || "尚无调查结论"}
+            ? "源端关闭"
+            : retainedRisk
+              ? detail.event.assessment?.risk_scope === "previous_activity"
+                ? "此前活动已确认风险"
+                : "已确认风险"
+              : historical
+                ? investigationLabels.stale
+                : investigationLabels[state] || "尚无调查结论"}
         </p>
+        {retainedRisk && recheckState && (
+          <p
+            title={recheckReason || undefined}
+            className="mb-3 inline-flex items-center gap-1.5 rounded-md bg-sky-100/60 px-2 py-1 text-xs font-medium text-sky-800 dark:bg-sky-950/60 dark:text-sky-200"
+          >
+            补充核查 · {investigationLabels[recheckState] || "待续查"}
+          </p>
+        )}
         <div className="mb-3">
           <AssessmentBadge
             status={assessmentStatus(detail.event)}
@@ -443,6 +502,15 @@ function StoryDetails({
         <EvidenceCards
           cards={evidenceCards}
           formatTime={(value) => formatTime(value, timezone)}
+          {...(retainedRisk && {
+            title: "此前确认风险的证据",
+            description:
+              detail.confirmed_evidence_scope === "previous_activity" ||
+              detail.event.assessment?.risk_scope === "previous_activity"
+                ? "以下为此前活动的取证，不代表新增活动已核查。"
+                : "保留已确认风险的原始依据，补充核查单独记录。",
+            emptyMessage: "此前确认风险的结论已保留，原取证明细暂不可读取。",
+          })}
         />
       )}
       {!hasEvidenceCards && evidence.length > 0 && (
@@ -543,8 +611,13 @@ function StoryDetails({
               key_evidence: evidence,
               evidence_cards: evidenceCards,
               original_evidence: detail.investigation?.evidence,
+              current_evidence_cards: currentEvidenceCards,
+              confirmed_story: detail.confirmed_story,
+              confirmed_evidence_scope: detail.confirmed_evidence_scope,
+              confirmed_at: detail.confirmed_at,
               timeline,
               gaps,
+              original_gaps: originalGaps,
             },
             null,
             2,
@@ -556,7 +629,7 @@ function StoryDetails({
           {strings(story.boundaries).join(" ")}
         </p>
       )}
-      {!evidence.length && !timeline.length && (
+      {!retainedRisk && !evidence.length && !timeline.length && (
         <p className="text-xs leading-6 text-slate-500">
           此记录尚无可展开的关键证据或事件时间线。可打开关联监测对话，查看当时查询结果与缺口。
         </p>
@@ -721,6 +794,11 @@ export default function EventList({
   const [windowHours, setWindowHours] = useState(24);
   const [device, setDevice] = useState("");
   const [assessment, setAssessment] = useState<EventAssessmentStatus | "">("");
+  const [shape, setShape] = useState<"grouped" | "ungrouped" | "">("");
+  const [sortBy, setSortBy] = useState<"first_seen_at" | "last_processed_at">(
+    "first_seen_at",
+  );
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [expandedRows, setExpandedRows] = useState<Set<string>>(
     () => new Set(),
   );
@@ -796,6 +874,9 @@ export default function EventList({
       limit,
       ...(device && { device }),
       ...(assessment && { assessment }),
+      ...(shape && { shape }),
+      sort_by: sortBy,
+      sort_order: sortOrder,
       ...(debouncedSearch && { search: debouncedSearch }),
     }),
     [
@@ -806,6 +887,9 @@ export default function EventList({
       offset,
       device,
       assessment,
+      shape,
+      sortBy,
+      sortOrder,
       debouncedSearch,
     ],
   );
@@ -929,22 +1013,43 @@ export default function EventList({
     (member) => member.key === memberKey,
   );
   const sourceTimezone = data?.timezone || calendarTimezone;
-  const metrics = data?.metrics;
-  const displayedRows = useMemo(
-    () =>
-      [...(data?.items || [])].sort(
-        (left, right) =>
-          occurrenceTimestamp(
-            right.last_event_at ?? memberTime(primaryMember(right)),
-          ) -
-            occurrenceTimestamp(
-              left.last_event_at ?? memberTime(primaryMember(left)),
-            ) || 0,
-      ),
-    [data],
+  const metrics = data?.summary_metrics || data?.metrics;
+  const displayedRows = data?.items || [];
+  const selectSummary = (
+    nextAssessment: EventAssessmentStatus | "",
+    nextShape: typeof shape = "",
+  ) => {
+    changeFilter(() => {
+      setAssessment(nextAssessment);
+      setShape(nextShape);
+      if (nextShape === "grouped") setGroup(true);
+    });
+  };
+  const changeSort = (next: typeof sortBy) =>
+    changeFilter(() => {
+      setSortBy(next);
+      setSortOrder(sortBy === next && sortOrder === "desc" ? "asc" : "desc");
+    });
+  const sortButton = (key: typeof sortBy, label: string) => (
+    <button
+      onClick={() => changeSort(key)}
+      aria-label={`${label}，${sortBy === key ? (sortOrder === "desc" ? "降序" : "升序") : "未排序"}`}
+      className="inline-flex items-center gap-1.5 whitespace-nowrap py-1 hover:text-emerald-700 dark:hover:text-emerald-300"
+    >
+      {label}
+      {sortBy === key ? (
+        sortOrder === "desc" ? (
+          <ArrowDown size={13} />
+        ) : (
+          <ArrowUp size={13} />
+        )
+      ) : (
+        <ArrowUpDown size={13} className="text-slate-400" />
+      )}
+    </button>
   );
   const totalPages = data ? Math.max(1, Math.ceil(data.total / limit)) : 1;
-  const activeFilters = !!device || !!assessment || !!search;
+  const activeFilters = !!device || !!assessment || !!search || !!shape;
   const openRound = (
     sessionID: string,
     messageID: string,
@@ -1109,6 +1214,7 @@ export default function EventList({
                   setDebouncedSearch("");
                   setDevice("");
                   setAssessment("");
+                  setShape("");
                 })
               }
             >
@@ -1124,7 +1230,10 @@ export default function EventList({
               aria-label="合并关联事件"
               checked={group}
               onChange={(event) =>
-                changeFilter(() => setGroup(event.target.checked))
+                changeFilter(() => {
+                  setGroup(event.target.checked);
+                  setShape("");
+                })
               }
               className="h-4 w-4 accent-emerald-600"
             />
@@ -1207,71 +1316,118 @@ export default function EventList({
           </ul>
         )}
         <div
-          className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-4 2xl:grid-cols-7"
+          className="mb-4 grid grid-cols-2 items-stretch gap-3 xl:grid-cols-4 2xl:grid-cols-7"
           aria-label="事件统计"
         >
-          {[
-            {
-              label: "原始事件",
-              value: metrics?.events,
-              hint: metrics
-                ? `期间事件 ${metrics.events_in_range ?? "—"} · 此前跟进 ${metrics.backlog_events ?? "—"}`
-                : "按事件 ID 去重，非查询累计",
-              icon: <ShieldCheck size={17} />,
-            },
-            {
-              label: group ? "关联组 / 独立事件" : "独立展示条目",
-              value: metrics
-                ? group
-                  ? `${metrics.groups ?? "—"} / ${metrics.ungrouped ?? "—"}`
-                  : metrics.rows
-                : undefined,
-              hint: group
-                ? `合并后 ${metrics?.rows ?? "—"} 个展示条目`
-                : "已关闭关联分组",
-              icon: <Layers3 size={17} />,
-            },
-            ...Object.entries(assessmentLabels).map(([status, label]) => ({
-              label,
-              value:
-                metrics?.assessment_counts?.[status as EventAssessmentStatus] ??
-                (status === "ended" ? metrics?.ended : undefined),
-              hint:
-                status === "ended"
-                  ? "监测范围中已不再返回，保留历史记录"
-                  : status === "insufficient"
-                    ? "未排除风险，暂不通知"
-                    : status === "benign"
-                      ? "有依据排除风险"
-                      : status === "risk_closed"
-                        ? "按已保存处置事实"
-                        : "已证实风险，等待处置闭环",
-              icon: <CircleDot size={17} />,
-            })),
-          ].map((item) => (
-            <div
-              key={item.label}
-              className="rounded-xl border border-sky-100 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900"
-            >
-              <div className="flex items-center gap-2 text-xs text-slate-500">
-                <span className="text-emerald-600 dark:text-emerald-400">
-                  {item.icon}
-                </span>
-                {item.label}
-              </div>
-              <div className="mt-2 text-2xl font-semibold tabular-nums tracking-tight">
-                {item.value ?? "—"}
-              </div>
-              <p className="mt-1 text-xs leading-5 text-slate-400">
-                {item.hint}
-              </p>
+          <button
+            onClick={() => selectSummary("")}
+            aria-pressed={!assessment && !shape}
+            className={`rounded-xl border bg-white px-4 py-3 text-left transition-colors dark:bg-slate-900 ${!assessment && !shape ? "border-emerald-400 ring-1 ring-emerald-100 dark:ring-emerald-900" : "border-sky-100 hover:border-emerald-300 dark:border-slate-800"}`}
+          >
+            <span className="flex items-center gap-2 text-xs text-slate-500">
+              <ShieldCheck size={17} className="text-emerald-600" />
+              原始事件
+            </span>
+            <span className="mt-2 block text-2xl font-semibold tabular-nums">
+              {metrics?.events ?? "—"}
+            </span>
+            <span className="mt-1 block text-xs text-slate-400">全部事件</span>
+          </button>
+          <div className="rounded-xl border border-sky-100 bg-white px-3 py-3 dark:border-slate-800 dark:bg-slate-900">
+            <p className="flex items-center gap-2 px-1 text-xs text-slate-500">
+              <Layers3 size={17} className="text-emerald-600" />
+              展示分组
+            </p>
+            <div className="mt-2 grid grid-cols-2 gap-1.5">
+              {(
+                [
+                  ["grouped", "关联组", metrics?.groups],
+                  ["ungrouped", "独立事件", metrics?.ungrouped],
+                ] as const
+              ).map(([value, label, count]) => (
+                <button
+                  key={value}
+                  onClick={() => selectSummary("", value)}
+                  aria-pressed={shape === value && !assessment}
+                  className={`rounded-lg border px-2 py-1.5 text-left ${shape === value && !assessment ? "border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/40" : "border-transparent hover:bg-sky-50 dark:hover:bg-sky-950/30"}`}
+                >
+                  <span className="block text-xl font-semibold tabular-nums">
+                    {count ?? "—"}
+                  </span>
+                  <span className="text-[11px] text-slate-500">{label}</span>
+                </button>
+              ))}
             </div>
+          </div>
+          {(
+            ["risk_open", "risk_closed", "benign", "insufficient"] as const
+          ).map((status) => (
+            <button
+              key={status}
+              onClick={() => selectSummary(status)}
+              aria-pressed={assessment === status && !shape}
+              className={`rounded-xl border bg-white px-4 py-3 text-left transition-colors dark:bg-slate-900 ${assessment === status && !shape ? "border-emerald-400 ring-1 ring-emerald-100 dark:ring-emerald-900" : "border-sky-100 hover:border-emerald-300 dark:border-slate-800"}`}
+            >
+              <span className="flex items-center gap-2 text-xs text-slate-500">
+                <CircleDot size={17} className="text-emerald-600" />
+                {assessmentLabels[status]}
+              </span>
+              <span className="mt-2 block text-2xl font-semibold tabular-nums">
+                {metrics?.assessment_counts?.[status] ?? "—"}
+              </span>
+            </button>
           ))}
+          <div
+            className={`rounded-xl border bg-white p-3 dark:bg-slate-900 ${assessment === "ended" || assessment.startsWith("source_closed_") ? "border-sky-400 ring-1 ring-sky-100 dark:ring-sky-900" : "border-sky-100 dark:border-slate-800"}`}
+          >
+            <button
+              onClick={() => selectSummary("ended")}
+              aria-pressed={assessment === "ended"}
+              className="block w-full rounded-lg px-1 text-left hover:bg-sky-50 dark:hover:bg-sky-950/30"
+            >
+              <span className="flex items-center gap-2 text-xs text-slate-500">
+                <CircleDot size={17} className="text-sky-600" />
+                源端关闭
+              </span>
+              <span className="mt-2 block text-2xl font-semibold tabular-nums">
+                {metrics?.ended ?? metrics?.assessment_counts?.ended ?? "—"}
+              </span>
+            </button>
+            <div className="mt-2 flex flex-wrap gap-1">
+              {(
+                [
+                  ["source_closed_risk", "曾确认风险"],
+                  ["source_closed_benign", "无风险"],
+                  ["source_closed_unknown", "未定性"],
+                ] as const
+              ).map(([status, label]) => (
+                <button
+                  key={status}
+                  onClick={() => selectSummary(status)}
+                  aria-pressed={assessment === status}
+                  className={`rounded px-1.5 py-1 text-[10px] font-medium ${assessment === status ? "bg-sky-600 text-white" : status === "source_closed_risk" ? "bg-amber-50 text-amber-800 hover:bg-amber-100 dark:bg-amber-950/40 dark:text-amber-200" : "bg-sky-50 text-sky-700 hover:bg-sky-100 dark:bg-sky-950/40 dark:text-sky-300"}`}
+                >
+                  {label}{" "}
+                  {metrics?.source_closed_counts?.[
+                    status.replace("source_closed_", "") as
+                      | "risk"
+                      | "benign"
+                      | "unknown"
+                  ] ??
+                    metrics?.assessment_counts?.[status] ??
+                    "—"}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
         <div className="overflow-hidden rounded-xl border border-sky-100 bg-white dark:border-slate-800 dark:bg-slate-900">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-3 dark:border-slate-800">
             <h3 className="text-sm font-semibold">事件跟踪记录</h3>
-            <span className="text-xs text-slate-500">按事件发生时间倒序</span>
+            <span className="text-xs text-slate-500">
+              {sortBy === "first_seen_at" ? "首次检出" : "最近处理"} ·{" "}
+              {sortOrder === "desc" ? "从近到远" : "从远到近"}
+            </span>
           </div>
           {loading && !data ? (
             <div
@@ -1296,11 +1452,34 @@ export default function EventList({
             </div>
           ) : data ? (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[920px] text-left text-sm">
+              <table className="w-full min-w-[1080px] text-left text-sm">
                 <thead className="bg-sky-50/60 text-xs text-slate-500 dark:bg-sky-950/20">
                   <tr>
+                    <th
+                      className="px-4 py-3 font-medium"
+                      aria-sort={
+                        sortBy === "first_seen_at"
+                          ? sortOrder === "desc"
+                            ? "descending"
+                            : "ascending"
+                          : "none"
+                      }
+                    >
+                      {sortButton("first_seen_at", "首次检出时间")}
+                    </th>
+                    <th
+                      className="px-4 py-3 font-medium"
+                      aria-sort={
+                        sortBy === "last_processed_at"
+                          ? sortOrder === "desc"
+                            ? "descending"
+                            : "ascending"
+                          : "none"
+                      }
+                    >
+                      {sortButton("last_processed_at", "最近处理时间")}
+                    </th>
                     {[
-                      "发生时间",
                       "监测设备",
                       "安全事件",
                       "事件 / 主机数",
@@ -1330,9 +1509,13 @@ export default function EventList({
                         <tr className="align-top transition-colors hover:bg-sky-50/50 dark:hover:bg-sky-950/20">
                           <td className="whitespace-nowrap px-4 py-4">
                             <p className="text-xs font-medium">
+                              {formatTime(row.first_seen_at, sourceTimezone)}
+                            </p>
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-4">
+                            <p className="text-xs font-medium">
                               {formatTime(
-                                row.last_event_at ??
-                                  (latest && memberTime(latest)),
+                                row.last_processed_at,
                                 sourceTimezone,
                               )}
                             </p>
@@ -1424,7 +1607,7 @@ export default function EventList({
                             </div>
                             {latest && monitoringEnded(latest) && (
                               <p className="mt-2 text-xs text-slate-500">
-                                XDR 本轮未再返回
+                                {sourceClosureText(latest)}
                               </p>
                             )}
                             {latest &&
@@ -1443,7 +1626,12 @@ export default function EventList({
                                 "system_wait",
                               ].includes(latest.investigation?.state || "") && (
                                 <p className="mt-2 text-xs text-sky-700 dark:text-sky-300">
-                                  最新事件待研判
+                                  {latest.assessment?.confirmed_risk_retained ||
+                                  row.assessment?.confirmed_risk_retained
+                                    ? latest.investigation?.state === "running"
+                                      ? "补充核查中"
+                                      : "补充核查待续查"
+                                    : "最新事件待研判"}
                                 </p>
                               )}
                           </td>
@@ -1461,7 +1649,7 @@ export default function EventList({
                         {expanded && row.grouped && (
                           <tr>
                             <td
-                              colSpan={6}
+                              colSpan={7}
                               className="bg-sky-50/40 px-5 py-4 dark:bg-sky-950/10"
                             >
                               <div className="max-h-96 overflow-auto rounded-lg border border-sky-100 bg-white dark:border-sky-900 dark:bg-slate-900">
@@ -1478,7 +1666,7 @@ export default function EventList({
                                         </p>
                                         <p className="mt-1 text-xs text-slate-500">
                                           {formatTime(
-                                            memberTime(member),
+                                            member.first_seen_at,
                                             sourceTimezone,
                                           )}{" "}
                                           · {member.id}
@@ -1491,7 +1679,7 @@ export default function EventList({
                                         />
                                         {monitoringEnded(member) && (
                                           <span className="text-xs text-slate-500">
-                                            XDR 本轮未再返回
+                                            {sourceClosureText(member)}
                                           </span>
                                         )}
                                         {!eventEnded(member) &&
@@ -1610,7 +1798,7 @@ export default function EventList({
                         {member.host || "主机未提供"} · {member.name}
                       </p>
                       <p className="mt-1 break-all text-xs text-slate-500">
-                        {formatTime(memberTime(member), sourceTimezone)}
+                        {formatTime(member.first_seen_at, sourceTimezone)}
                       </p>
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         <AssessmentBadge
@@ -1671,6 +1859,8 @@ export default function EventList({
                         detail?.event.handling || currentMember.handling
                       ]}
                     {monitoringEnded(detail?.event || currentMember) &&
+                      (detail?.event || currentMember).assessment
+                        ?.source_closure_basis !== "source_status" &&
                       (detail?.event.deal_status ??
                         currentMember.deal_status) != null &&
                       "（历史记录，当前未核验）"}
@@ -1681,7 +1871,10 @@ export default function EventList({
                 </div>
                 <p className="mt-2 text-xs text-slate-500">
                   {monitoringEnded(detail?.event || currentMember)
-                    ? "XDR本轮查询未返回此事件，保留原研判和历史记录，不再自动观察或跟进。"
+                    ? (detail?.event || currentMember).assessment
+                        ?.source_closure_basis === "source_status"
+                      ? "XDR 状态已关闭，保留原研判记录。"
+                      : "XDR本轮查询未返回此事件，保留原研判和历史记录，不再自动观察或跟进。"
                     : (detail?.event.handling_source ||
                           currentMember.handling_source) === "monitor_verified"
                       ? "处置来源：套件写回并回查确认"

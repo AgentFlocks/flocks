@@ -430,6 +430,8 @@ async def test_mixed_assessments_remain_separate_in_group_and_filters_match_orig
         await investigate(event, evidence=[proof], result={'verdict': verdict,
             'reason': '原始请求与调查结论对应', 'confidence': 'high',
             'risk_confirmed': verdict == 'risk', 'blocking_gaps': [], 'evidence_ids': ['evidence-1']})
+        if status == 40:
+            await mark(event)
     result = await listing()
     item = result['items'][0]
     assert item['assessment_status'] == item['members'][0]['assessment']['status'] == 'insufficient'
@@ -485,7 +487,9 @@ async def test_status_only_refresh_keeps_confirmed_risk_closed_in_list_and_detai
     completed = {**old, 'dealStatus': 40, 'basics': {'deal_status': 40}}
     await observe(completed, suffix='completed')
     member = (await listing())['items'][0]['members'][0]
-    assert member['assessment']['status'] == 'risk_closed'
+    assert member['assessment']['status'] == 'ended'
+    assert member['source_closed'] and member['source_closed_verdict'] == 'risk'
+    assert member['assessment']['label'] == '源端关闭'
     assert member['investigation']['state'] == 'ready' and member['investigation']['is_current']
     detailed = await event_list.detail('owner', COMPONENT_ID, old['key'])
     assert detailed['event']['assessment'] == member['assessment']
@@ -503,3 +507,180 @@ async def test_malformed_fact_payload_is_insufficient_not_a_list_failure(facts):
         'blocking_gaps': [], 'evidence_ids': ['evidence-1']})
     member = (await listing())['items'][0]['members'][0]
     assert member['assessment']['status'] == 'insufficient'
+
+
+async def test_click_filters_keep_card_snapshot_and_do_not_mix_suite_writes_with_source_closure():
+    from flocks.monitoring import followup
+    await install()
+    scenarios = [('risk-source', 'risk', 40, None), ('safe-source', 'benign', 60, None),
+                 ('unknown-source', 'unknown', 0, 'monitoring_ended'),
+                 ('risk-suite', 'risk', 40, 'verified'), ('unknown-suite', 'unknown', 60, 'verified'),
+                 ('open', 'unknown', 0, None)]
+    for identifier, verdict, status, state in scenarios:
+        event = incident(identifier, name=identifier, dealStatus=status)
+        await observe(event)
+        proof = {'id': 'evidence-1', 'event': identifier, 'device': 'a', 'success': True,
+                 'event_revision': fingerprint(event), 'kind': 'alert_proof',
+                 'facts': {'requestBody': 'observed command or payload'}}
+        await investigate(event, evidence=[proof], result={'verdict': verdict,
+            'reason': '证据对应结论', 'confidence': 'high', 'risk_confirmed': verdict == 'risk',
+            'blocking_gaps': [], 'evidence_ids': ['evidence-1']})
+        if state == 'verified':
+            await mark(event, target=status, observed=status)
+        if state:
+            await write('INSERT INTO monitor_event_followup(owner,scope,project,device,event_key,policy_revision,event_version,event,state,result,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                ('owner', COMPONENT_ID, 'project', 'a', event['key'], 'policy', followup.event_version(event),
+                 encode(event), state, encode({'observed_status': status}), DAY+'T14:00:00Z', DAY+'T14:00:00Z'))
+    all_events = await listing()
+    expected = all_events['summary_metrics']
+    assert expected['events'] == 6
+    assert expected['assessment_counts']['ended'] == 3
+    assert expected['source_closed_counts'] == {'risk': 1, 'benign': 1, 'unknown': 1}
+    ended = await listing(assessment='ended')
+    assert ended['metrics']['events'] == 3 and ended['summary_metrics'] == expected
+    for verdict in ('risk', 'benign', 'unknown'):
+        selected = await listing(assessment='source_closed_'+verdict)
+        assert selected['metrics']['events'] == 1
+        assert selected['summary_metrics'] == expected
+        member = selected['items'][0]['members'][0]
+        assert member['source_closed_verdict'] == verdict
+        assert member['assessment']['label'] == '源端关闭'
+        assert not member['assessment']['notify_eligible']
+    suite = next(member for item in all_events['items'] for member in item['members'] if member['id'] == 'risk-suite')
+    assert not suite['source_closed'] and suite['assessment']['status'] == 'risk_closed'
+    assert (await listing(assessment='risk_closed'))['metrics']['events'] == 1
+    internal_ignore = next(member for item in all_events['items'] for member in item['members'] if member['id'] == 'unknown-suite')
+    assert not internal_ignore['source_closed'] and internal_ignore['assessment']['label'] == '证据不足 · 已忽略'
+
+
+async def test_group_shape_filters_and_search_keep_summary_counts_scoped_to_query():
+    await install()
+    for event in [incident('one'), incident('two'), incident('single', name='other event'), incident('other-device', device='b')]:
+        await observe(event)
+    grouped = await listing(shape='grouped')
+    assert grouped['total'] == 1 and grouped['items'][0]['member_count'] == 2
+    assert grouped['metrics']['events'] == 2
+    assert grouped['summary_metrics']['events'] == 4
+    single = await listing(shape='ungrouped')
+    assert single['total'] == 2
+    assert single['summary_metrics'] == grouped['summary_metrics']
+    narrowed = await listing(device='a', search='SQL', assessment='risk_open')
+    assert narrowed['total'] == 0
+    assert narrowed['summary_metrics']['events'] == 2
+    assert narrowed['summary_metrics']['assessment_counts']['insufficient'] == 2
+
+
+async def test_risk_source_closure_is_preserved_when_supplementary_investigation_is_waiting():
+    from flocks.monitoring import followup
+    await install()
+    event = incident()
+    await observe(event)
+    proof = {'id': 'evidence-1', 'event': event['id'], 'device': 'a', 'success': True,
+             'event_revision': fingerprint(event), 'kind': 'alert_proof', 'facts': {'requestBody': 'malicious payload'}}
+    await investigate(event, evidence=[proof], result={'verdict': 'risk', 'reason': '已证实恶意上传',
+        'confidence': 'high', 'risk_confirmed': True, 'blocking_gaps': [], 'evidence_ids': ['evidence-1']})
+    # Opening the list backfills an evidence-validated durable conclusion once.
+    assert (await listing())['metrics']['assessment_counts']['risk_open'] == 1
+    await write("UPDATE monitor_investigations SET state='system_wait',result='{}',evidence='[]'")
+    await write('INSERT INTO monitor_event_followup(owner,scope,project,device,event_key,policy_revision,event_version,event,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+        ('owner', COMPONENT_ID, 'project', 'a', event['key'], 'policy', followup.event_version(event),
+         encode(event), 'monitoring_ended', DAY+'T14:00:00Z', DAY+'T14:00:00Z'))
+    result = await listing(assessment='source_closed_risk')
+    assert result['metrics']['events'] == 1
+    member = result['items'][0]['members'][0]
+    assert member['source_closed'] and member['source_closed_verdict'] == 'risk'
+    assert member['assessment']['previously_confirmed_risk']
+    assert not member['assessment']['notify_eligible']
+
+
+@pytest.mark.parametrize('new_activity', [False, True])
+async def test_retained_risk_detail_recovers_only_cited_original_version_packets(new_activity):
+    from flocks.monitoring.conclusions import capture_case
+    await install()
+    original = incident(name='异常文件上传')
+    await observe(original)
+    proof = {'id': 'evidence-1', 'event': original['id'], 'device': 'a', 'success': True,
+        'event_revision': fingerprint(original), 'kind': 'alert_proof', 'tool': 'sangfor_xdr_alerts',
+        'facts': {'requestBody': 'filename=../../test.jsp', 'responseBody': 'saved original upload',
+                  'srcIp': original['host'], 'dstIp': '192.0.2.20', 'dstPort': 80}}
+    result = {'verdict': 'risk', 'confidence': 'high', 'risk_confirmed': True,
+        'reason': '已证实异常文件写入', 'blocking_gaps': [], 'evidence_ids': ['evidence-1']}
+    snapshot = capture_case({'event': original, 'state': 'ready', 'revision': 2,
+        'evidence': [proof], 'result': result, 'updated_at': DAY+'T13:00:00Z'})
+    await write('INSERT INTO monitor_investigation_versions(owner,project,event_key,revision,event,evidence,result,state,attempts,archived_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+        ('owner', 'project', original['key'], 2, encode(original),
+         encode([proof, {**proof, 'id': 'uncited', 'facts': {'requestBody': 'UNCITED_PRIVATE'}}]),
+         encode(result), 'ready', 1, DAY+'T13:00:00Z'))
+    current = {**original, 'endTime': original['endTime']+3600} if new_activity else original
+    if new_activity:
+        await observe(current, suffix='new-activity')
+    await investigate(current, state='system_wait', evidence=[], result={'verdict': 'unknown', 'reason': '模型恢复中'})
+    await write('UPDATE monitor_investigations SET confirmed_risk=? WHERE event_key=?', (encode(snapshot), current['key']))
+    detailed = await event_list.detail('owner', COMPONENT_ID, current['key'])
+    assert detailed['event']['assessment']['confirmed_risk_retained']
+    assert not detailed['event']['assessment']['notify_eligible']
+    assert detailed['story']['evidence_cards'] == []
+    assert detailed['confirmed_story']['evidence_cards']
+    assert 'saved original upload' in encode(detailed['confirmed_story'])
+    assert 'UNCITED_PRIVATE' not in encode(detailed)
+    assert detailed['confirmed_story']['evidence_cards'][0]['evidence_id'] == 'evidence-1'
+    assert detailed['confirmed_evidence_scope'] == ('previous_activity' if new_activity else 'current_activity')
+    assert detailed['confirmed_at'] == DAY+'T13:00:00Z'
+    assert detailed['event']['assessment']['is_current'] != new_activity
+
+
+async def test_retained_history_proof_over_limit_is_skipped_without_breaking_json_or_risk(monkeypatch):
+    from flocks.monitoring.conclusions import capture_case
+    await install()
+    original = incident(name='异常文件上传')
+    await observe(original)
+    proof = {'id': 'evidence-1', 'event': original['id'], 'device': 'a', 'success': True,
+        'event_revision': fingerprint(original), 'kind': 'alert_proof',
+        'facts': {'requestBody': 'filename=../../test.jsp' + 'LARGE_PACKET'*40000}}
+    result = {'verdict': 'risk', 'confidence': 'high', 'risk_confirmed': True,
+        'reason': '已证实异常文件写入', 'blocking_gaps': [], 'evidence_ids': ['evidence-1']}
+    snapshot = capture_case({'event': original, 'state': 'ready', 'revision': 1,
+        'evidence': [proof], 'result': result, 'updated_at': DAY+'T13:00:00Z'})
+    await write('INSERT INTO monitor_investigation_versions(owner,project,event_key,revision,event,evidence,result,state,attempts,archived_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+        ('owner', 'project', original['key'], 1, encode(original), encode([proof]), encode(result), 'ready', 1, DAY+'T13:00:00Z'))
+    await investigate(original, state='system_wait', evidence=[], result={'verdict': 'unknown'})
+    await write('UPDATE monitor_investigations SET confirmed_risk=?', (encode(snapshot),))
+    detailed = await event_list.detail('owner', COMPONENT_ID, original['key'])
+    assert detailed['truncated']
+    assert any('超过详情读取上限' in note for note in detailed['warnings'])
+    assert detailed['event']['assessment']['verdict'] == 'risk'
+    assert detailed['confirmed_story']['evidence_cards'] == []
+    assert 'LARGE_PACKET' not in encode(detailed)
+
+
+@pytest.mark.parametrize('changed', ['device', 'event', 'revision', 'proof_revision'])
+async def test_retained_history_never_borrows_packets_from_other_identity_or_revision(changed):
+    from flocks.monitoring.conclusions import capture_case
+    await install()
+    original = incident(name='异常文件上传')
+    await observe(original)
+    proof = {'id': 'evidence-1', 'event': original['id'], 'device': 'a', 'success': True,
+        'event_revision': fingerprint(original), 'kind': 'alert_proof', 'facts': {'requestBody': 'ORIGINAL_ONLY_PACKET'}}
+    result = {'verdict': 'risk', 'confidence': 'high', 'risk_confirmed': True,
+        'reason': '已证实异常文件写入', 'blocking_gaps': [], 'evidence_ids': ['evidence-1']}
+    snapshot = capture_case({'event': original, 'state': 'ready', 'revision': 1,
+        'evidence': [proof], 'result': result, 'updated_at': DAY+'T13:00:00Z'})
+    version_event = {**original}
+    version_proof = {**proof}
+    if changed == 'device':
+        version_event['device'] = 'other'
+    elif changed == 'event':
+        version_event['id'] = 'other'
+    elif changed == 'proof_revision':
+        version_proof['event_revision'] = 'not-original-version'
+    await write('INSERT INTO monitor_investigation_versions(owner,project,event_key,revision,event,evidence,result,state,attempts,archived_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+        ('owner', 'project', original['key'], 2 if changed == 'revision' else 1, encode(version_event),
+         encode([version_proof]), encode(result), 'ready', 1, DAY+'T13:00:00Z'))
+    await investigate(original, state='system_wait', evidence=[], result={'verdict': 'unknown'})
+    await write('UPDATE monitor_investigations SET confirmed_risk=?', (encode(snapshot),))
+    detailed = await event_list.detail('owner', COMPONENT_ID, original['key'])
+    assert detailed['event']['assessment']['confirmed_risk_retained']
+    assert not detailed['event']['assessment']['notify_eligible']
+    assert detailed['confirmed_story']['evidence_cards'] == []
+    assert 'ORIGINAL_ONLY_PACKET' not in encode(detailed)
+    assert any('此前确证依据暂未加载' in note for note in detailed['warnings'])

@@ -13,19 +13,23 @@ const valueText = (value: unknown): string => {
 export function EvidenceCards({
   cards,
   formatTime,
+  title = "关键证据",
+  description = "每条先说明查到了什么及其作用，展开详情可核对来源、查询和原始记录。",
+  emptyMessage = "尚未取得与当前事件版本对应的具体行为证据，查询限制与原始记录保留在技术明细。",
 }: {
   cards: EventEvidenceCard[];
   formatTime: (value: unknown) => string;
+  title?: string;
+  description?: string;
+  emptyMessage?: string;
 }) {
   return (
-    <section aria-label="关键证据概述">
+    <section aria-label={title === "关键证据" ? "关键证据概述" : title}>
       <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold">
         <ShieldCheck size={16} className="text-emerald-600" />
-        关键证据
+        {title}
       </h3>
-      <p className="mb-3 text-xs leading-6 text-slate-500">
-        每条先说明查到了什么及其作用，展开详情可核对来源、查询和原始记录。
-      </p>
+      <p className="mb-3 text-xs leading-6 text-slate-500">{description}</p>
       {cards.length ? (
         <ol className="space-y-2">
           {cards.map((card, index) => (
@@ -128,7 +132,7 @@ export function EvidenceCards({
         </ol>
       ) : (
         <p className="rounded-lg bg-slate-50 p-3 text-xs leading-6 text-slate-500 dark:bg-slate-900">
-          尚未取得与当前事件版本对应的具体行为证据，查询限制与原始记录保留在技术明细。
+          {emptyMessage}
         </p>
       )}
     </section>

@@ -121,7 +121,7 @@ def same_evidence_version(first, second):
     return fingerprint(activity(first)) == fingerprint(activity(second))
 
 
-def assess_event(event, investigation=None, evidence=None, *, handling=None):
+def _assess_current(event, investigation=None, evidence=None, *, handling=None):
     """Return four business outcomes; only confirmed current risks notify.
 
     ``investigation`` may be the persisted row (JSON strings are accepted) or
@@ -192,6 +192,51 @@ def assess_event(event, investigation=None, evidence=None, *, handling=None):
             'risk_excluded': bool(benign)}
 
 
+def assess_event(event, investigation=None, evidence=None, *, handling=None):
+    """Keep confirmed incident facts separate from a supplementary execution.
+
+    Retained conclusions are for presentation and follow-up only. They never
+    grant notification or source-write authority to expired/new activity facts.
+    """
+    event = event if isinstance(event, dict) else {}
+    value = _assess_current(event, investigation, evidence, handling=handling)
+    case = investigation if isinstance(investigation, dict) else event.get('investigation', {})
+    case = case if isinstance(case, dict) else {}
+    snapshot = _decoded(case.get('confirmed_risk'), {})
+    from .conclusions import validated_snapshot
+    prior = validated_snapshot(snapshot, event)
+    if not prior:
+        return value
+    generic_gap = re.compile(r'调查尚未|尚未形成|系统故障|服务暂不可用|模型|查询未完成|置信度|版本不一致')
+    gaps = [_text(item, 300) for item in prior.get('gaps', [])
+            if isinstance(item, str) and not generic_gap.search(item)] if isinstance(prior.get('gaps'), list) else []
+    findings = [_text(item, 300) for item in prior.get('operator_explanation', [])
+                if isinstance(item, str)] if isinstance(prior.get('operator_explanation'), list) else []
+    value.update(previously_confirmed_risk=True, historical_verdict='risk', confirmed_at=snapshot.get('confirmed_at'),
+                 risk_fact_summary=_text(prior.get('operator_summary') or prior.get('reason')),
+                 risk_fact_findings=findings[:2], risk_fact_gaps=gaps[:3],
+                 confirmed_reason=_text(prior.get('reason')))
+    # An independently supported current benign conclusion can supersede the
+    # earlier judgment. An unknown verdict/service failure cannot retract it.
+    if value['verdict'] in {'risk', 'benign'} or snapshot.get('superseded_by'):
+        return value
+    canonical = _decoded(snapshot.get('event'), {})
+    current = same_evidence_version(canonical, event)
+    result = _decoded(case.get('result'), {})
+    if not current:
+        gaps.insert(0, '事件出现新增活动，新增部分尚待核实；此前已确认风险仍保留。')
+    closed = handling == 'closed' if handling is not None else type(event.get('dealStatus')) is int and event['dealStatus'] == 40
+    value.update(status='risk_closed' if closed else 'risk_open',
+                 label=LABELS['risk_closed' if closed else 'risk_open'], verdict='risk',
+                 reason=_text(prior.get('reason')), gaps=list(dict.fromkeys(gaps))[:6],
+                 notify_eligible=False, risk_excluded=False, suspected_risk=False,
+                 confirmed_risk_retained=True, risk_scope='current' if current else 'previous_activity',
+                 recheck_state=case.get('state', 'pending'), recheck_reason=_text(result.get('reason')),
+                 is_current=bool(current), evidence_supported=True,
+                 evidence_ids=list(prior.get('evidence_ids', [])))
+    return value
+
+
 def apply_followup(assessment, event, followup):
     """Project lifecycle facts without changing the evidence verdict."""
     from .followup import event_version
@@ -228,9 +273,12 @@ def apply_followup(assessment, event, followup):
             value.update(label='无风险 · 已忽略' if value['verdict'] == 'benign' else '有风险 · 已忽略' if value['verdict'] == 'risk' else '证据不足 · 已忽略',
                          status='benign' if value['verdict'] == 'benign' else 'ended', xdr_closed=True, notify_eligible=False)
     elif target == 60 and state in {'queued', 'writing', 'pending'}:
+        if value['verdict'] == 'risk':
+            value['label'] = '有风险 · 忽略待核验'
+            return value
         prefix = '无风险' if value['verdict'] == 'benign' else '证据不足 · 观察期已满'
         value['label'] = prefix + (' · 待下一轮忽略' if state == 'queued' else ' · 忽略结果待回查')
-    elif state == 'watching':
+    elif state == 'watching' and value['verdict'] == 'unknown':
         native, legacy = event.get('incidentSeverity'), event.get('riskLevel')
         high = type(native) is int and native in {3, 4} or type(legacy) is int and legacy in {0, 1}
         value['label'] = ('有风险线索 · 证据不足 · 待观察（处置中）' if value.get('suspected_risk') else

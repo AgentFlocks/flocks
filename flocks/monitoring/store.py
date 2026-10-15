@@ -154,7 +154,8 @@ async def connection():
         for table, additions in (
             ('monitor_investigations', [('revision', 'INTEGER NOT NULL DEFAULT 1'),
                 ('failure_count', 'INTEGER NOT NULL DEFAULT 0'), ('next_retry_at', 'TEXT'),
-                ('error_kind', 'TEXT'), ('retry_exhausted', 'INTEGER NOT NULL DEFAULT 0')]),
+                ('error_kind', 'TEXT'), ('retry_exhausted', 'INTEGER NOT NULL DEFAULT 0'),
+                ('confirmed_risk', 'TEXT')]),
             ('monitor_attempts', [('summary', 'TEXT'), ('next_step', 'TEXT'), ('end_message_id', 'TEXT'), ('end_published', 'INTEGER NOT NULL DEFAULT 0')]),
             ('monitor_mail_notices', [('sent_at', 'TEXT')]),
             ('monitor_mail_manual', [('notes', "TEXT NOT NULL DEFAULT ''")]),

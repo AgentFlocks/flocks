@@ -12,7 +12,10 @@ export type EventAssessmentStatus =
   | "risk_closed"
   | "benign"
   | "insufficient"
-  | "ended";
+  | "ended"
+  | "source_closed_risk"
+  | "source_closed_benign"
+  | "source_closed_unknown";
 export interface EventAssessment {
   lifecycle?: string;
   observation_rounds?: number;
@@ -29,6 +32,17 @@ export interface EventAssessment {
   gaps?: string[];
   is_current?: boolean;
   evidence_supported?: boolean;
+  source_closed?: boolean;
+  source_closed_verdict?: "risk" | "benign" | "unknown";
+  source_closure_basis?: string;
+  historical_verdict?: "risk" | "benign" | "unknown";
+  confirmed_risk_retained?: boolean;
+  previously_confirmed_risk?: boolean;
+  risk_scope?: "current" | "previous_activity";
+  recheck_state?: string;
+  recheck_reason?: string;
+  confirmed_at?: string | null;
+  risk_fact_summary?: string;
 }
 export interface MonitorEventQuery {
   start_date: string;
@@ -43,6 +57,9 @@ export interface MonitorEventQuery {
   risk?: string;
   handling?: string;
   assessment?: EventAssessmentStatus;
+  shape?: "grouped" | "ungrouped";
+  sort_by?: "first_seen_at" | "last_processed_at";
+  sort_order?: "asc" | "desc";
 }
 export interface EventMember {
   key: string;
@@ -58,6 +75,9 @@ export interface EventMember {
   observed_at?: string | null;
   first_seen_at?: string | null;
   last_seen_at?: string | null;
+  last_processed_at?: string | null;
+  source_closed?: boolean;
+  source_closed_verdict?: "risk" | "benign" | "unknown";
   event_at?: string | number | null;
   event_end_at?: string | number | null;
   occurrence_at?: string | number | null;
@@ -102,6 +122,9 @@ export interface EventListRow {
   primary_event_key?: string;
   first_seen_at?: string | null;
   last_seen_at?: string | null;
+  last_processed_at?: string | null;
+  source_closed?: boolean;
+  source_closed_verdict?: "risk" | "benign" | "unknown";
   risk: string;
   handling: EventHandling;
   assessment_counts?: Partial<Record<EventAssessmentStatus, number>>;
@@ -117,6 +140,23 @@ export interface EventListRow {
   is_backlog?: boolean;
   closure_counts?: Partial<Record<EventHandling, number>>;
 }
+export interface EventListMetrics {
+  assessment_counts?: Partial<Record<EventAssessmentStatus, number>>;
+  source_closed_counts?: Partial<Record<"risk" | "benign" | "unknown", number>>;
+  events: number;
+  events_in_range?: number;
+  backlog_events?: number;
+  rows: number;
+  groups?: number;
+  ungrouped?: number;
+  open: number;
+  closed: number;
+  ignored: number;
+  contained: number;
+  ended?: number;
+  mail_sent: number;
+  mail_replied: number;
+}
 export interface EventListResponse {
   start_date: string;
   end_date: string;
@@ -127,22 +167,8 @@ export interface EventListResponse {
   has_more: boolean;
   offset: number;
   limit: number;
-  metrics: {
-    assessment_counts?: Partial<Record<EventAssessmentStatus, number>>;
-    events: number;
-    events_in_range?: number;
-    backlog_events?: number;
-    rows: number;
-    groups?: number;
-    ungrouped?: number;
-    open: number;
-    closed: number;
-    ignored: number;
-    contained: number;
-    ended?: number;
-    mail_sent: number;
-    mail_replied: number;
-  };
+  metrics: EventListMetrics;
+  summary_metrics?: EventListMetrics;
   devices: { id: string; name: string }[];
   truncated: boolean;
   warnings: string[];
@@ -168,6 +194,9 @@ export interface EventEvidenceCard {
 }
 export interface EventDetailResponse {
   story?: Record<string, unknown>;
+  confirmed_story?: Record<string, unknown>;
+  confirmed_evidence_scope?: "current_activity" | "previous_activity";
+  confirmed_at?: string | null;
   overview?: {
     basics?: Record<string, unknown>;
     conclusion?: string;
@@ -181,6 +210,10 @@ export interface EventDetailResponse {
     evidence_cards?: EventEvidenceCard[];
     timeline?: { time: string | number; text: string }[];
     gaps?: string[];
+    recheck_state?: string;
+    recheck_reason?: string;
+    confirmed_risk_retained?: boolean;
+    risk_scope?: "current" | "previous_activity";
   };
   event: EventMember & Record<string, unknown>;
   investigation?: {

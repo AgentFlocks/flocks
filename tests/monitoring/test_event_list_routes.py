@@ -97,3 +97,45 @@ async def test_http_forwards_business_assessment_filter(client, monkeypatch):
     response = await client.get(BASE, params={**DATES, 'assessment': 'insufficient'})
     assert response.status_code == 200
     assert read.call_args.kwargs['assessment'] == 'insufficient'
+
+
+@pytest.mark.parametrize('state', ['ended', 'source_closed_risk', 'source_closed_benign', 'source_closed_unknown'])
+async def test_http_accepts_source_closure_filters_that_previously_failed_validation(client, monkeypatch, state):
+    read = AsyncMock(return_value={'items': [], 'total': 0})
+    monkeypatch.setattr(event_list, 'list_events', read)
+    response = await client.get(BASE, params={**DATES, 'assessment': state})
+    assert response.status_code == 200
+    assert read.call_args.kwargs['assessment'] == state
+
+
+async def test_http_forwards_both_sort_clocks_and_shape(client, monkeypatch):
+    read = AsyncMock(return_value={'items': [], 'total': 0})
+    monkeypatch.setattr(event_list, 'list_events', read)
+    response = await client.get(BASE, params={**DATES, 'sort_by': 'last_processed_at', 'sort_order': 'asc', 'shape': 'grouped'})
+    assert response.status_code == 200
+    assert read.call_args.kwargs['sort_by'] == 'last_processed_at'
+    assert read.call_args.kwargs['sort_order'] == 'asc'
+    assert read.call_args.kwargs['shape'] == 'grouped'
+
+
+@pytest.mark.parametrize('extra', [{'sort_by': 'occurrence_at'}, {'sort_order': 'backward'}, {'shape': 'all'}])
+async def test_http_rejects_unknown_sort_and_shape(client, monkeypatch, extra):
+    read = AsyncMock()
+    monkeypatch.setattr(event_list, 'list_events', read)
+    assert (await client.get(BASE, params={**DATES, **extra})).status_code == 422
+    read.assert_not_called()
+
+
+async def test_http_source_filter_uses_real_list_and_preserves_summary_card_counts(client):
+    from test_event_list import DAY, incident, install, observe
+    await install()
+    await observe(incident('source-closed', dealStatus=40))
+    await observe(incident('open'))
+    response = await client.get(BASE, params={'start_date': DAY, 'end_date': DAY,
+        'assessment': 'ended', 'sort_by': 'last_processed_at', 'sort_order': 'asc'})
+    assert response.status_code == 200
+    value = response.json()
+    assert value['metrics']['events'] == 1 and value['summary_metrics']['events'] == 2
+    assert value['items'][0]['members'][0]['source_closed']
+    assert value['items'][0]['members'][0]['assessment']['label'] == '源端关闭'
+    assert '_risk_restore' not in value

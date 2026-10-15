@@ -35,6 +35,8 @@ CORE_CAPABILITIES.add('monitor.next-round-disposition.v1')
 CORE_CAPABILITIES.add('monitor.source-membership.v1')
 CORE_CAPABILITIES.add('monitor.mail-controls.v1')
 CORE_CAPABILITIES.add('monitor.investigation-replan.v1')
+CORE_CAPABILITIES.add('monitor.event-list-controls.v1')
+CORE_CAPABILITIES.add('monitor.confirmed-findings.v1')
 
 
 def validate_manifest(manifest, package=None):
