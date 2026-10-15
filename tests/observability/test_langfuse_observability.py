@@ -1,6 +1,8 @@
 import sys
 import types
 
+import pytest
+
 import flocks.utils.langfuse as lf
 
 
@@ -341,6 +343,58 @@ def test_normalize_usage_uses_explicit_total_without_double_counting():
         "reasoning": 16,
         "total": 4_237,
     }
+
+
+def test_normalize_usage_keeps_cache_hits_out_of_input():
+    """OpenAI counts cached tokens inside prompt_tokens; Langfuse's keys do
+    not overlap, so input is the uncached part."""
+    from flocks.provider.token_usage import normalize_usage
+
+    usage = normalize_usage({
+        "prompt_tokens": 10_000,
+        "completion_tokens": 16,
+        "total_tokens": 10_016,
+        "prompt_tokens_details": {"cached_tokens": 8_192},
+    })
+
+    assert lf._normalize_usage_details(usage) == {
+        "input": 1_808,
+        "output": 16,
+        "total": 10_016,
+        "cache_read": 8_192,
+    }
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Anthropic: cache reads and writes on top of the uncached input.
+        (
+            {"input_tokens": 1_000, "output_tokens": 300,
+             "cache_read_input_tokens": 50_000, "cache_creation_input_tokens": 2_000},
+            {"input": 1_000, "output": 300, "total": 53_300, "cache_read": 50_000, "cache_write": 2_000},
+        ),
+        # LiteLLM's shape guesses prompt_tokens counts the cache; a request
+        # of 100,000 tokens shows the cache came on top.
+        (
+            {"prompt_tokens": 60_000, "completion_tokens": 300, "cache_read_input_tokens": 50_000,
+             "prompt_tokens_details": {"cached_tokens": 50_000}},
+            {"input": 60_000, "output": 300, "total": 110_300, "cache_read": 50_000},
+        ),
+    ],
+    ids=["anthropic", "litellm-guess-dropped"],
+)
+def test_normalize_usage_total_covers_the_whole_prompt(raw, expected):
+    from flocks.provider.token_usage import needs_request_check, normalize_usage, settle_cache_in_prompt
+
+    normalized = normalize_usage(raw)
+    usage = settle_cache_in_prompt(normalized, request_tokens=100_000)
+
+    if "prompt_tokens_details" in raw:
+        assert needs_request_check(normalized)
+        assert usage["cache_tokens_in_prompt"] == 0
+    assert not needs_request_check(usage)
+    assert lf._normalize_usage_details(usage) == expected
 
 
 def test_observation_trace_context_requires_portable_otel_ids():

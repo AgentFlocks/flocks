@@ -27,7 +27,10 @@ import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
 import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
 import {
   convertCurrencyAmount,
+  formatCacheHitRate,
+  formatTokenCount,
   formatTokenMillions,
+  getCacheUsageSummary,
   getConvertedTotalCost,
   getDefaultDashboardCurrency,
   toggleDashboardCurrency,
@@ -728,6 +731,7 @@ function DashboardStrip({
 }) {
   const { t, i18n } = useTranslation('model');
   const totalTokens = usageStats?.summary?.total_tokens ?? 0;
+  const cacheUsage = useMemo(() => getCacheUsageSummary(usageStats), [usageStats]);
   const defaultCurrency = getDefaultDashboardCurrency(i18n.language);
   const [displayCurrency, setDisplayCurrency] = useState(defaultCurrency);
   const totalCost = useMemo(
@@ -781,6 +785,28 @@ function DashboardStrip({
         label={t('dashboard.totalTokens')}
         value={totalTokens > 0 ? formatTokenMillions(totalTokens) : t('dashboard.noUsage')}
         color="blue"
+        hint={cacheUsage.state === 'unreported'
+          ? t('dashboard.cacheUnreported')
+          : cacheUsage.state === 'legacy'
+            ? t('dashboard.cacheReadLegacy', { tokens: formatTokenCount(cacheUsage.cacheRead) })
+            : cacheUsage.state === 'reported'
+              ? cacheUsage.hitRate === null
+                ? t('dashboard.cacheRead', { tokens: formatTokenCount(cacheUsage.cacheRead) })
+                : t('dashboard.cacheHit', {
+                  tokens: formatTokenCount(cacheUsage.cacheRead),
+                  rate: formatCacheHitRate(cacheUsage.hitRate),
+                })
+              : undefined}
+        hintTitle={cacheUsage.state === 'unreported'
+          ? t('dashboard.cacheUnreportedHint')
+          : cacheUsage.state === 'legacy'
+            ? t('dashboard.cacheLegacyHint')
+            : cacheUsage.state === 'reported'
+              ? t('dashboard.cacheCoverageHint', {
+                reported: cacheUsage.reportedRequests,
+                total: cacheUsage.totalRequests,
+              })
+              : undefined}
       />
       <StatCard
         icon={<DollarSign className="w-5 h-5" />}
@@ -794,7 +820,7 @@ function DashboardStrip({
   );
 }
 
-function StatCard({ icon, label, value, color, small, onClick, title }: {
+function StatCard({ icon, label, value, color, small, onClick, title, hint, hintTitle }: {
   icon: React.ReactNode;
   label: string;
   value: React.ReactNode;
@@ -802,6 +828,8 @@ function StatCard({ icon, label, value, color, small, onClick, title }: {
   small?: boolean;
   onClick?: () => void;
   title?: string;
+  hint?: React.ReactNode;
+  hintTitle?: string;
 }) {
   const colorMap: Record<string, string> = {
     green: 'bg-green-50 text-green-700 border-green-200',
@@ -828,6 +856,9 @@ function StatCard({ icon, label, value, color, small, onClick, title }: {
         <span className="text-xs font-medium">{label}</span>
       </div>
       <div className={`font-bold break-words ${small ? 'text-sm' : 'text-lg'}`}>{value}</div>
+      {hint && (
+        <div className="mt-0.5 text-xs leading-snug opacity-70 break-words" title={hintTitle}>{hint}</div>
+      )}
     </div>
   );
 }

@@ -503,6 +503,12 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         log.warning("knowledgebase.integration.start_failed", {"error_type": type(exc).__name__})
 
+    # Extension services (e.g. Pro's scheduled audits) start on this loop once
+    # the server is ready, without holding up requests.
+    from flocks.extensions import run_startup_hooks
+
+    _schedule_startup_phase(app, log, "extensions.startup_hooks", run_startup_hooks)
+
     blocking_startup_ms = int((time.perf_counter() - startup_started_at) * 1000)
     log.info("server.startup.ready", {
         "blocking_duration_ms": blocking_startup_ms,
@@ -1239,6 +1245,8 @@ from flocks.server.routes.workflow import router as workflow_router, webhook_rou
 # WebUI: Skill & Command routes
 from flocks.server.routes.skill import router as skill_router
 from flocks.server.routes.hub import router as hub_router
+# REA reverse-analysis component install and session work
+from flocks.server.routes.rea import router as rea_router
 # WebUI: Hook management routes
 from flocks.server.routes.hooks import router as hooks_router
 # Model management: Default model, Usage routes
@@ -1296,6 +1304,7 @@ app.include_router(workflow_webhook_router, tags=["WorkflowWebhook"])
 app.include_router(skill_router, prefix="/api", tags=["Skill"])
 # WebUI: Hub routes
 app.include_router(hub_router, prefix="/api", tags=["Hub"])
+app.include_router(rea_router, prefix="/api", tags=["REA"])
 # WebUI: Hook management routes
 app.include_router(hooks_router, prefix="/api/hooks", tags=["Hooks"])
 # Model management: Default model routes

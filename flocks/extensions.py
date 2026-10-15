@@ -188,7 +188,31 @@ def register_public_path(pattern: Any) -> None:
     register_public_path_pattern(pattern)
 
 
+_startup_hooks: list[tuple[str, Callable[[], Any], float]] = []
 _shutdown_hooks: list[tuple[str, Callable[[], Any], float]] = []
+
+
+def register_startup_hook(
+    name: str,
+    hook: Callable[[], Any],
+    *,
+    timeout_seconds: float = 30.0,
+) -> None:
+    """Run ``hook`` once the server has started, to start an extension's
+    background service (e.g. Pro's scheduled audits) on the server's event
+    loop. Re-registering a name replaces it.
+
+    The hooks run in the background after storage, auth and the installed
+    plugins are ready, so a slow hook never delays serving requests. They are
+    called the same way as shutdown hooks and should return once their service
+    is running. A hook registered after the server started runs at its next start.
+
+    Prefer a coroutine function: if the server stops while it runs, it is
+    cancelled and given up to its timeout to clean up before the shutdown hooks
+    run. A plain callable runs on a daemon thread that nothing can stop.
+    """
+    _startup_hooks[:] = [entry for entry in _startup_hooks if entry[0] != name]
+    _startup_hooks.append((name, hook, timeout_seconds))
 
 
 def register_shutdown_hook(
@@ -245,11 +269,11 @@ def _run_on_daemon_thread(func: Callable[[], Any]) -> Any:
         except RuntimeError:  # the loop closed after a timeout
             _discard(outcome[0])
 
-    threading.Thread(target=run, name="flocks-shutdown-hook", daemon=True).start()
+    threading.Thread(target=run, name="flocks-extension-hook", daemon=True).start()
     return future
 
 
-async def _call_shutdown_hook(hook: Callable[[], Any]) -> None:
+async def _call_hook(hook: Callable[[], Any]) -> None:
     import inspect
 
     if inspect.iscoroutinefunction(hook):
@@ -267,35 +291,59 @@ def _retrieve_late_outcome(task: Any) -> None:
         task.exception()
 
 
-async def run_shutdown_hooks() -> None:
-    """Called by the server lifespan. Each hook runs as its own task with a hard
-    time limit, so a failing, slow or self-cancelling hook never stops the hooks
-    or the shutdown steps after it. Cancelling the shutdown itself still
-    propagates (and cancels the running hook)."""
+async def _run_hooks(
+    hooks: list[tuple[str, Callable[[], Any], float]],
+    stage: str,
+    *,
+    settle_on_cancel: bool = False,
+) -> None:
+    """Each hook runs as its own task with a hard time limit, so a failing,
+    slow or self-cancelling hook never stops the hooks or the steps after it.
+    Cancelling the caller itself still propagates (and cancels the running hook);
+    with ``settle_on_cancel`` it first waits, within the hook's time limit, for
+    the hook to finish cleaning up."""
     import asyncio
 
     from flocks.utils.log import Log
 
     log = Log.create(service="extensions")
-    for name, hook, timeout_seconds in list(_shutdown_hooks):
-        task = asyncio.ensure_future(_call_shutdown_hook(hook))
+    for name, hook, timeout_seconds in list(hooks):
+        task = asyncio.ensure_future(_call_hook(hook))
         try:
             done, _pending = await asyncio.wait({task}, timeout=timeout_seconds)
         except asyncio.CancelledError:
             task.cancel()
+            # Before the wait below: a second cancellation must not leave its outcome unread.
             task.add_done_callback(_retrieve_late_outcome)
+            if settle_on_cancel:
+                await asyncio.wait({task}, timeout=timeout_seconds)
             raise
         if not done:
             # Not awaited after cancelling: a hook that ignores cancellation
-            # must not hold up the rest of the shutdown.
+            # must not hold up the hooks and steps after it.
             task.cancel()
             task.add_done_callback(_retrieve_late_outcome)
-            log.warning("extensions.shutdown_hook.timeout", {"name": name, "timeout_seconds": timeout_seconds})
+            log.warning(f"extensions.{stage}_hook.timeout", {"name": name, "timeout_seconds": timeout_seconds})
         elif task.cancelled():
             # The hook cancelled something of its own and let that escape.
-            log.warning("extensions.shutdown_hook.cancelled", {"name": name})
+            log.warning(f"extensions.{stage}_hook.cancelled", {"name": name})
         elif task.exception() is not None:
-            log.warning("extensions.shutdown_hook.failed", {"name": name, "error": str(task.exception())})
+            log.warning(f"extensions.{stage}_hook.failed", {"name": name, "error": str(task.exception())})
+
+
+async def run_startup_hooks() -> None:
+    """Called by the server lifespan, in the background, once startup is ready.
+
+    The lifespan cancels it when the server stops early. A hook still starting
+    its service then gets up to its timeout to stop before the shutdown hooks
+    run; cleanup that takes longer, or a second cancellation, can still overlap
+    them."""
+    await _run_hooks(_startup_hooks, "startup", settle_on_cancel=True)
+
+
+async def run_shutdown_hooks() -> None:
+    """Called by the server lifespan before sessions, MCP and storage close."""
+    await _run_hooks(_shutdown_hooks, "shutdown")
 
 
 __all__ = [
@@ -314,6 +362,8 @@ __all__ = [
     "register_event_hook",
     "register_public_path",
     "register_shutdown_hook",
+    "register_startup_hook",
     "run_shutdown_hooks",
+    "run_startup_hooks",
     "unregister_hub_root",
 ]

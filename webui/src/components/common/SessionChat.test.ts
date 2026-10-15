@@ -2731,6 +2731,33 @@ describe('SessionChat composer controls', () => {
     expect(JSON.stringify(promptCall?.[1])).not.toContain('/Users/');
   });
 
+  it('attaches a reverse-engineering sample only when any file type is allowed', async () => {
+    clientPostMock.mockImplementation((url: string) => (url === '/api/workspace/upload'
+      ? Promise.resolve({
+        data: { uploaded: [{ uploadID: 'prt-sample', name: 'rea_demo', mime: 'application/octet-stream', size: 4, is_text_file: false }] },
+      })
+      : Promise.resolve({ data: {} })));
+    const sample = () => new File([new Uint8Array([0xcf, 0xfa, 0xed, 0xfe])], 'rea_demo', { type: 'application/octet-stream' });
+
+    const first = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    const docsOnly = first.container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(docsOnly.getAttribute('accept')).toContain('.pdf');
+    fireEvent.change(docsOnly, { target: { files: [sample()] } });
+    await screen.findByText('chat.upload.invalidType');
+    expect(clientPostMock).not.toHaveBeenCalledWith('/api/workspace/upload', expect.anything(), expect.anything());
+    first.unmount();
+
+    const second = render(React.createElement(SessionChat, { sessionId: 'sess-1', allowAnyUpload: true }));
+    const anyFile = second.container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(anyFile.hasAttribute('accept')).toBe(false);
+    fireEvent.change(anyFile, { target: { files: [sample()] } });
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith('/api/workspace/upload', expect.anything(), expect.anything());
+    });
+    expect(await screen.findByText('rea_demo')).toBeInTheDocument();
+    expect(screen.queryByText('chat.upload.invalidType')).not.toBeInTheDocument();
+  });
+
   it('deletes an abandoned staged document when the user removes it', async () => {
     clientPostMock.mockResolvedValue({
       data: {

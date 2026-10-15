@@ -140,6 +140,11 @@ export default function UpdateModal({
           pollUntilReady();
         }
       }, i18n.language, edition);
+      // The stream can close without an error or a restart (e.g. nothing to upgrade):
+      // stop showing the upgrade as running.
+      if (!restartingRef.current) {
+        setUpgrading(false);
+      }
     } catch (e: any) {
       // Use the ref to avoid stale closure — restarting may have been set
       // to true by the progress callback before this catch fires.
@@ -273,16 +278,18 @@ export default function UpdateModal({
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-semibold text-amber-950">
-                      {upgrading || restarting ? t('upgrading') : t('newVersionTitle')}
+                      {isBusy ? t('upgrading') : error ? t('upgradeFailed') : t('newVersionTitle')}
                     </div>
                     {latestDisplayVersion && (
-                      <div className="mt-1 text-2xl font-bold text-amber-900">
+                      <div className="mt-1 text-2xl font-bold text-amber-900 dark:text-amber-200">
                         {formatUpdateVersion(latestDisplayVersion)}
                       </div>
                     )}
-                    <p className="mt-2 text-sm leading-6 text-amber-800">
-                      {t('confirmUpgradeDesc')}
-                    </p>
+                    {(isBusy || !error) && (
+                      <p className="mt-2 text-sm leading-6 text-amber-800">
+                        {t('confirmUpgradeDesc')}
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -309,7 +316,7 @@ export default function UpdateModal({
             )}
 
             <div className="px-4 pb-4 flex items-center gap-2 flex-wrap">
-              {!restarting && (
+              {upgrading && !restarting && (
                 <span className="flex items-center gap-1.5 text-xs text-gray-500">
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   {t('upgrading')}

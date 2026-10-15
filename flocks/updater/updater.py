@@ -52,6 +52,12 @@ OFFLINE_UPGRADE_REFUSED_MESSAGE = (
     "此实例由离线安装包部署，不支持联网就地升级：核心升级请用新版 flocks-offline.run 覆盖安装，"
     "Pro 组件从包内 /opt/flocks/bundle 安装（FLOCKS_PRO_BUNDLE_DIR）。"
 )
+_PROC_ROOT = Path("/proc")
+SYSTEMD_MAIN_PROCESS_REFUSED_MESSAGE = (
+    "后端由 systemd 直接以 flocks serve 运行，不支持页面内就地升级或降级：这一步要先退出当前进程，"
+    "systemd 会随之停掉整个服务，接手升级的进程也会被结束，服务就停了。"
+    "请用部署流程更新版本，或像离线安装包那样改用 flocks start 托管服务。"
+)
 
 _PRESERVE_NAMES: set[str] = {
     ".venv",
@@ -318,6 +324,51 @@ async def _validate_restart_runtime(
     if not python_exe.exists():
         return f"Restart runtime is missing: {python_exe}"
     return None
+
+
+def _running_as_systemd_service_main_process() -> bool:
+    """Return whether this process is the main process of a systemd service.
+
+    The upgrade restart handoff relies on this process exiting while a detached
+    helper finishes the work. When systemd runs ``flocks serve`` directly, that
+    exit stops the unit and systemd kills the helper with the rest of the cgroup.
+    systemd exports ``INVOCATION_ID`` to the processes it starts for a unit, and
+    a unit's main process is a direct child of the service manager (PID 1, or the
+    user's ``systemd --user``). Under ``flocks start`` the backend is a child of
+    the Flocks supervisor instead.
+    """
+    if not sys.platform.startswith("linux") or not os.environ.get("INVOCATION_ID"):
+        return False
+    parent_pid = os.getppid()
+    if parent_pid == 1:
+        return True
+    try:
+        return (_PROC_ROOT / str(parent_pid) / "comm").read_text(encoding="utf-8").strip() == "systemd"
+    except OSError:
+        return False
+
+
+def _install_write_blocker(*paths: Path) -> str | None:
+    """Return a refusal when an existing install path is not writable by this process."""
+    for path in paths:
+        if path.exists() and not os.access(path, os.W_OK | os.X_OK):
+            return (
+                f"安装目录 {path} 当前服务用户写不了（只读挂载或属主不对），无法就地升级。"
+                "请用部署流程更新版本，或给服务用户写权限后再升级。"
+            )
+    return None
+
+
+def _inplace_upgrade_blocker(install_root: Path, *, restart: bool, replaces_core: bool) -> str | None:
+    """Return why an in-place upgrade cannot run here, before anything is downloaded.
+
+    Whether a Pro bundle replaces the core is only known once it is extracted, so bundle
+    upgrades pass ``replaces_core=False`` here and check the install root again then.
+    """
+    if restart and _running_as_systemd_service_main_process():
+        return SYSTEMD_MAIN_PROCESS_REFUSED_MESSAGE
+    venv = install_root / ".venv"
+    return _install_write_blocker(install_root, venv) if replaces_core else _install_write_blocker(venv)
 
 
 def _build_uv_sync_env() -> dict[str, str] | None:
@@ -2870,6 +2921,10 @@ async def perform_pro_bundle_downgrade(
         return
 
     yield UpdateProgress(stage="checking", message="Checking local Pro installation...")
+    if restart and _running_as_systemd_service_main_process():
+        # The restart below exits this process; refuse before the Pro component is removed.
+        yield UpdateProgress(stage="error", message=SYSTEMD_MAIN_PROCESS_REFUSED_MESSAGE, success=False)
+        return
     uv_path = _find_executable("uv")
     if not uv_path:
         yield UpdateProgress(
@@ -3023,6 +3078,32 @@ async def perform_update(
     dependency_wheels_dir: Path | None = None
     console_manifest_info: ConsoleManifestRelease | None = None
     console_manifest_payload = console_manifest_payload if isinstance(console_manifest_payload, dict) else None
+
+    # Everything below needs a writable install, a restartable service and uv; check them
+    # before downloading a bundle that can take minutes and would be thrown away.
+    blocker = _inplace_upgrade_blocker(
+        install_root,
+        restart=restart,
+        replaces_core=profile.sources != ["console-manifest"],
+    )
+    if blocker is not None:
+        log.warning("updater.inplace_upgrade.refused", {"install_root": str(install_root), "reason": blocker})
+        _record_update_journal(f"ERROR {blocker}")
+        yield UpdateProgress(stage="error", message=blocker, success=False)
+        return
+    uv_path = _find_executable("uv")
+    if not uv_path:
+        hint = (
+            "Dependency sync failed: uv is required but was not found. "
+            "Please install uv (https://docs.astral.sh/uv/) and ensure it "
+            "is in PATH (e.g. add ~/.local/bin to PATH for systemd services)."
+        )
+        if sys.platform == "win32":
+            hint = "Dependency sync failed: uv is required to refresh the Windows project runtime."
+        _record_update_journal(f"ERROR {hint}")
+        yield UpdateProgress(stage="error", message=hint, success=False)
+        return
+
     fmt = _choose_archive_format(ucfg.archive_format)
     if local_bundle_path is not None:
         fmt = "dir" if local_bundle_path.is_dir() else _archive_format_for_url(local_bundle_path.name, bundle_format)
@@ -3207,22 +3288,16 @@ async def perform_update(
             )
         else:
             effective_update_version = _pro_bundle_core_version_for_marker(pro_bundle_manifest)
+            # Only now is it known that this bundle replaces files in the install root.
+            blocker = _install_write_blocker(install_root)
+            if blocker is not None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                log.warning("updater.inplace_upgrade.refused", {"install_root": str(install_root), "reason": blocker})
+                _record_update_journal(f"ERROR {blocker}")
+                yield UpdateProgress(stage="error", message=blocker, success=False)
+                return
     else:
         effective_update_version = latest_tag
-
-    uv_path = _find_executable("uv")
-    if not uv_path:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        hint = (
-            "Dependency sync failed: uv is required but was not found. "
-            "Please install uv (https://docs.astral.sh/uv/) and ensure it "
-            "is in PATH (e.g. add ~/.local/bin to PATH for systemd services)."
-        )
-        if sys.platform == "win32":
-            hint = "Dependency sync failed: uv is required to refresh the Windows project runtime."
-        _record_update_journal(f"ERROR {hint}")
-        yield UpdateProgress(stage="error", message=hint, success=False)
-        return
 
     sync_timeout = _dependency_sync_timeout_seconds()
     pro_bundle_manifest_path: Path | None = None

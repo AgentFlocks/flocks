@@ -16,6 +16,7 @@ from flocks.provider.provider import (
     StreamChunk,
 )
 from flocks.provider.sdk.openai_base import build_reasoning_metadata
+from flocks.provider.token_usage import normalize_usage
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.anthropic")
@@ -406,13 +407,8 @@ class AnthropicProvider(BaseProvider):
             model=response.model,
             content="\n".join(content_parts),
             finish_reason="tool_calls" if tool_calls else (response.stop_reason or "stop"),
-            usage={
-                "prompt_tokens": response.usage.input_tokens,
-                "completion_tokens": response.usage.output_tokens,
-                "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
-                "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
-                "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
-            }
+            # Anthropic reports cache reads and writes on top of input_tokens.
+            usage=normalize_usage(response.usage, response_id=response.id) or {},
         )
     
     async def chat_stream(
@@ -490,11 +486,14 @@ class AnthropicProvider(BaseProvider):
         current_reasoning_open = False
         current_reasoning_signature: Optional[str] = None
         current_redacted_thinking_data: Optional[str] = None
-        # Track token usage from streaming events
+        # Track token usage from streaming events.  The cache counters stay
+        # None until the server reports them: a missing counter is unknown,
+        # not a cache miss.
         input_tokens: int = 0
         output_tokens: int = 0
-        cache_read_tokens: int = 0
-        cache_write_tokens: int = 0
+        cache_read_tokens: Optional[int] = None
+        cache_write_tokens: Optional[int] = None
+        response_id: Optional[str] = None
         # Anthropic reports why generation ended on message_delta only; without
         # keeping it, message_stop below always said "stop" and a max_tokens cut
         # was indistinguishable from a clean finish downstream.
@@ -514,12 +513,15 @@ class AnthropicProvider(BaseProvider):
                         # Capture initial token counts (input tokens + cache)
                         msg = getattr(event, 'message', None)
                         if msg:
+                            msg_id = getattr(msg, 'id', None)
+                            if isinstance(msg_id, str) and msg_id:
+                                response_id = msg_id
                             usage = getattr(msg, 'usage', None)
                             if usage:
                                 input_tokens = getattr(usage, 'input_tokens', 0) or 0
                                 output_tokens = getattr(usage, 'output_tokens', 0) or 0
-                                cache_read_tokens = getattr(usage, 'cache_read_input_tokens', 0) or 0
-                                cache_write_tokens = getattr(usage, 'cache_creation_input_tokens', 0) or 0
+                                cache_read_tokens = getattr(usage, 'cache_read_input_tokens', None)
+                                cache_write_tokens = getattr(usage, 'cache_creation_input_tokens', None)
 
                     elif event.type == "content_block_start":
                         block = event.content_block
@@ -618,7 +620,22 @@ class AnthropicProvider(BaseProvider):
                         # Capture output token count (accumulates during streaming)
                         usage = getattr(event, 'usage', None)
                         if usage:
-                            output_tokens = getattr(usage, 'output_tokens', output_tokens) or output_tokens
+                            # Counts here are cumulative and final; a field the
+                            # server leaves out (None) keeps the message_start
+                            # value.  Some Anthropic-compatible servers report
+                            # the prompt side only here.
+                            final_output = getattr(usage, 'output_tokens', None)
+                            if isinstance(final_output, int):
+                                output_tokens = final_output
+                            final_input = getattr(usage, 'input_tokens', None)
+                            if isinstance(final_input, int):
+                                input_tokens = final_input
+                            final_read = getattr(usage, 'cache_read_input_tokens', None)
+                            if isinstance(final_read, int):
+                                cache_read_tokens = final_read
+                            final_write = getattr(usage, 'cache_creation_input_tokens', None)
+                            if isinstance(final_write, int):
+                                cache_write_tokens = final_write
                         delta_obj = getattr(event, 'delta', None)
                         if delta_obj is not None:
                             stop_reason = getattr(delta_obj, 'stop_reason', None)
@@ -629,16 +646,16 @@ class AnthropicProvider(BaseProvider):
                         # Build usage metadata from captured token counts.
                         # Use OpenAI-compatible key names (prompt_tokens / completion_tokens)
                         # so that runner.py can read them without provider-specific branching.
-                        usage_meta: Dict[str, Any] = {}
-                        if input_tokens or output_tokens or cache_read_tokens:
-                            usage_meta = {
-                                "prompt_tokens": input_tokens,
-                                "completion_tokens": output_tokens,
-                                "total_tokens": input_tokens + output_tokens,
-                                # Keep Anthropic-specific cache fields for future use
+                        usage_meta = normalize_usage(
+                            {
+                                "input_tokens": input_tokens,
+                                "output_tokens": output_tokens,
                                 "cache_read_input_tokens": cache_read_tokens,
                                 "cache_creation_input_tokens": cache_write_tokens,
-                            }
+                            },
+                            response_id=response_id,
+                        )
+                        if usage_meta:
                             log.info("anthropic.stream.usage", {
                                 "input_tokens": input_tokens,
                                 "output_tokens": output_tokens,

@@ -313,10 +313,13 @@ class UsageRecord(BaseModel):
     credential_id: Optional[str] = None
     session_id: Optional[str] = None
     message_id: Optional[str] = None
-    input_tokens: int = 0
+    input_tokens: int = 0  # whole prompt, cache reads and writes included
     output_tokens: int = 0
-    cached_tokens: int = 0
-    cache_write_tokens: int = 0
+    cached_tokens: int = 0  # cache reads, part of input_tokens
+    cache_write_tokens: int = 0  # cache writes, part of input_tokens
+    # Whether the provider reported cache usage; None on rows written before
+    # this was tracked.  Unreported cache counts are unknown, not zero.
+    cache_reported: Optional[bool] = None
     reasoning_tokens: int = 0
     total_tokens: int = 0
     input_cost: float = 0.0
@@ -325,6 +328,7 @@ class UsageRecord(BaseModel):
     currency: str = "USD"
     latency_ms: Optional[int] = None
     source: str = "live"
+    response_id: Optional[str] = None  # provider's id for the response
     created_at: datetime
     backfilled_at: Optional[datetime] = None
 

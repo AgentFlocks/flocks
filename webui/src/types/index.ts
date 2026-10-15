@@ -575,6 +575,13 @@ export interface UsageStats {
     total_requests: number;
     currency: string;
     cost_by_currency: { currency: string; total_cost: number }[];
+    total_cache_read_tokens?: number;
+    total_cache_write_tokens?: number;
+    /** Requests whose provider reported cache usage; the rest did not say or predate tracking. */
+    cache_reported_requests?: number;
+    /** Cache reads and input tokens of those requests: the cache hit rate is reads / input. */
+    cache_reported_read_tokens?: number;
+    cache_reported_input_tokens?: number;
   };
   by_provider: {
     provider_id: string;

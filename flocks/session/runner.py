@@ -89,6 +89,11 @@ from flocks.provider.llm_budget import llm_slot
 from flocks.provider import output_limits
 from flocks.provider.provider import Provider, ChatMessage
 from flocks.provider.reasoning_replay import prepare_reasoning_for_replay
+from flocks.provider.token_usage import (
+    needs_request_check,
+    resolve_usage,
+    settle_cache_in_prompt,
+)
 from flocks.hooks.pipeline import HookPipeline, HookStage
 from flocks.tool.catalog import (
     get_always_load_tool_names,
@@ -146,12 +151,6 @@ def _annotate_with_provider_version(tool_info: Any, description: Optional[str]) 
     return f"{base.rstrip()}\n\n{note}"
 TOOL_RESULT_MIN_TURN_BUDGET = 4_000
 TOOL_RESULT_PREVIEW_CHARS = 160
-
-# Usage that marks cache tokens as counted in prompt_tokens is only trusted
-# when the request estimate is below this share of prompt_tokens plus the
-# cache.  The estimate runs low on real tokenizers (code, JSON, blocks it
-# leaves out), and trusting an Anthropic-style report would under-count.
-CACHE_IN_PROMPT_REQUEST_RATIO = 0.7
 
 # Maximum seconds to wait for the *first* chunk from the LLM stream.
 # If the model never starts responding, the stream times out and the session
@@ -1071,6 +1070,11 @@ class SessionRunner:
         # LLM as plain text and explode the prompt token count. Also clamp the
         # placeholder to a hard byte cap as a belt-and-braces measure.
         MAX_PLACEHOLDER_CHARS = 200
+        # A local file URL is the model's only way to reach a binary
+        # attachment (a sample to reverse engineer, an archive), so it is
+        # kept whole; only an overlong display name is shortened.
+        MAX_LOCAL_URL_CHARS = 4096
+        MAX_FILENAME_CHARS = 120
         if is_image:
             placeholder = (
                 f"[Image: {filename} — model does not support image input; "
@@ -1084,6 +1088,13 @@ class SessionRunner:
             })
         else:
             safe_url = url if url and not url.startswith("data:") else ""
+            if safe_url.startswith("file:") and len(safe_url) <= MAX_LOCAL_URL_CHARS:
+                # The filename is optional on file parts.
+                name = filename or "file"
+                if len(name) > MAX_FILENAME_CHARS:
+                    name = name[:MAX_FILENAME_CHARS] + "…"
+                text_fallbacks.append(f"[File: {name}]({safe_url})")
+                return
             placeholder = (
                 f"[File: {filename}]({safe_url})" if safe_url else f"[File: {filename}]"
             )
@@ -2262,42 +2273,29 @@ class SessionRunner:
 
     @staticmethod
     def _build_tokens_update(
-        stream_usage: Optional[Dict[str, int]],
+        stream_usage: Optional[Dict[str, Any]],
         *,
         request_tokens: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """Normalize runner token updates from provider usage.
 
-        ``request_tokens`` is an estimate of the request that produced the
-        usage; it is only needed when the usage marks cache tokens as already
-        counted in prompt_tokens.
+        ``input`` is the uncached part of the prompt, next to cache reads and
+        writes (see ``flocks.provider.token_usage``).  ``request_tokens`` is an
+        estimate of the request that produced the usage; it is only needed
+        when the usage guesses that prompt_tokens counts the cache.
         """
         if not stream_usage:
             return None
-        # ``input`` is the uncached part of the prompt, next to cache reads and
-        # writes.  A gateway that already counted those into prompt_tokens
-        # says how many (see openai_base._cache_tokens_in_prompt).
-        prompt_tokens = stream_usage.get("prompt_tokens") or 0
-        in_prompt = stream_usage.get("cache_tokens_in_prompt") or 0
-        if in_prompt and request_tokens:
-            cached = (stream_usage.get("cache_read_input_tokens") or 0) + (
-                stream_usage.get("cache_creation_input_tokens") or 0
-            )
-            # Take the cache out only when the request sent is clearly smaller
-            # than prompt_tokens plus the cache.  Taking it out of an
-            # Anthropic-style prompt_tokens would under-count, and a prompt
-            # that runs past the window is not recovered from; counting the
-            # cache twice only compacts early.
-            if request_tokens >= CACHE_IN_PROMPT_REQUEST_RATIO * (prompt_tokens + cached):
-                in_prompt = 0
-        uncached_input = max(0, prompt_tokens - in_prompt)
+        usage = resolve_usage(settle_cache_in_prompt(stream_usage, request_tokens))
         return {
-            "input": uncached_input,
-            "output": stream_usage.get("completion_tokens", 0),
-            "reasoning": stream_usage.get("reasoning_tokens", 0),
+            "input": usage.input,
+            "output": usage.output,
+            "reasoning": usage.reasoning,
             "cache": {
-                "read": stream_usage.get("cache_read_input_tokens", 0),
-                "write": stream_usage.get("cache_creation_input_tokens", 0),
+                "read": usage.cache_read,
+                "write": usage.cache_write,
+                # Without a report the counts above are unknown, not zero.
+                "reported": usage.cache_reported,
             },
         }
 
@@ -2425,17 +2423,23 @@ class SessionRunner:
         try:
             from flocks.provider.usage_service import RecordUsageRequest, record_usage
 
+            # The same breakdown as the message tokens: the record keeps the
+            # whole prompt, the cache inside it once.
+            tokens = resolve_usage(usage)
+            response_id = usage.get("response_id")
             await record_usage(
                 RecordUsageRequest(
                     provider_id=self.provider_id,
                     model_id=self.model_id,
                     session_id=self.session.id,
                     message_id=message_id,
-                    input_tokens=usage.get("prompt_tokens", 0),
-                    output_tokens=usage.get("completion_tokens", 0),
-                    cached_tokens=usage.get("cache_read_input_tokens", 0),
-                    cache_write_tokens=usage.get("cache_creation_input_tokens", 0),
-                    reasoning_tokens=usage.get("reasoning_tokens", 0),
+                    input_tokens=tokens.prompt,
+                    output_tokens=tokens.output,
+                    cached_tokens=tokens.cache_read,
+                    cache_write_tokens=tokens.cache_write,
+                    cache_reported=tokens.cache_reported,
+                    reasoning_tokens=tokens.reasoning,
+                    response_id=response_id if isinstance(response_id, str) else None,
                     pricing=self._resolve_usage_pricing(),
                 )
             )
@@ -4175,6 +4179,7 @@ class SessionRunner:
                 generation_ctx = None
         first_chunk_logged = False
         accounted_usage = {}
+        request_tokens_estimate: Optional[int] = None
         aborted_during_stream = False
         stream_timeouts = resolve_llm_stream_timeouts(provider, self.model_id)
         log.debug("runner.llm.stream_timeouts", {
@@ -4266,6 +4271,16 @@ class SessionRunner:
                 # Capture usage from chunk (providers may include it in the final chunk)
                 if hasattr(chunk, 'usage') and chunk.usage:
                     stream_usage = chunk.usage
+                    if needs_request_check(stream_usage):
+                        # Settle whether prompt_tokens counts the cache before
+                        # the usage is charged or a tool in this chunk runs, so
+                        # the budget, message tokens, usage record, hooks and
+                        # traces all read it the same way.
+                        if request_tokens_estimate is None:
+                            request_tokens_estimate = self._estimate_request_tokens(
+                                messages, provider_tools,
+                            )
+                        stream_usage = settle_cache_in_prompt(stream_usage, request_tokens_estimate)
                     if controls is not None:
                         # Usage snapshots are cumulative within one request. Charge
                         # before any tool in this chunk, including on error streams.
@@ -4602,14 +4617,7 @@ class SessionRunner:
         reasoning = processor.get_reasoning_content()
         
         # Update message tokens if provider reported usage
-        tokens_update = self._build_tokens_update(
-            stream_usage,
-            request_tokens=(
-                self._estimate_request_tokens(messages, provider_tools)
-                if stream_usage and stream_usage.get("cache_tokens_in_prompt")
-                else None
-            ),
-        )
+        tokens_update = self._build_tokens_update(stream_usage)
         if tokens_update:
             try:
                 await Message.update(
@@ -4620,7 +4628,14 @@ class SessionRunner:
                 log.info("runner.stream.usage_captured", {
                     "input": tokens_update["input"],
                     "output": tokens_update["output"],
+                    "reasoning": tokens_update["reasoning"],
+                    "cache_read": tokens_update["cache"]["read"],
+                    "cache_write": tokens_update["cache"]["write"],
+                    "cache_reported": tokens_update["cache"]["reported"],
+                    "prompt_tokens": stream_usage.get("prompt_tokens", 0),
                     "total": stream_usage.get("total_tokens", 0),
+                    "response_id": stream_usage.get("response_id"),
+                    "message_id": assistant_msg.id,
                 })
             except Exception as e:
                 log.warn("runner.stream.usage_update_failed", {"error": str(e)})

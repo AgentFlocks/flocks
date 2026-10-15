@@ -27,6 +27,12 @@ log = Log.create(service="usage-service")
 _auto_backfill_complete = False
 _auto_backfill_lock = asyncio.Lock()
 
+# Rows whose provider reported cache usage.  Rows written before this was
+# tracked (NULL) are left out: their input_tokens may or may not include the
+# cache (Anthropic-style rows kept only the uncached part), so they cannot
+# go into a hit rate.  Keep in step with usage_record_reports_cache.
+_CACHE_REPORTED_SQL = "cache_reported = 1"
+
 
 class RecordUsageRequest(BaseModel):
     """Usage write request."""
@@ -36,11 +42,14 @@ class RecordUsageRequest(BaseModel):
     credential_id: Optional[str] = None
     session_id: Optional[str] = None
     message_id: Optional[str] = None
-    input_tokens: int = 0
+    input_tokens: int = 0  # whole prompt, cache reads and writes included
     output_tokens: int = 0
-    cached_tokens: int = 0
-    cache_write_tokens: int = 0
+    cached_tokens: int = 0  # cache reads, part of input_tokens
+    cache_write_tokens: int = 0  # cache writes, part of input_tokens
+    # Whether the provider reported cache usage (None: not known).
+    cache_reported: Optional[bool] = None
     reasoning_tokens: int = 0
+    response_id: Optional[str] = None
     latency_ms: Optional[int] = None
     pricing: Optional[PriceConfig] = None
     cost_override: Optional[UsageCost] = None
@@ -66,6 +75,15 @@ class UsageSummary(BaseModel):
     total_requests: int = 0
     currency: str = "USD"
     cost_by_currency: List[CurrencyCostSummary] = Field(default_factory=list)
+    total_cache_read_tokens: int = 0
+    total_cache_write_tokens: int = 0
+    # Requests whose provider reported cache usage, with their cache reads
+    # and input tokens: the cache hit rate is the reads over the input.  The
+    # other requests did not say whether the cache was used, or were recorded
+    # before this was tracked.
+    cache_reported_requests: int = 0
+    cache_reported_read_tokens: int = 0
+    cache_reported_input_tokens: int = 0
 
 
 class ProviderUsageSummary(BaseModel):
@@ -176,6 +194,11 @@ def _currency_rollup(cost_rows: Sequence[Tuple[str, float]]) -> tuple[float, str
     return 0.0, "MIXED", grouped
 
 
+def usage_record_reports_cache(record: UsageRecord) -> bool:
+    """Whether the provider reported cache usage for a record (see _CACHE_REPORTED_SQL)."""
+    return record.cache_reported is True
+
+
 def _usage_record_from_row(row: aiosqlite.Row) -> UsageRecord:
     """Convert a database row into a UsageRecord."""
     created_at = datetime.fromisoformat(row["created_at"])
@@ -184,6 +207,7 @@ def _usage_record_from_row(row: aiosqlite.Row) -> UsageRecord:
         if row["backfilled_at"]
         else None
     )
+    cache_reported = row["cache_reported"]
     return UsageRecord(
         id=row["id"],
         provider_id=row["provider_id"],
@@ -195,6 +219,7 @@ def _usage_record_from_row(row: aiosqlite.Row) -> UsageRecord:
         output_tokens=row["output_tokens"],
         cached_tokens=row["cached_tokens"],
         cache_write_tokens=row["cache_write_tokens"],
+        cache_reported=None if cache_reported is None else bool(cache_reported),
         reasoning_tokens=row["reasoning_tokens"],
         total_tokens=row["total_tokens"],
         input_cost=row["input_cost"],
@@ -203,6 +228,7 @@ def _usage_record_from_row(row: aiosqlite.Row) -> UsageRecord:
         currency=row["currency"],
         latency_ms=row["latency_ms"],
         source=row["source"],
+        response_id=row["response_id"],
         created_at=created_at,
         backfilled_at=backfilled_at,
     )
@@ -255,9 +281,9 @@ async def _get_existing_usage_record(
         return None
     async with db.execute(
         """SELECT id, provider_id, model_id, credential_id, session_id, message_id,
-                  input_tokens, output_tokens, cached_tokens, cache_write_tokens, reasoning_tokens,
-                  total_tokens, input_cost, output_cost, total_cost, currency,
-                  latency_ms, source, created_at, backfilled_at
+                  input_tokens, output_tokens, cached_tokens, cache_write_tokens, cache_reported,
+                  reasoning_tokens, total_tokens, input_cost, output_cost, total_cost, currency,
+                  latency_ms, source, response_id, created_at, backfilled_at
            FROM usage_records
            WHERE session_id = ? AND message_id = ?
            LIMIT 1""",
@@ -323,6 +349,7 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
             pricing=req.pricing,
             cached_tokens=req.cached_tokens,
             cache_write_tokens=req.cache_write_tokens,
+            reasoning_tokens=req.reasoning_tokens,
         )
         input_cost = computed_cost.input_cost
         output_cost = computed_cost.output_cost
@@ -348,10 +375,10 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
         await db.execute(
             """INSERT INTO usage_records
                (id, provider_id, model_id, credential_id, session_id, message_id,
-                input_tokens, output_tokens, cached_tokens, cache_write_tokens, reasoning_tokens,
-                total_tokens, input_cost, output_cost, total_cost, currency,
-                latency_ms, source, created_at, backfilled_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                input_tokens, output_tokens, cached_tokens, cache_write_tokens, cache_reported,
+                reasoning_tokens, total_tokens, input_cost, output_cost, total_cost, currency,
+                latency_ms, source, response_id, created_at, backfilled_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record_id,
                 req.provider_id,
@@ -363,6 +390,7 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
                 req.output_tokens,
                 req.cached_tokens,
                 req.cache_write_tokens,
+                None if req.cache_reported is None else int(req.cache_reported),
                 req.reasoning_tokens,
                 total_tokens,
                 input_cost,
@@ -371,6 +399,7 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
                 currency,
                 req.latency_ms,
                 req.source,
+                req.response_id,
                 created_at.isoformat(),
                 req.backfilled_at.isoformat() if req.backfilled_at else None,
             ),
@@ -388,6 +417,7 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
         output_tokens=req.output_tokens,
         cached_tokens=req.cached_tokens,
         cache_write_tokens=req.cache_write_tokens,
+        cache_reported=req.cache_reported,
         reasoning_tokens=req.reasoning_tokens,
         total_tokens=total_tokens,
         input_cost=input_cost,
@@ -396,6 +426,7 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
         currency=currency,
         latency_ms=req.latency_ms,
         source=req.source,
+        response_id=req.response_id,
         created_at=created_at,
         backfilled_at=req.backfilled_at,
     )
@@ -423,9 +454,9 @@ async def get_usage_records(
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"""SELECT id, provider_id, model_id, credential_id, session_id, message_id,
-                       input_tokens, output_tokens, cached_tokens, cache_write_tokens, reasoning_tokens,
-                       total_tokens, input_cost, output_cost, total_cost, currency,
-                       latency_ms, source, created_at, backfilled_at
+                       input_tokens, output_tokens, cached_tokens, cache_write_tokens, cache_reported,
+                       reasoning_tokens, total_tokens, input_cost, output_cost, total_cost, currency,
+                       latency_ms, source, response_id, created_at, backfilled_at
                 FROM usage_records{where_sql}
                 ORDER BY created_at ASC""",
             params,
@@ -461,7 +492,15 @@ async def get_usage_stats(
                     COALESCE(SUM(total_tokens), 0) AS total_tokens,
                     COALESCE(SUM(input_tokens), 0) AS total_input,
                     COALESCE(SUM(output_tokens), 0) AS total_output,
-                    COUNT(*) AS total_requests
+                    COUNT(*) AS total_requests,
+                    COALESCE(SUM(cached_tokens), 0) AS total_cache_read,
+                    COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write,
+                    COALESCE(SUM(CASE WHEN {_CACHE_REPORTED_SQL} THEN 1 ELSE 0 END), 0)
+                        AS cache_reported_requests,
+                    COALESCE(SUM(CASE WHEN {_CACHE_REPORTED_SQL} THEN cached_tokens ELSE 0 END), 0)
+                        AS cache_reported_read,
+                    COALESCE(SUM(CASE WHEN {_CACHE_REPORTED_SQL} THEN input_tokens ELSE 0 END), 0)
+                        AS cache_reported_input
                 FROM usage_records{where_sql}""",
             params,
         ) as cursor:
@@ -487,6 +526,11 @@ async def get_usage_stats(
             total_requests=totals_row["total_requests"],
             currency=summary_currency,
             cost_by_currency=summary_cost_by_currency,
+            total_cache_read_tokens=totals_row["total_cache_read"],
+            total_cache_write_tokens=totals_row["total_cache_write"],
+            cache_reported_requests=totals_row["cache_reported_requests"],
+            cache_reported_read_tokens=totals_row["cache_reported_read"],
+            cache_reported_input_tokens=totals_row["cache_reported_input"],
         )
 
         async with db.execute(
@@ -626,16 +670,22 @@ async def get_usage_stats(
 
 
 def _token_fields(tokens) -> tuple[int, int, int, int, int]:
-    """Extract token counts from message metadata."""
+    """Extract token counts from message metadata.
+
+    Message ``input`` is the uncached part of the prompt; the returned input
+    is the whole prompt, as usage records keep it.
+    """
     if not tokens:
         return 0, 0, 0, 0, 0
     cache = getattr(tokens, "cache", None)
+    cache_read = (getattr(cache, "read", 0) or 0) if cache else 0
+    cache_write = (getattr(cache, "write", 0) or 0) if cache else 0
     return (
-        getattr(tokens, "input", 0) or 0,
+        (getattr(tokens, "input", 0) or 0) + cache_read + cache_write,
         getattr(tokens, "output", 0) or 0,
         getattr(tokens, "reasoning", 0) or 0,
-        getattr(cache, "read", 0) if cache else 0,
-        getattr(cache, "write", 0) if cache else 0,
+        cache_read,
+        cache_write,
     )
 
 
@@ -741,6 +791,7 @@ async def _backfill_message_if_needed(
         currency = pricing.currency if pricing else "USD"
         cost_override = UsageCost(total_cost=cost, currency=currency)
 
+    cache = getattr(tokens, "cache", None) if tokens else None
     await record_usage(
         RecordUsageRequest(
             provider_id=provider_id,
@@ -751,6 +802,7 @@ async def _backfill_message_if_needed(
             output_tokens=output_tokens,
             cached_tokens=cached_tokens,
             cache_write_tokens=cache_write_tokens,
+            cache_reported=getattr(cache, "reported", None) if cache else None,
             reasoning_tokens=reasoning_tokens,
             pricing=pricing if cost_override is None else None,
             cost_override=cost_override,
