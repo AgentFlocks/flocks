@@ -937,9 +937,12 @@ class TestToolCallExecution:
             )
 
         assert handler_calls == [{"text": "hi"}]
-        # contract plus the flat legacy keys (sessionID / workspace / agent / tool)
-        assert observed["before"] == [["agent", "operation", "sessionID", "tool", "tool_execution", "workspace"]]
-        assert observed["after"] == [["operation", "outcome", "tool_execution"]]
+        # contract (with the caller it runs for) plus the flat legacy keys
+        # (sessionID / workspace / agent / tool)
+        assert observed["before"] == [[
+            "agent", "callerID", "callerType", "operation", "sessionID", "tool", "tool_execution", "workspace",
+        ]]
+        assert observed["after"] == [["callerID", "callerType", "operation", "outcome", "tool_execution"]]
         assert proc.tool_calls["tc_once"].status == "completed"
 
     @pytest.mark.asyncio

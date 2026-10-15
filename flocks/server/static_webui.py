@@ -46,10 +46,26 @@ def packaged_webui_dist_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "webui_static"
 
 
+#: Set by a deployment that ships its interface in one verified directory.  The
+#: server then serves ``FLOCKS_WEBUI_DIST_DIR`` and nothing else: a missing or
+#: empty directory is a failed start, never a fallback to another build.
+DIST_DIR_ENV = "FLOCKS_WEBUI_DIST_DIR"
+DIST_STRICT_ENV = "FLOCKS_WEBUI_DIST_STRICT"
+
+
+def webui_dist_pinned() -> bool:
+    return (os.getenv(DIST_STRICT_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def resolve_webui_dist_dir() -> Path | None:
     """Return the first usable WebUI dist directory."""
+    override = os.getenv(DIST_DIR_ENV)
+    if webui_dist_pinned():
+        if not override:
+            return None
+        pinned = Path(override).expanduser()
+        return pinned.resolve() if (pinned / "index.html").is_file() else None
     candidates: list[Path] = []
-    override = os.getenv("FLOCKS_WEBUI_DIST_DIR")
     if override:
         candidates.append(Path(override).expanduser())
     candidates.extend([source_webui_dist_dir(), packaged_webui_dist_dir()])
@@ -57,6 +73,21 @@ def resolve_webui_dist_dir() -> Path | None:
         if (candidate / "index.html").is_file():
             return candidate.resolve()
     return None
+
+
+def enforce_pinned_webui_dist() -> None:
+    """Refuse to start when the deployment pinned a UI directory that is not there.
+
+    Without a pin this does nothing: a source checkout may well run with no
+    build at all.
+    """
+    if not webui_dist_pinned():
+        return
+    if resolve_webui_dist_dir() is None:
+        raise WebUIDistMissingError(
+            f"{DIST_STRICT_ENV} is set but {DIST_DIR_ENV} "
+            f"({os.getenv(DIST_DIR_ENV) or 'unset'}) has no index.html; refusing to serve another build"
+        )
 
 
 def ensure_webui_dist_dir() -> Path:

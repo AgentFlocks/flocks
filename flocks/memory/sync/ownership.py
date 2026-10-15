@@ -51,21 +51,50 @@ def _root_identity(root: Path) -> str | None:
     return str(UUID(marker.read_bytes().decode("ascii").strip()))
 
 
+#: The one owner every instance indexes under once the memory notes are shared
+#: through the database (``flocks.memory.sync.mirror``): their local trees are
+#: copies of one tree, not separate sources.
+SHARED_ROOT_ID = "shared:memory"
+
+
 @dataclass(frozen=True)
 class MemoryIndexOwnership:
     root_id: str
     generation: int
     root: Path
 
+    @property
+    def shared(self) -> bool:
+        return self.root_id == SHARED_ROOT_ID
+
     @classmethod
-    async def begin(cls, root: Path) -> MemoryIndexOwnership | None:
-        root_id = await asyncio.to_thread(_root_identity, root)
+    async def begin(cls, root: Path, *, shared: bool = False) -> MemoryIndexOwnership | None:
+        """Start a scan of *root*.
+
+        *shared*: index as the one shared tree.  Ownership rows of the
+        per-instance roots used before move to it (each path keeps the hash
+        its index has), so a path no longer needs every instance's copy to
+        change before its index can.
+        """
+        if not root.is_dir():
+            return None
+        root_id = SHARED_ROOT_ID if shared else await asyncio.to_thread(_root_identity, root)
         if root_id is None:
             return None
         async with Storage.transaction() as db:
             # Concurrent first starts must not race PostgreSQL catalog DDL.
             await db.execute("SELECT pg_advisory_xact_lock(hashtext(?))", ("memory:index-owner-schema",))
             await db.executescript(SCHEMA)
+        if shared:
+            async with Storage.transaction() as db:
+                await db.execute("SELECT pg_advisory_xact_lock(hashtext(?))", ("memory:index-owner-shared",))
+                await db.execute(
+                    "INSERT INTO memory_index_owners(scope,scope_id,path,root_id,hash,mtime,size) "
+                    "SELECT f.scope,f.scope_id,f.path,?,f.hash,0,0 FROM memory_files f WHERE f.source='memory' "
+                    "ON CONFLICT(scope,scope_id,path,root_id) DO NOTHING",
+                    (SHARED_ROOT_ID,),
+                )
+                await db.execute("DELETE FROM memory_index_owners WHERE root_id <> ?", (SHARED_ROOT_ID,))
         async with Storage.transaction() as db:
             row = await db.fetch_one(
                 "INSERT INTO memory_index_roots(root_id,generation) VALUES (?,1) "
@@ -127,6 +156,10 @@ class MemoryIndexOwnership:
         # Recheck after scanning: an unmounted/replaced tree is not a complete
         # empty scan. Do not create a replacement identity during this check.
         def same_root():
+            if self.shared:
+                # The shared tree's caller settled this copy with the store
+                # before scanning; a root that went away is not a complete scan.
+                return self.root.is_dir()
             try:
                 return str(UUID((self.root / ".flocks-index-root").read_bytes().decode("ascii").strip())) == self.root_id
             except FileNotFoundError:

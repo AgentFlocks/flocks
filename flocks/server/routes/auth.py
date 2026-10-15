@@ -355,7 +355,8 @@ async def login(payload: LoginRequest, response: Response, request: Request) -> 
 @router.get("/console-login/start", response_model=ConsoleLoginStartResponse, summary="发起 console 云账号登录")
 async def console_login_start(request: Request, return_to: str | None = None) -> ConsoleLoginStartResponse:
     require_admin(request)
-    resolved_return_to = _validate_return_to(return_to or "/flockspro-upgrade/callback")
+    # The page that starts the sign-in says where to come back to; home otherwise.
+    resolved_return_to = _validate_return_to(return_to or "/")
     try:
         result = await ConsoleLoginService.start_console_login(return_to=resolved_return_to)
         return ConsoleLoginStartResponse(**result)

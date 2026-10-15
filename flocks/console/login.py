@@ -1,4 +1,11 @@
-"""OSS console login orchestration for local nodes."""
+"""Console login orchestration for local nodes.
+
+The console session, heartbeat and node profile are this module's.  An
+installed extension that reports more about the node -- its own edition and
+component versions, a licence it keeps in sync from the heartbeat --
+registers a :class:`ConsoleNodeExtension`.  Reports the node still owes the
+console wait in :mod:`flocks.console.outbox`; the heartbeat sends them.
+"""
 
 from __future__ import annotations
 
@@ -9,12 +16,13 @@ import platform
 import secrets
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 import httpx
 
 from flocks import __version__
+from flocks.console.outbox import deliver_reports
 from flocks.storage.storage import Storage
 from flocks.net.http import async_client
 
@@ -24,86 +32,39 @@ def _shared_console_session_path() -> Path:
     return Path(raw).expanduser() / "run" / "console-session.json"
 
 
-def _flocks_root() -> Path:
-    return Path(os.getenv("FLOCKS_ROOT", str(Path.home() / ".flocks"))).expanduser()
+class ConsoleNodeExtension(Protocol):
+    """What an installed extension adds to this node's reports to the console."""
+
+    def node_versions(self) -> dict[str, str] | None:
+        """Edition and version fields for heartbeats and profile syncs; ``None`` keeps the default."""
+
+    def heartbeat_identity(self) -> dict[str, str | None]:
+        """``status`` and ``license_id`` a heartbeat reports, when the extension has them."""
+
+    async def on_heartbeat_response(
+        self,
+        data: dict[str, Any],
+        *,
+        client: httpx.AsyncClient,
+        session: dict[str, Any],
+        console_base: str,
+        report_pending: bool,
+    ) -> None:
+        """Act on the console's answer; ``report_pending`` is set on the heartbeats that also
+        send the reports waiting in :mod:`flocks.console.outbox`."""
 
 
-def _read_json_file(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+_node_extensions: list[ConsoleNodeExtension] = []
 
 
-def _read_pro_bundle_marker() -> dict[str, Any]:
-    return _read_json_file(_flocks_root() / "run" / "pro-bundle-installed.json")
+def register_console_node_extension(extension: ConsoleNodeExtension) -> None:
+    if extension not in _node_extensions:
+        _node_extensions.append(extension)
 
 
-def _marker_has_pro_bundle(marker: dict[str, Any]) -> bool:
-    return any(str(marker.get(key) or "").strip() for key in ("bundle_version", "flockspro_component_version"))
-
-
-def _local_pro_license_path() -> Path:
-    return _flocks_root() / "flockspro" / "license.json"
-
-
-def _read_local_pro_license_state() -> dict[str, Any]:
-    return _read_json_file(_local_pro_license_path())
-
-
-def _read_local_pro_license_id() -> str:
-    state = _read_local_pro_license_state()
-    payload = state.get("payload") if isinstance(state.get("payload"), dict) else {}
-    return str(state.get("license_id") or payload.get("license_id") or "").strip()
-
-
-def _read_local_pro_license_status() -> str:
-    state = _read_local_pro_license_state()
-    payload = state.get("payload") if isinstance(state.get("payload"), dict) else {}
-    return str(
-        state.get("license_status")
-        or state.get("status")
-        or payload.get("license_status")
-        or payload.get("status")
-        or ""
-    ).strip()
-
-
-def _pending_pro_bundle_install_receipt_path() -> Path:
-    return _flocks_root() / "run" / "pro-bundle-install-receipt-pending.json"
-
-
-def _pending_pro_bundle_downgrade_receipt_path() -> Path:
-    return _flocks_root() / "run" / "pro-bundle-downgrade-receipt-pending.json"
-
-
-def _sync_local_pro_license_from_heartbeat_response(data: dict[str, Any]) -> None:
-    license_path = _local_pro_license_path()
-    state = _read_json_file(license_path)
-    now_ts = int(datetime.now(UTC).timestamp())
-    if state:
-        changed = False
-        patch_token = data.get("license_patch") or data.get("latest_patch")
-        if isinstance(patch_token, str) and patch_token:
-            patches = state.get("patches") if isinstance(state.get("patches"), list) else []
-            if patch_token not in patches:
-                state["patches"] = [*patches, patch_token]
-                changed = True
-        if state.get("last_sync_at") != now_ts:
-            state["last_sync_at"] = now_ts
-            state["last_heartbeat_ok_at"] = now_ts
-            changed = True
-        if changed:
-            license_path.parent.mkdir(parents=True, exist_ok=True)
-            license_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    revoked_license_ids = data.get("revoked_license_ids")
-    if isinstance(revoked_license_ids, list):
-        revocation_path = _flocks_root() / "flockspro" / "revocation.json"
-        revocation_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"revoked_license_ids": sorted({str(item) for item in revoked_license_ids})}
-        revocation_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+def unregister_console_node_extension(extension: ConsoleNodeExtension) -> None:
+    if extension in _node_extensions:
+        _node_extensions.remove(extension)
 
 
 def _write_shared_console_session(session: dict[str, Any]) -> None:
@@ -162,8 +123,8 @@ def update_channel() -> str:
     """Return the Console manifest channel pinned via FLOCKS_UPDATE_CHANNEL, if any.
 
     Offline installations pin a frozen channel so Console can tell them apart from
-    the default ``flockspro`` channel. Online installations leave it unset and the
-    field is omitted from every payload.
+    the default one. Online installations leave it unset and the field is omitted
+    from every payload.
     """
     return (os.getenv("FLOCKS_UPDATE_CHANNEL") or "").strip()
 
@@ -392,11 +353,6 @@ class ConsoleLoginService:
         return session
 
     @staticmethod
-    def _edition() -> str:
-        raw = (os.getenv("FLOCKS_EDITION") or "oss").strip().lower()
-        return "flockspro" if raw == "flockspro" else "oss"
-
-    @staticmethod
     def _runtime_version() -> str:
         try:
             from flocks.updater.updater import get_current_version
@@ -409,15 +365,11 @@ class ConsoleLoginService:
         return str(__version__).lstrip("v")
 
     @classmethod
-    def runtime_version_payload(cls, *, pro_component_version: str | None = None) -> dict[str, str]:
-        marker = _read_pro_bundle_marker()
-        if _marker_has_pro_bundle(marker):
-            return {
-                "edition": "flockspro",
-                "core_version": str(marker.get("core_version") or "").strip(),
-                "bundle_version": str(marker.get("bundle_version") or "").strip(),
-                "flockspro_component_version": str(marker.get("flockspro_component_version") or "").strip(),
-            }
+    def runtime_version_payload(cls) -> dict[str, str]:
+        for extension in list(_node_extensions):
+            fields = extension.node_versions()
+            if fields:
+                return dict(fields)
 
         core_version = cls._runtime_version()
         payload = {
@@ -434,9 +386,8 @@ class ConsoleLoginService:
         *,
         status: str = "ok",
         license_id: str | None = None,
-        pro_component_version: str | None = None,
     ) -> dict[str, Any]:
-        version_payload = cls.runtime_version_payload(pro_component_version=pro_component_version)
+        version_payload = cls.runtime_version_payload()
         payload = {
             "fingerprint": session.get("fingerprint"),
             "install_id": session.get("install_id"),
@@ -459,15 +410,13 @@ class ConsoleLoginService:
         status: str = "ok",
         license_id: str | None = None,
         heartbeat_url: str | None = None,
-        report_install_receipt: bool = False,
-        pro_component_version: str | None = None,
+        report_pending: bool = False,
     ) -> dict[str, Any]:
         console_base = cls.console_base_url()
         payload = cls.heartbeat_payload(
             session,
             status=status,
             license_id=license_id,
-            pro_component_version=pro_component_version,
         )
         target_url = heartbeat_url or (f"{console_base}/v1/heartbeats" if console_base else "")
         if not target_url:
@@ -485,92 +434,45 @@ class ConsoleLoginService:
                 raise ValueError("console 会话已失效，请重新登录")
             resp.raise_for_status()
             data = resp.json()
-            _sync_local_pro_license_from_heartbeat_response(data)
-            if report_install_receipt:
-                await cls._report_pending_pro_bundle_install_receipt(client=client, session=session)
+            console_base_for_session = cls.console_base_url_for_session(session)
+            for extension in list(_node_extensions):
+                await extension.on_heartbeat_response(
+                    data,
+                    client=client,
+                    session=session,
+                    console_base=console_base_for_session,
+                    report_pending=report_pending,
+                )
+            if report_pending:
+                # Whoever wrote them may be gone (an extension that took
+                # itself out); the core sends them all the same.
+                await deliver_reports(client=client, session=session, console_base=console_base_for_session)
             return data
 
     @classmethod
     async def send_heartbeat(cls) -> dict[str, Any]:
         session = await cls._require_session()
+        status = "ok"
+        license_id: str | None = None
+        for extension in list(_node_extensions):
+            identity = extension.heartbeat_identity() or {}
+            status = identity.get("status") or status
+            license_id = identity.get("license_id") or license_id
         return await cls.send_heartbeat_for_session(
             session=session,
-            status=_read_local_pro_license_status() or "ok",
-            license_id=_read_local_pro_license_id() or None,
-            report_install_receipt=True,
+            status=status,
+            license_id=license_id,
+            report_pending=True,
         )
 
     @classmethod
-    async def report_pending_pro_bundle_install_receipt(cls) -> bool:
-        try:
-            session = await cls._require_session()
-        except Exception:
-            session = read_shared_console_session()
-        if not session:
-            return False
-        async with async_client(timeout=10) as client:
-            return await cls._report_pending_pro_bundle_install_receipt(client=client, session=session)
-
-    @classmethod
-    def _console_base_url_for_session(cls, session: dict[str, Any]) -> str:
+    def console_base_url_for_session(cls, session: dict[str, Any]) -> str:
+        """The console a session belongs to: configured, else recorded with the session."""
         console_base = cls.console_base_url() or str(session.get("console_base_url") or "").strip().rstrip("/")
         if console_base:
             return console_base
         shared_session = read_shared_console_session()
         return str((shared_session or {}).get("console_base_url") or "").strip().rstrip("/")
-
-    @classmethod
-    async def _report_pending_pro_bundle_install_receipt(
-        cls,
-        *,
-        client: httpx.AsyncClient,
-        session: dict[str, Any],
-    ) -> bool:
-        install_reported = await cls._report_pending_pro_bundle_receipt(
-            client=client,
-            session=session,
-            path=_pending_pro_bundle_install_receipt_path(),
-        )
-        downgrade_reported = await cls._report_pending_pro_bundle_receipt(
-            client=client,
-            session=session,
-            path=_pending_pro_bundle_downgrade_receipt_path(),
-        )
-        return install_reported or downgrade_reported
-
-    @classmethod
-    async def _report_pending_pro_bundle_receipt(
-        cls,
-        *,
-        client: httpx.AsyncClient,
-        session: dict[str, Any],
-        path: Path,
-    ) -> bool:
-        console_base = cls._console_base_url_for_session(session)
-        token = str(session.get("console_session_token") or "").strip()
-        if not console_base or not token:
-            return False
-        payload = _read_json_file(path)
-        if not payload:
-            return False
-        payload = {
-            **payload,
-            "fingerprint": session.get("fingerprint"),
-            "install_id": session.get("install_id"),
-            "license_id": payload.get("license_id") or _read_local_pro_license_id() or None,
-        }
-        try:
-            resp = await client.post(
-                f"{console_base}/v1/pro-bundles/installations",
-                json=payload,
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            if resp.status_code in {200, 201, 202}:
-                path.unlink(missing_ok=True)
-                return True
-        except Exception:
-            return False
-        return False
 
     @classmethod
     async def sync_node_profile(cls, *, force: bool = False, source: str = "scheduled") -> dict[str, Any]:

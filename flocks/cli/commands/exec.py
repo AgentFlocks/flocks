@@ -92,6 +92,9 @@ def exec_command(
     max_budget: Optional[float] = typer.Option(None, "--max-budget", help="USD stop threshold checked between calls; one in-flight request can exceed it"),
 ):
     """Run an agent to completion without entering a TUI or requesting input."""
+    from flocks.cli.managed import refuse_local_runtime_when_managed
+
+    refuse_local_runtime_when_managed("flocks exec")
     if session_id and last:
         raise typer.BadParameter("--session and --last are mutually exclusive")
     if max_budget is not None and (not math.isfinite(max_budget) or max_budget < 0):

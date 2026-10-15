@@ -1365,10 +1365,11 @@ class Session:
                 invalidate_session_callable_tools_cache(session.id)
 
                 try:
-                    from flocks.session.files import remove_session_uploads
+                    from flocks.session.files import forget_session_uploads, remove_session_uploads
 
                     if await asyncio.to_thread(remove_session_uploads, session.id):
                         log.info("session.uploads.cleaned", {"session_id": session.id})
+                    await forget_session_uploads(session.id)
                 except Exception as exc:
                     log.warn("session.uploads.cleanup_failed", {
                         "session_id": session.id,

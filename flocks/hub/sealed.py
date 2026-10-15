@@ -366,7 +366,11 @@ def _plan(plugin_type: str, plugin_id: str) -> list[tuple[list[SealedPlugin], bo
             refs = load_manifest("component", plugin_id).components
         except Exception:
             refs = []  # the install itself reports an unreadable suite
+        from flocks.hub.installer import _is_managed_ref
+
         for ref in refs:
+            if _is_managed_ref(ref.type, ref.id):
+                continue  # served by the deployment: nothing to unseal for it
             (optional if ref.optional else required).append((ref.type, ref.id))
 
     try:

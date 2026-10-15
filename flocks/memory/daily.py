@@ -106,6 +106,14 @@ class DailyMemory:
         # Get file path
         file_path = self.get_today_path(date)
         rel_path = self.get_relative_path(date)
+        from flocks.memory.sync.mirror import MemoryNotShared, reconcile_note
+
+        # The note as stored first (another instance may have appended), then
+        # this write, then the stored copy brought up to date.  Written on a
+        # copy that could not be brought up to date, the text would end up
+        # beside the note as a conflict copy: nothing is written then.
+        if not await reconcile_note(self.memory_dir, file_path, attempts=3):
+            raise MemoryNotShared(f"{rel_path}: the shared memory store is unavailable; nothing was written")
         
         try:
             if append and file_path.exists():
@@ -123,6 +131,10 @@ class DailyMemory:
                 # Write/overwrite mode
                 file_path.write_text(content, encoding='utf-8')
             
+            if not await reconcile_note(self.memory_dir, file_path, attempts=3):
+                # Kept here and shared once the store takes it -- unless this
+                # instance goes first: not reported as a write that worked.
+                raise MemoryNotShared(f"{rel_path} was saved on this instance only; the shared memory store did not take it")
             log.info("daily.write", {
                 "path": rel_path,
                 "length": len(content),

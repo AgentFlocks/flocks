@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 #
 # End-to-end smoke test for flocks-offline.run inside a throw-away container on a simulated
-# customer intranet: install, bootstrap the admin, install the bundled Pro component from
-# disk, restart, re-run the installer as an upgrade and check that data survived.
-# An open-source package (no Pro bundle) upgrades online instead: the test checks that
-# the env file carries no offline pins, that the Pro upgrade gets past the offline-install
-# guard to the bundle download (a local stand-in for Console serves the manifest; an
-# offline-mode env is run through the same path as a control and must be refused), and
-# that a re-run switches an offline env file over.
+# customer intranet: install, bootstrap the admin, restart, re-run the installer as an upgrade
+# and check that data survived. The package upgrades online like a source install: the test
+# checks that the env file carries no offline pins and that a re-run switches an env file an
+# older package left over, and that installs the package must not take over (a supervised one,
+# one carrying a component the package does not ship) are refused without changing anything.
 #
 # Usage: packaging/linux/smoke-test.sh /path/to/flocks-offline.run [image]
 #   image defaults to the build_image of versions.manifest.json (RHEL 8.10 / UBI 8.10, the oldest
@@ -16,6 +14,9 @@
 #   server reaches only what the offline install manual opens for it (intranet-allowlist.txt) and
 #   nothing else resolves or connects; the test host needs internet for that. `none` = no network.
 #   Set SMOKE_KEEP=1 to keep the container (and its gateway) for inspection.
+#   PostgreSQL (required by the installer) runs in a throw-away sidecar (SMOKE_PG_IMAGE, default
+#   postgres:16) that shares the test container's network namespace: the installer reaches it on
+#   127.0.0.1 and the network rules above stay what they are.
 #   Set SMOKE_INIT=systemd to boot the image with systemd as PID 1 (the image must contain
 #   systemd, firewalld and chrony, e.g. one committed after `dnf install systemd firewalld chrony`):
 #   the installer then registers the real unit, opens firewalld and the test also simulates a
@@ -74,21 +75,28 @@ in_ctr() { docker exec "$NAME" bash -c "$*"; }
 in_ctr_q() { docker exec "$NAME" bash -c "$*" >/dev/null 2>&1; }
 NETWORK_MODE="${SMOKE_NETWORK:-intranet}"
 GATEWAY="$NAME-gw"
+PG_NAME="$NAME-pg"
+PG_IMAGE="${SMOKE_PG_IMAGE:-postgres:16}"
 case "$NETWORK_MODE" in
-  intranet) NET_ARGS=(--network "container:$GATEWAY") ;;
-  none) NET_ARGS=(--network none) ;;
+  # the sidecar joins the gateway's namespace like the server; with no network the server joins the
+  # sidecar's, which has nothing but its loopback
+  intranet) PG_NET_ARGS=(--network "container:$GATEWAY"); NET_ARGS=(--network "container:$GATEWAY") ;;
+  none) PG_NET_ARGS=(--network none); NET_ARGS=(--network "container:$PG_NAME") ;;
   *) echo "SMOKE_NETWORK must be intranet or none, not $NETWORK_MODE" >&2; exit 2 ;;
 esac
 # cleanup removes only what this run created: a container or gateway that already had the name
 # (say, kept by an earlier SMOKE_KEEP=1 run with the same PID) makes the start fail, not disappear
 CONTAINER_CREATED=0
 GATEWAY_CREATED=0
+PG_CREATED=0
 cleanup() {
   if [[ "${SMOKE_KEEP:-0}" == "1" ]]; then
     if [[ "$CONTAINER_CREATED" -eq 1 ]]; then say "container kept: $NAME"; fi
+    if [[ "$PG_CREATED" -eq 1 ]]; then say "postgres sidecar kept: $PG_NAME"; fi
     if [[ "$GATEWAY_CREATED" -eq 1 ]]; then say "gateway kept: $GATEWAY (intranet-sim.sh down --name $GATEWAY)"; fi
   else
     if [[ "$CONTAINER_CREATED" -eq 1 ]]; then docker rm -f -v "$NAME" >/dev/null 2>&1 || true; fi
+    if [[ "$PG_CREATED" -eq 1 ]]; then docker rm -f -v "$PG_NAME" >/dev/null 2>&1 || true; fi
     if [[ "$GATEWAY_CREATED" -eq 1 ]]; then bash "$SCRIPT_DIR/intranet-sim.sh" down --name "$GATEWAY" >/dev/null 2>&1 || true; fi
   fi
 }
@@ -102,13 +110,27 @@ if [[ "$NETWORK_MODE" == "intranet" ]]; then
   bash "$SCRIPT_DIR/intranet-sim.sh" up --name "$GATEWAY"
   GATEWAY_CREATED=1
 fi
+# a test-only password, generated for this run
+PG_PASSWORD="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+# created, marked as this run's, then started: a sidecar that fails to start is still cleaned up
+docker create --name "$PG_NAME" "${PG_NET_ARGS[@]}" -e POSTGRES_USER=flocks -e POSTGRES_DB=flocks \
+  -e POSTGRES_PASSWORD="$PG_PASSWORD" "$PG_IMAGE" >/dev/null
+PG_CREATED=1
+docker start "$PG_NAME" >/dev/null
+pg_up=0
+for _ in $(seq 1 60); do
+  if docker exec "$PG_NAME" pg_isready -h 127.0.0.1 -U flocks -d flocks >/dev/null 2>&1; then pg_up=1; break; fi
+  sleep 1
+done
+[[ "$pg_up" -eq 1 ]] || { say "postgres sidecar did not come up"; exit 1; }
+INSTALL_ENV="$INSTALL_ENV FLOCKS_DB_DSN=postgresql://flocks:$PG_PASSWORD@127.0.0.1:5432/flocks"
 if [[ "$INIT_MODE" == "systemd" ]]; then
   docker create --name "$NAME" "${NET_ARGS[@]}" --privileged --cgroupns=host \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock ${BASE_VOLUME[@]+"${BASE_VOLUME[@]}"} \
     "$IMAGE" /usr/lib/systemd/systemd >/dev/null
   CONTAINER_CREATED=1
   docker start "$NAME" >/dev/null
-  INSTALL_ENV=""
+  INSTALL_ENV="${INSTALL_ENV#FLOCKS_OFFLINE_SKIP_SYSTEMD=1 }"
   for _ in $(seq 1 30); do
     if in_ctr_q "systemctl is-system-running --wait >/dev/null 2>&1 || systemctl list-units >/dev/null 2>&1"; then break; fi
     sleep 1
@@ -166,17 +188,11 @@ if [[ -n "$BASE_DIR" ]]; then
   check "service user home is $DH" in_ctr_q "getent passwd flocks | cut -d: -f6 | grep -qx '$DH'"
   check "CLI wrapper and env file point below $BASE_DIR" in_ctr_q "grep -q '^ENV_FILE=\"$EF\"' /usr/local/bin/flocks && grep -q '^FLOCKS_ROOT=$DH/.flocks' $EF && grep -q '^FLOCKS_INSTALL_ROOT=$IR' $EF && grep -q '^UV_PYTHON=$IR/tools/python/bin/python3' $EF"
 fi
-# the package decides how this instance upgrades (install.sh UPGRADE_MODE): with a Pro bundle
-# everything stays offline, an open-source package upgrades online like a source install
-if in_ctr_q "test -d $IR/bundle"; then HAS_BUNDLE=1; else HAS_BUNDLE=0; fi
+# the package upgrades online like a source install; the offline pins older packages wrote must
+# never appear (OFFLINE_ONLY_KEYS_RE in install.sh)
 OFFLINE_PINS_RE='^(FLOCKS_OFFLINE_INSTALL|FLOCKS_UPDATE_CHANNEL|FLOCKS_PRO_BUNDLE_DIR|UV_OFFLINE|npm_config_offline)='
-if [[ "$HAS_BUNDLE" -eq 1 ]]; then
-  say "package ships a Pro bundle: offline upgrades"
-  check "$EF written (offline mode, bundle dir, uv / npm offline)" in_ctr_q "grep -q '^FLOCKS_HOST=0.0.0.0' $EF && grep -q '^FLOCKS_DEPLOY_MODE=offline\$' $EF && grep -q '^FLOCKS_PRO_BUNDLE_DIR=$IR/bundle' $EF && grep -q '^UV_OFFLINE=1' $EF"
-else
-  say "open-source package: online upgrades"
-  check "$EF written (source mode, no offline pins)" in_ctr_q "grep -q '^FLOCKS_HOST=0.0.0.0' $EF && grep -q '^FLOCKS_DEPLOY_MODE=source\$' $EF && ! grep -Eq '$OFFLINE_PINS_RE' $EF"
-fi
+check "$EF written (source mode, no offline pins)" in_ctr_q "grep -q '^FLOCKS_HOST=0.0.0.0' $EF && grep -q '^FLOCKS_DEPLOY_MODE=source\$' $EF && ! grep -Eq '$OFFLINE_PINS_RE' $EF"
+check "no bundle/ in the install root" in_ctr_q "test ! -e $IR/bundle"
 check "$EF has UV_NO_SYNC=1 (the skills' uv run uses the shipped venv as it is)" in_ctr_q "grep -qx 'UV_NO_SYNC=1' $EF"
 check "install_profile.json zh-CN" in_ctr_q "grep -q zh-CN $DH/.flocks/config/install_profile.json"
 check "health endpoint answers" in_ctr_q "curl -fsS http://127.0.0.1:$PORT/api/health"
@@ -221,72 +237,13 @@ fi
 check "bootstrap status reports admin missing" in_ctr_q "curl -fsS http://127.0.0.1:$PORT/api/auth/bootstrap-status | grep -q '\"bootstrapped\": *false'"
 check "create admin and log in" in_ctr_q "curl -fsS -c /tmp/cookie -H 'Content-Type: application/json' -d '{\"username\":\"admin\",\"password\":\"Smoke-Test-2026\"}' http://127.0.0.1:$PORT/api/auth/bootstrap-admin | grep -q admin"
 check "session cookie valid (/api/auth/me)" in_ctr_q "curl -fsS -b /tmp/cookie http://127.0.0.1:$PORT/api/auth/me | grep -q admin"
-check "Pro not installed before upgrade" in_ctr_q "curl -fsS -b /tmp/cookie http://127.0.0.1:$PORT/api/console/pro-package-status | grep -q '\"runtime_importable\": *false'"
-check "edition reported as oss" in_ctr_q "curl -fsS -b /tmp/cookie http://127.0.0.1:$PORT/api/console/pro-package-status | grep -q '\"install_marker_present\": *false'"
-if [[ "$HAS_BUNDLE" -eq 1 ]]; then
-check "update check reports offline deploy mode, upgrade not allowed" in_ctr_q "curl -fsS -b /tmp/cookie 'http://127.0.0.1:$PORT/api/update/check?edition=flocks&force=true' | grep -q '\"deploy_mode\": *\"offline\"' && curl -fsS -b /tmp/cookie 'http://127.0.0.1:$PORT/api/update/check?edition=flocks' | grep -q '\"update_allowed\": *false'"
-check "network upgrade refused before touching files" in_ctr_q "curl -sS -N --max-time 20 -b /tmp/cookie -X POST 'http://127.0.0.1:$PORT/api/update/apply?edition=flocks' | grep -q 'flocks-offline.run' && test -f $IR/flocks/pyproject.toml"
-else
 # read-only on purpose: with online upgrades POST /api/update/apply would start a real upgrade
 check "update check reports source deploy mode, upgrade allowed" in_ctr_q "out=\$(curl -fsS --max-time 120 -b /tmp/cookie 'http://127.0.0.1:$PORT/api/update/check?edition=flocks'); grep -q '\"deploy_mode\": *\"source\"' <<<\"\$out\" && grep -q '\"update_allowed\": *true' <<<\"\$out\""
-fi
-
-if [[ "$HAS_BUNDLE" -eq 0 ]]; then
-# ---------------------------------------------------------------- open-source package: the Pro upgrade takes the online path
-# what "开始升级" runs, minus the approval: Console manifest → download → install. A local stand-in for
-# Console serves a valid manifest whose bundle URL 404s: an instance that still counts as an offline
-# install is refused in perform_update before any download, an online-upgrade instance gets past that
-# guard, asks for the bundle and fails at the download without changing anything. (Without a manifest
-# both would fail the same way at Console, which proves nothing.)
-in_ctr_q "$IR/tools/python/bin/python3 - <<'PY'
-import json, pathlib
-version = json.load(open('$IR/versions.json'))['core_version']
-target = pathlib.Path('/var/tmp/fake-console/v1/manifest')
-target.mkdir(parents=True, exist_ok=True)
-(target / 'latest').write_text(json.dumps({'bundle_version': version, 'core_version': version,
-    'flockspro_component_version': '0.0.0', 'bundle_format': 'tar.gz',
-    'bundle_url': 'http://127.0.0.1:18080/bundles/missing.tar.gz'}))
-PY"
-in_ctr_q "cd /var/tmp/fake-console && (nohup $IR/tools/python/bin/python3 -m http.server 18080 --bind 127.0.0.1 > /var/tmp/fake-console.log 2>&1 &)"
-in_ctr_q "for i in \$(seq 1 20); do curl -fsS -o /dev/null http://127.0.0.1:18080/v1/manifest/latest && exit 0; sleep 1; done; exit 1" || say "local Console stand-in did not come up"
-in_ctr_q "cp -p $EF /var/tmp/flocks.env.smoke && sed -i 's|^FLOCKS_CONSOLE_BASE_URL=.*|FLOCKS_CONSOLE_BASE_URL=http://127.0.0.1:18080|' $EF"
-in_ctr "flocks update --pro-bundle --no-restart" > /tmp/smoke-pro-online.log 2>&1 || true
-check "Pro upgrade gets past the offline guard to the bundle download" bash -c "! grep -q '离线安装包部署' /tmp/smoke-pro-online.log && docker exec $NAME grep -q 'GET /bundles/missing.tar.gz' /var/tmp/fake-console.log"
-check "failed Pro download changed nothing" in_ctr_q "test -f $IR/flocks/pyproject.toml && ! $IR/flocks/.venv/bin/python -c 'import flockspro' 2>/dev/null && test ! -f $DH/.flocks/run/pro-bundle-installed.json && curl -fsS http://127.0.0.1:$PORT/api/health"
-# control: the same run with the old offline pins must be refused before it downloads anything
-downloads_before="$(docker exec "$NAME" grep -c 'GET /bundles/missing.tar.gz' /var/tmp/fake-console.log || true)"
-in_ctr_q "sed -i 's/^FLOCKS_DEPLOY_MODE=.*/FLOCKS_DEPLOY_MODE=offline/' $EF && printf 'FLOCKS_OFFLINE_INSTALL=1\nUV_OFFLINE=1\nnpm_config_offline=true\n' >> $EF"
-in_ctr "flocks update --pro-bundle --no-restart" > /tmp/smoke-pro-offline-control.log 2>&1 || true
-downloads_after="$(docker exec "$NAME" grep -c 'GET /bundles/missing.tar.gz' /var/tmp/fake-console.log || true)"
-check "control: an offline-mode env is refused before any download" bash -c "grep -q '离线安装包部署' /tmp/smoke-pro-offline-control.log && [[ '$downloads_before' == '$downloads_after' ]]"
-in_ctr_q "cp -p /var/tmp/flocks.env.smoke $EF"
-else
-# ---------------------------------------------------------------- local Pro bundle: --check first (must not install), then the real install
-check "flocks update --check --pro-bundle describes the local bundle" in_ctr_q "flocks update --check --pro-bundle | grep -q '$IR/bundle'"
-check "--check --pro-bundle installed nothing" in_ctr_q "! $IR/flocks/.venv/bin/python -c 'import flockspro' 2>/dev/null && test ! -f $DH/.flocks/run/pro-bundle-installed.json"
-
-# ---------------------------------------------------------------- local Pro bundle install (what "开始升级" does, without Console)
-if in_ctr "flocks update --pro-bundle --no-restart" > /tmp/smoke-pro.log 2>&1; then
-  record PASS "flocks update --pro-bundle installs from $IR/bundle offline"
-else
-  record FAIL "flocks update --pro-bundle installs from $IR/bundle offline"
-  tail -n 20 /tmp/smoke-pro.log
-fi
-check "no download / no uv sync in the Pro install" bash -c "! grep -qi 'Downloading Flocks Pro bundle\|uv sync' /tmp/smoke-pro.log && grep -q 'Using local Flocks Pro bundle' /tmp/smoke-pro.log"
-check "pro-bundle-installed.json marker written" in_ctr_q "grep -q rel_offline_test_1 $DH/.flocks/run/pro-bundle-installed.json"
-check "flockspro importable in the venv" in_ctr_q "$IR/flocks/.venv/bin/python -c 'import flockspro'"
-check "backend restart after Pro install" in_ctr_q "flocks restart --server-only"
-check "Pro package reported as installed after restart" in_ctr_q "curl -fsS -b /tmp/cookie http://127.0.0.1:$PORT/api/console/pro-package-status | grep -q '\"runtime_importable\": *true'"
-check "license status route served by Pro runtime" in_ctr_q "curl -fsS -b /tmp/cookie http://127.0.0.1:$PORT/api/flockspro/license/status | grep -qv flockspro_not_installed"
-glibc_check "Pro component's binaries fit glibc_floor too"
-fi
 
 # ---------------------------------------------------------------- re-run the installer (upgrade / repair)
-if [[ "$HAS_BUNDLE" -eq 0 ]]; then
-  # pretend the env file was left by an earlier (never activated) Pro-bundle install: the open-source
-  # package must switch it over to online upgrades, the plain merge would keep the offline pins
-  in_ctr_q "sed -i 's/^FLOCKS_DEPLOY_MODE=.*/FLOCKS_DEPLOY_MODE=offline/' $EF && printf 'FLOCKS_OFFLINE_INSTALL=1\nFLOCKS_UPDATE_CHANNEL=flockspro-offline-old\nFLOCKS_PRO_BUNDLE_DIR=$IR/bundle\nUV_OFFLINE=1\nnpm_config_offline=true\n' >> $EF"
-fi
+# pretend the env file was left by an older offline package with its offline pins: the re-run must
+# switch it over to online upgrades, the plain merge would keep the pins
+in_ctr_q "sed -i 's/^FLOCKS_DEPLOY_MODE=.*/FLOCKS_DEPLOY_MODE=offline/' $EF && printf 'FLOCKS_OFFLINE_INSTALL=1\nFLOCKS_UPDATE_CHANNEL=offline-old\nFLOCKS_PRO_BUNDLE_DIR=$IR/bundle\nUV_OFFLINE=1\nnpm_config_offline=true\n' >> $EF"
 # (without FLOCKS_OFFLINE_BASE on purpose: an install below a base has to be found and upgraded where it is)
 if in_ctr "env $INSTALL_ENV bash /var/tmp/flocks-offline.run" > /tmp/smoke-install-2.log 2>&1; then
   record PASS "re-running the installer exits 0"
@@ -300,12 +257,8 @@ if [[ -n "$BASE_DIR" ]]; then
 fi
 check "old program dirs parked, not deleted" in_ctr_q "ls -d $IR/flocks.bak-* $IR/tools.bak-*"
 check "data survived the re-run (admin login)" in_ctr_q "curl -fsS -c /tmp/cookie2 -H 'Content-Type: application/json' -d '{\"username\":\"admin\",\"password\":\"Smoke-Test-2026\"}' http://127.0.0.1:$PORT/api/auth/login | grep -q admin"
-if [[ "$HAS_BUNDLE" -eq 1 ]]; then
-  check "Pro component re-installed into the new venv" in_ctr_q "$IR/flocks/.venv/bin/python -c 'import flockspro' && grep -q flockspro_component_version $DH/.flocks/run/pro-bundle-installed.json"
-else
-  check "re-run switched an offline env file over to online upgrades" in_ctr_q "grep -q '^FLOCKS_DEPLOY_MODE=source\$' $EF && ! grep -Eq '$OFFLINE_PINS_RE' $EF"
-  check "restarted service runs in source mode" in_ctr_q "out=\$(curl -fsS --max-time 120 -b /tmp/cookie2 'http://127.0.0.1:$PORT/api/update/check?edition=flocks'); grep -q '\"deploy_mode\": *\"source\"' <<<\"\$out\""
-fi
+check "re-run switched an offline env file over to online upgrades" in_ctr_q "grep -q '^FLOCKS_DEPLOY_MODE=source\$' $EF && ! grep -Eq '$OFFLINE_PINS_RE' $EF"
+check "restarted service runs in source mode" in_ctr_q "out=\$(curl -fsS --max-time 120 -b /tmp/cookie2 'http://127.0.0.1:$PORT/api/update/check?edition=flocks'); grep -q '\"deploy_mode\": *\"source\"' <<<\"\$out\""
 check "env file kept and backed up" in_ctr_q "ls $EF.bak-* && grep -q '^FLOCKS_HOST=0.0.0.0' $EF"
 check "service healthy after re-run" in_ctr_q "curl -fsS http://127.0.0.1:$PORT/api/health"
 check "re-run without FLOCKS_OFFLINE_PORT kept port $PORT" bash -c "grep -q \"安装完成：http://.*:$PORT\$\" /tmp/smoke-install-2.log"
@@ -341,79 +294,52 @@ if [[ -n "$BASE_DIR" ]]; then
   check "data and port survived the interrupted upgrade (admin login on $PORT)" in_ctr_q "curl -fsS -H 'Content-Type: application/json' -d '{\"username\":\"admin\",\"password\":\"Smoke-Test-2026\"}' http://127.0.0.1:$PORT/api/auth/login | grep -q admin"
 fi
 
-# ---------------------------------------------------------------- open-source package over an instance whose Pro came online
-# marker present, no bundle/ in the install root: the installer must refuse before touching the running instance
-if [[ "$HAS_BUNDLE" -eq 0 ]]; then
-  in_ctr_q "printf '{\"bundle_version\": \"v0\", \"flockspro_component_version\": \"0\"}' > $DH/.flocks/run/pro-bundle-installed.json"
-  if in_ctr "env $INSTALL_ENV $BASE_ENV bash /var/tmp/flocks-offline.run" > /tmp/smoke-online-pro.log 2>&1; then
-    record FAIL "open-source package over an online-upgraded Pro instance is refused"
+# ---------------------------------------------------------------- installs the package must not take over
+# a component the package does not ship (its marker in the data dir), and an install a supervising process
+# manages (deployment.json says managed): both refused before the running instance is touched
+refused_takeover() {
+  local label="$1" log="$2"
+  if in_ctr "env $INSTALL_ENV $BASE_ENV bash /var/tmp/flocks-offline.run" > "$log" 2>&1; then
+    record FAIL "$label is refused"
   else
-    record PASS "open-source package over an online-upgraded Pro instance is refused"
+    record PASS "$label is refused"
   fi
-  check "refusal points at the online upgrade and changed nothing" bash -c "grep -q '在线升级' /tmp/smoke-online-pro.log && grep -q '本次未做任何改动' /tmp/smoke-online-pro.log"
-  check "instance still serving after the refusal" in_ctr_q "curl -fsS http://127.0.0.1:$PORT/api/health && test -f $IR/flocks/pyproject.toml"
-  in_ctr_q "rm -f $DH/.flocks/run/pro-bundle-installed.json"
-fi
+  check "$label: refusal changed nothing" bash -c "grep -q '本次未做任何改动' $log"
+  check "$label: instance still serving" in_ctr_q "curl -fsS http://127.0.0.1:$PORT/api/health && test -f $IR/flocks/pyproject.toml"
+}
+in_ctr_q "printf '{\"bundle_version\": \"v0\"}' > $DH/.flocks/run/pro-bundle-installed.json"
+refused_takeover "package over an install carrying a component it does not ship" /tmp/smoke-component.log
+check "refusal names the marker" bash -c "grep -q 'pro-bundle-installed.json' /tmp/smoke-component.log"
+in_ctr_q "rm -f $DH/.flocks/run/pro-bundle-installed.json"
+in_ctr_q "printf '{\"mode\": \"managed\", \"managed_by\": \"supervisor\"}' > $DH/.flocks/config/deployment.json"
+refused_takeover "package over a supervised install" /tmp/smoke-managed.log
+check "refusal names the descriptor" bash -c "grep -q 'deployment.json' /tmp/smoke-managed.log"
+in_ctr_q "rm -f $DH/.flocks/config/deployment.json"
 
 # ---------------------------------------------------------------- an online upgrade left a newer version on the machine
 # the handoff swaps the source in before uv sync / npm and does not roll back, so the package is the way
 # back from an upgrade that never finished; a finished newer version must not be overwritten silently
-if [[ "$HAS_BUNDLE" -eq 0 ]]; then
-  pkg_version="$(docker exec "$NAME" sed -n 's/.*"core_version": *"\([^"]*\)".*/\1/p' $IR/versions.json)"
-  in_ctr_q "sed -i 's/^version = .*/version = \"v2099.1.1\"/' $IR/flocks/pyproject.toml && mkdir -p $DH/.flocks/version && printf '2099.1.1\n' > $DH/.flocks/version/.current_version"
-  if in_ctr "env $INSTALL_ENV $BASE_ENV bash /var/tmp/flocks-offline.run" > /tmp/smoke-downgrade-refused.log 2>&1; then
-    record FAIL "older package over a finished newer version is refused"
-  else
-    record PASS "older package over a finished newer version is refused"
-  fi
-  check "downgrade refusal names the override and changed nothing" bash -c "grep -q 'FLOCKS_OFFLINE_ALLOW_DOWNGRADE=1' /tmp/smoke-downgrade-refused.log && grep -q '本次未做任何改动' /tmp/smoke-downgrade-refused.log"
-  check "instance untouched after the downgrade refusal" in_ctr_q "grep -q 'v2099.1.1' $IR/flocks/pyproject.toml && curl -fsS http://127.0.0.1:$PORT/api/health"
-  in_ctr_q "printf '{\"phase\": \"failed\", \"version\": \"v2099.1.1\", \"current_version\": \"%s\", \"failed_stage\": \"sync\"}' '${pkg_version#v}' > $DH/.flocks/run/upgrade-result.json"
-  if in_ctr "env $INSTALL_ENV $BASE_ENV bash /var/tmp/flocks-offline.run" > /tmp/smoke-downgrade-recover.log 2>&1; then
-    record PASS "package recovers an online upgrade that never finished"
-  else
-    record FAIL "package recovers an online upgrade that never finished"
-    tail -n 20 /tmp/smoke-downgrade-recover.log
-  fi
-  check "recovery logged" grep -q '没有完成' /tmp/smoke-downgrade-recover.log
-  check "code back to the package version" in_ctr_q "grep -q '^version = \"$pkg_version\"' $IR/flocks/pyproject.toml"
-  check "version marker rewritten to the package version" in_ctr_q "grep -qx '${pkg_version#v}' $DH/.flocks/version/.current_version"
-  check "used upgrade record parked, cannot let a later package through" in_ctr_q "test ! -f $DH/.flocks/run/upgrade-result.json && ls $DH/.flocks/run/upgrade-result.json.bak-*"
-  check "service healthy after the recovery" in_ctr_q "curl -fsS http://127.0.0.1:$PORT/api/health"
+pkg_version="$(docker exec "$NAME" sed -n 's/.*"core_version": *"\([^"]*\)".*/\1/p' $IR/versions.json)"
+in_ctr_q "sed -i 's/^version = .*/version = \"v2099.1.1\"/' $IR/flocks/pyproject.toml && mkdir -p $DH/.flocks/version && printf '2099.1.1\n' > $DH/.flocks/version/.current_version"
+if in_ctr "env $INSTALL_ENV $BASE_ENV bash /var/tmp/flocks-offline.run" > /tmp/smoke-downgrade-refused.log 2>&1; then
+  record FAIL "older package over a finished newer version is refused"
+else
+  record PASS "older package over a finished newer version is refused"
 fi
-
-# ---------------------------------------------------------------- upgrade an activated Pro instance with a package that ships no Pro bundle (R2)
-# same .run, bundle/ moved aside after extraction: the installer must carry the current bundle over
-# (same core), and refuse when no compatible bundle exists, without touching the running instance
-if in_ctr_q "grep -q flockspro_component_version $DH/.flocks/run/pro-bundle-installed.json"; then
-  in_ctr_q "bash /var/tmp/flocks-offline.run --noexec --target /var/tmp/staging-nobundle >/dev/null 2>&1 && mv /var/tmp/staging-nobundle/bundle /var/tmp/staging-nobundle/bundle.moved"
-  if in_ctr "cd /var/tmp/staging-nobundle && env $INSTALL_ENV $BASE_ENV bash installer/install.sh" > /tmp/smoke-nobundle.log 2>&1; then
-    record PASS "Pro-less package over an activated instance: installer exits 0 by carrying the bundle over"
-  else
-    record FAIL "Pro-less package over an activated instance: installer exits 0 by carrying the bundle over"
-    tail -n 20 /tmp/smoke-nobundle.log
-  fi
-  check "carry-over logged" grep -q '沿用当前已激活的 Pro bundle' /tmp/smoke-nobundle.log
-  check "Pro runtime still importable after Pro-less upgrade" in_ctr_q "$IR/flocks/.venv/bin/python -c 'import flockspro'"
-  check "FLOCKS_PRO_BUNDLE_DIR kept in env" in_ctr_q "grep -q '^FLOCKS_PRO_BUNDLE_DIR=$IR/bundle' $EF"
-  check "service healthy after Pro-less upgrade" in_ctr_q "curl -fsS http://127.0.0.1:$PORT/api/health"
-
-  # no compatible bundle anywhere → must refuse before changing anything
-  in_ctr_q "bash /var/tmp/flocks-offline.run --noexec --target /var/tmp/staging-nobundle2 >/dev/null 2>&1 && mv /var/tmp/staging-nobundle2/bundle /var/tmp/staging-nobundle2/bundle.moved && mv $IR/bundle $IR/bundle.moved-by-smoke"
-  parked_before="$(in_ctr "ls -d $IR/*.bak-* 2>/dev/null | wc -l" | tr -d '[:space:]')"
-  if in_ctr "cd /var/tmp/staging-nobundle2 && env $INSTALL_ENV $BASE_ENV bash installer/install.sh" > /tmp/smoke-nobundle2.log 2>&1; then
-    record FAIL "Pro-less package with no bundle to carry over is refused"
-  else
-    record PASS "Pro-less package with no bundle to carry over is refused"
-  fi
-  # an offline instance cannot upgrade online, so it must not be pointed at the online upgrade
-  check "refusal explains itself (offline instance: use the matching Pro package)" bash -c "grep -q '本次未做任何改动' /tmp/smoke-nobundle2.log && grep -q '带 Pro 组件的配套安装包' /tmp/smoke-nobundle2.log && ! grep -q '在线升级' /tmp/smoke-nobundle2.log"
-  check "refused install left the running instance untouched" in_ctr_q "curl -fsS http://127.0.0.1:$PORT/api/health && $IR/flocks/.venv/bin/python -c 'import flockspro'"
-  parked_after="$(in_ctr "ls -d $IR/*.bak-* 2>/dev/null | wc -l" | tr -d '[:space:]')"
-  check "refused install parked nothing (bak dirs before=$parked_before after=$parked_after)" test "$parked_before" = "$parked_after"
-  check "refused install parked its payload instead of leaving it for the next package" in_ctr_q "test ! -e /var/tmp/staging-nobundle2/versions.json && ls -d /var/tmp/staging-nobundle2/flocks-offline-failed-*/versions.json >/dev/null && test -d /var/tmp/staging-nobundle2/bundle.moved"
-  in_ctr_q "mv $IR/bundle.moved-by-smoke $IR/bundle"
+check "downgrade refusal names the override and changed nothing" bash -c "grep -q 'FLOCKS_OFFLINE_ALLOW_DOWNGRADE=1' /tmp/smoke-downgrade-refused.log && grep -q '本次未做任何改动' /tmp/smoke-downgrade-refused.log"
+check "instance untouched after the downgrade refusal" in_ctr_q "grep -q 'v2099.1.1' $IR/flocks/pyproject.toml && curl -fsS http://127.0.0.1:$PORT/api/health"
+in_ctr_q "printf '{\"phase\": \"failed\", \"version\": \"v2099.1.1\", \"current_version\": \"%s\", \"failed_stage\": \"sync\"}' '${pkg_version#v}' > $DH/.flocks/run/upgrade-result.json"
+if in_ctr "env $INSTALL_ENV $BASE_ENV bash /var/tmp/flocks-offline.run" > /tmp/smoke-downgrade-recover.log 2>&1; then
+  record PASS "package recovers an online upgrade that never finished"
+else
+  record FAIL "package recovers an online upgrade that never finished"
+  tail -n 20 /tmp/smoke-downgrade-recover.log
 fi
+check "recovery logged" grep -q '没有完成' /tmp/smoke-downgrade-recover.log
+check "code back to the package version" in_ctr_q "grep -q '^version = \"$pkg_version\"' $IR/flocks/pyproject.toml"
+check "version marker rewritten to the package version" in_ctr_q "grep -qx '${pkg_version#v}' $DH/.flocks/version/.current_version"
+check "used upgrade record parked, cannot let a later package through" in_ctr_q "test ! -f $DH/.flocks/run/upgrade-result.json && ls $DH/.flocks/run/upgrade-result.json.bak-*"
+check "service healthy after the recovery" in_ctr_q "curl -fsS http://127.0.0.1:$PORT/api/health"
 
 # ---------------------------------------------------------------- reboot simulation (systemd mode only)
 if [[ "$INIT_MODE" == "systemd" ]]; then
@@ -429,26 +355,6 @@ if [[ "$INIT_MODE" == "systemd" ]]; then
     check "intranet still in force after the reboot" bash "$SCRIPT_DIR/intranet-sim.sh" check "$NAME"
   fi
   check "admin can still log in after reboot" in_ctr_q "curl -fsS -H 'Content-Type: application/json' -d '{\"username\":\"admin\",\"password\":\"Smoke-Test-2026\"}' http://127.0.0.1:$PORT/api/auth/login | grep -q admin"
-  if [[ "$HAS_BUNDLE" -eq 1 ]]; then
-    check "Pro component survives reboot" in_ctr_q "curl -fsS http://127.0.0.1:$PORT/api/auth/bootstrap-status >/dev/null && $IR/flocks/.venv/bin/python -c 'import flockspro'"
-  fi
-fi
-
-# ---------------------------------------------------------------- Pro → OSS downgrade on the offline instance (R3)
-# (after the reboot block on purpose: that block asserts the Pro component survives a reboot)
-# the restart handoff must run in prebuilt mode: no uv sync, no npm; the service must come back as OSS
-if in_ctr_q "curl -fsS -b /tmp/cookie http://127.0.0.1:$PORT/api/console/pro-package-status | grep -q '\"runtime_importable\": *true'"; then
-  in_ctr "curl -sS -N --max-time 120 -b /tmp/cookie -H 'Content-Type: application/json' -d '{\"reason\":\"smoke\"}' -X POST http://127.0.0.1:$PORT/api/console/pro-package/downgrade" > /tmp/smoke-downgrade.log 2>&1 || true
-  check "downgrade stream reached the restarting stage" grep -Eq '"stage": ?"restarting"' /tmp/smoke-downgrade.log
-  back=0
-  for _ in $(seq 1 60); do
-    if in_ctr_q "curl -fsS http://127.0.0.1:$PORT/api/health && ! $IR/flocks/.venv/bin/python -c 'import flockspro' 2>/dev/null"; then back=1; break; fi
-    sleep 3
-  done
-  if [[ "$back" -eq 1 ]]; then record PASS "service back as OSS after offline downgrade (handoff did not need uv sync / npm)"; else record FAIL "service back as OSS after offline downgrade (handoff did not need uv sync / npm)"; in_ctr "tail -n 30 $DH/.flocks/logs/backend.log; grep -rh restart_handoff $DH/.flocks/logs/ | tail -n 20" || true; fi
-  check "downgrade handoff ran in prebuilt mode (sync_skipped_prebuilt logged)" in_ctr_q "grep -rq -- 'sync_skipped_prebuilt' $DH/.flocks/logs/"
-  check "Pro marker archived after downgrade" in_ctr_q "test ! -f $DH/.flocks/run/pro-bundle-installed.json"
-  check "admin still logs in after downgrade" in_ctr_q "curl -fsS -c /tmp/cookie -H 'Content-Type: application/json' -d '{\"username\":\"admin\",\"password\":\"Smoke-Test-2026\"}' http://127.0.0.1:$PORT/api/auth/login | grep -q admin"
 fi
 
 # ---------------------------------------------------------------- install-only run (FLOCKS_OFFLINE_SKIP_START=1, R5)

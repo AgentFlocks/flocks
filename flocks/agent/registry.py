@@ -377,6 +377,11 @@ class Agent:
                 log.warn("agent.registry.permission_to_tools.error", {"error": str(exc)})
                 return []
 
+        from flocks.agent.managed import managed_agent_ids, managed_agents
+
+        managed_names = managed_agent_ids()
+        disabled_by_config: Set[str] = set()
+
         if cfg.agent:
             for key, value in cfg.agent.items():
                 alias_key = AGENT_ALIASES.get(key, key)
@@ -385,6 +390,16 @@ class Agent:
                 key = alias_key
                 if value.disable:
                     result.pop(key, None)
+                    disabled_by_config.add(key)
+                    continue
+                if key in managed_names:
+                    # The deployment's definition is not overlaid; only
+                    # disabling it (above) and its group (below) are local.
+                    if any(
+                        field != "group" and setting not in (None, {}, [])
+                        for field, setting in value.model_dump(exclude_defaults=True).items()
+                    ):
+                        log.warn("agent.managed.config_override_ignored", {"name": key})
                     continue
 
                 item = result.get(key)
@@ -439,6 +454,22 @@ class Agent:
                     if isinstance(value.permission, dict):
                         item.tools = _permission_dict_to_tools(value.permission)
 
+        # ── ③b Managed agents ─────────────────────────────────────────────
+        # What the deployment manages (flocks.content.managed) replaces every
+        # local agent of the same name -- YAML, plugin, Storage or config --
+        # and a name whose definition is unusable stays reserved instead of
+        # falling back to a local copy.
+        for name in managed_names:
+            result.pop(name, None)
+        for name, info in managed_agents().items():
+            if name in disabled_by_config:
+                continue
+            if user_perms or cli_overrides:
+                # The global and CLI restrictions bind a managed agent like
+                # any YAML one (step ②); only its definition is the deployment's.
+                info = info.model_copy(update={"permission": merge(info.permission, user_perms, cli_overrides)})
+            result[name] = info
+
         _apply_delegatable_overrides(result)
 
         # enabled_agents whitelist filter
@@ -454,8 +485,13 @@ class Agent:
             available_workflows,
         )
 
-        # Merge runtime-registered custom agents
-        result.update(Agent._custom_agents)
+        # Merge runtime-registered custom agents -- except over a managed name,
+        # which no in-process registration may take over either.
+        for name, info in Agent._custom_agents.items():
+            if name in managed_names:
+                log.warn("agent.managed.registration_ignored", {"name": name})
+                continue
+            result[name] = info
 
         # Group overlays also apply to runtime/Storage registrations. Copy the
         # result rather than mutating the registered source definition.
@@ -516,6 +552,19 @@ class Agent:
         except Exception:
             pass
 
+    # Generation of the managed-content snapshot the cached agents were built
+    # from (flocks.content.managed); a refresh that changed it rebuilds them.
+    _managed_generation: int = -1
+
+    @classmethod
+    def _sync_managed_content_cache(cls) -> None:
+        from flocks.content.managed import ManagedContent
+
+        generation = ManagedContent.generation()
+        if generation != cls._managed_generation:
+            cls._managed_generation = generation
+            cls.invalidate_cache()
+
     @classmethod
     def _sync_delegatable_settings_cache(cls) -> None:
         """Invalidate in-process agent cache when delegatable overrides change on disk."""
@@ -543,6 +592,7 @@ class Agent:
         # Detect cross-worker skill-settings changes before serving cached state.
         Agent._sync_skill_settings_cache()
         Agent._sync_delegatable_settings_cache()
+        Agent._sync_managed_content_cache()
         key = Instance.get_directory() or "default"
         if Agent._state_generations.get(key) != Agent._cache_generation:
             Agent._state_accessor.invalidate()  # type: ignore[attr-defined]

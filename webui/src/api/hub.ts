@@ -163,6 +163,11 @@ export interface HubSceneSuite {
   licenseState?: string | null;
   /** Epoch ms; null when the licence does not expire. */
   licenseExpiresAt?: number | null;
+  /**
+   * A pro-edition suite this install cannot install: the platform licence
+   * does not grant the edition. Null for an open-edition suite.
+   */
+  editionLocked?: boolean | null;
 }
 
 export interface HubUpdatePlanPage {

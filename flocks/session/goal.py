@@ -13,6 +13,7 @@ from flocks.provider.options import build_provider_options
 from flocks.provider.provider import ChatMessage, Provider
 from flocks.session.response_rewriter import transform_complete_response
 from flocks.session.llm_hook_utils import (
+    model_call_hook_metadata,
     apply_hook_request_output,
     restore_text_with_replacements,
     serialize_chat_message,
@@ -213,15 +214,13 @@ async def judge_goal_with_model(
     if session_id:
         from flocks.hooks.pipeline import HookPipeline, HookStage
 
-        hook_metadata = {
-            "sessionID": session_id,
-            "agent": "goal_judge",
-            "model": {
-                "providerID": provider_id,
-                "modelID": model_id,
-            },
-            "purpose": "goal_judge",
-        }
+        hook_metadata = await model_call_hook_metadata(
+            session_id=session_id,
+            agent="goal_judge",
+            purpose="goal_judge",
+            provider_id=provider_id,
+            model_id=model_id,
+        )
         try:
             llm_before_enabled = await HookPipeline.has_stage_handlers(
                 HookStage.LLM_BEFORE,

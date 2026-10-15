@@ -63,7 +63,7 @@ async def test_oss_may_not_install_a_pro_suite(suite_id: str):
         await _assert_edition_allowed("component", suite_id)
 
     assert excinfo.value.status_code == 403
-    assert "Flocks Pro" in excinfo.value.detail
+    assert "需要授权" in excinfo.value.detail
 
 
 @pytest.mark.asyncio
@@ -96,4 +96,4 @@ async def test_suite_license_needs_an_active_platform_license(pro_checker):
 
     with pytest.raises(HTTPException) as excinfo:
         await _assert_edition_allowed("component", "code-audit-workspace")
-    assert "Flocks Pro" in excinfo.value.detail
+    assert "需要授权" in excinfo.value.detail

@@ -66,6 +66,9 @@ class _PageRuntime:
     routes_mtime_ns: int
     handlers_mtime_ns: int
     loaded_at: int
+    #: Secret ids this page's handlers may read through ``ctx.secrets``, from
+    #: the ``secrets`` list in ``api/routes.yaml``.  Nothing else is readable.
+    secrets: frozenset[str] = frozenset()
 
 
 class WebUIPageApiRuntime:
@@ -124,7 +127,7 @@ class WebUIPageApiRuntime:
         if entry is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="page api route not found")
 
-        ctx = self._create_context(page_id, user)
+        ctx = self._create_context(page_id, user, runtime.secrets)
         try:
             result = await asyncio.wait_for(
                 self._invoke_handler(entry.handler, ctx, request),
@@ -228,6 +231,14 @@ class WebUIPageApiRuntime:
         route_items = raw.get("routes")
         if not isinstance(route_items, list):
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="routes.yaml must contain a routes list")
+        declared_secrets = raw.get("secrets", [])  # secret-guard: allow 误报：字段名含 secret
+        if not isinstance(declared_secrets, list) or not all(
+            isinstance(item, str) and item.strip() for item in declared_secrets
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="routes.yaml secrets must be a list of secret ids",
+            )
 
         module_name = f"flocks_webui_page_{page_id}_{int(time.time() * 1000)}"
         spec = importlib.util.spec_from_file_location(module_name, handlers_path)
@@ -302,6 +313,7 @@ class WebUIPageApiRuntime:
             routes_mtime_ns=routes_mtime_ns,
             handlers_mtime_ns=handlers_mtime_ns,
             loaded_at=int(time.time() * 1000),
+            secrets=frozenset(item.strip() for item in declared_secrets),  # secret-guard: allow 误报：字段名含 secret
         )
 
     def _create_guarded_import(self, *, api_root: Path, original_import, builtins_module: ModuleType):
@@ -375,14 +387,14 @@ class WebUIPageApiRuntime:
             raise ValueError("response body is too large")
         return JSONResponse(content=result)
 
-    def _create_context(self, page_id: str, user: Any) -> Any:
+    def _create_context(self, page_id: str, user: Any, secrets: frozenset[str] = frozenset()) -> Any:
         from flocks.db import sync_query
 
         logger = Log.create(service=f"webui-page-api:{page_id}")
         return SimpleNamespace(
             page_id=page_id,
             user=user,
-            secrets=_SecretAccessor(),
+            secrets=_SecretAccessor(page_id, secrets),  # secret-guard: allow 误报：字段名含 secret
             logger=logger,
             cache=None,
             database=SimpleNamespace(connect=sync_query.connect, identity=sync_query.identity),
@@ -400,8 +412,33 @@ class WebUIPageApiRuntime:
         )
 
 
+class SecretNotDeclared(PermissionError):
+    """A page handler asked for a secret its routes.yaml does not list."""
+
+
 class _SecretAccessor:
+    """``ctx.secrets``: the secrets one page declared, and only those.
+
+    A page plugin is extension code.  Handing every handler the whole secret
+    store would make any page able to read every credential the install holds,
+    so a page lists the secret ids it needs (``secrets:`` in ``api/routes.yaml``)
+    and gets exactly those.
+    """
+
+    def __init__(self, page_id: str = "", allowed: frozenset[str] = frozenset()) -> None:
+        self._page_id = page_id
+        self._allowed = allowed
+
     def get(self, key: str, default: Any = None) -> Any:
+        if key not in self._allowed:
+            log.warning(
+                "webui_pages.api.secret_not_declared",
+                {"pageId": self._page_id, "secret": key},
+            )
+            raise SecretNotDeclared(
+                f"page {self._page_id or '?'} did not declare secret {key!r}; "
+                "list it under 'secrets' in api/routes.yaml"
+            )
         from flocks.security import get_secret_manager
 
         value = get_secret_manager().get(key)

@@ -133,16 +133,25 @@ async def test_perform_update_refuses_before_any_network_or_config_access(monkey
     assert events[0].message == deploy.MANAGED_UPGRADE_REFUSAL
 
 
-async def test_pro_bundle_install_refuses_in_managed_mode(monkeypatch, source_layout) -> None:
+async def test_channel_installs_and_removals_refuse_in_managed_mode(monkeypatch, source_layout) -> None:
+    """An extension's update channel goes through the same refusal as the project's own update."""
+    from flocks.updater.channels import ChannelRelease
+
     _managed_by_core(monkeypatch)
 
+    def _never_planned(*_args, **_kwargs):
+        raise AssertionError("a managed installation must not be planned, let alone changed")
+
+    release = ChannelRelease(version="v2", plan=_never_planned, archive_path=Path("/opt/flocks/bundle"), label="extension bundle")
+    events = [p async for p in updater.perform_update("v2", release=release)]
+    assert [e.stage for e in events] == ["error"]
+    assert events[0].message == deploy.MANAGED_UPGRADE_REFUSAL
+
     async def _boom(*_args, **_kwargs):
-        raise AssertionError("manifest must not be fetched")
+        raise AssertionError("nothing may be uninstalled")
 
-    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _boom)
-
-    events = [p async for p in updater.perform_pro_bundle_install()]
-
+    monkeypatch.setattr(updater, "_uninstall_packages", _boom)
+    events = [p async for p in updater.remove_components(["extension"], version="v1")]
     assert [e.stage for e in events] == ["error"]
     assert events[0].message == deploy.MANAGED_UPGRADE_REFUSAL
 

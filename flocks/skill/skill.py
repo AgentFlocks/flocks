@@ -26,6 +26,9 @@ from flocks.project.instance import Instance
 
 log = Log.create(service="skill")
 
+#: ``source`` of a skill served by a deployment content source (see _overlay_managed).
+MANAGED_SKILL_SOURCE = "managed"
+
 # Process-wide reentrant lock guarding ~/.flocks/config/skill_settings.json.
 # FastAPI runs request handlers on a thread pool, so concurrent toggle calls
 # can race on the JSON file.  We use an RLock so high-level read-modify-write
@@ -251,11 +254,44 @@ class Skill:
 
     @classmethod
     def is_readonly(cls, skill: SkillInfo) -> bool:
+        from flocks.content.managed import is_managed_location
+
         return (
             skill.native
-            or skill.source in {"project", "flocks"}
+            or skill.source in {"project", "flocks", MANAGED_SKILL_SOURCE}
+            or is_managed_location(skill.location)
             or cls.is_system_shipped(skill.location)
         )
+
+    @classmethod
+    def is_managed(cls, skill: SkillInfo) -> bool:
+        """A skill the deployment serves through a content source, not a file."""
+        from flocks.content.managed import is_managed_location
+
+        return is_managed_location(skill.location)
+
+    @classmethod
+    async def read_body(cls, skill: SkillInfo, *, scope: Optional[str] = None) -> str:
+        """The skill's SKILL.md text, wherever the skill comes from.
+
+        A managed skill is fetched from its content source; ``scope`` (the
+        session using it) keeps one version for the whole task.  A local skill
+        is read from its file, as before.
+        """
+        from flocks.content.managed import fetch_managed_pinned, parse_managed_location
+
+        managed = parse_managed_location(skill.location)
+        if managed is not None:
+            body = await fetch_managed_pinned(managed[0], managed[1], scope=scope)
+            return body.as_text()
+        return await asyncio.to_thread(Path(skill.location).read_text, encoding="utf-8")
+
+    @classmethod
+    def base_directory(cls, skill: SkillInfo) -> Optional[str]:
+        """Where a skill's attachments live; ``None`` for a managed skill, which has none on disk."""
+        if cls.is_managed(skill):
+            return None
+        return os.path.dirname(skill.location)
 
     @classmethod
     def preserve_install_group(
@@ -312,9 +348,23 @@ class Skill:
             os.path.normcase(os.path.realpath(worktree)),
         )
 
+    # Generation of the managed-content snapshot the cache was built from
+    # (flocks.content.managed); a refresh that changed it rediscovers.
+    _managed_generation: int = -1
+
+    @classmethod
+    def _sync_managed_content(cls) -> None:
+        from flocks.content.managed import ManagedContent
+
+        generation = ManagedContent.generation()
+        if generation != cls._managed_generation:
+            cls._managed_generation = generation
+            cls.clear_cache()
+
     @classmethod
     def _all_sync(cls) -> List[SkillInfo]:
         """Discover skills once per request context and cache generation."""
+        cls._sync_managed_content()
         context_key = cls._cache_context()
         while True:
             with cls._cache_lock:
@@ -659,8 +709,33 @@ class Skill:
             for pattern in plugin_patterns:
                 cls._scan_directory(global_flocks, pattern, skills, source="user")
 
+        # 6) Skills the deployment manages (flocks.content.managed) — they win
+        #    over every local copy of the same name, which is not loaded at all:
+        #    a file dropped into a skills directory cannot stand in for one.
+        cls._overlay_managed(skills)
+
         log.info("skill.discovery.complete", {"count": len(skills), "names": list(skills.keys())})
         return skills
+
+    @classmethod
+    def _overlay_managed(cls, skills: Dict[str, SkillInfo]) -> None:
+        from flocks.content.managed import managed_entries, managed_ids, managed_location
+
+        # Every name the deployment controls leaves the local listing, also one
+        # it no longer lists: an unavailable skill is not replaced by a copy.
+        for name in managed_ids("skill"):
+            local = skills.pop(name, None)
+            if local is not None:
+                log.info("skill.managed.shadows_local", {"name": name, "local": local.location})
+        for entry in managed_entries("skill"):
+            name = entry.ref.content_id
+            skills[name] = SkillInfo(
+                name=name,
+                description=(entry.summary or entry.name or name).strip() or name,
+                location=managed_location("skill", name),
+                source=MANAGED_SKILL_SOURCE,
+                category=(entry.metadata or {}).get("category"),
+            )
 
     @staticmethod
     def _find_dirs_up(target: str, start_dir: str, stop_dir: str) -> List[str]:

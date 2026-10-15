@@ -6,8 +6,7 @@
 # Produces packaging/linux/Output/<arch>/flocks-offline.run (+ .sha256, versions.json).
 #
 # Usage:
-#   packaging/linux/build-in-docker.sh [--arch x86_64|aarch64|all] [--flockspro-wheel PATH]
-#       [--pro-release-id ID] [--pro-bundle-version VER] [--output-dir DIR] [--cache-dir DIR]
+#   packaging/linux/build-in-docker.sh [--arch x86_64|aarch64|all] [--output-dir DIR] [--cache-dir DIR]
 #       [--cn] [--image IMAGE] [--keep-container] [--allow-dirty]
 #
 #   --arch      defaults to the host architecture. Building the other architecture needs
@@ -28,9 +27,6 @@ DOCKER="${DOCKER:-docker}"
 IMAGE="$(sed -n 's/^[[:space:]]*"build_image"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SCRIPT_DIR/versions.manifest.json")"
 [[ -n "$IMAGE" ]] || { printf '[build-in-docker] error: no build_image in versions.manifest.json\n' >&2; exit 1; }
 ARCHES=""
-FLOCKSPRO_WHEEL=""
-PRO_RELEASE_ID=""
-PRO_BUNDLE_VERSION=""
 OUTPUT_DIR="$SCRIPT_DIR/Output"
 CACHE_DIR="${FLOCKS_CACHE_ROOT:-$HOME/.cache/flocks-offline-build}"
 CN=0
@@ -43,9 +39,8 @@ fail() { printf '[build-in-docker] error: %s\n' "$*" >&2; exit 1; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --arch) ARCHES="$2"; shift 2 ;;
-    --flockspro-wheel) FLOCKSPRO_WHEEL="$2"; shift 2 ;;
-    --pro-release-id) PRO_RELEASE_ID="$2"; shift 2 ;;
-    --pro-bundle-version) PRO_BUNDLE_VERSION="$2"; shift 2 ;;
+    --flockspro-wheel|--pro-release-id|--pro-bundle-version)
+      fail "$1 is no longer supported: this package is the open-source edition, extensions are not packed into it" ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
     --cache-dir) CACHE_DIR="$2"; shift 2 ;;
     --cn) CN=1; shift ;;
@@ -71,11 +66,6 @@ if [[ "$ARCHES" == "all" ]]; then
   ARCHES="x86_64 aarch64"
 fi
 
-if [[ -n "$FLOCKSPRO_WHEEL" ]]; then
-  [[ -f "$FLOCKSPRO_WHEEL" ]] || fail "flockspro wheel not found: $FLOCKSPRO_WHEEL"
-  [[ "$(basename "$FLOCKSPRO_WHEEL")" == flockspro-*.whl ]] || fail "expected flockspro-*.whl"
-fi
-
 mkdir -p "$OUTPUT_DIR" "$CACHE_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 CACHE_DIR="$(cd "$CACHE_DIR" && pwd)"
@@ -90,23 +80,14 @@ trap cleanup EXIT
 
 build_one() {
   local arch="$1" platform container arch_cache started
-  local wheel_arg=() mirror_env=()
+  local mirror_env=()
   case "$arch" in
     x86_64) platform="linux/amd64" ;;
     aarch64) platform="linux/arm64" ;;
     *) fail "unsupported arch: $arch (x86_64 or aarch64)" ;;
   esac
   arch_cache="$CACHE_DIR/$arch"
-  mkdir -p "$arch_cache/pro-dist" "$arch_cache/out"
-  if [[ -n "$FLOCKSPRO_WHEEL" ]]; then
-    # the wheel may already be the cached copy itself (cp refuses to copy a file onto itself)
-    if ! cmp -s "$FLOCKSPRO_WHEEL" "$arch_cache/pro-dist/$(basename "$FLOCKSPRO_WHEEL")"; then
-      cp "$FLOCKSPRO_WHEEL" "$arch_cache/pro-dist/"
-    fi
-    wheel_arg=(--flockspro-wheel "/root/.cache/flocks-offline-build/pro-dist/$(basename "$FLOCKSPRO_WHEEL")")
-  fi
-  if [[ -n "$PRO_RELEASE_ID" ]]; then wheel_arg+=(--pro-release-id "$PRO_RELEASE_ID"); fi
-  if [[ -n "$PRO_BUNDLE_VERSION" ]]; then wheel_arg+=(--pro-bundle-version "$PRO_BUNDLE_VERSION"); fi
+  mkdir -p "$arch_cache/out"
   if [[ "$CN" -eq 1 ]]; then
     mirror_env=(-e FLOCKS_NODE_BASE_URL=https://registry.npmmirror.com/-/binary/node -e FLOCKS_NPM_REGISTRY=https://registry.npmmirror.com/)
   fi
@@ -151,12 +132,8 @@ build_one() {
 
   "$DOCKER" exec "$container" bash -c \
     'dnf -y install tar gzip findutils which diffutils procps-ng iproute python3 git >/root/.cache/flocks-offline-build/dnf.log 2>&1 || { tail -n 20 /root/.cache/flocks-offline-build/dnf.log; exit 1; }'
-  local extra_args=""
-  if [[ "${#wheel_arg[@]}" -gt 0 ]]; then
-    extra_args="$(printf '%q ' "${wheel_arg[@]}")"
-  fi
   "$DOCKER" exec "$container" bash -c \
-    "HOME=/root bash /pkg/build-offline-run.sh --repo-root /src --output-dir /root/.cache/flocks-offline-build/out $extra_args"
+    "HOME=/root bash /pkg/build-offline-run.sh --repo-root /src --output-dir /root/.cache/flocks-offline-build/out"
 
   mkdir -p "$OUTPUT_DIR/$arch"
   cp "$arch_cache/out/flocks-offline.run" "$arch_cache/out/flocks-offline.run.sha256" "$arch_cache/out/versions.json" "$OUTPUT_DIR/$arch/"

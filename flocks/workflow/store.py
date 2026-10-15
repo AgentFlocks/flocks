@@ -774,6 +774,55 @@ class WorkflowStore:
         return cur.rowcount
 
     @classmethod
+    async def claim_webhook_delivery(
+        cls, key: str, delivery_id: str, window_s: float, claim_token: str = "",
+    ) -> Optional[str]:
+        """Record a webhook delivery unless the same one is still within its window.
+
+        Returns ``None`` when this call recorded it -- go ahead and run -- or
+        the first delivery's id when *key* is a replay.  Atomic across every
+        instance on the database: two copies arriving at two nodes at once
+        resolve to exactly one recorded delivery.  *claim_token* identifies
+        this claim (and only this one) to :meth:`release_webhook_delivery`.
+        """
+        db = await cls._db()
+        async with db.transaction() as tx:
+            # Rows past their window are only kept long enough to be harmless.
+            await tx.execute(
+                "DELETE FROM workflow_webhook_deliveries WHERE expires_at < clock_timestamp() - interval '1 hour'"
+            )
+            claimed = await tx.execute(
+                "INSERT INTO workflow_webhook_deliveries (key, delivery_id, expires_at, claim_token) "
+                "VALUES (?, ?, clock_timestamp() + (? * interval '1 second'), ?) "
+                "ON CONFLICT (key) DO UPDATE SET delivery_id = EXCLUDED.delivery_id, expires_at = EXCLUDED.expires_at, "
+                "claim_token = EXCLUDED.claim_token "  # secret-guard: allow 误报：SQL 片段 EXCLUDED.claim_token
+                "WHERE workflow_webhook_deliveries.expires_at <= clock_timestamp() "
+                "RETURNING delivery_id",
+                (key, delivery_id, float(window_s), claim_token),
+            )
+            if await claimed.fetchone() is not None:
+                return None
+            existing = await tx.execute("SELECT delivery_id FROM workflow_webhook_deliveries WHERE key = ?", (key,))
+            row = await existing.fetchone()
+        return str(row["delivery_id"]) if row is not None else ""
+
+    @classmethod
+    async def release_webhook_delivery(cls, key: str, claim_token: str) -> None:
+        """Forget the delivery one claim recorded, so the same one may be sent again.
+
+        Only that claim: a later claim of the same key (after this one's window
+        ran out) carries another token and stays.
+        """
+        if not claim_token:
+            return
+        db = await cls._db()
+        async with db.transaction() as tx:
+            await tx.execute(
+                "DELETE FROM workflow_webhook_deliveries WHERE key = ? AND claim_token = ?",
+                (key, claim_token),
+            )
+
+    @classmethod
     async def kv_put(cls, key: str, value: Any, value_type: str = _JSON_TYPE) -> None:
         db = await cls._db()
         now = cls._now_iso()
@@ -878,6 +927,12 @@ def _workflow_ddl(dialect) -> list[str]:
         f"""CREATE TABLE IF NOT EXISTS workflow_kv (
             key {text} PRIMARY KEY, value {text} NOT NULL, type {text} NOT NULL,
             created_at {text} NOT NULL, updated_at {text} NOT NULL)""",
+        # Webhook deliveries seen recently, shared by every instance on the
+        # database so a replay is recognised wherever it lands.
+        f"""CREATE TABLE IF NOT EXISTS workflow_webhook_deliveries (
+            key {text} PRIMARY KEY, delivery_id {text} NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL, claim_token {text} NOT NULL DEFAULT '')""",
+        "ALTER TABLE workflow_webhook_deliveries ADD COLUMN IF NOT EXISTS claim_token TEXT NOT NULL DEFAULT ''",
     ]
 
 _INDEX_STMTS = [
@@ -887,4 +942,5 @@ _INDEX_STMTS = [
     "CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow_status ON workflow_executions(workflow_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_executions_trigger ON workflow_executions(workflow_id, trigger_type, trigger_id)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_execution_steps_exec_step ON workflow_execution_steps(exec_id, step_index)",
+    "CREATE INDEX IF NOT EXISTS idx_workflow_webhook_deliveries_expiry ON workflow_webhook_deliveries(expires_at)",
 ]

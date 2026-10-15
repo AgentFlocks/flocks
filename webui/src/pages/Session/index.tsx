@@ -39,14 +39,8 @@ import SuiteInstallProgressPanel, {
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi, type SessionContextFile, type SessionContextSnapshot } from '@/api/session';
-import {
-  flocksproPolicyApi,
-  isSessionExecutionSettingsUnsupported,
-  type NetworkMode,
-  type PermissionMode,
-  type RuntimeMode,
-} from '@/api/flocksproPolicy';
-import { flocksproUsersApi } from '@/api/flocksproUsers';
+import ExtensionSlot from '@/components/extensions/ExtensionSlot';
+import type { SessionStartHook } from '@/extensions/registry';
 import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
 import { skillAPI, type Skill } from '@/api/skill';
 import { workflowAPI, type WorkflowSummary } from '@/api/workflow';
@@ -523,19 +517,13 @@ export default function SessionPage() {
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [showModelOptions, setShowModelOptions] = useState(false);
   const modelSelectorRef = useRef<HTMLDivElement>(null);
-  const [showPermissionModeOptions, setShowPermissionModeOptions] = useState(false);
-  const permissionModeSelectorRef = useRef<HTMLDivElement>(null);
-  const [proPolicyEnabled, setProPolicyEnabled] = useState(false);
-  const [sessionPermissionMode, setSessionPermissionMode] = useState<PermissionMode | null>(null);
-  const [draftPermissionMode, setDraftPermissionMode] = useState<PermissionMode>('require-confirm');
-  const [sessionRuntimeMode, setSessionRuntimeMode] = useState<RuntimeMode | null>(null);
-  const [sessionNetworkMode, setSessionNetworkMode] = useState<NetworkMode | null>(null);
-  const [sessionNetworkModeDefault, setSessionNetworkModeDefault] = useState<NetworkMode | null>(null);
-  const [sessionNetworkModeOverridden, setSessionNetworkModeOverridden] = useState(false);
-  const [sessionEntry, setSessionEntry] = useState<string>('unknown');
-  const [sessionExecutionRevision, setSessionExecutionRevision] = useState<number | null>(null);
-  const [draftRuntimeMode, setDraftRuntimeMode] = useState<RuntimeMode>('dev-mode');
-  const [draftNetworkMode, setDraftNetworkMode] = useState<NetworkMode>('require-confirm');
+  // Prepared when a first message is sent and run on its new session before
+  // the prompt; extensions register them through the session.settings slot.
+  const sessionStartHooksRef = useRef(new Set<SessionStartHook>());
+  const registerSessionStartHook = useCallback((hook: SessionStartHook) => {
+    sessionStartHooksRef.current.add(hook);
+    return () => { sessionStartHooksRef.current.delete(hook); };
+  }, []);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
   const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
@@ -1289,220 +1277,10 @@ export default function SessionPage() {
     return () => document.removeEventListener('mousedown', handle);
   }, [showModelOptions]);
 
-  useEffect(() => {
-    if (!showPermissionModeOptions) return;
-    const handle = (event: MouseEvent) => {
-      if (!(event.target as HTMLElement).closest('[data-permission-mode-selector]')) {
-        setShowPermissionModeOptions(false);
-      }
-    };
-    document.addEventListener('mousedown', handle);
-    return () => document.removeEventListener('mousedown', handle);
-  }, [showPermissionModeOptions]);
-
-  useEffect(() => {
-    void flocksproUsersApi.hasCapability().then(setProPolicyEnabled);
-  }, []);
-
-  useEffect(() => {
-    if (!proPolicyEnabled || !selectedSessionId) {
-      setSessionPermissionMode(null);
-      setSessionRuntimeMode(null);
-      setSessionNetworkMode(null);
-      setSessionNetworkModeDefault(null);
-      setSessionNetworkModeOverridden(false);
-      setSessionEntry('unknown');
-      setSessionExecutionRevision(null);
-      return;
-    }
-    let cancelled = false;
-    void flocksproPolicyApi.getSessionExecutionSettings(selectedSessionId)
-      .then((result) => {
-        if (cancelled) return;
-        setSessionPermissionMode(result.permissionMode);
-        setSessionRuntimeMode(result.runtimeMode);
-        setSessionNetworkMode(result.networkMode);
-        setSessionNetworkModeDefault(result.networkModeDefault);
-        setSessionNetworkModeOverridden(result.networkModeOverridden);
-        setSessionEntry(result.entry);
-        setSessionExecutionRevision(result.revision);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setSessionPermissionMode(null);
-        setSessionRuntimeMode(null);
-        setSessionNetworkMode(null);
-        setSessionNetworkModeDefault(null);
-        setSessionNetworkModeOverridden(false);
-        setSessionEntry('unknown');
-        setSessionExecutionRevision(null);
-      });
-    return () => { cancelled = true; };
-  }, [proPolicyEnabled, selectedSessionId]);
-
-  const handlePermissionModeChange = useCallback(async (permissionMode: PermissionMode) => {
-    if (!proPolicyEnabled) return;
-    if (!selectedSessionId) {
-      setDraftPermissionMode(permissionMode);
-      return;
-    }
-    try {
-      const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
-        permissionMode,
-        ...(sessionExecutionRevision === null ? {} : { revision: sessionExecutionRevision }),
-      });
-      setSessionPermissionMode(updated.permissionMode);
-      setSessionRuntimeMode(updated.runtimeMode);
-      setSessionNetworkMode(updated.networkMode);
-      setSessionNetworkModeDefault(updated.networkModeDefault);
-      setSessionNetworkModeOverridden(updated.networkModeOverridden);
-      setSessionEntry(updated.entry);
-      setSessionExecutionRevision(updated.revision);
-    } catch (error: unknown) {
-      if (isSessionExecutionSettingsUnsupported(error)) return;
-      const message = error instanceof Error ? error.message : String(error);
-      toast.error(t('chat.error', 'Error'), message);
-    }
-  }, [proPolicyEnabled, selectedSessionId, sessionExecutionRevision, t, toast]);
-
-  const handleRuntimeModeChange = useCallback(async (runtimeMode: RuntimeMode) => {
-    if (!proPolicyEnabled) return;
-    if (!selectedSessionId) {
-      setDraftRuntimeMode(runtimeMode);
-      return;
-    }
-    try {
-      const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
-        runtimeMode,
-        ...(sessionExecutionRevision === null ? {} : { revision: sessionExecutionRevision }),
-      });
-      setSessionPermissionMode(updated.permissionMode);
-      setSessionRuntimeMode(updated.runtimeMode);
-      setSessionNetworkMode(updated.networkMode);
-      setSessionNetworkModeDefault(updated.networkModeDefault);
-      setSessionNetworkModeOverridden(updated.networkModeOverridden);
-      setSessionEntry(updated.entry);
-      setSessionExecutionRevision(updated.revision);
-    } catch (error: unknown) {
-      if (isSessionExecutionSettingsUnsupported(error)) return;
-      const message = error instanceof Error ? error.message : String(error);
-      toast.error(t('chat.error', 'Error'), message);
-    }
-  }, [proPolicyEnabled, selectedSessionId, sessionExecutionRevision, t, toast]);
-
-  const handleNetworkModeChange = useCallback(async (networkMode: NetworkMode) => {
-    if (!proPolicyEnabled) return;
-    if (!selectedSessionId) {
-      setDraftNetworkMode(networkMode);
-      return;
-    }
-    try {
-      const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
-        networkMode,
-        ...(sessionExecutionRevision === null ? {} : { revision: sessionExecutionRevision }),
-      });
-      setSessionPermissionMode(updated.permissionMode);
-      setSessionRuntimeMode(updated.runtimeMode);
-      setSessionNetworkMode(updated.networkMode);
-      setSessionNetworkModeDefault(updated.networkModeDefault);
-      setSessionNetworkModeOverridden(updated.networkModeOverridden);
-      setSessionEntry(updated.entry);
-      setSessionExecutionRevision(updated.revision);
-    } catch (error: unknown) {
-      if (isSessionExecutionSettingsUnsupported(error)) return;
-      const message = error instanceof Error ? error.message : String(error);
-      toast.error(t('chat.error', 'Error'), message);
-    }
-  }, [proPolicyEnabled, selectedSessionId, sessionExecutionRevision, t, toast]);
-
-  const permissionModeLabels = useMemo<Record<PermissionMode, string>>(
-    () => ({
-      readonly: t('permissionMode.readonly'),
-      'require-confirm': t('permissionMode.requireConfirm'),
-      'auto-allow-all': t('permissionMode.autoAllowAll'),
-    }),
-    [t],
+  const sessionSettingsSlotContext = useMemo(
+    () => ({ sessionId: selectedSessionId, onSessionStart: registerSessionStartHook }),
+    [registerSessionStartHook, selectedSessionId],
   );
-
-  const permissionModeOptions = useMemo(
-    () => ([
-      {
-        value: 'readonly' as const,
-        label: permissionModeLabels.readonly,
-        description: t('permissionMode.readonlyDesc'),
-      },
-      {
-        value: 'require-confirm' as const,
-        label: permissionModeLabels['require-confirm'],
-        description: t('permissionMode.requireConfirmDesc'),
-      },
-      {
-        value: 'auto-allow-all' as const,
-        label: permissionModeLabels['auto-allow-all'],
-        description: t('permissionMode.autoAllowAllDesc'),
-      },
-    ]),
-    [permissionModeLabels, t],
-  );
-  const runtimeModeLabels = useMemo<Record<RuntimeMode, string>>(
-    () => ({
-      'dev-mode': t('permissionMode.runtimeDev', '开发模式'),
-      'exe-mode': t('permissionMode.runtimeExe', '执行模式'),
-    }),
-    [t],
-  );
-  const runtimeModeOptions = useMemo(
-    () => ([
-      {
-        value: 'dev-mode' as const,
-        label: runtimeModeLabels['dev-mode'],
-        description: t('permissionMode.runtimeDevDesc', 'Plugins 与代码目录按当前会话权限模式处理'),
-      },
-      {
-        value: 'exe-mode' as const,
-        label: runtimeModeLabels['exe-mode'],
-        description: t('permissionMode.runtimeExeDesc', 'Plugins 与代码目录固定 readonly'),
-      },
-    ]),
-    [runtimeModeLabels, t],
-  );
-  const networkModeLabels = useMemo<Record<NetworkMode, string>>(
-    () => ({
-      'auto-deny-all': t('permissionMode.networkAutoDenyAll', '自动拒绝全部'),
-      'require-confirm': t('permissionMode.networkRequireConfirm', '访问前确认'),
-      'auto-allow-all': t('permissionMode.networkAutoAllowAll', '自动允许全部'),
-    }),
-    [t],
-  );
-  const networkModeOptions = useMemo(
-    () => ([
-      {
-        value: 'auto-deny-all' as const,
-        label: networkModeLabels['auto-deny-all'],
-        description: t('permissionMode.networkAutoDenyAllDesc', '未命中白名单的网络请求全部拒绝。'),
-      },
-      {
-        value: 'require-confirm' as const,
-        label: networkModeLabels['require-confirm'],
-        description: t('permissionMode.networkRequireConfirmDesc', '未命中白名单时弹出独立网络确认。'),
-      },
-      {
-        value: 'auto-allow-all' as const,
-        label: networkModeLabels['auto-allow-all'],
-        description: t('permissionMode.networkAutoAllowAllDesc', '未命中黑白名单时自动放行。'),
-      },
-    ]),
-    [networkModeLabels, t],
-  );
-  const currentPermissionMode = selectedSessionId
-    ? (sessionPermissionMode ?? 'require-confirm')
-    : draftPermissionMode;
-  const currentRuntimeMode = selectedSessionId
-    ? (sessionRuntimeMode ?? 'dev-mode')
-    : draftRuntimeMode;
-  const currentNetworkMode = selectedSessionId
-    ? (sessionNetworkMode ?? 'require-confirm')
-    : draftNetworkMode;
 
   useEffect(() => {
     if (selectedSession?.model_auto) {
@@ -1683,6 +1461,11 @@ export default function SessionPage() {
   ) => {
     const navigationKey = navigationRef.current.key;
     try {
+      // What each extension needs done on the new session, fixed now: the
+      // page may move on (and the extension go away) while it is created.
+      const sessionStartWork = Array.from(sessionStartHooksRef.current)
+        .map((prepare) => prepare())
+        .filter((run): run is (sessionId: string) => Promise<void> => typeof run === 'function');
       const effectiveExecutionMode = executionModeOverride || selectedExecutionMode;
       const response = await client.post('/api/session', {
         title: 'New Session',
@@ -1720,32 +1503,10 @@ export default function SessionPage() {
       if (options?.displayText) payload.displayText = options.displayText;
       payload.executionMode = effectiveExecutionMode;
 
-      if (proPolicyEnabled) {
-        try {
-          const updated = await flocksproPolicyApi.setSessionExecutionSettings(newSessionId, {
-            permissionMode: draftPermissionMode,
-            runtimeMode: draftRuntimeMode,
-            networkMode: draftNetworkMode,
-          });
-          if (mountedRef.current && navigationRef.current.key === navigationKey) {
-            setSessionPermissionMode(updated.permissionMode);
-            setSessionRuntimeMode(updated.runtimeMode);
-            setSessionNetworkMode(updated.networkMode);
-            setSessionNetworkModeDefault(updated.networkModeDefault);
-            setSessionNetworkModeOverridden(updated.networkModeOverridden);
-            setSessionEntry(updated.entry);
-            setSessionExecutionRevision(updated.revision);
-          }
-        } catch (error: unknown) {
-          if (isSessionExecutionSettingsUnsupported(error)) {
-            // Backward compatibility: older backends may not expose execution-settings yet.
-            // Session creation and prompt sending should continue without interruption.
-          } else {
-            const message = error instanceof Error ? error.message : String(error);
-            toast.error(t('chat.error', 'Error'), message);
-            throw error;
-          }
-        }
+      // Work an extension needs done on a new session before its first
+      // prompt (session.settings); a hook that throws stops the send.
+      for (const run of sessionStartWork) {
+        await run(newSessionId);
       }
       await client.post(`/api/session/${newSessionId}/prompt_async`, payload);
 
@@ -1801,10 +1562,6 @@ export default function SessionPage() {
     selectedExecutionMode,
     selectedModelAuto,
     selectedProjectIDForCreate,
-    draftPermissionMode,
-    draftRuntimeMode,
-    draftNetworkMode,
-    proPolicyEnabled,
     toast,
     t,
   ]);
@@ -2469,109 +2226,7 @@ export default function SessionPage() {
                 </SessionComposerMenu>
               )}
               </div>
-              {proPolicyEnabled && (
-                <div ref={permissionModeSelectorRef} className="relative" data-permission-mode-selector>
-                  <button
-                    type="button"
-                    onClick={() => setShowPermissionModeOptions((open) => !open)}
-                    className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                    title={t('permissionMode.executionControlTitle')}
-                  >
-                    <Shield className="h-3 w-3 shrink-0" />
-                    <span className="max-w-[116px] truncate font-medium">
-                      {permissionModeLabels[currentPermissionMode]}
-                    </span>
-                    <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
-                  </button>
-                  {showPermissionModeOptions && (
-                    <SessionComposerMenu
-                      anchorRef={permissionModeSelectorRef}
-                      data-permission-mode-selector
-                      aria-label={t('permissionMode.executionControlTitle')}
-                      contentClassName="space-y-3 p-1.5"
-                    >
-                      <section>
-                        <div className="flex min-w-0 items-center justify-between gap-3 px-2.5 py-1.5">
-                          <div
-                            className="min-w-0 truncate text-xs font-semibold text-zinc-500 dark:text-zinc-400"
-                            title={t('permissionMode.runtimeTitle', '平台开发模式')}
-                          >
-                            {t('permissionMode.runtimeTitle', '平台开发模式')}
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setShowPermissionModeOptions(false);
-                              navigate('/settings/security-config');
-                            }}
-                            className="shrink-0 whitespace-nowrap text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-                          >
-                            {t('permissionMode.viewDetails')}
-                          </button>
-                        </div>
-                        <div className="space-y-0.5">
-                          {runtimeModeOptions.map(({ value: mode, label, description }) => (
-                            <SessionModeOption
-                              key={mode}
-                              selected={currentRuntimeMode === mode}
-                              label={label}
-                              description={description}
-                              onClick={() => {
-                                void handleRuntimeModeChange(mode);
-                                setShowPermissionModeOptions(false);
-                              }}
-                            />
-                          ))}
-                        </div>
-                      </section>
-                      <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
-                        <div
-                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
-                          title={t('permissionMode.networkTitle', '网络访问模式')}
-                        >
-                          {t('permissionMode.networkTitle', '网络访问模式')}
-                        </div>
-                        <div className="space-y-0.5">
-                          {networkModeOptions.map(({ value: mode, label, description }) => (
-                            <SessionModeOption
-                              key={mode}
-                              selected={currentNetworkMode === mode}
-                              label={label}
-                              description={description}
-                              onClick={() => {
-                                void handleNetworkModeChange(mode);
-                                setShowPermissionModeOptions(false);
-                              }}
-                            />
-                          ))}
-                        </div>
-                      </section>
-                      <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
-                        <div
-                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
-                          title={t('permissionMode.title')}
-                        >
-                          {t('permissionMode.title')}
-                        </div>
-                        <div className="space-y-0.5">
-                          {permissionModeOptions.map(({ value: mode, label, description }) => (
-                            <SessionModeOption
-                              key={mode}
-                              selected={currentPermissionMode === mode}
-                              label={label}
-                              description={description}
-                              onClick={() => {
-                                void handlePermissionModeChange(mode);
-                                setShowPermissionModeOptions(false);
-                              }}
-                            />
-                          ))}
-                        </div>
-                      </section>
-                    </SessionComposerMenu>
-                  )}
-                </div>
-              )}
+              <ExtensionSlot name="session.settings" context={sessionSettingsSlotContext} />
             </div>
           }
           />

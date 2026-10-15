@@ -56,8 +56,23 @@ def _load_workflow_dict(workflow: Union[Dict[str, Any], str]) -> Dict[str, Any]:
         existing = read_workflow_from_fs(raw)
         if existing is not None:
             return dict(existing["workflowJson"])
+        from flocks.workflow.fs_store import is_managed_workflow
+
+        if is_managed_workflow(raw):
+            # Reserved for the deployment's definition, which is unavailable:
+            # never a file that happens to share the name.
+            raise ValueError(f"Workflow {raw} is unavailable from its managed source")
         p = Path(raw).expanduser()
         if p.exists() and p.is_file():
+            # A local copy of a managed workflow stands for the managed one.
+            from flocks.workflow.fs_store import managed_workflow_id_for_path
+
+            managed_id = managed_workflow_id_for_path(p)
+            if managed_id is not None:
+                managed = read_workflow_from_fs(managed_id)
+                if managed is None:
+                    raise ValueError(f"Workflow {managed_id} is unavailable from its managed source")
+                return dict(managed["workflowJson"])
             with open(p, encoding="utf-8") as f:
                 return json.load(f)
         raise ValueError(

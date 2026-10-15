@@ -6,13 +6,13 @@ import asyncio
 import json
 import re
 import time
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from flocks.server.auth import require_admin, require_user
-from flocks.updater import check_update, perform_update, detect_deploy_mode
+from flocks.updater import check_update, get_update_channel, perform_update, detect_deploy_mode
 from flocks.updater.deploy import update_refusal_reason
 from flocks.updater.models import VersionInfo
 from flocks.updater.updater import get_current_version, get_installed_release
@@ -40,8 +40,24 @@ _SSE_HEADERS = {
 _TARGET_VERSION_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:[.+-][0-9A-Za-z][0-9A-Za-z.-]{0,63})?$")
 
 
-def _update_cache_key(locale: str | None, edition: str) -> tuple[str, str]:
-    return (locale or "", edition)
+DEFAULT_CHANNEL = "flocks"
+
+
+def _update_cache_key(locale: str | None, channel: str) -> tuple[str, str]:
+    return (locale or "", channel)
+
+
+def _requested_channel(channel: object, edition: object) -> str:
+    """The channel asked for; ``edition`` is the name older clients send."""
+    for value in (channel, edition):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return DEFAULT_CHANNEL
+
+
+def _require_known_channel(channel: str) -> None:
+    if channel != DEFAULT_CHANNEL and get_update_channel(channel) is None:
+        raise HTTPException(status_code=400, detail=f"Unknown update channel: {channel}")
 
 
 def clear_update_check_cache() -> None:
@@ -55,11 +71,11 @@ async def _run_update_check_for_cache(
     key: tuple[str, str],
     *,
     locale: str | None,
-    edition: Literal["flocks", "flockspro"],
+    channel: str,
 ) -> VersionInfo:
     current_task = asyncio.current_task()
     try:
-        info = await check_update(locale=locale, force_console_manifest=(edition == "flockspro"))
+        info = await check_update(locale=locale, channel=None if channel == DEFAULT_CHANNEL else channel)
         ttl = _UPDATE_CHECK_ERROR_CACHE_TTL_SECONDS if info.error else _UPDATE_CHECK_CACHE_TTL_SECONDS
         async with _update_check_lock:
             if _update_check_inflight.get(key) is current_task:
@@ -74,10 +90,10 @@ async def _run_update_check_for_cache(
 async def _check_update_cached(
     *,
     locale: str | None,
-    edition: Literal["flocks", "flockspro"],
+    channel: str,
     force: bool,
 ) -> VersionInfo:
-    key = _update_cache_key(locale, edition)
+    key = _update_cache_key(locale, channel)
     now = time.monotonic()
     task: asyncio.Task[VersionInfo]
     async with _update_check_lock:
@@ -92,7 +108,7 @@ async def _check_update_cached(
         existing_task = _update_check_inflight.get(key)
         if existing_task is None:
             task = asyncio.create_task(
-                _run_update_check_for_cache(key, locale=locale, edition=edition)
+                _run_update_check_for_cache(key, locale=locale, channel=channel)
             )
             _update_check_inflight[key] = task
         else:
@@ -153,17 +169,21 @@ async def check_version(
         default=None,
         description="Optional UI locale hint used to choose region-appropriate upgrade mirrors.",
     ),
-    edition: Literal["flocks", "flockspro"] = Query(
-        default="flocks",
-        description="Version channel to check. flockspro checks the Console Pro bundle manifest.",
+    channel: str | None = Query(
+        default=None,
+        description="Update channel an installed extension provides; unset checks this project's own releases.",
     ),
+    edition: str | None = Query(default=None, include_in_schema=False),
     force: Annotated[bool, Query(
         description="Bypass the short server-side cache for an explicit manual check.",
     )] = False,
 ) -> VersionInfo:
-    if edition == "flockspro":
+    requested = _requested_channel(channel, edition)
+    if requested != DEFAULT_CHANNEL:
+        # An extension's channel may answer with its own credentials.
         require_admin(request)
-    return await _check_update_cached(locale=locale, edition=edition, force=force)
+        _require_known_channel(requested)
+    return await _check_update_cached(locale=locale, channel=requested, force=force)
 
 
 @router.post(
@@ -186,10 +206,11 @@ async def apply_update(
         default=None,
         description="Optional UI locale hint used to choose region-appropriate upgrade mirrors.",
     ),
-    edition: Literal["flocks", "flockspro"] = Query(
-        default="flocks",
-        description="Version channel to apply. flockspro applies the Console Pro bundle.",
+    channel: str | None = Query(
+        default=None,
+        description="Update channel an installed extension provides; unset applies this project's own release.",
     ),
+    edition: str | None = Query(default=None, include_in_schema=False),
 ):
     """
     Stream upgrade progress as Server-Sent Events (text/event-stream).
@@ -199,6 +220,9 @@ async def apply_update(
     """
 
     require_admin(request)
+    requested = _requested_channel(channel, edition)
+    _require_known_channel(requested)
+    update_channel = get_update_channel(requested) if requested != DEFAULT_CHANNEL else None
 
     async def _error(msg: str):
         yield f"data: {json.dumps({'stage': 'error', 'message': msg, 'success': False})}\n\n"
@@ -228,13 +252,11 @@ async def apply_update(
 
     zipball_url: str | None = None
     tarball_url: str | None = None
-    bundle_sha256: str | None = None
-    bundle_format: str | None = None
 
     if target_version:
         version_to_apply = target_version
     else:
-        info = await check_update(locale=locale, force_console_manifest=(edition == "flockspro"))
+        info = await check_update(locale=locale, channel=None if update_channel is None else requested)
         if info.error:
             return StreamingResponse(_error(info.error), media_type="text/event-stream")
         if not info.has_update or not info.latest_version:
@@ -244,20 +266,24 @@ async def apply_update(
         version_to_apply = info.latest_version
         zipball_url = info.zipball_url
         tarball_url = info.tarball_url
-        bundle_sha256 = info.bundle_sha256
-        bundle_format = info.bundle_format
 
-    log.info("update.apply.start", {"target": version_to_apply})
+    log.info("update.apply.start", {"target": version_to_apply, "channel": requested})
 
     async def _stream():
+        release = None
+        if update_channel is not None:
+            try:
+                release = await update_channel.release(version=version_to_apply)
+            except Exception as exc:
+                log.error("update.apply.channel_release_failed", {"channel": requested, "error": str(exc)})
+                yield f"data: {json.dumps({'stage': 'error', 'message': f'The update channel could not provide this release: {exc}', 'success': False})}\n\n"
+                return
         gen = perform_update(
             version_to_apply,
             zipball_url=zipball_url,
             tarball_url=tarball_url,
-            bundle_sha256=bundle_sha256,
-            bundle_format=bundle_format,
             locale=locale,
-            force_console_manifest=(edition == "flockspro"),
+            release=release,
         )
         try:
             async for progress in gen:

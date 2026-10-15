@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   AlertCircle,
@@ -18,7 +18,7 @@ import SuiteInstallProgressPanel, {
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
 import { webuiContractPagesAPI } from '@/api/webuiContractPages';
-import { flocksproUsersApi } from '@/api/flocksproUsers';
+import ExtensionSlot from '@/components/extensions/ExtensionSlot';
 import { useToast } from '@/components/common/Toast';
 import { useProtectedHubUpdate } from '@/components/hub/useProtectedHubUpdate';
 import { notifySceneSuitesChanged, useSceneSuiteUpdates } from '@/hooks/useSceneSuiteUpdates';
@@ -45,9 +45,6 @@ const TEXT = {
     incompatible: '不兼容',
     localOnly: '仅本地',
     disabled: '已停用',
-    proBadge: '需要 Flocks Pro',
-    proHint: '当前为开源版，升级后可安装该场景。',
-    upgrade: '去升级',
     licenseState: {
       unlicensed: '未授权',
       expired: '授权已过期',
@@ -63,7 +60,6 @@ const TEXT = {
     licensedUntil: '授权至 {date}',
     licensedNoExpiry: '已授权',
     licenseHint: '这个场景套件需要单独授权。把本机申请码发给授权负责人，拿到授权文件后在「场景套件授权」中导入即可，不需要联网。',
-    licenseAction: '导入授权',
     currentVersion: '已装 v{v}',
     latestVersion: '最新 v{v}',
     pagesVersion: '场景页面 v{installed} → v{latest}',
@@ -101,9 +97,6 @@ const TEXT = {
     incompatible: 'Incompatible',
     localOnly: 'Local only',
     disabled: 'Disabled',
-    proBadge: 'Flocks Pro required',
-    proHint: 'This is the open-source edition; upgrade to install this scene.',
-    upgrade: 'Upgrade',
     licenseState: {
       unlicensed: 'Not licensed',
       expired: 'Licence expired',
@@ -119,7 +112,6 @@ const TEXT = {
     licensedUntil: 'licensed until {date}',
     licensedNoExpiry: 'licensed',
     licenseHint: 'This scene suite is licensed on its own. Send this install\'s activation code to your licence contact, then import the licence file under Suite licences. No network connection is needed.',
-    licenseAction: 'Import licence',
     currentVersion: 'installed v{v}',
     latestVersion: 'latest v{v}',
     pagesVersion: 'scene pages v{installed} → v{latest}',
@@ -183,6 +175,8 @@ function licenseDate(ms: number, zh: boolean): string {
 
 export default function SceneSuitesPage() {
   const { i18n } = useTranslation('nav');
+  // Edition wording comes from the up-front bundle an extension may override.
+  const { t: tScene } = useTranslation('webuiContractPage');
   const zh = i18n.language.toLowerCase().startsWith('zh');
   const text = zh ? TEXT.zh : TEXT.en;
   const toast = useToast();
@@ -195,14 +189,12 @@ export default function SceneSuitesPage() {
   const { suites, loading, error, refetch } = useSceneSuiteUpdates();
   const [busyId, setBusyId] = useState<string | null>(null);
   const protectedUpdate = useProtectedHubUpdate();
-  const [hasPro, setHasPro] = useState(false);
   // Installing a suite pulls in its pages, tool and workflows one by one; show
   // the same per-component progress the hub used to show.
   const [installProgress, setInstallProgress] = useState<SuiteInstallProgressState | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
-    void flocksproUsersApi.hasCapability().then(setHasPro).catch(() => setHasPro(false));
     return () => { mountedRef.current = false; };
   }, []);
 
@@ -352,9 +344,11 @@ export default function SceneSuitesPage() {
 
       <div className="space-y-3">
         {suites.map((suite) => {
-          const proLocked = suite.edition === 'pro' && !hasPro;
-          // Under Pro each Pro suite still needs its own licence.
-          const licenseLocked = !proLocked && suite.edition === 'pro' && suite.licensed === false;
+          // The server says whether this install has the edition the suite
+          // needs (the same test its install refusal applies).
+          const editionLocked = suite.editionLocked === true;
+          // With the edition, each pro suite still needs its own licence.
+          const licenseLocked = !editionLocked && suite.edition === 'pro' && suite.licensed === false;
           const isPartial = suite.state === 'partial';
           const isInstalled = isPartial || suite.state === 'installed' || suite.state === 'updateAvailable' || suite.state === 'localOnly';
           const hasWorkspace = suite.workspaceEnabled != null;
@@ -383,7 +377,7 @@ export default function SceneSuitesPage() {
                     </span>
                     {suite.edition === 'pro' && (
                       <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
-                        {text.proBadge}
+                        {tScene('sceneSuites.editionBadge')}
                       </span>
                     )}
                     {licenseLocked && (
@@ -391,7 +385,7 @@ export default function SceneSuitesPage() {
                         {text.licenseState[suite.licenseState ?? 'unlicensed'] ?? text.licenseState.unlicensed}
                       </span>
                     )}
-                    {!proLocked && suite.licensed === true && suite.licenseState === 'grace' && (
+                    {!editionLocked && suite.licensed === true && suite.licenseState === 'grace' && (
                       <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
                         {text.licenseGrace}
                       </span>
@@ -406,7 +400,7 @@ export default function SceneSuitesPage() {
                   <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
                     {suite.installedVersion ? text.currentVersion.replace('{v}', suite.installedVersion) + ' · ' : ''}
                     {text.latestVersion.replace('{v}', suite.version)}
-                    {!proLocked && suite.licensed === true && (
+                    {!editionLocked && suite.licensed === true && (
                       <>
                         {' · '}
                         {suite.licenseExpiresAt
@@ -423,8 +417,8 @@ export default function SceneSuitesPage() {
                       </>
                     )}
                   </p>
-                  {proLocked && (
-                    <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{text.proHint}</p>
+                  {editionLocked && (
+                    <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{tScene('sceneSuites.editionHint')}</p>
                   )}
                   {licenseLocked && (
                     <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{text.licenseHint}</p>
@@ -442,23 +436,13 @@ export default function SceneSuitesPage() {
                 </div>
 
                 <div className="flex shrink-0 flex-col items-end gap-2">
-                  {proLocked ? (
-                    <Link
-                      to="/settings/flockspro"
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-amber-600"
-                    >
-                      <ArrowUpCircle aria-hidden="true" className="h-4 w-4" />
-                      {text.upgrade}
-                    </Link>
+                  {editionLocked ? (
+                    // Where to get the edition is the licensing extension's to say.
+                    <ExtensionSlot name="sceneSuites.lockedAction" context={{ suiteId: suite.id, reason: 'edition' }} />
                   ) : (
                     <>
                       {licenseLocked && (
-                        <Link
-                          to="/settings/suite-licenses"
-                          className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-amber-600"
-                        >
-                          {text.licenseAction}
-                        </Link>
+                        <ExtensionSlot name="sceneSuites.lockedAction" context={{ suiteId: suite.id, reason: 'license' }} />
                       )}
                       {!licenseLocked && (!isInstalled || isPartial) && (
                         <button

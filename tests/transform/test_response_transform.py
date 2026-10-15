@@ -384,12 +384,20 @@ def test_every_model_call_site_runs_the_response_transform():
     from pathlib import Path
 
     source_root = Path(__file__).resolve().parents[2] / "flocks"
-    # The pipeline module defines the stage rather than calling it.
-    definition_module = source_root / "hooks" / "pipeline.py"
+    # The pipeline module defines the stage and llm_hook_utils wraps it for
+    # callers; neither sends a model request.  Every module that calls the
+    # wrapper still shows up below, because its name contains the stage's.
+    definition_modules = {
+        source_root / "hooks" / "pipeline.py",
+        source_root / "session" / "llm_hook_utils.py",
+        # Embedding requests pass llm_before as outbound text, but the model
+        # answers with vectors: there is no text response to restore.
+        source_root / "memory" / "embedding.py",
+    }
     call_sites = {
         path
         for path in source_root.rglob("*.py")
-        if path != definition_module and "run_llm_before" in path.read_text(encoding="utf-8")
+        if path not in definition_modules and "run_llm_before" in path.read_text(encoding="utf-8")
     }
     assert len(call_sites) >= 4, f"expected the known model call sites, found {call_sites}"
 

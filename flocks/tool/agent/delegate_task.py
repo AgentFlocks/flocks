@@ -80,7 +80,7 @@ def _parse_model(model: Optional[str]) -> Optional[Dict[str, str]]:
     return {"modelID": model}
 
 
-async def _resolve_skill_content(skill_names: List[str]) -> Dict[str, Any]:
+async def _resolve_skill_content(skill_names: List[str], *, scope: Optional[str] = None) -> Dict[str, Any]:
     skill_names = [str(name).strip() for name in (skill_names or []) if str(name).strip()]
     if len(skill_names) == 0:
         return {"content": None, "error": None}
@@ -95,8 +95,8 @@ async def _resolve_skill_content(skill_names: List[str]) -> Dict[str, Any]:
             missing.append(name)
             continue
         try:
-            with open(skill.location, "r", encoding="utf-8") as f:
-                resolved.append(f.read())
+            # The delegating session's version of a managed skill.
+            resolved.append(await Skill.read_body(skill, scope=scope))
         except Exception as exc:
             return {"content": None, "error": f"Failed to load skill {name}: {exc}"}
     if missing:
@@ -261,7 +261,7 @@ async def delegate_task_tool(
     if execution_ended():
         return ToolResult(success=False, error="Execution stopped")
 
-    skill_result = await _resolve_skill_content(load_skills)
+    skill_result = await _resolve_skill_content(load_skills, scope=ctx.session_id)
     if skill_result["error"]:
         return ToolResult(success=False, error=skill_result["error"])
 
