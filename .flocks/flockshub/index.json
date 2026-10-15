@@ -7,6 +7,32 @@
   },
   "plugins": [
     {
+      "id": "rea",
+      "type": "skill",
+      "name": "REA Reverse Engineering",
+      "nameCn": "REA 逆向分析",
+      "description": "Reverse analysis tool based on Reverse Engineer Anything that helps recover key logic, algorithms or API flows.",
+      "descriptionCn": "基于 Reverse Engineer Anything 的逆向分析工具，帮助还原关键逻辑、算法或接口流程。",
+      "version": "6.4.0",
+      "category": "devtools",
+      "tags": [
+        "linux",
+        "windows",
+        "integration"
+      ],
+      "useCases": [
+        "endpoint-forensics",
+        "incident-response"
+      ],
+      "trust": "official",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/skills/rea/manifest.json",
+      "guidedInstall": {
+        "kind": "rea",
+        "title": "REA 逆向分析"
+      }
+    },
+    {
       "id": "ndr-alert-analysis",
       "type": "skill",
       "name": "NDR Alert Analysis",

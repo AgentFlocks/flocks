@@ -229,3 +229,12 @@ describe('redactToolInput', () => {
     });
   });
 });
+
+describe('rea_analysis presentation', () => {
+  it('labels each action', () => {
+    expect(resolveToolPresentation('rea_analysis', { input: { action: 'status' } }, zh).label).toBe('REA 逆向分析');
+    expect(resolveToolPresentation('rea_analysis', { input: { action: 'install' } }, zh).label).toBe('安装 REA 插件');
+    expect(resolveToolPresentation('rea_analysis', { input: { action: 'install' } }, en).label).toBe('Install the REA plugin');
+    expect(resolveToolPresentation('rea_analysis', { input: { action: 'report' } }, en).label).toBe('Submit analysis report');
+  });
+});

@@ -123,6 +123,11 @@ const ACTION_LABEL_KEYS: Record<string, Record<string, string>> = {
     list: 'chat.tool.actions.listWeComTools',
     call: 'chat.tool.actions.useWeCom',
   },
+  rea_analysis: {
+    status: 'chat.tool.actions.reaStatus',
+    install: 'chat.tool.actions.reaInstall',
+    report: 'chat.tool.actions.reaReport',
+  },
 };
 
 const SENSITIVE_KEY_PATTERN =

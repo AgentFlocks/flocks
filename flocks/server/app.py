@@ -1239,6 +1239,8 @@ from flocks.server.routes.workflow import router as workflow_router, webhook_rou
 # WebUI: Skill & Command routes
 from flocks.server.routes.skill import router as skill_router
 from flocks.server.routes.hub import router as hub_router
+# REA reverse-analysis component install and session work
+from flocks.server.routes.rea import router as rea_router
 # WebUI: Hook management routes
 from flocks.server.routes.hooks import router as hooks_router
 # Model management: Default model, Usage routes
@@ -1296,6 +1298,7 @@ app.include_router(workflow_webhook_router, tags=["WorkflowWebhook"])
 app.include_router(skill_router, prefix="/api", tags=["Skill"])
 # WebUI: Hub routes
 app.include_router(hub_router, prefix="/api", tags=["Hub"])
+app.include_router(rea_router, prefix="/api", tags=["REA"])
 # WebUI: Hook management routes
 app.include_router(hooks_router, prefix="/api/hooks", tags=["Hooks"])
 # Model management: Default model routes

@@ -368,6 +368,42 @@ class TestUpload:
         assert "Unsupported file type" in result["error"]
         assert not (_ws(workspace_client) / "archive.zip").exists()
 
+    @pytest.mark.parametrize("filename", ["sample.exe", "libfoo.so", "rea_demo", "app.apk"])
+    def test_chat_upload_takes_reverse_samples_only_once_rea_is_ready(
+        self, workspace_client, monkeypatch, filename: str,
+    ):
+        from flocks.rea import runtime
+        from flocks.session.files import resolve_staged_chat_upload
+
+        client = _client(workspace_client)
+        body = b"\x7fELF\x02\x01\x01\x00"
+        monkeypatch.setattr(runtime, "is_ready", lambda: False)
+        refused = client.post(
+            "/api/workspace/upload?purpose=chat", files=[("files", (filename, body, "application/octet-stream"))],
+        ).json()["uploaded"][0]
+        assert "Unsupported file type" in refused["error"]
+
+        monkeypatch.setattr(runtime, "is_ready", lambda: True)
+        accepted = client.post(
+            "/api/workspace/upload?purpose=chat", files=[("files", (filename, body, "application/octet-stream"))],
+        ).json()["uploaded"][0]
+        assert accepted.get("error") is None
+        assert accepted["name"] == filename
+        assert accepted["is_text_file"] is False
+        assert resolve_staged_chat_upload("usr_workspace", accepted["uploadID"]).read_bytes() == body
+
+    def test_chat_upload_size_limit_still_applies_to_samples(self, workspace_client, monkeypatch):
+        from flocks.rea import runtime
+
+        monkeypatch.setattr(runtime, "is_ready", lambda: True)
+        monkeypatch.setenv("FLOCKS_WORKSPACE_MAX_UPLOAD_MB", "1")
+        client = _client(workspace_client)
+        result = client.post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("big.bin", b"\0" * (1024 * 1024 + 1), "application/octet-stream"))],
+        ).json()["uploaded"][0]
+        assert "File too large" in result["error"]
+
     @pytest.mark.parametrize("filename", ALL_SUPPORTED_UPLOAD_FILENAMES)
     def test_chat_upload_accepts_all_supported_file_types(
         self,
