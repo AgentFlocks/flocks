@@ -293,6 +293,48 @@ async def test_admin_relaxing_policy_via_dual_name_notifies_scheduler(client, ru
     assert run_requests == ["run"]
 
 
+_FOREVER_SNAKE = {"log_days": 0, "message_days": 0, "session_days": 0}
+
+
+@pytest.mark.parametrize("camel", [None, [], "soon", False, 123])
+async def test_member_cannot_change_policy_held_on_disk_under_mixed_spellings(client, camel):
+    # On disk the policy in force is "keep forever", stored with a null or junk
+    # camelCase key next to the real snake_case one (the loader resolves that to
+    # forever). The guard must read the disk the same way: a member saving
+    # camelCase 30/0/0 would make logs deletable, so it is a real change and is
+    # refused — it used to compare against the default and slip through.
+    from flocks.config.config import Config
+    from flocks.config.config_writer import ConfigWriter
+
+    on_disk = {"dataRetention": camel, "data_retention": _FOREVER_SNAKE}
+    ConfigWriter._write_raw(on_disk)
+    Config.clear_cache()
+
+    resp = _member_client().patch(
+        "/api/config/", json={"dataRetention": {"logDays": 30, "messageDays": 0, "sessionDays": 0}},
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert _flocks_json() == on_disk  # nothing written
+
+
+async def test_admin_relaxing_policy_held_on_disk_under_mixed_spellings_notifies(client, run_requests):
+    # Same disk state; an admin's save is a real change, so it goes through and
+    # kicks the scheduler (the guard used to call it "unchanged" and skip that).
+    from flocks.config.config import Config
+    from flocks.config.config_writer import ConfigWriter
+
+    ConfigWriter._write_raw({"dataRetention": None, "data_retention": _FOREVER_SNAKE})
+    Config.clear_cache()
+
+    resp = await client.patch(
+        "/api/config/", json={"dataRetention": {"logDays": 30, "messageDays": 0, "sessionDays": 0}},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert run_requests == ["run"]
+
+
 async def test_generic_config_change_triggers_the_scheduler(client, monkeypatch):
     # Changing the policy through the generic endpoint must kick the cleanup too,
     # the same as the dedicated endpoint, so an in-flight round is superseded.

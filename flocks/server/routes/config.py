@@ -814,6 +814,20 @@ def _policy_config_of(section: Any) -> Dict[str, int]:
     return policy_from_config(ConfigInfoModel.model_validate({"dataRetention": section})).to_config()
 
 
+def _retention_section_of(raw: Dict[str, Any]) -> Any:
+    """The data retention section ``raw`` carries, resolved exactly as the config loader does.
+
+    Both spellings go through ConfigInfo, whose ``_single_data_retention_spelling``
+    collapses a camelCase/snake_case mix into one value. Reading a request body
+    and the on-disk file this way means both are judged as the policy that will be
+    saved / is in force, never by hand-picking one key.
+    """
+    retention_only = {key: raw[key] for key in ("dataRetention", "data_retention") if key in raw}
+    if not retention_only:
+        return None
+    return ConfigInfoModel.model_validate(retention_only).data_retention
+
+
 async def _guard_data_retention_change(request: Request, config_data: Dict[str, Any]) -> bool:
     """Changing the global retention policy through this generic endpoint needs admin.
 
@@ -828,22 +842,14 @@ async def _guard_data_retention_change(request: Request, config_data: Dict[str, 
         return False
     # The model accepts both the alias (camelCase) and the field name
     # (snake_case), so either spelling is just as effective; consider both.
-    retention_only = {
-        key: config_data[key]
-        for key in ("dataRetention", "data_retention")
-        if key in config_data
-    }
-    if not retention_only:
+    if "dataRetention" not in config_data and "data_retention" not in config_data:
         return False
-    # Resolve the incoming policy through the same model the save validates with.
-    # ConfigInfo collapses a camelCase/snake_case mix into one canonical value
-    # (``_single_data_retention_spelling``), so this one validation yields exactly
-    # what update_config persists — the old hand-picked ``.get("dataRetention")``
-    # read a null camelCase value as "unchanged" while the save wrote the
-    # snake_case one. Only these two keys are inspected, so an unrelated invalid
-    # field cannot flip the decision either.
+    # Both sides are resolved with ``_retention_section_of`` — the same model and
+    # spelling rules the save and the loader use — never by hand-picking one key.
+    # Hand-picking is how a null camelCase value next to a real snake_case one
+    # used to read as "unchanged", on the request side and on the disk side.
     try:
-        incoming_section = ConfigInfoModel.model_validate(retention_only).data_retention
+        incoming_section = _retention_section_of(config_data)
     except Exception:
         # A retention value that fails validation fails the real save too (400);
         # don't gate on a request that cannot be written.
@@ -859,7 +865,12 @@ async def _guard_data_retention_change(request: Request, config_data: Dict[str, 
         on_disk = ConfigWriter._read_raw()
     except Exception:
         on_disk = {}
-    current_section = on_disk.get("dataRetention", on_disk.get("data_retention"))
+    try:
+        current_section = _retention_section_of(on_disk if isinstance(on_disk, dict) else {})
+    except Exception:
+        # Can't tell which policy is in force: treat any concrete value as a change.
+        require_admin(request)
+        return True
     if _policy_config_of(incoming_section) == _policy_config_of(current_section):
         return False
     require_admin(request)
