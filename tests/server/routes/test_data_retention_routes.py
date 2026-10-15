@@ -237,6 +237,62 @@ async def test_member_cannot_reestablish_policy_by_echoing_stale_value(client):
     assert _flocks_json()["dataRetention"] == {"logDays": 0, "messageDays": 0, "sessionDays": 0}
 
 
+async def test_member_cannot_bypass_guard_with_dual_name_keys(client):
+    # The exploit: a null (or non-object) camelCase value sent alongside a real
+    # snake_case value. The guard used to read camelCase-first, see the null, and
+    # judge "unchanged" — while the save re-parsed the snake_case value and wrote
+    # it. The guard now resolves the policy exactly as the save does, over the
+    # same two keys, so the mix cannot diverge.
+    from flocks.auth.context import AuthUser
+    from flocks.server.routes.config import router
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def as_member(request, call_next):
+        request.state.auth_user = AuthUser(id="m", username="m", role="member", status="active", must_reset_password=False)
+        return await call_next(request)
+
+    app.include_router(router, prefix="/api/config")
+    member = TestClient(app, raise_server_exceptions=False)
+
+    destructive = {"logDays": 1, "messageDays": 1, "sessionDays": 1}
+
+    resp = member.patch("/api/config/", json={
+        "dataRetention": None,
+        "data_retention": {"log_days": 1, "message_days": 1, "session_days": 1},
+    })
+    assert resp.status_code == 403, resp.text
+    assert _flocks_json().get("dataRetention") != destructive
+
+    # Non-object camelCase values must not be a back door either.
+    for camel in ([], "soon"):
+        member.patch("/api/config/", json={
+            "dataRetention": camel,
+            "data_retention": {"log_days": 1, "message_days": 1, "session_days": 1},
+        })
+        assert _flocks_json().get("dataRetention") != destructive
+
+
+async def test_admin_relaxing_policy_via_dual_name_notifies_scheduler(client, run_requests):
+    # Disk currently deletes aggressively; an admin relaxing it to "keep forever"
+    # — even through a dual-name payload — must register as a real change so the
+    # scheduler is kicked (bumping the generation that supersedes an in-flight,
+    # stricter round). The guard used to mis-read this as "unchanged".
+    from flocks.config.config import Config
+    from flocks.config.config_writer import ConfigWriter
+
+    ConfigWriter._write_raw({"dataRetention": {"logDays": 30, "messageDays": 30, "sessionDays": 30}})
+    Config.clear_cache()
+
+    resp = await client.patch("/api/config/", json={
+        "dataRetention": None,
+        "data_retention": {"log_days": 0, "message_days": 0, "session_days": 0},
+    })
+    assert resp.status_code == 200, resp.text
+    assert run_requests == ["run"]
+
+
 async def test_generic_config_change_triggers_the_scheduler(client, monkeypatch):
     # Changing the policy through the generic endpoint must kick the cleanup too,
     # the same as the dedicated endpoint, so an in-flight round is superseded.

@@ -954,6 +954,28 @@ class ConfigInfo(BaseModel):
             return value
         return None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _single_data_retention_spelling(cls, data: Any) -> Any:
+        """Collapse ``dataRetention`` / ``data_retention`` into the one canonical key.
+
+        Both spellings fill the same field. Left alone, a payload carrying both
+        keeps one as the field and the other as an *extra*; the config merge
+        (validate -> dump -> re-validate) can then turn that extra back into the
+        field, so a single validation and the value actually written disagree,
+        and the extra is written to disk and echoed by GET. Choosing one value
+        here, deterministically, makes every path agree: a real mapping under the
+        camelCase key wins; a null or non-mapping camelCase value means "not set
+        here" and yields to the snake_case one.
+        """
+        if not isinstance(data, dict) or "dataRetention" not in data or "data_retention" not in data:
+            return data
+        normalized = dict(data)
+        snake = normalized.pop("data_retention")
+        if not isinstance(normalized.get("dataRetention"), (dict, DataRetentionConfig)):
+            normalized["dataRetention"] = snake
+        return normalized
+
     experimental: Optional[ExperimentalConfig] = None
     concurrency: Optional[ConcurrencyConfig] = Field(
         None,

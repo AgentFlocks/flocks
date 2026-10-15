@@ -1084,33 +1084,23 @@ class Session:
         project_id: str,
         session_id: str,
         *,
-        require_idle_before_ms: Optional[int] = None,
+        precheck: Optional[Callable[[List["SessionInfo"]], bool]] = None,
     ) -> bool:
         """Permanently delete a session tree and all application-owned data.
 
-        ``require_idle_before_ms`` lets data retention abort if the tree was used
-        since it planned the delete: under the lifecycle guard, if any session in
-        the tree has activity at or after that time, nothing is deleted.
+        ``precheck`` lets data retention abort if the tree must be kept: it is
+        called with the freshly-collected tree while every session's lifecycle
+        lock is held and *before* the lifecycle generation is bumped or any abort
+        side effect runs, so returning ``False`` leaves the tree completely
+        untouched (nothing stopped, no queue cleared, no in-flight write rejected).
         """
 
         from flocks.project.project import Project
 
         async with Project.lifecycle_guard(project_id):
             return await cls._delete_locked(
-                project_id, session_id, require_idle_before_ms=require_idle_before_ms,
+                project_id, session_id, precheck=precheck,
             )
-
-    @staticmethod
-    def _tree_is_idle_before(sessions: List["SessionInfo"], before_ms: int) -> bool:
-        """True iff no session in the tree is running or has activity at/after ``before_ms``."""
-        from flocks.session.session_loop import SessionLoop
-
-        for s in sessions:
-            if max(int(s.time.updated or 0), int(s.time.created or 0)) >= before_ms:
-                return False
-            if SessionLoop.is_running(s.id):
-                return False
-        return True
 
     @classmethod
     async def _delete_locked(
@@ -1118,7 +1108,7 @@ class Session:
         project_id: str,
         session_id: str,
         *,
-        require_idle_before_ms: Optional[int] = None,
+        precheck: Optional[Callable[[List["SessionInfo"]], bool]] = None,
     ) -> bool:
         """
         Permanently delete a session tree and all application-owned data.
@@ -1132,19 +1122,18 @@ class Session:
         Returns:
             True if deleted
         """
-        sessions = await cls._begin_lifecycle_transition(project_id, session_id)
+        # ``precheck`` is evaluated inside _begin_lifecycle_transition — under the
+        # tree's lifecycle locks and before the generation bump — so a tree that
+        # must be kept is never claimed: no generation change, no abort side
+        # effects, no in-flight write wrongly rejected. Once claimed, the
+        # transition blocks new activity, so no further idle re-check is needed.
+        sessions = await cls._begin_lifecycle_transition(
+            project_id, session_id, precheck=precheck,
+        )
         if not sessions:
             return False
         deleted = False
         try:
-            # Retention: re-check the (freshly collected) tree BEFORE any abort
-            # side effect. If it was touched or started running since retention
-            # planned this, leave it untouched — don't stop it or clear its queue.
-            if require_idle_before_ms is not None and not cls._tree_is_idle_before(
-                sessions, require_idle_before_ms
-            ):
-                return False
-
             if not await cls._stop_session_tree_for_archive(sessions):
                 return False
             for session in sessions:
@@ -1154,10 +1143,6 @@ class Session:
             if not refreshed:
                 return False
             sessions = refreshed
-            if require_idle_before_ms is not None and not cls._tree_is_idle_before(
-                sessions, require_idle_before_ms
-            ):
-                return False
             session_ids = [session.id for session in sessions]
 
             from flocks.permission.next import PermissionNext
@@ -1618,8 +1603,15 @@ class Session:
         session_id: str,
         *,
         require_root: bool = False,
+        precheck: Optional[Callable[[List[SessionInfo]], bool]] = None,
     ) -> List[SessionInfo]:
-        """Claim a complete tree so ordinary writes cannot overtake its transition."""
+        """Claim a complete tree so ordinary writes cannot overtake its transition.
+
+        ``precheck`` (if given) is called with the tree re-read under all its
+        lifecycle locks, right before the claim: returning ``False`` abandons the
+        transition without marking it or bumping any generation, so a caller that
+        decides not to proceed leaves the tree exactly as it found it.
+        """
         async with cls._tree_lock:
             sessions = await cls.collect_tree(project_id, session_id)
             if not sessions:
@@ -1641,6 +1633,10 @@ class Session:
                     or ids & cls._lifecycle_transition_ids
                     or any(cls.has_active_operations(item_id) for item_id in ids)
                 ):
+                    return []
+                # Final caller veto before the claim: still under the locks, so no
+                # generation is bumped and no transition is marked if it declines.
+                if precheck is not None and not precheck(sessions):
                     return []
                 cls._lifecycle_transition_ids.update(ids)
                 for item_id in ids:

@@ -96,6 +96,35 @@ def test_oversized_values_are_capped():
     assert policy.log_days == 3650
 
 
+_ONES = {"log_days": 1, "message_days": 1, "session_days": 1}
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        ({"dataRetention": None, "data_retention": _ONES}, (1, 1, 1)),
+        ({"dataRetention": [], "data_retention": _ONES}, (1, 1, 1)),
+        ({"dataRetention": "soon", "data_retention": _ONES}, (1, 1, 1)),
+        ({"dataRetention": {"logDays": 9, "messageDays": 9, "sessionDays": 9}, "data_retention": _ONES}, (9, 9, 9)),
+        ({"data_retention": _ONES}, (1, 1, 1)),
+    ],
+)
+def test_both_spellings_collapse_to_one_value_that_survives_the_save_round_trip(payload, expected):
+    # Config.update writes validate -> dump -> re-validate. A camelCase/snake_case
+    # mix must resolve to the same single value at every step, and must never
+    # leave the second spelling behind as an extra that gets written to disk —
+    # otherwise one validation (the admin guard) and the saved value disagree.
+    config = ConfigInfo.model_validate(payload)
+    section = config.data_retention
+    assert (section.log_days, section.message_days, section.session_days) == expected
+    assert "data_retention" not in (config.model_extra or {})
+
+    dumped = config.model_dump(by_alias=True, exclude_none=True)
+    assert "data_retention" not in dumped
+    again = ConfigInfo.model_validate(dumped).data_retention
+    assert (again.log_days, again.message_days, again.session_days) == expected
+
+
 @pytest.mark.parametrize(
     "values",
     [

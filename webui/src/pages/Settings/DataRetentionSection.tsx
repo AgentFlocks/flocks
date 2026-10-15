@@ -90,14 +90,17 @@ export default function DataRetentionSection() {
     }
   }, [loadFailedMessage, showToastError]);
 
-  // Manual refresh after a timeout: restart the polling window so a cleanup that
-  // is still running keeps being followed (the effect's deps wouldn't otherwise
-  // change, leaving it stuck).
+  // Manual refresh after a timeout. Only on success (refresh() returned state and
+  // already cleared the timed-out flag) do we restart the polling window, so a
+  // cleanup that is still running keeps being followed. If the refresh itself
+  // fails, refresh() leaves the timed-out flag set and shows a toast, so the
+  // button stays instead of vanishing into a blank "never ran" state.
   const manualRefresh = useCallback(async () => {
-    pollStartRef.current = null;
-    setPollTimedOut(false);
-    setPollTick((tick) => tick + 1);
-    await refresh();
+    const next = await refresh();
+    if (next) {
+      pollStartRef.current = null;
+      setPollTick((tick) => tick + 1);
+    }
   }, [refresh]);
 
   useEffect(() => {

@@ -2113,6 +2113,8 @@ class Message:
         cls,
         session_id: str,
         selector: "Callable[[List[Dict[str, Any]], Optional[Any]], Iterable[str]]",
+        *,
+        is_busy: "Optional[Callable[[Any], bool]]" = None,
     ) -> int:
         """Delete the messages ``selector`` picks, decided under the session lock.
 
@@ -2120,7 +2122,11 @@ class Message:
         freshly-read stored message list and the live session, so a retention
         decision (which turns are expired, the current revert point) can't be
         stale by the time it deletes. Returns the count, or -1 if the session is
-        running (left alone).
+        busy (left alone).
+
+        ``is_busy(session)`` is the authoritative "leave it alone" check (a
+        running loop, or a non-idle status such as compacting/dreaming that has
+        no live loop). Without it, only a running loop is treated as busy.
         """
         from flocks.session.session import Session
         from flocks.session.session_loop import SessionLoop
@@ -2131,12 +2137,15 @@ class Message:
         # before the message lock, so this order cannot deadlock.
         async with Session.lifecycle_lock(session_id):
             async with _session_locks.get(session_id):
-                if SessionLoop.is_running(session_id):
+                session = await Session.get_by_id_unfiltered(session_id)
+                if is_busy is not None:
+                    if session is not None and is_busy(session):
+                        return -1
+                elif SessionLoop.is_running(session_id):
                     return -1
                 stored = await Storage.get(f"{cls._MESSAGE_PREFIX}:{session_id}")
                 if not isinstance(stored, list) or not stored:
                     return 0
-                session = await Session.get_by_id_unfiltered(session_id)
                 target_ids = {mid for mid in selector(stored, session) if mid}
                 if not target_ids:
                     return 0

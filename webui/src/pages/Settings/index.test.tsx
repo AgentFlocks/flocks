@@ -329,11 +329,42 @@ it('restarts polling when the admin refreshes after a timeout', async () => {
       const refreshButton = screen.getByRole('button', { name: /dataRetentionRefresh/ });
 
       const before = dataRetentionApi.get.mock.calls.length;
-      await act(async () => { refreshButton.click(); await Promise.resolve(); });
-      // Polling resumes: at least one more poll after refresh.
+      // The manual refresh fires one request of its own...
+      await act(async () => { refreshButton.click(); await vi.advanceTimersByTimeAsync(0); });
+      const afterManual = dataRetentionApi.get.mock.calls.length;
+      expect(afterManual).toBeGreaterThan(before);
+      // ...and a *timed* poll must fire afterwards, proving polling actually
+      // resumed (the old `calls > before` check could not tell the resumed poll
+      // apart from the manual GET itself).
       await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
-      expect(dataRetentionApi.get.mock.calls.length).toBeGreaterThan(before);
+      expect(dataRetentionApi.get.mock.calls.length).toBeGreaterThan(afterManual);
       expect(screen.getByText('dataRetentionRunning')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the refresh button when a manual refresh after a timeout fails', async () => {
+    vi.useFakeTimers();
+    try {
+      dataRetentionApi.get.mockResolvedValue({ logDays: 7, messageDays: 0, sessionDays: 0, running: true, lastRun: null });
+
+      renderSettings('/settings/preferences');
+      await act(async () => { await Promise.resolve(); });
+
+      for (let i = 0; i < 32; i += 1) {
+        await act(async () => { await vi.advanceTimersByTimeAsync(2100); });
+      }
+      expect(screen.getByText('dataRetentionStatusUnknown')).toBeInTheDocument();
+      const refreshButton = screen.getByRole('button', { name: /dataRetentionRefresh/ });
+
+      // The refresh itself fails: the unknown state and the button must stay,
+      // instead of collapsing into a blank "never ran a cleanup" dead end.
+      dataRetentionApi.get.mockRejectedValueOnce(new Error('network'));
+      await act(async () => { refreshButton.click(); await vi.advanceTimersByTimeAsync(0); });
+
+      expect(screen.getByText('dataRetentionStatusUnknown')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /dataRetentionRefresh/ })).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }

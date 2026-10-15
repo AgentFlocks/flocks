@@ -335,7 +335,7 @@ async def test_delete_selected_honors_revert_set_after_planning(tmp_path):
     deleted = await Message.delete_selected(session.id, selector)
 
     # Only the first turn goes; the second turn is protected by the live revert.
-    assert deleted == 2
+    assert deleted == len(first) == 2
     assert await _stored_message_ids(session.id) == second
 
 
@@ -357,14 +357,25 @@ async def test_record_delete_respects_mtime_touched_after_planning(tmp_path):
     assert outcome == "deleted" and freed > 0 and not path.exists()
 
 
+def _retainable_before(cutoff_ms: int):
+    """A retention-style precheck: keep the tree if any session is newer than the cutoff."""
+    def ok_to_delete(tree) -> bool:
+        return all(
+            max(int(s.time.updated or 0), int(s.time.created or 0)) < cutoff_ms
+            for s in tree
+        )
+    return ok_to_delete
+
+
 async def test_session_delete_aborts_when_touched_since_planning(tmp_path):
     session = await _new_session(tmp_path)
     await _set_session_time(session, created_ms=_days_ago_ms(60), updated_ms=NOW_MS)  # just used
 
-    # Retention planned under a 30-day cutoff; the re-check under the lock sees
+    # Retention planned under a 30-day cutoff; the precheck under the lock sees
     # the fresh activity and refuses.
-    cutoff_ms = _days_ago_ms(30)
-    deleted = await Session.delete(session.project_id, session.id, require_idle_before_ms=cutoff_ms)
+    deleted = await Session.delete(
+        session.project_id, session.id, precheck=_retainable_before(_days_ago_ms(30)),
+    )
 
     assert deleted is False
     assert await Session.get_by_id_unfiltered(session.id) is not None
@@ -410,8 +421,10 @@ async def test_record_delete_failure_is_counted_as_error(tmp_path, monkeypatch):
     assert report.errors >= 1
 
 
-async def test_delete_abort_does_not_stop_or_clear_the_session(tmp_path, monkeypatch):
-    # Retention must not abort/clear a session it then decides to keep.
+async def test_delete_abort_does_not_stop_clear_or_bump_generation(tmp_path, monkeypatch):
+    # Retention must not abort/clear a session it then decides to keep, and must
+    # not even bump its lifecycle generation: the precheck runs under the lock
+    # before the bump, so an in-flight write carrying the old generation survives.
     session = await _new_session(tmp_path)
     await _set_session_time(session, created_ms=_days_ago_ms(60), updated_ms=NOW_MS)  # touched
 
@@ -424,8 +437,102 @@ async def test_delete_abort_does_not_stop_or_clear_the_session(tmp_path, monkeyp
 
     monkeypatch.setattr(Session, "_stop_session_tree_for_archive", classmethod(lambda cls, s, **k: spy_stop(s, **k)))
 
-    deleted = await Session.delete(session.project_id, session.id, require_idle_before_ms=_days_ago_ms(30))
+    gen_before = Session.lifecycle_generation(session.id)
+    deleted = await Session.delete(
+        session.project_id, session.id, precheck=_retainable_before(_days_ago_ms(30)),
+    )
 
     assert deleted is False
     assert stop_calls["n"] == 0  # bailed out before stopping the session
+    assert Session.lifecycle_generation(session.id) == gen_before  # generation untouched
     assert await Session.get_by_id_unfiltered(session.id) is not None
+
+
+def _status(target_id: str, type_when_match: str, type_otherwise: str = "idle"):
+    """A SessionStatus.get_for_session stand-in: ``type_when_match`` for one session."""
+    from types import SimpleNamespace
+
+    def get_for_session(cls, sid, preferred_instance_id=None):
+        return SimpleNamespace(type=type_when_match if sid == target_id else type_otherwise)
+
+    return classmethod(get_for_session)
+
+
+async def test_busy_check_covers_non_idle_status_without_a_running_loop(tmp_path, monkeypatch):
+    # The retention "leave it alone" predicate must catch a session that is doing
+    # work under a non-idle status (dreaming/compacting) even when no SessionLoop
+    # is registered for it — looking only at the loop would miss these.
+    from flocks.retention.cleanup import _session_is_busy
+    from flocks.session.core.status import SessionStatus
+    from flocks.session.session_loop import SessionLoop
+
+    session = await _new_session(tmp_path)
+    monkeypatch.setattr(SessionLoop, "is_running", classmethod(lambda cls, sid: False))
+
+    monkeypatch.setattr(SessionStatus, "get_for_session", _status(session.id, "dreaming"))
+    assert _session_is_busy(session) is True
+
+    monkeypatch.setattr(SessionStatus, "get_for_session", _status(session.id, "idle"))
+    assert _session_is_busy(session) is False
+
+
+async def test_session_turning_busy_after_planning_is_left_alone(tmp_path, monkeypatch):
+    # Idle when retention plans, but dreaming (a non-idle status with no live
+    # loop) by the time the delete claims the tree. The precheck that runs under
+    # the tree's lifecycle locks must see it and veto: nothing deleted, nothing
+    # stopped, and the lifecycle generation left alone.
+    from types import SimpleNamespace
+
+    from flocks.session.core.status import SessionStatus
+    from flocks.session.session_loop import SessionLoop
+
+    session = await _new_session(tmp_path)
+    await _set_session_time(session, created_ms=_days_ago_ms(60), updated_ms=_days_ago_ms(45))
+    monkeypatch.setattr(SessionLoop, "is_running", classmethod(lambda cls, sid: False))
+
+    claiming = {"on": False}
+    real_begin = Session._begin_lifecycle_transition.__func__
+
+    async def spy_begin(cls, project_id, session_id, **kwargs):
+        claiming["on"] = True  # from the claim onwards the session reports "dreaming"
+        return await real_begin(cls, project_id, session_id, **kwargs)
+
+    monkeypatch.setattr(Session, "_begin_lifecycle_transition", classmethod(spy_begin))
+    monkeypatch.setattr(
+        SessionStatus,
+        "get_for_session",
+        classmethod(lambda cls, sid, preferred_instance_id=None: SimpleNamespace(
+            type="dreaming" if claiming["on"] and sid == session.id else "idle"
+        )),
+    )
+    gen_before = Session.lifecycle_generation(session.id)
+
+    report = await apply_policy(_policy(sessions=30), now=NOW)
+
+    assert claiming["on"]  # planning passed it; the delete really tried to claim the tree
+    assert report.sessions == 0
+    assert report.skipped_busy >= 1
+    assert Session.lifecycle_generation(session.id) == gen_before
+    assert await Session.get_by_id_unfiltered(session.id) is not None
+
+
+async def test_delete_selected_skips_non_idle_status_via_is_busy(tmp_path, monkeypatch):
+    # Message trimming uses the same full busy check: a dreaming session with no
+    # running loop is left alone (return -1), not trimmed.
+    from flocks.retention.cleanup import _session_is_busy
+    from flocks.session.core.status import SessionStatus
+    from flocks.session.session_loop import SessionLoop
+
+    session = await _new_session(tmp_path)
+    await _turn(session.id, _days_ago_ms(45), _days_ago_ms(45), "old")
+    monkeypatch.setattr(SessionLoop, "is_running", classmethod(lambda cls, sid: False))
+    monkeypatch.setattr(SessionStatus, "get_for_session", _status(session.id, "dreaming"))
+
+    result = await Message.delete_selected(
+        session.id,
+        lambda stored, s: [m["id"] for m in stored],
+        is_busy=_session_is_busy,
+    )
+
+    assert result == -1  # busy: left alone
+    assert len(await _stored_message_ids(session.id)) == 2  # nothing trimmed

@@ -826,11 +826,32 @@ async def _guard_data_retention_change(request: Request, config_data: Dict[str, 
     """
     if not isinstance(config_data, dict):
         return False
-    # The model accepts both the alias and the field name, so a snake_case key
-    # is just as effective as camelCase; check both.
-    if "dataRetention" not in config_data and "data_retention" not in config_data:
+    # The model accepts both the alias (camelCase) and the field name
+    # (snake_case), so either spelling is just as effective; consider both.
+    retention_only = {
+        key: config_data[key]
+        for key in ("dataRetention", "data_retention")
+        if key in config_data
+    }
+    if not retention_only:
         return False
-    incoming_section = config_data.get("dataRetention", config_data.get("data_retention"))
+    # Resolve the incoming policy through the same model the save validates with.
+    # ConfigInfo collapses a camelCase/snake_case mix into one canonical value
+    # (``_single_data_retention_spelling``), so this one validation yields exactly
+    # what update_config persists — the old hand-picked ``.get("dataRetention")``
+    # read a null camelCase value as "unchanged" while the save wrote the
+    # snake_case one. Only these two keys are inspected, so an unrelated invalid
+    # field cannot flip the decision either.
+    try:
+        incoming_section = ConfigInfoModel.model_validate(retention_only).data_retention
+    except Exception:
+        # A retention value that fails validation fails the real save too (400);
+        # don't gate on a request that cannot be written.
+        return False
+    if incoming_section is None:
+        # ``None`` is dropped by the exclude_none config merge, so the persisted
+        # policy is left unchanged — there is nothing to gate.
+        return False
     # Compare against what is persisted on disk, not a possibly-stale in-process
     # cache: a worker whose cache lags an admin's change must not let a member
     # re-establish the old (deleting) policy by echoing it.

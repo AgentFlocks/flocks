@@ -364,22 +364,35 @@ async def apply_policy(
     deleted_ids: set[str] = set()
     if targets.sessions:
         cutoff_ms = now_ms - policy.session_days * DAY_MS
+
+        def _tree_retainable_for_delete(tree: Sequence[Any]) -> bool:
+            """Keep the tree (abort the delete) if it was used since the plan or is busy.
+
+            Passed to Session.delete, which runs it under the tree's lifecycle
+            locks before bumping the generation, so a session that became busy
+            (running, or a non-idle status such as compacting/dreaming with no
+            live loop) is never stopped, cleared or deleted.
+            """
+            for session in tree:
+                if _session_last_activity_ms(session) >= cutoff_ms:
+                    return False
+                if _session_is_busy(session):
+                    return False
+            return True
+
         for target in targets.sessions:
             if _superseded():
                 break
             tree = await Session.collect_tree(target.project_id, target.root_id)
             if not tree:
                 continue
-            if max(_session_last_activity_ms(session) for session in tree) >= cutoff_ms:
-                continue  # used again since the plan was made
-            if any(_session_is_busy(session) for session in tree):
-                report.skipped_busy += 1
+            if not _tree_retainable_for_delete(tree):
+                report.skipped_busy += 1  # used again or busy since the plan was made
                 continue
             try:
-                # Session.delete re-checks the activity under its lifecycle guard
-                # and aborts if the tree was touched since this point.
                 deleted = await Session.delete(
-                    target.project_id, target.root_id, require_idle_before_ms=cutoff_ms,
+                    target.project_id, target.root_id,
+                    precheck=_tree_retainable_for_delete,
                 )
             except Exception as exc:
                 log.warning("retention.session_delete_failed", {
@@ -407,7 +420,9 @@ async def apply_policy(
             if _superseded():
                 break
             try:
-                deleted = await Message.delete_selected(session_id, _expired_selector)
+                deleted = await Message.delete_selected(
+                    session_id, _expired_selector, is_busy=_session_is_busy,
+                )
             except Exception as exc:
                 log.warning("retention.message_delete_failed", {
                     "session_id": session_id,
