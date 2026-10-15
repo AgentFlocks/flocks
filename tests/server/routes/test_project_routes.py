@@ -12,6 +12,60 @@ from flocks.storage.storage import Storage
 
 
 @pytest.mark.asyncio
+async def test_audit_workspace_does_not_adopt_session_manager_projects(
+    client: AsyncClient,
+    tmp_path: Path,
+):
+    session_projects = []
+    for index in range(4):
+        response = await client.post(
+            "/api/project",
+            json={"name": f"Chat project {index}", "worktree": str(tmp_path / f"chat-{index}")},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        session_projects.append(response.json())
+
+    session_response = await client.post(
+        "/api/session",
+        json={"title": "Existing conversation", "projectID": session_projects[0]["id"]},
+    )
+    assert session_response.status_code == status.HTTP_200_OK
+    session = session_response.json()
+    workbench_response = await client.get("/api/project")
+    assert workbench_response.status_code == status.HTTP_200_OK
+    before = {item["id"]: item for item in workbench_response.json()}
+    assert set(before) == {item["id"] for item in session_projects}
+    assert before[session_projects[0]["id"]]["sessionCount"] == 1
+
+    empty_audit = await client.get("/api/project", params={"scope": "code-security"})
+    assert empty_audit.status_code == status.HTTP_200_OK
+    assert empty_audit.json() == []
+
+    audit_response = await client.post(
+        "/api/project",
+        json={"name": "Audit source", "worktree": str(tmp_path / "audit"), "scope": "code-security"},
+    )
+    assert audit_response.status_code == status.HTTP_200_OK
+    audit_project = audit_response.json()
+    other_response = await client.post(
+        "/api/project",
+        json={"name": "Other workspace", "worktree": str(tmp_path / "other"), "scope": "extension-b"},
+    )
+    assert other_response.status_code == status.HTTP_200_OK
+
+    audit_list = await client.get("/api/project/", params={"scope": "code-security"})
+    assert audit_list.status_code == status.HTTP_200_OK
+    assert [item["id"] for item in audit_list.json()] == [audit_project["id"]]
+    assert audit_list.json()[0]["sessionCount"] == 0
+    workbench_after = await client.get("/api/project", params={"scope": "workbench"})
+    assert workbench_after.status_code == status.HTTP_200_OK
+    assert {item["id"]: item for item in workbench_after.json()} == before
+    session_after = await client.get(f"/api/session/{session['id']}")
+    assert session_after.status_code == status.HTTP_200_OK
+    assert session_after.json()["projectID"] == session_projects[0]["id"]
+
+
+@pytest.mark.asyncio
 async def test_project_crud_uses_registry_without_project_database_rows(
     client: AsyncClient,
     tmp_path: Path,
