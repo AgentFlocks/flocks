@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import asyncio
+import json
 import secrets
+from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
 import pytest
@@ -223,6 +225,119 @@ async def test_current_release_http_allows_logged_in_member(client, monkeypatch:
     assert response.status_code == 200, response.text
     assert response.json()["current_version"] == "2026.9.23"
     assert response.json()["release_notes"] == "Full official notes by @author in #749"
+
+
+def _write_pro_install_marker(**fields) -> None:
+    marker = Path(os.environ["FLOCKS_ROOT"]) / "run" / "pro-bundle-installed.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "bundle_version": "v2026.10.16",
+        "core_version": "v2026.10.15",
+        "flockspro_component_version": "2026.10.16",
+        **fields,
+    }
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+
+
+async def test_current_release_announces_installed_pro_bundle_notes(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import update as update_routes
+
+    _write_pro_install_marker(release_notes="### Flocks Pro\n\n- 报告中心不再列出空报告")
+
+    async def _oss_release(_version):
+        raise AssertionError("a Pro install must not announce the OSS Core notes")
+
+    monkeypatch.setattr(update_routes, "require_user", lambda _request: object())
+    monkeypatch.setattr(update_routes, "get_current_version", lambda: "2026.10.15")
+    monkeypatch.setattr(update_routes, "get_installed_release", _oss_release)
+
+    info = await update_routes.current_release(_request())
+
+    assert info.edition == "flockspro"
+    assert info.current_version == info.latest_version == "v2026.10.16"
+    assert info.current_bundle_version == "v2026.10.16"
+    assert info.current_core_version == "v2026.10.15"
+    assert info.release_notes == "### Flocks Pro\n\n- 报告中心不再列出空报告"
+
+
+async def test_current_release_caches_pro_lookup_per_install_marker(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import update as update_routes
+    from flocks.updater.models import VersionInfo
+
+    looked_up: list[tuple[str, str]] = []
+
+    async def _pro_release(marker):
+        looked_up.append((marker["bundle_version"], marker["flockspro_component_version"]))
+        return VersionInfo(
+            current_version=marker["bundle_version"],
+            latest_version=marker["bundle_version"],
+            edition="flockspro",
+            release_notes="Pro notes",
+        )
+
+    monkeypatch.setattr(update_routes, "require_user", lambda _request: object())
+    monkeypatch.setattr(update_routes, "get_installed_pro_release", _pro_release)
+
+    _write_pro_install_marker()
+    await asyncio.gather(*[update_routes.current_release(_request()) for _ in range(3)])
+    await update_routes.current_release(_request())
+    _write_pro_install_marker(flockspro_component_version="2026.10.17")
+    await update_routes.current_release(_request())
+    _write_pro_install_marker(bundle_version="v2026.10.20")
+    upgraded = await update_routes.current_release(_request())
+
+    assert looked_up == [
+        ("v2026.10.16", "2026.10.16"),
+        ("v2026.10.16", "2026.10.17"),
+        ("v2026.10.20", "2026.10.16"),
+    ]
+    assert upgraded.latest_version == "v2026.10.20"
+
+
+async def test_current_release_refreshes_after_a_same_number_component_update(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import update as update_routes
+
+    monkeypatch.setattr(update_routes, "require_user", lambda _request: object())
+
+    _write_pro_install_marker(flockspro_component_version="v2026.6.1", release_notes="组件 v2026.6.1 的说明")
+    first = await update_routes.current_release(_request())
+    _write_pro_install_marker(flockspro_component_version="v2026.6.2", release_notes="组件 v2026.6.2 的说明")
+    second = await update_routes.current_release(_request())
+
+    assert first.release_notes == "组件 v2026.6.1 的说明"
+    assert second.current_bundle_version == first.current_bundle_version == "v2026.10.16"
+    assert second.current_pro_component_version == "v2026.6.2"
+    assert second.release_notes == "组件 v2026.6.2 的说明"
+
+
+async def test_current_release_http_returns_pro_notes_to_members(client, monkeypatch: pytest.MonkeyPatch):
+    from flocks.auth.service import AuthService
+    from flocks.server.routes import update as update_routes
+
+    password = secrets.token_urlsafe(18)  # secret-guard: allow - generated test credential
+    await AuthService.bootstrap_admin(username="pro-release-admin", password=password)
+    member = await AuthService._create_user_internal(username="pro-release-member", password=password)
+    browser_headers = {"sec-fetch-mode": "cors"}
+
+    async def _oss_release(_version):
+        raise AssertionError("a Pro install must not announce the OSS Core notes")
+
+    monkeypatch.setattr(update_routes, "get_installed_release", _oss_release)
+    _write_pro_install_marker(release_notes="Pro notes for members")
+
+    login = await client.post(
+        "/api/auth/login",
+        json={"username": member.username, "password": password},
+        headers=browser_headers,
+    )
+    assert login.status_code == 200, login.text
+    response = await client.get("/api/update/current-release", headers=browser_headers)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["edition"] == "flockspro"
+    assert body["current_bundle_version"] == "v2026.10.16"
+    assert body["release_notes"] == "Pro notes for members"
 
 
 async def test_check_version_reuses_cached_flocks_result(monkeypatch: pytest.MonkeyPatch):
