@@ -222,7 +222,13 @@ def main_callback(
     Flocks Python implementation
     """
     # Initialize logging
-    asyncio.run(Log.init(print=print_logs, dev=False, level=log_level))
+    async def _init_logging() -> None:
+        from flocks.retention import preload_log_retention
+
+        await preload_log_retention()
+        await Log.init(print=print_logs, dev=False, level=log_level)
+
+    asyncio.run(_init_logging())
 
     Log.Default.info(
         "flocks.start",
