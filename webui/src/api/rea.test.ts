@@ -20,15 +20,6 @@ describe('reaApi', () => {
     expect(client.get.mock.calls[1]).toEqual(['/api/rea/status', { params: { refresh: true } }]);
   });
 
-  it('reserves and records the install conversation', async () => {
-    client.post.mockResolvedValueOnce({ data: { decision: 'create', sessionId: null } });
-    client.post.mockResolvedValueOnce({ data: { installSessionId: 'ses_1' } });
-    expect(await reaApi.reserveInstallSession()).toEqual({ decision: 'create', sessionId: null });
-    await reaApi.recordInstallSession('ses_1');
-    expect(client.post.mock.calls[0]).toEqual(['/api/rea/install-session/reserve']);
-    expect(client.post.mock.calls[1]).toEqual(['/api/rea/install-session', { sessionId: 'ses_1' }]);
-  });
-
   it('previews and starts the uninstall', async () => {
     client.get.mockResolvedValue({ data: { removes: [], keeps: [], tasks: [] } });
     client.post.mockResolvedValue({ data: { state: 'uninstalling' } });
@@ -49,9 +40,13 @@ describe('reaApi', () => {
   });
 
   it('keeps plain and network errors readable', async () => {
-    client.post.mockRejectedValueOnce({ response: { status: 404, data: { detail: 'Session not found' } } });
-    await expect(reaApi.recordInstallSession('gone')).rejects.toMatchObject({ code: 'request_failed', message: 'Session not found' });
+    client.get.mockRejectedValueOnce({ response: { status: 403, data: { detail: 'Admin required' } } });
+    await expect(reaApi.uninstallPreview()).rejects.toMatchObject({ code: 'request_failed', message: 'Admin required' });
     client.post.mockRejectedValueOnce(new Error('Network Error'));
-    await expect(reaApi.reserveInstallSession()).rejects.toMatchObject({ code: 'network', status: 0 });
+    await expect(reaApi.uninstall(false)).rejects.toMatchObject({ code: 'network', status: 0 });
+  });
+
+  it('no longer reserves or records an install conversation: the entry only fills the guide in', () => {
+    expect(Object.keys(reaApi).sort()).toEqual(['status', 'uninstall', 'uninstallPreview']);
   });
 });

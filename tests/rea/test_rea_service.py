@@ -195,17 +195,6 @@ async def test_status_badge_keeps_the_pre_uninstall_state(fake_toolchain, fake_m
 # ── install conversation ──
 
 
-def test_reserving_the_install_conversation(monkeypatch):
-    assert service.reserve_install_session(ADMIN, "ses_live") == "open"
-    assert service.reserve_install_session(ADMIN, None) == "create"
-    assert service.reserve_install_session(ADMIN, None) == "pending"  # another tab is creating it
-    assert service.reserve_install_session(ADMIN_2, None) == "create"  # per account
-
-    later = service._now_ms() + service.INSTALL_SESSION_PENDING_MS + 1
-    monkeypatch.setattr(service, "_now_ms", lambda: later)
-    assert service.reserve_install_session(ADMIN, None) == "create"
-
-
 def test_recorded_install_conversation_expires_unless_the_install_runs(monkeypatch):
     service.record_install_session("ses_install", ADMIN)
     assert service.recent_install_session(ADMIN) == "ses_install"
@@ -322,16 +311,6 @@ def test_a_successful_uninstall_outranks_an_earlier_failed_install(fake_mcp):
     # An install started after the uninstall counts again.
     ReaInstaller._job = _job(status="failed", stage="components", tier="light", startedAt=40, finishedAt=41)
     assert service.install_state() == "install_failed"
-
-
-def test_a_conversation_another_tab_recorded_meanwhile_is_not_created_twice():
-    looked_at = service._now_ms()
-    # Tab A created and recorded its conversation after this click looked for one.
-    service.record_install_session("ses_from_tab_a", ADMIN)
-    assert service.reserve_install_session(ADMIN, None, looked_at=looked_at) == "pending"
-    # A recorded conversation the lookup already saw and rejected (deleted, archived) does not block.
-    later = service._now_ms() + 1
-    assert service.reserve_install_session(ADMIN, None, looked_at=later) == "create"
 
 
 @pytest.mark.asyncio

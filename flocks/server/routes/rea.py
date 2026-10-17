@@ -1,11 +1,11 @@
-"""REA plugin routes: the unified status, the install conversation and the uninstall."""
+"""REA plugin routes: the unified status and the uninstall."""
 
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from flocks.rea import runtime, service
+from flocks.rea import service
 from flocks.rea.uninstaller import (
     ReaUninstaller,
     TasksRunning,
@@ -21,10 +21,6 @@ router = APIRouter()
 log = Log.create(service="rea-routes")
 
 
-class InstallSessionRequest(BaseModel):
-    sessionId: str = Field(..., min_length=1, max_length=128)
-
-
 class UninstallRequest(BaseModel):
     # The user saw the running related tasks and agreed to stop them.
     stopTasks: bool = False
@@ -34,34 +30,6 @@ class UninstallRequest(BaseModel):
 async def rea_status(request: Request, refresh: bool = Query(False)):
     user = require_user(request)
     return await service.build_status(user, refresh=refresh)
-
-
-@router.post("/rea/install-session/reserve", summary="Open or create the REA install conversation")
-async def rea_reserve_install_session(request: Request):
-    """``open`` the account's recent install conversation, ``create`` one, or ``pending`` (another tab creates it)."""
-
-    user = require_admin(request)
-    looked_at = service._now_ms()
-    live = await service.live_install_session(user)
-    decision = await runtime.run_in_thread(service.reserve_install_session, user, live, looked_at=looked_at)
-    return {"decision": decision, "sessionId": live if decision == "open" else None}
-
-
-@router.post("/rea/install-session", summary="Record the conversation that installs REA")
-async def rea_install_session(body: InstallSessionRequest, request: Request):
-    """Lets the next click reopen this conversation instead of starting a second one."""
-
-    from flocks.server.routes.session import _require_session_write_access
-    from flocks.session.session import Session
-
-    user = require_admin(request)
-    session = await Session.get_by_id(body.sessionId)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    _require_session_write_access(session, user)
-    await runtime.run_in_thread(service.record_install_session, session.id, user)
-    log.info("rea.install_session.recorded", {"session_id": session.id})
-    return await service.build_status(user)
 
 
 @router.get("/rea/uninstall/preview", summary="What an REA uninstall removes, keeps and stops")
