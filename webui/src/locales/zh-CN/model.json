@@ -50,6 +50,7 @@
   "providerList": {
     "empty": "尚未添加模型供应商",
     "emptyHint": "点击右上角「添加模型供应商」开始配置",
+    "emptyHintMember": "请联系管理员添加模型供应商",
     "addProvider": "添加模型供应商"
   },
   "detail": {
@@ -60,7 +61,8 @@
     "batchTest": "批量测试",
     "testing": "测试中",
     "success": "成功",
-    "failed": "失败"
+    "failed": "失败",
+    "testAdminOnly": "连通性测试仅管理员可用"
   },
   "status": {
     "connected": "已连接",

@@ -50,6 +50,7 @@
   "providerList": {
     "empty": "No providers configured",
     "emptyHint": "Click \"Add Provider\" to get started",
+    "emptyHintMember": "Ask an administrator to add a provider",
     "addProvider": "Add Provider"
   },
   "detail": {
@@ -60,7 +61,8 @@
     "batchTest": "Batch Test",
     "testing": "Testing",
     "success": "succeeded",
-    "failed": "failed"
+    "failed": "failed",
+    "testAdminOnly": "Connection tests are available to administrators only"
   },
   "status": {
     "connected": "Connected",
