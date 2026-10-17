@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from flocks.config.config_writer import ConfigWriter
+from flocks.provider.credential import get_api_key
 from flocks.provider.provider import (
     BaseProvider,
     ModelCapabilities,
@@ -26,6 +27,7 @@ from flocks.provider.provider import (
 )
 from flocks.provider.sdk.openai_compatible import OpenAICompatibleProvider
 from flocks.server.config_mutation import serialized_config_mutation
+from flocks.server.routes.provider import _get_inline_provider_api_key
 from flocks.utils.log import Log
 
 
@@ -290,6 +292,7 @@ async def create_model(provider_id: str, body: CreateModelReq):
 
     models = raw.get("models", {})
     existing_model = models.get(body.model_id)
+    is_new_model = existing_model is None
     limits = await _resolve_model_limits(provider_id, body, raw)
     cache_read_price = body.cache_read_price
     if existing_model and "cache_read_price" not in body.model_fields_set:
@@ -321,6 +324,11 @@ async def create_model(provider_id: str, body: CreateModelReq):
         context_window=limits.context_window,
         max_output_tokens=limits.max_output_tokens,
     )
+
+    # First model for this provider, and no default LLM anywhere yet: make it
+    # the default so the app is usable without a second manual step (and so
+    # /api/onboarding/status reports completed when credentials are already set).
+    _maybe_promote_first_model_to_default(provider_id, body.model_id, is_new_model, models)
 
     action = "updated" if existing_model else "created"
     log.info(f"custom_model.{action}", {
@@ -360,6 +368,38 @@ async def delete_model(provider_id: str, model_id: str):
 
 
 # ==================== Runtime helpers ====================
+
+
+def _maybe_promote_first_model_to_default(
+    provider_id: str, model_id: str, is_new_model: bool, pre_existing_models: dict
+) -> None:
+    """Auto-promote the provider's first model to the global default LLM.
+
+    Only when ALL of the following hold (conservative on purpose):
+    - the model was just created (not an upsert of an existing model)
+    - the provider had no other models before this create
+    - no default LLM is configured anywhere yet
+    - the provider already has usable credentials (secret or inline key);
+      otherwise we'd create a "default that can't actually run" state and
+      /api/onboarding/status would still report completed=False.
+    """
+    if not is_new_model or pre_existing_models:
+        return
+    try:
+        if ConfigWriter.get_default_model("llm"):
+            return
+        if not (get_api_key(provider_id) or _get_inline_provider_api_key(provider_id)):
+            return
+        ConfigWriter.set_default_model("llm", provider_id, model_id)
+        log.info("custom_model.auto_default", {
+            "unique": f"{provider_id}/{model_id}",
+        })
+    except Exception as exc:
+        # Never block model creation on a default-promotion failure.
+        log.warning("custom_model.auto_default_failed", {
+            "unique": f"{provider_id}/{model_id}",
+            "error": str(exc),
+        })
 
 
 def _coerce_positive_int(value: Any) -> Optional[int]:
