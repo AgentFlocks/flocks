@@ -86,17 +86,23 @@ def test_litellm_cache_is_split_out_of_the_uncached_input():
     tokens = _tokens(LITELLM_CLAUDE_WARM)
 
     assert tokens["input"] == 1_000
-    assert tokens["cache"] == {"read": 50_000, "write": 2_000}
+    assert tokens["cache"] == {"read": 50_000, "write": 2_000, "reported": True}
 
 
 def test_reported_prompt_tokens_stay_as_the_gateway_sent_them():
-    """Usage records and cost keep reading the gateway's own prompt_tokens."""
+    """The usage keeps the gateway's own prompt_tokens and says how much of
+    the cache it already counts."""
     usage = _normalize_stream_usage(CompletionUsage(**LITELLM_CLAUDE_WARM))
 
     assert usage["prompt_tokens"] == 53_000
     assert usage["cache_tokens_in_prompt"] == 52_000
     assert "cache_tokens_in_prompt" not in _normalize_stream_usage(CompletionUsage(**ANTHROPIC_STYLE))
-    assert "cache_tokens_in_prompt" not in _normalize_stream_usage(CompletionUsage(**OPENAI_CACHED))
+    # OpenAI documents cached_tokens as part of prompt_tokens: no guess to check.
+    openai_usage = _normalize_stream_usage(CompletionUsage(**OPENAI_CACHED))
+    assert openai_usage["prompt_tokens"] == 53_000
+    assert openai_usage["cache_read_input_tokens"] == 50_000
+    assert openai_usage["cache_tokens_in_prompt"] == 50_000
+    assert "cache_in_prompt_unconfirmed" not in openai_usage
 
 
 def test_breakdown_larger_than_the_prompt_is_not_subtracted():

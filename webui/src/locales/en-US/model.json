@@ -20,7 +20,14 @@
     "totalCost": "Total Cost",
     "noUsage": "None",
     "noCost": "No cost",
-    "toggleCurrency": "Click to switch between USD and CNY"
+    "toggleCurrency": "Click to switch between USD and CNY",
+    "cacheHit": "Cache hits {{tokens}} · {{rate}}",
+    "cacheRead": "Cache hits {{tokens}}",
+    "cacheUnreported": "Cache hits: not reported",
+    "cacheReadLegacy": "Old cache hits {{tokens}}",
+    "cacheLegacyHint": "These cache reads come from records made before the upgrade, which did not record whether the model service reported cache usage and counted input differently, so the hit rate is unknown; later calls are counted separately",
+    "cacheUnreportedHint": "These calls have no cache usage to go by (the model service did not report it, or they were recorded before the upgrade), so cache hits are unknown, not zero",
+    "cacheCoverageHint": "Hit rate over the {{reported}} / {{total}} calls that reported cache usage; the other calls did not report it or were recorded before the upgrade"
   },
   "fallbacks": {
     "title": "Auxiliary Models",

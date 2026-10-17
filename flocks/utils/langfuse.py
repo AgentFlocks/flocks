@@ -500,6 +500,16 @@ def _normalize_usage_details(usage: Dict[str, Any]) -> Dict[str, int]:
     total_tokens = first_counter("total_tokens", "total")
     if total_tokens == 0:
         total_tokens = input_tokens + output_tokens
+    if "prompt_tokens" in usage:
+        # Provider usage (flocks.provider.token_usage shape): ``input`` is
+        # the uncached part and the total covers the whole prompt, so the
+        # cache is counted once whichever way the provider reported it, the
+        # same as in usage_records.
+        from flocks.provider.token_usage import resolve_usage
+
+        breakdown = resolve_usage(usage)
+        input_tokens = breakdown.input
+        total_tokens = breakdown.prompt + breakdown.output + breakdown.reasoning
 
     normalized = {
         "input": input_tokens,

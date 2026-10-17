@@ -1474,6 +1474,7 @@ class Storage:
                         output_tokens INTEGER NOT NULL DEFAULT 0,
                         cached_tokens INTEGER NOT NULL DEFAULT 0,
                         cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                        cache_reported INTEGER,
                         reasoning_tokens INTEGER NOT NULL DEFAULT 0,
                         total_tokens INTEGER NOT NULL DEFAULT 0,
                         input_cost REAL NOT NULL DEFAULT 0,
@@ -1482,6 +1483,7 @@ class Storage:
                         currency TEXT NOT NULL DEFAULT 'USD',
                         latency_ms INTEGER,
                         source TEXT NOT NULL DEFAULT 'live',
+                        response_id TEXT,
                         created_at TEXT NOT NULL,
                         backfilled_at TEXT
                     );
@@ -1498,11 +1500,21 @@ class Storage:
                     ),
                     ("source", "ALTER TABLE usage_records ADD COLUMN source TEXT NOT NULL DEFAULT 'live'"),
                     ("backfilled_at", "ALTER TABLE usage_records ADD COLUMN backfilled_at TEXT"),
+                    # 1 / 0: the provider did / did not report cache usage;
+                    # NULL on rows written before this was tracked.
+                    ("cache_reported", "ALTER TABLE usage_records ADD COLUMN cache_reported INTEGER"),
+                    ("response_id", "ALTER TABLE usage_records ADD COLUMN response_id TEXT"),
                 ]
                 for column_name, statement in schema_additions:
                     if column_name in existing_columns:
                         continue
-                    await db.execute(statement)
+                    try:
+                        await db.execute(statement)
+                    except sqlite3.OperationalError as exc:
+                        # Another process upgrading the same database added it
+                        # after the column list above was read.
+                        if "duplicate column name" not in str(exc).lower():
+                            raise
 
                 index_statements = [
                     "CREATE INDEX IF NOT EXISTS idx_usage_provider ON usage_records(provider_id, model_id)",

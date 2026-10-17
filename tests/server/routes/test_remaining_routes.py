@@ -18,6 +18,15 @@ from unittest.mock import AsyncMock, Mock
 # Minimal workflow JSON (valid structure)
 # ---------------------------------------------------------------------------
 
+def _admin_request():
+    """Minimal request carrying an admin identity for update_config's admin guard."""
+    from types import SimpleNamespace
+    from flocks.auth.context import AuthUser
+
+    return SimpleNamespace(state=SimpleNamespace(auth_user=AuthUser(
+        id="admin", username="admin", role="admin", status="active", must_reset_password=False,
+    )))
+
 _WORKFLOW_JSON = {
     "start": "node_1",
     "nodes": [
@@ -594,7 +603,7 @@ class TestConfigRoutes:
         }
 
         with pytest.raises(HTTPException) as exc:
-            await config_routes.update_config(payload)
+            await config_routes.update_config(_admin_request(), payload)
 
         assert exc.value.status_code == status.HTTP_403_FORBIDDEN
         update.assert_not_awaited()
@@ -629,7 +638,7 @@ class TestConfigRoutes:
             "api_services": {"configured_v1": {"group": None}},
         }
 
-        assert await config_routes.update_config(payload) == {"saved": True}
+        assert await config_routes.update_config(_admin_request(), payload) == {"saved": True}
 
         agent_check.assert_not_awaited()
         tool_check.assert_not_called()
@@ -648,7 +657,7 @@ class TestConfigRoutes:
         monkeypatch.setattr(config_routes.Config, "update", update)
         monkeypatch.setattr(channel_secrets, "extract_channel_secrets", extract)
         with pytest.raises(HTTPException) as exc:
-            await config_routes.update_config({
+            await config_routes.update_config(_admin_request(), {
                 "agent": {"custom": {"group": ["invalid"]}},
                 "channels": {"slack": {"botToken": "synthetic-not-a-real-token"}},
             })
@@ -668,7 +677,7 @@ class TestConfigRoutes:
         monkeypatch.setattr(config_routes.Config, "update", update)
         monkeypatch.setattr(channel_secrets, "extract_channel_secrets", extract)
         with pytest.raises(HTTPException) as exc:
-            await config_routes.update_config({
+            await config_routes.update_config(_admin_request(), {
                 section: {"configured-instance": {"group": group}},
                 "channels": {"slack": {"botToken": "synthetic-not-a-real-token"}},
             })
@@ -696,7 +705,7 @@ class TestConfigRoutes:
         monkeypatch.setattr(Agent, "invalidate_cache", invalidate)
         monkeypatch.setattr(config_routes.Config, "update", AsyncMock(side_effect=OSError("write failed")))
         with pytest.raises(HTTPException) as exc:
-            await config_routes.update_config({"agent": {"custom": {"group": "After"}}})
+            await config_routes.update_config(_admin_request(), {"agent": {"custom": {"group": "After"}}})
         assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
         invalidate.assert_not_called()
 
@@ -743,7 +752,7 @@ class TestConfigRoutes:
 
         monkeypatch.setattr(config_routes, "get_config", fake_get_config)
 
-        await config_routes.update_config(
+        await config_routes.update_config(_admin_request(), 
             {"channels": {"slack": {"enabled": False, "allowFrom": None}}}
         )
 
@@ -770,7 +779,7 @@ class TestConfigRoutes:
 
         monkeypatch.setattr(config_routes, "get_config", fake_get_config)
 
-        await config_routes.update_config(
+        await config_routes.update_config(_admin_request(), 
             {"channels": {"slack": {"enabled": False, "allowFrom": ["U123"]}}}
         )
 
@@ -806,7 +815,7 @@ class TestConfigRoutes:
         monkeypatch.setattr(config_routes.Config, "get_config_file", lambda: config_file)
 
         with pytest.raises(HTTPException) as exc:
-            await config_routes.update_config(
+            await config_routes.update_config(_admin_request(), 
                 {
                     "share": "invalid-mode",
                     "channels": {"slack": {"allowFrom": None}},

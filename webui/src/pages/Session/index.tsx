@@ -48,6 +48,14 @@ import {
 } from '@/api/flocksproPolicy';
 import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
+import { currentReaIdentity, reaAcceptsSamples, useReaStatus } from '@/features/rea/useRea';
+import { ReaShortcut } from '@/features/rea/ReaCards';
+import {
+  consumeReaEntryNavigation,
+  reaEntryNavigationAction,
+  type ReaEntryAction,
+} from '@/features/rea/navigation';
+import { reaApi, type ReaStatus } from '@/api/rea';
 import { skillAPI, type Skill } from '@/api/skill';
 import { workflowAPI, type WorkflowSummary } from '@/api/workflow';
 import type { Agent } from '@/api/agent';
@@ -503,6 +511,14 @@ export default function SessionPage() {
   const [draftNetworkMode, setDraftNetworkMode] = useState<NetworkMode>('require-confirm');
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
+  const [startingRea, setStartingRea] = useState(false);
+  const startingReaRef = useRef(false);
+  // Watched: the shortcut badge and the upload rule follow installs and uninstalls done elsewhere.
+  const {
+    status: reaStatus,
+    refresh: refreshReaStatus,
+    recordInstallSession: recordReaInstallSession,
+  } = useReaStatus({ watch: true });
   const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
   const [pendingInitialDisplayText, setPendingInitialDisplayText] = useState<string | null>(null);
@@ -1645,12 +1661,13 @@ export default function SessionPage() {
     modelOverride?: { providerID: string; modelID: string } | null,
     options?: PromptDisplayOptions,
     executionModeOverride?: SessionExecutionMode,
+    sessionTitle?: string,
   ) => {
     const navigationKey = navigationRef.current.key;
     try {
       const effectiveExecutionMode = executionModeOverride || selectedExecutionMode;
       const response = await client.post('/api/session', {
-        title: 'New Session',
+        title: sessionTitle || 'New Session',
         ...(selectedProjectIDForCreate ? { projectID: selectedProjectIDForCreate } : {}),
         ...(selectedModelAuto ? { model_auto: true } : {}),
       });
@@ -1716,7 +1733,7 @@ export default function SessionPage() {
 
       addSession(response.data);
       void fetchProjects(undefined, searchQuery).catch(() => {});
-      if (!mountedRef.current || navigationRef.current.key !== navigationKey) return;
+      if (!mountedRef.current || navigationRef.current.key !== navigationKey) return newSessionId as string;
       setSelectedSessionFallback(response.data);
       executionModeHandoffRef.current = {
         sessionId: newSessionId,
@@ -1753,6 +1770,7 @@ export default function SessionPage() {
           DEFAULT_SESSION_EXECUTION_MODE,
         );
       }
+      return newSessionId as string;
     } catch (err: any) {
       toast.error(t('chat.sendFailed', 'Send failed'), err.message);
       throw err;
@@ -1824,6 +1842,134 @@ export default function SessionPage() {
       setInstallingSocWorkspace(false);
     }
   }, [handleCreateAndSend, handleSuiteInstallProgress, installingSocWorkspace, selectedPromptModel, t, toast]);
+
+  // The 「REA 逆向分析」 shortcut (and the plugin square's actions): route by the
+  // live plugin state. A new Rex conversation gets the install or the use
+  // prompt as its first, visible message; a recent install conversation of
+  // this account is reopened instead of starting a second one. Every await is
+  // checked against the account and the page the click came from.
+  const handleReaEntry = useCallback(async (requested?: ReaEntryAction) => {
+    if (startingReaRef.current) return;
+    startingReaRef.current = true;
+    setStartingRea(true);
+    const identity = currentReaIdentity();
+    const navigationKey = navigationRef.current.key;
+    const stale = () => (
+      !mountedRef.current
+      || currentReaIdentity() !== identity
+      || navigationRef.current.key !== navigationKey
+    );
+    // handleCreateAndSend reports its own failures.
+    let reported = false;
+    const newSession = async (text: string) => {
+      try {
+        return await handleCreateAndSend(
+          text,
+          [],
+          'rex',
+          selectedPromptModel,
+          undefined,
+          // Plan mode cannot install; REA work runs with Rex's normal tools.
+          'build',
+          t('rea.sessionTitle'),
+        );
+      } catch (error) {
+        reported = true;
+        throw error;
+      }
+    };
+    try {
+      let status: ReaStatus | null;
+      try {
+        status = await refreshReaStatus();
+      } catch (error) {
+        if (!stale()) toast.error(t('rea.entry.statusFailed', { message: error instanceof Error ? error.message : String(error) }));
+        return;
+      }
+      if (stale() || !status) return;
+      const state = status.state;
+      if (state === 'uninstalling') {
+        toast.info(t('rea.entry.uninstalling'));
+        return;
+      }
+      if (state === 'uninstall_failed') {
+        toast.warning(t('rea.entry.uninstallFailed', { count: status.uninstallJob?.residues?.length ?? 0 }));
+        return;
+      }
+      if (state === 'installing' || state === 'validating') {
+        if (status.installSessionId) {
+          selectSession(status.installSessionId);
+          return;
+        }
+        toast.info(t('rea.entry.installing', {
+          stage: t(`rea.stage.${status.job?.stage ?? 'check'}`),
+          progress: status.job?.progress ?? 0,
+        }));
+        return;
+      }
+      // Usable, or broken after it passed once: an analysis conversation, where Rex repairs first.
+      if (state === 'ready' || (state === 'degraded' && requested !== 'repair')) {
+        await newSession(t('rea.usePrompt'));
+        return;
+      }
+      if (!status.canInstall) {
+        toast.info(t(state === 'not_installed' ? 'rea.entry.memberInstall' : 'rea.entry.memberRepair'));
+        return;
+      }
+      const reservation = await reaApi.reserveInstallSession();
+      if (stale()) return;
+      if (reservation.decision === 'pending') {
+        toast.info(t('rea.entry.pending'));
+        return;
+      }
+      if (reservation.decision === 'open' && reservation.sessionId) {
+        if (state !== 'not_installed') {
+          // Continue troubleshooting where the install ran.
+          await client.post(`/api/session/${reservation.sessionId}/prompt_async`, {
+            parts: buildPromptParts(t('rea.repairPrompt'), []),
+            messageID: createMessageId(),
+            agent: 'rex',
+            executionMode: 'build',
+          });
+          if (stale()) return;
+        }
+        selectSession(reservation.sessionId);
+        return;
+      }
+      // A failed install starts over with the same guide (it reuses what is there).
+      const prompt = state === 'degraded' ? t('rea.repairPrompt') : t('rea.installPrompt');
+      const sessionId = await newSession(prompt);
+      if (sessionId && currentReaIdentity() === identity) {
+        await recordReaInstallSession(sessionId).catch(() => undefined);
+      }
+    } catch (error) {
+      if (!reported && !stale()) {
+        toast.error(t('chat.sendFailed', 'Send failed'), error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      startingReaRef.current = false;
+      if (mountedRef.current) setStartingRea(false);
+    }
+  }, [
+    handleCreateAndSend,
+    recordReaInstallSession,
+    refreshReaStatus,
+    selectSession,
+    selectedPromptModel,
+    t,
+    toast,
+  ]);
+
+  // The plugin square's 「安装」「使用」「排查并修复」 land here (see the Hub page) and
+  // run the shortcut's routing once per navigation, also across a page reload.
+  const reaEntryNavigationRef = useRef<string | null>(null);
+  useEffect(() => {
+    const action = reaEntryNavigationAction(location.state);
+    if (!paneActive || selectedSessionId || !action) return;
+    if (reaEntryNavigationRef.current === location.key || consumeReaEntryNavigation(location.key)) return;
+    reaEntryNavigationRef.current = location.key;
+    void handleReaEntry(action);
+  }, [handleReaEntry, location.key, location.state, paneActive, selectedSessionId]);
 
   const showSelectorTooltip = useCallback((target: HTMLElement, title: string, lines: string[]) => {
     const rect = target.getBoundingClientRect();
@@ -1947,6 +2093,8 @@ export default function SessionPage() {
             setPendingInitialDisplayText(null);
           }}
           supportsVision={effectiveSupportsVision}
+          // Reverse-engineering samples can be attached once REA is usable.
+          allowAnyUpload={reaAcceptsSamples(reaStatus)}
           contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
           model={selectedPromptModel}
           welcomeContent={(setInput) => (
@@ -1954,6 +2102,11 @@ export default function SessionPage() {
               onSuggestion={setInput}
               onAlertOperationsSetup={() => void handleAlertOperationsSetup()}
               alertOperationsBusy={installingSocWorkspace}
+              reaShortcut={{
+                badge: Boolean(reaStatus?.badge),
+                busy: startingRea,
+                onClick: () => void handleReaEntry(),
+              }}
             />
           )}
           onComposerAddMenuOpenChange={(open) => {
@@ -2623,29 +2776,43 @@ export default function SessionPage() {
 
 // ── Welcome Screen (shown when no messages) ──
 
+interface WelcomeReaShortcut {
+  badge: boolean;
+  busy: boolean;
+  onClick: () => void;
+}
+
+const SHORTCUT_CLASS = 'inline-flex h-11 shrink-0 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white';
+
 function WelcomeScreen({
   onSuggestion,
   onAlertOperationsSetup,
   alertOperationsBusy,
+  reaShortcut,
 }: {
   onSuggestion: (text: string) => void;
   onAlertOperationsSetup: () => void;
   alertOperationsBusy: boolean;
+  reaShortcut?: WelcomeReaShortcut | null;
 }) {
   const { t } = useTranslation('session');
   return (
-    <div className="w-full max-w-[660px] px-9 text-center">
+    <div className="w-full max-w-[700px] px-9 text-center max-[600px]:px-4">
       <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-slate-800 text-white shadow-[0_3px_10px_rgba(30,41,59,0.10)] dark:bg-[#46515e]">
         <Sparkles className="h-[30px] w-[30px]" strokeWidth={1.7} />
       </div>
       <h3 className="text-[22px] font-semibold tracking-[-0.01em] text-[#1f2937] dark:text-[#f0f3f7]">{t('welcome.title')}</h3>
       <p className="mt-3 text-sm leading-6 text-[#647084] dark:text-[#aeb9c5]">{t('welcome.description')}</p>
 
-      <div className="mt-6 flex flex-wrap justify-center gap-2.5">
+      {/* One row (REA V5): narrow screens scroll it sideways instead of wrapping; the top padding keeps the 「新」 badge visible. */}
+      <div
+        data-testid="welcome-shortcuts"
+        className="mt-6 flex justify-center gap-2.5 max-[850px]:-mx-1 max-[850px]:justify-start max-[850px]:overflow-x-auto max-[850px]:px-1 max-[850px]:pb-1 max-[850px]:pt-3"
+      >
         <button
           onClick={onAlertOperationsSetup}
           disabled={alertOperationsBusy}
-          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
+          className={SHORTCUT_CLASS}
         >
           {alertOperationsBusy ? (
             <Loader2 className="h-[18px] w-[18px] animate-spin text-[#657489] dark:text-[#aeb9c5]" />
@@ -2656,18 +2823,26 @@ function WelcomeScreen({
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.threatHuntingSuggestion'))}
-          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
+          className={SHORTCUT_CLASS}
         >
           <Search className="h-[18px] w-[18px] text-[#f4511e]" />
           <span>{t('welcome.threatHunting')}</span>
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.incidentResponseSuggestion'))}
-          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
+          className={SHORTCUT_CLASS}
         >
           <AlertTriangle className="h-[18px] w-[18px] text-amber-500" />
           <span>{t('welcome.incidentResponse')}</span>
         </button>
+        {reaShortcut && (
+          <ReaShortcut
+            badge={reaShortcut.badge}
+            busy={reaShortcut.busy}
+            onClick={reaShortcut.onClick}
+            className={SHORTCUT_CLASS}
+          />
+        )}
       </div>
     </div>
   );
