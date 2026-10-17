@@ -2702,6 +2702,28 @@ async def _test_provider_credentials_impl(
                         "code": "model_configuration_error",
                     }
 
+                # OpenAI-compatible / custom-* providers ship no curated model
+                # list, so probe_models can be empty even when the upstream is
+                # healthy. When onboarding explicitly asks to test a model id,
+                # synthesize a minimal ModelInfo so the real chat call validates
+                # that model against the upstream instead of failing early with
+                # "no models available" (which never actually hit the endpoint).
+                if (
+                    not probe_models
+                    and provider_id not in _THREATBOOK_LLM_PROVIDER_IDS
+                    and body is not None
+                    and (body.model_id or "").strip()
+                ):
+                    probe_model_id = (body.model_id or "").strip()
+                    probe_models = [
+                        ProviderModelInfo(
+                            id=probe_model_id,
+                            name=probe_model_id,
+                            provider_id=provider_id,
+                            pricing=None,
+                        )
+                    ]
+
             # Always reconfigure with the freshest key from secret manager
             # to avoid stale keys from cached config or prior apply_config.
             effective_base_url = None
