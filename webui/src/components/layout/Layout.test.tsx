@@ -56,6 +56,9 @@ vi.mock('@/components/common/UpdateModal', () => {
 vi.mock('@/components/common/OnboardingModal', () => ({ default: () => <div role="dialog" aria-label="onboarding" /> }));
 vi.mock('@/components/common/NotificationModal', () => ({ default: () => null }));
 vi.mock('@/components/common/TokenPolicyNotice', () => ({ default: () => null }));
+vi.mock('@/components/common/BackendStatusBanner', () => ({
+  BackendStatusBanner: ({ inline }: { inline?: boolean }) => <div data-testid="backend-status-banner" data-inline={String(Boolean(inline))} />,
+}));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, options?: Record<string, string>) => {
@@ -126,6 +129,15 @@ describe('Layout chrome', () => {
     expect(screen.getByText('Flocks')).toBeInTheDocument();
     expect(screen.getByText('agentWorkspace')).toBeInTheDocument();
     expect(screen.getByTestId('history-panel')).toBeInTheDocument();
+  });
+
+  it('puts the backend status banner in the content column, right above the page', () => {
+    renderAt('/');
+    const banner = screen.getByTestId('backend-status-banner');
+    const main = document.querySelector('main') as HTMLElement;
+    expect(banner).toHaveAttribute('data-inline', 'true');
+    expect(banner.parentElement).toBe(main.parentElement);
+    expect(banner.nextElementSibling).toBe(main);
   });
 
   it('shows the Flocks logo beside the product name', () => {

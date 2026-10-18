@@ -77,6 +77,87 @@ describe('useBackendStatus', () => {
     expect(apiGetMock).toHaveBeenCalledTimes(2);
   });
 
+  it('reports checked only after the first health answer arrives', async () => {
+    let resolveHealth: (value: { status: number }) => void = () => {};
+    apiGetMock.mockReturnValue(new Promise((resolve) => {
+      resolveHealth = resolve;
+    }));
+
+    const { result } = renderHook(() => useBackendStatus());
+
+    expect(result.current.checked).toBe(false);
+    expect(result.current.status).toBe('connecting');
+
+    await act(async () => {
+      resolveHealth({ status: 200 });
+    });
+
+    await waitFor(() => {
+      expect(result.current.checked).toBe(true);
+      expect(result.current.status).toBe('connected');
+    });
+  });
+
+  it('re-checks every 5 seconds after a failed check and stops once the backend is back', async () => {
+    vi.useFakeTimers();
+    apiGetMock
+      .mockRejectedValueOnce({ response: { status: 502 } })
+      .mockRejectedValueOnce({ code: 'ECONNABORTED' })
+      .mockResolvedValue({ status: 200 });
+
+    const { result } = renderHook(() => useBackendStatus());
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.status).toBe('disconnected');
+    expect(apiGetMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(apiGetMock).toHaveBeenCalledTimes(2);
+    expect(result.current.status).toBe('disconnected');
+    expect(result.current.message).toBe('连接超时');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(apiGetMock).toHaveBeenCalledTimes(3);
+    expect(result.current.status).toBe('connected');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(apiGetMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops the recovery checks when the last hook instance unmounts', async () => {
+    vi.useFakeTimers();
+    apiGetMock.mockRejectedValue({ response: { status: 502 } });
+
+    const { result, unmount } = renderHook(() => useBackendStatus());
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.status).toBe('disconnected');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(apiGetMock).toHaveBeenCalledTimes(2);
+
+    unmount();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(apiGetMock).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps checkHealth compatible with the previous boolean return', async () => {
     apiGetMock
       .mockResolvedValueOnce({ status: 200 })

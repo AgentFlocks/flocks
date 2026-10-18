@@ -55,6 +55,7 @@ import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useConfirm } from '@/components/common/ConfirmDialog';
+import { BackendStatusBanner } from '@/components/common/BackendStatusBanner';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
@@ -973,6 +974,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       </aside>
 
       <div className={`flex h-screen flex-col pt-14 transition-[padding] ${collapsed ? 'lg:pl-16' : 'lg:pl-64'}`}>
+        {/* In the flow under the fixed header: a fixed banner would either hide under it or cover it. */}
+        <BackendStatusBanner inline />
         <main className="relative flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
           <KeepAlivePanes panes={keepAlivePanes} activeHref={activePaneHref} location={location} routes={contentRoutes} />
         </main>

@@ -11,6 +11,7 @@ interface BackendStatusState {
 }
 
 const BACKEND_HEALTH_POLL_INTERVAL_MS = 3_600_000;
+const BACKEND_HEALTH_RECOVERY_POLL_INTERVAL_MS = 5_000;
 const BACKEND_HEALTH_STALE_TIME_MS = 5_000;
 const BACKEND_HEALTH_MIN_FETCH_INTERVAL_MS = 1_000;
 
@@ -69,6 +70,39 @@ const backendStatusResource = createSharedResource<BackendStatusState>({
 
 let backendHealthPollSubscriberCount = 0;
 let backendHealthPollIntervalId: number | null = null;
+let backendHealthRecoveryIntervalId: number | null = null;
+let unsubscribeBackendHealthRecovery: (() => void) | null = null;
+
+function stopBackendHealthRecoveryPolling(): void {
+  if (backendHealthRecoveryIntervalId !== null) {
+    window.clearInterval(backendHealthRecoveryIntervalId);
+    backendHealthRecoveryIntervalId = null;
+  }
+}
+
+// 检查失败后按短间隔重查，后端恢复后提示自己消失，不用等下一次整点轮询
+function syncBackendHealthRecoveryPolling(): void {
+  const snapshot = backendStatusResource.getSnapshot();
+  if (!snapshot.initialized || snapshot.data.status === 'connected') {
+    stopBackendHealthRecoveryPolling();
+    return;
+  }
+  if (backendHealthRecoveryIntervalId === null) {
+    backendHealthRecoveryIntervalId = window.setInterval(() => {
+      void backendStatusResource.fetch({ force: true, silent: true });
+    }, BACKEND_HEALTH_RECOVERY_POLL_INTERVAL_MS);
+  }
+}
+
+function stopBackendHealthPolling(): void {
+  if (backendHealthPollIntervalId !== null) {
+    window.clearInterval(backendHealthPollIntervalId);
+    backendHealthPollIntervalId = null;
+  }
+  unsubscribeBackendHealthRecovery?.();
+  unsubscribeBackendHealthRecovery = null;
+  stopBackendHealthRecoveryPolling();
+}
 
 function subscribeBackendHealthPolling(): () => void {
   backendHealthPollSubscriberCount += 1;
@@ -77,24 +111,22 @@ function subscribeBackendHealthPolling(): () => void {
     backendHealthPollIntervalId = window.setInterval(() => {
       void backendStatusResource.fetch({ silent: true });
     }, BACKEND_HEALTH_POLL_INTERVAL_MS);
+    unsubscribeBackendHealthRecovery = backendStatusResource.subscribe(syncBackendHealthRecoveryPolling);
+    syncBackendHealthRecoveryPolling();
   }
 
   return () => {
     backendHealthPollSubscriberCount = Math.max(0, backendHealthPollSubscriberCount - 1);
-    if (backendHealthPollSubscriberCount === 0 && backendHealthPollIntervalId !== null) {
-      window.clearInterval(backendHealthPollIntervalId);
-      backendHealthPollIntervalId = null;
+    if (backendHealthPollSubscriberCount === 0) {
+      stopBackendHealthPolling();
     }
   };
 }
 
 export function __resetBackendStatusResourceForTesting(): void {
+  stopBackendHealthPolling();
   backendStatusResource.resetForTesting();
   backendHealthPollSubscriberCount = 0;
-  if (backendHealthPollIntervalId !== null) {
-    window.clearInterval(backendHealthPollIntervalId);
-    backendHealthPollIntervalId = null;
-  }
 }
 
 /**
@@ -102,7 +134,7 @@ export function __resetBackendStatusResourceForTesting(): void {
  * 定期检查后端健康状态，并在后端重启时提供友好的用户反馈
  */
 export function useBackendStatus() {
-  const { data: state } = useSharedResource(backendStatusResource);
+  const { data: state, initialized } = useSharedResource(backendStatusResource);
 
   const checkHealth = useCallback(async () => {
     const nextState = await backendStatusResource.fetch({ force: true });
@@ -115,6 +147,8 @@ export function useBackendStatus() {
 
   return {
     ...state,
+    /** 首次健康检查是否已有结果；之前的 status 只是初始值 'connecting'。 */
+    checked: initialized,
     checkHealth,
   };
 }
