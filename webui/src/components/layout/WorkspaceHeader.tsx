@@ -81,7 +81,7 @@ export default function WorkspaceHeader({
   return (
     <header
       data-workspace-header
-      className="fixed inset-x-0 top-0 z-50 flex h-14 items-center gap-1 border-b border-zinc-200 bg-white px-2 sm:gap-3 sm:px-5 dark:border-zinc-800 dark:bg-zinc-900"
+      className="fixed inset-x-0 top-0 z-50 flex h-14 items-center gap-1 border-b border-zinc-200 bg-white px-2 sm:gap-3 sm:px-5 lg:gap-0 lg:pl-0 dark:border-zinc-800 dark:bg-zinc-900"
     >
       <button
         type="button"
@@ -93,7 +93,7 @@ export default function WorkspaceHeader({
         <Menu className="h-5 w-5" />
       </button>
 
-      <Link to="/" className="flex min-w-0 shrink-0 items-center gap-2 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400" title={productName}>
+      <Link to="/" className="flex min-w-0 shrink-0 items-center gap-2 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 lg:w-[calc(var(--sidebar-expanded-width)-1px)] lg:px-5" title={productName}>
         {logoUrl ? (
           <img src={logoUrl} alt="" aria-hidden="true" data-brand-logo className="h-8 w-8 shrink-0" />
         ) : (
@@ -101,7 +101,7 @@ export default function WorkspaceHeader({
             {brandInitial}
           </span>
         )}
-        <span className="hidden max-w-[9rem] truncate sm:inline text-lg font-bold tracking-tight text-zinc-900 sm:max-w-[14rem] sm:text-xl dark:text-zinc-50">
+        <span className="hidden min-w-0 max-w-[9rem] truncate sm:inline text-lg font-bold tracking-tight text-zinc-900 sm:max-w-[14rem] sm:text-xl dark:text-zinc-50">
           {productName}
         </span>
       </Link>
@@ -128,7 +128,7 @@ export default function WorkspaceHeader({
         })}
       </nav>
 
-      <div className="flex shrink-0 items-center sm:gap-0.5">
+      <div className="flex shrink-0 items-center sm:gap-0.5 lg:ml-3">
         <HeaderMenu label={t('language')} align="right" menuClassName="w-40" triggerClassName={ICON_BUTTON_CLASS} trigger={<Languages className="h-[18px] w-[18px]" />}>
           {(close) => (
             <>

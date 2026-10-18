@@ -1012,7 +1012,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   return (
     <div
       className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100"
-      style={{ '--sidebar-width': `${collapsed ? 64 : sidebarResize.width}px` } as CSSProperties}
+      style={{
+        '--sidebar-width': `${collapsed ? 64 : sidebarResize.width}px`,
+        '--sidebar-expanded-width': `${sidebarResize.width}px`,
+      } as CSSProperties}
     >
       <LazyLoadErrorBoundary mode="overlay">
         <Suspense fallback={null}>
