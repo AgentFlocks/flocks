@@ -1,6 +1,6 @@
 import { Suspense, lazy, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, ComponentType, ReactNode } from 'react';
-import { Link, Navigate, useParams } from 'react-router-dom';
+import { Navigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   ImageIcon,
@@ -26,7 +26,6 @@ import { toolFailureConfigApi } from '@/api/toolFailureConfig';
 import {
   isSettingsSectionId,
   useSettingsSectionGroups,
-  type SettingsSection,
   type SettingsSectionId,
 } from '@/utils/settingsSections';
 import { preloadI18nNamespaces } from '@/i18nResources';
@@ -437,38 +436,6 @@ function PreferencesPanel() {
   );
 }
 
-/** Horizontal tabs across the management pages; only sections this user may open are listed. */
-function SettingsTabs({ sections, activeId }: { sections: SettingsSection[]; activeId: SettingsSectionId }) {
-  const { t } = useTranslation('nav');
-  return (
-    <nav aria-label={t('settingsTitle')} className="border-b border-zinc-200 dark:border-zinc-800">
-      <div className="-mb-px flex gap-1 overflow-x-auto" role="tablist">
-        {sections.map((section) => {
-          const active = section.id === activeId;
-          const Icon = section.icon;
-          return (
-            <Link
-              key={section.id}
-              to={`/settings/${section.id}`}
-              role="tab"
-              aria-selected={active}
-              aria-current={active ? 'page' : undefined}
-              className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-3 text-sm font-medium transition-colors ${
-                active
-                  ? 'border-red-600 text-zinc-950 dark:text-zinc-50'
-                  : 'border-transparent text-zinc-500 hover:border-zinc-300 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
-              }`}
-            >
-              <Icon className="h-4 w-4" />
-              {section.name}
-            </Link>
-          );
-        })}
-      </div>
-    </nav>
-  );
-}
-
 function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
   if (sectionId === 'preferences') return <PreferencesPanel />;
 
@@ -513,14 +480,10 @@ export default function SettingsPage() {
     return <Navigate to="/settings/preferences" replace />;
   }
 
-  // The upgrade page has its own entry in the account menu; the tabs cover the management pages.
-  const tabs = sections.filter((item) => item.id !== 'flockspro');
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <SettingsTabs sections={tabs} activeId={sectionId} />
       <div className="min-h-0 flex-1 overflow-auto">
-        {/* Every tab starts at the tabs' left edge, a fixed gap below them, at one width. */}
-        <div data-testid="settings-content" className="w-full max-w-6xl pb-8 pt-6">
+        <div data-testid="settings-content" className="w-full max-w-6xl pb-8">
           <SettingsContent sectionId={sectionId} />
         </div>
       </div>

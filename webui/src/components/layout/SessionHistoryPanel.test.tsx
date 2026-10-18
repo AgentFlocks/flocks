@@ -201,27 +201,37 @@ describe('SessionHistoryPanel', () => {
     expect(apiDelete).not.toHaveBeenCalled();
   });
 
-  it('shows a compact list, loads more and collapses back, keeping the open session reachable', async () => {
+  it.each(['tasks', 'prj_a'])('reveals 50 more sessions per click in %s, including after collapse', async (sectionId) => {
     const loadMore = vi.fn();
-    const ungrouped = Array.from({ length: 12 }, (_, i) => session(`u${i + 1}`, '', `未分类 ${i + 1}`));
-    setSessions(ungrouped, { hasMoreByProject: { tasks: true }, loadMore });
-    render(<MemoryRouter initialEntries={['/sessions/u12']}><SessionHistoryPanel collapsed={false} onExpandSidebar={vi.fn()} onNavigate={vi.fn()} /></MemoryRouter>);
-    // With a folder on screen the first page holds 6 sessions per list.
+    const sessions = Array.from({ length: 130 }, (_, i) => session(`u${i + 1}`, sectionId === 'tasks' ? '' : sectionId, `会话 ${i + 1}`));
+    setSessions(sessions, { hasMoreByProject: { [sectionId]: true }, loadMore });
+    render(<MemoryRouter initialEntries={['/sessions/u130']}><SessionHistoryPanel collapsed={false} onExpandSidebar={vi.fn()} onNavigate={vi.fn()} /></MemoryRouter>);
+    // Every list starts with 20 sessions, including when project folders exist.
     await waitFor(() => expect(screen.getByText('产品设计')).toBeInTheDocument());
-    expect(screen.getByText('未分类 6')).toBeInTheDocument();
-    expect(screen.queryByText('未分类 7')).not.toBeInTheDocument();
-    expect(screen.getByText('未分类 12')).toBeInTheDocument(); // the open session stays visible
+    expect(useSessionsMock).toHaveBeenLastCalledWith('', { projectIds: ['tasks', 'prj_a'], pageSize: 20, loadMorePageSize: 50 });
+    expect(screen.getByText('会话 20')).toBeInTheDocument();
+    expect(screen.queryByText('会话 21')).not.toBeInTheDocument();
+    expect(screen.getByText('会话 130')).toBeInTheDocument(); // the open session stays visible
     expect(screen.queryByRole('button', { name: 'history.collapse' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'history.loadMore' }));
-    expect(screen.getByText('未分类 11')).toBeInTheDocument();
-    expect(loadMore).not.toHaveBeenCalled(); // first reveal what is already loaded
+    expect(screen.getByText('会话 70')).toBeInTheDocument();
+    expect(screen.queryByText('会话 71')).not.toBeInTheDocument();
+    expect(loadMore).not.toHaveBeenCalled(); // reveal cached rows before requesting another page
     fireEvent.click(screen.getByRole('button', { name: 'history.loadMore' }));
-    expect(loadMore).toHaveBeenCalledWith('tasks');
+    expect(screen.getByText('会话 120')).toBeInTheDocument();
+    expect(screen.queryByText('会话 121')).not.toBeInTheDocument();
+    expect(loadMore).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'history.loadMore' }));
+    expect(loadMore).toHaveBeenCalledWith(sectionId);
 
     fireEvent.click(screen.getByRole('button', { name: 'history.collapse' }));
-    expect(screen.queryByText('未分类 7')).not.toBeInTheDocument();
-    expect(screen.getByText('未分类 12')).toBeInTheDocument();
+    expect(screen.queryByText('会话 21')).not.toBeInTheDocument();
+    expect(screen.getByText('会话 130')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'history.loadMore' }));
+    expect(screen.getByText('会话 70')).toBeInTheDocument();
+    expect(screen.queryByText('会话 71')).not.toBeInTheDocument();
+    expect(loadMore).toHaveBeenCalledOnce();
   });
 
   it('archives selected sessions in batch mode', async () => {
@@ -422,4 +432,3 @@ describe('SessionHistoryPanel', () => {
     expect(menu?.parentElement).toBe(document.body);
   });
 });
-

@@ -1936,14 +1936,14 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
   });
 
-  it('installs the SOC workspace component before starting alert operations setup', async () => {
+  it('installs the Alert Operations Suite before starting alert operations setup', async () => {
     const user = userEvent.setup();
     hubAPI.catalog.mockResolvedValueOnce({
       data: [{
         id: 'soc-workspace',
         type: 'component',
-        name: 'SOC Workspace Component',
-        nameCn: 'SOC 工作区场景套件',
+        name: 'Alert Operations Suite',
+        nameCn: '告警运营套件',
         state: 'available',
       }],
     });
@@ -1952,8 +1952,8 @@ describe('SessionPage session actions menu', () => {
         event: 'start',
         id: 'soc-workspace',
         type: 'component',
-        name: 'SOC Workspace Component',
-        nameCn: 'SOC 工作区场景套件',
+        name: 'Alert Operations Suite',
+        nameCn: '告警运营套件',
         total: 1,
         items: [{
           type: 'webui',
@@ -1966,8 +1966,8 @@ describe('SessionPage session actions menu', () => {
         event: 'item',
         id: 'soc-workspace',
         type: 'component',
-        name: 'SOC Workspace Component',
-        nameCn: 'SOC 工作区场景套件',
+        name: 'Alert Operations Suite',
+        nameCn: '告警运营套件',
         total: 1,
         item: {
           type: 'webui',
@@ -1980,8 +1980,8 @@ describe('SessionPage session actions menu', () => {
         event: 'complete',
         id: 'soc-workspace',
         type: 'component',
-        name: 'SOC Workspace Component',
-        nameCn: 'SOC 工作区场景套件',
+        name: 'Alert Operations Suite',
+        nameCn: '告警运营套件',
         total: 1,
       });
     });
@@ -2014,7 +2014,7 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
   });
 
-  it('shows a localized error when the SOC workspace component is missing', async () => {
+  it('shows a localized error when the Alert Operations Suite is missing', async () => {
     const user = userEvent.setup();
     hubAPI.catalog.mockResolvedValueOnce({ data: [] });
 
@@ -2033,14 +2033,14 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
   });
 
-  it('shows a localized error title when SOC workspace component installation fails', async () => {
+  it('shows a localized error title when Alert Operations Suite installation fails', async () => {
     const user = userEvent.setup();
     hubAPI.catalog.mockResolvedValueOnce({
       data: [{
         id: 'soc-workspace',
         type: 'component',
-        name: 'SOC Workspace Component',
-        nameCn: 'SOC 工作区场景套件',
+        name: 'Alert Operations Suite',
+        nameCn: '告警运营套件',
         state: 'available',
       }],
     });
@@ -2056,7 +2056,7 @@ describe('SessionPage session actions menu', () => {
       );
     });
     expect(await screen.findByText('场景套件安装进度')).toBeInTheDocument();
-    expect(screen.getByText('安装失败: SOC 工作区场景套件')).toBeInTheDocument();
+    expect(screen.getByText('安装失败: 告警运营套件')).toBeInTheDocument();
     expect(client.post).not.toHaveBeenCalled();
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
   });

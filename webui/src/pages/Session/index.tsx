@@ -26,7 +26,6 @@ import { useLocation, useNavigate, useSearchParams, useParams } from 'react-rout
 import SessionComposerMenu, { SessionComposerMenuHeader, SessionModeOption } from './SessionComposerMenu';
 import { sessionPath } from '@/utils/sessionUrl';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
-import CopyButton from '@/components/common/CopyButton';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
@@ -1830,8 +1829,8 @@ export default function SessionPage() {
       if (startedComponentInstall) {
         setSuiteInstallProgress(current => failSuiteInstallProgress(current, {
           id: SOC_WORKSPACE_COMPONENT_ID,
-          name: 'SOC Workspace Component',
-          nameCn: 'SOC 工作区场景套件',
+          name: 'Alert Operations Suite',
+          nameCn: '告警运营套件',
         }, message));
       }
       toast.error(
@@ -2001,10 +2000,6 @@ export default function SessionPage() {
               {selectedSession?.title || t('newSession')}
             </h2>
           </div>
-
-          {selectedSessionId && selectedSession && !activeSessionError && (
-            <CopyButton text={new URL(sessionPath(selectedSessionId), window.location.origin).href} label={t('copyLink')} />
-          )}
 
           {workbenchRefreshing && (
             <WorkbenchRefreshStatus label={workbenchRefreshLabel} />

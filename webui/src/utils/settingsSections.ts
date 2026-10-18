@@ -25,12 +25,12 @@ export type SettingsSectionId =
 
 export const SETTINGS_SECTION_IDS: readonly SettingsSectionId[] = [
   'preferences',
-  'archived-data',
   'account',
   'security-config',
   'system-logs',
   'audit-logs',
   'flockspro',
+  'archived-data',
 ] as const;
 
 export function isSettingsSectionId(value: string | undefined): value is SettingsSectionId {
@@ -105,13 +105,6 @@ export function useSettingsSectionGroups(): { groups: SettingsGroup[]; ready: bo
         ],
       },
       {
-        id: 'data',
-        name: t('settingsGroupData'),
-        items: [
-          { id: 'archived-data', name: t('archivedData'), icon: Archive },
-        ],
-      },
-      {
         id: 'system',
         name: t('settingsGroupSystem'),
         items: [
@@ -120,6 +113,13 @@ export function useSettingsSectionGroups(): { groups: SettingsGroup[]; ready: bo
           { id: 'system-logs', name: t('systemLog'), icon: ScrollText },
           { id: 'audit-logs', name: t('auditLogs'), icon: ShieldCheck, adminOnly: true, requiresFlockspro: true },
           { id: 'flockspro', name: proProductName, icon: ArrowUpCircle, adminOnly: true },
+        ],
+      },
+      {
+        id: 'data',
+        name: t('settingsGroupData'),
+        items: [
+          { id: 'archived-data', name: t('archivedData'), icon: Archive },
         ],
       },
     ],

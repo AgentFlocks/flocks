@@ -41,8 +41,8 @@ import { announceProjectsChanged, onProjectsChanged } from '@/utils/projectEvent
 // Sessions outside any registered folder are grouped as "未分类".
 const UNGROUPED_ID = 'tasks';
 const ARCHIVE_CONCURRENCY = 4;
-const MULTI_FOLDER_PAGE_SIZE = 6;
-const SINGLE_FOLDER_PAGE_SIZE = 20;
+const HISTORY_PAGE_SIZE = 20;
+const HISTORY_LOAD_MORE_SIZE = 50;
 // "加载更多" reveals the rest of a list (fetching another page when needed); "收起" goes back to the
 // first page, so the compact list is exactly what the panel showed when it opened.
 const SEARCH_DEBOUNCE_MS = 250;
@@ -171,7 +171,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Session[] | null>(null);
   const [creatingIn, setCreatingIn] = useState<string | null>(null);
-  const [expandedSections, setExpandedSections] = useState<Set<string>>(() => new Set());
+  const [visibleCounts, setVisibleCounts] = useState<Record<string, number>>({});
   const [selecting, setSelecting] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(() => new Set());
   const [archivingChecked, setArchivingChecked] = useState(false);
@@ -193,9 +193,10 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
     loadMore,
   } = useSessions('', {
     projectIds: folderIds,
-    pageSize: folders.length > 0 ? MULTI_FOLDER_PAGE_SIZE : SINGLE_FOLDER_PAGE_SIZE,
+    pageSize: HISTORY_PAGE_SIZE,
+    loadMorePageSize: HISTORY_LOAD_MORE_SIZE,
   });
-  const compactCount = folders.length > 0 ? MULTI_FOLDER_PAGE_SIZE : SINGLE_FOLDER_PAGE_SIZE;
+  const compactCount = HISTORY_PAGE_SIZE;
 
   // The open session can sort past the loaded pages; read it on its own so it stays listed
   // (and its folder is known) without loading every older page.
@@ -603,20 +604,11 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
     }
   };
 
-  const setSectionExpanded = (sectionId: string, expanded: boolean) => {
-    setExpandedSections((current) => {
-      if (current.has(sectionId) === expanded) return current;
-      const next = new Set(current);
-      if (expanded) next.add(sectionId);
-      else next.delete(sectionId);
-      return next;
-    });
-  };
-
-  /** Compact view keeps the open session reachable even when it sorts past the cut. */
+  /** Keep the open session reachable even when it sorts past the visible page. */
   const visibleRows = (sectionId: string, list: Session[], compactCount: number): Session[] => {
-    if (expandedSections.has(sectionId) || list.length <= compactCount) return list;
-    const head = list.slice(0, compactCount);
+    const visibleCount = visibleCounts[sectionId] ?? compactCount;
+    if (list.length <= visibleCount) return list;
+    const head = list.slice(0, visibleCount);
     const selected = list.find((session) => session.id === selectedSessionId);
     return selected && !head.includes(selected) ? [...head, selected] : head;
   };
@@ -743,10 +735,10 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
     remoteMore: boolean,
     indent: boolean,
   ) => {
-    const expanded = expandedSections.has(sectionId);
-    const hiddenLoaded = !expanded && list.length > compactCount;
+    const visibleCount = visibleCounts[sectionId] ?? compactCount;
+    const hiddenLoaded = list.length > visibleCount;
     const canLoad = hiddenLoaded || remoteMore;
-    const canCollapse = expanded && list.length > compactCount;
+    const canCollapse = visibleCount > compactCount && list.length > compactCount;
     const loadingMore = loadingMoreProjectIds.has(sectionId);
     if (!canLoad && !canCollapse) return null;
     const linkClass = 'flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:text-zinc-600 disabled:opacity-60 dark:hover:text-zinc-200';
@@ -755,14 +747,15 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
         {canLoad && (
           <button type="button" disabled={loadingMore} className={linkClass}
             onClick={() => {
-              setSectionExpanded(sectionId, true);
-              if (!hiddenLoaded) loadMore?.(sectionId);
+              const nextCount = Math.min(visibleCount, list.length) + HISTORY_LOAD_MORE_SIZE;
+              setVisibleCounts((current) => ({ ...current, [sectionId]: nextCount }));
+              if (remoteMore && list.length < nextCount) loadMore?.(sectionId);
             }}>
             {loadingMore && <Loader2 className="h-3 w-3 animate-spin" />}{t('history.loadMore')}
           </button>
         )}
         {canCollapse && (
-          <button type="button" className={linkClass} onClick={() => setSectionExpanded(sectionId, false)}>
+          <button type="button" className={linkClass} onClick={() => setVisibleCounts((current) => ({ ...current, [sectionId]: compactCount }))}>
             {t('history.collapse')}
           </button>
         )}
@@ -775,8 +768,8 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   const moveTargets = folders.filter((folder) => folder.canWrite !== false && folder.pathStatus === 'available');
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col border-t border-zinc-200 pt-2 dark:border-zinc-800" aria-label={t('history.title')}>
-      <div className="flex items-center gap-1 px-3 pb-1.5">
+    <section className="flex min-h-0 flex-1 flex-col pt-2" aria-label={t('history.title')}>
+      <div className="flex items-center gap-0.5 px-2 pb-1.5">
         <span className="flex-1 text-xs font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">{t('history.title')}</span>
         <button type="button" onClick={() => { setSearchOpen((open) => !open); setTimeout(() => searchInputRef.current?.focus(), 0); }} className={iconButtonClass} title={t('history.search')} aria-label={t('history.search')} aria-expanded={searchOpen}>
           <Search className="h-4 w-4" />

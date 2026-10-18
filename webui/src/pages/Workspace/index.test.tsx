@@ -235,6 +235,13 @@ describe('WorkspacePage', () => {
     mocks.confirm.mockResolvedValue(true);
   });
 
+  it('opens a direct memory link on the memory tab', async () => {
+    renderWithRouter(<WorkspacePage />, { routerProps: { initialEntries: ['/workspace?tab=memory'] } });
+    await waitFor(() => expect(mocks.listMemory).toHaveBeenCalled());
+    expect(mocks.list).not.toHaveBeenCalled();
+    expect(screen.getByRole('heading', { name: 'Memory' })).toBeInTheDocument();
+  });
+
   it.each(['/workspace', '/workspace?tab=knowledge'])('点击文件目录导航回到文件管理：%s', async initialEntry => {
     const user = userEvent.setup();
     renderWithRouter(<><Link to="/workspace">File directory</Link><WorkspacePage /></>, {
@@ -521,12 +528,12 @@ describe('WorkspacePage', () => {
     await user.click(screen.getByRole('button', { name: 'Memory' }));
     await user.click(await screen.findByText('MEMORY.md'));
 
-    expect(await screen.findByRole('heading', { name: 'Memory' })).toBeInTheDocument();
+    expect(await screen.findAllByRole('heading', { name: 'Memory' })).toHaveLength(2);
     expect(screen.getByRole('button', { name: 'Preview' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Source' })).toBeInTheDocument();
 
     await user.click(screen.getByTitle('Fullscreen preview'));
-    expect(screen.getAllByRole('heading', { name: 'Memory' })).toHaveLength(2);
+    expect(screen.getAllByRole('heading', { name: 'Memory' })).toHaveLength(3);
   });
 
   it('Memory Daily 文件复用编辑器并保存到 Memory API', async () => {
