@@ -905,16 +905,16 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     ? { title: t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' }), onClick: requestUpdate }
     : null;
 
-  const navLinkClass = (active: boolean) => `flex items-center rounded-lg transition-colors ${collapsed ? 'justify-center p-2.5' : 'gap-3 px-3 py-2 text-sm font-medium'} ${
+  const navLinkClass = (active: boolean) => `flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus ${collapsed ? 'justify-center p-2.5' : 'gap-3 px-3 py-2 text-sm'} ${
     active
-      ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-50'
-      : 'text-zinc-600 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50'
+      ? 'bg-ui-selected font-medium text-ui-text'
+      : 'font-normal text-ui-text hover:bg-ui-hover hover:text-ui-text'
   }`;
 
   const renderNavItem = (item: NavItem) => {
     const active = isNavItemActive(item.href);
-    const iconClass = `h-5 w-5 shrink-0 ${
-      item.accent ? 'text-red-500' : active ? 'text-zinc-700 dark:text-zinc-100' : 'text-zinc-400 dark:text-zinc-500'
+    const iconClass = `h-5 w-5 shrink-0 stroke-[1.75] ${
+      item.accent ? 'text-red-500' : 'text-ui-text'
     }`;
     if (item.action === 'new-chat') {
       return (
@@ -946,7 +946,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         {!collapsed && (
           <>
             <span className="min-w-0 flex-1 truncate">{item.name}</span>
-            {item.count ? <span className="shrink-0 rounded-full bg-zinc-200 px-1.5 text-xs text-zinc-500 dark:bg-zinc-700 dark:text-zinc-300">{item.count}</span> : null}
+            {item.count ? <span className="shrink-0 rounded-full bg-ui-subtle px-1.5 text-xs font-normal text-ui-secondary">{item.count}</span> : null}
             {item.hasNew && <>
               <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-red-500" aria-hidden="true" />
               <span className="sr-only">{t('newBadge')}</span>
@@ -964,10 +964,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           return (
             <div key={section.id} className="mb-4">
               {!collapsed && section.name && (
-                <h3 className="mb-1 px-3 text-xs font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
+                <h3 className="mb-1 px-3 text-xs font-medium uppercase tracking-wide text-ui-secondary">
                   {section.collapsible ? (
                     <button type="button" onClick={() => toggleNavSection(section.id)} aria-expanded={!sectionCollapsed}
-                      className="flex h-6 w-full items-center justify-between hover:text-zinc-600 dark:hover:text-zinc-300">
+                      className="flex h-6 w-full items-center justify-between rounded transition-colors hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus">
                       <span className="min-w-0 truncate">{section.name}</span>
                       <ChevronRight className={`ml-2 h-3.5 w-3.5 shrink-0 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
                     </button>
@@ -990,7 +990,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           <SessionHistoryPanel collapsed={collapsed} onExpandSidebar={() => setCollapsed(false)} onNavigate={() => setSidebarOpen(false)} />
         ) : null}
       />
-      <div className={`shrink-0 border-t border-zinc-200 dark:border-zinc-800 ${collapsed ? 'p-2' : 'p-3'}`}>
+      <div className={`shrink-0 border-t border-ui-border ${collapsed ? 'p-2' : 'p-3'}`}>
         <AccountMenu
           collapsed={collapsed}
           username={user?.username || productName}
@@ -1011,7 +1011,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   return (
     <div
-      className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100"
+      className="min-h-screen bg-ui-canvas text-ui-text"
       style={{
         '--sidebar-width': `${collapsed ? 64 : sidebarResize.width}px`,
         '--sidebar-expanded-width': `${sidebarResize.width}px`,
@@ -1062,11 +1062,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         onOpenMobileNav={() => setSidebarOpen(true)}
       />
 
-      {sidebarOpen && <div className="fixed inset-0 top-14 z-30 bg-zinc-900/40 lg:hidden" onClick={() => setSidebarOpen(false)} />}
+      {sidebarOpen && <div className="fixed inset-0 top-14 z-30 bg-black/40 lg:hidden" onClick={() => setSidebarOpen(false)} />}
 
       <aside
         id="layout-sidebar"
-        className={`fixed bottom-0 left-0 top-14 z-40 w-[var(--sidebar-width)] border-r border-zinc-200 bg-zinc-100 transition-transform dark:border-zinc-800 dark:bg-zinc-950 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
+        className={`fixed bottom-0 left-0 top-14 z-40 w-[var(--sidebar-width)] border-r border-ui-border bg-ui-sidebar transition-transform lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
       >
         {sidebar}
         {!collapsed && (
@@ -1079,7 +1079,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
             aria-valuemin={sidebarResize.minimum}
             aria-valuemax={sidebarResize.maximum}
             aria-valuenow={sidebarResize.width}
-            className="absolute inset-y-0 -right-1 z-10 hidden w-2 touch-none cursor-col-resize outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-zinc-400 lg:block"
+            className="absolute inset-y-0 -right-1 z-10 hidden w-2 touch-none cursor-col-resize outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ui-focus lg:block"
             {...sidebarResize.handleProps}
           />
         )}
@@ -1087,7 +1087,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           type="button"
           onClick={toggleCollapsed}
           // A tall, narrow handle sits flush with the sidebar edge in both states.
-          className="absolute -right-px top-1/2 z-20 hidden h-[92px] w-[14px] -translate-y-1/2 items-center justify-center rounded-l-[10px] border border-zinc-200 bg-white text-zinc-500 shadow-[-3px_0_10px_rgba(15,23,42,0.06)] transition-colors hover:bg-zinc-50 hover:text-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400 lg:flex dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+          className="absolute -right-px top-1/2 z-20 hidden h-[92px] w-[14px] -translate-y-1/2 items-center justify-center rounded-l-[10px] border border-ui-control bg-ui-surface text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus lg:flex"
           aria-expanded={!collapsed}
           aria-label={collapsed ? t('expandNav') : t('collapseNav')}
           title={collapsed ? t('expandNav') : t('collapseNav')}
@@ -1097,7 +1097,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       </aside>
 
       <div className={`flex h-screen flex-col pt-14 lg:pl-[var(--sidebar-width)] ${sidebarResize.dragging ? '' : 'transition-[padding]'}`}>
-        <main className="relative flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
+        <main className="relative flex-1 overflow-hidden bg-ui-canvas">
           <KeepAlivePanes panes={keepAlivePanes} activeHref={activePaneHref} location={location} routes={contentRoutes} />
         </main>
       </div>

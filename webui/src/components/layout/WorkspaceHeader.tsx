@@ -47,7 +47,7 @@ interface WorkspaceHeaderProps {
 }
 
 const ICON_BUTTON_CLASS =
-  'relative flex h-8 w-8 shrink-0 sm:h-9 sm:w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100';
+  'relative flex h-8 w-8 shrink-0 sm:h-9 sm:w-9 items-center justify-center rounded-lg text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus [&_svg]:stroke-[1.75]';
 
 /**
  * The bar above sidebar and content: product name, module navigation,
@@ -81,7 +81,7 @@ export default function WorkspaceHeader({
   return (
     <header
       data-workspace-header
-      className="fixed inset-x-0 top-0 z-50 flex h-14 items-center gap-1 border-b border-zinc-200 bg-white px-2 sm:gap-3 sm:px-5 lg:gap-0 lg:pl-0 dark:border-zinc-800 dark:bg-zinc-900"
+      className="fixed inset-x-0 top-0 z-50 flex h-14 items-center gap-1 border-b border-ui-border bg-ui-surface px-2 sm:gap-3 sm:px-5 lg:gap-0 lg:pl-0"
     >
       <button
         type="button"
@@ -93,21 +93,21 @@ export default function WorkspaceHeader({
         <Menu className="h-5 w-5" />
       </button>
 
-      <Link to="/" className="flex min-w-0 shrink-0 items-center gap-2 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 lg:w-[calc(var(--sidebar-expanded-width)-1px)] lg:px-5" title={productName}>
+      <Link to="/" className="flex min-w-0 shrink-0 items-center gap-2 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus lg:w-[calc(var(--sidebar-expanded-width)-1px)] lg:px-5" title={productName}>
         {logoUrl ? (
           <img src={logoUrl} alt="" aria-hidden="true" data-brand-logo className="h-8 w-8 shrink-0" />
         ) : (
-          <span aria-hidden="true" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-600 text-base font-bold text-white sm:flex">
+          <span aria-hidden="true" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-600 text-base font-semibold text-white sm:flex">
             {brandInitial}
           </span>
         )}
-        <span className="hidden min-w-0 max-w-[9rem] truncate sm:inline text-lg font-bold tracking-tight text-zinc-900 sm:max-w-[14rem] sm:text-xl dark:text-zinc-50">
+        <span className="hidden min-w-0 max-w-[9rem] truncate sm:inline text-lg font-semibold tracking-tight text-ui-text sm:max-w-[14rem] sm:text-xl">
           {productName}
         </span>
       </Link>
 
 
-      <div className="h-6 shrink-0 border-l border-zinc-200 dark:border-zinc-800" aria-hidden="true" />
+      <div className="h-6 shrink-0 border-l border-ui-border" aria-hidden="true" />
 
       <nav aria-label={t('modules')} className="flex h-full min-w-0 flex-1 items-stretch overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {workspaces.map((workspace) => {
@@ -119,9 +119,9 @@ export default function WorkspaceHeader({
               type="button"
               onClick={() => onSelectWorkspace(workspace.id)}
               aria-current={selected ? 'page' : undefined}
-              className={`relative flex shrink-0 items-center gap-1 border-b-2 px-3 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400 ${workspace.separated ? 'ml-3 before:absolute before:-left-1.5 before:top-4 before:h-6 before:border-l before:border-zinc-200 dark:before:border-zinc-700' : ''} ${selected ? 'border-red-600 font-semibold text-zinc-950 dark:text-white' : 'border-transparent text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white'}`}
+              className={`relative flex shrink-0 items-center gap-1 border-b-2 px-3 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus ${workspace.separated ? 'ml-3 before:absolute before:-left-1.5 before:top-4 before:h-6 before:border-l before:border-ui-border' : ''} ${selected ? 'border-red-600 font-medium text-ui-text' : 'border-transparent font-normal text-ui-text hover:bg-ui-hover hover:text-ui-text'}`}
             >
-              <Icon className="hidden h-4 w-4 shrink-0 xl:block" />
+              <Icon className="hidden h-4 w-4 shrink-0 stroke-[1.75] xl:block" />
               <span className="whitespace-nowrap">{workspace.name}</span>
             </button>
           );
@@ -172,7 +172,7 @@ export default function WorkspaceHeader({
             <>
               <Bell className="h-[18px] w-[18px]" />
               {hasUnread && (
-                <span data-notification-dot className="absolute right-2 top-2 h-2 w-2 rounded-full bg-red-500 ring-2 ring-white dark:ring-zinc-900" />
+                <span data-notification-dot className="absolute right-2 top-2 h-2 w-2 rounded-full bg-red-500 ring-2 ring-ui-surface" />
               )}
             </>
           )}
@@ -190,10 +190,10 @@ export default function WorkspaceHeader({
                   }}
                   className={MENU_ITEM_CLASS}
                 >
-                  <ListTodo className="h-4 w-4 shrink-0 text-zinc-400" />
+                  <ListTodo className="h-4 w-4 shrink-0 text-ui-secondary" />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate">{t('tasksInProgress', { count: activeTasks })}</span>
-                    <span className="block text-xs text-zinc-400">{t('viewTaskCenter')}</span>
+                    <span className="block text-xs text-ui-muted">{t('viewTaskCenter')}</span>
                   </span>
                 </button>
               )}
@@ -208,17 +208,17 @@ export default function WorkspaceHeader({
                   }}
                   className={MENU_ITEM_CLASS}
                 >
-                  <Bell className="h-4 w-4 shrink-0 self-start text-zinc-400" />
+                  <Bell className="h-4 w-4 shrink-0 self-start text-ui-secondary" />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate font-medium">{notification.title}</span>
                     {notification.summary && (
-                      <span className="line-clamp-2 block text-xs text-zinc-400">{notification.summary}</span>
+                      <span className="line-clamp-2 block text-xs text-ui-muted">{notification.summary}</span>
                     )}
                   </span>
                 </button>
               ))}
               {!hasUnread && (
-                <p className="px-2.5 py-3 text-sm text-zinc-400">{t('noNotifications')}</p>
+                <p className="px-2.5 py-3 text-sm text-ui-muted">{t('noNotifications')}</p>
               )}
             </>
           )}
@@ -235,7 +235,7 @@ export default function WorkspaceHeader({
             <>
               <div className={MENU_LABEL_CLASS}>{t('helpAndSupport')}</div>
               <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" role="menuitem" onClick={() => close()} className={MENU_ITEM_CLASS}>
-                <BookOpen className="h-4 w-4 shrink-0 text-zinc-400" />
+                <BookOpen className="h-4 w-4 shrink-0 text-ui-secondary" />
                 {t('helpDocs')}
               </a>
               <button
@@ -247,11 +247,11 @@ export default function WorkspaceHeader({
                 }}
                 className={MENU_ITEM_CLASS}
               >
-                <Keyboard className="h-4 w-4 shrink-0 text-zinc-400" />
+                <Keyboard className="h-4 w-4 shrink-0 text-ui-secondary" />
                 {t('helpShortcuts')}
               </button>
               <a href={FEEDBACK_URL} target="_blank" rel="noopener noreferrer" role="menuitem" onClick={() => close()} className={MENU_ITEM_CLASS}>
-                <MessageSquareWarning className="h-4 w-4 shrink-0 text-zinc-400" />
+                <MessageSquareWarning className="h-4 w-4 shrink-0 text-ui-secondary" />
                 {t('helpFeedback')}
               </a>
             </>

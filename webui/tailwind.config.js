@@ -10,6 +10,10 @@ export default {
   theme: {
     extend: {
       colors: {
+        ui: Object.fromEntries(
+          ['canvas', 'sidebar', 'surface', 'subtle', 'hover', 'selected', 'text', 'secondary', 'muted', 'border', 'control', 'focus', 'action', 'on-action']
+            .map(name => [name, `rgb(var(--ui-${name}) / <alpha-value>)`]),
+        ),
         primary: {
           50: '#fff1f2',
           100: '#ffe4e6',
@@ -24,8 +28,12 @@ export default {
         },
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'monospace'],
+        sans: ['-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', '"PingFang SC"', '"Microsoft YaHei"', 'sans-serif'],
+        mono: ['"SFMono-Regular"', 'Consolas', '"Liberation Mono"', 'monospace'],
+      },
+      boxShadow: {
+        'ui-input': 'var(--ui-shadow-input)',
+        'ui-panel': 'var(--ui-shadow-panel)',
       },
     },
   },

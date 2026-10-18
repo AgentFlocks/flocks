@@ -1224,20 +1224,20 @@ export function getMessageBubbleClassName({
   isEditing: boolean;
 }): string {
   if (!isUser) {
-    const typographyClass = compact ? 'text-sm' : 'text-[15px]';
+    const typographyClass = compact ? 'text-sm' : 'text-base';
 
-    return `w-full max-w-full min-w-0 bg-transparent py-1 ${typographyClass} text-[#34393e] break-words dark:text-zinc-100`;
+    return `w-full max-w-full min-w-0 bg-transparent py-1 ${typographyClass} text-ui-text break-words`;
   }
 
   if (compact) {
     const widthClass = isEditing ? 'w-full max-w-full' : 'max-w-full';
 
-    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm border border-black/[0.07] bg-zinc-50 text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
+    return `${widthClass} min-w-0 px-4 py-3 rounded-[18px] text-sm break-words border border-ui-border/60 bg-ui-subtle text-ui-text`;
   }
 
   const widthClass = isEditing ? 'w-full' : 'w-auto';
 
-  return `${widthClass} min-w-0 max-w-full px-5 py-3 rounded-[18px] text-sm break-words shadow-sm border border-black/[0.09] bg-zinc-50 text-[#30343a] dark:border-white/[0.10] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
+  return `${widthClass} min-w-0 max-w-full px-5 py-3 rounded-[18px] text-base break-words border border-ui-border/60 bg-ui-subtle text-ui-text`;
 }
 
 export function getInstructionDisplayBubbleClassName(compact: boolean): string {
@@ -4580,12 +4580,14 @@ export default function SessionChat({
       ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-transparent py-5'
       : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 dark:bg-zinc-950';
 
+  // A 760px reading column plus 48px avatar gutters aligns with the composer's
+  // 760px text area, 16px inner padding and 32px outer gutters.
   const msgListClass = compact
     ? fullWidth ? 'space-y-3 w-full px-4' : 'space-y-3'
     : fullWidth
       ? 'space-y-5 w-full px-12'
       : pageCanvas
-        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-7'
+        ? 'space-y-7 w-full max-w-[856px] mx-auto px-12'
         : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
   const visibleGoalBanner = goalBanner && getGoalBannerKey(goalBanner) !== dismissedGoalKey
     ? goalBanner
@@ -4617,7 +4619,7 @@ export default function SessionChat({
     <button
       onClick={handleAbort}
       title={t('chat.stopTitle')}
-      className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+      className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-ui-action text-ui-on-action hover:bg-ui-action/90 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus focus-visible:ring-offset-2"
     >
       <Square className="w-3 h-3 fill-current" />
     </button>
@@ -4894,7 +4896,7 @@ export default function SessionChat({
             compact
               ? 'bg-white px-4 py-3 dark:bg-zinc-950'
               : pageCanvas
-                ? 'bg-transparent px-7 pb-6 pt-2'
+                ? 'bg-transparent px-8 pb-5 pt-3'
                 : 'bg-white py-4 dark:bg-zinc-950'
           }`}
         >
@@ -4904,7 +4906,7 @@ export default function SessionChat({
                 ? fullWidth
                   ? 'w-full px-5'
                   : pageCanvas
-                    ? 'mx-auto w-full max-w-[760px]'
+                    ? 'mx-auto w-full max-w-[792px]'
                     : 'w-[min(76%,64rem)] mx-auto px-6'
                 : ''
             }`}
@@ -4988,17 +4990,17 @@ export default function SessionChat({
               onDragOver={transport ? undefined : handleComposerDragOver}
               onDragLeave={handleComposerDragLeave}
               onDrop={transport ? undefined : handleComposerDrop}
-              className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-[20px] shadow-[0_3px_12px_rgba(22,27,34,0.045)]' : 'rounded-2xl'} border transition-all ${
+              className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-[18px] shadow-ui-input' : 'rounded-2xl'} border transition-colors ${
                 isCompacting
                   ? 'border-amber-200 bg-amber-50/30 dark:border-amber-500/35 dark:bg-amber-950/25'
                   : isDragOver
                     ? 'border-sky-300 bg-sky-50/60 ring-4 ring-sky-100 dark:border-sky-500/50 dark:bg-sky-950/35 dark:ring-sky-500/10'
                     : isStreaming
-                      ? 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/70'
+                      ? 'border-ui-border bg-ui-surface'
                       : pageCanvas && !compact
-                        // Focus is one red border, no second ring (REA V30 / Flocks UI); it also wins over hover.
-                        ? 'border-black/[0.09] bg-zinc-50 hover:border-black/[0.14] focus-within:!border-[#DC2626] focus-within:bg-white dark:border-white/[0.10] dark:bg-[#303842] dark:hover:border-white/[0.16] dark:focus-within:!border-[#DC2626] dark:focus-within:bg-[#343d48]'
-                        : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
+                        // Focus changes the border only, keeping the composer geometry stable.
+                        ? 'border-ui-border bg-ui-surface hover:border-ui-control focus-within:border-ui-focus'
+                        : 'border-ui-border bg-ui-surface hover:border-ui-control focus-within:border-ui-focus focus-within:ring-2 focus-within:ring-ui-focus/15'
               }`}
             >
                 {/* Node reference chip */}
@@ -5225,8 +5227,8 @@ export default function SessionChat({
                             ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
                             : effectivePlaceholder
                     }
-                    className={`w-full resize-none bg-transparent text-sm outline-none placeholder:text-[#7b838e] dark:placeholder:text-[#9aa7b4] ${
-                      sending ? 'text-zinc-400 cursor-not-allowed dark:text-zinc-500' : 'text-zinc-900 dark:text-zinc-100'
+                    className={`w-full resize-none bg-transparent leading-[1.8] outline-none placeholder:text-ui-muted ${pageCanvas && !compact ? 'text-base' : 'text-sm'} ${
+                      sending ? 'text-ui-muted cursor-not-allowed' : 'text-ui-text'
                     }`}
                     style={{
                       minHeight: `${effectiveComposerTextareaMinHeight}px`,
@@ -5251,8 +5253,8 @@ export default function SessionChat({
                       aria-expanded={showComposerAddMenu}
                       className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
                         showComposerAddMenu
-                          ? 'bg-zinc-100 text-zinc-900 dark:bg-white/[0.09] dark:text-white'
-                          : 'text-zinc-500 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.07] dark:hover:text-white'
+                          ? 'bg-ui-selected text-ui-text'
+                          : 'text-ui-secondary hover:bg-ui-hover hover:text-ui-text'
                       }`}
                     >
                       <Plus className="h-[17px] w-[17px]" strokeWidth={2} />
@@ -5325,7 +5327,7 @@ export default function SessionChat({
                         <button
                           onClick={handleSend}
                           title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-ui-action text-ui-on-action transition-colors hover:bg-ui-action/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus focus-visible:ring-offset-2"
                         >
                           {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
                         </button>
@@ -5335,10 +5337,10 @@ export default function SessionChat({
                         onClick={handleSend}
                         disabled={!canSend}
                         title={hasUploadingFiles ? t('chat.upload.waiting') : undefined}
-                        className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
+                        className={`inline-flex h-8 w-8 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus focus-visible:ring-offset-2 ${
                           canSend
-                            ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
-                            : 'cursor-not-allowed border border-zinc-300 bg-zinc-200 text-zinc-400 dark:border-[#5a6573] dark:bg-[#46515e] dark:text-[#b8c2cc]'
+                            ? 'bg-ui-action text-ui-on-action hover:bg-ui-action/90'
+                            : 'cursor-not-allowed border border-ui-border bg-ui-subtle text-ui-muted'
                         }`}
                       >
                         {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
@@ -6408,7 +6410,7 @@ function ChatMessageBubbleInner({
         </div>
         <div className="flex w-full min-w-0 flex-col items-start">
           <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-base font-semibold text-[#3f444a] dark:text-[#d7dee8]">
+            <span className="text-base font-medium text-ui-text">
               {agentName}
             </span>
           </div>

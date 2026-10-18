@@ -110,7 +110,7 @@ export default function HeaderMenu({
       aria-label={label}
       onKeyDown={onMenuKeyDown}
       style={portalled ? position ?? { visibility: 'hidden' } : undefined}
-      className={`${portalled ? 'fixed' : `absolute top-full mt-2 ${align === 'right' ? 'right-0' : 'left-0'}`} z-[60] max-h-[calc(100dvh-5rem)] max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-xl border border-zinc-200 bg-white p-1.5 shadow-lg dark:border-zinc-700 dark:bg-zinc-900 ${menuClassName}`}
+      className={`${portalled ? 'fixed' : `absolute top-full mt-2 ${align === 'right' ? 'right-0' : 'left-0'}`} z-[60] max-h-[calc(100dvh-5rem)] max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-xl border border-ui-border bg-ui-surface p-1.5 text-ui-text shadow-ui-panel [&_svg]:stroke-[1.75] ${menuClassName}`}
     >
       {children(close)}
     </div>
@@ -148,8 +148,8 @@ export default function HeaderMenu({
 }
 
 export const MENU_ITEM_CLASS =
-  'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 focus:bg-zinc-100 focus:outline-none dark:text-zinc-200 dark:hover:bg-zinc-800 dark:focus:bg-zinc-800';
+  'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm font-normal text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus:bg-ui-hover focus:text-ui-text focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus aria-checked:bg-ui-selected aria-checked:font-medium aria-checked:text-ui-text';
 
-export const MENU_LABEL_CLASS = 'px-2.5 pb-1 pt-2 text-[11px] font-medium tracking-wide text-zinc-400 dark:text-zinc-500';
+export const MENU_LABEL_CLASS = 'px-2.5 pb-1 pt-2 text-[11px] font-medium tracking-wide text-ui-muted';
 
-export const MENU_SEPARATOR_CLASS = 'my-1 border-t border-zinc-100 dark:border-zinc-800';
+export const MENU_SEPARATOR_CLASS = 'my-1 border-t border-ui-border';
