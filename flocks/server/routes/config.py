@@ -877,6 +877,72 @@ async def _guard_data_retention_change(request: Request, config_data: Dict[str, 
     return True
 
 
+# Model settings: providers with their models and options, the default, small and
+# fallback models, and which providers are enabled. The model routes keep them
+# admin-only, and this generic endpoint must not be a way around that.
+_MODEL_CONFIG_FIELDS = (
+    "provider",
+    "model",
+    "small_model",
+    "default_models",
+    "fallback_providers",
+    "disabled_providers",
+    "enabled_providers",
+)
+
+
+# The loader expands these references anywhere in the file text, object keys included.
+_CONFIG_REFERENCE = re.compile(r"\{(?:env|secret|file):[^}]+\}")
+
+
+def _has_reference_key(value: Any) -> bool:
+    """Whether any object key in ``value`` holds a {env:…}, {secret:…} or {file:…} reference."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if isinstance(key, str) and _CONFIG_REFERENCE.search(key):
+                    return True
+                stack.append(child)
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
+
+
+async def _guard_model_config_change(request: Request, config_data: Dict[str, Any]) -> None:
+    """Changing model settings through this generic endpoint needs admin.
+
+    Members still save other settings here, and the Channel page sends back the
+    whole config it read, so a model setting equal to the current one is not a
+    change. The payload is judged as the save will write it (same model, same
+    dump), under both spellings of each key.
+
+    A key holding a reference also needs admin: once the file is reloaded,
+    "{secret:…}" can turn into "model" (or any other guarded key) and slip past
+    the comparison below.
+    """
+    if not isinstance(config_data, dict):
+        return
+    if _has_reference_key(config_data):
+        require_admin(request)
+    keys = {
+        spelling
+        for name in _MODEL_CONFIG_FIELDS
+        for spelling in (name, ConfigInfoModel.model_fields[name].alias or name)
+    }
+    if not keys.intersection(config_data):
+        return
+    try:
+        incoming = ConfigInfoModel.model_validate(config_data).model_dump(by_alias=True, exclude_none=True)
+    except Exception:
+        # A payload that fails validation fails the real save too (400).
+        return
+    current = (await Config.get()).model_dump(by_alias=True, exclude_none=True)
+    if any(key in incoming and incoming[key] != current.get(key) for key in keys):
+        require_admin(request)
+
+
 @router.patch("/", summary="Update configuration")
 @serialized_config_mutation
 async def update_config(request: Request, config_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -891,6 +957,7 @@ async def update_config(request: Request, config_data: Dict[str, Any]) -> Dict[s
     {secret:channel_<id>_<field>} references before the config is written to
     flocks.json, so that plaintext secrets never land in that file.
     """
+    await _guard_model_config_change(request, config_data)
     retention_changed = await _guard_data_retention_change(request, config_data)
     await _validate_plugin_group_updates(config_data)
     try:
