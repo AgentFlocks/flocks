@@ -29,7 +29,7 @@ import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
 import CopyButton from '@/components/common/CopyButton';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
-import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import SessionChat, { buildInstructionDisplayText, type ComposerPrefill, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
 import SessionContextPanel from './SessionContextPanel';
 import { getInitialSidePanelWidth, getMaxSidePanelWidth, SIDE_PANEL_MIN_WIDTH } from '@/components/common/sidePanelSizing';
 import SuiteInstallProgressPanel, {
@@ -55,7 +55,8 @@ import {
   reaEntryNavigationAction,
   type ReaEntryAction,
 } from '@/features/rea/navigation';
-import { reaApi, type ReaStatus } from '@/api/rea';
+import type { ReaStatus } from '@/api/rea';
+import { writeChatDraft } from '@/utils/chatDraft';
 import { skillAPI, type Skill } from '@/api/skill';
 import { workflowAPI, type WorkflowSummary } from '@/api/workflow';
 import type { Agent } from '@/api/agent';
@@ -514,11 +515,10 @@ export default function SessionPage() {
   const [startingRea, setStartingRea] = useState(false);
   const startingReaRef = useRef(false);
   // Watched: the shortcut badge and the upload rule follow installs and uninstalls done elsewhere.
-  const {
-    status: reaStatus,
-    refresh: refreshReaStatus,
-    recordInstallSession: recordReaInstallSession,
-  } = useReaStatus({ watch: true });
+  const { status: reaStatus, refresh: refreshReaStatus } = useReaStatus({ watch: true });
+  // The guide the REA entry put into the message box of the conversation it was clicked in (null: a
+  // new conversation); filled in, never sent.
+  const [reaComposerPrefill, setReaComposerPrefill] = useState<(ComposerPrefill & { sessionId: string | null }) | null>(null);
   const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
   const [pendingInitialDisplayText, setPendingInitialDisplayText] = useState<string | null>(null);
@@ -1661,13 +1661,12 @@ export default function SessionPage() {
     modelOverride?: { providerID: string; modelID: string } | null,
     options?: PromptDisplayOptions,
     executionModeOverride?: SessionExecutionMode,
-    sessionTitle?: string,
   ) => {
     const navigationKey = navigationRef.current.key;
     try {
       const effectiveExecutionMode = executionModeOverride || selectedExecutionMode;
       const response = await client.post('/api/session', {
-        title: sessionTitle || 'New Session',
+        title: 'New Session',
         ...(selectedProjectIDForCreate ? { projectID: selectedProjectIDForCreate } : {}),
         ...(selectedModelAuto ? { model_auto: true } : {}),
       });
@@ -1733,7 +1732,7 @@ export default function SessionPage() {
 
       addSession(response.data);
       void fetchProjects(undefined, searchQuery).catch(() => {});
-      if (!mountedRef.current || navigationRef.current.key !== navigationKey) return newSessionId as string;
+      if (!mountedRef.current || navigationRef.current.key !== navigationKey) return;
       setSelectedSessionFallback(response.data);
       executionModeHandoffRef.current = {
         sessionId: newSessionId,
@@ -1770,7 +1769,6 @@ export default function SessionPage() {
           DEFAULT_SESSION_EXECUTION_MODE,
         );
       }
-      return newSessionId as string;
     } catch (err: any) {
       toast.error(t('chat.sendFailed', 'Send failed'), err.message);
       throw err;
@@ -1844,10 +1842,12 @@ export default function SessionPage() {
   }, [handleCreateAndSend, handleSuiteInstallProgress, installingSocWorkspace, selectedPromptModel, t, toast]);
 
   // The 「REA 逆向分析」 shortcut (and the plugin square's actions): route by the
-  // live plugin state. A new Rex conversation gets the install or the use
-  // prompt as its first, visible message; a recent install conversation of
-  // this account is reopened instead of starting a second one. Every await is
-  // checked against the account and the page the click came from.
+  // live plugin state. The install or the use prompt only fills the message box
+  // of a new Rex conversation, for the user to edit and send (PRD 6.1 / 6.2):
+  // no message, conversation or install starts here. A failed install continues
+  // in its recent install conversation, with the repair request filled in the
+  // same way. Every await is checked against the account and the page the click
+  // came from.
   const handleReaEntry = useCallback(async (requested?: ReaEntryAction) => {
     if (startingReaRef.current) return;
     startingReaRef.current = true;
@@ -1859,24 +1859,12 @@ export default function SessionPage() {
       || currentReaIdentity() !== identity
       || navigationRef.current.key !== navigationKey
     );
-    // handleCreateAndSend reports its own failures.
-    let reported = false;
-    const newSession = async (text: string) => {
-      try {
-        return await handleCreateAndSend(
-          text,
-          [],
-          'rex',
-          selectedPromptModel,
-          undefined,
-          // Plan mode cannot install; REA work runs with Rex's normal tools.
-          'build',
-          t('rea.sessionTitle'),
-        );
-      } catch (error) {
-        reported = true;
-        throw error;
-      }
+    const fill = (text: string) => {
+      // REA runs with Rex's tools; plan mode cannot install, so the composer shows Build.
+      setSelectedAgent('rex');
+      handleSelectExecutionMode('build');
+      // An empty conversation that already has an id shows the shortcut too.
+      setReaComposerPrefill({ id: createMessageId(), text, sessionId: selectedSessionIdRef.current ?? null });
     };
     try {
       let status: ReaStatus | null;
@@ -1909,56 +1897,47 @@ export default function SessionPage() {
       }
       // Usable, or broken after it passed once: an analysis conversation, where Rex repairs first.
       if (state === 'ready' || (state === 'degraded' && requested !== 'repair')) {
-        await newSession(t('rea.usePrompt'));
+        fill(t('rea.usePrompt'));
         return;
       }
       if (!status.canInstall) {
         toast.info(t(state === 'not_installed' ? 'rea.entry.memberInstall' : 'rea.entry.memberRepair'));
         return;
       }
-      const reservation = await reaApi.reserveInstallSession();
-      if (stale()) return;
-      if (reservation.decision === 'pending') {
-        toast.info(t('rea.entry.pending'));
-        return;
-      }
-      if (reservation.decision === 'open' && reservation.sessionId) {
-        if (state !== 'not_installed') {
-          // Continue troubleshooting where the install ran.
-          await client.post(`/api/session/${reservation.sessionId}/prompt_async`, {
-            parts: buildPromptParts(t('rea.repairPrompt'), []),
-            messageID: createMessageId(),
-            agent: 'rex',
-            executionMode: 'build',
-          });
-          if (stale()) return;
+      if (state !== 'not_installed' && status.installSessionId) {
+        if (status.installSessionId === selectedSessionIdRef.current) {
+          // Already in it (an emptied install conversation shows the shortcut again).
+          fill(t('rea.repairPrompt'));
+          return;
         }
-        selectSession(reservation.sessionId);
+        // Continue troubleshooting where the install ran: the request waits in its message box, in
+        // Build mode (plan mode cannot install).
+        writeChatDraft(status.installSessionId, t('rea.repairPrompt'));
+        writeSessionExecutionMode(status.installSessionId, 'build');
+        selectSession(status.installSessionId);
         return;
       }
       // A failed install starts over with the same guide (it reuses what is there).
-      const prompt = state === 'degraded' ? t('rea.repairPrompt') : t('rea.installPrompt');
-      const sessionId = await newSession(prompt);
-      if (sessionId && currentReaIdentity() === identity) {
-        await recordReaInstallSession(sessionId).catch(() => undefined);
-      }
-    } catch (error) {
-      if (!reported && !stale()) {
-        toast.error(t('chat.sendFailed', 'Send failed'), error instanceof Error ? error.message : String(error));
-      }
+      fill(state === 'degraded' ? t('rea.repairPrompt') : t('rea.installPrompt'));
     } finally {
       startingReaRef.current = false;
       if (mountedRef.current) setStartingRea(false);
     }
   }, [
-    handleCreateAndSend,
-    recordReaInstallSession,
+    handleSelectExecutionMode,
     refreshReaStatus,
     selectSession,
-    selectedPromptModel,
     t,
     toast,
   ]);
+
+  const handleReaComposerPrefillApplied = useCallback((id: string) => {
+    setReaComposerPrefill((current) => (current?.id === id ? null : current));
+  }, []);
+  // A guide meant for one conversation is not carried into another one.
+  useEffect(() => {
+    setReaComposerPrefill((current) => (current && current.sessionId !== (selectedSessionId ?? null) ? null : current));
+  }, [selectedSessionId]);
 
   // The plugin square's 「安装」「使用」「排查并修复」 land here (see the Hub page) and
   // run the shortcut's routing once per navigation, also across a page reload.
@@ -2095,6 +2074,8 @@ export default function SessionPage() {
           supportsVision={effectiveSupportsVision}
           // Reverse-engineering samples can be attached once REA is usable.
           allowAnyUpload={reaAcceptsSamples(reaStatus)}
+          composerPrefill={reaComposerPrefill?.sessionId === (activeChatSessionId ?? null) ? reaComposerPrefill : null}
+          onComposerPrefillApplied={handleReaComposerPrefillApplied}
           contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
           model={selectedPromptModel}
           welcomeContent={(setInput) => (

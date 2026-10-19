@@ -4933,6 +4933,41 @@ describe('SessionChat composer references', () => {
     });
   });
 
+  it('fills a guide into the message box once and sends only what the user sends (REA entry)', async () => {
+    const user = userEvent.setup();
+    const onCreateAndSend = vi.fn().mockResolvedValue('sess-created');
+    const onComposerPrefillApplied = vi.fn();
+    const guide = 'REA 安装指引\n安装原则：仅安装缺失组件\n安装执行前请再次和我确认你计划安装哪些模块？';
+    const props = {
+      sessionId: null,
+      agentName: 'rex',
+      onCreateAndSend,
+      composerPrefill: { id: 'guide-1', text: guide },
+      onComposerPrefillApplied,
+    };
+    const view = render(React.createElement(SessionChat, props));
+    const input = screen.getByPlaceholderText('请输入消息') as HTMLTextAreaElement;
+    await waitFor(() => expect(input).toHaveValue(guide));
+    expect(onComposerPrefillApplied).toHaveBeenCalledWith('guide-1');
+    // Ready to read from the top: focused, caret before the first line.
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.selectionStart).toBe(0);
+    expect(onCreateAndSend).not.toHaveBeenCalled();
+
+    // The same prefill on a later render does not overwrite what the user wrote.
+    await user.clear(input);
+    await user.type(input, '只装轻量档');
+    view.rerender(React.createElement(SessionChat, props));
+    expect(input).toHaveValue('只装轻量档');
+    // Shift+Enter is a new line; Enter sends.
+    await user.type(input, '{Shift>}{Enter}{/Shift}缺什么装什么');
+    expect(onCreateAndSend).not.toHaveBeenCalled();
+    await user.type(input, '{Enter}');
+    await waitFor(() => expect(onCreateAndSend).toHaveBeenCalledTimes(1));
+    expect(onCreateAndSend.mock.calls[0][0]).toBe('只装轻量档\n缺什么装什么');
+    expect(onComposerPrefillApplied).toHaveBeenCalledTimes(1);
+  });
+
   it('queues streaming messages to the mentioned agent', async () => {
     const user = userEvent.setup();
     render(React.createElement(SessionChat, {

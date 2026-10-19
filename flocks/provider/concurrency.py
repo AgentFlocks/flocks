@@ -375,6 +375,10 @@ class ConcurrencyLimiter:
 # ----------------------------------------------------------------------
 _registry_lock = threading.Lock()
 _limiters: Dict[str, ConcurrencyLimiter] = {}
+# Sessions queued for a request slot right now (session id -> waits). A
+# background run's inactivity watchdog reads it: queueing behind other
+# callers' requests is not the session stalling.
+_waiting_sessions: Dict[str, int] = {}
 
 
 def _normalize_provider_id(provider_id: Optional[str]) -> str:
@@ -465,12 +469,35 @@ async def acquire_llm_slot(
     *,
     priority: int = PRIORITY_INTERACTIVE,
     timeout_s: Optional[float] = None,
+    session_id: Optional[str] = None,
 ) -> LlmSlot:
-    """Resolve the configured cap for ``provider_id`` and wait for a slot."""
+    """Resolve the configured cap for ``provider_id`` and wait for a slot.
+
+    With ``session_id`` the session counts as waiting until the slot is
+    granted (or the wait ends otherwise); see :func:`is_waiting_for_llm_slot`.
+    """
     config = await _load_config()
     limit = resolve_provider_request_limit(config, provider_id)
     limiter = get_provider_limiter(provider_id, limit=limit)
-    return await limiter.acquire(priority=priority, timeout_s=timeout_s)
+    if not session_id:
+        return await limiter.acquire(priority=priority, timeout_s=timeout_s)
+    with _registry_lock:
+        _waiting_sessions[session_id] = _waiting_sessions.get(session_id, 0) + 1
+    try:
+        return await limiter.acquire(priority=priority, timeout_s=timeout_s)
+    finally:
+        with _registry_lock:
+            remaining = _waiting_sessions.get(session_id, 1) - 1
+            if remaining > 0:
+                _waiting_sessions[session_id] = remaining
+            else:
+                _waiting_sessions.pop(session_id, None)
+
+
+def is_waiting_for_llm_slot(session_id: str) -> bool:
+    """Whether ``session_id`` is queued in :func:`acquire_llm_slot` right now."""
+    with _registry_lock:
+        return _waiting_sessions.get(session_id, 0) > 0
 
 
 def report_provider_rate_limited(
@@ -492,6 +519,7 @@ def limiter_snapshots() -> List[Dict[str, Any]]:
 def reset_limiters_for_testing() -> None:
     with _registry_lock:
         _limiters.clear()
+        _waiting_sessions.clear()
 
 
 __all__ = [
@@ -504,6 +532,7 @@ __all__ = [
     "LlmSlot",
     "acquire_llm_slot",
     "get_provider_limiter",
+    "is_waiting_for_llm_slot",
     "limiter_snapshots",
     "report_provider_rate_limited",
     "reset_limiters_for_testing",

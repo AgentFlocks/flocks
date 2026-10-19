@@ -4215,6 +4215,7 @@ class SessionRunner:
             self._active_llm_slot = await acquire_llm_slot(
                 self.provider_id,
                 priority=llm_priority,
+                session_id=self.session.id,
             )
         except BaseException:
             # Cancelled or failed while queued: the try/finally below has not

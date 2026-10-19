@@ -16,6 +16,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
 import EntitySheet from '@/components/common/EntitySheet';
+import { useAuth } from '@/contexts/AuthContext';
 import { useProviders, type EnrichedProvider } from '@/hooks/useProviders';
 import { useSSE } from '@/hooks/useSSE';
 import { MODEL_CHANGED_EVENT } from '@/hooks/useDefaultModelVision';
@@ -25,6 +26,7 @@ import {
 } from '@/api/provider';
 import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
 import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
+import { extractErrorMessage } from '@/utils/error';
 import {
   convertCurrencyAmount,
   formatCacheHitRate,
@@ -96,7 +98,9 @@ function convertEditablePrice(
 
 // ==================== Connection Cache ====================
 
-const CONNECTION_CACHE_KEY = 'flocks_provider_connection_cache';
+// v2 drops statuses cached before members lost the test buttons: their 403s were stored as "failed".
+const CONNECTION_CACHE_KEY = 'flocks_provider_connection_cache_v2';
+const LEGACY_CONNECTION_CACHE_KEY = 'flocks_provider_connection_cache';
 const CONNECTION_CACHE_TTL_CONNECTED = 60 * 60 * 1000; // connected: 1 hour
 const CONNECTION_CACHE_TTL_FAILED = 5 * 60 * 1000;     // failed: 5 minutes
 
@@ -104,6 +108,7 @@ type CachedStatus = { status: 'connected' | 'failed'; ts: number };
 
 function loadConnectionCache(): Record<string, CachedStatus> {
   try {
+    localStorage.removeItem(LEGACY_CONNECTION_CACHE_KEY);
     return JSON.parse(localStorage.getItem(CONNECTION_CACHE_KEY) || '{}');
   } catch {
     return {};
@@ -133,6 +138,12 @@ export default function ModelPage() {
   const { providers, connectedIds, loading, error, refetch } = useProviders();
   const toast = useToast();
   const { t } = useTranslation('model');
+  // Provider credentials and connection tests are admin-only on the backend
+  // (require_admin); members only get read access plus model-level settings.
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+  const isAdminRef = useRef(isAdmin);
+  isAdminRef.current = isAdmin;
 
   // State
   const [selectedProvider, setSelectedProvider] = useState<EnrichedProvider | null>(null);
@@ -304,7 +315,10 @@ export default function ModelPage() {
 
       const enabledMap: Record<string, boolean> = {};
       const [credentialsResult] = await Promise.allSettled([
-        providerAPI.getCredentials(provider.id),
+        // Credentials are only used by the admin configure dialog; members would just get a 403.
+        isAdminRef.current
+          ? providerAPI.getCredentials(provider.id).then(res => res.data)
+          : Promise.resolve(null),
         Promise.allSettled(
           models.map(async (m) => {
             try {
@@ -319,7 +333,7 @@ export default function ModelPage() {
 
       if (providerLoadSeqRef.current !== requestSeq) return;
 
-      setCredentials(credentialsResult.status === 'fulfilled' ? credentialsResult.value.data : null);
+      setCredentials(credentialsResult.status === 'fulfilled' ? credentialsResult.value : null);
       setModelEnabledMap(prev => ({ ...prev, ...enabledMap }));
     } catch {
       if (providerLoadSeqRef.current !== requestSeq) return;
@@ -496,13 +510,15 @@ export default function ModelPage() {
         icon={<Brain className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowAddProvider(true)}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              <Plus className="w-4 h-4" />
-              {t('addProvider')}
-            </button>
+            {isAdmin && (
+              <button
+                onClick={() => setShowAddProvider(true)}
+                className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                {t('addProvider')}
+              </button>
+            )}
             {selectedProvider && (
               <button
                 onClick={() => setShowAddModel(true)}
@@ -539,14 +555,18 @@ export default function ModelPage() {
                   <Brain className="w-8 h-8 text-gray-400" />
                 </div>
                 <p className="text-sm font-medium text-gray-700 mb-1">{t('providerList.empty')}</p>
-                <p className="text-xs text-gray-500 mb-4">{t('providerList.emptyHint')}</p>
-                <button
-                  onClick={() => setShowAddProvider(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-slate-800 text-white rounded-lg hover:bg-slate-900 transition-colors"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  {t('providerList.addProvider')}
-                </button>
+                <p className="text-xs text-gray-500 mb-4">
+                  {isAdmin ? t('providerList.emptyHint') : t('providerList.emptyHintMember')}
+                </p>
+                {isAdmin && (
+                  <button
+                    onClick={() => setShowAddProvider(true)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-slate-800 text-white rounded-lg hover:bg-slate-900 transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    {t('providerList.addProvider')}
+                  </button>
+                )}
               </div>
             ) : (
               configuredProviders.map((provider) => (
@@ -556,7 +576,7 @@ export default function ModelPage() {
                   isSelected={selectedProvider?.id === provider.id}
                   connStatus={connectionStatus[provider.id] || 'unknown'}
                   onClick={() => handleSelectProvider(provider)}
-                  onConfigure={async () => {
+                  onConfigure={isAdmin ? async () => {
                     await handleSelectProvider(provider);
                     if (selectedProviderRef.current?.id === provider.id) {
                       try {
@@ -566,10 +586,10 @@ export default function ModelPage() {
                           setShowConfigDialog(true);
                         }
                       } catch (err: any) {
-                        toast.error(t('configFailed'), err.message);
+                        toast.error(t('configFailed'), extractErrorMessage(err));
                       }
                     }
-                  }}
+                  } : undefined}
                 />
               ))
             )}
@@ -586,6 +606,7 @@ export default function ModelPage() {
               loadingModels={loadingModels}
               modelEnabledMap={modelEnabledMap}
               connStatus={connectionStatus[selectedProvider.id] || 'unknown'}
+              canTest={isAdmin}
               onToggleModel={handleToggleModel}
               onDeleteModel={handleDeleteModel}
               onOpenModelDetail={(model) => setSelectedModelForDetail({ provider: selectedProvider, model })}
@@ -653,6 +674,7 @@ export default function ModelPage() {
       {showAddModel && selectedProvider && (
         <AddModelDialog
           provider={selectedProvider}
+          canTest={isAdmin}
           onClose={() => setShowAddModel(false)}
           onCreated={handleModelCreated}
         />
@@ -869,7 +891,7 @@ function ProviderCard({ provider, isSelected, connStatus, onClick, onConfigure }
   provider: EnrichedProvider; isSelected: boolean;
   connStatus: 'unknown' | 'connected' | 'failed';
   onClick: () => void;
-  onConfigure: () => void;
+  onConfigure?: () => void;
 }) {
   const { t } = useTranslation('model');
   const dotColor = connStatus === 'connected' ? 'bg-green-500'
@@ -899,13 +921,15 @@ function ProviderCard({ provider, isSelected, connStatus, onClick, onConfigure }
           }
         </div>
       </div>
-      <button
-        onClick={(e) => { e.stopPropagation(); onConfigure(); }}
-        className="p-1.5 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 flex-shrink-0"
-        title="Configure"
-      >
-        <Cog className="w-3.5 h-3.5" />
-      </button>
+      {onConfigure && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onConfigure(); }}
+          className="p-1.5 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 flex-shrink-0"
+          title="Configure"
+        >
+          <Cog className="w-3.5 h-3.5" />
+        </button>
+      )}
     </div>
   );
 }
@@ -920,7 +944,7 @@ type ModelTestStatus = {
 
 function ProviderDetail({
   provider, models, loadingModels,
-  modelEnabledMap, connStatus, onToggleModel, onDeleteModel,
+  modelEnabledMap, connStatus, canTest, onToggleModel, onDeleteModel,
   onOpenModelDetail, onConnectionStatusChange,
 }: {
   provider: EnrichedProvider;
@@ -928,6 +952,8 @@ function ProviderDetail({
   loadingModels: boolean;
   modelEnabledMap: Record<string, boolean>;
   connStatus: 'unknown' | 'connected' | 'failed';
+  /** Connection tests hit the admin-only test-credentials endpoint. */
+  canTest: boolean;
   onToggleModel: (providerId: string, modelId: string, enabled: boolean) => void;
   onDeleteModel?: (modelId: string) => void;
   onOpenModelDetail?: (model: ModelDefinitionV2) => void;
@@ -953,8 +979,8 @@ function ProviderDetail({
         onConnectionStatusChange('connected');
       }
       return result;
-    } catch (err: any) {
-      const result: ModelTestStatus = { status: 'failed', message: err.response?.data?.detail || err.message };
+    } catch (err) {
+      const result: ModelTestStatus = { status: 'failed', message: extractErrorMessage(err) };
       setModelTestStatus(prev => ({ ...prev, [modelId]: result }));
       batchResultsRef.current[modelId] = result;
       return result;
@@ -1025,14 +1051,18 @@ function ProviderDetail({
                 )}
               </span>
             )}
-            <button
-              onClick={handleBatchTest}
-              disabled={batchTesting || loadingModels || models.length === 0}
-              className="flex items-center gap-1 px-2 py-1 text-xs border border-gray-300 text-gray-600 rounded hover:border-slate-400 hover:text-slate-800 hover:bg-slate-50 disabled:opacity-50"
-            >
-              {batchTesting ? <Loader2 className="w-3 h-3 animate-spin" /> : <TestTube className="w-3 h-3" />}
-              {batchTesting ? t('detail.testing') : t('detail.batchTest')}
-            </button>
+            {canTest ? (
+              <button
+                onClick={handleBatchTest}
+                disabled={batchTesting || loadingModels || models.length === 0}
+                className="flex items-center gap-1 px-2 py-1 text-xs border border-gray-300 text-gray-600 rounded hover:border-slate-400 hover:text-slate-800 hover:bg-slate-50 disabled:opacity-50"
+              >
+                {batchTesting ? <Loader2 className="w-3 h-3 animate-spin" /> : <TestTube className="w-3 h-3" />}
+                {batchTesting ? t('detail.testing') : t('detail.batchTest')}
+              </button>
+            ) : (
+              <span className="text-[11px] text-gray-400">{t('detail.testAdminOnly')}</span>
+            )}
           </div>
         </div>
 
@@ -1058,7 +1088,7 @@ function ProviderDetail({
                   enabled={enabled}
                   testStatus={modelTestStatus[model.id]}
                   onOpenDetail={onOpenModelDetail ? () => onOpenModelDetail(model) : undefined}
-                  onTestModel={() => handleTestSingleModel(model.id)}
+                  onTestModel={canTest ? () => handleTestSingleModel(model.id) : undefined}
                   onToggle={() => onToggleModel(provider.id, model.id, !enabled)}
                   onDelete={onDeleteModel ? () => onDeleteModel(model.id) : undefined}
                 />
@@ -1078,7 +1108,7 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
   enabled: boolean;
   testStatus?: ModelTestStatus;
   onOpenDetail?: () => void;
-  onTestModel: () => void;
+  onTestModel?: () => void;
   onToggle: () => void;
   onDelete?: () => void;
 }) {
@@ -1155,7 +1185,7 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
-          {enabled && (
+          {enabled && onTestModel && (
             <button
               onClick={(e) => { e.stopPropagation(); onTestModel(); }}
               disabled={testStatus?.status === 'testing'}
@@ -2180,8 +2210,8 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
 
 // ==================== Add Model Dialog ====================
 
-function AddModelDialog({ provider, onClose, onCreated }: {
-  provider: EnrichedProvider; onClose: () => void; onCreated: () => void;
+function AddModelDialog({ provider, canTest, onClose, onCreated }: {
+  provider: EnrichedProvider; canTest: boolean; onClose: () => void; onCreated: () => void;
 }) {
   const toast = useToast();
   const { t } = useTranslation('model');
@@ -2203,6 +2233,12 @@ function AddModelDialog({ provider, onClose, onCreated }: {
       modelSavedRef.current = true;
       onCreated();
       toast.success(t('modelAdded'), `${form.name.trim()} (${form.modelId.trim()})`);
+
+      // The follow-up connection test is admin-only; members are done once the model is saved.
+      if (!canTest) {
+        onClose();
+        return;
+      }
 
       setTesting(true);
       try {

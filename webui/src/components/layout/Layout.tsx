@@ -55,6 +55,7 @@ import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useConfirm } from '@/components/common/ConfirmDialog';
+import { BackendStatusBanner } from '@/components/common/BackendStatusBanner';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
@@ -151,14 +152,38 @@ function latestProductVersion(info: VersionInfo, isFlocksproActive: boolean): st
 function buildUpdateNotification(info: VersionInfo | null, language: string): UserNotification | null {
   const releaseNotes = getLocalizedReleaseNotes(info?.release_notes, language);
   if (!info || info.error || !releaseNotes) return null;
+  const isZh = language.toLowerCase().startsWith('zh');
+  const summary = isZh ? '这里是本次版本值得关注的新功能和变化。' : 'Here are the highlights from this version.';
+  if (info.edition === 'flockspro') {
+    const proVersion = formatProVersion(info.current_bundle_version || info.latest_version || info.current_version);
+    if (!proVersion) return null;
+    // Own prefix: a Pro bundle may share its number with a Core release. Core and component versions,
+    // as in the Pro update dismissal key: a component-only update keeps the bundle number.
+    const coreVersion = formatProVersion(info.current_core_version);
+    const componentVersion = formatProVersion(info.current_pro_component_version);
+    const releaseKey = [
+      proVersion,
+      coreVersion && `core-${coreVersion}`,
+      componentVersion && `pro-${componentVersion}`,
+    ].filter(Boolean).join('-');
+    return {
+      id: `whats-new-flockspro-${releaseKey}`,
+      kind: 'whats_new',
+      title: isZh ? `Flocks Pro ${proVersion} 更新内容` : `What's new in Flocks Pro ${proVersion}`,
+      summary,
+      body: releaseNotes,
+      highlights: [],
+      version: proVersion,
+      priority: 20,
+    };
+  }
   const version = info.latest_version ?? info.current_version;
   if (!version || version === 'unknown') return null;
-  const isZh = language.toLowerCase().startsWith('zh');
   return {
     id: `whats-new-${version}`,
     kind: 'whats_new',
     title: isZh ? `Flocks ${formatUpdateVersion(version)} 更新内容` : `What's new in Flocks ${formatUpdateVersion(version)}`,
-    summary: isZh ? '这里是本次版本值得关注的新功能和变化。' : 'Here are the highlights from this version.',
+    summary,
     body: releaseNotes,
     highlights: [],
     version,
@@ -973,6 +998,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       </aside>
 
       <div className={`flex h-screen flex-col pt-14 transition-[padding] ${collapsed ? 'lg:pl-16' : 'lg:pl-64'}`}>
+        {/* In the flow under the fixed header: a fixed banner would either hide under it or cover it. */}
+        <BackendStatusBanner inline />
         <main className="relative flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
           <KeepAlivePanes panes={keepAlivePanes} activeHref={activePaneHref} location={location} routes={contentRoutes} />
         </main>
