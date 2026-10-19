@@ -212,8 +212,12 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const [collapsed, setCollapsed] = useState(readSidebarCollapsed);
   const isHome = location.pathname === '/';
   const [showOnboarding, setShowOnboarding] = useState(false);
+  // Onboarding writes model credentials and the default model, so only admins get it
+  // (and a session that drops to member does not keep the dialog).
+  const canOnboard = user?.role === 'admin';
+  const onboardingOpen = showOnboarding && canOnboard;
   const [updateState, setUpdateState] = useState<'idle' | 'pending' | 'visible'>('idle');
-  const tokenPolicy = useTokenPolicyNotice(user?.id, showOnboarding || updateState === 'visible');
+  const tokenPolicy = useTokenPolicyNotice(user?.id, onboardingOpen || updateState === 'visible');
   const handleUpdatePresented = useCallback(() => {
     if (document.visibilityState === 'visible') setUpdateState('visible');
   }, []);
@@ -275,7 +279,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, []);
 
   useEffect(() => {
-    if (!isHome) return undefined;
+    if (!isHome || !canOnboard) return undefined;
     let cancelled = false;
     onboardingAPI.getStatus()
       .then((res) => {
@@ -287,9 +291,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     return () => {
       cancelled = true;
     };
-  }, [isHome]);
+  }, [isHome, canOnboard]);
 
-  const handleOpenOnboarding = useCallback(() => setShowOnboarding(true), []);
+  const handleOpenOnboarding = useCallback(() => {
+    if (canOnboard) setShowOnboarding(true);
+  }, [canOnboard]);
 
   useEffect(() => {
     window.addEventListener('flocks:open-onboarding', handleOpenOnboarding);
@@ -533,7 +539,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const allNotifications = updateNotification
     ? [...notifications, updateNotification].sort((a, b) => a.priority - b.priority)
     : notifications;
-  const visibleNotifications = tokenPolicy.ready && !tokenPolicy.notice && backendNotificationsReady && currentReleaseReady && updateNotificationReady && !showOnboarding && updateState === 'idle' && allNotifications.length > 0
+  const visibleNotifications = tokenPolicy.ready && !tokenPolicy.notice && backendNotificationsReady && currentReleaseReady && updateNotificationReady && !onboardingOpen && updateState === 'idle' && allNotifications.length > 0
     ? allNotifications
     : [];
 
@@ -934,11 +940,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
       <LazyLoadErrorBoundary mode="overlay">
         <Suspense fallback={null}>
-          {showOnboarding && <OnboardingModal onClose={() => setShowOnboarding(false)} />}
-          {tokenPolicy.notice && !showOnboarding && updateState !== 'visible' && (
+          {onboardingOpen && <OnboardingModal onClose={() => setShowOnboarding(false)} />}
+          {tokenPolicy.notice && !onboardingOpen && updateState !== 'visible' && (
             <TokenPolicyNotice onClose={tokenPolicy.close} onPresented={tokenPolicy.onPresented} />
           )}
-          {updateState !== 'idle' && (updateState === 'visible' || (tokenPolicy.ready && !tokenPolicy.notice && !showOnboarding)) && (
+          {updateState !== 'idle' && (updateState === 'visible' || (tokenPolicy.ready && !tokenPolicy.notice && !onboardingOpen)) && (
             <UpdateModal
               initialInfo={updateInfo}
               forceInitialCheck={updateInfo === null}

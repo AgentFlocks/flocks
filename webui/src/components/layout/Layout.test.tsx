@@ -1,6 +1,6 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation, type RouteObject } from 'react-router-dom';
 import Layout from './Layout';
 
@@ -342,5 +342,38 @@ describe('Layout chrome', () => {
     renderAt('/');
     fireEvent.click(screen.getByRole('button', { name: 'newChat' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/sessions'));
+  });
+});
+
+describe('Layout onboarding', () => {
+  it('opens onboarding for an admin when the first-run setup is not complete', async () => {
+    onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });
+    renderAt('/');
+    expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+  });
+
+  it('keeps onboarding away from members: no status check, no prompt, no event opener', async () => {
+    useAuth.mockReturnValue({ user: { id: 'u2', username: 'member', role: 'member' }, logout: vi.fn() });
+    onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });
+    renderAt('/');
+    await act(async () => {
+      window.dispatchEvent(new Event('flocks:open-onboarding'));
+    });
+    expect(onboardingAPI.getStatus).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
+  });
+
+  it('closes onboarding when the signed-in user is no longer an admin', async () => {
+    onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });
+    const { rerender } = renderAt('/');
+    expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+
+    useAuth.mockReturnValue({ user: { id: 'u2', username: 'member', role: 'member' }, logout: vi.fn() });
+    rerender(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes><Route path="/*" element={<Layout contentRoutes={routes} />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
   });
 });
