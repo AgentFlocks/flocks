@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from flocks.config.config_writer import ConfigWriter
@@ -25,6 +25,7 @@ from flocks.provider.provider import (
     ProviderConfig,
 )
 from flocks.provider.sdk.openai_compatible import OpenAICompatibleProvider
+from flocks.server.auth import require_admin
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.utils.log import Log
 
@@ -177,7 +178,7 @@ async def list_providers():
 
 @router.post("/providers", response_model=ProviderResp, status_code=201)
 @serialized_config_mutation
-async def create_provider(body: CreateProviderReq):
+async def create_provider(body: CreateProviderReq, _admin: object = Depends(require_admin)):
     """Create a custom OpenAI-compatible provider in flocks.json."""
     pid = "custom-" + body.name.lower().replace(" ", "-").replace("_", "-")
 
@@ -222,7 +223,7 @@ async def create_provider(body: CreateProviderReq):
 
 @router.delete("/providers/{provider_id}", status_code=204)
 @serialized_config_mutation
-async def delete_provider(provider_id: str):
+async def delete_provider(provider_id: str, _admin: object = Depends(require_admin)):
     """Delete a custom provider from flocks.json."""
     raw = ConfigWriter.get_provider_raw(provider_id)
     if raw is None:
@@ -282,7 +283,7 @@ async def list_models(provider_id: str):
 
 @router.post("/models/{provider_id}", response_model=ModelResp, status_code=201)
 @serialized_config_mutation
-async def create_model(provider_id: str, body: CreateModelReq):
+async def create_model(provider_id: str, body: CreateModelReq, _admin: object = Depends(require_admin)):
     """Add a model to a provider in flocks.json."""
     raw = ConfigWriter.get_provider_raw(provider_id)
     if raw is None:
@@ -342,7 +343,7 @@ async def create_model(provider_id: str, body: CreateModelReq):
 
 @router.delete("/models/{provider_id}/{model_id:path}", status_code=204)
 @serialized_config_mutation
-async def delete_model(provider_id: str, model_id: str):
+async def delete_model(provider_id: str, model_id: str, _admin: object = Depends(require_admin)):
     """Remove a model from a provider in flocks.json."""
     removed = ConfigWriter.remove_model(provider_id, model_id)
     if not removed:

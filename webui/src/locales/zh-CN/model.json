@@ -9,6 +9,7 @@
     "setDefaultModel": "设置默认模型",
     "defaultModelUpdated": "默认模型已更新",
     "defaultModelInvalid": "当前默认模型「{{model}}」已不在可用列表中，已自动清除，请重新选择",
+    "defaultModelInvalidMember": "当前默认模型「{{model}}」已不在可用列表中，请联系管理员重新设置",
     "fallbackModels": "辅助模型",
     "noFallbackModels": "自动策略",
     "fallbackAvailability": "{{available}} / {{total}} 可用",
@@ -69,7 +70,8 @@
     "testing": "测试中",
     "success": "成功",
     "failed": "失败",
-    "testAdminOnly": "连通性测试仅管理员可用"
+    "configAdminOnly": "模型配置仅管理员可修改",
+    "noModelsMember": "请联系管理员添加模型"
   },
   "status": {
     "connected": "已连接",
