@@ -625,6 +625,54 @@ async def test_existing_background_session_pins_agent_identity(
 
 
 @pytest.mark.asyncio
+async def test_waiting_for_a_provider_slot_is_not_inactivity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Ten tasks share a provider's eight request slots by default: a session
+    # queued for one past the inactivity timeout must still run once granted.
+    from flocks.config.config import ConfigInfo
+    from flocks.provider import concurrency
+
+    monkeypatch.setattr(background_module, "_WATCHDOG_CHECK_INTERVAL", 0.01)
+    monkeypatch.setenv("FLOCKS_LLM_MAX_CONCURRENT_REQUESTS", "1")
+    monkeypatch.setattr(Config, "get", AsyncMock(return_value=ConfigInfo()))
+    provider_id = "prov_slot_wait"
+    blocker = await concurrency.acquire_llm_slot(provider_id)
+    granted: list[str] = []
+
+    async def loop_run(session_id, **_kwargs):
+        slot = await concurrency.acquire_llm_slot(provider_id, session_id=session_id)
+        granted.append(session_id)
+        slot.release()
+        return SimpleNamespace(last_message=None, metadata={})
+
+    monkeypatch.setattr(background_module.SessionLoop, "run", loop_run)
+    task = BackgroundTask(
+        id="bg_slot_wait",
+        status="running",
+        description="scheduled",
+        prompt="",
+        agent="rex",
+        last_activity_at=int(datetime.now().timestamp() * 1000),
+    )
+    run = asyncio.create_task(
+        BackgroundManager()._run_session_with_watchdog(
+            task, "ses_slot_wait", callbacks=None, timeout_seconds=0.05,
+        )
+    )
+    try:
+        # Several inactivity timeouts pass while the session is still queued.
+        await asyncio.sleep(0.3)
+        assert not run.done()
+    finally:
+        blocker.release()
+
+    result = await asyncio.wait_for(run, timeout=2.0)
+    assert result.metadata == {}
+    assert granted == ["ses_slot_wait"]
+
+
+@pytest.mark.asyncio
 async def test_background_event_progress_refreshes_inactivity_timer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -694,6 +742,49 @@ async def test_existing_background_session_waits_for_start_gate(
     assert completed is task
     assert task.status == "completed"
     run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_existing_sessions_are_not_held_back_by_the_background_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Task center executions run through run_existing_session and TaskQueue
+    # already caps them; the pool must not hold any of them back on top of that.
+    manager = BackgroundManager()
+    release = asyncio.Event()
+    entered: list[str] = []
+
+    async def run(task, session_id, *_args, **_kwargs):
+        entered.append(session_id)
+        await release.wait()
+        return SimpleNamespace(last_message=None)
+
+    monkeypatch.setattr(manager, "_run_session_with_watchdog", run)
+    monkeypatch.setattr(manager, "_inject_parent_completion", AsyncMock())
+
+    tasks = [
+        await manager.run_existing_session(
+            session_id=f"ses_task_{index}",
+            description="scheduled",
+            agent="rex",
+            allow_user_questions=False,
+        )
+        for index in range(10)
+    ]
+    try:
+        for _ in range(100):
+            if len(entered) == 10:
+                break
+            await asyncio.sleep(0.01)
+
+        assert len(entered) == 10
+        assert all(task.status == "running" for task in tasks)
+    finally:
+        release.set()
+        for task in tasks:
+            await manager.wait_for(task.id, timeout_ms=1_000)
+
+    assert all(task.status == "completed" for task in tasks)
 
 
 @pytest.mark.asyncio
@@ -998,6 +1089,52 @@ async def test_queue_dequeue_respects_claimed_slots_before_running_status(tmp_pa
     next_claimed = await queue.dequeue()
     assert next_claimed is not None
     assert next_claimed.id == second.id
+
+
+@pytest.mark.asyncio
+async def test_default_queue_runs_ten_executions_and_queues_the_eleventh(tmp_path: Path):
+    queue = TaskQueue()
+    scheduler = await TaskManager.create_scheduler(
+        title="默认并发",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+    executions = [
+        await TaskManager.create_execution_from_scheduler(
+            scheduler,
+            trigger_type=ExecutionTriggerType.RUN_ONCE,
+            enqueue=True,
+        )
+        for _ in range(11)
+    ]
+
+    claimed = [await queue.dequeue() for _ in range(10)]
+    blocked = await queue.dequeue()
+
+    claimed_ids = {execution.id for execution in claimed if execution is not None}
+    assert len(claimed_ids) == 10
+    assert blocked is None
+    (waiting_id,) = {execution.id for execution in executions} - claimed_ids
+    waiting = await TaskManager.get_execution(waiting_id)
+    assert waiting is not None
+    assert waiting.status == TaskStatus.QUEUED
+    status = await queue.status()
+    assert status["max_concurrent"] == 10
+    assert status["running"] == 10
+    assert status["queued"] == 1
+
+
+@pytest.mark.asyncio
+async def test_task_manager_defaults_to_ten_concurrent_executions():
+    # Without a running manager (e.g. `flocks task queue` in the CLI process)
+    # the reported limit must match the real default.
+    assert (await TaskManager.queue_status())["max_concurrent"] == 10
+
+    manager = await TaskManager.start(poll_interval=999, scheduler_interval=999)
+
+    assert manager.queue.max_concurrent == 10
+    assert (await TaskManager.queue_status())["max_concurrent"] == 10
 
 
 @pytest.mark.asyncio
