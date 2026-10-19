@@ -16,6 +16,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
 import EntitySheet from '@/components/common/EntitySheet';
+import { useAuth } from '@/contexts/AuthContext';
 import { useProviders, type EnrichedProvider } from '@/hooks/useProviders';
 import { useSSE } from '@/hooks/useSSE';
 import { MODEL_CHANGED_EVENT } from '@/hooks/useDefaultModelVision';
@@ -25,6 +26,7 @@ import {
 } from '@/api/provider';
 import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
 import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
+import { extractErrorMessage } from '@/utils/error';
 import {
   convertCurrencyAmount,
   formatCacheHitRate,
@@ -96,7 +98,9 @@ function convertEditablePrice(
 
 // ==================== Connection Cache ====================
 
-const CONNECTION_CACHE_KEY = 'flocks_provider_connection_cache';
+// v2 drops statuses cached while members' tests were refused (403) and stored as "failed".
+const CONNECTION_CACHE_KEY = 'flocks_provider_connection_cache_v2';
+const LEGACY_CONNECTION_CACHE_KEY = 'flocks_provider_connection_cache';
 const CONNECTION_CACHE_TTL_CONNECTED = 60 * 60 * 1000; // connected: 1 hour
 const CONNECTION_CACHE_TTL_FAILED = 5 * 60 * 1000;     // failed: 5 minutes
 
@@ -104,6 +108,7 @@ type CachedStatus = { status: 'connected' | 'failed'; ts: number };
 
 function loadConnectionCache(): Record<string, CachedStatus> {
   try {
+    localStorage.removeItem(LEGACY_CONNECTION_CACHE_KEY);
     return JSON.parse(localStorage.getItem(CONNECTION_CACHE_KEY) || '{}');
   } catch {
     return {};
@@ -133,6 +138,12 @@ export default function ModelPage() {
   const { providers, connectedIds, loading, error, refetch } = useProviders();
   const toast = useToast();
   const { t } = useTranslation('model');
+  // Members may run connection tests but change no model configuration: the
+  // backend keeps credentials, providers, models and default models admin-only.
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+  const isAdminRef = useRef(isAdmin);
+  isAdminRef.current = isAdmin;
 
   // State
   const [selectedProvider, setSelectedProvider] = useState<EnrichedProvider | null>(null);
@@ -228,8 +239,12 @@ export default function ModelPage() {
         setDefaultModel(dm);
       } else {
         const modelLabel = `${dm.provider_id} / ${dm.model_id}`;
-        toast.warning(t('dashboard.defaultModelInvalid', { model: modelLabel }));
-        defaultModelAPI.delete('llm').catch(() => {});
+        if (isAdminRef.current) {
+          toast.warning(t('dashboard.defaultModelInvalid', { model: modelLabel }));
+          defaultModelAPI.delete('llm').catch(() => {});
+        } else {
+          toast.warning(t('dashboard.defaultModelInvalidMember', { model: modelLabel }));
+        }
         setDefaultModel(null);
       }
     }).catch(() => {
@@ -304,7 +319,10 @@ export default function ModelPage() {
 
       const enabledMap: Record<string, boolean> = {};
       const [credentialsResult] = await Promise.allSettled([
-        providerAPI.getCredentials(provider.id),
+        // Credentials are only used by the admin configure dialog; members would just get a 403.
+        isAdminRef.current
+          ? providerAPI.getCredentials(provider.id).then(res => res.data)
+          : Promise.resolve(null),
         Promise.allSettled(
           models.map(async (m) => {
             try {
@@ -319,7 +337,7 @@ export default function ModelPage() {
 
       if (providerLoadSeqRef.current !== requestSeq) return;
 
-      setCredentials(credentialsResult.status === 'fulfilled' ? credentialsResult.value.data : null);
+      setCredentials(credentialsResult.status === 'fulfilled' ? credentialsResult.value : null);
       setModelEnabledMap(prev => ({ ...prev, ...enabledMap }));
     } catch {
       if (providerLoadSeqRef.current !== requestSeq) return;
@@ -429,6 +447,8 @@ export default function ModelPage() {
   }, [providers, pendingSelectId, loading]);
 
   const handleModelCreated = useCallback(() => {
+    // Creating the first model may also set the default on the server.
+    defaultModelAPI.getResolved().then(r => setDefaultModel(r.data)).catch(() => {});
     if (selectedProvider) {
       handleSelectProvider(selectedProvider);
     }
@@ -496,14 +516,16 @@ export default function ModelPage() {
         icon={<Brain className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowAddProvider(true)}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              <Plus className="w-4 h-4" />
-              {t('addProvider')}
-            </button>
-            {selectedProvider && (
+            {isAdmin && (
+              <button
+                onClick={() => setShowAddProvider(true)}
+                className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                {t('addProvider')}
+              </button>
+            )}
+            {isAdmin && selectedProvider && (
               <button
                 onClick={() => setShowAddModel(true)}
                 className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
@@ -522,10 +544,10 @@ export default function ModelPage() {
         totalModels={totalModels}
         usageStats={usageStats}
         defaultModel={defaultModel}
-        onEditDefault={() => setShowDefaultModelDialog(true)}
+        onEditDefault={isAdmin ? () => setShowDefaultModelDialog(true) : undefined}
         fallbackCount={fallbackModels.length}
         availableFallbackCount={availableFallbackCount}
-        onEditFallbacks={() => setShowFallbackModelsDialog(true)}
+        onEditFallbacks={isAdmin ? () => setShowFallbackModelsDialog(true) : undefined}
       />
 
       {/* Main Content: Provider List + Detail Panel */}
@@ -539,14 +561,18 @@ export default function ModelPage() {
                   <Brain className="w-8 h-8 text-gray-400" />
                 </div>
                 <p className="text-sm font-medium text-gray-700 mb-1">{t('providerList.empty')}</p>
-                <p className="text-xs text-gray-500 mb-4">{t('providerList.emptyHint')}</p>
-                <button
-                  onClick={() => setShowAddProvider(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-slate-800 text-white rounded-lg hover:bg-slate-900 transition-colors"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  {t('providerList.addProvider')}
-                </button>
+                <p className="text-xs text-gray-500 mb-4">
+                  {isAdmin ? t('providerList.emptyHint') : t('providerList.emptyHintMember')}
+                </p>
+                {isAdmin && (
+                  <button
+                    onClick={() => setShowAddProvider(true)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-slate-800 text-white rounded-lg hover:bg-slate-900 transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    {t('providerList.addProvider')}
+                  </button>
+                )}
               </div>
             ) : (
               configuredProviders.map((provider) => (
@@ -556,7 +582,7 @@ export default function ModelPage() {
                   isSelected={selectedProvider?.id === provider.id}
                   connStatus={connectionStatus[provider.id] || 'unknown'}
                   onClick={() => handleSelectProvider(provider)}
-                  onConfigure={async () => {
+                  onConfigure={isAdmin ? async () => {
                     await handleSelectProvider(provider);
                     if (selectedProviderRef.current?.id === provider.id) {
                       try {
@@ -566,10 +592,10 @@ export default function ModelPage() {
                           setShowConfigDialog(true);
                         }
                       } catch (err: any) {
-                        toast.error(t('configFailed'), err.message);
+                        toast.error(t('configFailed'), extractErrorMessage(err));
                       }
                     }
-                  }}
+                  } : undefined}
                 />
               ))
             )}
@@ -586,8 +612,9 @@ export default function ModelPage() {
               loadingModels={loadingModels}
               modelEnabledMap={modelEnabledMap}
               connStatus={connectionStatus[selectedProvider.id] || 'unknown'}
-              onToggleModel={handleToggleModel}
-              onDeleteModel={handleDeleteModel}
+              canEdit={isAdmin}
+              onToggleModel={isAdmin ? handleToggleModel : undefined}
+              onDeleteModel={isAdmin ? handleDeleteModel : undefined}
               onOpenModelDetail={(model) => setSelectedModelForDetail({ provider: selectedProvider, model })}
               onConnectionStatusChange={(status) => {
                 setConnectionStatus(prev => ({ ...prev, [selectedProvider.id]: status }));
@@ -662,6 +689,7 @@ export default function ModelPage() {
         <ModelDetailSheet
           provider={selectedModelForDetail.provider}
           model={selectedModelForDetail.model}
+          readOnly={!isAdmin}
           onClose={() => setSelectedModelForDetail(null)}
           onSaved={() => {
             setSelectedModelForDetail(null);
@@ -724,10 +752,11 @@ function DashboardStrip({
   totalModels: number;
   usageStats: UsageStats | null;
   defaultModel: { provider_id: string; model_id: string } | null;
-  onEditDefault: () => void;
+  /** Absent for members: default and auxiliary models are admin settings. */
+  onEditDefault?: () => void;
   fallbackCount: number;
   availableFallbackCount: number;
-  onEditFallbacks: () => void;
+  onEditFallbacks?: () => void;
 }) {
   const { t, i18n } = useTranslation('model');
   const totalTokens = usageStats?.summary?.total_tokens ?? 0;
@@ -752,13 +781,15 @@ function DashboardStrip({
             <Star className="w-5 h-5" />
             <span className="text-xs font-medium">{t('dashboard.defaultModel')}</span>
           </div>
-          <button
-            onClick={onEditDefault}
-            className="hover:opacity-100 opacity-60 transition-opacity"
-            title={t('dashboard.setDefaultModel')}
-          >
-            <Pencil className="w-3.5 h-3.5" />
-          </button>
+          {onEditDefault && (
+            <button
+              onClick={onEditDefault}
+              className="hover:opacity-100 opacity-60 transition-opacity"
+              title={t('dashboard.setDefaultModel')}
+            >
+              <Pencil className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
         <div className="text-lg font-bold truncate">
           {defaultModel ? defaultModel.model_id : t('dashboard.noDefaultModel')}
@@ -776,7 +807,7 @@ function DashboardStrip({
         color="purple"
         small={fallbackCount > 0}
         onClick={onEditFallbacks}
-        title={t('dashboard.editFallbackModels')}
+        title={onEditFallbacks ? t('dashboard.editFallbackModels') : undefined}
       />
       <StatCard icon={<Link2 className="w-5 h-5" />} label={t('dashboard.connected')} value={String(connectedCount)} color="green" />
       <StatCard icon={<Cpu className="w-5 h-5" />} label={t('dashboard.availableModels')} value={String(totalModels)} color="blue" />
@@ -869,7 +900,7 @@ function ProviderCard({ provider, isSelected, connStatus, onClick, onConfigure }
   provider: EnrichedProvider; isSelected: boolean;
   connStatus: 'unknown' | 'connected' | 'failed';
   onClick: () => void;
-  onConfigure: () => void;
+  onConfigure?: () => void;
 }) {
   const { t } = useTranslation('model');
   const dotColor = connStatus === 'connected' ? 'bg-green-500'
@@ -899,13 +930,15 @@ function ProviderCard({ provider, isSelected, connStatus, onClick, onConfigure }
           }
         </div>
       </div>
-      <button
-        onClick={(e) => { e.stopPropagation(); onConfigure(); }}
-        className="p-1.5 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 flex-shrink-0"
-        title="Configure"
-      >
-        <Cog className="w-3.5 h-3.5" />
-      </button>
+      {onConfigure && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onConfigure(); }}
+          className="p-1.5 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 flex-shrink-0"
+          title="Configure"
+        >
+          <Cog className="w-3.5 h-3.5" />
+        </button>
+      )}
     </div>
   );
 }
@@ -920,7 +953,7 @@ type ModelTestStatus = {
 
 function ProviderDetail({
   provider, models, loadingModels,
-  modelEnabledMap, connStatus, onToggleModel, onDeleteModel,
+  modelEnabledMap, connStatus, canEdit, onToggleModel, onDeleteModel,
   onOpenModelDetail, onConnectionStatusChange,
 }: {
   provider: EnrichedProvider;
@@ -928,7 +961,9 @@ function ProviderDetail({
   loadingModels: boolean;
   modelEnabledMap: Record<string, boolean>;
   connStatus: 'unknown' | 'connected' | 'failed';
-  onToggleModel: (providerId: string, modelId: string, enabled: boolean) => void;
+  /** Members test models but change nothing; the page says so. */
+  canEdit: boolean;
+  onToggleModel?: (providerId: string, modelId: string, enabled: boolean) => void;
   onDeleteModel?: (modelId: string) => void;
   onOpenModelDetail?: (model: ModelDefinitionV2) => void;
   onConnectionStatusChange?: (status: 'connected' | 'failed') => void;
@@ -953,8 +988,8 @@ function ProviderDetail({
         onConnectionStatusChange('connected');
       }
       return result;
-    } catch (err: any) {
-      const result: ModelTestStatus = { status: 'failed', message: err.response?.data?.detail || err.message };
+    } catch (err) {
+      const result: ModelTestStatus = { status: 'failed', message: extractErrorMessage(err) };
       setModelTestStatus(prev => ({ ...prev, [modelId]: result }));
       batchResultsRef.current[modelId] = result;
       return result;
@@ -1025,6 +1060,7 @@ function ProviderDetail({
                 )}
               </span>
             )}
+            {!canEdit && <span className="text-[11px] text-gray-400">{t('detail.configAdminOnly')}</span>}
             <button
               onClick={handleBatchTest}
               disabled={batchTesting || loadingModels || models.length === 0}
@@ -1044,7 +1080,9 @@ function ProviderDetail({
           <EmptyState
             icon={<Brain className="w-10 h-10" />}
             title={t('detail.noModels')}
-            description={provider.configured ? t('detail.addModelHint') : t('detail.configureFirst')}
+            description={!canEdit
+              ? t('detail.noModelsMember')
+              : provider.configured ? t('detail.addModelHint') : t('detail.configureFirst')}
           />
         ) : (
           <div className="space-y-1.5">
@@ -1059,7 +1097,7 @@ function ProviderDetail({
                   testStatus={modelTestStatus[model.id]}
                   onOpenDetail={onOpenModelDetail ? () => onOpenModelDetail(model) : undefined}
                   onTestModel={() => handleTestSingleModel(model.id)}
-                  onToggle={() => onToggleModel(provider.id, model.id, !enabled)}
+                  onToggle={onToggleModel ? () => onToggleModel(provider.id, model.id, !enabled) : undefined}
                   onDelete={onDeleteModel ? () => onDeleteModel(model.id) : undefined}
                 />
               );
@@ -1078,8 +1116,8 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
   enabled: boolean;
   testStatus?: ModelTestStatus;
   onOpenDetail?: () => void;
-  onTestModel: () => void;
-  onToggle: () => void;
+  onTestModel?: () => void;
+  onToggle?: () => void;
   onDelete?: () => void;
 }) {
   const { t } = useTranslation('model');
@@ -1155,7 +1193,7 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
-          {enabled && (
+          {enabled && onTestModel && (
             <button
               onClick={(e) => { e.stopPropagation(); onTestModel(); }}
               disabled={testStatus?.status === 'testing'}
@@ -1165,13 +1203,15 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
               {testStatus?.status === 'testing' ? <Loader2 className="w-4 h-4 animate-spin text-amber-600" /> : <TestTube className="w-4 h-4" />}
             </button>
           )}
-          <button
-            onClick={(e) => { e.stopPropagation(); onToggle(); }}
-            className={`p-1 rounded ${enabled ? 'text-green-600 hover:text-slate-600' : 'text-gray-400 hover:text-green-600'}`}
-            title={enabled ? t('status.disabled') : t('status.available')}
-          >
-            {enabled ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
-          </button>
+          {onToggle && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onToggle(); }}
+              className={`p-1 rounded ${enabled ? 'text-green-600 hover:text-slate-600' : 'text-gray-400 hover:text-green-600'}`}
+              title={enabled ? t('status.disabled') : t('status.available')}
+            >
+              {enabled ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
+            </button>
+          )}
           {onDelete && (
             <button onClick={(e) => { e.stopPropagation(); onDelete(); }} className="p-1 rounded text-gray-400 hover:text-slate-700 hover:bg-slate-100" title="Delete">
               <Trash2 className="w-4 h-4" />
@@ -2844,11 +2884,14 @@ const inputClsReadOnly = inputCls + " bg-gray-50 text-gray-900 cursor-default";
 function ModelDetailSheet({
   provider,
   model,
+  readOnly = false,
   onClose,
   onSaved,
 }: {
   provider: EnrichedProvider;
   model: ModelDefinitionV2;
+  /** Members see the model's settings but cannot change them. */
+  readOnly?: boolean;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -2858,6 +2901,9 @@ function ModelDetailSheet({
   const modelSupportsReasoning = features.includes('reasoning') || !!model.capabilities?.supports_reasoning;
   const isPredefined = model.fetch_from === 'predefined';
   const visionToggleLocked = isPredefined && !allowsBuiltInVisionToggle(model.id);
+  const readOnlyHint = readOnly ? t('detail.configAdminOnly') : undefined;
+  // Same look as the fields that are always read-only (Provider, model ID), dark mode included.
+  const fieldCls = readOnly ? inputClsReadOnly : inputCls;
   const [name, setName] = useState(model.name);
   const [contextWindow, setContextWindow] = useState(model.limits?.context_window != null ? String(model.limits.context_window) : '128000');
   const [maxOutput, setMaxOutput] = useState(model.limits?.max_output_tokens != null ? String(model.limits.max_output_tokens) : '4096');
@@ -2909,6 +2955,7 @@ function ModelDetailSheet({
   }, [model.id, modelSupportsReasoning, provider.id]);
 
   const handleSave = async () => {
+    if (readOnly) return;
     setLoading(true);
     try {
       await Promise.all([
@@ -2956,7 +3003,7 @@ function ModelDetailSheet({
       icon={<Brain className="w-5 h-5" />}
       rexSystemContext=""
       rexWelcomeMessage=""
-      submitDisabled={false}
+      submitDisabled={readOnly}
       submitLoading={loading}
       submitLabel="Save"
       onClose={onClose}
@@ -2964,7 +3011,8 @@ function ModelDetailSheet({
       hideRex
       hideTest
     >
-      <div className="space-y-4">
+      <fieldset disabled={readOnly} className="space-y-4 min-w-0">
+        {readOnly && <p className="text-xs text-gray-500">{t('detail.configAdminOnly')}</p>}
         {loadingSettings ? (
           <div className="flex justify-center py-8"><LoadingSpinner /></div>
         ) : (
@@ -2987,7 +3035,7 @@ function ModelDetailSheet({
                   type="text"
                   value={name}
                   onChange={e => setName(e.target.value)}
-                  className={inputCls}
+                  className={fieldCls}
                 />
               </div>
             </div>
@@ -3000,7 +3048,7 @@ function ModelDetailSheet({
                   type="number"
                   value={contextWindow}
                   onChange={e => setContextWindow(e.target.value)}
-                  className={inputCls}
+                  className={fieldCls}
                 />
               </div>
               <div>
@@ -3009,7 +3057,7 @@ function ModelDetailSheet({
                   type="number"
                   value={maxOutput}
                   onChange={e => setMaxOutput(e.target.value)}
-                  className={inputCls}
+                  className={fieldCls}
                 />
               </div>
             </div>
@@ -3018,16 +3066,34 @@ function ModelDetailSheet({
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.capabilities')}</label>
               <div className="grid grid-cols-2 gap-2">
-                <ToggleField label={t('form.toolCall')} checked={supportsTools} onChange={setSupportsTools} />
+                <ToggleField
+                  label={t('form.toolCall')}
+                  checked={supportsTools}
+                  onChange={setSupportsTools}
+                  disabled={readOnly}
+                  disabledHint={readOnlyHint}
+                />
                 <ToggleField
                   label={t('form.vision')}
                   checked={supportsVision}
                   onChange={setSupportsVision}
-                  disabled={visionToggleLocked}
-                  disabledHint={visionToggleLocked ? t('form.visionPredefinedHint') : undefined}
+                  disabled={readOnly || visionToggleLocked}
+                  disabledHint={readOnlyHint ?? (visionToggleLocked ? t('form.visionPredefinedHint') : undefined)}
                 />
-                <ToggleField label={t('form.streaming')} checked={supportsStreaming} onChange={setSupportsStreaming} />
-                <ToggleField label={t('form.reasoning')} checked={supportsReasoning} onChange={setSupportsReasoning} />
+                <ToggleField
+                  label={t('form.streaming')}
+                  checked={supportsStreaming}
+                  onChange={setSupportsStreaming}
+                  disabled={readOnly}
+                  disabledHint={readOnlyHint}
+                />
+                <ToggleField
+                  label={t('form.reasoning')}
+                  checked={supportsReasoning}
+                  onChange={setSupportsReasoning}
+                  disabled={readOnly}
+                  disabledHint={readOnlyHint}
+                />
               </div>
             </div>
 
@@ -3037,11 +3103,11 @@ function ModelDetailSheet({
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.input')}</label>
-                  <input type="number" step="0.01" value={inputPrice} onChange={e => setInputPrice(e.target.value)} className={inputCls} />
+                  <input type="number" step="0.01" value={inputPrice} onChange={e => setInputPrice(e.target.value)} className={fieldCls} />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.output')}</label>
-                  <input type="number" step="0.01" value={outputPrice} onChange={e => setOutputPrice(e.target.value)} className={inputCls} />
+                  <input type="number" step="0.01" value={outputPrice} onChange={e => setOutputPrice(e.target.value)} className={fieldCls} />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.cacheRead')}</label>
@@ -3050,13 +3116,13 @@ function ModelDetailSheet({
                     step="0.01"
                     value={cacheReadPrice}
                     onChange={e => setCacheReadPrice(e.target.value)}
-                    className={inputCls}
+                    className={fieldCls}
                     placeholder="—"
                   />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.currency')}</label>
-                  <select value={currency} onChange={e => handleCurrencyChange(e.target.value)} className={inputCls}>
+                  <select value={currency} onChange={e => handleCurrencyChange(e.target.value)} className={fieldCls}>
                     {currency !== 'USD' && currency !== 'CNY' && (
                       <option value={currency}>{currency}</option>
                     )}
@@ -3073,15 +3139,18 @@ function ModelDetailSheet({
               <button
                 type="button"
                 onClick={() => setEnabled(!enabled)}
-                className="transition-colors"
+                className={`transition-colors ${readOnly ? 'cursor-not-allowed' : ''}`}
                 aria-checked={enabled}
+                title={readOnlyHint}
               >
-                {enabled ? <ToggleRight className="w-8 h-8 text-green-500" /> : <ToggleLeft className="w-8 h-8 text-gray-300" />}
+                {enabled
+                  ? <ToggleRight className={`w-8 h-8 ${readOnly ? 'text-green-300' : 'text-green-500'}`} />
+                  : <ToggleLeft className={`w-8 h-8 ${readOnly ? 'text-gray-200' : 'text-gray-300'}`} />}
               </button>
             </div>
           </>
         )}
-      </div>
+      </fieldset>
     </EntitySheet>
   );
 }

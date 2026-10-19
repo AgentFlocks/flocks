@@ -117,6 +117,9 @@ async def lifespan(app: FastAPI):
     service_boot_id()
     # Ensure file logging when server is started without CLI (e.g. uvicorn app:app)
     if Log._writer is None:
+        from flocks.retention import preload_log_retention
+
+        await preload_log_retention()
         await Log.init(print=False, dev=False, level=LogLevel.INFO)
 
     log = Log.create(service="server")
@@ -223,6 +226,18 @@ async def lifespan(app: FastAPI):
         _schedule_startup_phase(app, log, "console.sync.start", _start_console_sync_phase)
     except Exception as e:
         log.warning("console.sync.start_failed", {"error": str(e)})
+
+    try:
+        from flocks.retention import DataRetentionScheduler
+
+        _schedule_startup_phase(
+            app,
+            log,
+            "data_retention.start",
+            DataRetentionScheduler.start,
+        )
+    except Exception as e:
+        log.warning("data_retention.start_failed", {"error": str(e)})
 
     # Ensure default device room exists, then migrate legacy device API
     # configs from flocks.json → device_integrations table.
@@ -546,6 +561,13 @@ async def lifespan(app: FastAPI):
         await ConsoleSyncScheduler.stop()
     except Exception as exc:
         log.warning("console.sync.stop_failed", {"error": str(exc)})
+
+    try:
+        from flocks.retention import DataRetentionScheduler
+
+        await DataRetentionScheduler.stop()
+    except Exception as exc:
+        log.warning("data_retention.stop_failed", {"error": str(exc)})
 
     try:
         from flocks.memory.evolution.scheduler import MemoryEvolutionScheduler

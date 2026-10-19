@@ -1035,6 +1035,131 @@ class TestTurnLifecycle:
         # would fall inside the throttle window.
         assert run.forced_pushes == [True]
 
+    async def _run_long_turn(self, *, session_id, steps, prompt_after_compaction):
+        """One user turn of ``steps`` tool steps on a 128K window (108.8K
+        threshold).  Each step's prompt is 20K larger than the last; a
+        compaction leaves the summary as the latest finished message and the
+        next step starts from ``prompt_after_compaction``."""
+        session = SimpleNamespace(
+            id=session_id,
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        user = self._make_msg(f"{session_id}_user", "user")
+        world = {"messages": [user], "next_prompt": 30_000, "steps": 0}
+        ctx.session_ctx = SimpleNamespace(
+            get_messages=AsyncMock(side_effect=lambda: list(world["messages"])),
+        )
+
+        async def process_step(*_args, **_kwargs):
+            world["steps"] += 1
+            done = world["steps"] >= steps
+            assistant = self._make_msg(
+                f"{session_id}_step_{world['steps']}",
+                "assistant",
+                finish="stop" if done else "tool-calls",
+                tokens={
+                    "input": world["next_prompt"],
+                    "output": 0,
+                    "cache": {"read": 0, "write": 0},
+                },
+            )
+            assistant.parentID = user.id
+            world["messages"].append(assistant)
+            world["next_prompt"] += 20_000
+            return StepResult(action="stop" if done else "continue")
+
+        async def compact(*_args, **_kwargs):
+            summary = self._make_msg(
+                f"{session_id}_summary_{world['steps']}",
+                "assistant",
+                finish="summary",
+                summary=True,
+            )
+            summary.parentID = user.id
+            world["messages"] = [user, summary]
+            world["next_prompt"] = prompt_after_compaction
+            return "continue"
+
+        run_compaction = AsyncMock(side_effect=compact)
+        on_error = AsyncMock()
+
+        with patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(128_000, 8_192, None),
+        ), patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[]),
+        ), patch.object(
+            SessionLoop,
+            "_push_context_usage_before_cleanup",
+            AsyncMock(),
+        ), patch.object(
+            SessionLoop,
+            "_schedule_context_usage_push",
+            classmethod(lambda _cls, _ctx, _callbacks, *, force=False: None),
+        ), patch(
+            "flocks.session.session_loop.SessionCompaction.truncate_oversized_tool_outputs",
+            AsyncMock(return_value=0),
+        ), patch(
+            "flocks.session.session_loop.SessionCompaction.prune",
+            AsyncMock(),
+        ), patch(
+            "flocks.session.session_loop.run_compaction",
+            run_compaction,
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            AsyncMock(side_effect=process_step),
+        ):
+            result = await SessionLoop._run_loop(ctx, LoopCallbacks(on_error=on_error))
+
+        return SimpleNamespace(
+            result=result,
+            ctx=ctx,
+            steps=world["steps"],
+            compactions=run_compaction.await_count,
+            on_error=on_error,
+        )
+
+    @pytest.mark.asyncio
+    async def test_long_turn_keeps_going_after_each_compaction_that_worked(self):
+        """A long task fills the window again after every compaction.  Each
+        compaction got the prompt back under the threshold, so the turn must
+        not end at its fourth overflow ("compacted 3 times, still near the
+        limit") with the prompt left over the threshold."""
+        run = await self._run_long_turn(
+            session_id="turn_long_task_session",
+            steps=30,
+            prompt_after_compaction=40_000,
+        )
+
+        assert run.steps == 30
+        assert run.compactions >= 4
+        run.on_error.assert_not_awaited()
+        assert run.result.action == "stop"
+
+    @pytest.mark.asyncio
+    async def test_compactions_that_leave_the_prompt_over_the_threshold_still_stop(self):
+        """The cap still ends a turn whose compactions cannot get the prompt
+        under the threshold, instead of compacting after every step."""
+        run = await self._run_long_turn(
+            session_id="turn_irreducible_session",
+            steps=30,
+            prompt_after_compaction=115_000,
+        )
+
+        assert run.compactions == 3
+        run.on_error.assert_awaited_once()
+        assert "after 3 compaction attempts" in run.on_error.await_args.args[0]
+        assert run.steps < 30
+
     async def _pushes_before_first_step(self, session_id, messages):
         session = SimpleNamespace(
             id=session_id,

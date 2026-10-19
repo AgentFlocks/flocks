@@ -9,7 +9,7 @@ limits, pricing, and parameter rules.
 """
 
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from flocks.config.config_writer import ConfigWriter
@@ -20,6 +20,7 @@ from flocks.provider.types import (
     ModelSetting,
     ModelType,
 )
+from flocks.server.auth import require_admin
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.utils.log import Log
 
@@ -506,7 +507,8 @@ async def get_model_settings(provider_id: str, model_id: str):
 )
 @serialized_config_mutation
 async def update_model_settings(
-    provider_id: str, model_id: str, body: UpdateModelSettingRequest
+    provider_id: str, model_id: str, body: UpdateModelSettingRequest,
+    _admin: object = Depends(require_admin),
 ) -> ModelSetting:
     """Update model settings (enable/disable, default parameters)."""
     manager = get_model_manager()
@@ -527,6 +529,7 @@ async def update_model_settings(
 @serialized_config_mutation
 async def delete_model_definition(
     provider_id: str, model_id: str,
+    _admin: object = Depends(require_admin),
 ):
     """Delete a model from a provider.
 

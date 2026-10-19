@@ -19,7 +19,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from flocks.config.config import Config
 from flocks.utils.log import Log
@@ -85,6 +85,37 @@ class Recorder:
         if len(cls._locks) > _MAX_FILE_LOCKS:
             cls._locks.popitem(last=False)  # evict oldest
         return lock
+
+    @classmethod
+    async def delete_file(cls, path: Path, *, older_than: Optional[float] = None) -> Tuple[str, int]:
+        """Delete one record file under its append lock.
+
+        Returns ``(outcome, bytes_freed)`` where outcome is ``"deleted"``,
+        ``"skipped"`` (missing, or written to since ``older_than``) or
+        ``"failed"`` (e.g. a permission error) so the caller can count a real
+        failure instead of mistaking it for a skip. Holding the same lock
+        ``append_jsonl`` uses keeps a concurrent append and this delete from
+        racing.
+        """
+        async with cls._get_lock(str(path)):
+            def _remove() -> Tuple[str, int]:
+                try:
+                    stat = path.stat()
+                except FileNotFoundError:
+                    return ("skipped", 0)
+                except OSError:
+                    return ("failed", 0)
+                if older_than is not None and stat.st_mtime >= older_than:
+                    return ("skipped", 0)
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    return ("skipped", 0)
+                except OSError:
+                    return ("failed", 0)
+                return ("deleted", stat.st_size)
+
+            return await asyncio.to_thread(_remove)
 
     @classmethod
     async def append_jsonl(cls, path: Path, obj: Dict[str, Any]) -> None:

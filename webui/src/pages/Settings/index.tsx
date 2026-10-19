@@ -21,6 +21,7 @@ import PageHeader from '@/components/common/PageHeader';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useToast } from '@/components/common/Toast';
+import { useAuth } from '@/contexts/AuthContext';
 import { toolFailureConfigApi } from '@/api/toolFailureConfig';
 import {
   isSettingsSectionId,
@@ -29,6 +30,7 @@ import {
   type SettingsSectionId,
 } from '@/utils/settingsSections';
 import { preloadI18nNamespaces } from '@/i18nResources';
+import DataRetentionSection from './DataRetentionSection';
 
 type LazySettingsModule = { default: ComponentType<any> };
 
@@ -153,6 +155,8 @@ function PreferencesPanel() {
     resetProductFavicon,
   } = useProductName();
   const { error: showToastError, success: showToastSuccess } = useToast();
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const language = i18n.language?.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en-US';
   const faviconInputRef = useRef<HTMLInputElement | null>(null);
   const [displayNameDraft, setDisplayNameDraft] = useState(configuredDisplayName ?? '');
@@ -426,6 +430,9 @@ function PreferencesPanel() {
           />
         </PreferenceRow>
       </div>
+
+      {/* Deleting data affects every user, so only admins see the policy. */}
+      {isAdmin && <DataRetentionSection />}
     </div>
   );
 }

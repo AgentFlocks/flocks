@@ -607,7 +607,7 @@ async def test_status_texts(ctx, as_user, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_status_when_ready_lists_the_validated_capabilities(ctx, as_user, monkeypatch):
+async def test_status_when_ready_lists_the_validated_capabilities(ctx, as_user, monkeypatch, conversation):
     as_user("member")
     runtime.write_install_record({
         "version": runtime.REA_VERSION, "tier": "light",
@@ -622,8 +622,21 @@ async def test_status_when_ready_lists_the_validated_capabilities(ctx, as_user, 
     assert "Native ELF/PE decompilation is not verified" in result.output
     # The model repeats what it reads: no tool parameters for it to pass on to the user.
     assert 'tier="full"' not in result.output and "完整档" in result.output
-    assert "placeholders in the prompt are not input" in result.output
+    # The shortcut's prompt names no target: the files are what this conversation has, nothing else.
+    assert "No file is attached to this conversation yet." in result.output
+    assert "ask the user to attach the file(s)" in result.output
     assert "do not search the host or other conversations" in result.output
+    conversation.append(_message("user", [_text("帮我使用 REA 逆向工具分析上传的附件文件"), SimpleNamespace(type="file")]))
+    conversation.append(_message("assistant", [SimpleNamespace(type="file")]))  # not the user's
+    result = await rea_analysis_tool(ctx, action="status")
+    assert "The user attached 1 file(s) to this conversation." in result.output
+
+
+def test_the_tool_description_reads_the_shortcuts_prompt_as_the_attached_files():
+    assert "帮我使用 REA 逆向工具分析上传的附件文件" in rea_tool.REA_TOOL_DESCRIPTION
+    assert "when none is attached, ask the user to attach them" in rea_tool.REA_TOOL_DESCRIPTION
+    # The guide's last line asks to confirm the modules: the plan card is that confirmation.
+    assert "it is the confirmation the guide asks for before installing" in rea_tool.REA_TOOL_DESCRIPTION
 
 
 @pytest.mark.asyncio

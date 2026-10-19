@@ -13,10 +13,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.provider.credential import get_api_key
 from flocks.provider.provider import (
     BaseProvider,
     ModelCapabilities,
@@ -25,7 +27,9 @@ from flocks.provider.provider import (
     ProviderConfig,
 )
 from flocks.provider.sdk.openai_compatible import OpenAICompatibleProvider
+from flocks.server.auth import require_admin
 from flocks.server.config_mutation import serialized_config_mutation
+from flocks.server.routes.provider import _get_inline_provider_api_key
 from flocks.utils.log import Log
 
 
@@ -177,7 +181,7 @@ async def list_providers():
 
 @router.post("/providers", response_model=ProviderResp, status_code=201)
 @serialized_config_mutation
-async def create_provider(body: CreateProviderReq):
+async def create_provider(body: CreateProviderReq, _admin: object = Depends(require_admin)):
     """Create a custom OpenAI-compatible provider in flocks.json."""
     pid = "custom-" + body.name.lower().replace(" ", "-").replace("_", "-")
 
@@ -222,7 +226,7 @@ async def create_provider(body: CreateProviderReq):
 
 @router.delete("/providers/{provider_id}", status_code=204)
 @serialized_config_mutation
-async def delete_provider(provider_id: str):
+async def delete_provider(provider_id: str, _admin: object = Depends(require_admin)):
     """Delete a custom provider from flocks.json."""
     raw = ConfigWriter.get_provider_raw(provider_id)
     if raw is None:
@@ -282,7 +286,7 @@ async def list_models(provider_id: str):
 
 @router.post("/models/{provider_id}", response_model=ModelResp, status_code=201)
 @serialized_config_mutation
-async def create_model(provider_id: str, body: CreateModelReq):
+async def create_model(provider_id: str, body: CreateModelReq, _admin: object = Depends(require_admin)):
     """Add a model to a provider in flocks.json."""
     raw = ConfigWriter.get_provider_raw(provider_id)
     if raw is None:
@@ -322,6 +326,10 @@ async def create_model(provider_id: str, body: CreateModelReq):
         max_output_tokens=limits.max_output_tokens,
     )
 
+    # Capture first-model eligibility from the config before the upsert.
+    if not models:
+        await _maybe_promote_first_model_to_default(provider_id, body.model_id)
+
     action = "updated" if existing_model else "created"
     log.info(f"custom_model.{action}", {
         "unique": f"{provider_id}/{body.model_id}",
@@ -342,7 +350,7 @@ async def create_model(provider_id: str, body: CreateModelReq):
 
 @router.delete("/models/{provider_id}/{model_id:path}", status_code=204)
 @serialized_config_mutation
-async def delete_model(provider_id: str, model_id: str):
+async def delete_model(provider_id: str, model_id: str, _admin: object = Depends(require_admin)):
     """Remove a model from a provider in flocks.json."""
     removed = ConfigWriter.remove_model(provider_id, model_id)
     if not removed:
@@ -360,6 +368,28 @@ async def delete_model(provider_id: str, model_id: str):
 
 
 # ==================== Runtime helpers ====================
+
+
+async def _maybe_promote_first_model_to_default(provider_id: str, model_id: str) -> None:
+    """Complete first-model setup without replacing a user's existing default.
+
+    Called under the create route's configuration mutation lock. Credential
+    checks match onboarding status, including the no-auth placeholder.
+    """
+    try:
+        # Resolve both structured defaults and the legacy `model` setting.
+        if await Config.resolve_default_llm():
+            return
+        if not (get_api_key(provider_id) or _get_inline_provider_api_key(provider_id)):
+            return
+        ConfigWriter.set_default_model("llm", provider_id, model_id)
+        log.info("custom_model.auto_default", {"unique": f"{provider_id}/{model_id}"})
+    except Exception as exc:
+        # The model is already saved; optional default setup must not reject it.
+        log.warning("custom_model.auto_default_failed", {
+            "unique": f"{provider_id}/{model_id}",
+            "error": str(exc),
+        })
 
 
 def _coerce_positive_int(value: Any) -> Optional[int]:
