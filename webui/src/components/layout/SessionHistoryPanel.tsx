@@ -48,6 +48,7 @@ const HISTORY_LOAD_MORE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 250;
 const SEARCH_RESULT_LIMIT = 30;
 const REFRESH_DEBOUNCE_MS = 500;
+const SCROLLBAR_HIDE_DELAY_MS = 800;
 const REFRESH_EVENTS = new Set(['session.created', 'session.updated', 'session.deleted', 'session.archived', 'session.unarchived']);
 
 interface FolderInfo extends ProjectFolderSummary {
@@ -175,8 +176,23 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   const [selecting, setSelecting] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(() => new Set());
   const [archivingChecked, setArchivingChecked] = useState(false);
+  const [historyScrolling, setHistoryScrolling] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const refreshTimerRef = useRef<number | null>(null);
+  const scrollbarTimerRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (scrollbarTimerRef.current !== null) window.clearTimeout(scrollbarTimerRef.current);
+  }, []);
+
+  const handleHistoryScroll = useCallback(() => {
+    setHistoryScrolling(true);
+    if (scrollbarTimerRef.current !== null) window.clearTimeout(scrollbarTimerRef.current);
+    scrollbarTimerRef.current = window.setTimeout(() => {
+      setHistoryScrolling(false);
+      scrollbarTimerRef.current = null;
+    }, SCROLLBAR_HIDE_DELAY_MS);
+  }, []);
 
   useEffect(() => writeIdSet(collapsedKey, collapsedFolders), [collapsedFolders, collapsedKey]);
   useEffect(() => writeIdSet(pinnedKey, pinnedFolders), [pinnedFolders, pinnedKey]);
@@ -795,7 +811,8 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+      <div className="session-history-scrollbar min-h-0 flex-1 overflow-y-auto px-2 pb-3"
+        onScroll={handleHistoryScroll} data-scrolling={historyScrolling}>
         {searchResults !== null ? (
           searchResults.length > 0 ? searchResults.map((session) => (
             <button key={session.id} type="button" onClick={() => { openSession(session.id); setSearchOpen(false); setSearchQuery(''); }}

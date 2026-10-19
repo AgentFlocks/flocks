@@ -1511,6 +1511,41 @@
   background-clip: padding-box;
 }
 
+/* Keep the history gutter stable; show its thumb only while scrolling. */
+.session-history-scrollbar,
+.dark .session-history-scrollbar {
+  --history-scrollbar-thumb: transparent;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--history-scrollbar-thumb) transparent !important;
+}
+
+.session-history-scrollbar[data-scrolling='true'] {
+  --history-scrollbar-thumb: rgb(var(--ui-muted) / 0.55);
+}
+
+.session-history-scrollbar::-webkit-scrollbar,
+.dark .session-history-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+  background: transparent;
+}
+
+.session-history-scrollbar::-webkit-scrollbar-track,
+.dark .session-history-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.session-history-scrollbar::-webkit-scrollbar-thumb,
+.session-history-scrollbar::-webkit-scrollbar-thumb:hover,
+.dark .session-history-scrollbar::-webkit-scrollbar-thumb,
+.dark .session-history-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--history-scrollbar-thumb);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
 .dark table {
   color: var(--flocks-dark-text-muted);
 }
