@@ -447,6 +447,8 @@ export default function ModelPage() {
   }, [providers, pendingSelectId, loading]);
 
   const handleModelCreated = useCallback(() => {
+    // Creating the first model may also set the default on the server.
+    defaultModelAPI.getResolved().then(r => setDefaultModel(r.data)).catch(() => {});
     if (selectedProvider) {
       handleSelectProvider(selectedProvider);
     }
