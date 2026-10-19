@@ -18,7 +18,7 @@ import { sceneSuiteErrorMessage } from '@/utils/sceneSuites';
 
 const TEXT = {
   zh: {
-    title: '添加场景',
+    title: '场景管理',
     description: '安装后会自动启用场景，也可以在这里启用、停用和卸载已安装的场景。',
     refresh: '刷新',
     install: '安装',
@@ -59,7 +59,7 @@ const TEXT = {
     disabled_ok: '已停用',
   },
   en: {
-    title: 'Add scene',
+    title: 'Scene management',
     description: 'Scenes are enabled after installation. You can also enable, disable or uninstall installed scenes here.',
     refresh: 'Refresh',
     install: 'Install',

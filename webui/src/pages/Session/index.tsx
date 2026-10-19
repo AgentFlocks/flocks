@@ -28,7 +28,7 @@ import { sessionPath } from '@/utils/sessionUrl';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
-import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SendWelcomePrompt, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
 import SessionContextPanel from './SessionContextPanel';
 import { getInitialSidePanelWidth, getMaxSidePanelWidth, SIDE_PANEL_MIN_WIDTH } from '@/components/common/sidePanelSizing';
 import SuiteInstallProgressPanel, {
@@ -1795,9 +1795,11 @@ export default function SessionPage() {
     setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
   }, []);
 
-  const handleAlertOperationsSetup = useCallback(async () => {
-    if (installingSocWorkspace) return;
+  const handleAlertOperationsSetup = useCallback(async (sendPrompt: SendWelcomePrompt) => {
+    if (installingSocWorkspace || selectedSession?.canWrite === false) return;
 
+    const navigationKey = navigationRef.current.key;
+    const identity = currentReaIdentity();
     setInstallingSocWorkspace(true);
     let startedComponentInstall = false;
     try {
@@ -1817,12 +1819,18 @@ export default function SessionPage() {
         await hubAPI.installStream('component', SOC_WORKSPACE_COMPONENT_ID, handleSuiteInstallProgress);
       }
 
+      if (!mountedRef.current || !paneActiveRef.current || navigationRef.current.key !== navigationKey || currentReaIdentity() !== identity) return;
+      const options = { displayText: buildInstructionDisplayText(t('welcome.alertOperations')) };
+      if (selectedSessionId) {
+        await sendPrompt(t('welcome.alertOperationsSuggestion'), options);
+        return;
+      }
       await handleCreateAndSend(
         t('welcome.alertOperationsSuggestion'),
         [],
         undefined,
         selectedPromptModel,
-        { displayText: buildInstructionDisplayText(t('welcome.alertOperations')) },
+        options,
       );
     } catch (err: any) {
       const message = err?.message ?? t('welcome.socComponentInstallFailedDescription');
@@ -1840,28 +1848,32 @@ export default function SessionPage() {
     } finally {
       setInstallingSocWorkspace(false);
     }
-  }, [handleCreateAndSend, handleSuiteInstallProgress, installingSocWorkspace, selectedPromptModel, t, toast]);
+  }, [handleCreateAndSend, handleSuiteInstallProgress, installingSocWorkspace, selectedPromptModel, selectedSession?.canWrite, selectedSessionId, t, toast]);
 
-  // The 「REA 逆向分析」 shortcut (and the plugin square's actions): route by the
-  // live plugin state. A new Rex conversation gets the install or the use
-  // prompt as its first, visible message; a recent install conversation of
-  // this account is reopened instead of starting a second one. Every await is
-  // checked against the account and the page the click came from.
-  const handleReaEntry = useCallback(async (requested?: ReaEntryAction) => {
-    if (startingReaRef.current) return;
+  // Welcome shortcuts stay in the current conversation. Only entries without
+  // a session (such as the plugin square) create/reopen an install conversation.
+  const handleReaEntry = useCallback(async (requested?: ReaEntryAction, sendPrompt?: SendWelcomePrompt) => {
+    if (startingReaRef.current || selectedSession?.canWrite === false) return;
     startingReaRef.current = true;
     setStartingRea(true);
     const identity = currentReaIdentity();
     const navigationKey = navigationRef.current.key;
     const stale = () => (
       !mountedRef.current
+      || !paneActiveRef.current
       || currentReaIdentity() !== identity
       || navigationRef.current.key !== navigationKey
     );
-    // handleCreateAndSend reports its own failures.
+    // Both chat send paths report their own failures.
     let reported = false;
-    const newSession = async (text: string) => {
+    const sendEntryPrompt = async (text: string) => {
       try {
+        if (selectedSessionId) {
+          const accepted = await sendPrompt?.(text, { agent: 'rex', executionMode: 'build' });
+          if (!accepted) return;
+          if (!stale()) handleSelectExecutionMode('build');
+          return selectedSessionId;
+        }
         return await handleCreateAndSend(
           text,
           [],
@@ -1896,7 +1908,7 @@ export default function SessionPage() {
         return;
       }
       if (state === 'installing' || state === 'validating') {
-        if (status.installSessionId) {
+        if (!selectedSessionId && status.installSessionId) {
           selectSession(status.installSessionId);
           return;
         }
@@ -1908,11 +1920,19 @@ export default function SessionPage() {
       }
       // Usable, or broken after it passed once: an analysis conversation, where Rex repairs first.
       if (state === 'ready' || (state === 'degraded' && requested !== 'repair')) {
-        await newSession(t('rea.usePrompt'));
+        await sendEntryPrompt(t('rea.usePrompt'));
         return;
       }
       if (!status.canInstall) {
         toast.info(t(state === 'not_installed' ? 'rea.entry.memberInstall' : 'rea.entry.memberRepair'));
+        return;
+      }
+      if (selectedSessionId) {
+        const prompt = state === 'install_failed' || state === 'degraded' ? t('rea.repairPrompt') : t('rea.installPrompt');
+        const sessionId = await sendEntryPrompt(prompt);
+        if (sessionId && currentReaIdentity() === identity) {
+          await recordReaInstallSession(sessionId).catch(() => undefined);
+        }
         return;
       }
       const reservation = await reaApi.reserveInstallSession();
@@ -1937,7 +1957,7 @@ export default function SessionPage() {
       }
       // A failed install starts over with the same guide (it reuses what is there).
       const prompt = state === 'degraded' ? t('rea.repairPrompt') : t('rea.installPrompt');
-      const sessionId = await newSession(prompt);
+      const sessionId = await sendEntryPrompt(prompt);
       if (sessionId && currentReaIdentity() === identity) {
         await recordReaInstallSession(sessionId).catch(() => undefined);
       }
@@ -1951,10 +1971,13 @@ export default function SessionPage() {
     }
   }, [
     handleCreateAndSend,
+    handleSelectExecutionMode,
     recordReaInstallSession,
     refreshReaStatus,
     selectSession,
     selectedPromptModel,
+    selectedSession?.canWrite,
+    selectedSessionId,
     t,
     toast,
   ]);
@@ -2092,15 +2115,15 @@ export default function SessionPage() {
           allowAnyUpload={reaAcceptsSamples(reaStatus)}
           contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
           model={selectedPromptModel}
-          welcomeContent={(setInput) => (
+          welcomeContent={(setInput, sendPrompt) => (
             <WelcomeScreen
               onSuggestion={setInput}
-              onAlertOperationsSetup={() => void handleAlertOperationsSetup()}
+              onAlertOperationsSetup={() => void handleAlertOperationsSetup(sendPrompt)}
               alertOperationsBusy={installingSocWorkspace}
               reaShortcut={{
                 badge: Boolean(reaStatus?.badge),
                 busy: startingRea,
-                onClick: () => void handleReaEntry(),
+                onClick: () => void handleReaEntry(undefined, sendPrompt),
               }}
             />
           )}

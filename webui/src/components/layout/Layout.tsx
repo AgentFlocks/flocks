@@ -126,7 +126,6 @@ interface NavItem {
   /** Starts a new chat instead of routing to a stored path. */
   action?: 'new-chat';
   count?: number;
-  hasNew?: boolean;
   accent?: boolean;
 }
 
@@ -589,7 +588,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     || webuiContractWorkspaces.length > 0
     || webuiContractPages.length > 0;
 
-  // Remember the module to return to when leaving settings.
+  // Remember the module to return to when leaving settings or scene management.
   const routeNav = resolveNavRoute(`${location.pathname}${location.search}`, navStateReady ? webuiContractWorkspaces : null);
   const [rememberedWorkspace, setRememberedWorkspace] = useState<NavWorkspaceId>(readCurrentWorkspace);
   const routeWorkspace = routeNav.kind === 'workspace' ? routeNav.workspace : null;
@@ -598,13 +597,13 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     ? sceneNavWorkspace(sceneNavigationOwner(rememberedSceneId, openSceneWorkspaces)) : rememberedWorkspace;
   const currentWorkspace = routeWorkspace ?? (headerWorkspaces.some((workspace) => workspace.id === rememberedNavigation) ? rememberedNavigation : AGENT_WORKSPACE);
   useEffect(() => {
-    if (!routeWorkspace || (!navStateReady && !viewingScenes)) return;
-    // SOC also owns the always-available scene catalog; other scenes must be open.
+    if (!routeWorkspace || !navStateReady) return;
+    // SOC is permanent; other scenes must be open.
     const sceneId = sceneWorkspaceIdOf(routeWorkspace);
     if (sceneId && sceneId !== SOC_WORKSPACE_ID && !openSceneWorkspaces.some((workspace) => workspace.id === sceneId)) return;
     setRememberedWorkspace(routeWorkspace);
     saveCurrentWorkspace(routeWorkspace);
-  }, [navStateReady, openSceneWorkspaces, routeWorkspace, viewingScenes]);
+  }, [navStateReady, openSceneWorkspaces, routeWorkspace]);
 
   // Last path visited inside each workspace, so switching back lands there.
   const workspacePathsRef = useRef<NavWorkspacePaths>(readWorkspacePaths());
@@ -735,15 +734,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       map.set(sceneNavWorkspace(SOC_WORKSPACE_ID), socSections);
       map.delete(sceneNavWorkspace(CODE_AUDIT_WORKSPACE_ID));
     }
-    const socSections = map.get(sceneNavWorkspace(SOC_WORKSPACE_ID)) ?? [];
-    socSections.push({
-      id: `scene:${SOC_WORKSPACE_ID}:more-scenes`,
-      name: t('moreScenes'),
-      items: [{ name: t('sceneSuiteManager'), href: SCENE_SUITES_PATH, icon: Layers, hasNew: hasUnseenSuites }],
-    });
-    map.set(sceneNavWorkspace(SOC_WORKSPACE_ID), socSections);
     return map;
-  }, [i18n.language, openSceneWorkspaces, workspacePageOrders, t, hasUnseenSuites]);
+  }, [i18n.language, openSceneWorkspaces, workspacePageOrders, t]);
 
   const { groups: settingsGroups } = useSettingsSectionGroups();
   const settingsSection = useMemo<NavSection>(() => ({
@@ -780,11 +772,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, [allNavItems]);
 
   const isNavItemActive = useCallback((href: string) => {
-    if (href === SCENE_SUITES_PATH) return viewingScenes;
     if (href.startsWith('/settings/')) return location.pathname === href;
     const active = findActiveTabHref(navItemsFlat.map((item) => item.href), location.pathname, location.search);
     return active === href;
-  }, [location.pathname, location.search, navItemsFlat, viewingScenes]);
+  }, [location.pathname, location.search, navItemsFlat]);
 
   const activeTabHref = useMemo(
     () => findActiveTabHref(navItemsFlat.map((item) => item.href), location.pathname, location.search),
@@ -840,6 +831,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   const selectWorkspace = useCallback((workspaceId: NavWorkspaceId) => {
     setSidebarOpen(false);
+    if (workspaceId === AGENT_WORKSPACE && routeNav.kind === 'settings') {
+      navigate(AGENT_WORKSPACE_DEFAULT_PATH);
+      return;
+    }
     if (workspaceId === currentWorkspace && routeNav.kind === 'workspace') return;
     const stored = workspacePathsRef.current[workspaceId];
     const storedRoute = stored ? resolveNavRoute(stored, webuiContractWorkspaces) : null;
@@ -937,7 +932,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         to={navItemPath(item.href)}
         onClick={() => setSidebarOpen(false)}
         aria-current={active ? 'page' : undefined}
-        aria-label={item.hasNew ? item.name : undefined}
         title={collapsed ? item.name : undefined}
         data-tip={collapsed ? item.name : undefined}
         className={navLinkClass(active)}
@@ -947,10 +941,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           <>
             <span className="min-w-0 flex-1 truncate">{item.name}</span>
             {item.count ? <span className="shrink-0 rounded-full bg-zinc-200 px-1.5 text-xs text-zinc-500 dark:bg-zinc-700 dark:text-zinc-300">{item.count}</span> : null}
-            {item.hasNew && <>
-              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-red-500" aria-hidden="true" />
-              <span className="sr-only">{t('newBadge')}</span>
-            </>}
           </>
         )}
       </Link>
@@ -1050,8 +1040,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         productName={productName}
         logoUrl={logoUrl}
         workspaces={headerWorkspaces}
-        currentWorkspace={(navStateReady || viewingScenes) && routeNav.kind === 'workspace' ? currentWorkspace : null}
+        currentWorkspace={navStateReady && routeNav.kind === 'workspace' ? currentWorkspace : null}
         onSelectWorkspace={selectWorkspace}
+        hasUnseenSuites={hasUnseenSuites}
+        onOpenSceneManager={() => setSidebarOpen(false)}
         notifications={notifications}
         onOpenNotification={(notification) => {
           setUpdateNotification(notification.id === updateNotification?.id ? notification : updateNotification);
