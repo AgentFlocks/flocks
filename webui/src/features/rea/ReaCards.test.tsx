@@ -20,8 +20,6 @@ vi.mock('react-i18next', () => ({
 
 const api = vi.hoisted(() => ({
   status: vi.fn(),
-  reserveInstallSession: vi.fn(),
-  recordInstallSession: vi.fn(),
   uninstallPreview: vi.fn(),
   uninstall: vi.fn(),
 }));
@@ -106,6 +104,7 @@ function chatValue(overrides: Partial<ReaChatContextValue> = {}): ReaChatContext
     readOnly: false,
     latestCardPartId: null,
     submitPrompt: vi.fn().mockResolvedValue(undefined),
+    fillComposer: vi.fn(),
     ...overrides,
   };
 }
@@ -120,7 +119,6 @@ beforeEach(() => {
   __resetReaStateForTesting();
   auth.user = { id: 'admin-1', role: 'admin' };
   Object.values(api).forEach((fn) => fn.mockReset());
-  api.recordInstallSession.mockResolvedValue(status());
 });
 
 afterEach(() => {
@@ -153,14 +151,13 @@ describe('ReaShortcut', () => {
 });
 
 describe('REA prompts', () => {
-  it('the analysis prompt is the PRD 6.2 text with placeholders, not a request to analyse an upload', () => {
-    // A prompt that presumes an attachment sent the model searching the host for one (BUG-006).
-    expect(zhSession.rea.usePrompt).toBe(
-      '使用 REA 逆向分析工具，分析【目标文件、下载链接或网站 URL】，重点解决【希望了解的问题】。'
-      + '复用已有配置，按目标检查并补齐所需工具，还原关键逻辑、算法或接口流程，并尽可能使用原程序或原运行环境核对结果。'
-      + '请给出简明结论、关键原理、可复核证据和验证情况，明确区分已验证事实、推断与未完成项。',
-    );
-    expect(zhSession.rea.installPrompt.startsWith('REA 安装指引\n')).toBe(true);
+  it('are the PRD v0.7 texts: the short analysis request and the guide ending with the confirmation', () => {
+    // Without a file the server keeps that turn to asking for one (flocks/rea/attachment_guard.py).
+    expect(zhSession.rea.usePrompt).toBe('帮我使用 REA 逆向工具分析上传的附件文件');
+    expect(zhSession.rea.installPrompt.startsWith('REA 安装指引\n安装原则：仅安装缺失组件')).toBe(true);
+    expect(zhSession.rea.installPrompt.endsWith(
+      '执行系统软件包安装或平台配置写入前，须先取得确认。\n安装执行前请再次和我确认你计划安装哪些模块？',
+    )).toBe(true);
   });
 });
 
@@ -187,13 +184,17 @@ describe('blockers and problems', () => {
 describe('status card (REA not usable when Rex asked)', () => {
   const statusPart = (state: string) => toolPart('status', { metadata: { state, canInstall: true } });
 
-  it('sends the full install guide into this conversation', async () => {
+  it('fills the full install guide into the message box and sends nothing', async () => {
     api.status.mockResolvedValue(status());
     const { value } = renderWithChat(<ReaToolPart part={statusPart('not_installed')} />);
     const button = await screen.findByRole('button', { name: zh.card.install });
     fireEvent.click(button);
-    await waitFor(() => expect(value.submitPrompt).toHaveBeenCalledWith(zh.installPrompt));
-    expect(await screen.findByRole('button', { name: zh.card.sent })).toBeDisabled();
+    expect(value.fillComposer).toHaveBeenCalledWith(zh.installPrompt);
+    expect(value.submitPrompt).not.toHaveBeenCalled();
+    expect(await screen.findByTestId('rea-card-filled')).toHaveTextContent(zh.card.filled);
+    // Cleared or edited away, it can be filled in again.
+    fireEvent.click(button);
+    expect(value.fillComposer).toHaveBeenCalledTimes(2);
   });
 
   it('lists what broke for administrators when REA is degraded', async () => {
@@ -217,7 +218,8 @@ describe('status card (REA not usable when Rex asked)', () => {
       api.status.mockResolvedValue(status({ state }));
       const { value, unmount } = renderWithChat(<ReaToolPart part={statusPart(state)} />);
       fireEvent.click(await screen.findByRole('button', { name: zh.card.repair }));
-      await waitFor(() => expect(value.submitPrompt).toHaveBeenCalledWith(zh.repairPrompt));
+      expect(value.fillComposer).toHaveBeenCalledWith(zh.repairPrompt);
+      expect(value.submitPrompt).not.toHaveBeenCalled();
       unmount();
     }
   });

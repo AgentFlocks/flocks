@@ -16,5 +16,8 @@ def register_builtin_hooks() -> None:
     Should be called once during application startup.
     """
     log.info("hooks.builtin.registering")
-    # Future built-in hooks are registered here.
+    from flocks.rea import attachment_guard
+
+    # The REA analysis prompt without a file asks for the file (PRD 6.2).
+    attachment_guard.register()
     log.info("hooks.builtin.registered")

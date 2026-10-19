@@ -43,11 +43,10 @@ ReaState = Literal[
 # ``ready`` and ``degraded`` REA was usable, so there is nothing new to show.
 BADGE_STATES = frozenset({"not_installed", "installing", "validating", "install_failed", "uninstall_failed"})
 
-# A recorded install conversation is reopened for this long, so repeated
-# clicks do not start a second one.
+# The account's install conversation (recorded by the install tool) is what the
+# entry opens while the install runs and for this long after, so a failed
+# install continues there.
 INSTALL_SESSION_REUSE_MS = 30 * 60 * 1000
-# Another tab of the same account is creating the install conversation.
-INSTALL_SESSION_PENDING_MS = 30 * 1000
 
 _preferences_lock = threading.Lock()
 
@@ -211,37 +210,6 @@ def recent_install_session(user: Any) -> Optional[str]:
     with _preferences_lock:
         record = _install_sessions(_read_preferences()).get(key)
     return _recent_session(record, _now_ms())
-
-
-def reserve_install_session(
-    user: Any, live_session: Optional[str], *, looked_at: Optional[int] = None,
-) -> Literal["open", "create", "pending"]:
-    """Whether this click opens ``live_session``, creates a conversation, or waits for another tab.
-
-    ``looked_at`` is when ``live_session`` was looked up: a conversation another tab recorded since
-    then is opened by the next click instead of creating a second one.
-    """
-
-    if live_session:
-        return "open"
-    key = _user_key(user)
-    if key is None:
-        return "create"
-    now = _now_ms()
-    with _preferences_lock:
-        data = _read_preferences()
-        sessions = _install_sessions(data)
-        record = sessions.get(key) if isinstance(sessions.get(key), dict) else {}
-        pending = record.get("pendingAt")
-        if isinstance(pending, int) and now - pending < INSTALL_SESSION_PENDING_MS:
-            return "pending"
-        created = record.get("createdAt")
-        if looked_at is not None and record.get("id") and isinstance(created, int) and created >= looked_at:
-            return "pending"
-        sessions[key] = {**record, "pendingAt": now}
-        data["installSessions"] = sessions
-        _write_preferences(data)
-    return "create"
 
 
 async def live_install_session(user: Any) -> Optional[str]:

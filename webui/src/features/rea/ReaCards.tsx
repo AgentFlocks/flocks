@@ -464,7 +464,8 @@ function ReaStatusCard({ part, cardKey, isLatest, readOnly }: {
   const { t } = useTranslation('session');
   const titleId = useId();
   const { status, error, loading, refresh } = useReaStatus({ enabled: isLatest, watch: isLatest });
-  const { chat, sending, sent, message, send } = useSendOnce(cardKey);
+  const chat = useReaChat();
+  const [filled, setFilled] = useCardState(cardKey, 'filled', false);
 
   if (!isLatest) return <OlderCardChip text={t('rea.card.older')} />;
 
@@ -504,7 +505,7 @@ function ReaStatusCard({ part, cardKey, isLatest, readOnly }: {
   const busy = state === 'installing' || state === 'validating';
   const offersInstall = state === 'not_installed';
   const offersRepair = state === 'install_failed' || state === 'degraded';
-  const canAct = status.canInstall && !readOnly && Boolean(chat?.submitPrompt) && Boolean(part.sessionID || chat?.sessionId);
+  const canAct = status.canInstall && !readOnly && Boolean(chat?.fillComposer) && Boolean(part.sessionID || chat?.sessionId);
   const body = !status.canInstall && (offersInstall || offersRepair)
     ? t('rea.card.memberNotice')
     : t(STATUS_BODY[state] ?? 'rea.card.notInstalled');
@@ -522,18 +523,20 @@ function ReaStatusCard({ part, cardKey, isLatest, readOnly }: {
       {busy && <JobProgress job={status.job} t={t} />}
       {canAct && (offersInstall || offersRepair) && (
         <div className="mt-4 flex flex-wrap items-center gap-3">
+          {/* The guide goes into the message box, like the shortcut's: the user reads and sends it. */}
           <button
             type="button"
             className={PRIMARY_BUTTON_CLASS}
-            disabled={sending || sent !== null}
-            onClick={() => void send(offersInstall ? 'install' : 'repair', t(offersInstall ? 'rea.installPrompt' : 'rea.repairPrompt'))}
+            onClick={() => {
+              chat?.fillComposer(t(offersInstall ? 'rea.installPrompt' : 'rea.repairPrompt'));
+              setFilled(true);
+            }}
           >
-            {sending && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
-            {sent ? t('rea.card.sent') : t(offersInstall ? 'rea.card.install' : 'rea.card.repair')}
+            {t(offersInstall ? 'rea.card.install' : 'rea.card.repair')}
           </button>
+          {filled && <span className={`text-xs ${MUTED_CLASS}`} aria-live="polite" data-testid="rea-card-filled">{t('rea.card.filled')}</span>}
         </div>
       )}
-      {message && <p role="alert" className={`mt-3 text-[13px] ${ALERT_TEXT_CLASS}`}>{message}</p>}
     </section>
   );
 }

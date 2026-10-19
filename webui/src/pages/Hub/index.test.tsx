@@ -207,13 +207,16 @@ describe('HubPage catalog loading', () => {
       Object.values(reaApi).forEach((fn) => fn.mockReset());
     });
 
-    it('installs in a Rex session instead of copying files', async () => {
+    it('opens a Rex conversation with the install guide filled in instead of copying files', async () => {
       const user = userEvent.setup();
       reaApi.status.mockResolvedValue(reaStatus());
       renderWithSessions();
       expect(await screen.findByTestId('rea-hub-state')).toHaveTextContent('Not installed');
       const install = await screen.findByRole('button', { name: 'Install' });
-      expect(install).toHaveAttribute('title', 'Installs and validates REA in a Rex session following the REA install guide');
+      expect(install).toHaveAttribute(
+        'title',
+        'Fills the REA install guide into the message box of a new Rex conversation, for you to review and send',
+      );
       await user.click(install);
       expect(await screen.findByTestId('sessions-route')).toHaveTextContent(
         JSON.stringify({ skipLastSelectedSessionRestore: true, reaEntry: 'install' }),
@@ -228,6 +231,10 @@ describe('HubPage catalog loading', () => {
       renderWithSessions();
       expect(await screen.findByTestId('rea-hub-state')).toHaveTextContent('Ready');
       expect(await screen.findByRole('button', { name: 'Uninstall' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Use' })).toHaveAttribute(
+        'title',
+        'Fills the analysis prompt into the message box of a new Rex conversation; attach the files and send it',
+      );
       await user.click(screen.getByRole('button', { name: 'Use' }));
       expect(await screen.findByTestId('sessions-route')).toHaveTextContent('"reaEntry":"use"');
     });
