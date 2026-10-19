@@ -9,6 +9,7 @@
     "setDefaultModel": "Set Default Model",
     "defaultModelUpdated": "Default model updated",
     "defaultModelInvalid": "Default model \"{{model}}\" is no longer available and has been cleared. Please select a new one.",
+    "defaultModelInvalidMember": "Default model \"{{model}}\" is no longer available. Ask an administrator to choose a new one.",
     "fallbackModels": "Auxiliary Models",
     "noFallbackModels": "Automatic",
     "fallbackAvailability": "{{available}} / {{total}} available",
@@ -69,7 +70,8 @@
     "testing": "Testing",
     "success": "succeeded",
     "failed": "failed",
-    "testAdminOnly": "Connection tests are available to administrators only"
+    "configAdminOnly": "Only administrators can change model settings",
+    "noModelsMember": "Ask an administrator to add models"
   },
   "status": {
     "connected": "Connected",
