@@ -341,6 +341,7 @@ class TestCuratedCatalogModels:
             "deepseek-v4-flash",
             "deepseek-v4-flash-0731",
             "deepseek-v4.1-flash",
+            "deepseek-v4.1-flash-1017",
         }
 
         assert models[0].id == "deepseek-v4.1-flash"
@@ -412,6 +413,7 @@ class TestCuratedCatalogModels:
             "deepseek-v4-flash",
             "deepseek-v4-flash-0731",
             "deepseek-v4.1-flash",
+            "deepseek-v4.1-flash-1017",
         }
 
         assert models[0].id == "deepseek-v4.1-flash"

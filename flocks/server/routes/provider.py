@@ -24,7 +24,7 @@ from flocks.auth.context import AuthUser
 from flocks.utils.log import Log
 from flocks.provider.provider import BaseProvider, Provider, ModelInfo as ProviderModelInfo
 from flocks.security.secrets import SecretManager
-from flocks.server.auth import get_request_ip, get_request_user_agent, require_admin
+from flocks.server.auth import get_request_ip, get_request_user_agent, require_admin, require_user
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
@@ -2607,9 +2607,33 @@ def _credential_test_error_code(error: Exception) -> str:
 async def test_provider_credentials(
     provider_id: str,
     body: Optional[TestCredentialRequest] = None,
-    _admin: object = Depends(require_admin),
+    user: AuthUser = Depends(require_user),
 ):
+    # Members may check that a configured model answers: the call runs with
+    # the stored credentials on the server and returns only its outcome.
+    # API services (tool credentials) stay with administrators. Direct calls
+    # from server code (onboarding, the API service refresh) pass no user.
+    if isinstance(user, AuthUser) and user.role != "admin" and not await _is_llm_provider(provider_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可执行该操作")
     return await _test_provider_credentials_impl(provider_id, body)
+
+
+async def _is_llm_provider(provider_id: str) -> bool:
+    """Whether test-credentials would test ``provider_id`` as an LLM provider (not an API service)."""
+    await _ensure_provider_initialized()
+    await _load_dynamic_providers()
+    return Provider.get(provider_id) is not None
+
+
+def _without_credential(text: str, api_key: Optional[str]) -> str:
+    """Hide the key in error text: some gateways echo it back in auth errors, and members see these.
+
+    Keys of one to three characters are placeholders for gateways without auth
+    ("x", "-"); replacing them would garble the message without hiding a secret.
+    """
+    if api_key and len(api_key) >= 4:
+        return text.replace(api_key, "***")
+    return text
 
 
 async def _test_provider_credentials_impl(
@@ -2623,6 +2647,7 @@ async def _test_provider_credentials_impl(
     """Test credentials for a provider or API service by making a real API call"""
     from flocks.security import get_secret_manager
 
+    api_key = api_key_override
     try:
         start = time.time()
         
@@ -2791,7 +2816,7 @@ async def _test_provider_credentials_impl(
                 return response
             except Exception as chat_err:
                 latency = int((time.time() - start) * 1000)
-                error_msg = str(chat_err)
+                error_msg = _without_credential(str(chat_err), api_key)
                 response = {
                     "success": False,
                     "message": f"API 调用失败: {error_msg}",
@@ -3202,10 +3227,11 @@ async def _test_provider_credentials_impl(
             await _save_api_service_status(provider_id, response)
             return response
     except Exception as e:
+        error_msg = _without_credential(str(e), api_key)
         return {
             "success": False,
-            "message": f"Credentials test failed: {str(e)}",
-            "error": str(e),
+            "message": f"Credentials test failed: {error_msg}",
+            "error": error_msg,
             "code": _credential_test_error_code(e),
         }
 

@@ -15,6 +15,7 @@ from typing import Dict, Optional, Any, List
 from flocks.utils.id import Identifier
 from flocks.utils.log import Log
 from flocks.project.instance import Instance
+from flocks.provider.concurrency import is_waiting_for_llm_slot
 from flocks.session.session import Session
 from flocks.session.message import Message, MessageRole
 from flocks.session.session_loop import SessionLoop
@@ -268,47 +269,49 @@ class BackgroundManager:
     ) -> None:
         if start_gate is not None:
             await start_gate.wait()
-        async with self._semaphore:
-            task.started_at = int(datetime.now().timestamp() * 1000)
-            task.last_activity_at = task.started_at
-            task.status = "running"
-            try:
-                self._validate_execution_capsule(
-                    task.execution_capsule,
-                    session_id=session_id,
-                    agent=task.agent,
-                    provider_id=task.provider_id,
-                    model_id=task.model_id,
-                )
-                callbacks = self._build_activity_callbacks(task)
-                result = await self._run_session_with_watchdog(
-                    task,
-                    session_id,
-                    callbacks,
-                    allow_user_questions=task.allow_user_questions,
-                    provider_id=task.provider_id,
-                    model_id=task.model_id,
-                    agent_name=task.agent,
-                )
-                output = ""
-                if result.last_message:
-                    output = await Message.get_text_content(result.last_message)
-                task.output = output
-                task.status = "completed"
-                task.completed_at = int(datetime.now().timestamp() * 1000)
-                await self._inject_parent_completion(task)
-            except asyncio.CancelledError:
-                task.status = "cancelled"
-                task.completed_at = int(datetime.now().timestamp() * 1000)
-                await self._inject_parent_completion(task)
-                if _cancel_requested():
-                    raise
-            except Exception as exc:
-                log.error("background.existing_session.error", {"error": str(exc), "task_id": task.id})
-                task.error = str(exc)
-                task.status = "error"
-                task.completed_at = int(datetime.now().timestamp() * 1000)
-                await self._inject_parent_completion(task)
+        # No slot from self._semaphore: TaskExecutor is the only caller and its
+        # TaskQueue already caps how many executions run at once. A pool slot on
+        # top of that let two run while the rest sat here marked "running".
+        task.started_at = int(datetime.now().timestamp() * 1000)
+        task.last_activity_at = task.started_at
+        task.status = "running"
+        try:
+            self._validate_execution_capsule(
+                task.execution_capsule,
+                session_id=session_id,
+                agent=task.agent,
+                provider_id=task.provider_id,
+                model_id=task.model_id,
+            )
+            callbacks = self._build_activity_callbacks(task)
+            result = await self._run_session_with_watchdog(
+                task,
+                session_id,
+                callbacks,
+                allow_user_questions=task.allow_user_questions,
+                provider_id=task.provider_id,
+                model_id=task.model_id,
+                agent_name=task.agent,
+            )
+            output = ""
+            if result.last_message:
+                output = await Message.get_text_content(result.last_message)
+            task.output = output
+            task.status = "completed"
+            task.completed_at = int(datetime.now().timestamp() * 1000)
+            await self._inject_parent_completion(task)
+        except asyncio.CancelledError:
+            task.status = "cancelled"
+            task.completed_at = int(datetime.now().timestamp() * 1000)
+            await self._inject_parent_completion(task)
+            if _cancel_requested():
+                raise
+        except Exception as exc:
+            log.error("background.existing_session.error", {"error": str(exc), "task_id": task.id})
+            task.error = str(exc)
+            task.status = "error"
+            task.completed_at = int(datetime.now().timestamp() * 1000)
+            await self._inject_parent_completion(task)
 
     async def _inject_parent_completion(self, task: BackgroundTask) -> None:
         """Inject completed background task output into the parent context."""
@@ -596,6 +599,12 @@ class BackgroundManager:
                         continue
                 except Exception:
                     pass
+                # Queued for a provider request slot (other tasks or interactive
+                # sessions hold them all) is not inactivity either; the clock
+                # starts again once the slot is granted.
+                if is_waiting_for_llm_slot(session_id):
+                    task.last_activity_at = int(datetime.now().timestamp() * 1000)
+                    continue
                 last = task.last_activity_at or task.started_at or int(datetime.now().timestamp() * 1000)
                 elapsed_s = (int(datetime.now().timestamp() * 1000) - last) / 1000
                 if elapsed_s > timeout_seconds:

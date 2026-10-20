@@ -56,20 +56,172 @@ def test_provider_global_configuration_credentials_and_tests_require_admin():
     assert [response.status_code for response in responses] == [403] * len(responses)
 
 
-def test_onboarding_configuration_allows_members():
+def test_members_can_test_configured_llm_providers_but_not_api_services(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import provider as provider_routes
+
+    tested = []
+
+    async def fake_test(provider_id, body=None, **_kwargs):
+        tested.append((provider_id, body.model_id if body else None))
+        return {"success": True, "message": "连接成功", "model_id": body.model_id if body else None}
+
+    llm_provider = MagicMock()
+    monkeypatch.setattr(provider_routes, "_ensure_provider_initialized", AsyncMock())
+    monkeypatch.setattr(provider_routes, "_load_dynamic_providers", AsyncMock())
+    monkeypatch.setattr(
+        provider_routes.Provider,
+        "get",
+        lambda provider_id: llm_provider if provider_id == "llm-example" else None,
+    )
+    monkeypatch.setattr(provider_routes, "_test_provider_credentials_impl", fake_test)
+
+    member = _user_client(provider_routes.router, prefix="/api/provider", role="member")
+    allowed = member.post("/api/provider/llm-example/test-credentials", json={"model_id": "m1"})
+    # API services (tool credentials) and unknown ids stay with administrators.
+    refused = member.post("/api/provider/service-example/test-credentials", json={})
+    admin = _user_client(provider_routes.router, prefix="/api/provider", role="admin")
+    admin_service = admin.post("/api/provider/service-example/test-credentials", json={})
+
+    assert allowed.status_code == 200 and allowed.json()["success"] is True
+    assert refused.status_code == 403
+    assert admin_service.status_code == 200
+    assert tested == [("llm-example", "m1"), ("service-example", None)]
+
+
+def test_model_configuration_changes_require_admin(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes.custom_provider import router as custom_router
+    from flocks.server.routes.default_model import router as default_router
+    from flocks.server.routes import model as model_routes
+
+    responses = []
+    model = _user_client(model_routes.router, prefix="/api/model", role="member")
+    responses += [
+        model.put("/api/model/v2/settings/example/m1", json={"enabled": False}),
+        model.delete("/api/model/v2/definitions/example/m1"),
+    ]
+    custom = _user_client(custom_router, prefix="/api/custom", role="member")
+    responses += [
+        custom.post("/api/custom/providers", json={"name": "x", "base_url": "https://llm.example.test"}),
+        custom.delete("/api/custom/providers/custom-x"),
+        custom.post("/api/custom/models/custom-x", json={"model_id": "m1"}),
+        custom.delete("/api/custom/models/custom-x/m1"),
+    ]
+    default = _user_client(default_router, prefix="/api/default-model", role="member")
+    responses += [
+        default.put("/api/default-model/llm", json={"provider_id": "example", "model_id": "m1"}),
+        default.delete("/api/default-model/llm"),
+        default.put("/api/default-model/fallbacks", json={"fallback_providers": []}),
+    ]
+    assert [response.status_code for response in responses] == [403] * len(responses)
+
+    # Administrators still change them.
+    manager = MagicMock()
+    manager.update_setting.return_value = model_routes.ModelSetting(
+        provider_id="example", model_id="m1", enabled=False,
+    )
+    monkeypatch.setattr(model_routes, "get_model_manager", lambda: manager)
+    admin = _user_client(model_routes.router, prefix="/api/model", role="admin")
+    updated = admin.put("/api/model/v2/settings/example/m1", json={"enabled": False})
+    assert updated.status_code == 200 and updated.json()["enabled"] is False
+    manager.update_setting.assert_called_once()
+
+
+def test_members_cannot_change_model_settings_via_generic_config_endpoint():
+    from flocks.config.config import Config
+    from flocks.config.config_writer import ConfigWriter
+    from flocks.server.routes.config import router as config_router
+
+    model_settings = {
+        "model": "example/m1",
+        "smallModel": "example/m1",
+        "provider": {
+            "example": {
+                "options": {"baseURL": "https://llm.example.test/v1"},
+                "models": {"m1": {"name": "M1"}},
+            },
+        },
+        "fallback_providers": [{"provider_id": "example", "model_id": "m1"}],
+    }
+    ConfigWriter._write_raw(dict(model_settings))
+    Config.clear_cache()
+
+    def saved_model_settings() -> dict:
+        raw = ConfigWriter._read_raw()
+        return {key: raw.get(key) for key in model_settings}
+
+    member = _user_client(config_router, prefix="/api/config", role="member")
+    # The Channel page sends back the whole config it read; members keep saving it.
+    echoed = member.get("/api/config").json()
+    assert member.patch("/api/config/", json=echoed).status_code == 200
+    assert member.patch("/api/config/", json={"toolFailure": {"disableOnRepeatedFailure": True}}).status_code == 200
+
+    changes = [
+        {"model": "example/m2"},
+        {"smallModel": "example/m2"},
+        {"small_model": "example/m2"},
+        {"provider": {"example": {"options": {"baseURL": "https://other.example.test/v1"}}}},
+        {"provider": {"other": {"options": {"baseURL": "https://other.example.test/v1"}}}},
+        {"default_models": {"llm": {"provider_id": "example", "model_id": "m2"}}},
+        {"fallback_providers": []},
+        {"disabled_providers": ["example"]},
+        {"enabled_providers": ["example"]},
+        {**echoed, "model": "example/m2"},
+    ]
+    assert [member.patch("/api/config/", json=change).status_code for change in changes] == [403] * len(changes)
+    assert saved_model_settings() == model_settings
+
+    # The loader expands references in keys too, so "{secret:…}" could become
+    # "model" once the file is reloaded.
+    hidden = [
+        {"channels": {"feishu": {"botToken": "model"}}, "{secret:channel_feishu_botToken}": "example/replaced"},
+        {"{env:FLOCKS_TEST_MODEL_KEY}": "example/replaced"},
+        {"agent": {"rex": {"{file:model.txt}": "x"}}},
+    ]
+    assert [member.patch("/api/config/", json=change).status_code for change in hidden] == [403] * len(hidden)
+    Config.clear_cache()
+    assert saved_model_settings() == model_settings
+
+    admin = _user_client(config_router, prefix="/api/config", role="admin")
+    assert admin.patch("/api/config/", json={"model": "example/m2"}).status_code == 200
+    assert ConfigWriter._read_raw()["model"] == "example/m2"
+
+
+def test_legacy_provider_auth_route_requires_admin(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import misc as misc_routes
+
+    provider = MagicMock()
+    monkeypatch.setattr(misc_routes.Provider, "_ensure_initialized", lambda: None)
+    monkeypatch.setattr(misc_routes.Provider, "get", lambda provider_id: provider)
+
+    member = _user_client(misc_routes.router, prefix="", role="member")
+    refused = member.put("/auth/openai", json={"auth": {"key": "wrong-key"}})
+    assert refused.status_code == 403
+    provider.configure.assert_not_called()
+
+    admin = _user_client(misc_routes.router, prefix="", role="admin")
+    allowed = admin.put("/auth/openai", json={"auth": {"key": "new-key"}})
+    assert allowed.status_code == 200 and allowed.json()["success"] is True
+    provider.configure.assert_called_once()
+
+
+def test_onboarding_configuration_requires_admin():
+    # Onboarding writes model credentials and the default model, which members may not change.
     from flocks.server.routes.onboarding import router
 
-    client = _user_client(router, prefix="/api/onboarding", role="member")
     payload = {
         "region": "cn",
         "use_threatbook_model": False,
     }
+    member = _user_client(router, prefix="/api/onboarding", role="member")
+    assert member.post("/api/onboarding/validate", json=payload).status_code == 403
+    assert member.post("/api/onboarding/apply", json=payload).status_code == 403
 
-    validate_response = client.post("/api/onboarding/validate", json=payload)
-    apply_response = client.post("/api/onboarding/apply", json=payload)
-
-    assert validate_response.status_code == 200
-    assert apply_response.status_code == 400
+    admin = _user_client(router, prefix="/api/onboarding", role="admin")
+    assert admin.post("/api/onboarding/validate", json=payload).status_code == 200
+    # Nothing to apply without a model or key, so the admin gets the validation error.
+    assert admin.post("/api/onboarding/apply", json=payload).status_code == 400
 
 
 def test_mcp_credential_and_threatbook_configuration_require_admin():

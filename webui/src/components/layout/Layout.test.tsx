@@ -1,18 +1,20 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useLocation, type RouteObject } from 'react-router-dom';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter, Navigate, Route, Routes, useLocation, type RouteObject } from 'react-router-dom';
 import Layout from './Layout';
 import { ThemeProvider } from '@/contexts/ThemeContext';
+import FlocksproUpgradeCallbackPage from '@/pages/FlocksproUpgrade/Callback';
 
 const {
   checkUpdate, getCurrentRelease, onboardingAPI, sessionApi,
   getActiveNotifications, ackNotification, getNotificationAckStatus,
   flocksproUsersApi, consoleUpgradeApi, productNameContextValue,
   useAuth, useWebUIContractPages, useSceneSuiteUpdates, useTaskDashboard,
-  confirmMock, tokenPolicy, changeLanguage,
+  confirmMock, tokenPolicy, changeLanguage, finishConsoleLogin, notificationModal,
 } = vi.hoisted(() => ({
   changeLanguage: vi.fn(),
+  finishConsoleLogin: vi.fn(),
   checkUpdate: vi.fn(),
   getCurrentRelease: vi.fn(),
   onboardingAPI: { getStatus: vi.fn() },
@@ -29,6 +31,7 @@ const {
   useTaskDashboard: vi.fn(() => ({ counts: { running: 1, queued: 2 } })),
   confirmMock: vi.fn(() => Promise.resolve(true)),
   tokenPolicy: { ready: true, notice: null, close: vi.fn(), onPresented: vi.fn() },
+  notificationModal: vi.fn(),
 }));
 
 vi.mock('@/api/update', () => ({ checkUpdate, getCurrentRelease }));
@@ -37,6 +40,7 @@ vi.mock('@/api/session', () => ({ sessionApi }));
 vi.mock('@/api/notifications', () => ({ getActiveNotifications, ackNotification, getNotificationAckStatus }));
 vi.mock('@/api/flocksproUsers', () => ({ flocksproUsersApi }));
 vi.mock('@/api/consoleUpgrade', () => ({ consoleUpgradeApi }));
+vi.mock('@/api/auth', () => ({ authApi: { finishConsoleLogin } }));
 vi.mock('@/contexts/AuthContext', () => ({ useAuth }));
 vi.mock('@/contexts/ProductNameContext', () => ({ useProductName: () => productNameContextValue }));
 vi.mock('@/components/common/ConfirmDialog', () => ({ useConfirm: () => confirmMock }));
@@ -56,8 +60,16 @@ vi.mock('@/components/common/UpdateModal', () => {
   return { default: UpdateModalMock };
 });
 vi.mock('@/components/common/OnboardingModal', () => ({ default: () => <div role="dialog" aria-label="onboarding" /> }));
-vi.mock('@/components/common/NotificationModal', () => ({ default: () => null }));
+vi.mock('@/components/common/NotificationModal', () => ({
+  default: (props: Record<string, unknown>) => {
+    notificationModal(props);
+    return null;
+  },
+}));
 vi.mock('@/components/common/TokenPolicyNotice', () => ({ default: () => null }));
+vi.mock('@/components/common/BackendStatusBanner', () => ({
+  BackendStatusBanner: ({ inline }: { inline?: boolean }) => <div data-testid="backend-status-banner" data-inline={String(Boolean(inline))} />,
+}));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, options?: Record<string, string>) => {
@@ -77,6 +89,8 @@ function RouteProbe() {
 
 const routes: RouteObject[] = [
   { index: true, element: <RouteProbe /> },
+  { path: 'flockspro-upgrade', element: <Navigate to="/settings/flockspro" replace /> },
+  { path: 'flockspro-upgrade/callback', element: <FlocksproUpgradeCallbackPage /> },
   { path: '*', element: <RouteProbe /> },
 ];
 
@@ -105,6 +119,7 @@ function sceneWorkspace(id: string, title: string, over: Record<string, any> = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  finishConsoleLogin.mockResolvedValue(undefined);
   localStorage.clear();
   Object.assign(productNameContextValue, { productName: 'Flocks', configuredDisplayName: null, logoUrl: '/favicon.svg' });
   useAuth.mockReturnValue({ user: { id: 'u1', username: 'admin', role: 'admin' }, logout: vi.fn() });
@@ -134,7 +149,7 @@ describe('Layout chrome', () => {
       .map((element) => element.getAttribute('aria-label'))
       .filter((label) => controls.includes(label!))).toEqual(controls);
     expect(header.querySelector('a[href^="/settings"]')).not.toBeInTheDocument();
-    expect(header.querySelector('a[href^="/scenes"]')).not.toBeInTheDocument();
+    expect(within(header).getByRole('link', { name: 'sceneManagement' })).toHaveAttribute('href', '/scenes/suites');
   });
 
   it('offers the history resize handle only in the expanded workbench', async () => {
@@ -166,6 +181,15 @@ describe('Layout chrome', () => {
     expect(layout.style.getPropertyValue('--sidebar-width')).toBe('208px');
   });
 
+  it('puts the backend status banner in the content column, right above the page', () => {
+    renderAt('/');
+    const banner = screen.getByTestId('backend-status-banner');
+    const main = document.querySelector('main') as HTMLElement;
+    expect(banner).toHaveAttribute('data-inline', 'true');
+    expect(banner.parentElement).toBe(main.parentElement);
+    expect(banner.nextElementSibling).toBe(main);
+  });
+
   it('shows the Flocks logo beside the product name', () => {
     renderAt('/');
     const header = document.querySelector('[data-workspace-header]') as HTMLElement;
@@ -181,7 +205,7 @@ describe('Layout chrome', () => {
     expect(within(header).getByText('Acme SOC')).toBeInTheDocument();
   });
 
-  it('opens the scene catalog from More Scenes in SOC and keeps SOC selected', async () => {
+  it('opens scene management from the module bar without replacing the remembered SOC page', async () => {
     useWebUIContractPages.mockReturnValue({
       pages: [], workspaces: [sceneWorkspace('soc_ui', 'SOC 工作区'), sceneWorkspace('code_audit_ui', '代码漏洞审计工作区')],
       loading: false, error: null, refetch: vi.fn(),
@@ -191,26 +215,27 @@ describe('Layout chrome', () => {
     const menu = screen.getByRole('navigation', { name: 'modules' });
     expect(within(menu).getByText('SOC 工作区')).toBeInTheDocument();
     expect(within(menu).queryByText('代码漏洞审计工作区')).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'sceneManagement' })).not.toBeInTheDocument();
     fireEvent.click(within(menu).getByRole('button', { name: 'SOC 工作区' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/soc_ui'));
     const sidebar = screen.getByRole('navigation', { name: 'moduleNavigation' });
-    expect(within(sidebar).getByRole('heading', { name: 'moreScenes' })).toBeInTheDocument();
-    const sceneMgmt = within(sidebar).getByRole('link', { name: 'sceneSuiteManager' });
+    expect(within(sidebar).queryByRole('heading', { name: 'moreScenes' })).not.toBeInTheDocument();
+    expect(within(sidebar).queryByRole('link', { name: 'sceneSuiteManager' })).not.toBeInTheDocument();
+    const sceneMgmt = within(menu).getByRole('link', { name: 'sceneManagement' });
     expect(within(sceneMgmt).getByText('newBadge')).toBeInTheDocument();
     fireEvent.click(sceneMgmt);
     await waitFor(() => expect(activeProbe().textContent).toBe('/scenes/suites'));
-    expect(within(sidebar).getByRole('link', { name: 'sceneSuiteManager' })).toHaveAttribute('aria-current', 'page');
-    expect(within(menu).getByRole('button', { name: 'SOC 工作区' })).toHaveAttribute('aria-current', 'page');
+    expect(sceneMgmt).toHaveAttribute('aria-current', 'page');
+    expect(within(menu).getByRole('button', { name: 'SOC 工作区' })).not.toHaveAttribute('aria-current');
     expect(within(sidebar).queryByRole('link', { name: 'settingsPreferences' })).not.toBeInTheDocument();
     expect(screen.queryByTestId('history-panel')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/'));
     fireEvent.click(screen.getByRole('button', { name: 'SOC 工作区' }));
-    await waitFor(() => expect(activeProbe().textContent).toBe('/scenes/suites'));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/soc_ui'));
+    expect(sceneMgmt).not.toHaveAttribute('aria-current');
   });
 
-  it.each(['missing', 'disabled', 'locked', 'loading'])('keeps Add Scene reachable in SOC when the SOC suite is %s', async (state) => {
+  it.each(['missing', 'disabled', 'locked', 'loading'])('keeps scene management reachable in the header when the SOC suite is %s', async (state) => {
     useWebUIContractPages.mockReturnValue({
       pages: [], loading: state === 'loading', error: null, refetch: vi.fn(),
       workspaces: state === 'missing' || state === 'loading' ? [] : [sceneWorkspace('soc_ui', 'SOC 工作区', {
@@ -218,15 +243,16 @@ describe('Layout chrome', () => {
       })],
     });
     renderAt('/');
-    fireEvent.click(screen.getByRole('button', { name: 'socWorkspace' }));
+    const menu = screen.getByRole('navigation', { name: 'modules' });
+    expect(within(menu).getByRole('button', { name: 'socWorkspace' })).toBeInTheDocument();
+    fireEvent.click(within(menu).getByRole('link', { name: 'sceneManagement' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/scenes/suites'));
-    expect(screen.getByRole('button', { name: 'socWorkspace' })).toHaveAttribute('aria-current', 'page');
-    expect(screen.getByRole('heading', { name: 'moreScenes' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'sceneSuiteManager' })).toHaveAttribute('aria-current', 'page');
-    expect(screen.queryByTestId('history-panel')).not.toBeInTheDocument();
+    expect(within(menu).getByRole('button', { name: 'socWorkspace' })).not.toHaveAttribute('aria-current');
+    expect(screen.queryByRole('heading', { name: 'moreScenes' })).not.toBeInTheDocument();
+    expect(within(menu).getByRole('link', { name: 'sceneManagement' })).toHaveAttribute('aria-current', 'page');
   });
 
-  it('keeps SOC and Add Scene after all installed scenes are removed', async () => {
+  it('keeps SOC and scene management after all installed scenes are removed', async () => {
     useWebUIContractPages.mockReturnValue({
       pages: [], loading: false, error: null, refetch: vi.fn(),
       workspaces: [sceneWorkspace('soc_ui', 'SOC 工作区'), sceneWorkspace('code_audit_ui', '代码漏洞审计工作区'), sceneWorkspace('ai_redteam_ui', 'AI 渗透')],
@@ -236,12 +262,11 @@ describe('Layout chrome', () => {
     fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
     fireEvent.click(screen.getByRole('button', { name: 'socWorkspace' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/scenes/suites'));
-    expect(screen.getByRole('link', { name: 'sceneSuiteManager' })).toHaveAttribute('aria-current', 'page');
-    expect(localStorage.getItem('flocks_layout_current_workspace')).toBe('scene:soc_ui');
+    expect(screen.getByRole('link', { name: 'sceneManagement' })).toHaveAttribute('aria-current', 'page');
     view.unmount();
     renderAt('/scenes/suites');
-    expect(screen.getByRole('button', { name: 'socWorkspace' })).toHaveAttribute('aria-current', 'page');
-    expect(screen.getByRole('link', { name: 'sceneSuiteManager' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'socWorkspace' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'sceneManagement' })).toHaveAttribute('aria-current', 'page');
   });
 
   it('switches to a scene directly from the module bar', async () => {
@@ -284,7 +309,7 @@ describe('Layout chrome', () => {
     expect(screen.getByRole('button', { name: 'SOC 工作区' })).toHaveAttribute('aria-current', 'page');
     expect(screen.queryByRole('button', { name: '代码漏洞审计工作区' })).not.toBeInTheDocument();
     const sidebar = screen.getByRole('navigation', { name: 'moduleNavigation' });
-    expect(within(sidebar).getAllByRole('heading').map((heading) => heading.textContent)).toEqual(['态势', '告警运营', 'codeAudit', '其他', 'moreScenes']);
+    expect(within(sidebar).getAllByRole('heading').map((heading) => heading.textContent)).toEqual(['态势', '告警运营', 'codeAudit', '其他']);
     expect(within(sidebar).getByRole('link', { name: 'codeAuditProjects' })).toHaveAttribute('href', '/contracts/webui/workspaces/code_audit_ui/audit-home');
     expect(within(sidebar).getByRole('link', { name: '任务列表' })).toHaveAttribute('href', path);
     expect(within(sidebar).getByRole('link', { name: '任务列表' })).toHaveAttribute('aria-current', 'page');
@@ -309,6 +334,7 @@ describe('Layout chrome', () => {
     });
     renderAt('/contracts/webui/workspaces/code_audit_ui/code_audit_ui-overview');
     await waitFor(() => expect(activeProbe().textContent).toBe('/scenes/suites'));
+    fireEvent.click(screen.getByRole('button', { name: 'SOC 工作区' }));
     fireEvent.click(screen.getByRole('link', { name: 'SOC 工作区 概览' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/soc_ui/soc_ui-overview'));
     expect(screen.queryByRole('button', { name: 'codeAudit' })).not.toBeInTheDocument();
@@ -347,7 +373,7 @@ describe('Layout chrome', () => {
     expect(screen.queryByRole('button', { name: '代码漏洞审计工作区' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'codeAudit' })).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByRole('link', { name: '报告中心' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'sceneSuiteManager' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'sceneManagement' })).toBeInTheDocument();
     await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/code_audit_ui/audit-home?view=audits'));
   });
 
@@ -372,7 +398,7 @@ describe('Layout chrome', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'socWorkspace' })).toHaveAttribute('aria-current', 'page'));
     expect(activeProbe().textContent).toBe(path);
     expect(screen.getByRole('link', { name: '代码漏洞审计工作区 概览' })).toHaveAttribute('aria-current', 'page');
-    expect(screen.getByRole('link', { name: 'sceneSuiteManager' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'sceneManagement' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '代码漏洞审计工作区' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
     fireEvent.click(screen.getByRole('button', { name: 'socWorkspace' }));
@@ -428,6 +454,27 @@ describe('Layout chrome', () => {
     expect(within(sidebar).getAllByRole('link').map((link) => link.textContent)).toEqual([
       'settingsPreferences', 'accountManagement', 'systemLog', 'archivedData',
     ]);
+  });
+
+  it('returns to the workbench home after cloud login from Flocks Pro settings', async () => {
+    localStorage.setItem('flocks_layout_workspace_paths', JSON.stringify({ agent: '/sessions/previous-session' }));
+    renderAt('/flockspro-upgrade/callback?console_login_id=test-login&state=test-state');
+    await waitFor(() => expect(activeProbe().textContent).toBe('/settings/flockspro?login=success'));
+    expect(finishConsoleLogin).toHaveBeenCalledWith('test-login', 'test-state', undefined);
+    expect(JSON.parse(localStorage.getItem('flocks_layout_workspace_paths')!).agent).toBe('/sessions/previous-session');
+    const completedExchanges = finishConsoleLogin.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/'));
+    expect(screen.getByRole('button', { name: 'workbench' })).toHaveAttribute('aria-current', 'page');
+    expect(finishConsoleLogin).toHaveBeenCalledTimes(completedExchanges);
+  });
+
+  it.each(['/flockspro-upgrade?login=success', '/flockspro-upgrade/callback?console_login_id=expired'])('discards a remembered upgrade URL when returning to the workbench: %s', async (path) => {
+    localStorage.setItem('flocks_layout_workspace_paths', JSON.stringify({ agent: path }));
+    renderAt('/settings/flockspro');
+    fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/'));
+    expect(finishConsoleLogin).not.toHaveBeenCalled();
   });
 
   it('combines account and version information in a single sidebar footer menu', () => {
@@ -524,6 +571,78 @@ describe('Layout chrome', () => {
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument());
   });
 
+  const proRelease = (component: string, notes: string) => ({
+    edition: 'flockspro',
+    current_version: 'v2026.10.16',
+    latest_version: 'v2026.10.16',
+    current_bundle_version: 'v2026.10.16',
+    current_core_version: 'v2026.10.15',
+    current_pro_component_version: component,
+    has_update: false,
+    release_notes: notes,
+    release_url: null,
+    error: null,
+  });
+
+  it('announces an installed Pro bundle with its own release notes', async () => {
+    getCurrentRelease.mockResolvedValue(proRelease('2026.10.16', 'Pro 报告中心不再列出空报告'));
+    getNotificationAckStatus.mockResolvedValue({ acknowledged: false });
+    renderAt('/');
+    await waitFor(() => expect(notificationModal).toHaveBeenCalled());
+    const id = 'whats-new-flockspro-v2026.10.16-core-v2026.10.15-pro-v2026.10.16';
+    expect(getNotificationAckStatus).toHaveBeenCalledWith(id);
+    expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
+      expect.objectContaining({
+        id,
+        kind: 'whats_new',
+        title: 'Flocks Pro v2026.10.16 更新内容',
+        body: 'Pro 报告中心不再列出空报告',
+        version: 'v2026.10.16',
+      }),
+    ]);
+  });
+
+  it('does not let a dismissed Pro component hide a same-number component update', async () => {
+    getCurrentRelease.mockResolvedValue(proRelease('2026.10.16', '组件 2026.10.16 的说明'));
+    getNotificationAckStatus.mockResolvedValue({ acknowledged: false });
+    const first = renderAt('/');
+    await waitFor(() => expect(getNotificationAckStatus).toHaveBeenCalled());
+    const dismissedId = getNotificationAckStatus.mock.calls[0][0];
+    first.unmount();
+    vi.clearAllMocks();
+
+    getCurrentRelease.mockResolvedValue(proRelease('2026.10.17', '组件 2026.10.17 的说明'));
+    getNotificationAckStatus.mockImplementation(async (id: string) => ({ acknowledged: id === dismissedId }));
+    renderAt('/');
+    await waitFor(() => expect(notificationModal).toHaveBeenCalled());
+    expect(getNotificationAckStatus).not.toHaveBeenCalledWith(dismissedId);
+    expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
+      expect.objectContaining({ body: '组件 2026.10.17 的说明', title: 'Flocks Pro v2026.10.16 更新内容' }),
+    ]);
+  });
+
+  it('keeps the Core release notice for an OSS install', async () => {
+    getCurrentRelease.mockResolvedValue({
+      current_version: '2026.10.15',
+      latest_version: '2026.10.15',
+      has_update: false,
+      release_notes: 'OSS 2026.10.15 notes',
+      release_url: null,
+      error: null,
+    });
+    getNotificationAckStatus.mockResolvedValue({ acknowledged: false });
+    renderAt('/');
+    await waitFor(() => expect(notificationModal).toHaveBeenCalled());
+    expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-2026.10.15');
+    expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
+      expect.objectContaining({
+        id: 'whats-new-2026.10.15',
+        title: 'Flocks v2026.10.15 更新内容',
+        body: 'OSS 2026.10.15 notes',
+      }),
+    ]);
+  });
+
   it('surfaces active tasks and backend notifications in the bell menu', async () => {
     getActiveNotifications.mockResolvedValue([{ id: 'n1', kind: 'announcement', title: '系统公告', summary: '内容', highlights: [], priority: 10 }]);
     const { container } = renderAt('/');
@@ -538,5 +657,38 @@ describe('Layout chrome', () => {
     renderAt('/');
     fireEvent.click(screen.getByRole('button', { name: 'newChat' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/sessions'));
+  });
+});
+
+describe('Layout onboarding', () => {
+  it('opens onboarding for an admin when the first-run setup is not complete', async () => {
+    onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });
+    renderAt('/');
+    expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+  });
+
+  it('keeps onboarding away from members: no status check, no prompt, no event opener', async () => {
+    useAuth.mockReturnValue({ user: { id: 'u2', username: 'member', role: 'member' }, logout: vi.fn() });
+    onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });
+    renderAt('/');
+    await act(async () => {
+      window.dispatchEvent(new Event('flocks:open-onboarding'));
+    });
+    expect(onboardingAPI.getStatus).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
+  });
+
+  it('closes onboarding when the signed-in user is no longer an admin', async () => {
+    onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });
+    const { rerender } = renderAt('/');
+    expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+
+    useAuth.mockReturnValue({ user: { id: 'u2', username: 'member', role: 'member' }, logout: vi.fn() });
+    rerender(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes><Route path="/*" element={<Layout contentRoutes={routes} />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
   });
 });

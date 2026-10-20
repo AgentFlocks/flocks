@@ -41,12 +41,22 @@ describe('navPartitions', () => {
     expect(sceneWorkspaceIdOf(AGENT_WORKSPACE)).toBeNull();
   });
 
-  it('keeps settings separate and places the scene catalog under SOC', () => {
+  it('keeps settings and scene management separate from workspaces', () => {
     expect(resolveNavRoute('/settings')).toEqual({ kind: 'settings' });
     expect(resolveNavRoute('/settings/audit-logs')).toEqual({ kind: 'settings' });
     for (const path of ['/scenes', '/scenes/suites', '/scenes/suites?workspace=code_audit_ui']) {
-      expect(resolveNavRoute(path)).toEqual({ kind: 'workspace', workspace: sceneNavWorkspace('soc_ui') });
+      expect(resolveNavRoute(path)).toEqual({ kind: 'scenes' });
     }
+  });
+
+  it('classifies legacy Pro upgrade and cloud-login callback URLs as settings', () => {
+    for (const path of ['/flockspro-upgrade', '/flockspro-upgrade?login=success', '/flockspro-upgrade/callback?console_login_id=test-login']) {
+      expect(resolveNavRoute(path)).toEqual({ kind: 'settings' });
+    }
+    saveWorkspacePaths({ [AGENT_WORKSPACE]: '/flockspro-upgrade?login=success' });
+    expect(readWorkspacePaths()).toEqual({});
+    saveWorkspacePaths({ [AGENT_WORKSPACE]: '/flockspro-upgrade/callback?console_login_id=test-login' });
+    expect(readWorkspacePaths()).toEqual({});
   });
 
   it('routes ordinary pages to the Agent workspace', () => {
@@ -103,10 +113,16 @@ describe('navPartitions', () => {
     }
   });
 
-  it.each(['/contracts/webui/workspaces/code_audit_ui/audit-home?view=audits', '/scenes/suites?workspace=soc_ui'])('preserves SOC navigation memory for %s', (path) => {
+  it('preserves SOC navigation memory for code audit', () => {
+    const path = '/contracts/webui/workspaces/code_audit_ui/audit-home?view=audits';
     const paths = { [sceneNavWorkspace('soc_ui')]: path };
     saveWorkspacePaths(paths);
     expect(readWorkspacePaths()).toEqual(paths);
+  });
+
+  it('drops the old SOC scene-catalog memory after moving scene management to the header', () => {
+    saveWorkspacePaths({ [sceneNavWorkspace('soc_ui')]: '/scenes/suites?workspace=soc_ui', [AGENT_WORKSPACE]: '/tasks' });
+    expect(readWorkspacePaths()).toEqual({ [AGENT_WORKSPACE]: '/tasks' });
   });
 
   it('remembers the current workspace', () => {

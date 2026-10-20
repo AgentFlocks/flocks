@@ -4,8 +4,8 @@ import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
  * The top navigation separates the workbench, enabled scene suites and Agent
  * workshop. Each module owns its sidebar and remembers its last visited page.
  *
- * System settings has its own sidebar. The scene catalog (/scenes) belongs
- * to SOC, which remains reachable even before its scene suite is installed.
+ * System settings has its own sidebar. Scene management (/scenes) is a
+ * separate header entry and does not replace any module's remembered page.
  */
 export type NavWorkspaceId = string;
 
@@ -36,7 +36,10 @@ export function sceneWorkspaceIdOf(workspace: NavWorkspaceId): string | null {
 }
 
 export function isSettingsPath(pathname: string): boolean {
-  return pathname === '/settings' || pathname.startsWith('/settings/');
+  return pathname === '/settings' || pathname.startsWith('/settings/')
+    // Cloud login returns through the legacy upgrade route. Keep both the
+    // callback and redirect out of the workbench's remembered page.
+    || pathname === '/flockspro-upgrade' || pathname.startsWith('/flockspro-upgrade/');
 }
 
 export function isSceneSuitesPath(pathname: string): boolean {
@@ -67,7 +70,8 @@ export function sceneNavigationOwner(
 
 export type NavRoute =
   | { kind: 'workspace'; workspace: NavWorkspaceId }
-  | { kind: 'settings' };
+  | { kind: 'settings' }
+  | { kind: 'scenes' };
 
 /**
  * The owner of a route. `workspaces` is the loaded workspace list; leave it
@@ -80,7 +84,7 @@ export function resolveNavRoute(
 ): NavRoute {
   const [pathname, search = ''] = path.split('?');
   if (isSettingsPath(pathname)) return { kind: 'settings' };
-  if (isSceneSuitesPath(pathname)) return { kind: 'workspace', workspace: sceneNavWorkspace(SOC_WORKSPACE_ID) };
+  if (isSceneSuitesPath(pathname)) return { kind: 'scenes' };
   const workspaceTab = new URLSearchParams(search).get('tab');
   if (WORKSHOP_PATHS.some((base) => pathname === base || pathname.startsWith(`${base}/`))
     || (pathname === '/workspace' && (workspaceTab === 'knowledge' || workspaceTab === 'memory'))) {
@@ -120,7 +124,7 @@ export function readWorkspacePaths(): NavWorkspacePaths {
         // SOC can remember a code-audit page. Layout validates suite availability when using it.
         const pageWorkspaceId = workspaceIdFromPath(value.split('?')[0]);
         if (pageWorkspaceId === sceneId
-          || (sceneId === SOC_WORKSPACE_ID && (pageWorkspaceId === CODE_AUDIT_WORKSPACE_ID || isSceneSuitesPath(value.split('?')[0])))) result[workspace] = value;
+          || (sceneId === SOC_WORKSPACE_ID && pageWorkspaceId === CODE_AUDIT_WORKSPACE_ID)) result[workspace] = value;
       } else if (workspace === AGENT_WORKSPACE || workspace === AGENT_WORKSHOP) {
         // Placement of a workspace route is only known once navigation loads;
         // Layout checks stored paths against the current menu anyway.

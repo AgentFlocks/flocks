@@ -639,9 +639,8 @@
     "session": "会话"
   },
   "rea": {
-    "sessionTitle": "REA 逆向分析",
-    "installPrompt": "REA 安装指引\n安装原则：仅安装缺失组件；凡可并行执行的操作一律并行，避免串行等待。\n\n一、选择安装档位\n轻量档——仅需 JavaScript / .NET / 压缩包分析时选用，不安装 JDK 与 Ghidra，可节省约 1.2GB 磁盘空间与约 4 分钟安装时间。\n完整档——需反编译原生 ELF / PE 时选用，在轻量档基础上增装 JDK 21 与 Ghidra 12.1.4。\n二、并行安装缺失组件（以下三项应同时执行）\n技能组件：来源为 github:zouineoualid/rea-reverse-engineering/reverse-engineer-anything；该源存在间歇性不可达，安装失败时原样重试。\nJDK 21：执行 dnf install -y java-21-openjdk-devel。\nGhidra 12.1.4：经 https://ghfast.top/ 镜像下载（官方直连速率约 30KB/s，预计耗时 4 小时）；下载后必须校验官方 SHA-256（ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db），校验不通过须丢弃并重新下载；校验通过后解包至 /opt。\n三、MCP 服务仅注册一次\n服务名为 rea，启动命令为 npx -y rea-agents@6.4.0 --mcp（版本必须锁定 6.4.0）；写入环境变量 GHIDRA_INSTALL_DIR=/opt/ghidra_12.1.4_PUBLIC 与 JAVA_HOME=/usr/lib/jvm/java-21-openjdk。轻量档无需写入环境变量。\n不得在安装前后各注册一次，以免产生额外的服务重连开销。\n\n四、执行有效性验证\n按所选安装档位执行真实验证，不得仅以服务启动成功或工具数量（170）作为可用性依据。\n轻量档：不安装 JDK/Ghidra。使用本地生成或来源明确且附源码的最小 JavaScript 文件、.NET 托管程序集和 ZIP 压缩包进行真实工具调用验证，无需用户提供分析材料。JavaScript 和 .NET 样例均包含一个可核对的计算函数及固定输入输出，须通过实际工具还原逻辑，并尽可能在相应运行环境执行核对；ZIP 样例包含已知目录和文件，须通过实际工具列出、提取并核对内容。工具名称以真实 MCP 工具清单为准。逐项报告通过、失败与未完成，不将部分能力通过等同于全部能力可用。\n完整档：先完成轻量档验证，再完成真实原生反编译验证。编译一个约 10 行、包含独立计算函数的 C 程序，依次调用 open_binary 与 procedure_pseudo_code，核对还原逻辑与源码一致，并运行原程序核对固定输入输出。仅确认工具数量（170）不足以证明原生反编译能力可用。\n\n五、其他要求\n组件已存在时应直接复用；/opt/ghidra_* 与 /root/.npm/_npx 为缓存目录，请勿删除——保留缓存可将重复安装耗时由约 6 分钟降至约 30 秒。\n执行系统软件包安装或平台配置写入前，须先取得确认。",
-    "usePrompt": "使用 REA 逆向分析工具，分析【目标文件、下载链接或网站 URL】，重点解决【希望了解的问题】。复用已有配置，按目标检查并补齐所需工具，还原关键逻辑、算法或接口流程，并尽可能使用原程序或原运行环境核对结果。请给出简明结论、关键原理、可复核证据和验证情况，明确区分已验证事实、推断与未完成项。",
+    "installPrompt": "REA 安装指引\n安装原则：仅安装缺失组件；凡可并行执行的操作一律并行，避免串行等待。\n\n一、选择安装档位\n轻量档——仅需 JavaScript / .NET / 压缩包分析时选用，不安装 JDK 与 Ghidra，可节省约 1.2GB 磁盘空间与约 4 分钟安装时间。\n完整档——需反编译原生 ELF / PE 时选用，在轻量档基础上增装 JDK 21 与 Ghidra 12.1.4。\n二、并行安装缺失组件（以下三项应同时执行）\n技能组件：来源为 github:zouineoualid/rea-reverse-engineering/reverse-engineer-anything；该源存在间歇性不可达，安装失败时原样重试。\nJDK 21：执行 dnf install -y java-21-openjdk-devel。\nGhidra 12.1.4：经 https://ghfast.top/ 镜像下载（官方直连速率约 30KB/s，预计耗时 4 小时）；下载后必须校验官方 SHA-256（ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db），校验不通过须丢弃并重新下载；校验通过后解包至 /opt。\n三、MCP 服务仅注册一次\n服务名为 rea，启动命令为 npx -y rea-agents@6.4.0 --mcp（版本必须锁定 6.4.0）；写入环境变量 GHIDRA_INSTALL_DIR=/opt/ghidra_12.1.4_PUBLIC 与 JAVA_HOME=/usr/lib/jvm/java-21-openjdk。轻量档无需写入环境变量。\n不得在安装前后各注册一次，以免产生额外的服务重连开销。\n\n四、执行有效性验证\n按所选安装档位执行真实验证，不得仅以服务启动成功或工具数量（170）作为可用性依据。\n轻量档：不安装 JDK/Ghidra。使用本地生成或来源明确且附源码的最小 JavaScript 文件、.NET 托管程序集和 ZIP 压缩包进行真实工具调用验证，无需用户提供分析材料。JavaScript 和 .NET 样例均包含一个可核对的计算函数及固定输入输出，须通过实际工具还原逻辑，并尽可能在相应运行环境执行核对；ZIP 样例包含已知目录和文件，须通过实际工具列出、提取并核对内容。工具名称以真实 MCP 工具清单为准。逐项报告通过、失败与未完成，不将部分能力通过等同于全部能力可用。\n完整档：先完成轻量档验证，再完成真实原生反编译验证。编译一个约 10 行、包含独立计算函数的 C 程序，依次调用 open_binary 与 procedure_pseudo_code，核对还原逻辑与源码一致，并运行原程序核对固定输入输出。仅确认工具数量（170）不足以证明原生反编译能力可用。\n\n五、其他要求\n组件已存在时应直接复用；/opt/ghidra_* 与 /root/.npm/_npx 为缓存目录，请勿删除——保留缓存可将重复安装耗时由约 6 分钟降至约 30 秒。\n执行系统软件包安装或平台配置写入前，须先取得确认。\n安装执行前请再次和我确认你计划安装哪些模块？",
+    "usePrompt": "帮我使用 REA 逆向工具分析上传的附件文件",
     "repairPrompt": "继续排查 REA 插件的安装或验证问题，修复后按原档位重新验证，再告诉我结果。",
     "confirm": {
       "light": "选择轻量档：确认安装缺失组件并写入 Flocks 配置。",
@@ -676,7 +675,6 @@
       "installing": "REA 正在安装（{{stage}}，{{progress}}%），完成后再点入口即可使用。",
       "uninstalling": "REA 正在卸载，卸载完成前不能开始分析。",
       "uninstallFailed": "REA 上次卸载没有完成，还有 {{count}} 项残留。请到插件广场重试卸载或查看详情。",
-      "pending": "安装会话正在另一个页面创建，请稍候再试。",
       "statusFailed": "暂时读不到 REA 插件状态：{{message}}"
     },
     "state": {
@@ -787,11 +785,12 @@
       "uninstalling": "REA 逆向分析插件正在卸载，卸载期间不能开始分析。",
       "uninstallFailed": "REA 上次卸载没有完成，请到插件广场重试卸载或查看详情。",
       "readyNow": "REA 逆向分析插件已通过可用性验证，可以继续这项任务。",
-      "install": "开始安装",
+      "install": "安装",
       "repair": "排查并修复",
       "sent": "已发送",
       "sendFailed": "发送失败：{{message}}",
-      "diagnosticsHint": "对话里只显示结论和固定说明：主机路径显示为 <path>，报错原文和验证备注不在这里显示。完整诊断在插件广场 → REA 逆向分析 →「查看详情」（仅管理员）。"
+      "diagnosticsHint": "对话里只显示结论和固定说明：主机路径显示为 <path>，报错原文和验证备注不在这里显示。完整诊断在插件广场 → REA 逆向分析 →「查看详情」（仅管理员）。",
+      "filled": "已填入输入框，检查后发送即可。"
     },
     "plan": {
       "title": "选择 REA 安装档位",

@@ -149,18 +149,12 @@ export function useReaStatus({ enabled = true, watch = false }: { enabled?: bool
 
   const refresh = useCallback(() => refetch(resource, true), [resource]);
 
-  const recordInstallSession = useCallback(async (sessionId: string) => {
-    await reaApi.recordInstallSession(sessionId);
-    return refetch(resource);
-  }, [resource]);
-
   return {
     status: snapshot.data,
     loading: snapshot.loading && !snapshot.initialized,
     error: snapshot.error,
     identity,
     refresh,
-    recordInstallSession,
   };
 }
 

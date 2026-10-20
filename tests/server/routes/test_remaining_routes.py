@@ -747,7 +747,7 @@ class TestConfigRoutes:
         )
         monkeypatch.setattr(config_routes.Config, "get_config_file", lambda: config_file)
 
-        async def fake_get_config():
+        async def fake_get_config(*_args):
             return {}
 
         monkeypatch.setattr(config_routes, "get_config", fake_get_config)
@@ -774,7 +774,7 @@ class TestConfigRoutes:
         config_file.write_text("{}", encoding="utf-8")
         monkeypatch.setattr(config_routes.Config, "get_config_file", lambda: config_file)
 
-        async def fake_get_config():
+        async def fake_get_config(*_args):
             return {}
 
         monkeypatch.setattr(config_routes, "get_config", fake_get_config)

@@ -1,4 +1,4 @@
-"""REA routes: unified status, the install conversation and the uninstall with its confirmation."""
+"""REA routes: unified status (with the install conversation) and the uninstall with its confirmation."""
 
 from __future__ import annotations
 
@@ -111,39 +111,31 @@ def test_failed_job_detail_is_only_shown_to_admins():
 
 
 @pytest.mark.asyncio
-async def test_install_session_reserve_and_record(tmp_path):
+async def test_the_install_session_is_the_one_rexs_install_recorded(tmp_path):
     own = await _session(tmp_path, "admin-1")
     foreign = await _session(tmp_path, "someone-else")
-    async with _async_client("member") as member:
-        assert (await member.post("/api/rea/install-session/reserve")).status_code == 403
-        assert (await member.post("/api/rea/install-session", json={"sessionId": own.id})).status_code == 403
+    # The entry only fills the guide in; the install tool records the conversation it runs in.
     async with _async_client("admin") as admin:
-        first = (await admin.post("/api/rea/install-session/reserve")).json()
-        assert first == {"decision": "create", "sessionId": None}
-        # A second tab asking meanwhile waits for the first one.
-        assert (await admin.post("/api/rea/install-session/reserve")).json()["decision"] == "pending"
+        assert (await admin.post("/api/rea/install-session/reserve")).status_code in (404, 405)
+        assert (await admin.post("/api/rea/install-session", json={"sessionId": own.id})).status_code in (404, 405)
+        assert (await admin.get("/api/rea/status")).json()["installSessionId"] is None
+        service.record_install_session(foreign.id, AuthUser(id="admin-1", username="admin", role="admin"))
+        assert (await admin.get("/api/rea/status")).json()["installSessionId"] is None  # not writable for them
+        service.record_install_session(own.id, AuthUser(id="admin-1", username="admin", role="admin"))
+        assert (await admin.get("/api/rea/status")).json()["installSessionId"] == own.id
 
-        assert (await admin.post("/api/rea/install-session", json={"sessionId": "ses_missing"})).status_code == 404
-        assert (await admin.post("/api/rea/install-session", json={"sessionId": ""})).status_code == 422
-        assert (await admin.post("/api/rea/install-session", json={"sessionId": foreign.id})).status_code in (403, 404)
-        recorded = await admin.post("/api/rea/install-session", json={"sessionId": own.id})
-        assert recorded.status_code == 200, recorded.text
-        assert recorded.json()["installSessionId"] == own.id
-        assert (await admin.post("/api/rea/install-session/reserve")).json() == {"decision": "open", "sessionId": own.id}
-
-    # Members never get it; another administrator starts their own.
+    # Members never get it; another administrator has their own.
     async with _async_client("member") as member:
         assert (await member.get("/api/rea/status")).json()["installSessionId"] is None
     async with _async_client("admin", "admin-2") as other:
         assert (await other.get("/api/rea/status")).json()["installSessionId"] is None
-        assert (await other.post("/api/rea/install-session/reserve")).json()["decision"] == "create"
 
 
 @pytest.mark.asyncio
 async def test_an_expired_or_archived_install_session_is_not_reopened(tmp_path, monkeypatch):
     session = await _session(tmp_path, "admin-1")
+    service.record_install_session(session.id, AuthUser(id="admin-1", username="admin", role="admin"))
     async with _async_client("admin") as admin:
-        await admin.post("/api/rea/install-session", json={"sessionId": session.id})
         later = int(time.time() * 1000) + service.INSTALL_SESSION_REUSE_MS + 1
         monkeypatch.setattr(service, "_now_ms", lambda: later)
         assert (await admin.get("/api/rea/status")).json()["installSessionId"] is None

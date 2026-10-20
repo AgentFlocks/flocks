@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ContextUsageSnapshot } from '@/api/session';
 import type { Message } from '@/types';
+import type { SendWelcomePrompt } from './SessionChat';
 
 import {
   areChatTimelineItemsRenderEqual,
@@ -2599,6 +2600,106 @@ describe('SessionChat instruction display text', () => {
   });
 });
 
+describe('SessionChat welcome prompt sending', () => {
+  it('sends to the current session with optimistic history, the chosen model and the shortcut execution mode', async () => {
+    mockStatefulSessionMessages();
+    const accepted = vi.fn();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      agentName: 'explore',
+      model: { providerID: 'provider-1', modelID: 'model-1' },
+      executionMode: 'goal',
+      onExecutionModeAccepted: accepted,
+      welcomeContent: (_setInput, sendPrompt) => React.createElement('button', {
+        onClick: () => void sendPrompt('REA install guide', { agent: 'rex', executionMode: 'build' }),
+      }, 'Start REA'),
+    }));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Start REA' }));
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/prompt_async', {
+      parts: [{ type: 'text', text: 'REA install guide' }],
+      messageID: expect.any(String),
+      agent: 'rex',
+      model: { providerID: 'provider-1', modelID: 'model-1' },
+      executionMode: 'build',
+    }));
+    expect(screen.getByText('REA install guide')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start REA' })).not.toBeInTheDocument();
+    expect(accepted).toHaveBeenCalledWith('build');
+    expect(screen.queryByText('Goal')).not.toBeInTheDocument();
+    expect(clientPostMock).not.toHaveBeenCalledWith('/api/session', expect.anything());
+  });
+
+  it('queues a delayed shortcut when the current session has started streaming meanwhile', async () => {
+    let sendPrompt!: SendWelcomePrompt;
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1', executionMode: 'plan',
+      welcomeContent: (_setInput, send) => { sendPrompt = send; return null; },
+    }));
+    const delayedSend = sendPrompt;
+    await act(async () => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+      });
+    });
+    await act(async () => {
+      expect(await delayedSend('REA use', { agent: 'rex', executionMode: 'build' })).toBe(true);
+    });
+    expect(sessionApiEnqueuePromptMock).toHaveBeenCalledWith('sess-1', {
+      parts: [{ type: 'text', text: 'REA use' }], agent: 'rex', executionMode: 'build',
+    });
+    expect(clientPostMock).not.toHaveBeenCalled();
+  });
+
+  it('prevents duplicate shortcut sends while acceptance is pending', async () => {
+    const request = deferred<{ data: object }>();
+    clientPostMock.mockReturnValue(request.promise);
+    let sendPrompt!: SendWelcomePrompt;
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      welcomeContent: (_setInput, send) => { sendPrompt = send; return null; },
+    }));
+    let first!: Promise<boolean>;
+    await act(async () => {
+      first = sendPrompt('REA install');
+      expect(await sendPrompt('REA install')).toBe(false);
+    });
+    await act(async () => {
+      request.resolve({ data: {} });
+      expect(await first).toBe(true);
+    });
+    expect(clientPostMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes a failed optimistic message and permits retry in the same session', async () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    clientPostMock.mockRejectedValueOnce(new Error('offline'));
+    const messages = useSessionMessagesMock();
+    let sendPrompt!: SendWelcomePrompt;
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      welcomeContent: (_setInput, send) => { sendPrompt = send; return null; },
+    }));
+    await act(async () => { await expect(sendPrompt('REA install')).rejects.toThrow('offline'); });
+    expect(messages.removeMessage).toHaveBeenCalledWith(messages.addMessage.mock.calls[0][0].id);
+    await act(async () => { expect(await sendPrompt('REA install')).toBe(true); });
+    expect(clientPostMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/session/sess-1/prompt_async', '/api/session/sess-1/prompt_async',
+    ]);
+    alert.mockRestore();
+  });
+
+  it.each([true, false])('does not send from a read-only or unmounted chat (read-only: %s)', async (readOnly) => {
+    let sendPrompt!: SendWelcomePrompt;
+    const view = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1', hideInput: readOnly,
+      welcomeContent: (_setInput, send) => { sendPrompt = send; return null; },
+    }));
+    if (!readOnly) view.unmount();
+    expect(await sendPrompt('REA install')).toBe(false);
+    expect(clientPostMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('SessionChat composer controls', () => {
   it('enables Auto on an existing session before sending without a model override', async () => {
     const user = userEvent.setup();
@@ -4931,6 +5032,41 @@ describe('SessionChat composer references', () => {
         'build',
       );
     });
+  });
+
+  it('fills a guide into the message box once and sends only what the user sends (REA entry)', async () => {
+    const user = userEvent.setup();
+    const onCreateAndSend = vi.fn().mockResolvedValue('sess-created');
+    const onComposerPrefillApplied = vi.fn();
+    const guide = 'REA 安装指引\n安装原则：仅安装缺失组件\n安装执行前请再次和我确认你计划安装哪些模块？';
+    const props = {
+      sessionId: null,
+      agentName: 'rex',
+      onCreateAndSend,
+      composerPrefill: { id: 'guide-1', text: guide },
+      onComposerPrefillApplied,
+    };
+    const view = render(React.createElement(SessionChat, props));
+    const input = screen.getByPlaceholderText('请输入消息') as HTMLTextAreaElement;
+    await waitFor(() => expect(input).toHaveValue(guide));
+    expect(onComposerPrefillApplied).toHaveBeenCalledWith('guide-1');
+    // Ready to read from the top: focused, caret before the first line.
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.selectionStart).toBe(0);
+    expect(onCreateAndSend).not.toHaveBeenCalled();
+
+    // The same prefill on a later render does not overwrite what the user wrote.
+    await user.clear(input);
+    await user.type(input, '只装轻量档');
+    view.rerender(React.createElement(SessionChat, props));
+    expect(input).toHaveValue('只装轻量档');
+    // Shift+Enter is a new line; Enter sends.
+    await user.type(input, '{Shift>}{Enter}{/Shift}缺什么装什么');
+    expect(onCreateAndSend).not.toHaveBeenCalled();
+    await user.type(input, '{Enter}');
+    await waitFor(() => expect(onCreateAndSend).toHaveBeenCalledTimes(1));
+    expect(onCreateAndSend.mock.calls[0][0]).toBe('只装轻量档\n缺什么装什么');
+    expect(onComposerPrefillApplied).toHaveBeenCalledTimes(1);
   });
 
   it('queues streaming messages to the mentioned agent', async () => {

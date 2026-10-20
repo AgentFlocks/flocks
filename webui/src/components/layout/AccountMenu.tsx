@@ -59,6 +59,7 @@ export default function AccountMenu({
             {version && <p className="mt-1 text-xs text-ui-muted">{version}</p>}
           </div>
           <div className={MENU_SEPARATOR_CLASS} role="separator" />
+          {/* A plain link: no trailing chevron, which would promise a submenu. */}
           <Link to="/settings/preferences" role="menuitem" onClick={() => { close(); onNavigate?.(); }} className={MENU_ITEM_CLASS}>
             <Settings className="h-4 w-4 shrink-0 text-ui-secondary" />
             {t('systemConfiguration')}

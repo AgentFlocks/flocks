@@ -10,9 +10,12 @@ from .store import TaskStore
 
 log = Log.create(service="task.queue")
 
+# Executions that may run at once; the next one waits in the queue.
+DEFAULT_MAX_CONCURRENT = 10
+
 
 class TaskQueue:
-    def __init__(self, max_concurrent: int = 4):
+    def __init__(self, max_concurrent: int = DEFAULT_MAX_CONCURRENT):
         self.max_concurrent = max_concurrent
         self._paused = False
         self._running_ids: set[str] = set()

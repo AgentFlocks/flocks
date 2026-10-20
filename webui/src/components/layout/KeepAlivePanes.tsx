@@ -87,8 +87,13 @@ export default function KeepAlivePanes({ panes, activeHref, location, routes }: 
     return () => window.clearTimeout(timer);
   }, [activeHref]);
 
+  // Clip rather than hide: a pane taller than the content area (e.g. a
+  // full-screen page sized with h-screen) would otherwise become scrollable
+  // overflow of the overflow-hidden <main>. Any scrollIntoView in any pane (a
+  // background chat following its latest message) then scrolls <main>, which
+  // the user cannot scroll back, so the visible page stays shifted until reload.
   return (
-    <div className="relative h-full">
+    <div className="relative h-full overflow-clip">
       {panes.map((pane) => {
         const active = pane.href === activeHref;
         const lastLocation = lastLocationsRef.current.get(pane.href);

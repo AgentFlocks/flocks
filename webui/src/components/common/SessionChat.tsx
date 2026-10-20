@@ -143,6 +143,12 @@ export interface ConversationBottomSlotActions {
   hasMessages: boolean;
 }
 
+/** Sends a shortcut through the current chat; false means no prompt was accepted. */
+export type SendWelcomePrompt = (
+  text: string,
+  options?: PromptDisplayOptions & { agent?: string; executionMode?: SessionExecutionMode },
+) => Promise<boolean>;
+
 export interface ComposerAddMenuActions {
   closeMenu: () => void;
   insertMention: (agentName: string) => void;
@@ -253,8 +259,8 @@ export interface SessionChatProps {
   mentionAgents?: Agent[];
   /** Display configuration (compact, showActions, showTimestamp) */
   display?: SessionChatDisplay;
-  /** Custom welcome content when no messages. Can be a render prop receiving setInput. */
-  welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
+  /** Custom welcome content with composer input and current-session sending actions. */
+  welcomeContent?: React.ReactNode | ((setInput: (text: string) => void, sendPrompt: SendWelcomePrompt) => React.ReactNode);
   /** Extra content rendered below the conversation area and above the composer. */
   conversationBottomSlot?: React.ReactNode | ((actions: ConversationBottomSlotActions) => React.ReactNode);
   /** Content above the messages that scrolls with them, e.g. the run a follow-up chat is about. */
@@ -314,6 +320,18 @@ export interface SessionChatProps {
    * samples once the REA plugin is installed; the server applies the same rule).
    */
   allowAnyUpload?: boolean;
+  /**
+   * Text to put into the message box once per ``id`` (the REA entry's guide):
+   * the user edits and sends it, nothing is sent here.
+   */
+  composerPrefill?: ComposerPrefill | null;
+  /** Called with the ``id`` once ``composerPrefill`` is in the message box. */
+  onComposerPrefillApplied?: (id: string) => void;
+}
+
+export interface ComposerPrefill {
+  id: string;
+  text: string;
 }
 
 type AttachmentStatus = 'uploading' | 'success' | 'error';
@@ -1922,6 +1940,8 @@ export default function SessionChat({
   onOpenContext,
   supportsVision,
   allowAnyUpload = false,
+  composerPrefill,
+  onComposerPrefillApplied,
   toolbarSlot,
   composerAddMenuSlot,
   onComposerAddMenuOpenChange,
@@ -3742,6 +3762,7 @@ export default function SessionChat({
     agentOverride?: string,
     options?: PromptDisplayOptions,
     uploadSubmission?: UploadSubmission,
+    promptExecutionMode = executionMode,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
@@ -3797,18 +3818,18 @@ export default function SessionChat({
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (model) payload.model = model;
       if (options?.displayText) payload.displayText = options.displayText;
-      payload.executionMode = executionMode;
+      payload.executionMode = promptExecutionMode;
 
       uploadSubmission?.start();
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
       uploadSubmission?.accept();
-      if (executionMode === 'goal' && text.trim()) {
+      if (promptExecutionMode === 'goal' && text.trim()) {
         goalHydrationVersionRef.current += 1;
         writeDismissedGoalKey(sessionId, '');
         setGoalBanner({ objective: text.trim(), status: 'active' });
         setDismissedGoalKey('');
       }
-      onExecutionModeAccepted?.(executionMode);
+      onExecutionModeAccepted?.(promptExecutionMode);
     } catch (err: unknown) {
       setIsStreaming(false);
       removeMessage(messageId);
@@ -3836,6 +3857,7 @@ export default function SessionChat({
     agentOverride?: string,
     options?: PromptDisplayOptions,
     uploadSubmission?: UploadSubmission,
+    promptExecutionMode = executionMode,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
@@ -3847,14 +3869,14 @@ export default function SessionChat({
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
         ...(model ? { model } : {}),
         ...(options?.displayText ? { displayText: options.displayText } : {}),
-        executionMode,
+        executionMode: promptExecutionMode,
       });
       // Acceptance transfers ownership before the queue refresh or a parent
       // callback can switch/unmount this composer.
       uploadSubmission?.accept();
       await fetchPromptQueue();
       setQueueExpanded(true);
-      onExecutionModeAccepted?.(executionMode);
+      onExecutionModeAccepted?.(promptExecutionMode);
     } catch (err: any) {
       const statusCode = err?.response?.status;
       const detail = err?.response?.data?.detail;
@@ -3865,6 +3887,23 @@ export default function SessionChat({
       throw err;
     }
   };
+
+  // A shortcut may await an installation/status lookup before sending. Read the
+  // latest chat state so a prompt started meanwhile is queued, not interrupted.
+  const welcomeSendingRef = useRef(false);
+  const welcomeSendRef = useRef<SendWelcomePrompt>(async () => false);
+  welcomeSendRef.current = async (text, options) => {
+    if (!attachmentsMountedRef.current || !sessionId || hideInput || transport || sending || welcomeSendingRef.current) return false;
+    welcomeSendingRef.current = true;
+    try {
+      const send = isStreaming ? enqueueText : sendText;
+      await send(text, [], options?.agent, options, undefined, options?.executionMode ?? executionMode);
+      return true;
+    } finally {
+      welcomeSendingRef.current = false;
+    }
+  };
+  const sendWelcomePrompt = useCallback<SendWelcomePrompt>((...args) => welcomeSendRef.current(...args), []);
 
   const handleComposerPrompt = async (text: string, options?: PromptDisplayOptions) => {
     const trimmed = text.trim();
@@ -4609,12 +4648,35 @@ export default function SessionChat({
     await sendText(text, [], agentName);
   };
   const submitReaPrompt = useCallback((text: string) => reaSubmitRef.current(text), []);
+  // Puts a guide into the message box for the user to read, edit and send:
+  // caret before its first line and the box scrolled to its top.
+  const fillComposer = useCallback((text: string) => {
+    setInput(text);
+    setShowCommandDropdown(false);
+    setMentionRange(null);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(0, 0);
+      el.scrollTop = 0;
+    });
+  }, []);
+  // After the draft restore above, so the restored (empty) draft does not replace it.
+  const appliedPrefillRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!composerPrefill || appliedPrefillRef.current === composerPrefill.id) return;
+    appliedPrefillRef.current = composerPrefill.id;
+    fillComposer(composerPrefill.text);
+    onComposerPrefillApplied?.(composerPrefill.id);
+  }, [composerPrefill, fillComposer, onComposerPrefillApplied]);
   const reaChatContext = useMemo<ReaChatContextValue>(() => ({
     sessionId: sessionId ?? null,
     readOnly: hideInput || Boolean(transport) || !sessionId,
     latestCardPartId: latestReaCardPartId,
     submitPrompt: submitReaPrompt,
-  }), [hideInput, latestReaCardPartId, sessionId, submitReaPrompt, transport]);
+    fillComposer,
+  }), [fillComposer, hideInput, latestReaCardPartId, sessionId, submitReaPrompt, transport]);
   const stopButton = canStop && (
     <button
       onClick={handleAbort}
@@ -4667,7 +4729,7 @@ export default function SessionChat({
               style={conversationTopSlot ? undefined : { minHeight: '100%' }}
             >
               {typeof welcomeContent === 'function'
-                ? welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); })
+                ? welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); }, sendWelcomePrompt)
                 : welcomeContent}
             </div>
           ) : conversationTopSlot ? null : (

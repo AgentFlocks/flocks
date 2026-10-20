@@ -1,6 +1,6 @@
 import { useContext } from 'react';
 import { ThemeContext, type ThemeMode } from '@/contexts/ThemeContext';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Bell,
@@ -11,6 +11,7 @@ import {
   Menu,
   MessageSquareWarning,
   Languages,
+  Layers,
   Monitor,
   Sun,
   Moon,
@@ -18,7 +19,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import type { UserNotification } from '@/api/notifications';
-import type { NavWorkspaceId } from '@/utils/navPartitions';
+import { isSceneSuitesPath, SCENE_SUITES_PATH, type NavWorkspaceId } from '@/utils/navPartitions';
 import HeaderMenu, { MENU_ITEM_CLASS, MENU_LABEL_CLASS, MENU_SEPARATOR_CLASS } from './HeaderMenu';
 
 export const DOCS_URL = 'https://agentflocks.github.io/flocks-docs/';
@@ -39,6 +40,8 @@ interface WorkspaceHeaderProps {
   /** Null while navigation data is loading. */
   currentWorkspace: NavWorkspaceId | null;
   onSelectWorkspace: (id: NavWorkspaceId) => void;
+  hasUnseenSuites: boolean;
+  onOpenSceneManager: () => void;
   notifications: UserNotification[];
   onOpenNotification: (notification: UserNotification) => void;
   taskCounts?: { running: number; queued: number } | null;
@@ -48,6 +51,9 @@ interface WorkspaceHeaderProps {
 
 const ICON_BUTTON_CLASS =
   'relative flex h-8 w-8 shrink-0 sm:h-9 sm:w-9 items-center justify-center rounded-lg text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus [&_svg]:stroke-[1.75]';
+
+const moduleClassName = (selected: boolean, separated = false) =>
+  `relative flex shrink-0 items-center gap-1 border-b-2 px-3 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus ${separated ? 'ml-3 before:absolute before:-left-1.5 before:top-4 before:h-6 before:border-l before:border-ui-border' : ''} ${selected ? 'border-red-600 font-medium text-ui-text' : 'border-transparent font-normal text-ui-text hover:bg-ui-hover hover:text-ui-text'}`;
 
 /**
  * The bar above sidebar and content: product name, module navigation,
@@ -59,6 +65,8 @@ export default function WorkspaceHeader({
   workspaces,
   currentWorkspace,
   onSelectWorkspace,
+  hasUnseenSuites,
+  onOpenSceneManager,
   notifications,
   onOpenNotification,
   taskCounts,
@@ -74,6 +82,8 @@ export default function WorkspaceHeader({
     { mode: 'dark', label: t('darkTheme'), icon: Moon },
   ];
   const navigate = useNavigate();
+  const location = useLocation();
+  const viewingScenes = isSceneSuitesPath(location.pathname);
   const activeTasks = (taskCounts?.running ?? 0) + (taskCounts?.queued ?? 0);
   const hasUnread = notifications.length > 0 || activeTasks > 0;
   const brandInitial = (productName.trim().charAt(0) || 'F').toUpperCase();
@@ -119,13 +129,27 @@ export default function WorkspaceHeader({
               type="button"
               onClick={() => onSelectWorkspace(workspace.id)}
               aria-current={selected ? 'page' : undefined}
-              className={`relative flex shrink-0 items-center gap-1 border-b-2 px-3 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus ${workspace.separated ? 'ml-3 before:absolute before:-left-1.5 before:top-4 before:h-6 before:border-l before:border-ui-border' : ''} ${selected ? 'border-red-600 font-medium text-ui-text' : 'border-transparent font-normal text-ui-text hover:bg-ui-hover hover:text-ui-text'}`}
+              className={moduleClassName(selected, workspace.separated)}
             >
               <Icon className="hidden h-4 w-4 shrink-0 stroke-[1.75] xl:block" />
               <span className="whitespace-nowrap">{workspace.name}</span>
             </button>
           );
         })}
+        <Link
+          to={SCENE_SUITES_PATH}
+          onClick={onOpenSceneManager}
+          aria-label={t('sceneManagement')}
+          aria-current={viewingScenes ? 'page' : undefined}
+          className={moduleClassName(viewingScenes, true)}
+        >
+          <Layers className="hidden h-4 w-4 shrink-0 xl:block" />
+          <span className="whitespace-nowrap">{t('sceneManagement')}</span>
+          {hasUnseenSuites && <>
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-red-500" aria-hidden="true" />
+            <span className="sr-only">{t('newBadge')}</span>
+          </>}
+        </Link>
       </nav>
 
       <div className="flex shrink-0 items-center sm:gap-0.5 lg:ml-3">

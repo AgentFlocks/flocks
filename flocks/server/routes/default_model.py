@@ -6,7 +6,7 @@ Provides endpoints to get/set default models per model type.
 
 from typing import Dict, List
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from flocks.config.config import Config, FallbackProviderConfig
@@ -14,6 +14,7 @@ from flocks.config.config_writer import ConfigWriter
 from flocks.provider.model_manager import get_model_manager
 from flocks.provider.provider import Provider
 from flocks.provider.types import DefaultModelConfig, ModelType
+from flocks.server.auth import require_admin
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.utils.log import Log
 
@@ -99,6 +100,7 @@ async def get_fallback_providers() -> FallbackProvidersConfig:
 @serialized_config_mutation
 async def set_fallback_providers(
     body: FallbackProvidersConfig,
+    _admin: object = Depends(require_admin),
 ) -> FallbackProvidersConfig:
     """Validate and atomically replace the runtime fallback model list."""
     override_source = ConfigWriter.get_fallback_override_source()
@@ -230,7 +232,8 @@ async def get_default_model(model_type: ModelType) -> DefaultModelConfig:
 )
 @serialized_config_mutation
 async def set_default_model(
-    model_type: ModelType, body: SetDefaultModelRequest
+    model_type: ModelType, body: SetDefaultModelRequest,
+    _admin: object = Depends(require_admin),
 ) -> DefaultModelConfig:
     """Set the default model for a specific model type."""
     manager = get_model_manager()
@@ -248,7 +251,7 @@ async def set_default_model(
     summary="Delete default model for type",
 )
 @serialized_config_mutation
-async def delete_default_model(model_type: ModelType):
+async def delete_default_model(model_type: ModelType, _admin: object = Depends(require_admin)):
     """Remove default model setting for a model type."""
     manager = get_model_manager()
     deleted = manager.delete_default_model(model_type)

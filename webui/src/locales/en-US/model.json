@@ -9,6 +9,7 @@
     "setDefaultModel": "Set Default Model",
     "defaultModelUpdated": "Default model updated",
     "defaultModelInvalid": "Default model \"{{model}}\" is no longer available and has been cleared. Please select a new one.",
+    "defaultModelInvalidMember": "Default model \"{{model}}\" is no longer available. Ask an administrator to choose a new one.",
     "fallbackModels": "Auxiliary Models",
     "noFallbackModels": "Automatic",
     "fallbackAvailability": "{{available}} / {{total}} available",
@@ -57,6 +58,7 @@
   "providerList": {
     "empty": "No providers configured",
     "emptyHint": "Click \"Add Provider\" to get started",
+    "emptyHintMember": "Ask an administrator to add a provider",
     "addProvider": "Add Provider"
   },
   "detail": {
@@ -67,7 +69,9 @@
     "batchTest": "Batch Test",
     "testing": "Testing",
     "success": "succeeded",
-    "failed": "failed"
+    "failed": "failed",
+    "configAdminOnly": "Only administrators can change model settings",
+    "noModelsMember": "Ask an administrator to add models"
   },
   "status": {
     "connected": "Connected",

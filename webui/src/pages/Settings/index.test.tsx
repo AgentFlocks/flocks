@@ -402,6 +402,16 @@ it('restarts polling when the admin refreshes after a timeout', async () => {
     expect(screen.getByTestId('settings-content')).toContainElement(screen.getByText('system logs page'));
   });
 
+  it('opens the Flocks Pro page on its own, without the management tabs', async () => {
+    const { container } = renderSettings('/settings/flockspro');
+
+    expect(await screen.findByText('flocks pro page')).toBeInTheDocument();
+    expect(flocksproUsersApi.hasCapability).toHaveBeenCalled();
+    expect(screen.queryByRole('navigation', { name: 'settingsTitle' })).not.toBeInTheDocument();
+    expect(screen.queryAllByRole('tab')).toHaveLength(0);
+    expect(container.querySelector('[data-testid="settings-content"]')).toContainElement(screen.getByText('flocks pro page'));
+  });
+
   it('redirects members away from admin-only settings', async () => {
     useAuth.mockReturnValue({
       user: { id: 'user-2', username: 'member', role: 'member', status: 'active', must_reset_password: false },
