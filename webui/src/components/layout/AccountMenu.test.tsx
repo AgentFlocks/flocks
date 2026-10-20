@@ -93,6 +93,20 @@ describe('AccountMenu', () => {
     expect(screen.queryByRole('menu', { name: 'accountMenu' })).not.toBeInTheDocument();
   });
 
+  it('links system management straight to its page without a submenu arrow', () => {
+    const { onNavigate } = renderMenu();
+    fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal:admin' }));
+    const item = within(screen.getByRole('menu', { name: 'accountMenu' })).getByRole('menuitem', { name: 'systemManagement' });
+
+    // A trailing chevron promises a flyout on hover; this entry is a plain link.
+    expect(item).not.toHaveAttribute('aria-haspopup');
+    expect(item.querySelector('.lucide-chevron-right')).toBeNull();
+
+    fireEvent.click(item);
+    expect(screen.getByTestId('path')).toHaveTextContent('/settings/preferences');
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+  });
+
   it('closes on an outside pointerdown, on Escape and on a second avatar click', () => {
     renderMenu({ collapsed: true });
     const avatar = screen.getByRole('button', { name: 'accountAndGlobal:admin' });

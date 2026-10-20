@@ -513,7 +513,16 @@ export default function SettingsPage() {
     return <Navigate to="/settings/preferences" replace />;
   }
 
-  // The upgrade page has its own entry in the account menu; the tabs cover the management pages.
+  // The upgrade page has its own entry in the account menu and is not a
+  // management page: it opens on its own, without the management tabs.
+  if (sectionId === 'flockspro') {
+    return (
+      <div data-testid="settings-content" className="w-full max-w-6xl pb-8">
+        <SettingsContent sectionId={sectionId} />
+      </div>
+    );
+  }
+
   const tabs = sections.filter((item) => item.id !== 'flockspro');
   return (
     <div className="flex h-full min-h-0 flex-col">
