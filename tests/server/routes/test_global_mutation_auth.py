@@ -206,20 +206,22 @@ def test_legacy_provider_auth_route_requires_admin(monkeypatch: pytest.MonkeyPat
     provider.configure.assert_called_once()
 
 
-def test_onboarding_configuration_allows_members():
+def test_onboarding_configuration_requires_admin():
+    # Onboarding writes model credentials and the default model, which members may not change.
     from flocks.server.routes.onboarding import router
 
-    client = _user_client(router, prefix="/api/onboarding", role="member")
     payload = {
         "region": "cn",
         "use_threatbook_model": False,
     }
+    member = _user_client(router, prefix="/api/onboarding", role="member")
+    assert member.post("/api/onboarding/validate", json=payload).status_code == 403
+    assert member.post("/api/onboarding/apply", json=payload).status_code == 403
 
-    validate_response = client.post("/api/onboarding/validate", json=payload)
-    apply_response = client.post("/api/onboarding/apply", json=payload)
-
-    assert validate_response.status_code == 200
-    assert apply_response.status_code == 400
+    admin = _user_client(router, prefix="/api/onboarding", role="admin")
+    assert admin.post("/api/onboarding/validate", json=payload).status_code == 200
+    # Nothing to apply without a model or key, so the admin gets the validation error.
+    assert admin.post("/api/onboarding/apply", json=payload).status_code == 400
 
 
 def test_mcp_credential_and_threatbook_configuration_require_admin():
