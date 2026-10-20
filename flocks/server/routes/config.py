@@ -39,7 +39,15 @@ from flocks.retention import (
     load_policy,
     policy_from_config,
 )
-from flocks.server.auth import require_admin
+from flocks.config.references import (
+    ReferencePlaces,
+    contains_reference,
+    drop_unchanged,
+    leftover_masks,
+    member_view,
+    restore_hidden,
+)
+from flocks.server.auth import get_optional_user, require_admin
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.utils.log import Log
 
@@ -420,8 +428,15 @@ def _default_display_name() -> str:
     return DEFAULT_UI_PRO_DISPLAY_NAME if _is_flockspro_enabled() else DEFAULT_UI_DISPLAY_NAME
 
 
-def _effective_display_name(config: ConfigInfoModel) -> tuple[str, Optional[str]]:
+def _effective_display_name(
+    config: ConfigInfoModel, places: Optional[ReferencePlaces] = None
+) -> tuple[str, Optional[str]]:
     configured = config.ui.display_name if config.ui else None
+    if configured and places is not None and (places.covers(("ui", "displayName")) or places.reveals(configured)):
+        # The display name is public (login page). One that a config file stores as
+        # a {secret:…}-style reference, or that holds what a reference expands to
+        # (another spelling of the key), is never shown.
+        configured = None
     return configured or _default_display_name(), configured
 
 
@@ -563,8 +578,8 @@ def _effective_tool_failure_preference(config: ConfigInfoModel) -> bool:
 async def get_ui_display() -> UIDisplayResponse:
     """Return only the effective WebUI display name for public screens."""
     try:
-        complete_config = await Config.get()
-        display_name, configured_display_name = _effective_display_name(complete_config)
+        complete_config, places = await Config.get_with_reference_places()
+        display_name, configured_display_name = _effective_display_name(complete_config, places)
         return UIDisplayResponse(
             displayName=display_name,
             configuredDisplayName=configured_display_name,
@@ -580,6 +595,9 @@ async def get_ui_display() -> UIDisplayResponse:
 async def update_ui_config(request: UIConfigUpdateRequest) -> UIDisplayResponse:
     """Update visible WebUI display preferences."""
     try:
+        if request.display_name and contains_reference(request.display_name):
+            # It would be expanded into the secret and shown on the public login page.
+            raise ValueError("显示名称不能包含 {env:…}、{secret:…}、{file:…} 这类引用")
         ui_config = UIConfig.model_validate({"displayName": request.display_name})
         data = ConfigWriter._read_raw()
         ui_section = _get_or_create_ui_section(data)
@@ -791,20 +809,32 @@ async def update_data_retention(
     return await _data_retention_status()
 
 
+def _is_admin(request: Request) -> bool:
+    user = get_optional_user(request)
+    return bool(user and user.role == "admin")
+
+
 @router.get("", summary="Get configuration")
-async def get_config() -> Dict[str, Any]:
+async def get_config(request: Request) -> Dict[str, Any]:
     """
     Get configuration
     
     Retrieve the current Flocks configuration settings and preferences.
     Flocks TUI expects the merged Config object directly.
+
+    The loaded config holds expanded {secret:…}/{env:…}/{file:…} values, so for
+    non-admins every value a config file stores as a reference, and every
+    credential-looking value, is masked.
     """
     try:
         # Get complete configuration (includes global + project + env)
-        complete_config = await Config.get()
+        complete_config, places = await Config.get_with_reference_places()
         
         # Return merged config in Flocks format
-        return complete_config.model_dump(by_alias=True, exclude_none=True)
+        data = complete_config.model_dump(by_alias=True, exclude_none=True)
+        if _is_admin(request):
+            return data
+        return member_view(data, places)[0]
     except Exception as e:
         log.error("config.get.error", {"error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
@@ -891,41 +921,18 @@ _MODEL_CONFIG_FIELDS = (
 )
 
 
-# The loader expands these references anywhere in the file text, object keys included.
-_CONFIG_REFERENCE = re.compile(r"\{(?:env|secret|file):[^}]+\}")
-
-
-def _has_reference_key(value: Any) -> bool:
-    """Whether any object key in ``value`` holds a {env:…}, {secret:…} or {file:…} reference."""
-    stack = [value]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, dict):
-            for key, child in item.items():
-                if isinstance(key, str) and _CONFIG_REFERENCE.search(key):
-                    return True
-                stack.append(child)
-        elif isinstance(item, list):
-            stack.extend(item)
-    return False
-
-
 async def _guard_model_config_change(request: Request, config_data: Dict[str, Any]) -> None:
     """Changing model settings through this generic endpoint needs admin.
 
     Members still save other settings here, and the Channel page sends back the
     whole config it read, so a model setting equal to the current one is not a
     change. The payload is judged as the save will write it (same model, same
-    dump), under both spellings of each key.
-
-    A key holding a reference also needs admin: once the file is reloaded,
-    "{secret:…}" can turn into "model" (or any other guarded key) and slip past
-    the comparison below.
+    dump), under both spellings of each key. References from members are
+    refused before this runs (``_restore_member_payload``), since a key such as
+    "{secret:…}" can turn into "model" once the file is reloaded.
     """
     if not isinstance(config_data, dict):
         return
-    if _has_reference_key(config_data):
-        require_admin(request)
     keys = {
         spelling
         for name in _MODEL_CONFIG_FIELDS
@@ -943,6 +950,35 @@ async def _guard_model_config_change(request: Request, config_data: Dict[str, An
         require_admin(request)
 
 
+async def _restore_member_payload(request: Request, config_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Turn what a non-admin read back into the stored values, and refuse new references.
+
+    Members read the config with referenced and credential values masked
+    (``get_config``), and the Channel page sends the whole of it back; masked
+    values returned unchanged get their real values again, so the save sees
+    them as unchanged and keeps what is stored. Whatever a member writes
+    is expanded when the file is reloaded, so a reference left after that would
+    read a secret for them (or turn into another key): it needs admin.
+    """
+    if _is_admin(request) or not isinstance(config_data, dict):
+        return config_data
+    current_config, places = await Config.get_with_reference_places()
+    current = current_config.model_dump(by_alias=True, exclude_none=True)
+    view, hidden = member_view(current, places)
+    restored = restore_hidden(config_data, view, hidden)
+    if contains_reference(restored):
+        require_admin(request)
+    if leftover_masks(drop_unchanged(restored, current), view, hidden):
+        # A mask moved or edited around (a list item shifted, a masked URL
+        # changed) has no real value to go back to; saving it would write the
+        # mask over the hidden value.
+        raise HTTPException(
+            status_code=400,
+            detail="Masked values cannot be saved where they were not shown; enter the real value",
+        )
+    return restored
+
+
 @router.patch("/", summary="Update configuration")
 @serialized_config_mutation
 async def update_config(request: Request, config_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -957,6 +993,7 @@ async def update_config(request: Request, config_data: Dict[str, Any]) -> Dict[s
     {secret:channel_<id>_<field>} references before the config is written to
     flocks.json, so that plaintext secrets never land in that file.
     """
+    config_data = await _restore_member_payload(request, config_data)
     await _guard_model_config_change(request, config_data)
     retention_changed = await _guard_data_retention_change(request, config_data)
     await _validate_plugin_group_updates(config_data)
@@ -965,11 +1002,18 @@ async def update_config(request: Request, config_data: Dict[str, Any]) -> Dict[s
         _normalize_slack_dm_policy(config_data)
 
         channels_payload = config_data.get("channels")
-        # Extract channel sensitive fields into .secret.json before persisting
+        # Extract channel sensitive fields into .secret.json before persisting.
+        # Only fields the caller changed: the Channel page sends back the whole
+        # config it read, and an unchanged credential (an {env:…} one included)
+        # must stay as flocks.json stores it; ``Config.update`` leaves it alone.
         if isinstance(channels_payload, dict):
             from flocks.security.channel_secrets import extract_channel_secrets
 
-            config_data = {**config_data, "channels": extract_channel_secrets(config_data["channels"])}
+            current_channels = (await Config.get()).model_dump(
+                by_alias=True, exclude_none=True, mode="json"
+            ).get("channels") or {}
+            extracted = extract_channel_secrets(drop_unchanged(channels_payload, current_channels))
+            config_data = {**config_data, "channels": Config.merge_deep(channels_payload, extracted)}
 
         # Parse and validate configuration
         config = ConfigInfoModel.model_validate(config_data)
@@ -1012,7 +1056,7 @@ async def update_config(request: Request, config_data: Dict[str, Any]) -> Dict[s
             DataRetentionScheduler.request_run()
 
         log.info("config.updated")
-        return await get_config()
+        return await get_config(request)
     except Exception as e:
         log.error("config.update.error", {"error": str(e)})
         raise HTTPException(status_code=400, detail=str(e))
