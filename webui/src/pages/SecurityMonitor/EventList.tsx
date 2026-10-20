@@ -589,41 +589,8 @@ function StoryDetails({
                 <li key={index}>{item}</li>
               ))}
           </ul>
-          {gaps.length > 3 && (
-            <p className="mt-2 text-xs text-slate-500">
-              更多查询限制见下方技术明细。
-            </p>
-          )}
         </section>
       )}
-      <details className="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
-        <summary className="cursor-pointer text-sm font-medium">
-          技术明细与原始依据
-        </summary>
-        <p className="mt-2 text-xs leading-6 text-slate-500">
-          以下保留来源原文和证据编号，供排障追溯；不改变上方研判结论。
-        </p>
-        <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words text-xs leading-6">
-          {JSON.stringify(
-            {
-              conclusion: originalExplanation,
-              basics,
-              key_evidence: evidence,
-              evidence_cards: evidenceCards,
-              original_evidence: detail.investigation?.evidence,
-              current_evidence_cards: currentEvidenceCards,
-              confirmed_story: detail.confirmed_story,
-              confirmed_evidence_scope: detail.confirmed_evidence_scope,
-              confirmed_at: detail.confirmed_at,
-              timeline,
-              gaps,
-              original_gaps: originalGaps,
-            },
-            null,
-            2,
-          )}
-        </pre>
-      </details>
       {strings(story.boundaries).length > 0 && (
         <p className="text-xs leading-6 text-slate-500">
           {strings(story.boundaries).join(" ")}

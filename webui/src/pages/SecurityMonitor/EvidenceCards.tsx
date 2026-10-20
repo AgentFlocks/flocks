@@ -108,7 +108,7 @@ export function EvidenceCards({
   formatTime,
   title = "关键证据",
   description = "",
-  emptyMessage = "尚未取得与当前事件版本对应的具体行为证据，查询限制与原始记录保留在技术明细。",
+  emptyMessage = "尚未取得与当前事件版本对应的具体行为证据。",
 }: {
   cards: EventEvidenceCard[];
   formatTime: (value: unknown) => string;

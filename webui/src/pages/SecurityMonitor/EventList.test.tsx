@@ -1097,7 +1097,7 @@ it("includes an ended count and filter separately from insufficient evidence awa
   );
 });
 
-it("puts opaque evidence identifiers in collapsed technical details while retaining clear facts", async () => {
+it("keeps readable facts without rendering the consolidated technical dump", async () => {
   const original =
     "[evidence-2] 告警编号：alert-ef05bbee-0056-4934-ab83-ec1791860330；10:59 主机访问大量随机域名，支持异常 DNS 通信判断";
   const value = detail();
@@ -1118,14 +1118,14 @@ it("puts opaque evidence identifiers in collapsed technical details while retain
   expect(readable).not.toHaveTextContent("evidence-2");
   expect(readable).not.toHaveTextContent("alert-");
   expect(
-    within(dialog).getByText("技术明细与原始依据").closest("details"),
-  ).not.toHaveAttribute("open");
+    within(dialog).queryByText("技术明细与原始依据"),
+  ).not.toBeInTheDocument();
   expect(
-    within(dialog).getByText(/"evidence_id": "evidence-2"/),
-  ).toBeInTheDocument();
+    within(dialog).queryByText(/"evidence_id": "evidence-2"/),
+  ).not.toBeInTheDocument();
 });
 
-it("uses the readable overview for operators and preserves full source facts in technical details", async () => {
+it("uses the readable overview without rendering the full source JSON", async () => {
   const value = detail({
     overview: {
       basics: { name: "异常 DNS 通信", host: "192.0.2.10", device: "股份 XDR" },
@@ -1164,10 +1164,10 @@ it("uses the readable overview for operators and preserves full source facts in 
     within(dialog).getByText("尚未取得主机侧进程证据，无法确定感染程序。"),
   ).toBeInTheDocument();
   expect(
-    within(dialog)
-      .getByText(/"conclusion": "请求含注入片段，利用结果仍需核对"/)
-      .closest("details"),
-  ).not.toHaveAttribute("open");
+    within(dialog).queryByText(
+      /"conclusion": "请求含注入片段，利用结果仍需核对"/,
+    ),
+  ).not.toBeInTheDocument();
 });
 
 it("does not turn an unqualified legacy malicious label into a confirmed result", async () => {
@@ -1839,14 +1839,13 @@ it.each(["current_activity", "previous_activity"] as const)(
     expect(
       within(section).getByText("stored=/uploads/../example.jsp"),
     ).toBeInTheDocument();
-    const technical = within(dialog)
-      .getByText("技术明细与原始依据")
+    const technical = within(section)
+      .getByText("查询参数与脱敏原始记录")
       .closest("details")!;
-    expect(technical).toHaveTextContent('"confirmed_story"');
     expect(technical).toHaveTextContent('"storedFile": "../example.jsp"');
-    expect(technical).toHaveTextContent(
-      `"confirmed_evidence_scope": "${scope}"`,
-    );
+    expect(
+      within(dialog).queryByText("技术明细与原始依据"),
+    ).not.toBeInTheDocument();
   },
 );
 
