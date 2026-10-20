@@ -29,7 +29,7 @@ async def execute_webui_contract_operation(
     body: dict[str, Any] | None = Body(default=None),
     user: AuthUser = Depends(require_user),
 ):
-    # A page's data contract is part of the page: a pro-edition suite's page
+    # A page's data contract is part of the page: a licensed-edition suite's page
     # serves it only while that suite's own licence is in force. A contract
     # path that is not a page id (``test/records``) names no page of the page
     # store, so there is no page licence to ask about; the runtime decides.

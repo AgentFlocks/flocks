@@ -80,21 +80,27 @@ async def test_same_root_edits_and_deleted_file_reconcile_normally(tmp_path):
     assert await counts() == (0, 0, 0)
 
 
-async def test_other_root_conflict_does_not_replace_metadata_chunks_or_fts(tmp_path):
+async def test_other_root_with_different_content_keeps_both_versions_without_replacing_the_stored_one(tmp_path):
+    """Local trees are caches of the stored notes: a second tree's different
+    MEMORY.md does not replace the stored one, and is not lost either -- it is
+    kept beside it as a conflict copy, and both are indexed."""
     await Storage.init()
     first = tree(tmp_path, "first", "firstword")
     second = tree(tmp_path, "second", "otherword")
     await sync(first)
-    with pytest.raises(MemoryOwnershipConflict, match="different content"):
-        await sync(second)
-    assert await counts() == (1, 1, 1)
+    await sync(second)
+    assert (second / "memory" / "MEMORY.md").read_text() == "firstword"
+    copies = list((second / "memory").glob("MEMORY.conflict-*.md"))
+    assert [copy.read_text() for copy in copies] == ["otherword"]
+    assert await counts() == (2, 2, 2)
     assert await fts_search(Storage.get_db_path(), "prj_test", "firstword")
-    assert not await fts_search(Storage.get_db_path(), "prj_test", "otherword")
-    async with Storage.transaction() as db:
-        assert await db.fetch_one("SELECT COUNT(*) FROM memory_index_owners") == (1,)
+    assert await fts_search(Storage.get_db_path(), "prj_test", "otherword")
 
 
-async def test_identical_content_can_have_two_owners_and_each_removal_is_local(tmp_path):
+async def test_a_removal_in_one_tree_removes_the_note_everywhere(tmp_path):
+    """Both trees are copies of the one shared tree: removing the note in one of
+    them removes it from the index at once, and from the other copy when that
+    one syncs -- moved aside there, not erased."""
     await Storage.init()
     first = tree(tmp_path, "first", "sharedword")
     second = tree(tmp_path, "second", "sharedword")
@@ -103,37 +109,47 @@ async def test_identical_content_can_have_two_owners_and_each_removal_is_local(t
     path = first / "memory" / "MEMORY.md"
     path.rename(path.with_suffix(".removed"))
     await sync(first)
-    assert await counts() == (1, 1, 1)
-    assert (second / "memory" / "MEMORY.md").read_text() == "sharedword"
-    path = second / "memory" / "MEMORY.md"
-    path.rename(path.with_suffix(".removed"))
+    assert await counts() == (0, 0, 0)
+    assert not await fts_search(Storage.get_db_path(), "prj_test", "sharedword")
     await sync(second)
+    assert not (second / "memory" / "MEMORY.md").exists()
+    assert [aside.read_text() for aside in (second / "memory").glob("MEMORY.md.removed-*")] == ["sharedword"]
     assert await counts() == (0, 0, 0)
 
 
-@pytest.mark.parametrize("local_content", [None, "legacyword survives"])
-async def test_unowned_legacy_rows_survive_and_matching_source_can_be_adopted(tmp_path, local_content):
+async def test_legacy_rows_are_adopted_by_the_shared_tree(tmp_path):
+    """Rows indexed before ownership existed belong to the shared tree like any
+    other: kept while the note exists, removed with it."""
     await Storage.init()
     await legacy()
-    data = tree(tmp_path, "legacy", local_content)
+    data = tree(tmp_path, "legacy", "legacyword survives")
     await sync(data)
     assert await counts() == (1, 1, 1)
     async with Storage.transaction() as db:
-        assert await db.fetch_one("SELECT COUNT(*) FROM memory_index_owners") == (int(local_content is not None),)
-    if local_content is not None:
-        path = data / "memory" / "MEMORY.md"
-        path.rename(path.with_suffix(".removed"))
-        await sync(data)
-        assert await counts() == (0, 0, 0)
+        assert await db.fetch_one("SELECT COUNT(*) FROM memory_index_owners") == (1,)
+    path = data / "memory" / "MEMORY.md"
+    path.rename(path.with_suffix(".removed"))
+    await sync(data)
+    assert await counts() == (0, 0, 0)
 
 
-async def test_different_legacy_content_requires_reconciliation_without_overwrite(tmp_path):
+async def test_a_legacy_row_whose_note_exists_nowhere_is_cleaned(tmp_path):
+    """No copy of the shared tree, and nothing in the store, holds the note."""
+    await Storage.init()
+    await legacy()
+    data = tree(tmp_path, "legacy")
+    await sync(data)
+    assert await counts() == (0, 0, 0)
+
+
+async def test_the_shared_tree_replaces_different_legacy_content(tmp_path):
+    """The settled tree is the source: its note replaces an older index of it."""
     await Storage.init()
     await legacy()
     data = tree(tmp_path, "legacy", "differentword")
-    with pytest.raises(MemoryOwnershipConflict, match="legacy"):
-        await sync(data)
-    assert await fts_search(Storage.get_db_path(), "prj_test", "legacyword")
+    await sync(data)
+    assert await fts_search(Storage.get_db_path(), "prj_test", "differentword")
+    assert not await fts_search(Storage.get_db_path(), "prj_test", "legacyword")
     assert await counts() == (1, 1, 1)
 
 
@@ -189,7 +205,7 @@ async def test_failed_replacement_rolls_back_new_owner_with_old_index_intact(tmp
         assert await db.fetch_one("SELECT COUNT(*) FROM memory_index_owners") == (0,)
 
 
-async def test_cleanup_batches_more_than_128_files_without_touching_other_root(tmp_path):
+async def test_cleanup_batches_more_than_128_files_and_deletions_reach_the_other_root(tmp_path):
     await Storage.init()
     data = tree(tmp_path, "batch")
     for index in range(131):
@@ -197,11 +213,17 @@ async def test_cleanup_batches_more_than_128_files_without_touching_other_root(t
     await sync(data)
     peer = tree(tmp_path, "peer", "peerword", "peer.md")
     await sync(peer)
+    assert len(list((peer / "memory").glob("note-*.md"))) == 131, "the peer has the stored notes"
     for path in (data / "memory").glob("*.md"):
         path.rename(path.with_suffix(".removed"))
     await sync(data)
+    # One tree removed them: gone from the index at once, in batches.
+    assert await counts() == (1, 1, 1)
+    await sync(peer)
+    assert not list((peer / "memory").glob("note-*.md"))
     assert await counts() == (1, 1, 1)
     assert await fts_search(Storage.get_db_path(), "prj_test", "peerword")
+    assert (data / "memory" / "peer.md").read_text() == "peerword"
 
 
 async def test_root_appearing_during_scan_cannot_create_an_unowned_index(tmp_path):
@@ -352,3 +374,141 @@ async def legacy_with(before_replace, content="legacyword survives"):
         "id": "legacy-chunk", "scope": "global", "scope_id": "", "path": "MEMORY.md",
         "source": "memory", "start_line": 1, "end_line": 1, "hash": "legacy-chunk-hash", "text": content,
     }], before_replace=before_replace)
+
+
+async def test_an_edit_in_one_tree_is_indexed_without_waiting_for_the_other_copies(tmp_path):
+    """Under the old per-tree owners both trees indexing v1 blocked either from
+    indexing v2. One shared owner: the edited tree indexes it at once."""
+    await Storage.init()
+    first = tree(tmp_path, "first", "oldword")
+    second = tree(tmp_path, "second", "oldword")
+    await sync(first)
+    await sync(second)
+
+    (first / "memory" / "MEMORY.md").write_text("newword")
+    await sync(first)
+
+    assert await fts_search(Storage.get_db_path(), "prj_test", "newword")
+    assert not await fts_search(Storage.get_db_path(), "prj_test", "oldword")
+    await sync(second)
+    assert (second / "memory" / "MEMORY.md").read_text() == "newword"
+    assert await counts() == (1, 1, 1)
+
+
+async def test_only_one_instance_indexes_the_shared_tree_at_a_time(tmp_path, monkeypatch):
+    await Storage.init()
+    data = tree(tmp_path, "busy", "busyword")
+    from flocks.db.singleton import cluster_lock
+    import flocks.memory.sync.indexer as indexer_module
+
+    monkeypatch.setattr(indexer_module, "_INDEX_LOCK_WAIT_S", 0.2)
+    async with cluster_lock("memory.index") as held:
+        assert held
+        _indexer, stats = await sync(data)
+    assert stats.get("skipped") == "another_instance_indexing"
+    assert await counts() == (0, 0, 0)
+    _indexer, stats = await sync(data)
+    assert "skipped" not in stats and await counts() == (1, 1, 1)
+
+
+async def test_a_run_that_waited_for_another_indexes_what_that_one_left(tmp_path, monkeypatch):
+    """Review round 2 (batch 4): settled after the lock, not before it."""
+    from contextlib import asynccontextmanager
+
+    import flocks.db.singleton as singleton_module
+    import flocks.memory.sync.mirror as mirror_module
+
+    await Storage.init()
+    data = tree(tmp_path, "waiting", "seenword")
+    order: list[str] = []
+    real_lock = singleton_module.cluster_lock
+
+    @asynccontextmanager
+    async def _recorded_lock(name, **kwargs):
+        async with real_lock(name, **kwargs) as held:
+            order.append("lock")
+            yield held
+
+    async def _recorded_settle(root):
+        order.append("settle")
+        return mirror_module.ReconcileStats()
+
+    async def _recorded_quiet(root):
+        order.append("settle")
+        return True
+
+    monkeypatch.setattr(singleton_module, "cluster_lock", _recorded_lock)
+    monkeypatch.setattr(mirror_module, "reconcile_all", _recorded_settle, raising=False)
+    monkeypatch.setattr(mirror_module, "reconcile_quietly", _recorded_quiet)
+
+    await sync(data)
+
+    assert order == ["lock", "settle"]
+
+
+async def test_an_unreachable_store_leaves_the_shared_index_alone(tmp_path, monkeypatch):
+    """Review round 3 (batch 4): a tree that could not be settled is not published."""
+    import flocks.memory.sync.mirror as mirror_module
+
+    await Storage.init()
+    data = tree(tmp_path, "published", "firstword")
+    await sync(data)
+    assert (await counts())[0] == 1
+    (data / "memory" / "MEMORY.md").write_text("staleword only here")
+
+    async def _unreachable(root):
+        return None
+
+    monkeypatch.setattr(mirror_module, "reconcile_all", _unreachable, raising=False)
+    _indexer, stats = await sync(data)
+
+    assert stats["skipped"] == "memory_store_unreachable"
+    async with Storage.transaction() as db:
+        hits = await db.fetch_one("SELECT COUNT(*) FROM memory_chunks WHERE text LIKE '%staleword%'")
+    assert hits[0] == 0, "the shared index still has the settled tree"
+
+
+async def test_a_note_the_settling_could_not_align_keeps_its_shared_index_rows(tmp_path, monkeypatch):
+    """Review round 3 (batch 4): this copy of a deferred note is not the shared one."""
+    import flocks.memory.sync.mirror as mirror_module
+
+    await Storage.init()
+    data = tree(tmp_path, "aligned", "sharedversion")
+    await sync(data)
+    (data / "memory" / "MEMORY.md").write_text("localversion changed in the store meanwhile")
+
+    async def _deferred(root):
+        stats = mirror_module.ReconcileStats()
+        stats.deferred.append("MEMORY.md")
+        return stats
+
+    monkeypatch.setattr(mirror_module, "reconcile_all", _deferred, raising=False)
+    _indexer, stats = await sync(data)
+
+    assert stats["files_unsettled"] == 1
+    async with Storage.transaction() as db:
+        local = await db.fetch_one("SELECT COUNT(*) FROM memory_chunks WHERE text LIKE '%localversion%'")
+        shared = await db.fetch_one("SELECT COUNT(*) FROM memory_chunks WHERE text LIKE '%sharedversion%'")
+    assert (local[0], shared[0]) == (0, 1)
+
+
+async def test_notes_left_unsettled_keep_their_index_rows(tmp_path, monkeypatch):
+    """Review round 2 (batch 4): a note behind a link here may be a real note elsewhere."""
+    import flocks.memory.sync.mirror as mirror_module
+
+    await Storage.init()
+    data = tree(tmp_path, "linked", "keptword", filename="kept.md")
+    await sync(data)
+    assert (await counts())[0] == 1
+    # The note is now behind a link on this instance (or could not be settled).
+    (data / "memory" / "kept.md").unlink()
+
+    async def _settled(root):
+        stats = mirror_module.ReconcileStats()
+        stats.linked.append("kept.md")
+        return stats
+
+    monkeypatch.setattr(mirror_module, "reconcile_all", _settled, raising=False)
+    await sync(data)
+
+    assert (await counts())[0] == 1, "the row of a note left unsettled is not cleaned"

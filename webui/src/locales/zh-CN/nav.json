@@ -137,7 +137,6 @@
   "systemManagement": "系统管理",
   "modelUsage": "模型用量",
   "modelUsageHint": "查看余额与用量",
-  "upgradePro": "升级 {{name}}",
   "logoutConfirm": "确定退出当前登录？",
   "shortcutsTitle": "快捷键",
   "shortcutsBody": "菜单内：↑ / ↓ 选择项目；Enter 打开；Esc 关闭菜单或弹窗；Tab 移动焦点。",

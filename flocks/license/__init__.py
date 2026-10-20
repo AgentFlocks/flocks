@@ -79,8 +79,8 @@ class _LicenseService:
         return {"active": bool(active), "status": "active" if active else "inactive", "details": {}}
 
 
-def is_pro_edition_status(status: dict[str, Any]) -> bool:
-    """Whether a checker status grants the Pro edition (the OSS default never does)."""
+def is_licensed_edition_status(status: dict[str, Any]) -> bool:
+    """Whether a checker status grants a licensed edition (the built-in checker never does)."""
     edition = str(status.get("status") or "").lower()
     return edition != "oss" and bool(status.get("active"))
 
@@ -100,7 +100,7 @@ __all__ = [
     "is_license_active",
     "assert_license_active",
     "license_status",
-    "is_pro_edition_status",
+    "is_licensed_edition_status",
     "license_feature_status",
 ]
 

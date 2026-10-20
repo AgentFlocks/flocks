@@ -8,18 +8,17 @@ from types import SimpleNamespace
 import pytest
 
 from flocks.updater import deploy, updater
-from tests.updater.test_updater_prebuilt_bundle import (
-    _no_console,
-    _no_download,
+from flocks.updater.channels import ChannelRelease, InstallPlan
+from tests.updater.test_updater_prebuilt_release import (
     _prepare_install_root,
     _stub_install_side_effects,
-    _write_local_bundle,
+    _write_component,
 )
 
 
 @pytest.fixture
 def upgrade_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SimpleNamespace:
-    """A writable fake install where reaching the download or manifest step is recorded."""
+    """A writable fake install where reaching the download step is recorded."""
     install_root = tmp_path / "install-root"
     (install_root / ".venv").mkdir(parents=True)
     calls: list[str] = []
@@ -40,9 +39,9 @@ def upgrade_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SimpleNamesp
         calls.append("download")
         raise RuntimeError("stop after the download started")
 
-    async def fake_fetch_console_manifest(*_args, **_kwargs):
-        calls.append("manifest")
-        raise RuntimeError("stop after the manifest fetch started")
+    async def fake_download_channel_archive(*_args, **_kwargs):
+        calls.append("channel-download")
+        raise RuntimeError("stop after the channel download started")
 
     def fake_mkdtemp(**_kwargs):
         calls.append("mkdtemp")
@@ -55,7 +54,7 @@ def upgrade_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SimpleNamesp
     monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.9.23")
     monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
-    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", fake_fetch_console_manifest)
+    monkeypatch.setattr(updater, "_download_channel_archive", fake_download_channel_archive)
     monkeypatch.setattr(updater.tempfile, "mkdtemp", fake_mkdtemp)
     monkeypatch.setattr(updater, "_record_update_journal", lambda _message: None)
     monkeypatch.setattr(updater, "_running_as_systemd_service_main_process", lambda: False)
@@ -63,21 +62,33 @@ def upgrade_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SimpleNamesp
     return SimpleNamespace(install_root=install_root, calls=calls)
 
 
-async def _run(**kwargs) -> list:
-    return [step async for step in updater.perform_update("2026.10.13", **kwargs)]
+def _remote_release() -> ChannelRelease:
+    """A channel release still to be downloaded; what it installs is only known from its plan."""
+    return ChannelRelease(
+        version="v2026.10.13",
+        plan=lambda root, current, work: InstallPlan(source_root=None, version=current),
+        archive_url="https://releases.example.test/bundle-v2026.10.13.zip",
+        label="extension bundle",
+        own_version_rules=True,
+    )
+
+
+async def _run(*, channel_release: bool = False, **kwargs) -> list:
+    release = _remote_release() if channel_release else None
+    return [step async for step in updater.perform_update("2026.10.13", release=release, **kwargs)]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("pro_bundle", [False, True], ids=["oss-source", "console-pro-bundle"])
+@pytest.mark.parametrize("channel_release", [False, True], ids=["oss-source", "channel-release"])
 async def test_missing_uv_fails_before_download(
     monkeypatch: pytest.MonkeyPatch,
     upgrade_env: SimpleNamespace,
-    pro_bundle: bool,
+    channel_release: bool,
 ) -> None:
     monkeypatch.setattr(updater.sys, "platform", "linux")
     monkeypatch.setattr(updater, "_find_executable", lambda _name: None)
 
-    progresses = await _run(force_console_manifest=pro_bundle)
+    progresses = await _run(channel_release=channel_release)
 
     assert [step.stage for step in progresses] == ["error"]
     assert "uv is required but was not found" in progresses[0].message
@@ -85,13 +96,15 @@ async def test_missing_uv_fails_before_download(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("channel_release", [False, True], ids=["oss-source", "channel-release"])
 async def test_systemd_main_process_is_refused_before_download(
     monkeypatch: pytest.MonkeyPatch,
     upgrade_env: SimpleNamespace,
+    channel_release: bool,
 ) -> None:
     monkeypatch.setattr(updater, "_running_as_systemd_service_main_process", lambda: True)
 
-    progresses = await _run(force_console_manifest=True)
+    progresses = await _run(channel_release=channel_release)
 
     assert [step.stage for step in progresses] == ["error"]
     assert progresses[0].message == updater.SYSTEMD_MAIN_PROCESS_REFUSED_MESSAGE
@@ -118,11 +131,11 @@ not_root = pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reas
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("read_only", "pro_bundle"),
+    ("read_only", "channel_release"),
     [
         pytest.param("install_root", False, id="source-upgrade-read-only-root"),
         pytest.param("venv", False, id="source-upgrade-read-only-venv"),
-        pytest.param("venv", True, id="pro-bundle-read-only-venv"),
+        pytest.param("venv", True, id="channel-release-read-only-venv"),
     ],
 )
 @posix_permissions
@@ -130,12 +143,12 @@ not_root = pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reas
 async def test_read_only_install_is_refused_before_download(
     upgrade_env: SimpleNamespace,
     read_only: str,
-    pro_bundle: bool,
+    channel_release: bool,
 ) -> None:
     target = upgrade_env.install_root if read_only == "install_root" else upgrade_env.install_root / ".venv"
     target.chmod(0o555)
     try:
-        progresses = await _run(force_console_manifest=pro_bundle)
+        progresses = await _run(channel_release=channel_release)
     finally:
         target.chmod(0o755)
 
@@ -148,76 +161,91 @@ async def test_read_only_install_is_refused_before_download(
 @pytest.mark.asyncio
 @posix_permissions
 @not_root
-async def test_pro_bundle_with_read_only_core_still_reaches_the_bundle(upgrade_env: SimpleNamespace) -> None:
-    """Whether a Pro bundle touches the core is only known after extraction."""
+async def test_channel_release_with_read_only_source_still_reaches_the_download(upgrade_env: SimpleNamespace) -> None:
+    """Whether a channel's release touches the source is only known from its plan."""
     upgrade_env.install_root.chmod(0o555)
     try:
-        progresses = await _run(force_console_manifest=True)
+        progresses = await _run(channel_release=True)
     finally:
         upgrade_env.install_root.chmod(0o755)
 
-    assert [step.stage for step in progresses] == ["error"]
-    assert "manifest" in progresses[0].message
-    assert upgrade_env.calls == ["manifest"]
+    assert progresses[-1].stage == "error"
+    assert "channel download started" in progresses[-1].message
+    assert upgrade_env.calls == ["mkdtemp", "channel-download"]
+
+
+def _local_release(tmp_path: Path, *, replaces_source: bool) -> ChannelRelease:
+    """An offline release on disk: a component wheel, and optionally a new source tree."""
+    release_dir = tmp_path / "opt-release"
+    wheel = _write_component(release_dir)
+    if replaces_source:
+        source = release_dir / "flocks"
+        source.mkdir()
+        (source / "pyproject.toml").write_text('[project]\nname = "flocks"\n', encoding="utf-8")
+        (source / "new_core.py").write_text("UPDATED = True\n", encoding="utf-8")
+
+    def _plan(content_root: Path, current_version: str, work_dir: Path) -> InstallPlan:
+        return InstallPlan(
+            source_root=content_root / "flocks" if replaces_source else None,
+            version="2026.10.1" if replaces_source else current_version,
+            extra_wheels=(content_root / "wheels" / wheel.name,),
+            prebuilt=True,
+        )
+
+    return ChannelRelease(
+        version="v2026.10.1",
+        plan=_plan,
+        archive_path=release_dir,
+        label="extension bundle",
+        own_version_rules=True,
+    )
 
 
 @pytest.mark.asyncio
 @posix_permissions
 @not_root
-async def test_pro_only_bundle_installs_when_only_the_venv_is_writable(
+async def test_component_only_release_installs_when_only_the_venv_is_writable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    bundle_dir = tmp_path / "opt-bundle"
-    wheel = _write_local_bundle(bundle_dir)
     install_root = _prepare_install_root(tmp_path)
     captured = _stub_install_side_effects(monkeypatch, tmp_path, install_root)
     monkeypatch.setattr(deploy, "detect_deploy_mode", lambda: "source")
-    monkeypatch.setenv("FLOCKS_PRO_BUNDLE_DIR", str(bundle_dir))
-    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _no_console)
-    monkeypatch.setattr(updater, "_download_console_bundle", _no_download)
     monkeypatch.setattr(updater, "_write_version_marker", lambda _version: None)
+    release = _local_release(tmp_path, replaces_source=False)
 
     install_root.chmod(0o555)
     try:
-        progresses = [step async for step in updater.perform_pro_bundle_install(restart=False)]
+        progresses = [step async for step in updater.perform_update("v2026.10.1", release=release, restart=False)]
     finally:
         install_root.chmod(0o755)
 
     assert progresses[-1].stage == "done", progresses[-1].message
     assert len(captured) == 1
     assert captured[0][:3] == ["/opt/flocks/tools/uv/uv", "pip", "install"]
-    assert captured[0][-1].endswith(wheel.name)
+    assert captured[0][-1].endswith("component-2026.9.14-py3-none-any.whl")
 
 
 @pytest.mark.asyncio
 @posix_permissions
 @not_root
-async def test_bundle_replacing_the_core_is_refused_before_backup_when_the_root_is_read_only(
+async def test_release_replacing_the_source_is_refused_before_backup_when_the_root_is_read_only(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    bundle_dir = tmp_path / "opt-bundle"
-    _write_local_bundle(
-        bundle_dir,
-        prebuilt=False,
-        with_core=True,
-        extra_manifest={"bundle_version": "v2026.10.1", "core_version": "v2026.10.1"},
-    )
     install_root = _prepare_install_root(tmp_path)
     captured = _stub_install_side_effects(monkeypatch, tmp_path, install_root)
     monkeypatch.setattr(deploy, "detect_deploy_mode", lambda: "source")
-    monkeypatch.setenv("FLOCKS_PRO_BUNDLE_DIR", str(bundle_dir))
-    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _no_console)
     monkeypatch.setattr(updater, "_running_as_systemd_service_main_process", lambda: False)
     backups: list[str] = []
     handoffs: list[list[str]] = []
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_a, **_k: backups.append("backup") or None)
     monkeypatch.setattr(updater, "_spawn_restart_handoff", lambda argv, **_k: handoffs.append(argv))
+    release = _local_release(tmp_path, replaces_source=True)
 
     install_root.chmod(0o555)
     try:
-        progresses = [step async for step in updater.perform_pro_bundle_install(restart=True)]
+        progresses = [step async for step in updater.perform_update("v2026.10.1", release=release, restart=True)]
     finally:
         install_root.chmod(0o755)
 
@@ -237,26 +265,26 @@ async def test_writable_install_with_uv_reaches_download(upgrade_env: SimpleName
 
 
 @pytest.mark.asyncio
-async def test_downgrade_refuses_systemd_main_process_before_uninstalling(
+async def test_removing_components_refuses_systemd_main_process_before_uninstalling(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    uninstalled: list[str] = []
+    uninstalled: list[list[str]] = []
 
-    async def fake_uninstall(**_kwargs):
-        uninstalled.append("flockspro")
+    async def fake_uninstall(packages, **_kwargs):
+        uninstalled.append(list(packages))
         return None
 
     monkeypatch.setattr(deploy, "detect_deploy_mode", lambda: "source")
     monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.10.13")
-    monkeypatch.setattr(updater, "_read_pro_bundle_install_marker", lambda: {})
-    monkeypatch.setattr(updater, "_is_pro_component_installed", lambda: True)
     monkeypatch.setattr(updater, "_find_executable", lambda _name: "/usr/bin/uv")
-    monkeypatch.setattr(updater, "_uninstall_pro_component", fake_uninstall)
+    monkeypatch.setattr(updater, "_uninstall_packages", fake_uninstall)
     monkeypatch.setattr(updater, "_running_as_systemd_service_main_process", lambda: True)
 
-    progresses = [step async for step in updater.perform_pro_bundle_downgrade(restart=True)]
+    progresses = [
+        step async for step in updater.remove_components(["extension-component"], version="2026.10.13", restart=True)
+    ]
 
     assert progresses[-1].stage == "error"
     assert progresses[-1].message == updater.SYSTEMD_MAIN_PROCESS_REFUSED_MESSAGE

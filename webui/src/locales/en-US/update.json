@@ -3,7 +3,6 @@
   "currentVersion": "Current Version",
   "latestVersion": "Latest Version",
   "coreVersion": "Core Version",
-  "proComponent": "Pro Component",
   "notInstalled": "Not installed",
   "hasUpdate": "Update Available",
   "upToDate": "Up to Date",
@@ -43,7 +42,6 @@
   "offlineNotChecked": "Offline deployment: remote versions are not checked",
   "stageLabels": {
     "fetching": "Downloading latest source archive",
-    "fetchingPro": "Downloading Pro bundle",
     "backing_up": "Backing up current version",
     "applying": "Applying new version",
     "restarting": "Restarting service",

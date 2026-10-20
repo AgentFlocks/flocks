@@ -162,7 +162,7 @@ export const contentRoutes: RouteObject[] = [
   { path: 'monitoring', element: <LazyRoute><MonitoringPage /></LazyRoute> },
   { path: 'audit-logs', element: <Navigate to="/settings/audit-logs" replace /> },
   { path: 'admin/users', element: <Navigate to="/settings/account" replace /> },
-  // A private build registers its own pages (for example the Pro upgrade
+  // A private build registers its own pages (for example an upgrade
   // flow) through @ext/registry; they get a keep-alive pane like any other.
   ...appExtensionRoutes,
   { path: '*', element: <Navigate to="/" replace /> },

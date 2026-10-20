@@ -863,15 +863,29 @@ class SessionLoop:
 
         kwargs = dict(provider_id=provider_id, model_id=model_id, agent_name=agent_name,
                       callbacks=callbacks, working_directory=working_directory, auto_failover=auto_failover)
+        from flocks.session import turn_receipt
+
         if cls.is_running(session_id):
-            return await cls._run_owned(session_id, **kwargs)
+            result = await cls._run_owned(session_id, **kwargs)
+            if result.action == "queued":
+                turn_receipt.note_handed_off()  # the run going on here answers it
+            return result
         lease = await SessionExecutionLease.acquire(session_id)
         if lease is None:
+            # Another worker's run takes the new message on its next step.
+            turn_receipt.note_handed_off()
             return LoopResult(action="queued", error="Loop already running")
+        from flocks.content.managed import task_scope
+
         try:
             async with lease:
-                result = await cls._run_owned(session_id, **kwargs)
+                # One run is one task: managed definitions it reads keep the
+                # version they had when it first read them.
+                with task_scope(f"session:{session_id}#{lease.generation}"):
+                    result = await cls._run_owned(session_id, **kwargs)
                 lease.require_owned()
+                if result.action == "queued":
+                    turn_receipt.note_handed_off()
                 return result
         except SessionOwnershipLost as exc:
             return LoopResult(action="error", error=str(exc))

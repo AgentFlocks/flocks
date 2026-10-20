@@ -111,7 +111,7 @@ def test_installer_covers_manual_requirements() -> None:
     assert "install_profile.json" in text and '"Language": "zh-CN"' in text
 
 
-def test_env_template_pins_offline_behaviour() -> None:
+def test_env_template_pins_service_settings() -> None:
     text = ENV_TEMPLATE.read_text(encoding="utf-8")
     required = {
         "HOME": "@DATA_HOME@",
@@ -119,20 +119,15 @@ def test_env_template_pins_offline_behaviour() -> None:
         "FLOCKS_INSTALL_ROOT": "@INSTALL_ROOT@",
         "FLOCKS_REPO_ROOT": "@INSTALL_ROOT@/flocks",
         "FLOCKS_NODE_HOME": "@INSTALL_ROOT@/tools/node",
-        # offline with a Pro bundle, source for an open-source package (see test_env_follows_upgrade_mode)
-        "FLOCKS_DEPLOY_MODE": "@DEPLOY_MODE@",
-        "FLOCKS_OFFLINE_INSTALL": "1",
+        # upgrades go online like a source install; a newer package also upgrades in place
+        "FLOCKS_DEPLOY_MODE": "source",
         "FLOCKS_HOST": "0.0.0.0",
         "FLOCKS_PORT": "@PORT@",
         "FLOCKS_CONSOLE_BASE_URL": "https://portalflocks.threatbook.cn",
-        "FLOCKS_UPDATE_CHANNEL": "@UPDATE_CHANNEL@",
-        "FLOCKS_PRO_BUNDLE_DIR": "@INSTALL_ROOT@/bundle",
-        "UV_OFFLINE": "1",
         # skills run `uv run python -c ...`: without it uv tries to rebuild flocks and fetch hatchling
         "UV_NO_SYNC": "1",
         "UV_NO_PYTHON_DOWNLOADS": "1",
         "UV_CACHE_DIR": "@INSTALL_ROOT@/cache/uv",
-        "npm_config_offline": "true",
         "LANG": "C.UTF-8",
     }
     values = {}
@@ -142,6 +137,8 @@ def test_env_template_pins_offline_behaviour() -> None:
             values[key] = value
     for key, expected in required.items():
         assert values.get(key) == expected, f"{key}={values.get(key)!r}, expected {expected!r}"
+    for key in OFFLINE_ONLY_KEYS:
+        assert key not in values, f"{key} belongs to older packages only"
     assert values["PATH"].startswith("@INSTALL_ROOT@/flocks/.venv/bin:")
     assert "@INSTALL_ROOT@/tools/uv" in values["PATH"]
 
@@ -149,22 +146,16 @@ def test_env_template_pins_offline_behaviour() -> None:
 OFFLINE_ONLY_KEYS = ("FLOCKS_OFFLINE_INSTALL", "FLOCKS_UPDATE_CHANNEL", "FLOCKS_PRO_BUNDLE_DIR", "UV_OFFLINE", "npm_config_offline")
 
 
-def _render_env(tmp_path: Path, upgrade_mode: str) -> dict[str, str]:
-    """Run install.sh's render_env_template for one upgrade mode and parse what it writes."""
-    text = INSTALL_SCRIPT.read_text(encoding="utf-8")
-    keys_re = re.search(r"^OFFLINE_ONLY_KEYS_RE='([^']+)'$", text, re.MULTILINE)
-    assert keys_re, "OFFLINE_ONLY_KEYS_RE must stay a single-quoted one-line assignment"
-    src_root = tmp_path / f"payload-{upgrade_mode}"
+def _render_env(tmp_path: Path) -> dict[str, str]:
+    """Run install.sh's render_env_template and parse what it writes."""
+    src_root = tmp_path / "payload-env"
     (src_root / "installer").mkdir(parents=True)
     shutil.copy(ENV_TEMPLATE, src_root / "installer" / "flocks.env.template")
-    deploy_mode = "source" if upgrade_mode == "online" else "offline"
     script = (
         "set -Eeuo pipefail\n"
-        f"OFFLINE_ONLY_KEYS_RE='{keys_re.group(1)}'\n"
         f"SRC_ROOT='{src_root}'; INSTALL_ROOT=/opt/flocks; DATA_HOME=/var/lib/flocks; PORT=5273\n"
         # The template points FLOCKS_DB_DSN_FILE next to the env file.
         "ENV_FILE=/etc/flocks/flocks.env\n"
-        f"UPDATE_CHANNEL=flockspro-offline-2026.9.23; UPGRADE_MODE={upgrade_mode}; DEPLOY_MODE={deploy_mode}\n"
         f"{_bash_function_source(INSTALL_SCRIPT, 'render_env_template')}render_env_template\n"
     )
     completed = subprocess.run([BASH, "-c", script], capture_output=True, text=True)
@@ -178,29 +169,20 @@ def _render_env(tmp_path: Path, upgrade_mode: str) -> dict[str, str]:
 
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
-def test_env_follows_upgrade_mode(tmp_path: Path) -> None:
-    """Open-source package: upgrades go online like a source install, so no offline pin may be written."""
-    online = _render_env(tmp_path, "online")
-    assert online["FLOCKS_DEPLOY_MODE"] == "source"
+def test_rendered_env_upgrades_online(tmp_path: Path) -> None:
+    """The package upgrades online like a source install, so no offline pin may be written."""
+    env = _render_env(tmp_path)
+    assert env["FLOCKS_DEPLOY_MODE"] == "source"
     for key in OFFLINE_ONLY_KEYS:
-        assert key not in online, f"{key} must not be written for an open-source package"
-    assert online["FLOCKS_CONSOLE_BASE_URL"] == "https://portalflocks.threatbook.cn"
-    assert online["UV_PYTHON"] == "/opt/flocks/tools/python/bin/python3"
-    assert online["FLOCKS_PORT"] == "5273"
-
-    offline = _render_env(tmp_path, "offline")
-    assert offline["FLOCKS_DEPLOY_MODE"] == "offline"
-    assert offline["FLOCKS_OFFLINE_INSTALL"] == "1"
-    assert offline["UV_OFFLINE"] == "1" and offline["npm_config_offline"] == "true"
-    assert offline["FLOCKS_UPDATE_CHANNEL"] == "flockspro-offline-2026.9.23"
-    assert offline["FLOCKS_PRO_BUNDLE_DIR"] == "/opt/flocks/bundle"
-    # the two modes differ in exactly the offline pins (and the deploy mode value)
-    assert set(offline) - set(online) == set(OFFLINE_ONLY_KEYS)
-    assert set(online) <= set(offline)
+        assert key not in env, f"{key} must not be written"
+    assert env["FLOCKS_CONSOLE_BASE_URL"] == "https://portalflocks.threatbook.cn"
+    assert env["UV_PYTHON"] == "/opt/flocks/tools/python/bin/python3"
+    assert env["FLOCKS_PORT"] == "5273"
+    assert not any("@" in value for value in env.values()), "every placeholder is filled in"
 
 
-def test_installer_switches_an_existing_env_between_upgrade_modes() -> None:
-    """Re-running a package of the other kind must move an existing env file over, not keep the old mode."""
+def test_installer_removes_the_offline_pins_an_older_package_left() -> None:
+    """An env file an older (offline) package wrote must come out upgrading online, not keep its pins."""
     text = INSTALL_SCRIPT.read_text(encoding="utf-8")
     managed = re.search(r'^MANAGED_KEYS="([^"]*)"$', text, re.MULTILINE).group(1).split()
     assert "FLOCKS_DEPLOY_MODE" in managed
@@ -208,11 +190,12 @@ def test_installer_switches_an_existing_env_between_upgrade_modes() -> None:
     for key in OFFLINE_ONLY_KEYS:
         assert re.match(keys_re, f"{key}=x"), f"{key} missing from OFFLINE_ONLY_KEYS_RE"
     assert not re.match(keys_re, "FLOCKS_OFFLINE_INSTALLED=1"), "the key pattern must be anchored on '='"
-    # online mode strips the pins an earlier Pro-bundle install left behind (the merge keeps unmanaged keys)
-    assert 'sed -i -E "/$OFFLINE_ONLY_KEYS_RE/d" "$ENV_FILE"' in text
-    # the upgrade mode is decided before the dry-run exit, from the payload and the carried-over bundle
-    decision = text.index('if [[ -d "$SRC_ROOT/bundle" || "$CARRY_OVER_BUNDLE" -eq 1 ]]; then')
-    assert decision < text.index('if [[ "$DRY_RUN" == "1" ]]; then')
+    # every run strips them (the merge keeps unmanaged keys), not only one kind of package
+    strip = 'sed -i -E "/$OFFLINE_ONLY_KEYS_RE/d" "$ENV_FILE"'
+    assert strip in text
+    line = next(line for line in text.splitlines() if strip in line)
+    assert not line.startswith(" "), "the strip must not sit inside a condition"
+    assert "UPGRADE_MODE" not in text and "pro_bundle" not in text
 
 
 def test_systemd_unit_matches_updater_restart_model() -> None:
@@ -447,14 +430,30 @@ def test_export_source_refuses_uncommitted_changes_and_tracked_secrets(tmp_path:
     assert "refusing to ship" in tracked_env_result.stderr and ".env" in tracked_env_result.stderr
 
 
-def test_build_script_bakes_channel_and_prebuilt_manifest() -> None:
+def test_build_script_packs_the_open_source_edition_only() -> None:
     text = BUILD_SCRIPT.read_text(encoding="utf-8")
-    assert 'UPDATE_CHANNEL="flockspro-offline-${CORE_VERSION_PLAIN}"' in text
-    assert '"prebuilt": True' in text
+    assert "UPDATE_CHANNEL" not in text and '"prebuilt": True' not in text and "pro_bundle" not in text
     assert "--frozen" in text and "--no-python-downloads" in text
     assert '--target "$INSTALL_ROOT/.staging"' in text
     assert "--needroot" in text
     assert "sha256sum" in text
+    # a staging root reused with --repack may still hold an older build's bundle/: moved out, never packed
+    assert 'mv "$INSTALL_ROOT/bundle" "$CACHE_DIR/bundle.previous-' in text
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+@pytest.mark.parametrize("script", [BUILD_SCRIPT, PACKAGING_DIR / "build-in-docker.sh"])
+@pytest.mark.parametrize("flag", ["--flockspro-wheel", "--pro-bundle-version", "--pro-release-id"])
+def test_build_scripts_refuse_the_old_extension_flags(script: Path, flag: str) -> None:
+    """Option parsing comes first: the refusal names the flag before any tool or platform check."""
+    completed = subprocess.run([BASH, str(script), flag, "x"], capture_output=True, text=True)
+    assert completed.returncode == 1
+    assert f"{flag} is no longer supported" in completed.stderr
+
+
+def test_workflow_packs_no_extension() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8").lower()
+    assert "flockspro" not in text and "pro_release_id" not in text
 
 
 def test_workflow_builds_inside_the_manifest_build_image() -> None:
@@ -857,9 +856,11 @@ exit 0
     assert not [line for line in logged if line.startswith(("rm", "run", "create", "start", "stop", "kill"))], logged
 
 
-def test_smoke_cleanup_removes_what_it_created_even_when_it_never_started(tmp_path: Path) -> None:
-    # the server container is created but does not start: the run fails, and the cleanup still
-    # removes that container and the gateway this run brought up, leaving nothing behind
+@pytest.mark.parametrize("failing", ["server", "sidecar"])
+def test_smoke_cleanup_removes_what_it_created_even_when_it_never_started(tmp_path: Path, failing: str) -> None:
+    # the server container (or the postgres sidecar) is created but does not start: the run fails,
+    # and the cleanup still removes every container and the gateway this run brought up, leaving
+    # nothing behind
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls, state = tmp_path / "docker-calls.log", tmp_path / "docker-state"
@@ -873,12 +874,13 @@ case "$1" in
     grep -qx "$name" {state} || exit 1
     case "$*" in *Labels*) echo 1 ;; esac
     exit 0 ;;
-  create)
+  create|run)
     shift
     while [ "$#" -gt 0 ]; do if [ "$1" = --name ]; then echo "$2" >> {state}; break; fi; shift; done
     exit 0 ;;
   start)
-    case "$2" in *-gw) exit 0 ;; *) echo "start failed" >&2; exit 1 ;; esac ;;
+    case "$2" in *-gw) exit 0 ;; *-pg) [ "$FAIL_START" = sidecar ] || exit 0 ;; *) [ "$FAIL_START" = server ] || exit 0 ;; esac
+    echo "start failed" >&2; exit 1 ;;
   rm)
     name="${{@: -1}}"
     grep -vx "$name" {state} > {state}.new || true
@@ -890,15 +892,18 @@ exit 0
     docker.chmod(0o755)
     run_file = tmp_path / "flocks-offline.run"
     run_file.write_text("not a real package\n", encoding="utf-8")
-    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER": str(docker)}
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER": str(docker),
+           "FAIL_START": failing}
     env.pop("SMOKE_KEEP", None)
     env.pop("SMOKE_NETWORK", None)
     result = subprocess.run([BASH, str(SMOKE_SCRIPT), str(run_file), "some/image"], capture_output=True, text=True,
                             env=env, timeout=60)
     assert result.returncode != 0
     logged = calls.read_text(encoding="utf-8").splitlines()
-    created = [line.split("--name ", 1)[1].split()[0] for line in logged if line.startswith("create ")]
-    assert len(created) == 2 and created[0].endswith("-gw"), logged  # gateway, then the server
+    created = [line.split("--name ", 1)[1].split()[0] for line in logged if line.startswith(("create ", "run "))]
+    # gateway, postgres sidecar, then the server (not reached when the sidecar does not start)
+    assert len(created) == (3 if failing == "server" else 2), logged
+    assert created[0].endswith("-gw") and created[1].endswith("-pg"), logged
     removed = [line.split()[-1] for line in logged if line.startswith("rm ")]
     assert set(removed) == set(created), logged
     assert state.read_text(encoding="utf-8").strip() == "", "left behind: " + state.read_text(encoding="utf-8")
@@ -926,8 +931,11 @@ def test_intranet_sim_stops_on_a_malformed_allowlist_before_touching_docker(tmp_
 def test_smoke_test_runs_behind_the_simulated_intranet_by_default() -> None:
     text = SMOKE_SCRIPT.read_text(encoding="utf-8")
     assert 'NETWORK_MODE="${SMOKE_NETWORK:-intranet}"' in text
-    assert 'intranet) NET_ARGS=(--network "container:$GATEWAY") ;;' in text
-    assert 'none) NET_ARGS=(--network none) ;;' in text
+    # the postgres sidecar and the server share one network namespace: the gateway's, or with no
+    # network at all the sidecar's own (loopback only)
+    assert 'intranet) PG_NET_ARGS=(--network "container:$GATEWAY"); NET_ARGS=(--network "container:$GATEWAY") ;;' in text
+    assert 'none) PG_NET_ARGS=(--network none); NET_ARGS=(--network "container:$PG_NAME") ;;' in text
+    assert text.count('"${PG_NET_ARGS[@]}"') == 1
     assert 'intranet-sim.sh" up --name "$GATEWAY"' in text
     assert 'intranet-sim.sh" check "$NAME"' in text
     assert 'intranet-sim.sh" down --name "$GATEWAY"' in text
@@ -944,7 +952,7 @@ def test_one_click_builder_supports_both_architectures() -> None:
     assert "--repack" in text
 
 
-def _fake_payload(tmp_path: Path, *, with_bundle: bool = False, core_version: str = "v2026.9.14") -> Path:
+def _fake_payload(tmp_path: Path, *, core_version: str = "v2026.9.14") -> Path:
     payload = tmp_path / "payload"
     (payload / "installer").mkdir(parents=True)
     for name in INSTALLER_FILES:
@@ -961,10 +969,6 @@ def _fake_payload(tmp_path: Path, *, with_bundle: bool = False, core_version: st
     python_dir.mkdir(parents=True)
     os.symlink(sys.executable, python_dir / "python3")
     (payload / "flocks").mkdir()
-    if with_bundle:
-        (payload / "bundle" / "wheels").mkdir(parents=True)
-        (payload / "bundle" / "wheels" / "flockspro-2026.8.12-py3-none-any.whl").write_bytes(b"new-wheel")
-        (payload / "bundle" / "manifest.json").write_text("{}", encoding="utf-8")
     (payload / "versions.json").write_text(
         json.dumps(
             {
@@ -972,8 +976,6 @@ def _fake_payload(tmp_path: Path, *, with_bundle: bool = False, core_version: st
                 "core_version": core_version,
                 "arch": os.uname().machine,
                 "install_root": str(tmp_path / "opt-flocks"),
-                "update_channel": "flockspro-offline-2026.9.14",
-                "pro_bundle": with_bundle,
             }
         ),
         encoding="utf-8",
@@ -981,33 +983,14 @@ def _fake_payload(tmp_path: Path, *, with_bundle: bool = False, core_version: st
     return payload
 
 
-def _fake_activated_install(tmp_path: Path, *, old_bundle_core: str | None = "v2026.9.14", wheel_sha_ok: bool = True) -> Path:
-    """An existing /opt/flocks with an activated Pro marker and (optionally) its bundle."""
-    import hashlib
-
+def _fake_existing_install(tmp_path: Path) -> Path:
+    """An existing /opt/flocks with its data home."""
     install_root = tmp_path / "opt-flocks"
     (install_root / "flocks").mkdir(parents=True)
     (install_root / "flocks" / "pyproject.toml").write_text('[project]\nname = "flocks"\n', encoding="utf-8")
     data_home = tmp_path / "data-home"
     (data_home / ".flocks" / "run").mkdir(parents=True)
-    (data_home / ".flocks" / "run" / "pro-bundle-installed.json").write_text('{"bundle_version": "v2026.9.14"}', encoding="utf-8")
-    if old_bundle_core is not None:
-        wheels = install_root / "bundle" / "wheels"
-        wheels.mkdir(parents=True)
-        wheel = wheels / "flockspro-2026.8.12-py3-none-any.whl"
-        wheel.write_bytes(b"old-wheel")
-        sha = hashlib.sha256(wheel.read_bytes()).hexdigest()
-        (install_root / "bundle" / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "prebuilt": True,
-                    "core_version": old_bundle_core,
-                    "flockspro_wheel": "wheels/flockspro-2026.8.12-py3-none-any.whl",
-                    "bundle_sha256": sha if wheel_sha_ok else "0" * 64,
-                }
-            ),
-            encoding="utf-8",
-        )
+    (data_home / ".flocks" / "config").mkdir(parents=True)
     return data_home
 
 
@@ -1061,65 +1044,127 @@ def _dry_run(
 
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
-def test_installer_refuses_to_drop_activated_pro_without_a_compatible_bundle(tmp_path: Path) -> None:
-    """R2: a new package without Pro must not silently turn an activated instance into OSS."""
-    payload = _fake_payload(tmp_path, with_bundle=False)
-
-    # no previous bundle to carry over (Pro was upgraded online on an open-source package) → refuse
-    # before changing anything, and point at the online upgrade instead of a package with Pro
-    data_home = _fake_activated_install(tmp_path, old_bundle_core=None)
+def test_installer_refuses_an_install_carrying_a_component_it_does_not_ship(tmp_path: Path) -> None:
+    """Replacing the venv would drop a component an earlier package or an online upgrade added."""
+    payload = _fake_payload(tmp_path)
+    data_home = _fake_existing_install(tmp_path)
+    marker = data_home / ".flocks" / "run" / "pro-bundle-installed.json"
+    marker.write_text('{"bundle_version": "v2026.9.14"}', encoding="utf-8")
     result = _dry_run(payload, data_home)
-    assert result.returncode == 1
-    assert "已激活 Flocks Pro" in result.stderr and "本次未做任何改动" in result.stderr
-    assert "在线升级" in result.stderr
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert str(marker) in result.stderr and "本次未做任何改动" in result.stderr
+    assert not (tmp_path / "opt-flocks" / "flocks.bak").exists()
 
-    # same state on an offline (Pro-bundle) install whose bundle went missing: it cannot upgrade online,
-    # so the refusal must point at the matching Pro package instead
-    env_file = tmp_path / "offline.env"
-    env_file.write_text("FLOCKS_DEPLOY_MODE=offline\nFLOCKS_PRO_BUNDLE_DIR=/opt/flocks/bundle\n", encoding="utf-8")
-    result = _dry_run(payload, data_home, env_file=env_file)
-    assert result.returncode == 1
-    assert "带 Pro 组件的配套安装包" in result.stderr and "本次未做任何改动" in result.stderr
-    assert "在线升级" not in result.stderr
-
-    # previous bundle built for another core → refuse
-    shutil.rmtree(tmp_path / "opt-flocks")
-    shutil.rmtree(tmp_path / "data-home")
-    data_home = _fake_activated_install(tmp_path, old_bundle_core="v2026.8.17")
+    # an older package's bundle/ left in the install root, never used: nothing is lost, the install goes on
+    marker.unlink()
+    (tmp_path / "opt-flocks" / "bundle" / "wheels").mkdir(parents=True)
     result = _dry_run(payload, data_home)
-    assert result.returncode == 1
-    assert "与新版本不匹配" in result.stderr
-
-    # previous bundle whose wheel no longer matches its manifest sha256 → refuse
-    shutil.rmtree(tmp_path / "opt-flocks")
-    shutil.rmtree(tmp_path / "data-home")
-    data_home = _fake_activated_install(tmp_path, wheel_sha_ok=False)
-    result = _dry_run(payload, data_home)
-    assert result.returncode == 1
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
-def test_installer_carries_over_compatible_bundle_or_uses_the_new_one(tmp_path: Path) -> None:
-    payload = _fake_payload(tmp_path, with_bundle=False)
-    data_home = _fake_activated_install(tmp_path, old_bundle_core="v2026.9.14")
+def test_installer_refuses_a_supervised_install(tmp_path: Path) -> None:
+    """A supervising process owns that install's upgrades and would start the old program again."""
+    payload = _fake_payload(tmp_path)
+    data_home = _fake_existing_install(tmp_path)
+    descriptor = data_home / ".flocks" / "config" / "deployment.json"
+    descriptor.write_text('{"mode": "managed", "managed_by": "flockspro-go"}', encoding="utf-8")
     result = _dry_run(payload, data_home)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "carry-over-bundle=1" in result.stdout
-    assert "沿用当前已激活的 Pro bundle" in result.stdout
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert str(descriptor) in result.stderr and "本次未做任何改动" in result.stderr
 
-    # new package ships its own bundle → nothing to carry over
-    shutil.rmtree(tmp_path / "payload")
-    payload = _fake_payload(tmp_path, with_bundle=True)
+    descriptor.write_text('{ "mode" :  "managed" }', encoding="utf-8")
+    assert _dry_run(payload, data_home).returncode == 1, "spacing does not hide the mode"
+
+    for other in ('{"mode": "offline"}', '{"mode": "source"}', "not json"):
+        descriptor.write_text(other, encoding="utf-8")
+        result = _dry_run(payload, data_home)
+        assert result.returncode == 0, f"{other}: {result.stdout}{result.stderr}"
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+@pytest.mark.parametrize(
+    ("descriptor", "managed"),
+    [
+        # read the way the runtime reads it: the top-level "mode", stripped and lower-cased
+        ('{"mode": " Managed "}', True),
+        ('{\n  "mode"\n  :\n  "managed"\n}', True),
+        ('{"mode": "source", "previous": {"mode": "managed"}}', False),
+        ('["mode", "managed"]', False),
+        ('{"mode": 1}', False),
+    ],
+)
+def test_the_managed_guard_reads_the_descriptor_like_the_runtime(tmp_path: Path, descriptor: str, managed: bool) -> None:
+    payload = _fake_payload(tmp_path)
+    data_home = _fake_existing_install(tmp_path)
+    (data_home / ".flocks" / "config" / "deployment.json").write_text(descriptor, encoding="utf-8")
     result = _dry_run(payload, data_home)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "carry-over-bundle=0" in result.stdout
+    assert (result.returncode == 1) == managed, result.stdout + result.stderr
+    if managed:
+        assert "deployment.json" in result.stderr
 
-    # not activated → nothing to check
-    shutil.rmtree(tmp_path / "data-home")
-    (tmp_path / "data-home").mkdir()
-    result = _dry_run(payload, tmp_path / "data-home")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "carry-over-bundle=0" in result.stdout
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+@pytest.mark.parametrize(
+    ("line", "managed"),
+    [
+        ("FLOCKS_DEPLOY_MODE=managed", True),
+        ('FLOCKS_DEPLOY_MODE = " Managed "', True),
+        ("FLOCKS_DEPLOY_MODE=source", False),
+        ("# FLOCKS_DEPLOY_MODE=managed", False),
+        ("export FLOCKS_DEPLOY_MODE=managed", False),  # an export line never reaches the service
+        # the service gets the last assignment
+        ("FLOCKS_DEPLOY_MODE=managed\nFLOCKS_DEPLOY_MODE=source", False),
+        ("FLOCKS_DEPLOY_MODE=source\nFLOCKS_DEPLOY_MODE=managed", True),
+    ],
+)
+def test_the_managed_guard_reads_the_service_environment(tmp_path: Path, line: str, managed: bool) -> None:
+    payload = _fake_payload(tmp_path)
+    data_home = _fake_existing_install(tmp_path)
+    env_file = tmp_path / "flocks.env"
+    env_file.write_text(f"FLOCKS_HOST=0.0.0.0\n{line}\n", encoding="utf-8")
+    result = _dry_run(payload, data_home, env_file=env_file)
+    assert (result.returncode == 1) == managed, result.stdout + result.stderr
+    if managed:
+        assert str(env_file) in result.stderr and "本次未做任何改动" in result.stderr
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_the_build_refuses_a_cache_or_output_inside_the_packed_root(tmp_path: Path) -> None:
+    """The install root is packed whole: a cache or an output inside it would go into the package."""
+    root = tmp_path / "opt-flocks"
+    (root / "cache").mkdir(parents=True)
+    os.symlink(root / "cache", tmp_path / "link-to-cache")
+    script = f"{_bash_function_source(BUILD_SCRIPT, 'inside_dir')}"
+    for child, inside in (
+        (root, True),
+        (root / "cache", True),
+        (root / "not-yet" / "deeper", True),
+        (tmp_path / "link-to-cache", True),
+        (tmp_path / "opt-flocks-cache", False),
+        (tmp_path / "elsewhere", False),
+    ):
+        completed = subprocess.run(
+            [BASH, "-c", f"{script}\ninside_dir '{child}' '{root}'"], capture_output=True, text=True
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert (completed.stdout.strip() == "inside") == inside, child
+    text = BUILD_SCRIPT.read_text(encoding="utf-8")
+    assert text.index('inside_dir "$CACHE_DIR" "$INSTALL_ROOT"') < text.index('mkdir -p "$INSTALL_ROOT/tools"')
+    assert text.index('inside_dir "$OUTPUT_DIR" "$INSTALL_ROOT"') < text.index('mkdir -p "$INSTALL_ROOT/tools"')
+
+
+def test_the_webui_scratch_build_keeps_the_repository_layout() -> None:
+    """The WebUI imports the knowledge-base guides from flocks/knowledgebase/ (?raw) relative to the
+    repository root; a scratch copy of webui/ alone cannot resolve them."""
+    text = BUILD_SCRIPT.read_text(encoding="utf-8")
+    assert 'WEBUI_SCRATCH="$WEBUI_SCRATCH_ROOT/webui"' in text
+    # copied from the exported source: a cache inside the repository cannot copy itself in
+    assert 'tar -C "$INSTALL_ROOT/flocks" -cf -' in text and "--exclude='./.venv'" in text
+    assert 'tar -C "$REPO_ROOT" -cf - --exclude=\'./webui/node_modules\'' not in text
+    guide = REPO_ROOT / "webui" / "src" / "pages" / "Workspace" / "knowledge" / "ConnectionGuideSheet.tsx"
+    for target in re.findall(r"from '(\.\./[^'?]+)\?raw'", guide.read_text(encoding="utf-8")):
+        assert (guide.parent / target).resolve().is_file(), target
 
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
@@ -1194,29 +1239,6 @@ def test_installer_lets_an_older_package_recover_a_failed_online_upgrade(tmp_pat
 
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
-def test_installer_upgrade_mode_follows_the_pro_bundle(tmp_path: Path) -> None:
-    """Open-source package → online upgrades; a Pro bundle on the machine (shipped or kept) → offline."""
-    payload = _fake_payload(tmp_path, with_bundle=False)
-    result = _dry_run(payload)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "upgrade=online" in result.stdout
-
-    shutil.rmtree(payload)
-    payload = _fake_payload(tmp_path, with_bundle=True)
-    result = _dry_run(payload)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "upgrade=offline" in result.stdout
-
-    # open-source package over an activated offline instance: its bundle is carried over, so it stays offline
-    shutil.rmtree(payload)
-    payload = _fake_payload(tmp_path, with_bundle=False)
-    data_home = _fake_activated_install(tmp_path, old_bundle_core="v2026.9.14")
-    result = _dry_run(payload, data_home)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "carry-over-bundle=1" in result.stdout and "upgrade=offline" in result.stdout
-
-
-@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
 def test_installer_dry_run_reads_payload_and_exits_cleanly(tmp_path: Path) -> None:
     """Run install.sh with FLOCKS_OFFLINE_DRY_RUN=1 against a fake payload."""
     payload = tmp_path / "payload"
@@ -1234,8 +1256,6 @@ def test_installer_dry_run_reads_payload_and_exits_cleanly(tmp_path: Path) -> No
                 "core_version": "v2026.9.14",
                 "arch": os.uname().machine,
                 "install_root": str(tmp_path / "opt-flocks"),
-                "update_channel": "flockspro-offline-2026.9.14",
-                "pro_bundle": True,
             }
         ),
         encoding="utf-8",
@@ -1252,8 +1272,7 @@ def test_installer_dry_run_reads_payload_and_exits_cleanly(tmp_path: Path) -> No
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "dry-run" in completed.stdout
-    assert "flockspro-offline-2026.9.14" not in completed.stderr
-    assert "Pro bundle=true" in completed.stdout
+    assert "bundle" not in completed.stdout and "upgrade=" not in completed.stdout
     assert not (tmp_path / "opt-flocks").exists(), "dry-run must not create the install root"
 
 
@@ -1500,17 +1519,6 @@ def test_firewall_rule_covers_every_active_zone_and_is_idempotent(tmp_path: Path
     assert already.get("reloads", 0) == 0
     assert not any(call.startswith("--permanent") and "--add-port" in call for call in already["calls"])
     assert "已在 firewalld 放行" not in already["stdout"]
-
-
-@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
-def test_installer_rejects_a_bundle_dir_without_wheels(tmp_path: Path) -> None:
-    """A package whose bundle/ has no wheels/ is broken; it must not be mistaken for a Pro-less package."""
-    payload = _fake_payload(tmp_path, with_bundle=False)
-    (payload / "bundle").mkdir()
-    (payload / "bundle" / "manifest.json").write_text("{}", encoding="utf-8")
-    completed = _dry_run(payload)
-    assert completed.returncode == 1
-    assert "bundle/ 目录里没有 wheels/" in completed.stderr
 
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
@@ -2189,7 +2197,7 @@ def test_build_script_ships_the_migrate_helper() -> None:
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
 def test_installer_plans_to_bring_over_the_previous_installations_data(tmp_path: Path) -> None:
-    payload = _fake_payload(tmp_path, with_bundle=True)
+    payload = _fake_payload(tmp_path)
     previous = _previous_data(tmp_path / "root-home" / ".flocks")
     result = _dry_run(payload, extra_env={"FLOCKS_OFFLINE_HOME_CANDIDATES": f"{previous}:{tmp_path / 'nobody' / '.flocks'}"})
     assert result.returncode == 0, result.stdout + result.stderr
@@ -2208,7 +2216,7 @@ def test_installer_plans_to_bring_over_the_previous_installations_data(tmp_path:
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
 def test_installer_stops_before_any_change_when_the_previous_data_is_ambiguous(tmp_path: Path) -> None:
-    payload = _fake_payload(tmp_path, with_bundle=True)
+    payload = _fake_payload(tmp_path)
     first = _previous_data(tmp_path / "root" / ".flocks")
     second = _previous_data(tmp_path / "home" / "admin" / ".flocks")
     result = _dry_run(payload, extra_env={"FLOCKS_OFFLINE_HOME_CANDIDATES": f"{first}:{second}"})
@@ -2220,7 +2228,7 @@ def test_installer_stops_before_any_change_when_the_previous_data_is_ambiguous(t
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
 def test_installer_keeps_the_flocks_root_an_existing_install_runs_with(tmp_path: Path) -> None:
-    payload = _fake_payload(tmp_path, with_bundle=True)
+    payload = _fake_payload(tmp_path)
     custom = _previous_data(tmp_path / "data-disk" / ".flocks")
     stray = _previous_data(tmp_path / "root" / ".flocks")
     env_file = tmp_path / "flocks.env"
@@ -2257,21 +2265,28 @@ def test_installer_refuses_to_migrate_data_a_newer_version_already_used(tmp_path
 
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
-def test_installer_treats_migrated_or_relocated_pro_data_as_activated(tmp_path: Path) -> None:
-    payload = _fake_payload(tmp_path, with_bundle=False)
-    # Pro activated in the data about to be migrated, new package without Pro → refuse before changing anything
+def test_installer_checks_migrated_or_relocated_data_for_what_it_cannot_take_over(tmp_path: Path) -> None:
+    payload = _fake_payload(tmp_path)
+    # a component installed in the data about to be migrated → refuse before changing anything
     previous = _previous_data(tmp_path / "root" / ".flocks", pro=True)
     result = _dry_run(payload, extra_env={"FLOCKS_OFFLINE_HOME_CANDIDATES": str(previous)})
     assert result.returncode == 1
-    assert "已激活 Flocks Pro" in result.stderr and "本次未做任何改动" in result.stderr
+    assert str(previous / "run" / "pro-bundle-installed.json") in result.stderr and "本次未做任何改动" in result.stderr
 
-    # Pro activated under a FLOCKS_ROOT moved off /var/lib/flocks/.flocks → the same check applies
+    # the same under a FLOCKS_ROOT moved off /var/lib/flocks/.flocks
     custom = _previous_data(tmp_path / "data-disk" / ".flocks", pro=True)
     env_file = tmp_path / "flocks.env"
     env_file.write_text(f"FLOCKS_ROOT={custom}\n", encoding="utf-8")
     result = _dry_run(payload, extra_env={"FLOCKS_OFFLINE_ENV_FILE": str(env_file)})
     assert result.returncode == 1
-    assert "已激活 Flocks Pro" in result.stderr
+    assert str(custom / "run" / "pro-bundle-installed.json") in result.stderr
+
+    # and a supervised install's data about to be migrated
+    managed = _previous_data(tmp_path / "srv-home" / ".flocks")
+    (managed / "config" / "deployment.json").write_text('{"mode": "managed"}', encoding="utf-8")
+    result = _dry_run(payload, extra_env={"FLOCKS_OFFLINE_HOME_CANDIDATES": str(managed)})
+    assert result.returncode == 1
+    assert str(managed / "config" / "deployment.json") in result.stderr
 
 
 def test_migrate_helper_leaves_the_existing_data_dir_alone_when_the_swap_fails(tmp_path: Path) -> None:
@@ -2430,7 +2445,7 @@ def test_migrate_helper_refuses_an_external_link_that_contains_the_new_data_dir(
 def test_installer_reads_flocks_root_the_way_the_service_gets_it(tmp_path: Path) -> None:
     """An export line never reaches the service (the merge appends FLOCKS_ROOT=, systemd skips export),
     so the installer must not migrate into or chown that directory."""
-    payload = _fake_payload(tmp_path, with_bundle=True)
+    payload = _fake_payload(tmp_path)
     custom = _previous_data(tmp_path / "data-disk" / ".flocks")
     env_file = tmp_path / "flocks.env"
     env_file.write_text(f"export FLOCKS_ROOT={custom}\n", encoding="utf-8")

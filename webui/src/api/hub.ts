@@ -140,6 +140,13 @@ export interface HubCatalogPageResponse {
   facets: HubCatalogFacets;
 }
 
+/** The edition that needs no licence; a suite of any other edition is licensed on its own. */
+export const OPEN_EDITION = 'oss';
+
+/** Whether a suite of *edition* needs a licence to install and open. */
+export const editionNeedsLicence = (edition?: string | null): boolean =>
+  !!edition && edition !== OPEN_EDITION;
+
 export interface HubSceneSuite {
   id: string;
   name: string;
@@ -148,7 +155,8 @@ export interface HubSceneSuite {
   descriptionCn?: string | null;
   version: string;
   installedVersion?: string | null;
-  edition: 'oss' | 'pro';
+  /** `oss` for the open edition; any other edition needs a licence. */
+  edition: string;
   state: HubPluginState;
   workspaceId?: string | null;
   workspaceTitle?: string | null;
@@ -158,13 +166,18 @@ export interface HubSceneSuite {
   workspaceVersion?: string | null;
   workspaceLatestVersion?: string | null;
   /**
-   * A pro-edition suite's own licence (each one is licensed separately);
+   * A licensed-edition suite's own licence (each one is licensed separately);
    * null for an open-edition suite and when no suite licences apply.
    */
   licensed?: boolean | null;
   licenseState?: string | null;
   /** Epoch ms; null when the licence does not expire. */
   licenseExpiresAt?: number | null;
+  /**
+   * A licensed-edition suite this install cannot install: the platform
+   * licence does not grant the edition. Null for an open-edition suite.
+   */
+  editionLocked?: boolean | null;
 }
 
 export interface HubUpdatePlanPage {

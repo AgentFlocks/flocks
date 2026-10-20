@@ -1,4 +1,4 @@
-"""Extension hub roots join the catalog and may replace bundled placeholders."""
+"""Extension hub roots join the catalog and may replace what an earlier root lists."""
 
 import json
 from pathlib import Path
@@ -74,18 +74,18 @@ def extension_root(tmp_path: Path):
     unregister_hub_root(ROOT_NAME)
 
 
-def test_bundled_placeholder_is_used_without_extension():
+def test_the_earlier_listing_is_used_without_another_extension():
     assert _suite_workspace_id("code-audit-workspace") == "code_audit_ui"
     assert all(item.id != "ext_demo_ui" for item in load_index().plugins)
 
 
-def test_extension_replaces_placeholder_and_adds_its_packages(extension_root: Path):
+def test_extension_replaces_an_earlier_listing_and_adds_its_packages(extension_root: Path):
     register_hub_root(ROOT_NAME, extension_root)
 
     by_key = {(item.type, item.id): item for item in load_index().plugins}
     assert by_key[("component", "code-audit-workspace")].version == "2.0.0"
     assert ("webui", "ext_demo_ui") in by_key
-    # The open hub only announces the suite: its pages come with the suite.
+    # The earlier listing only names the suite: its pages come with the suite.
     assert ("webui", "code_audit_ui") not in by_key
 
     assert manifest_path("component", "code-audit-workspace").is_relative_to(extension_root)
@@ -98,7 +98,7 @@ def test_extension_replaces_placeholder_and_adds_its_packages(extension_root: Pa
     assert catalog[("webui", "ext_demo_ui")].edition == "pro"
 
 
-def test_unregistering_restores_the_bundled_catalog(extension_root: Path):
+def test_unregistering_restores_the_earlier_listing(extension_root: Path):
     register_hub_root(ROOT_NAME, extension_root)
     assert unregister_hub_root(ROOT_NAME)
 

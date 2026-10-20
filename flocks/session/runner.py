@@ -106,6 +106,7 @@ from flocks.utils.langfuse import (
     resolve_session_trace_context,
     trace_scope,
 )
+from flocks.session.files import local_file_part_url
 from flocks.session.utils.file_extractor import (
     read_file_part_bytes,
     is_text_extractable_mime,
@@ -647,7 +648,8 @@ class SessionRunner:
 
         text_part = next((part for part in parts if getattr(part, "type", None) == "text"), None)
         if isinstance(text_part, TextPart):
-            text_part.text = error_message
+            # A copy: the cached part stays as it was if writing this fails.
+            text_part = text_part.model_copy(update={"text": error_message})
         else:
             text_part = TextPart(
                 id=Identifier.ascending("part"),
@@ -1457,10 +1459,27 @@ class SessionRunner:
                 "parts": [stored_part.model_dump(mode="json", by_alias=True)],
             }
 
+        from flocks.session.execution_profile import get_session_execution_profile
         from flocks.session.tool_execution import (
             build_session_tool_execution_payload,
             run_tool_execution_lifecycle,
         )
+
+        # The command is the session owner's, so the payload carries the
+        # session's subject -- the same caller its model calls name -- while
+        # entry and workspace stay those of a user-run shell command.
+        try:
+            session_profile = await get_session_execution_profile(session_id) or {}
+        except Exception as exc:
+            # Without a readable profile the command still runs, under the
+            # system caller, exactly as it did before callers existed.
+            log.warn("runner.shell.profile_unavailable", {"session_id": session_id, "error": str(exc)})
+            session_profile = {}
+        shell_subject = {
+            key: session_profile[key]
+            for key in ("subject_id", "subject_type", "owner_user_id", "owner_username")
+            if session_profile.get(key)
+        }
 
         payload = await build_session_tool_execution_payload(
             session_id=session_id,
@@ -1485,6 +1504,7 @@ class SessionRunner:
                 "tool_category": "command",
                 "workspace_dir": cwd,
                 "session_execution_profile": {
+                    **shell_subject,
                     "entry": "session.shell",
                     "workspace_dir": cwd,
                 },
@@ -3423,6 +3443,42 @@ class SessionRunner:
             blocks.append(block)
         return blocks
 
+    async def _restore_session_uploads(self) -> None:
+        """Bring this session's uploads to this instance's disk before reading them.
+
+        A message's files may have been uploaded through another instance;
+        they are read from local paths below.  Costs one listing query and a
+        size check per upload; only files missing here are fetched.
+        """
+        from flocks.session.files import restore_session_uploads
+
+        try:
+            await restore_session_uploads(self.session.id)
+        except Exception as exc:
+            log.warn("runner.uploads.restore_failed", {
+                "session_id": self.session.id,
+                "error_type": type(exc).__name__,
+            })
+
+    async def _restore_channel_media(self, parts_by_message: Dict[str, List[Any]]) -> None:
+        """Bring channel media these messages carry to this instance's disk.
+
+        A channel message may have been received by another instance; its
+        media are read from local paths below.  Only files missing here are
+        looked up.
+        """
+        from flocks.session.files import channel_media_paths, restore_channel_media
+
+        try:
+            paths = channel_media_paths(part for parts in parts_by_message.values() for part in parts)
+            if paths:
+                await restore_channel_media(paths)
+        except Exception as exc:
+            log.warn("runner.channel_media.restore_failed", {
+                "session_id": self.session.id,
+                "error_type": type(exc).__name__,
+            })
+
     async def _to_chat_messages(
         self,
         messages: List[MessageInfo],
@@ -3437,6 +3493,7 @@ class SessionRunner:
         - Format tool results as user messages
         """
         started_at = time.perf_counter()
+        await self._restore_session_uploads()
         chat_messages: List[ChatMessage] = []
         ctx_window_tokens = self._get_context_window_tokens()
         tool_result_refs: List[Dict[str, Any]] = []
@@ -3465,6 +3522,7 @@ class SessionRunner:
         preloaded_parts: List[List[Any]] = []
         message_signatures: List[Tuple[Any, ...]] = []
         parts_by_message = await Message.parts_many(self.session.id, [msg.id for msg in messages])
+        await self._restore_channel_media(parts_by_message)
         for msg in messages:
             parts = parts_by_message.get(msg.id, [])
             preloaded_parts.append(parts)
@@ -3554,7 +3612,7 @@ class SessionRunner:
                             mime = getattr(part, 'mime', '')
                             if mime != 'application/x-directory':
                                 filename = getattr(part, 'filename', 'file')
-                                url = getattr(part, 'url', '')
+                                url = local_file_part_url(self.session.id, part)
                                 # Image bytes only ride on the latest user
                                 # turn — older turns are reduced to a short,
                                 # opaque placeholder. Crucially the placeholder
@@ -4105,6 +4163,11 @@ class SessionRunner:
                 "modelID": self.model_id,
             },
         }
+        # The caller every hook stage of this call sees, derived like the actor
+        # of the tool payloads this response may produce.
+        from flocks.session.caller import session_caller
+
+        llm_hook_metadata.update((await session_caller(self.session.id)).as_metadata())
         llm_before_enabled = False
         llm_after_enabled = False
         legacy_replacements: list[tuple[str, str]] = []

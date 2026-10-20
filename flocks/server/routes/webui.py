@@ -29,14 +29,15 @@ from flocks.contracts.webui.models import (
 )
 from flocks.contracts.webui.store import WebUIPagesStore, webui_contract_page_route
 from flocks.hub.catalog import load_manifest, scene_suite_workspace_owners
-from flocks.license import is_pro_edition_status, license_status
+from flocks.hub.models import OPEN_EDITION, edition_needs_licence
+from flocks.license import is_licensed_edition_status, license_status
 from flocks.hub.suite_license import (
     SuiteOwnershipUnknown,
     clear_page_suite_cache,
     edition_status,
+    is_licensed_suite,
     is_open_edition,
-    is_pro_suite,
-    pro_suite_for_page,
+    licensed_suite_for_page,
     runtime_suite_license,
     shipped_page_owners,
     suite_license,
@@ -171,11 +172,11 @@ def _normalize_import_manifest(extracted_root: Path, page_id: str) -> None:
 
 
 async def _require_suite_license(page_id: str) -> None:
-    """Serve a pro-edition suite's page only while that suite's own licence
+    """Serve a licensed-edition suite's page only while that suite's own licence
     is in force. The built-in checker enforces nothing here; see
     flocks.hub.suite_license."""
     try:
-        suite_id = await asyncio.to_thread(pro_suite_for_page, page_id, _store)
+        suite_id = await asyncio.to_thread(licensed_suite_for_page, page_id, _store)
     except SuiteOwnershipUnknown as exc:
         if is_open_edition(await edition_status()):
             return
@@ -199,18 +200,18 @@ async def _require_suite_license(page_id: str) -> None:
     )
 
 
-def _maybe_pro_suite(suite_id: Optional[str]) -> bool:
+def _maybe_licensed_suite(suite_id: Optional[str]) -> bool:
     """For listings: a suite whose edition cannot be read counts as one that
     needs its own licence, so it stays hidden unless the checker says it is
     licensed. (Page access itself is decided by _require_suite_license.)"""
     try:
-        return is_pro_suite(suite_id)
+        return is_licensed_suite(suite_id)
     except SuiteOwnershipUnknown:
         return bool(suite_id)
 
 
-async def _pro_suite_verdicts(suite_ids: set[str]) -> dict[str, bool]:
-    """Licence verdicts for the given pro-edition suites; empty when nothing is enforced."""
+async def _licensed_suite_verdicts(suite_ids: set[str]) -> dict[str, bool]:
+    """Licence verdicts for the given licensed-edition suites; empty when nothing is enforced."""
     if not suite_ids or is_open_edition(await edition_status()):
         return {}
     ordered = sorted(suite_ids)
@@ -225,7 +226,7 @@ async def list_webui_pages(enabled_only: bool = Query(False, alias="enabledOnly"
         workspace_owners = {
             workspace_id: suite_id
             for workspace_id, suite_id in scene_suite_workspace_owners().items()
-            if _maybe_pro_suite(suite_id)
+            if _maybe_licensed_suite(suite_id)
         }
         try:
             # By page id first, as for serving: a suite page copied or
@@ -242,7 +243,7 @@ async def list_webui_pages(enabled_only: bool = Query(False, alias="enabledOnly"
         return pages, owners
 
     pages, owners = await asyncio.to_thread(load)
-    licensed = await _pro_suite_verdicts(set(owners.values()))
+    licensed = await _licensed_suite_verdicts(set(owners.values()))
     # A suite that is not licensed has no pages to offer anywhere.
     return [page for page in pages if licensed.get(owners.get(page.id, ""), True)]
 
@@ -250,22 +251,25 @@ async def list_webui_pages(enabled_only: bool = Query(False, alias="enabledOnly"
 @router.get("/contracts/webui/workspaces", response_model=list[WebUIWorkspaceListItem])
 async def list_webui_workspaces(enabled_only: bool = Query(False, alias="enabledOnly")):
     try:
-        pro_active = is_pro_edition_status(await license_status())
+        edition_active = is_licensed_edition_status(await license_status())
     except Exception as exc:
         log.warning("webui.workspaces.license_status_failed", {"error": str(exc)})
-        pro_active = False
+        edition_active = False
 
     # Directory scans plus the hub catalog signature: keep them off the event loop.
     def load() -> tuple[list[WebUIWorkspaceListItem], set[str]]:
-        workspaces = _attach_scene_suites(_store.list_workspaces(enabled_only=enabled_only), pro_active=pro_active)
-        if not pro_active:
+        workspaces = _attach_scene_suites(
+            _store.list_workspaces(enabled_only=enabled_only), edition_active=edition_active
+        )
+        if not edition_active:
             return workspaces, set()
-        return workspaces, {w.suiteId for w in workspaces if w.suiteId and _maybe_pro_suite(w.suiteId)}
+        return workspaces, {w.suiteId for w in workspaces if w.suiteId and _maybe_licensed_suite(w.suiteId)}
 
-    workspaces, pro_suites = await asyncio.to_thread(load)
-    # Under Pro each pro-edition suite needs its own licence as well; one
-    # without it is locked like any Pro scene without Pro.
-    licensed = await _pro_suite_verdicts(pro_suites)
+    workspaces, licensed_suites = await asyncio.to_thread(load)
+    # With the edition granted each licensed-edition suite needs its own
+    # licence as well; one without it is locked like a scene of an edition
+    # that is not granted.
+    licensed = await _licensed_suite_verdicts(licensed_suites)
     result = []
     for workspace in workspaces:
         verdict = licensed.get(workspace.suiteId or "")
@@ -281,19 +285,19 @@ async def list_webui_workspaces(enabled_only: bool = Query(False, alias="enabled
 
 def _suite_edition(suite_id: str) -> str:
     try:
-        return getattr(load_manifest("component", suite_id), "edition", "oss")
+        return getattr(load_manifest("component", suite_id), "edition", OPEN_EDITION)
     except Exception:
-        return "oss"
+        return OPEN_EDITION
 
 
 def _attach_scene_suites(
     workspaces: list[WebUIWorkspaceListItem],
     *,
-    pro_active: bool = False,
+    edition_active: bool = False,
 ) -> list[WebUIWorkspaceListItem]:
     """Tag each workspace with the scene suite that ships it and drop
     user-root scene workspaces no suite knows about. A workspace whose suite
-    needs Pro is marked locked while no Pro license is active.
+    is of a licensed edition is marked locked while no licence grants it.
 
     Scenes reach the user root (~/.flocks/plugins/contracts/webui) only through
     the suite manager, so a ``sceneWorkspace`` directory there without a suite
@@ -317,7 +321,7 @@ def _attach_scene_suites(
                 _hidden_scene_workspaces_logged.add(workspace.id)
                 log.info("webui.workspaces.unmanaged_scene_hidden", {"workspaceId": workspace.id})
             continue
-        locked = bool(suite_id) and not pro_active and _suite_edition(suite_id) == "pro"
+        locked = bool(suite_id) and not edition_active and edition_needs_licence(_suite_edition(suite_id))
         result.append(workspace.model_copy(update={"suiteId": suite_id, "locked": locked}))
     return result
 
@@ -508,6 +512,116 @@ async def reload_webui_page_api(page_id: str, _admin: object = Depends(require_a
     routes = await _api_runtime.reload_page(page_id)
     await publish_event("contracts.webui.pages.api_changed", {"id": page_id, "routes": routes})
     return {"routes": routes}
+
+
+class WebUIPageApprovalRequest(BaseModel):
+    """An administrator's approval of a page's server code, as reviewed."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    #: The digest of the code the administrator reviewed (from the GET); a
+    #: different one means the code changed since, and nothing is approved.
+    code_sha256: str = Field(alias="codeSha256", min_length=64, max_length=64)
+    #: secret id -> roles it may be read for ("admin", "member")
+    secrets: dict[str, list[str]] = Field(default_factory=dict)
+    handlers_enabled: bool = Field(default=False, alias="handlersEnabled")
+
+
+def _declared_page_secrets(page_id: str) -> list[str]:
+    """The secrets routes.yaml declares, read without running any page code."""
+    import yaml
+
+    routes_path = _store.routes_path(page_id)
+    if not routes_path.is_file():
+        return []
+    try:
+        raw = yaml.safe_load(routes_path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid routes.yaml: {exc}") from exc
+    declared = raw.get("secrets", []) if isinstance(raw, dict) else []
+    if not isinstance(declared, list):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="routes.yaml secrets must be a list of secret ids")
+    return sorted({item.strip() for item in declared if isinstance(item, str) and item.strip()})
+
+
+async def _page_approval_state(page_id: str) -> dict:
+    from flocks.contracts.webui.approvals import api_code_digest, get_approval
+    from flocks.updater.deploy import declared_managed
+
+    api_dir = _store.routes_path(page_id).parent
+    if not api_dir.is_dir():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="page api is not configured")
+    digest = await asyncio.to_thread(api_code_digest, api_dir)
+    approval = await get_approval(page_id)
+    return {
+        "pageId": page_id,
+        "codeSha256": digest,
+        "declaredSecrets": _declared_page_secrets(page_id),
+        "approval": approval.to_dict() if approval else None,
+        "approvalCurrent": bool(approval and approval.code_sha256 == digest),
+        "managed": declared_managed(),
+    }
+
+
+@router.get("/contracts/webui/pages/{page_id}/api-approval")
+async def get_webui_page_api_approval(page_id: str, _admin: object = Depends(require_admin)):
+    """What an administrator reviews: the code's digest, the secrets it asks for, any approval."""
+    page_id = _page_id_or_400(page_id)
+    return await _page_approval_state(page_id)
+
+
+@router.put("/contracts/webui/pages/{page_id}/api-approval")
+async def approve_webui_page_api(
+    page_id: str,
+    req: WebUIPageApprovalRequest,
+    request: Request,
+    _admin: object = Depends(require_admin),
+):
+    from flocks.contracts.webui.approvals import ROLES, set_approval
+
+    page_id = _page_id_or_400(page_id)
+    state = await _page_approval_state(page_id)
+    if req.code_sha256 != state["codeSha256"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="the page's server code changed since it was reviewed; review it again",
+        )
+    undeclared = sorted(set(req.secrets) - set(state["declaredSecrets"]))
+    if undeclared:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"the page does not declare these secrets: {', '.join(undeclared)}",
+        )
+    unknown_roles = sorted({role for roles in req.secrets.values() for role in roles} - set(ROLES))
+    if unknown_roles:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"unknown roles: {', '.join(unknown_roles)}")
+    admin = require_user(request)
+    approved_by = str(getattr(admin, "username", None) or getattr(admin, "id", None) or "admin")
+    approval = await set_approval(
+        page_id,
+        code_sha256=req.code_sha256,
+        secret_roles=req.secrets,  # secret-guard: allow 误报：字段名，值是角色列表
+        handlers_enabled=req.handlers_enabled,
+        approved_by=approved_by,
+    )
+    _api_runtime.clear_page(page_id)
+    log.info(
+        "webui_pages.api.approved",
+        {"pageId": page_id, "by": approved_by, "codeSha256": req.code_sha256,
+         "secrets": sorted(req.secrets), "handlersEnabled": req.handlers_enabled},
+    )
+    return {**state, "approval": approval.to_dict(), "approvalCurrent": True}
+
+
+@router.delete("/contracts/webui/pages/{page_id}/api-approval")
+async def revoke_webui_page_api_approval(page_id: str, _admin: object = Depends(require_admin)):
+    from flocks.contracts.webui.approvals import revoke_approval
+
+    page_id = _page_id_or_400(page_id)
+    revoked = await revoke_approval(page_id)
+    _api_runtime.clear_page(page_id)
+    log.info("webui_pages.api.approval_revoked", {"pageId": page_id, "revoked": revoked})
+    return {"revoked": revoked}
 
 
 @router.api_route(

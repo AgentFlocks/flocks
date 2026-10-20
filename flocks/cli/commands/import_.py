@@ -91,6 +91,36 @@ def _normalize_tool_state(
     return normalized
 
 
+async def _adopt_part_upload(part: Any, session_id: str) -> Any:
+    """A normalized file part of an imported copy, pointing at the copy's own upload.
+
+    Any session upload on this machine counts, not only the exported
+    session's: an older fork points at its ancestor's.  A legacy part's
+    ``metadata.url`` names the same file and moves with it.
+    """
+    if not isinstance(part, dict) or part.get("type") != "file" or not part.get("url"):
+        return part
+    from flocks.session.files import adopt_session_upload
+
+    adopted = dict(part)
+    adopted["url"] = await adopt_session_upload(session_id, part["url"])
+    metadata = adopted.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("url") == part["url"]:
+        adopted["metadata"] = {**metadata, "url": adopted["url"]}
+    if "sessionID" in adopted:
+        adopted["sessionID"] = session_id
+    return adopted
+
+
+async def _imported_parts(parts: Any, *, message_time: Any, new_session_id: Optional[str]) -> list:
+    """The parts as stored: normalized first (a legacy part's URL is in its
+    metadata), then, for a copy on this machine, with uploads of its own."""
+    normalized = [_normalize_part_data(part, message_time=message_time) for part in parts]
+    if new_session_id is None:
+        return normalized
+    return [await _adopt_part_upload(part, new_session_id) for part in normalized]
+
+
 def _normalize_part_data(
     part_data: dict[str, Any],
     *,
@@ -354,10 +384,12 @@ async def _import_session(
 
             serialized_messages.append(msg_info)
             if "id" in msg_info:
-                serialized_parts[msg_info["id"]] = [
-                    _normalize_part_data(part, message_time=msg_info.get("time"))
-                    for part in parts
-                ]
+                # A copy of a session on this machine gets its own copies of
+                # the uploads it shows (trimming or deleting the original then
+                # takes nothing from it); elsewhere the files are not here.
+                serialized_parts[msg_info["id"]] = await _imported_parts(
+                    parts, message_time=msg_info.get("time"), new_session_id=session_info["id"] if new_id else None,
+                )
 
             message_count += 1
 
@@ -375,11 +407,31 @@ async def _import_session(
                 row = await db.fetch_one("SELECT 1 FROM runtime_state WHERE key = ?", (session_key,))
                 if row is not None:
                     raise ValueError("Session already exists; use --new-id to import a new session")
+            # The uploads the imported parts name: the same lock and tombstone
+            # check as every other write of parts (an upload being removed is
+            # either seen named here or refuses this import).
+            stored_rows = await db.fetch_all(
+                "SELECT value FROM runtime_state WHERE key = ANY(?::text[])",
+                ([f"message_parts:{session_id}:{message_id}" for message_id in serialized_parts],),
+            )
+            stored = [
+                part for row in stored_rows
+                for part in (json.loads(row[0]) if isinstance(row[0], str) else (row[0] or []))
+            ]
+            await guard_new_upload_references(
+                db, stored, [part for parts in serialized_parts.values() for part in parts],
+            )
 
         async def update_message_projection(db):
             await replace_metadata(db, session_id, serialized_messages)
             await bump_revision(db, session_id)
 
+        from flocks.session.message import _named_uploads, guard_new_upload_references
+
+        if any(_named_uploads(parts) for parts in serialized_parts.values()):
+            from flocks.storage.file_mirror import FileMirror
+
+            await FileMirror._pool()  # the tombstone table, created outside the import's transaction
         await Storage.mutate_many(
             set_entries=[
                 (session_key, session_info, "session"),

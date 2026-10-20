@@ -274,14 +274,26 @@ class MemoryManager:
         )
 
     def _resolve_embedding_provider(self) -> Optional[str]:
-        """Resolve the requested embedding Provider from configured credentials."""
+        """Resolve the requested embedding Provider from configured credentials.
+
+        ``local`` (the default) only takes a provider whose endpoint is on this
+        host or a private network; an external service is used only when asked
+        for by name or with ``auto``.
+        """
         if not self._embedding_enabled:
             return None
-        candidates = (
-            _EMBEDDING_PROVIDER_ORDER
-            if self._requested_provider == "auto"
-            else (self._requested_provider,)
-        )
+        if self._requested_provider == "local":
+            from flocks.memory.embedding import is_local_provider
+            from flocks.provider.provider import Provider
+
+            candidates = tuple(
+                provider_id for provider_id in sorted(Provider.list_providers())
+                if is_local_provider(provider_id)
+            )
+        elif self._requested_provider == "auto":
+            candidates = _EMBEDDING_PROVIDER_ORDER
+        else:
+            candidates = (self._requested_provider,)
         return next(
             (
                 provider_id
@@ -564,6 +576,11 @@ class MemoryManager:
         data_dir = Config.get_data_path()
         memory_root = data_dir / "memory"
         file_path = _safe_resolve_memory_path(memory_root, rel_path)
+        if file_path.suffix.lower() == ".md":
+            from flocks.memory.sync.mirror import reconcile_note
+
+            # The shared copy, in case another instance wrote it last.
+            await reconcile_note(memory_root, file_path)
         
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {rel_path}")
@@ -614,6 +631,14 @@ class MemoryManager:
         
         coordinator = self._index_coordinator or self._coordinator_for_active_db()
         async with coordinator.write_lock:
+            from flocks.memory.sync.mirror import MemoryNotShared, reconcile_note
+
+            # The note as stored (another instance may have written it last),
+            # then this write, then the stored copy brought up to date.  A
+            # write on a copy that could not be brought up to date would end
+            # up beside the note as a conflict copy: nothing is written then.
+            if not await reconcile_note(memory_root, file_path, attempts=3):
+                raise MemoryNotShared(f"{path}: the shared memory store is unavailable; nothing was written")
             if append:
                 needs_separator = file_path.exists() and file_path.stat().st_size > 0
                 with open(file_path, "a", encoding="utf-8") as f:
@@ -623,6 +648,10 @@ class MemoryManager:
             else:
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
+            if not await reconcile_note(memory_root, file_path, attempts=3):
+                # Kept here, and shared once the store takes it -- unless this
+                # instance goes first: not reported as a write that worked.
+                raise MemoryNotShared(f"{path} was saved on this instance only; the shared memory store did not take it")
         log.info("manager.write", {"path": path, "append": append, "length": len(content)})
         
         return path

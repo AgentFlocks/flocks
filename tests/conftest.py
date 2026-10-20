@@ -212,6 +212,46 @@ async def _cleanup_runtime_singletons_after_test():
 
 
 @pytest.fixture(autouse=True)
+def _reset_log_retention_handover():
+    """Give the logger its own cleanup back after every test.
+
+    Starting the CLI or the server hands log cleanup to data retention for the
+    rest of the process (``preload_log_retention``); a test that does so would
+    otherwise leave later tests' loggers deleting nothing, whatever they expect.
+    """
+    yield
+    from flocks.utils.log import set_log_cleanup_managed, set_log_retention_days_override
+
+    set_log_cleanup_managed(False)
+    set_log_retention_days_override(None)
+
+
+@pytest.fixture(autouse=True)
+def _restore_log_output():
+    """Give the logger its output back after every test.
+
+    Invoking a CLI command initialises logging to the day's file
+    (``Log.init(print=False)``); left that way, every later test's log lines
+    go to that file and a test reading them from stderr sees nothing.
+    """
+    from flocks.utils.log import Log
+
+    fields = ("_writer", "_error_writer", "_log_file", "_log_dir_path", "_log_date", "_level")
+    before = {name: getattr(Log, name, None) for name in fields}
+    yield
+    with Log._state_lock:
+        for name in ("_writer", "_error_writer"):
+            current = getattr(Log, name, None)
+            if current is not None and current is not before[name]:
+                try:
+                    current.close()
+                except Exception:
+                    pass
+        for name, value in before.items():
+            setattr(Log, name, value)
+
+
+@pytest.fixture(autouse=True)
 def _default_source_deploy_mode(monkeypatch):
     """Run the updater as a plain source install unless a test opts into another mode.
 
@@ -272,3 +312,22 @@ def _isolate_outbound_proxy_from_shell(monkeypatch):
     yield
     proxy_mod.set_proxy_settings_override(None)
     proxy_mod._drop_cache()
+
+
+@pytest.fixture()
+def announced_suites():
+    """List two licensed-edition scene suites the way an extension does.
+
+    The bundled hub lists open-edition plugins only; an extension that
+    licenses suites lists them from a hub root of its own
+    (``tests/fixtures/licensed_suites_hub``), with the contents delivered
+    sealed (see tests.sealed_fakes).
+    """
+    from flocks.extensions import register_hub_root, unregister_hub_root
+
+    root = Path(__file__).parent / "fixtures" / "licensed_suites_hub"
+    register_hub_root("tests-licensed-suites", root)
+    try:
+        yield root
+    finally:
+        unregister_hub_root("tests-licensed-suites")

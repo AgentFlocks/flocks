@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
 import binascii
 import hashlib
 import json
@@ -18,7 +20,10 @@ from typing import Any, Iterable
 
 from flocks.config.config import Config
 from flocks.session.utils.file_extractor import file_url_to_path
+from flocks.utils.log import Log
 from flocks.workspace.manager import WorkspaceManager, WorkspaceOutputScope
+
+_log = Log.create(service="session.files")
 
 
 _CONTEXT_FOLDERS_METADATA_KEY = "contextFolders"
@@ -243,6 +248,313 @@ def remove_session_uploads(session_id: str) -> bool:
     return True
 
 
+# Uploads are kept in PostgreSQL as well (``file_mirror``, area ``uploads``),
+# so any instance can serve and read them; the directories above are this
+# instance's cache.  Uploads are written once and never changed in place, so
+# a local file of the stored size is taken to be the stored file.
+
+def uploads_mirror():
+    from flocks.storage.file_mirror import FileMirror
+
+    return FileMirror("uploads", (Config.get_data_path() / "uploads").resolve())
+
+
+def _uploads_relative(path: Path) -> str:
+    return uploads_mirror().relative(path)
+
+
+async def store_upload(path: Path) -> bool:
+    """Keep an upload that just landed on this instance's disk.
+
+    Returns whether it is shared; one over the size the database keeps
+    (flocks.storage.file_mirror.max_bytes) stays on this instance only.
+    """
+    from flocks.storage.file_mirror import FileTooLargeToShare
+
+    try:
+        await uploads_mirror().put(path)
+    except FileTooLargeToShare as exc:
+        _log.warning("session.uploads.kept_local_only", {"reason": str(exc)})
+        return False
+    return True
+
+
+# Channel media (images and files an IM channel delivered) lives under the data
+# directory's ``channel_media`` tree and is served through the guarded file
+# download route; it is kept in the database as well (area ``channel_media``)
+# so another instance can read and serve it too.
+
+def channel_media_mirror():
+    from flocks.storage.file_mirror import FileMirror
+
+    return FileMirror("channel_media", (Config.get_data_path() / "channel_media").resolve())
+
+
+def _within_channel_media(path: Path) -> bool:
+    try:
+        channel_media_mirror().relative(path)
+    except ValueError:
+        return False
+    return True
+
+
+def local_channel_media_path(target: Path) -> Path | None:
+    """Channel media named by any instance's path, as this instance's.
+
+    A file part's URL holds the path on the instance that received the media
+    (``<data>/channel_media/<channel>/<account>/<file>``).  Another instance --
+    or this one after its data directory moved -- finds the same file by its
+    place under its own ``channel_media`` directory.  None for anything else.
+    """
+    root = channel_media_mirror().root.resolve(strict=False)
+    target = Path(target)
+    if _is_within(root, target):
+        return target if target != root else None
+    parts = target.parts
+    if "channel_media" not in parts:
+        return None
+    rest = parts[parts.index("channel_media") + 1:]
+    if not rest or any(part in {"", ".", ".."} for part in rest):
+        return None
+    local = root.joinpath(*rest).resolve(strict=False)
+    return local if local != root and _is_within(root, local) else None
+
+
+async def store_channel_media(path: Path) -> bool:
+    """Keep channel media that just landed on this instance's disk; whether it is shared."""
+    from flocks.storage.file_mirror import FileTooLargeToShare
+
+    if not _within_channel_media(path):
+        return False
+    try:
+        await channel_media_mirror().put(path)
+    except FileTooLargeToShare as exc:
+        _log.warning("channel.media.kept_local_only", {"reason": str(exc)})
+        return False
+    return True
+
+
+async def restore_channel_media(paths: Iterable[Path]) -> int:
+    """Bring channel media this instance does not have from the database.
+
+    Only files missing here are looked up: channel media is written once.
+    """
+    restored = 0
+    mirror = channel_media_mirror()
+    for path in paths:
+        if path.exists() or not _within_channel_media(path):
+            continue
+        try:
+            if await mirror.restore(path, trust_size=True):
+                restored += 1
+        except ValueError:
+            continue
+    return restored
+
+
+def channel_media_paths(parts: Iterable[Any]) -> list[Path]:
+    """The channel media file parts point at, as this instance's paths."""
+    found: list[Path] = []
+    for part in parts:
+        if getattr(part, "type", None) != "file":
+            continue
+        target = _file_uri_path(str(getattr(part, "url", "") or ""))
+        local = local_channel_media_path(target) if target is not None else None
+        if local is not None:
+            found.append(local)
+    return found
+
+
+def upload_session_of(url: str) -> str | None:
+    """The session whose upload *url* names (``.../uploads/<session>/<name>``), wherever it was stored."""
+    target = _file_uri_path(str(url or ""))
+    if target is None or target.parent.parent.name != "uploads":
+        return None
+    session_id = target.parent.name
+    if not session_id or session_id == "staging":
+        return None
+    try:
+        session_uploads_dir(session_id)
+    except ValueError:
+        return None
+    return session_id
+
+
+def upload_relative_of(url: Any) -> str | None:
+    """The stored path (``<session>/<name>``) of the session upload *url* names, on this instance."""
+    from types import SimpleNamespace
+
+    session_id = upload_session_of(str(url or ""))
+    if session_id is None:
+        return None
+    path = session_upload_part_path(session_id, SimpleNamespace(url=url))
+    if path is None:
+        return None
+    try:
+        return uploads_mirror().relative(path)
+    except ValueError:
+        return None
+
+
+async def adopt_session_upload(owner_session_id: str, url: str) -> str:
+    """Give *owner_session_id* its own copy of the session upload *url* names.
+
+    Returns the copy's URL.  A fork or an imported copy of a session points at
+    files of its own -- also where the session it came from pointed at another
+    session's upload (a fork made before forks had copies) -- so trimming or
+    deleting any of them takes nothing it still shows.  Anything that is not a
+    session upload, or is on no disk here and not in the shared store, keeps
+    its URL.
+    """
+    from types import SimpleNamespace
+
+    source_session_id = upload_session_of(url)
+    if source_session_id is None or owner_session_id == source_session_id:
+        return url
+    source = session_upload_part_path(source_session_id, SimpleNamespace(url=url))
+    if source is None:
+        return url
+    if not source.is_file():
+        await restore_upload(source)
+    if not source.is_file():
+        return url
+    destination_root = session_uploads_dir(owner_session_id)
+    destination = destination_root / source.name
+    if not destination.is_file():
+        def copy() -> None:
+            destination_root.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+
+        await asyncio.to_thread(copy)
+    try:
+        await store_upload(destination)
+    except Exception as exc:
+        _log.warning("session.upload.adopt_store_failed", {"error_type": type(exc).__name__})
+    return destination.resolve().as_uri()
+
+
+async def restore_upload(path: Path) -> bool:
+    """Make sure the upload at *path* is on this instance's disk."""
+
+    try:
+        return await uploads_mirror().restore(path, trust_size=True)
+    except ValueError:
+        return False
+
+
+async def restore_session_uploads(session_id: str) -> int:
+    """Bring every stored upload of a session to this instance's disk."""
+
+    mirror = uploads_mirror()
+    return await mirror.restore_tree(f"{_uploads_relative(session_uploads_dir(session_id))}/", trust_size=True)
+
+
+async def restore_chat_upload_source(session_id: str, owner_id: str, upload_id: str) -> None:
+    """Fetch a chat upload that another instance staged or bound.
+
+    An upload discarded through another instance is refused, even while
+    this instance's cache still holds its file.
+    """
+
+    safe_id = _safe_upload_id(upload_id)
+    mirror = uploads_mirror()
+    staged = f"{_uploads_relative(chat_upload_staging_root(owner_id) / safe_id)}/"
+    bound = f"{_uploads_relative(session_uploads_dir(session_id))}/{safe_id}."
+    staged_rows = await mirror.listing(staged, tombstones=True)
+    bound_rows = await mirror.listing(bound)
+    if staged_rows and all(row.deleted for row in staged_rows.values()) and not bound_rows:
+        raise FileNotFoundError("Chat upload was discarded")
+    await mirror.restore_tree(staged, trust_size=True)
+    await mirror.restore_tree(bound, trust_size=True)
+
+
+async def move_stored_upload(source: Path, destination: Path) -> None:
+    await uploads_mirror().move(source, destination)
+
+
+async def forget_session_uploads(session_id: str) -> int:
+    return await uploads_mirror().forget_tree(f"{_uploads_relative(session_uploads_dir(session_id))}/")
+
+
+async def session_upload_candidates(session_ids: Iterable[str]) -> dict[str, list[str]]:
+    """Every upload of these sessions (stored or only on this disk), by session.
+
+    Read before the sessions are deleted: the delete records them as
+    candidates in its own transaction (flocks.session.message.UploadSweep), so
+    none is left behind without a record if anything fails later.
+    """
+    mirror = uploads_mirror()
+    found: dict[str, list[str]] = {}
+    for session_id in session_ids:
+        root = session_uploads_dir(session_id)
+        relatives = set(await mirror.listing(f"{_uploads_relative(root)}/"))
+        if root.is_dir():
+            relatives |= {mirror.relative(path) for path in root.rglob("*") if path.is_file()}
+        if relatives:
+            found[session_id] = sorted(relatives)
+    return found
+
+
+async def sweep_deleted_session_uploads(session_ids: Iterable[str]) -> int:
+    """After the delete: their uploads go -- except ones another session still names.
+
+    A copy imported before copies had uploads of their own points at the
+    original's files: those stay candidates until nothing names them.
+    Returns how many went.
+    """
+    from flocks.session.message import UploadSweep
+
+    session_ids = list(session_ids)
+    if not session_ids:
+        return 0
+    removed = await UploadSweep(sessions=session_ids).run()
+    for session_id in session_ids:
+        _remove_empty_dirs(session_uploads_dir(session_id))
+    return removed
+
+
+def _remove_empty_dirs(root: Path) -> None:
+    """Remove *root* and the directories under it that hold no file any more."""
+    if not root.is_dir():
+        return
+    for directory in sorted((path for path in root.rglob("*") if path.is_dir()), key=lambda path: len(path.parts), reverse=True):
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+    with contextlib.suppress(OSError):
+        root.rmdir()
+
+
+async def discard_staged_chat_upload(owner_id: str, upload_id: str) -> bool:
+    """Delete one unbound staged upload here and in the store."""
+
+    safe_id = _safe_upload_id(upload_id)
+    staged = chat_upload_staging_root(owner_id) / safe_id
+    mirror = uploads_mirror()
+    # Staged on another instance: bring it here first, so the queue check and
+    # the removal below see the same upload this instance would bind.
+    await mirror.restore_tree(f"{_uploads_relative(staged)}/", trust_size=True)
+    if not remove_staged_chat_upload(owner_id, safe_id):
+        return False
+    await mirror.forget_tree(f"{_uploads_relative(staged)}/")
+    return True
+
+
+async def discard_staged_chat_uploads_from_parts(owner_id: str, parts: Iterable[dict[str, Any]]) -> int:
+    """Delete staged uploads referenced by queued prompt parts, here and in the store."""
+
+    removed = 0
+    for part in parts:
+        upload_id = str(part.get("uploadID") or "").strip()
+        if not upload_id:
+            continue
+        try:
+            if await discard_staged_chat_upload(owner_id, upload_id):
+                removed += 1
+        except ValueError:
+            continue
+    return removed
+
+
 def _file_uri_path(url: str) -> Path | None:
     if not str(url or "").startswith("file:"):
         return None
@@ -353,6 +665,11 @@ def session_upload_part_path(session_id: str, part: Any) -> Path | None:
     resources. Channel media (WeCom / Feishu / DingTalk ... inbound images) is
     saved under the data directory's ``channel_media`` tree and is served
     through the guarded ``/api/file/download`` path instead, so it yields None.
+
+    The URL holds the absolute path on the instance that stored the upload.
+    Another instance -- or this one after its data directory moved -- finds
+    the same file by its place in this Session's uploads directory
+    (``.../uploads/<session>/<name>``); only a file of this Session qualifies.
     """
     target = _file_uri_path(str(getattr(part, "url", "") or ""))
     if target is None:
@@ -361,7 +678,29 @@ def session_upload_part_path(session_id: str, part: Any) -> Path | None:
         upload_root = session_uploads_dir(session_id).resolve(strict=False)
     except ValueError:
         return None
-    return target if _is_within(upload_root, target) else None
+    if _is_within(upload_root, target):
+        return target
+    if target.parent.name == session_id and target.parent.parent.name == "uploads":
+        local = (upload_root / target.name).resolve(strict=False)
+        if local != upload_root and _is_within(upload_root, local):
+            return local
+    return None
+
+
+def local_file_part_url(session_id: str, part: Any) -> str:
+    """The part's file URL as this instance reads it.
+
+    The session's own uploads (``session_upload_part_path``) and channel
+    media (``local_channel_media_path``) are found under this instance's data
+    directory, wherever the URL says they were written.
+    """
+
+    url = str(getattr(part, "url", "") or "")
+    local = session_upload_part_path(session_id, part)
+    if local is None:
+        target = _file_uri_path(url)
+        local = local_channel_media_path(target) if target is not None else None
+    return local.as_uri() if local is not None else url
 
 
 def _attachment_source_path(
@@ -830,6 +1169,11 @@ async def build_session_context(
     messages, has_more, next_before = await _messages_with_parts(
         str(session.id), before=before, limit=limit,
     )
+    # Uploads stored through another instance, so their state below is real.
+    try:
+        await restore_session_uploads(str(session.id))
+    except Exception as exc:
+        _log.warning("session.uploads.restore_failed", {"session_id": str(session.id), "error_type": type(exc).__name__})
     resources_by_path: dict[tuple[str, Path], ResolvedSessionFile] = {}
     all_parts: list[Any] = []
     for message in messages:
@@ -928,5 +1272,7 @@ async def resolve_session_resource(session: Any, resource_id: str) -> ResolvedSe
 
     for resource in _message_resources(session, message):
         if parse_public_resource_id(resource.resource_id)[1] == part_id:
+            if resource.origin == "user_upload":
+                await restore_upload(resource.path)
             return resource
     raise FileNotFoundError("Session file resource not found")

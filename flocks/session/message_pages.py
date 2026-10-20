@@ -101,8 +101,13 @@ def with_part_ids(parts: list[dict], session_id: str, message_id: str) -> list[d
 async def merge_parts(
     db: Any, session_id: str, message_id: str, *, previous: list[dict],
     incoming: list[dict], legacy: bool, delete: bool = False,
+    guard: Any = None,
 ) -> list[dict]:
-    """Apply this writer's part changes to the latest row under lock_session."""
+    """Apply this writer's part changes to the latest row under lock_session.
+
+    ``guard(db, current, merged)`` sees what is stored and what is about to
+    be written, before anything is written: it may refuse the write.
+    """
     key = f"message_parts:{session_id}"
     row = await db.fetch_one(
         "SELECT COALESCE(item.value, legacy.value -> ?) FROM (SELECT 1) seed "
@@ -131,6 +136,8 @@ async def merge_parts(
         seen.add(pid)
     if not delete:
         merged.extend(item for pid, item in changes.items() if pid not in seen)
+        if guard is not None:
+            await guard(db, current, merged)
     if legacy:
         if delete:
             await db.execute("UPDATE runtime_state SET value = value - ?, updated_at = clock_timestamp() WHERE key = ?",

@@ -17,6 +17,7 @@ from flocks.cli.commands.skill import skill_app
 from flocks.cli.commands.stats import stats_app
 from flocks.cli.commands.task import task_app
 from flocks.cli.commands.admin import admin_app
+from flocks.cli.commands.storage import storage_app
 from flocks.cli.commands.exec import exec_command
 from flocks.cli.commands.workflow import workflow_app
 from flocks.cli.commands.device import device_app
@@ -43,4 +44,5 @@ __all__ = [
     "task_app",
     "skill_app",
     "admin_app",
+    "storage_app",
 ]

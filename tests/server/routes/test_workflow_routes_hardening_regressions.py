@@ -309,7 +309,6 @@ async def test_trigger_api_key_is_write_only_and_survives_round_trip(client: Asy
 @pytest.mark.asyncio
 async def test_webhook_duplicate_delivery_is_not_executed_twice(client: AsyncClient, quiet_trigger_runtime: None, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_workflow("wf-replay", _wf_json())
-    monkeypatch.setattr(workflow_module, "_webhook_deliveries", {})
     assert (await client.post("/api/workflow/wf-replay/triggers", json=WEBHOOK)).status_code == 200
     headers = {"x-api-key": "K123"}
 

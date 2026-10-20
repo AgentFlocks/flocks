@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 from itertools import islice
 import sys
 import threading
 import time
 import uuid
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from flocks.session.recorder import Recorder
 from flocks.utils.log import Log
@@ -613,6 +615,26 @@ def build_initial_execution_record(
     }
 
 
+#: The webhook delivery the next run started in this context is for: a
+#: one-element list, emptied by the run that binds it (see for_webhook_delivery).
+_webhook_delivery: ContextVar[Optional[List[Tuple[str, str]]]] = ContextVar("workflow_webhook_delivery", default=None)
+
+
+@contextmanager
+def for_webhook_delivery(key: str, claim_token: str) -> Iterator[None]:
+    """Runs started inside are for this webhook delivery: the first one binds it.
+
+    The binding is made in the run's start transaction
+    (WorkflowStore.start_execution), so the delivery and the run that handles
+    it are recorded together or not at all.
+    """
+    previous = _webhook_delivery.set([(key, claim_token)])
+    try:
+        yield
+    finally:
+        _webhook_delivery.reset(previous)
+
+
 async def create_execution_record(
     workflow_id: str,
     *,
@@ -637,9 +659,11 @@ async def create_execution_record(
     )
     duration = lease_seconds()
     claimed_at = time.monotonic()
+    pending_delivery = _webhook_delivery.get()
+    delivery = pending_delivery.pop() if pending_delivery else None
     owned = await WorkflowStore.start_execution(
         compact_execution_summary(exec_data), owner_node_id=process_owner_id(),
-        lease_seconds=duration, scope_key=scope_key,
+        lease_seconds=duration, scope_key=scope_key, delivery=delivery,
     )
     start_renewal(owned, duration=duration, claimed_at=claimed_at)
     return owned

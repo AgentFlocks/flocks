@@ -553,6 +553,15 @@ describe('install card', () => {
     );
   });
 
+  it('says a managed install changes REA only with its release, without a retry', () => {
+    api.status.mockResolvedValue(status({ state: 'not_installed', canInstall: true }));
+    renderWithChat(<ReaToolPart part={toolPart('install', {
+      state: 'error', metadata: { phase: 'failed', ok: false, errorCode: 'managed' },
+    })} />);
+    expect(screen.getByTestId('rea-install-card')).toHaveTextContent(zh.error.managed);
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
   it('shows plan mode and permission refusals without a retry', () => {
     api.status.mockResolvedValue(status());
     renderWithChat(<ReaToolPart part={toolPart('install', {

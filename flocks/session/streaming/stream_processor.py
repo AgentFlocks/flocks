@@ -1547,8 +1547,9 @@ class StreamProcessor:
             if not runtime.sandboxed:
                 return result
 
-            # Sandbox tool constraints are Pro-owned policy input.  OSS does
-            # not normalize, merge, or decide against this raw metadata.
+            # Sandbox tool constraints are policy input owned by the policy
+            # extension.  Flocks does not normalize, merge, or decide against
+            # this raw metadata.
             result["extra"]["sandbox_tool_policy"] = runtime.tool_policy_metadata
 
             if self._sandbox_config_cache is None:

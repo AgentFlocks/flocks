@@ -789,6 +789,7 @@
       "plan_mode": "Plan mode cannot install. Switch to Build mode and send the request again.",
       "tasks_running": "Some conversations did not stop; REA was not changed",
       "tasks_unreadable": "A busy conversation could not be read, so it can be neither confirmed nor stopped; REA was not changed. Retry when it finished",
+      "managed": "This is a managed install: REA comes with the deployment's release and cannot be installed from a conversation",
       "unknown": "Unknown cause"
     },
     "card": {

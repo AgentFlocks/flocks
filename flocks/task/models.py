@@ -103,6 +103,12 @@ class RetryConfig(BaseModel):
     retry_count: int = Field(0, alias="retryCount")
     retry_delay_seconds: int = Field(60, alias="retryDelaySeconds")
     retry_after: Optional[datetime] = Field(None, alias="retryAfter")
+    #: Why the run is not retried automatically: what it started may have had
+    #: effects nobody confirmed (flocks.task.outcome).  A person checks them,
+    #: then resumes the run in its session or runs it afresh.
+    blocked_reason: Optional[str] = Field(None, alias="blockedReason")
+    #: The calls whose effects are not confirmed, as "tool:callID".
+    unverified_effects: List[str] = Field(default_factory=list, alias="unverifiedEffects")
 
 
 class TaskScheduler(BaseModel):

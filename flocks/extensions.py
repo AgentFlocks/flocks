@@ -313,7 +313,7 @@ def register_startup_hook(
     timeout_seconds: float = 30.0,
 ) -> None:
     """Run ``hook`` once the server has started, to start an extension's
-    background service (e.g. Pro's scheduled audits) on the server's event
+    background service (e.g. scheduled audits) on the server's event
     loop. Re-registering a name replaces it.
 
     The hooks run in the background after storage, auth and the installed
@@ -446,7 +446,8 @@ async def _run_hooks(
 
 
 async def run_startup_hooks() -> None:
-    """Called by the server lifespan, in the background, once startup is ready.
+    """Called by the server lifespan, in the background, once startup is ready
+    (and by the standalone workflow service once its plugins and MCP are up).
 
     The lifespan cancels it when the server stops early. A hook still starting
     its service then gets up to its timeout to stop before the shutdown hooks

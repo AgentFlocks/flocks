@@ -217,6 +217,12 @@ async def run_headless(options: ExecOptions, emit: Callable[[dict], None] | None
     emit = emit or (lambda event: None)
     controls = options.controls
     result = {"type": "result", "session_id": None, "success": False, "result": "", "error": None}
+    from flocks.cli.managed import local_runtime_refused, managed_refusal_message
+
+    if local_runtime_refused():
+        # Whichever command got here, a managed install runs no turn of its own.
+        result["error"] = managed_refusal_message("A headless agent turn")
+        return result
     config_token = policy_token = None
     mcp_started = False
     try:

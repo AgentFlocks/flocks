@@ -96,3 +96,40 @@ async def test_authentication_failure_closes_without_looking_up_terminal(monkeyp
     await routes.connect_session(websocket, "admin-terminal")
     websocket.close.assert_awaited_once_with(code=1011, reason="Authentication unavailable")
     lookup.assert_not_called()
+
+
+# -- G09: a managed install's terminal input is policy-visible, or not offered ----------
+
+
+def test_a_managed_install_offers_no_interactive_terminal_unless_turned_on(pty_client, monkeypatch):
+    monkeypatch.setenv("FLOCKS_DEPLOY_MODE", "managed")
+    monkeypatch.delenv("FLOCKS_PTY_INTERACTIVE", raising=False)
+    pty_client.cookies.set(auth.SESSION_COOKIE_NAME, "admin")
+
+    with pytest.raises(WebSocketDisconnect) as error:
+        with pty_client.websocket_connect("/api/pty/admin-terminal/connect"):
+            pytest.fail("a managed install must not accept the terminal")
+    assert error.value.code == 4403
+    routes.Pty.connect.assert_not_called()
+
+
+def test_a_managed_terminal_that_is_turned_on_sends_every_input_through_the_tool_lifecycle(pty_client, monkeypatch):
+    monkeypatch.setenv("FLOCKS_DEPLOY_MODE", "managed")
+    monkeypatch.setenv("FLOCKS_PTY_INTERACTIVE", "1")
+    pty_client.cookies.set(auth.SESSION_COOKIE_NAME, "admin")
+
+    with pty_client.websocket_connect("/api/pty/admin-terminal/connect") as websocket:
+        websocket.send_text("ls\n")
+        assert websocket.receive_text() == "ls\n"
+    assert routes.Pty.connect.await_args.kwargs["use_action_lifecycle"] is True
+
+
+def test_an_unmanaged_install_keeps_the_administrators_terminal_as_it_is(pty_client, monkeypatch):
+    monkeypatch.delenv("FLOCKS_DEPLOY_MODE", raising=False)
+    monkeypatch.setattr(routes, "declared_managed", lambda: False)
+    pty_client.cookies.set(auth.SESSION_COOKIE_NAME, "admin")
+
+    with pty_client.websocket_connect("/api/pty/admin-terminal/connect") as websocket:
+        websocket.send_text("x")
+        assert websocket.receive_text() == "x"
+    assert routes.Pty.connect.await_args.kwargs["use_action_lifecycle"] is False

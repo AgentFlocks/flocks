@@ -96,7 +96,7 @@ export const ACCOUNT_MENU_HREFS = ['/agents', '/skills', '/tools', '/workspace',
 /**
  * The account entry at the bottom of the sidebar. Its menu holds everything
  * that does not change with the workspace: AI capabilities, integrations,
- * system management, usage, the Pro license, updates and sign-out.
+ * system management, usage, licensing, updates and sign-out.
  */
 export default function AccountMenu({
   collapsed,

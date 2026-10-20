@@ -98,6 +98,8 @@
     "workflowJsonFormat": "JSON format",
     "actionCancel": "Cancel",
     "actionRetry": "Retry",
+    "actionResume": "Resume in session",
+    "heldForVerification": "This run stopped after starting actions whose effects were not confirmed, so it is not retried automatically. Check whether the calls below took effect, then resume it in its session or retry it.",
     "actionRerun": "Re-run",
     "actionDelete": "Delete",
     "confirmDelete": "Are you sure you want to delete this task?",

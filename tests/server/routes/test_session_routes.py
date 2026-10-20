@@ -2916,6 +2916,7 @@ class TestSessionUtilities:
         """POST /api/session/{id}/abort returns 200 (no active generation needed)."""
         resp = await client.post(f"/api/session/{session_id}/abort")
         assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {"status": "not_running", "generation": None}
 
     @pytest.mark.asyncio
     async def test_session_statistics(self, client: AsyncClient, session_id: str):

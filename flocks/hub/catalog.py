@@ -790,12 +790,17 @@ def _installed_plugins_cache_key() -> tuple[tuple[str, int, int], ...]:
 
 
 def _catalog_entries_cache_key() -> tuple[tuple[str, int, int], ...]:
+    from flocks.content.managed import ManagedContent
+
     root = get_bundled_hub_root()
     return (
         _path_signature(root / "index.json"),
         _path_signature(root / "taxonomy.json"),
         *(_path_signature(extension_root / "index.json") for extension_root in extension_hub_roots()),
         (f"sealed:{sealed.sealed_signature()}", 0, 0),
+        # What the deployment serves decides suite states below; it changes
+        # without any local file changing.
+        (f"managed:{ManagedContent.generation()}", 0, 0),
         *_installed_plugins_cache_key(),
         *local.tool_discovery_signature(),
         *_system_plugin_roots_cache_key(),
@@ -845,7 +850,22 @@ def _build_catalog_entries(
     # when required payloads are missing, even if its version is current. A
     # repair also updates outdated children, so completeness takes precedence.
     by_key = {(entry.type, entry.id): entry for entry in entries}
-    installed_keys = {key for key, entry in by_key.items() if entry.installPath}
+    # What the deployment controls (flocks.content.managed) counts as present
+    # for a suite only while it serves it.  A local copy under such an id is
+    # never loaded, so it neither completes a suite nor makes one outdated.
+    from flocks.content.managed import ManagedContent
+
+    managed_keys = {
+        (kind, content_id)
+        for kind in ("agent", "skill", "workflow")
+        for content_id in ManagedContent.ids(kind)
+    }
+    installed_keys = {key for key, entry in by_key.items() if entry.installPath and key not in managed_keys}
+    installed_keys |= {
+        (kind, content_id)
+        for kind in ("agent", "skill", "workflow")
+        for content_id in ManagedContent.available_ids(kind)
+    }
     for entry in entries:
         if entry.type != "component" or entry.state == "incompatible":
             continue
@@ -879,6 +899,7 @@ def _build_catalog_entries(
             child.state == "updateAvailable"
             for ref in refs
             if ref.type != "component"
+            and (ref.type, ref.id) not in managed_keys
             and (child := by_key.get((ref.type, ref.id))) is not None
         ):
             entry.state = "updateAvailable"

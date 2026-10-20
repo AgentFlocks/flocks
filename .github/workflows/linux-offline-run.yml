@@ -11,15 +11,6 @@ name: Linux offline installer
 
 on:
   workflow_dispatch:
-    inputs:
-      flockspro_wheel_url:
-        description: "Optional URL of the paired flockspro wheel to embed as the offline Pro bundle"
-        required: false
-        default: ""
-      pro_release_id:
-        description: "Optional Console release id to stamp into bundle/manifest.json"
-        required: false
-        default: ""
   release:
     types:
       - published
@@ -57,24 +48,10 @@ jobs:
           restore-keys: |
             linux-offline-toolchain-${{ matrix.arch }}-
 
-      - name: Fetch optional flockspro wheel
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.flockspro_wheel_url != '' }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/pro"
-          curl -fL "${{ github.event.inputs.flockspro_wheel_url }}" -o "$RUNNER_TEMP/pro/$(basename "${{ github.event.inputs.flockspro_wheel_url }}")"
-          echo "FLOCKSPRO_WHEEL=$(ls "$RUNNER_TEMP"/pro/flockspro-*.whl | head -n1)" >> "$GITHUB_ENV"
-
       - name: Build flocks-offline.run
         run: |
           set -euo pipefail
-          args=(--output-dir "$RUNNER_TEMP/out")
-          if [ -n "${FLOCKSPRO_WHEEL:-}" ]; then
-            args+=(--flockspro-wheel "$FLOCKSPRO_WHEEL")
-          fi
-          if [ -n "${{ github.event.inputs.pro_release_id }}" ]; then
-            args+=(--pro-release-id "${{ github.event.inputs.pro_release_id }}")
-          fi
-          bash packaging/linux/build-offline-run.sh "${args[@]}"
+          bash packaging/linux/build-offline-run.sh --output-dir "$RUNNER_TEMP/out"
           ls -la "$RUNNER_TEMP/out"
           test "$(uname -m)" = "${{ matrix.arch }}"
           # arch-specific file names so both matrix legs can be attached to one release

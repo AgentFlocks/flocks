@@ -1,9 +1,12 @@
 """Scene suites are the hub's component packages, gated by edition."""
 
+import json
+
 import pytest
 from fastapi import HTTPException
 
-from flocks.hub.catalog import list_catalog, load_manifest
+from flocks.hub.catalog import list_catalog, load_manifest, manifest_path
+from flocks.hub.paths import get_bundled_hub_root
 from flocks.server.routes.hub import _assert_edition_allowed, _suite_workspace_id
 
 
@@ -11,13 +14,21 @@ def _component_entries():
     return {entry.id: entry for entry in list_catalog() if entry.type == "component"}
 
 
-def test_bundled_scene_suites_declare_their_edition():
+def test_the_bundled_hub_lists_open_edition_plugins_only():
+    index = json.loads((get_bundled_hub_root() / "index.json").read_text(encoding="utf-8"))
+
+    assert {entry.get("edition", "oss") for entry in index["plugins"]} == {"oss"}
+    assert {entry["id"] for entry in index["plugins"] if entry["type"] == "component"} == {"soc-workspace"}
+
+
+def test_licensed_suites_are_listed_by_the_extension_that_licenses_them(announced_suites):
     entries = _component_entries()
 
     assert set(entries) == {"soc-workspace", "code-audit-workspace", "ai-redteam-workspace"}
     assert entries["soc-workspace"].edition == "oss"
     assert entries["code-audit-workspace"].edition == "pro"
     assert entries["ai-redteam-workspace"].edition == "pro"
+    assert manifest_path("component", "code-audit-workspace").is_relative_to(announced_suites)
 
 
 @pytest.mark.parametrize(
@@ -39,9 +50,9 @@ def test_pro_workspaces_are_scene_workspaces(sealed_suites):
         assert manifest.source.kind == "sealed"
 
 
-def test_open_source_hub_only_announces_pro_suites():
-    # The pro suites' pages are delivered sealed by an extension; the hub
-    # bundled here lists the suites and carries none of their contents.
+def test_the_listing_of_licensed_suites_carries_none_of_their_contents():
+    # The suites' pages are delivered sealed by the extension; its listing
+    # names the suites and carries none of their contents.
     for suite_id in ("code-audit-workspace", "ai-redteam-workspace"):
         assert load_manifest("component", suite_id).source.kind == "sealed"
     for workspace_id in ("code_audit_ui", "ai_redteam_ui"):
@@ -63,7 +74,7 @@ async def test_oss_may_not_install_a_pro_suite(suite_id: str):
         await _assert_edition_allowed("component", suite_id)
 
     assert excinfo.value.status_code == 403
-    assert "Flocks Pro" in excinfo.value.detail
+    assert "需要授权" in excinfo.value.detail
 
 
 @pytest.mark.asyncio
@@ -96,4 +107,4 @@ async def test_suite_license_needs_an_active_platform_license(pro_checker):
 
     with pytest.raises(HTTPException) as excinfo:
         await _assert_edition_allowed("component", "code-audit-workspace")
-    assert "Flocks Pro" in excinfo.value.detail
+    assert "需要授权" in excinfo.value.detail

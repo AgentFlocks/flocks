@@ -17,9 +17,11 @@ _REMOVED_SECURITY_MODULES = frozenset(
 )
 
 
-# Packages that only ship inside Flocks Pro (obfuscated). OSS may expose
-# generic mechanisms they use, but never import them.
-_PRO_ONLY_PACKAGES = frozenset({"flocks_code_security"})
+# Packages that only ship inside the commercial build. OSS may expose generic
+# mechanisms they use, but never imports them -- not even behind a guard: the
+# licence and audit bridges that used to are gone, and extensions reach Core
+# through flocks.extensions only.
+_COMMERCIAL_PACKAGES = frozenset({"flockspro", "flocks_code_security"})
 
 
 def _imports_in(module_path: Path) -> set[str]:
@@ -44,17 +46,10 @@ def test_oss_runtime_source_has_no_pro_or_removed_security_dependencies() -> Non
         for imported in _imports_in(module_path)
     }
 
-    # Legacy optional audit/licence bridges may import FlocksPro, but policy
-    # ownership itself must remain outside OSS.  The generic hooks are the
-    # only B1--B4 integration surface here.
-    assert not {
-        item
-        for item in imports
-        if item == "flockspro.policy" or item.startswith("flockspro.policy.")
-    }
+    # The generic hooks are the only B1--B4 integration surface here.
     assert not imports.intersection(_REMOVED_SECURITY_MODULES)
     assert not {
         item
         for item in imports
-        if item.split(".", 1)[0] in _PRO_ONLY_PACKAGES
+        if item.split(".", 1)[0] in _COMMERCIAL_PACKAGES
     }

@@ -62,6 +62,9 @@ from flocks.hub import suite_license as suite_license_mod
 from flocks.server.routes import webui as webui_routes
 from tests.license_fakes import registered_pro_checker
 
+# The licensed suites are listed by an extension, as in a real install.
+pytestmark = pytest.mark.usefixtures("announced_suites")
+
 PRO_SUITE = "audit-suite"
 OSS_SUITE = "ops-suite"
 
@@ -209,6 +212,29 @@ async def test_scene_suites_carry_their_own_licence(client: AsyncClient):
     assert suites["soc-workspace"]["licensed"] is None
 
 
+@pytest.mark.asyncio
+async def test_scene_suites_say_which_need_an_edition_the_install_lacks(client: AsyncClient):
+    """The lock the scene manager shows is the one install_decision enforces,
+    so the page needs no licence call of its own."""
+    resp = await client.get("/api/hub/scene-suites")
+    suites = {item["id"]: item for item in resp.json()}
+    assert suites["code-audit-workspace"]["editionLocked"] is True
+    assert suites["ai-redteam-workspace"]["editionLocked"] is True
+    assert suites["soc-workspace"]["editionLocked"] is None
+    decision = await suite_license_mod.install_decision("component", "code-audit-workspace")
+    assert (decision.allowed, decision.reason) == (False, "edition_required")
+
+    with registered_pro_checker() as checker:
+        checker.licensed = {"code-audit-workspace"}
+        resp = await client.get("/api/hub/scene-suites")
+    suites = {item["id"]: item for item in resp.json()}
+    assert suites["code-audit-workspace"]["editionLocked"] is False
+    # Unlocked by the edition, still waiting for its own licence.
+    assert suites["ai-redteam-workspace"]["editionLocked"] is False
+    assert suites["ai-redteam-workspace"]["licensed"] is False
+    assert suites["soc-workspace"]["editionLocked"] is None
+
+
 # SR6
 @pytest.mark.asyncio
 async def test_unanswerable_licence_check_refuses(client: AsyncClient, suite_pages):
@@ -295,15 +321,15 @@ def test_ownership_cache_keeps_no_made_up_ids(suite_pages, monkeypatch):
     monkeypatch.setattr(suite_license_mod, "shipped_page_owners", lambda store: {})
     suite_license_mod.clear_page_suite_cache()
     for n in range(50):
-        assert suite_license_mod.pro_suite_for_page(f"no-such-page-{n}", suite_pages) is None
+        assert suite_license_mod.licensed_suite_for_page(f"no-such-page-{n}", suite_pages) is None
     assert suite_license_mod._page_suite_cache == {}
-    assert suite_license_mod.pro_suite_for_page("audit-page", suite_pages) == PRO_SUITE
+    assert suite_license_mod.licensed_suite_for_page("audit-page", suite_pages) == PRO_SUITE
     assert set(suite_license_mod._page_suite_cache) == {"audit-page"}
 
     monkeypatch.setattr(suite_license_mod, "_PAGE_SUITE_CACHE_MAX", 4)
     monkeypatch.setattr(suite_pages, "page_exists", lambda page_id: True)
     for n in range(10):
-        suite_license_mod.pro_suite_for_page(f"page-{n}", suite_pages)
+        suite_license_mod.licensed_suite_for_page(f"page-{n}", suite_pages)
     assert len(suite_license_mod._page_suite_cache) <= 4
 
 
@@ -491,7 +517,7 @@ def test_suite_page_index_expires_like_the_page_cache(suite_pages, monkeypatch):
 
     clock["now"] += suite_license_mod._PAGE_SUITE_TTL_S
     assert suite_license_mod.shipped_page_owners(suite_pages)["custom-page"] == PRO_SUITE
-    assert suite_license_mod.pro_suite_for_page("custom-page", suite_pages) == PRO_SUITE
+    assert suite_license_mod.licensed_suite_for_page("custom-page", suite_pages) == PRO_SUITE
     suite_license_mod.clear_page_suite_cache()
 
 
@@ -506,13 +532,13 @@ def test_page_answers_expire_with_the_index_they_came_from(suite_pages, monkeypa
 
     # Looked up with one second of the index's time left: owned by no suite.
     clock["now"] += suite_license_mod._PAGE_SUITE_TTL_S - 1
-    assert suite_license_mod.pro_suite_for_page("custom-page", suite_pages) is None
+    assert suite_license_mod.licensed_suite_for_page("custom-page", suite_pages) is None
 
     _add_page_to_suite_workspace(suite_pages, "custom-page")
 
     # Two seconds on the index has expired, and so has the answer read from it.
     clock["now"] += 2
-    assert suite_license_mod.pro_suite_for_page("custom-page", suite_pages) == PRO_SUITE
+    assert suite_license_mod.licensed_suite_for_page("custom-page", suite_pages) == PRO_SUITE
     suite_license_mod.clear_page_suite_cache()
 
 
@@ -542,11 +568,11 @@ def test_page_answers_keep_their_index_read_time_across_a_rebuild(suite_pages, m
 
     monkeypatch.setattr(suite_pages, "workspace_id_for_page", another_lookup_meanwhile)
     clock["now"] = 1000.0 + ttl - 0.1
-    assert suite_license_mod.pro_suite_for_page("custom-page", suite_pages) is None
+    assert suite_license_mod.licensed_suite_for_page("custom-page", suite_pages) is None
     assert rebuilt and rebuilt[0]["custom-page"] == PRO_SUITE
 
     # That answer came from the index read at 1000, and is gone with it --
     # not kept for a full lifetime counted from the lookup.
     clock["now"] = 1000.0 + ttl + 2
-    assert suite_license_mod.pro_suite_for_page("custom-page", suite_pages) == PRO_SUITE
+    assert suite_license_mod.licensed_suite_for_page("custom-page", suite_pages) == PRO_SUITE
     suite_license_mod.clear_page_suite_cache()

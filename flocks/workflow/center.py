@@ -295,7 +295,16 @@ async def _read_registry(workflow_id: str) -> Dict[str, Any]:
 
 
 def _load_discoverable_workflow(workflow_path: Path) -> Optional[Dict[str, Any]]:
-    """Load and validate a workflow, returning None when intentionally hidden."""
+    """Load and validate a workflow, returning None when intentionally hidden.
+
+    A local copy of a workflow the deployment manages is never discoverable
+    (flocks.content.managed): it cannot be registered, listed or published in
+    the managed one's place.
+    """
+    from flocks.workflow.fs_store import is_managed_workflow
+
+    if is_managed_workflow(_logical_workflow_id(workflow_path)):
+        return None
     raw = json.loads(workflow_path.read_text(encoding="utf-8"))
     meta_path = workflow_path.parent / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else None
@@ -390,7 +399,49 @@ async def scan_skill_workflows(base_dir: Optional[Path] = None) -> List[Dict[str
 
     entries = list(by_id.values())
     entries.sort(key=lambda item: item.get("updatedAt", 0), reverse=True)
+    return entries + _managed_center_entries()
+
+
+def _managed_center_entries() -> List[Dict[str, Any]]:
+    """Workflows the deployment manages, as center entries.
+
+    Listed so agents can name them; not registered, because publishing one
+    would write its definition to disk as a release snapshot (see
+    _refuse_managed_publish).
+    """
+    from flocks.content.managed import managed_location
+    from flocks.workflow.fs_store import MANAGED_WORKFLOW_SOURCE, overlay_managed_workflows
+
+    managed: Dict[str, Dict[str, Any]] = {}
+    overlay_managed_workflows(managed)
+    entries = []
+    for workflow_id, data in sorted(managed.items()):
+        entries.append({
+            "workflowId": workflow_id,
+            "logicalWorkflowId": workflow_id,
+            "name": data.get("name") or workflow_id,
+            "description": data.get("description") or "",
+            "sourceType": MANAGED_WORKFLOW_SOURCE,
+            "native": True,
+            "workflowPath": managed_location("workflow", workflow_id),
+            "publishStatus": "unpublished",
+            "updatedAt": 0,
+        })
     return entries
+
+
+def _refuse_managed_publish(workflow_path: Path) -> None:
+    """A managed workflow is not published as a standalone service.
+
+    The service runs from a release snapshot written to disk, which would put
+    the deployment's definition there in the clear.
+    """
+    from flocks.workflow.fs_store import is_managed_workflow
+
+    if is_managed_workflow(_logical_workflow_id(workflow_path)):
+        raise WorkflowCenterError(
+            f"Workflow {_logical_workflow_id(workflow_path)} is managed by the deployment and cannot be published as a service"
+        )
 
 
 def format_workflow_entries(
@@ -907,6 +958,7 @@ async def publish_workflow_local(
     registry = await _read_registry(workflow_id)
     previous_registry = dict(registry)
     workflow_path = Path(str(registry["workflowPath"]))
+    _refuse_managed_publish(workflow_path)
     if not workflow_path.exists():
         raise WorkflowCenterError(f"Workflow file not found: {workflow_path}")
 
@@ -1127,6 +1179,7 @@ async def _publish_workflow_docker(
     registry = await _read_registry(workflow_id)
     previous_registry = dict(registry)
     workflow_path = Path(str(registry["workflowPath"]))
+    _refuse_managed_publish(workflow_path)
     if not workflow_path.exists():
         raise WorkflowCenterError(f"Workflow file not found: {workflow_path}")
 

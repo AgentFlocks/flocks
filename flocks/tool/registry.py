@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Mapping, Optional, Set
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_core import PydanticCustomError
@@ -173,6 +173,16 @@ class ToolInfo(BaseModel):
 
     group: Optional[str] = Field(None, description="Optional plugin group")
     group_readonly: bool = Field(False, description="Computed from the actual system definition source")
+    side_effect: Optional[Literal["none", "idempotent", "queryable", "unknown"]] = Field(
+        None,
+        description=(
+            "What a call may change outside the run (flocks.task.outcome): 'none', "
+            "'idempotent' (repeating it has the effect of once by its nature -- not by "
+            "an idempotency key, which a retried run does not reuse), 'queryable' (its "
+            "effect can be looked up; also for calls guarded by a key) or 'unknown'. "
+            "Unset: read-only built-ins are 'none', everything else 'unknown'."
+        ),
+    )
 
     _validate_group = field_validator("group", mode="before")(normalize_tool_group)
 
@@ -290,6 +300,23 @@ class ToolContext:
         # Optional caller-owned precondition on the final effective inputs.
         # It can restrict an allowed call, never bypass an extension's gate.
         self.validated_input_guard = validated_input_guard
+
+    @property
+    def idempotency_key(self) -> Optional[str]:
+        """A key naming this call, for an external system that deduplicates requests.
+
+        The same for every attempt of this call (a retry inside the tool, a
+        replay of the call), different for every other call -- including the
+        calls of a run started again, in a new session.  So it guards a call
+        against its own repeats, not a task against being run twice: a tool
+        that relies on it declares ``side_effect="queryable"``, and a run whose
+        such call did not confirm waits for a person instead of retrying.
+        """
+        if not self.call_id:
+            return None
+        import hashlib
+
+        return hashlib.sha256(f"{self.session_id}\x00{self.call_id}".encode("utf-8")).hexdigest()[:32]
 
     async def notify_input_patched(self, effective_input: Dict[str, Any]) -> None:
         """Report the input the handler will actually receive after a
@@ -792,7 +819,7 @@ class Tool:
                     # One gate pass authorizes the call (approvals and audit run
                     # once). Policies judged the redact_sensitive view, so an
                     # in-place rewrite may only fill values hidden there: the
-                    # secrets the Pro redaction hook restores. Anything a policy
+                    # secrets a redaction hook restores. Anything a policy
                     # can see must come through validated_input_patch.
                     rewritten = verdict.tool_input or {}
                     legacy_base = merge_redacted_rewrite(coerced_kwargs, rewritten)

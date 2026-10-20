@@ -4,6 +4,8 @@ PTY routes - API endpoints for PTY session management
 Matches Flocks' ported src/server/routes/pty.ts
 """
 
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
@@ -12,9 +14,17 @@ from flocks.hooks.execution import execution_context_scope, execution_lifecycle_
 from flocks.identity import reset_current_subject, set_current_subject
 from flocks.utils.log import Log
 from flocks.pty.pty import Pty, PtyInfo, PtyLimitExceeded, CreateInput, UpdateInput, PtyStatus
+from flocks.updater.deploy import declared_managed
 
 
 router = APIRouter()
+
+
+def interactive_pty_allowed() -> bool:
+    """Whether a managed install offers interactive terminals (``FLOCKS_PTY_INTERACTIVE``)."""
+    return os.environ.get("FLOCKS_PTY_INTERACTIVE", "").strip().lower() in {"1", "true", "yes", "allow"}
+
+
 log = Log.create(service="pty-routes")
 
 
@@ -179,14 +189,26 @@ async def connect_session(websocket: WebSocket, pty_id: str):
                         await websocket.close(code=4004, reason="Session not found")
                         return
 
+                    # A managed install's tool policy cannot follow an interactive
+                    # terminal keystroke by keystroke: it is off there unless the
+                    # deployment turns it on, and then every input goes through the
+                    # tool lifecycle as ``pty.input`` -- checked and audited like
+                    # any command.  Elsewhere the administrator's terminal stays as
+                    # it is (authenticated above, not an execution action).
+                    managed = declared_managed()
+                    if managed and not interactive_pty_allowed():
+                        await websocket.close(
+                            code=4403,
+                            reason="interactive terminals are off on a managed install",
+                        )
+                        return
+
                     await websocket.accept()
 
-                    # HTTP/WebSocket ingress is authenticated separately and
-                    # must not enter the execution action lifecycle.
                     handlers = await Pty.connect(
                         pty_id,
                         websocket,
-                        use_action_lifecycle=False,
+                        use_action_lifecycle=managed,
                     )
                     if not handlers:
                         await websocket.close(code=4004, reason="Session not found")

@@ -225,7 +225,7 @@ class Pty:
                 "tool_source": "pty",
                 "tool_category": "command",
                 "workspace_dir": input_data.cwd or os.getcwd(),
-                # Durable audit (Pro) records the attempt under the call id;
+                # A durable audit records the attempt under the call id;
                 # without one the gate refuses to start the tool.
                 "tool_call_id": call_id,
                 "session_execution_profile": cls._execution_profile(input_data.cwd or os.getcwd()),

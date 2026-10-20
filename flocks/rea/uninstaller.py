@@ -444,7 +444,9 @@ class ReaUninstaller:
     ) -> ReaUninstallJob:
         """Start the uninstall. Raises :class:`TasksRunning` when work must be stopped first."""
 
-        from flocks.rea.installer import ReaInstaller, refresh_jobs
+        from flocks.rea.installer import ReaInstaller, refresh_jobs, refuse_when_managed
+
+        refuse_when_managed()
 
         while cls._starting:
             # Another request is starting it; answer with its job.

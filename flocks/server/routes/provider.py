@@ -408,7 +408,7 @@ def _build_api_service_probe_context(provider_id: str, tool_name: str) -> "ToolC
 
     The probe has no session and nobody to answer a confirmation prompt, so it
     carries its own trusted execution profile: an ``api`` entry with
-    ``auto-allow-all`` permission / network modes. Policy hooks (Pro gate,
+    ``auto-allow-all`` permission / network modes. Policy hooks (policy gate,
     audit) still run — only the interactive user-confirm step is skipped,
     which otherwise waited 300s and then denied the probe.
     """
@@ -2956,7 +2956,7 @@ async def _test_provider_credentials_impl(
 
             await ToolRegistry.init_async()
 
-            # Connectivity probes run outside any session. The Pro audit hook
+            # Connectivity probes run outside any session. An audit hook
             # refuses to record (and therefore denies) a real tool execution
             # that has no call id, so give each probe its own id explicitly.
             def _probe_ctx(tool_name: str) -> ToolContext:

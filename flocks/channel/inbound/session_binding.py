@@ -113,7 +113,7 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
     ``Session.create`` cannot infer the owner from ``current_auth_user``.
     When an existing channel session is being replaced, preserve its owner.
     A channel message must never be implicitly attributed to an unrelated
-    local administrator.  Any identity-to-owner mapping belongs to a Pro
+    local administrator.  Any identity-to-owner mapping belongs to an
     ingress extension; neutral Flocks sessions remain ownerless when no
     explicit owner carrier was supplied.
     """

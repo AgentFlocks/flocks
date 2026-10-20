@@ -239,10 +239,10 @@ describe('Layout chrome', () => {
     renderAt('/');
     fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal:admin' }));
     const menu = screen.getByRole('menu', { name: 'accountMenu' });
-    // The open build registers no extension entries: no upgrade link, no PRO tag,
+    // The open build registers no extension entries: no upgrade link, no tag,
     // and every link goes to one of the default destinations.
-    expect(within(menu).queryByRole('menuitem', { name: /upgradePro/ })).not.toBeInTheDocument();
-    expect(within(menu).queryByText('PRO')).not.toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: /upgrade/i })).not.toBeInTheDocument();
+    expect(within(menu).queryByText('NEW')).not.toBeInTheDocument();
     const defaults = ['/agents', '/skills', '/tools', '/workspace', '/devices', '/hub', '/models', '/channels', '/settings/preferences', 'https://portal.agentflocks.com'];
     for (const link of Array.from(menu.querySelectorAll('a'))) {
       expect(defaults).toContain(link.getAttribute('href'));
@@ -276,16 +276,16 @@ describe('Layout chrome', () => {
     fireEvent.click(within(screen.getByRole('menu', { name: 'accountMenu' })).getByRole('menuitem', { name: 'checkUpdate' }));
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument());
     expect(updateModalProps.at(-1)).toEqual(expect.objectContaining({ forceInitialCheck: true }));
-    expect(updateModalProps.at(-1)).not.toHaveProperty('edition');
+    expect(updateModalProps.at(-1)).not.toHaveProperty('channel');
   });
 
   const bundleRelease = (component: string, notes: string) => ({
-    edition: 'bundle',
+    channel: 'bundle',
     current_version: 'v2026.10.16',
     latest_version: 'v2026.10.16',
     current_bundle_version: 'v2026.10.16',
     current_core_version: 'v2026.10.15',
-    current_pro_component_version: component,
+    current_component_version: component,
     has_update: false,
     release_notes: notes,
     release_url: null,
@@ -298,7 +298,7 @@ describe('Layout chrome', () => {
     getNotificationAckStatus.mockResolvedValue({ acknowledged: false });
     renderAt('/');
     await waitFor(() => expect(notificationModal).toHaveBeenCalled());
-    const id = 'whats-new-bundle-v2026.10.16-core-v2026.10.15-pro-v2026.10.16';
+    const id = 'whats-new-bundle-v2026.10.16-core-v2026.10.15-component-v2026.10.16';
     expect(getNotificationAckStatus).toHaveBeenCalledWith(id);
     expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
       expect.objectContaining({
@@ -308,6 +308,18 @@ describe('Layout chrome', () => {
         body: '报告中心不再列出空报告',
         version: 'v2026.10.16',
       }),
+    ]);
+  });
+
+  it('reads a bundle version an installer recorded under its edition prefix', async () => {
+    Object.assign(productNameContextValue, { productName: 'Acme Suite', configuredDisplayName: null, logoUrl: '/favicon.svg' });
+    getCurrentRelease.mockResolvedValue({ ...bundleRelease('acme-v2026.10.16', '说明'), current_bundle_version: 'acme-v2026.10.16' });
+    getNotificationAckStatus.mockResolvedValue({ acknowledged: false });
+    renderAt('/');
+    await waitFor(() => expect(notificationModal).toHaveBeenCalled());
+    expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-bundle-v2026.10.16-core-v2026.10.15-component-v2026.10.16');
+    expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
+      expect.objectContaining({ title: 'Acme Suite v2026.10.16 更新内容', version: 'v2026.10.16' }),
     ]);
   });
 
@@ -333,6 +345,8 @@ describe('Layout chrome', () => {
 
   it('keeps the Core release notice for a Core install', async () => {
     getCurrentRelease.mockResolvedValue({
+      // The server names its own releases' channel.
+      channel: 'flocks',
       current_version: '2026.10.15',
       latest_version: '2026.10.15',
       has_update: false,

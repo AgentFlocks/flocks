@@ -38,6 +38,7 @@ from flocks.cli.commands import (
     session_app,
     skill_app,
     stats_app,
+    storage_app,
     task_app,
 )
 from flocks.cli.commands.update import update_command
@@ -88,6 +89,7 @@ app.add_typer(stats_app, name="stats")
 app.add_typer(task_app, name="task")
 app.add_typer(skill_app, name="skills")
 app.add_typer(admin_app, name="admin")
+app.add_typer(storage_app, name="storage")
 # Developer/editor-integration groups: invocable, but kept out of `flocks --help`.
 # (`agent` is registered above as part of the Agent CLI panel.)
 app.add_typer(acp_app, name="acp", hidden=True)
@@ -591,6 +593,52 @@ def service_daemon(
     )
 
 
+def _refuse_local_runtime_when_managed(command: str) -> None:
+    """See :func:`flocks.cli.managed.refuse_local_runtime_when_managed`."""
+    from flocks.cli.managed import refuse_local_runtime_when_managed
+
+    refuse_local_runtime_when_managed(command)
+
+
+def _attach_tui_to_managed_service(*, tui_dir: Path, project_dir: Path, server_url: str, session: Optional[str]) -> None:
+    """Attach the TUI to the supervised service instead of starting a server.
+
+    No local token is minted and no server environment is set: the service
+    has its own configuration, and this command only connects to it.
+    """
+    import subprocess
+
+    import httpx
+
+    try:
+        # loopback health probe: never through a proxy
+        healthy = httpx.get(f"{server_url}/api/health", timeout=2.0, trust_env=False).status_code == 200
+    except Exception:
+        healthy = False
+    if not healthy:
+        console.print(
+            f"[red]No Flocks service answered at {server_url}. In a managed install the TUI only "
+            "attaches to the running service; pass --host/--port to point at it.[/red]"
+        )
+        raise typer.Exit(1)
+    console.print(f"[cyan]Attaching the TUI to the managed service at {server_url}...[/cyan]")
+    tui_cmd = [
+        "bun",
+        "run",
+        "--conditions=browser",
+        str(tui_dir / "src" / "index.ts"),
+        "attach",
+        server_url,
+        "--dir",
+        str(project_dir),
+    ]
+    if session:
+        tui_cmd.extend(["--session", session])
+    from flocks.net import child_env
+
+    subprocess.run(tui_cmd, cwd=tui_dir, env=child_env(socks_capable=False))
+
+
 @app.command(hidden=True)
 def run(
     message: Optional[str] = typer.Argument(None, help="Message to send; omit to start an interactive session"),
@@ -604,6 +652,7 @@ def run(
     """
     Run an interactive Flocks session in the terminal (no server required).
     """
+    _refuse_local_runtime_when_managed("flocks run")
     from flocks.cli import session_runner
 
     project_dir = (directory or Path.cwd()).expanduser().resolve()
@@ -671,6 +720,17 @@ def tui(
         except subprocess.CalledProcessError as e:
             console.print(f"[red]Failed to install TUI dependencies: {e}[/red]")
             raise typer.Exit(1) from e
+
+    from flocks.updater.deploy import declared_managed
+
+    if declared_managed():
+        _attach_tui_to_managed_service(
+            tui_dir=tui_dir,
+            project_dir=project_dir,
+            server_url=f"http://{host}:{port}",
+            session=session,
+        )
+        return
 
     console.print(Panel(logo(), border_style="cyan"))
     console.print("[cyan]Starting Flocks TUI...[/cyan]")

@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
 PluginType = Literal["skill", "agent", "tool", "device", "workflow", "webui", "component"]
-# Which edition may install a plugin. Pro-only suites stay visible in the
-# catalog so the operator can see what an upgrade unlocks.
-PluginEdition = Literal["oss", "pro"]
+#: The edition that installs without a licence.
+OPEN_EDITION = "oss"
+# Which edition may install a plugin: the open edition, or the name of an
+# edition a registered licence checker grants. What any other name means is
+# the checker's business, not the hub's.
+PluginEdition = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]{0,31}$")]
+
+
+def edition_needs_licence(edition: Optional[str]) -> bool:
+    """Whether a plugin of this edition needs a licence to install and run."""
+    return bool(edition) and edition != OPEN_EDITION
 
 PluginState = Literal[
     "available",
@@ -94,7 +102,7 @@ class HubPluginManifest(BaseModel):
     domains: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
     trust: Literal["official", "verified", "community", "experimental", "deprecated"] = "community"
-    edition: PluginEdition = "oss"
+    edition: PluginEdition = OPEN_EDITION
     source: HubSource = Field(default_factory=HubSource)
     compatibility: HubCompatibility = Field(default_factory=HubCompatibility)
     dependencies: HubDependencies = Field(default_factory=HubDependencies)
@@ -119,7 +127,7 @@ class HubIndexEntry(BaseModel):
     useCases: list[str] = Field(default_factory=list)
     trust: str = "community"
     riskLevel: str = "low"
-    edition: PluginEdition = "oss"
+    edition: PluginEdition = OPEN_EDITION
     manifestPath: str
     guidedInstall: Optional[HubGuidedInstall] = None
 
@@ -189,7 +197,7 @@ class HubCatalogEntry(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     trust: str = "community"
     riskLevel: str = "low"
-    edition: PluginEdition = "oss"
+    edition: PluginEdition = OPEN_EDITION
     state: PluginState = "available"
     installedVersion: Optional[str] = None
     source: str = "bundled"

@@ -1,5 +1,6 @@
 import asyncio
-import json
+
+import pytest
 
 from flocks.console import login as login_mod
 from flocks.console.login import ConsoleLoginService
@@ -26,111 +27,76 @@ def test_heartbeat_payload_reports_oss_for_core_only_install(tmp_path, monkeypat
     assert "version_info" not in payload
 
 
-def test_heartbeat_payload_includes_pro_runtime_versions(tmp_path, monkeypatch):
+class _NodeExtension:
+    """What an installed extension would add to the node's reports."""
+
+    def __init__(self, versions=None, identity=None):
+        self.versions = versions
+        self.identity = identity or {}
+        self.responses: list[dict] = []
+
+    def node_versions(self):
+        return self.versions
+
+    def heartbeat_identity(self):
+        return self.identity
+
+    async def on_heartbeat_response(self, data, *, client, session, console_base, report_pending):
+        self.responses.append({"data": data, "console_base": console_base, "report_pending": report_pending})
+
+
+@pytest.fixture
+def node_extension():
+    created: list[_NodeExtension] = []
+
+    def _register(**kwargs):
+        extension = _NodeExtension(**kwargs)
+        login_mod.register_console_node_extension(extension)
+        created.append(extension)
+        return extension
+
+    yield _register
+    for extension in created:
+        login_mod.unregister_console_node_extension(extension)
+
+
+def test_heartbeat_payload_uses_the_versions_an_extension_reports(tmp_path, monkeypatch, node_extension):
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
     monkeypatch.setattr(ConsoleLoginService, "_runtime_version", staticmethod(lambda: "2026.7.3"))
-
-    marker = tmp_path / "run" / "pro-bundle-installed.json"
-    marker.parent.mkdir(parents=True)
-    marker.write_text(
-        json.dumps(
-            {
-                "bundle_version": "v2026.7.3",
-                "core_version": "v2026.7.3",
-                "flockspro_component_version": "2026.7.3.1",
-            }
-        ),
-        encoding="utf-8",
-    )
+    node_extension(versions={"edition": "extension-edition", "core_version": "v2026.7.3", "component_version": "1.2"})
 
     payload = ConsoleLoginService.heartbeat_payload(
-        {
-            "console_session_token": "cs_heartbeat",
-            "fingerprint": "fp_heartbeat",
-            "install_id": "inst_heartbeat",
-        },
+        {"console_session_token": "cs_heartbeat", "fingerprint": "fp_heartbeat", "install_id": "inst_heartbeat"},
         status="poc",
         license_id="lic_heartbeat",
-        pro_component_version="2026.7.3.1",
     )
 
-    assert payload["fingerprint"] == "fp_heartbeat"
-    assert payload["install_id"] == "inst_heartbeat"
-    assert payload["status"] == "poc"
-    assert payload["license_id"] == "lic_heartbeat"
-    assert payload["edition"] == "flockspro"
-    assert payload["bundle_version"] == "v2026.7.3"
+    assert payload["status"] == "poc" and payload["license_id"] == "lic_heartbeat"
+    assert payload["edition"] == "extension-edition"
     assert payload["core_version"] == "v2026.7.3"
-    assert payload["flockspro_component_version"] == "2026.7.3.1"
-    assert "version" not in payload
-    assert "version_info" not in payload
+    assert payload["component_version"] == "1.2"
 
 
-def test_heartbeat_payload_keeps_sending_with_incomplete_pro_marker(tmp_path, monkeypatch):
+def test_an_extension_with_nothing_to_report_leaves_the_default(tmp_path, monkeypatch, node_extension):
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
-    monkeypatch.setattr(ConsoleLoginService, "_runtime_version", staticmethod(lambda: "2026.7.5"))
-    marker = tmp_path / "run" / "pro-bundle-installed.json"
-    marker.parent.mkdir(parents=True)
-    marker.write_text(
-        json.dumps(
-            {
-                "bundle_version": "v2026.7.5",
-                "flockspro_component_version": "v2026.7.4",
-            }
-        ),
-        encoding="utf-8",
-    )
+    monkeypatch.setattr(ConsoleLoginService, "_runtime_version", staticmethod(lambda: "2026.7.3"))
+    node_extension(versions=None)
 
     payload = ConsoleLoginService.heartbeat_payload(
-        {
-            "console_session_token": "cs_heartbeat",
-            "fingerprint": "fp_heartbeat",
-            "install_id": "inst_heartbeat",
-        },
+        {"console_session_token": "cs", "fingerprint": "fp", "install_id": "inst"},
     )
 
-    assert payload["edition"] == "flockspro"
-    assert payload["bundle_version"] == "v2026.7.5"
-    assert payload["core_version"] == ""
-    assert payload["flockspro_component_version"] == "v2026.7.4"
+    assert payload["edition"] == "oss" and payload["core_version"] == "2026.7.3"
 
 
-def test_send_heartbeat_uses_local_pro_license_and_applies_response(tmp_path, monkeypatch):
+def test_send_heartbeat_reports_the_extension_identity_and_hands_it_the_answer(tmp_path, monkeypatch, node_extension):
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
     monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
     monkeypatch.setattr(ConsoleLoginService, "_runtime_version", staticmethod(lambda: "2026.7.3"))
-
-    license_path = tmp_path / "flockspro" / "license.json"
-    license_path.parent.mkdir(parents=True)
-    license_path.write_text(
-        json.dumps(
-            {
-                "license_id": "lic_core",
-                "payload": {"license_id": "lic_core", "status": "poc"},
-                "patches": [],
-            }
-        ),
-        encoding="utf-8",
-    )
-    marker = tmp_path / "run" / "pro-bundle-installed.json"
-    marker.parent.mkdir(parents=True)
-    marker.write_text(
-        json.dumps(
-            {
-                "bundle_version": "v2026.7.3",
-                "core_version": "v2026.7.3",
-                "flockspro_component_version": "2026.7.3.1",
-            }
-        ),
-        encoding="utf-8",
-    )
+    extension = node_extension(identity={"status": "poc", "license_id": "lic_core"})
 
     async def _require_session(cls):
-        return {
-            "console_session_token": "cs_core",
-            "fingerprint": "fp_core",
-            "install_id": "inst_core",
-        }
+        return {"console_session_token": "cs_core", "fingerprint": "fp_core", "install_id": "inst_core"}
 
     captured: dict[str, object] = {}
 
@@ -141,10 +107,7 @@ def test_send_heartbeat_uses_local_pro_license_and_applies_response(tmp_path, mo
             return None
 
         def json(self):
-            return {
-                "license_patch": "patch_token_1",
-                "revoked_license_ids": ["lic_revoked"],
-            }
+            return {"license_patch": "patch_token_1"}
 
     class _Client:
         def __init__(self, *_args, **_kwargs):
@@ -169,58 +132,29 @@ def test_send_heartbeat_uses_local_pro_license_and_applies_response(tmp_path, mo
 
     assert captured["url"] == "https://console.example.com/v1/heartbeats"
     assert captured["headers"] == {"Authorization": "Bearer cs_core"}
-    payload = captured["json"]
-    assert payload["status"] == "poc"
-    assert payload["license_id"] == "lic_core"
-    assert payload["bundle_version"] == "v2026.7.3"
-    assert payload["core_version"] == "v2026.7.3"
-    assert payload["flockspro_component_version"] == "2026.7.3.1"
-    assert "version" not in payload
-    assert "version_info" not in payload
-
-    updated = json.loads(license_path.read_text(encoding="utf-8"))
-    assert updated["patches"] == ["patch_token_1"]
-    assert updated["last_sync_at"]
-    revocation = json.loads((tmp_path / "flockspro" / "revocation.json").read_text(encoding="utf-8"))
-    assert revocation == {"revoked_license_ids": ["lic_revoked"]}
+    assert captured["json"]["status"] == "poc" and captured["json"]["license_id"] == "lic_core"
+    assert extension.responses == [
+        {"data": {"license_patch": "patch_token_1"}, "console_base": "https://console.example.com", "report_pending": True}
+    ]
 
 
-def test_report_pending_pro_bundle_install_receipt_posts_and_deletes(tmp_path, monkeypatch):
+def test_heartbeat_without_extensions_sends_the_plain_identity(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
-    monkeypatch.delenv("FLOCKS_CONSOLE_BASE_URL", raising=False)
-
-    license_path = tmp_path / "flockspro" / "license.json"
-    license_path.parent.mkdir(parents=True)
-    license_path.write_text(json.dumps({"license_id": "lic_pending"}), encoding="utf-8")
-    pending_path = tmp_path / "run" / "pro-bundle-install-receipt-pending.json"
-    pending_path.parent.mkdir(parents=True)
-    pending_path.write_text(
-        json.dumps(
-            {
-                "release_id": "rel_pending",
-                "bundle_release_id": "rel_pending",
-                "bundle_version": "2026.7.3.5",
-                "core_version": "2026.7.3.5",
-                "flockspro_component_version": "2026.7.3.3",
-                "build_id": "job_pending",
-                "install_result": "success",
-            }
-        ),
-        encoding="utf-8",
-    )
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
 
     async def _require_session(cls):
-        return {
-            "console_session_token": "cs_pending",
-            "fingerprint": "fp_pending",
-            "install_id": "inst_pending",
-            "console_base_url": "http://127.0.0.1:18001",
-        }
+        return {"console_session_token": "cs_core", "fingerprint": "fp_core", "install_id": "inst_core"}
 
     captured: dict[str, object] = {}
 
     class _Response:
         status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
 
     class _Client:
         def __init__(self, *_args, **_kwargs):
@@ -233,106 +167,14 @@ def test_report_pending_pro_bundle_install_receipt_posts_and_deletes(tmp_path, m
             return False
 
         async def post(self, url, json=None, headers=None):
-            captured["url"] = url
             captured["json"] = json
-            captured["headers"] = headers
             return _Response()
 
     monkeypatch.setattr(ConsoleLoginService, "_require_session", classmethod(_require_session))
     monkeypatch.setattr(login_mod.httpx, "AsyncClient", _Client)
 
-    reported = asyncio.run(ConsoleLoginService.report_pending_pro_bundle_install_receipt())
+    asyncio.run(ConsoleLoginService.send_heartbeat())
 
-    assert reported is True
-    assert not pending_path.exists()
-    assert captured["url"] == "http://127.0.0.1:18001/v1/pro-bundles/installations"
-    assert captured["headers"] == {"Authorization": "Bearer cs_pending"}
-    payload = captured["json"]
-    assert payload["fingerprint"] == "fp_pending"
-    assert payload["install_id"] == "inst_pending"
-    assert payload["license_id"] == "lic_pending"
-    assert payload["bundle_version"] == "2026.7.3.5"
-
-
-def test_report_pending_pro_bundle_downgrade_receipt_posts_and_deletes(tmp_path, monkeypatch):
-    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
-    monkeypatch.delenv("FLOCKS_CONSOLE_BASE_URL", raising=False)
-
-    pending_path = tmp_path / "run" / "pro-bundle-downgrade-receipt-pending.json"
-    pending_path.parent.mkdir(parents=True)
-    pending_path.write_text(
-        json.dumps(
-            {
-                "request_id": "req_downgrade_pending",
-                "release_id": "rel_downgrade_pending",
-                "bundle_release_id": "rel_downgrade_pending",
-                "license_id": "lic_downgrade_pending",
-                "bundle_version": "2026.7.3.5",
-                "core_version": "2026.7.3.5",
-                "flockspro_component_version": "2026.7.3.3",
-                "install_result": "downgraded",
-                "runtime_edition": "oss",
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    async def _require_session(cls):
-        return {
-            "console_session_token": "cs_pending",
-            "fingerprint": "fp_pending",
-            "install_id": "inst_pending",
-            "console_base_url": "http://127.0.0.1:18001",
-        }
-
-    captured: dict[str, object] = {}
-
-    class _Response:
-        status_code = 200
-
-    class _Client:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url, json=None, headers=None):
-            captured["url"] = url
-            captured["json"] = json
-            captured["headers"] = headers
-            return _Response()
-
-    monkeypatch.setattr(ConsoleLoginService, "_require_session", classmethod(_require_session))
-    monkeypatch.setattr(login_mod.httpx, "AsyncClient", _Client)
-
-    reported = asyncio.run(ConsoleLoginService.report_pending_pro_bundle_install_receipt())
-
-    assert reported is True
-    assert not pending_path.exists()
-    assert captured["url"] == "http://127.0.0.1:18001/v1/pro-bundles/installations"
-    assert captured["headers"] == {"Authorization": "Bearer cs_pending"}
-    payload = captured["json"]
-    assert payload["fingerprint"] == "fp_pending"
-    assert payload["install_id"] == "inst_pending"
-    assert payload["license_id"] == "lic_downgrade_pending"
-    assert payload["install_result"] == "downgraded"
-    assert payload["runtime_edition"] == "oss"
-
-
-def test_heartbeat_payload_omits_channel_unless_pinned(tmp_path, monkeypatch):
-    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
-    monkeypatch.delenv("FLOCKS_UPDATE_CHANNEL", raising=False)
-    monkeypatch.setattr(ConsoleLoginService, "_runtime_version", staticmethod(lambda: "2026.9.14"))
-    session = {"console_session_token": "cs", "fingerprint": "fp", "install_id": "inst"}
-
-    assert "channel" not in ConsoleLoginService.heartbeat_payload(session)
-    assert ConsoleLoginService.update_channel() == ""
-
-    monkeypatch.setenv("FLOCKS_UPDATE_CHANNEL", " flockspro-offline-2026.9.14 ")
-    payload = ConsoleLoginService.heartbeat_payload(session)
-    assert payload["channel"] == "flockspro-offline-2026.9.14"
-    assert payload["edition"] == "oss"
+    assert captured["json"]["status"] == "ok"
+    assert captured["json"]["license_id"] is None
+    assert captured["json"]["edition"] == "oss"

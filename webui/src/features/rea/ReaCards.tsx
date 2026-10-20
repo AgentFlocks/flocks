@@ -39,6 +39,7 @@ const TIER_CAPABILITIES: Record<ReaTier, string[]> = {
 const KNOWN_ERRORS = new Set([
   'environment', 'blocked', 'component_failed', 'service_failed', 'validation_failed', 'install_failed',
   'interrupted', 'uninstalling', 'busy', 'forbidden', 'plan_mode', 'tasks_running', 'tasks_unreadable',
+  'managed',
 ]);
 const KNOWN_BLOCKERS = new Set([
   'jdk_no_dnf', 'jdk_needs_root', 'ghidra_dir_not_writable', 'ghidra_dir_occupied', 'ghidra_decompiler_missing',
@@ -772,7 +773,8 @@ function ReaInstallCard({ part, cardKey, isLatest, readOnly }: {
   const errorCode = typeof meta.errorCode === 'string' ? meta.errorCode : null;
   // Other conversations kept REA from being changed: no stage, the conversations instead.
   const tasksError = errorCode === 'tasks_running' || errorCode === 'tasks_unreadable';
-  const simple = errorCode === 'forbidden' || errorCode === 'plan_mode' || errorCode === 'uninstalling';
+  // Refusals a retry here cannot change (a managed install changes REA only with its release).
+  const simple = errorCode === 'forbidden' || errorCode === 'plan_mode' || errorCode === 'uninstalling' || errorCode === 'managed';
   // A retry sends the tier's confirmation again: the install tool takes only that as consent to write.
   const canRetry = isLatest && !readOnly && !simple && Boolean(chat?.submitPrompt) && canInstallNow(status);
   return (

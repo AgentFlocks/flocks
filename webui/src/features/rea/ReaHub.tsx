@@ -99,6 +99,7 @@ const TEXT = {
       cancel: '取消',
       running: '正在卸载…',
       startFailed: '卸载没有开始：{message}',
+      managed: '这是受管部署，REA 随部署的发版安装和移除，不能在这里卸载。',
       succeeded: 'REA 已卸载',
       succeededHint: '已完成首次安装的账号会保留记录，入口不再对其显示「新」；再次使用需要重新安装。',
       removedTitle: '已移除',
@@ -196,6 +197,7 @@ const TEXT = {
       cancel: 'Cancel',
       running: 'Uninstalling…',
       startFailed: 'The uninstall did not start: {message}',
+      managed: 'This is a managed install: REA is installed and removed with the deployment\'s release, not from here.',
       succeeded: 'REA is uninstalled',
       succeededHint: 'Accounts that completed a first install keep that record, so the shortcut shows them no "New" again; using REA again needs a new install.',
       removedTitle: 'Removed',
@@ -510,6 +512,8 @@ function ReaHubDialog({ mode, status, text, onMode, onRefresh, onOpenSession, on
       if (apiError?.code === 'tasks_running' && Array.isArray(apiError.details?.tasks)) {
         // Tasks started meanwhile: show them and ask again.
         setPreview((current) => current && { ...current, tasks: apiError.details.tasks as ReaUninstallTask[] });
+      } else if (apiError?.code === 'managed') {
+        setError(text.uninstall.managed);
       } else {
         setError(format(text.uninstall.startFailed, { message: apiError?.message ?? String(startError) }));
       }
