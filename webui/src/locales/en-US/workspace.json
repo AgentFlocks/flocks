@@ -289,5 +289,6 @@
     "selectDesc": "Memory files are written automatically by agents like Rex to record task context and key information",
     "loadMemoryFailed": "Failed to load memory files",
     "readFileFailed": "Failed to read file"
-  }
+  },
+  "title": "Working directory"
 }

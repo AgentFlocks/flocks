@@ -1,20 +1,24 @@
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
 
 /**
- * The navigation is split by workspace: the built-in Agent workspace and one
- * workspace per enabled scene suite (SOC 工作区, 代码漏洞审计工作区, ...). The
- * header switcher picks the workspace and the sidebar shows its menu.
+ * The top navigation separates the workbench, enabled scene suites and Agent
+ * workshop. Each module owns its sidebar and remembers its last visited page.
  *
- * System management (/settings) and the scene manager (/scenes) belong to no
- * workspace: while they are open the sidebar keeps the workspace they were
- * opened from.
+ * System settings has its own sidebar. Scene management (/scenes) is a
+ * separate header entry and does not replace any module's remembered page.
  */
 export type NavWorkspaceId = string;
 
+// Keep the legacy id for existing workbench navigation preferences.
 export const AGENT_WORKSPACE: NavWorkspaceId = 'agent';
+export const AGENT_WORKSHOP: NavWorkspaceId = 'agent-workshop';
 const SCENE_WORKSPACE_PREFIX = 'scene:';
+export const SOC_WORKSPACE_ID = 'soc_ui';
+export const CODE_AUDIT_WORKSPACE_ID = 'code_audit_ui';
 
 export const AGENT_WORKSPACE_DEFAULT_PATH = '/';
+export const AGENT_WORKSHOP_DEFAULT_PATH = '/agents';
+const WORKSHOP_PATHS = ['/agents', '/skills', '/workflows', '/tools', '/devices', '/models', '/hub', '/channels'];
 export const SETTINGS_DEFAULT_PATH = '/settings/preferences';
 export const SCENE_SUITES_PATH = '/scenes/suites';
 
@@ -32,7 +36,10 @@ export function sceneWorkspaceIdOf(workspace: NavWorkspaceId): string | null {
 }
 
 export function isSettingsPath(pathname: string): boolean {
-  return pathname === '/settings' || pathname.startsWith('/settings/');
+  return pathname === '/settings' || pathname.startsWith('/settings/')
+    // Cloud login returns through the legacy upgrade route. Keep both the
+    // callback and redirect out of the workbench's remembered page.
+    || pathname === '/flockspro-upgrade' || pathname.startsWith('/flockspro-upgrade/');
 }
 
 export function isSceneSuitesPath(pathname: string): boolean {
@@ -49,6 +56,18 @@ export function isOpenSceneWorkspace(workspace: WebUIContractWorkspaceListItem):
   return workspace.placement === 'sceneWorkspace' && workspace.enabled && !workspace.locked;
 }
 
+/** Code audit belongs to the permanent SOC module, independently of the alert suite. */
+export function sceneNavigationOwner(
+  workspaceId: string,
+  workspaces?: readonly WebUIContractWorkspaceListItem[] | null,
+): string {
+  if (workspaceId === CODE_AUDIT_WORKSPACE_ID
+    && workspaces?.some((workspace) => workspace.id === CODE_AUDIT_WORKSPACE_ID && isOpenSceneWorkspace(workspace))) {
+    return SOC_WORKSPACE_ID;
+  }
+  return workspaceId;
+}
+
 export type NavRoute =
   | { kind: 'workspace'; workspace: NavWorkspaceId }
   | { kind: 'settings' }
@@ -60,17 +79,23 @@ export type NavRoute =
  * scene, which it is unless the workspace puts its pages in the Agent menu.
  */
 export function resolveNavRoute(
-  pathname: string,
+  path: string,
   workspaces?: readonly WebUIContractWorkspaceListItem[] | null,
 ): NavRoute {
+  const [pathname, search = ''] = path.split('?');
   if (isSettingsPath(pathname)) return { kind: 'settings' };
   if (isSceneSuitesPath(pathname)) return { kind: 'scenes' };
+  const workspaceTab = new URLSearchParams(search).get('tab');
+  if (WORKSHOP_PATHS.some((base) => pathname === base || pathname.startsWith(`${base}/`))
+    || (pathname === '/workspace' && (workspaceTab === 'knowledge' || workspaceTab === 'memory'))) {
+    return { kind: 'workspace', workspace: AGENT_WORKSHOP };
+  }
   const workspaceId = workspaceIdFromPath(pathname);
   if (workspaceId) {
     const workspace = workspaces?.find((item) => item.id === workspaceId);
     // Workbench-placed workspaces render their pages under the Agent menu.
     if (workspace?.placement === 'aiWorkbench') return { kind: 'workspace', workspace: AGENT_WORKSPACE };
-    return { kind: 'workspace', workspace: sceneNavWorkspace(workspaceId) };
+    return { kind: 'workspace', workspace: sceneNavWorkspace(sceneNavigationOwner(workspaceId, workspaces)) };
   }
   // Custom pages outside any workspace sit in the Agent menu.
   return { kind: 'workspace', workspace: AGENT_WORKSPACE };
@@ -92,16 +117,20 @@ export function readWorkspacePaths(): NavWorkspacePaths {
     const result: NavWorkspacePaths = {};
     for (const [workspace, value] of Object.entries(parsed as Record<string, unknown>)) {
       if (!isInternalPath(value)) continue;
-      const route = resolveNavRoute(value.split('?')[0]);
+      const route = resolveNavRoute(value);
       if (route.kind !== 'workspace') continue;
       const sceneId = sceneWorkspaceIdOf(workspace);
       if (sceneId !== null) {
-        // A scene only ever stores one of its own pages.
-        if (workspaceIdFromPath(value) === sceneId) result[workspace] = value;
-      } else if (workspace === AGENT_WORKSPACE) {
+        // SOC can remember a code-audit page. Layout validates suite availability when using it.
+        const pageWorkspaceId = workspaceIdFromPath(value.split('?')[0]);
+        if (pageWorkspaceId === sceneId
+          || (sceneId === SOC_WORKSPACE_ID && pageWorkspaceId === CODE_AUDIT_WORKSPACE_ID)) result[workspace] = value;
+      } else if (workspace === AGENT_WORKSPACE || workspace === AGENT_WORKSHOP) {
         // Placement of a workspace route is only known once navigation loads;
         // Layout checks stored paths against the current menu anyway.
-        result[workspace] = value;
+        if (route.workspace === workspace || (workspace === AGENT_WORKSPACE && workspaceIdFromPath(value))) {
+          result[workspace] = value;
+        }
       }
     }
     return result;
@@ -122,7 +151,7 @@ export function saveWorkspacePaths(paths: NavWorkspacePaths): void {
 export function readCurrentWorkspace(): NavWorkspaceId {
   try {
     const value = window.localStorage.getItem(CURRENT_WORKSPACE_KEY);
-    if (value === AGENT_WORKSPACE || (value && sceneWorkspaceIdOf(value))) return value;
+    if (value === AGENT_WORKSPACE || value === AGENT_WORKSHOP || (value && sceneWorkspaceIdOf(value))) return value;
   } catch {
     // Fall through to the default.
   }

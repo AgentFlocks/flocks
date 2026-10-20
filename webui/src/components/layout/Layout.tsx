@@ -1,9 +1,17 @@
 import { Link, useLocation, useNavigate, type RouteObject } from 'react-router-dom';
 import {
   Home,
+  Bot,
+  Blocks,
+  Brain,
+  Database,
+  FolderOpen,
+  ServerCog,
+  Wrench,
   MessageSquarePlus,
   Workflow,
   ListTodo,
+  Radio,
   ChevronLeft,
   ChevronRight,
   Layers,
@@ -13,7 +21,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
-import type { ComponentType } from 'react';
+import type { ComponentType, CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { onboardingAPI } from '@/api/onboarding';
 import { useTokenPolicyNotice } from '@/hooks/useTokenPolicyNotice';
@@ -71,10 +79,15 @@ import {
 } from '@/utils/webuiContractWorkspaceSections';
 import { useWorkspacePageOrders } from '@/hooks/useWorkspacePageOrders';
 import { useLayoutOpenTabs } from '@/hooks/useLayoutOpenTabs';
+import { useSidebarResize } from '@/hooks/useSidebarResize';
 import { findActiveTabHref, resolveOpenTabs } from '@/utils/layoutTabs';
 import {
   AGENT_WORKSPACE,
+  AGENT_WORKSHOP,
+  AGENT_WORKSHOP_DEFAULT_PATH,
   AGENT_WORKSPACE_DEFAULT_PATH,
+  CODE_AUDIT_WORKSPACE_ID,
+  SOC_WORKSPACE_ID,
   SCENE_SUITES_PATH,
   isOpenSceneWorkspace,
   readCurrentWorkspace,
@@ -83,13 +96,17 @@ import {
   saveCurrentWorkspace,
   saveWorkspacePaths,
   sceneNavWorkspace,
+  sceneNavigationOwner,
   sceneWorkspaceIdOf,
+  workspaceIdFromPath,
   type NavWorkspaceId,
   type NavWorkspacePaths,
 } from '@/utils/navPartitions';
 import WorkspaceHeader, { type HeaderWorkspace } from './WorkspaceHeader';
 import AccountMenu from './AccountMenu';
+import { useSettingsSectionGroups } from '@/utils/settingsSections';
 import SessionHistoryPanel from './SessionHistoryPanel';
+import SidebarHistorySplit from './SidebarHistorySplit';
 import KeepAlivePanes from './KeepAlivePanes';
 import { contentRoutes as appContentRoutes } from '@/routes/contentRoutes';
 import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
@@ -210,6 +227,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(readSidebarCollapsed);
+  const sidebarResize = useSidebarResize(!collapsed);
   const isHome = location.pathname === '/';
   const [showOnboarding, setShowOnboarding] = useState(false);
   // Onboarding writes model credentials and the default model, so only admins get it
@@ -577,30 +595,43 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     () => sceneWorkspaces.filter(isOpenSceneWorkspace),
     [sceneWorkspaces],
   );
-  const headerWorkspaces = useMemo<HeaderWorkspace[]>(() => [
-    { id: AGENT_WORKSPACE, name: t('agentWorkspace'), icon: Sparkles },
-    ...openSceneWorkspaces.map((workspace) => ({
-      id: sceneNavWorkspace(workspace.id),
-      name: getLocalizedWebUIContractTitle(workspace, i18n.language),
-      icon: sceneHeaderIcon(workspace),
-    })),
-  ], [i18n.language, openSceneWorkspaces, t]);
+  const headerWorkspaces = useMemo<HeaderWorkspace[]>(() => {
+    const socWorkspace = openSceneWorkspaces.find((workspace) => workspace.id === SOC_WORKSPACE_ID);
+    return [
+      { id: AGENT_WORKSPACE, name: t('workbench'), icon: Home },
+      // SOC is a permanent module, including when none of its scene suites are installed.
+      {
+        id: sceneNavWorkspace(SOC_WORKSPACE_ID),
+        name: socWorkspace ? getLocalizedWebUIContractTitle(socWorkspace, i18n.language) : t('socWorkspace'),
+        icon: socWorkspace ? sceneHeaderIcon(socWorkspace) : ShieldCheck,
+      },
+      ...openSceneWorkspaces.filter((workspace) => workspace.id !== SOC_WORKSPACE_ID
+        && sceneNavigationOwner(workspace.id, openSceneWorkspaces) === workspace.id).map((workspace) => ({
+        id: sceneNavWorkspace(workspace.id),
+        name: getLocalizedWebUIContractTitle(workspace, i18n.language),
+        icon: sceneHeaderIcon(workspace),
+      })),
+      { id: AGENT_WORKSHOP, name: t('agentWorkshop'), icon: Bot, separated: true },
+    ];
+  }, [i18n.language, openSceneWorkspaces, t]);
 
   const navStateReady = !webuiContractNavLoading
     || webuiContractWorkspaces.length > 0
     || webuiContractPages.length > 0;
 
-  // The workspace whose menu the sidebar shows. Settings and the scene manager
-  // keep the workspace they were opened from.
-  const routeNav = resolveNavRoute(location.pathname, navStateReady ? webuiContractWorkspaces : null);
+  // Remember the module to return to when leaving settings or scene management.
+  const routeNav = resolveNavRoute(`${location.pathname}${location.search}`, navStateReady ? webuiContractWorkspaces : null);
   const [rememberedWorkspace, setRememberedWorkspace] = useState<NavWorkspaceId>(readCurrentWorkspace);
   const routeWorkspace = routeNav.kind === 'workspace' ? routeNav.workspace : null;
-  const currentWorkspace = routeWorkspace ?? rememberedWorkspace;
+  const rememberedSceneId = sceneWorkspaceIdOf(rememberedWorkspace);
+  const rememberedNavigation = rememberedSceneId
+    ? sceneNavWorkspace(sceneNavigationOwner(rememberedSceneId, openSceneWorkspaces)) : rememberedWorkspace;
+  const currentWorkspace = routeWorkspace ?? (headerWorkspaces.some((workspace) => workspace.id === rememberedNavigation) ? rememberedNavigation : AGENT_WORKSPACE);
   useEffect(() => {
     if (!routeWorkspace || !navStateReady) return;
-    // A scene route only "counts" once we know that scene is still open.
+    // SOC is permanent; other scenes must be open.
     const sceneId = sceneWorkspaceIdOf(routeWorkspace);
-    if (sceneId && !openSceneWorkspaces.some((workspace) => workspace.id === sceneId)) return;
+    if (sceneId && sceneId !== SOC_WORKSPACE_ID && !openSceneWorkspaces.some((workspace) => workspace.id === sceneId)) return;
     setRememberedWorkspace(routeWorkspace);
     saveCurrentWorkspace(routeWorkspace);
   }, [navStateReady, openSceneWorkspaces, routeWorkspace]);
@@ -608,11 +639,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   // Last path visited inside each workspace, so switching back lands there.
   const workspacePathsRef = useRef<NavWorkspacePaths>(readWorkspacePaths());
   useEffect(() => {
-    if (!routeWorkspace || !navStateReady || viewingScenes) return;
+    if (!routeWorkspace || !navStateReady) return;
     const next = { ...workspacePathsRef.current, [routeWorkspace]: `${location.pathname}${location.search}` };
     workspacePathsRef.current = next;
     saveWorkspacePaths(next);
-  }, [location.pathname, location.search, navStateReady, routeWorkspace, viewingScenes]);
+  }, [location.pathname, location.search, navStateReady, routeWorkspace]);
 
   const newChat = useCallback(() => {
     setSidebarOpen(false);
@@ -620,11 +651,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, [navigate]);
 
   // ── Sidebar sections for the current workspace ───────────────────────────
-  const agentSection = useMemo<NavSection>(() => {
-    const workbenchPages = openSceneWorkspaces
-      .filter((workspace) => workspace.placement === 'aiWorkbench');
+  const workbenchSection = useMemo<NavSection>(() => {
     const workbenchItems: NavItem[] = webuiContractWorkspaces
-      .filter((workspace) => workspace.placement === 'aiWorkbench' && workspace.enabled)
+      .filter((workspace) => workspace.placement === 'aiWorkbench' && workspace.enabled && !workspace.locked)
       .flatMap((workspace) => workspacePageOrders
         .apply(workspace.id, buildWebUIContractWorkspacePageList(workspace, i18n.language)
           .filter((page) => page.enabled && page.buildStatus === 'ready'))
@@ -641,19 +670,37 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         href: page.route,
         icon: resolveWebUIContractPageIcon(page.icon),
       }));
-    void workbenchPages;
     return {
       id: 'agent',
       items: [
         { name: t('flocksHome'), href: '/', icon: Home },
         { name: t('newChat'), href: '/sessions', icon: MessageSquarePlus, action: 'new-chat', accent: true },
         { name: t('tasks'), href: '/tasks', icon: ListTodo, count: taskCounts ? (taskCounts.running ?? 0) + (taskCounts.queued ?? 0) : undefined },
-        { name: t('workflows'), href: '/workflows', icon: Workflow },
+        { name: t('workspace'), href: '/workspace', icon: FolderOpen },
         ...workbenchItems,
         ...customItems,
       ],
     };
-  }, [i18n.language, openSceneWorkspaces, taskCounts, t, webuiContractPages, webuiContractWorkspaces, workspacePageOrders]);
+  }, [i18n.language, taskCounts, t, webuiContractPages, webuiContractWorkspaces, workspacePageOrders]);
+
+  const workshopSections = useMemo<NavSection[]>(() => [
+    { id: 'orchestration', name: t('capabilityOrchestration'), items: [
+      { name: t('agents'), href: '/agents', icon: Bot },
+      { name: t('skills'), href: '/skills', icon: Sparkles },
+      { name: t('workflows'), href: '/workflows', icon: Workflow },
+    ] },
+    { id: 'knowledge-memory', name: t('knowledgeAndMemory'), items: [
+      { name: t('knowledgeBase'), href: '/workspace?tab=knowledge', icon: Database },
+      { name: t('memory'), href: '/workspace?tab=memory', icon: Brain },
+    ] },
+    { id: 'tools-models', name: t('toolsAndModels'), items: [
+      { name: t('tools'), href: '/tools', icon: Wrench },
+      { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
+      { name: t('models'), href: '/models', icon: Brain },
+      { name: t('channels'), href: '/channels', icon: Radio },
+      { name: t('hub', { productName }), href: '/hub', icon: Blocks },
+    ] },
+  ], [productName, t]);
 
   const sceneSections = useMemo(() => {
     const map = new Map<string, NavSection[]>();
@@ -668,7 +715,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
             if (!page) return result;
             const item: NavItem = {
               pageId: page.id,
-              name: section.label,
+              name: workspace.id === CODE_AUDIT_WORKSPACE_ID && section.id === 'home' ? t('codeAuditProjects') : section.label,
               href: workspaceSectionHref(workspace.route, section, page.id),
               icon: resolveWebUIContractPageIcon(section.icon || page.icon),
             };
@@ -703,27 +750,51 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         }];
       map.set(sceneNavWorkspace(workspace.id), groups.filter((group) => group.items.length > 0));
     }
+    if (sceneNavigationOwner(CODE_AUDIT_WORKSPACE_ID, openSceneWorkspaces) === SOC_WORKSPACE_ID) {
+      const socSections = map.get(sceneNavWorkspace(SOC_WORKSPACE_ID)) ?? [];
+      const auditItems = (map.get(sceneNavWorkspace(CODE_AUDIT_WORKSPACE_ID)) ?? []).flatMap((group) => group.items);
+      if (auditItems.length > 0) {
+        const operationsIndex = socSections.findIndex((section) => section.id === `scene:${SOC_WORKSPACE_ID}:operations`);
+        socSections.splice(operationsIndex < 0 ? socSections.length : operationsIndex + 1, 0, {
+          id: `scene:${SOC_WORKSPACE_ID}:code-audit`,
+          name: t('codeAudit'),
+          collapsible: true,
+          items: auditItems,
+        });
+      }
+      map.set(sceneNavWorkspace(SOC_WORKSPACE_ID), socSections);
+      map.delete(sceneNavWorkspace(CODE_AUDIT_WORKSPACE_ID));
+    }
     return map;
-  }, [i18n.language, openSceneWorkspaces, workspacePageOrders]);
+  }, [i18n.language, openSceneWorkspaces, workspacePageOrders, t]);
+
+  const { groups: settingsGroups } = useSettingsSectionGroups();
+  const settingsSection = useMemo<NavSection>(() => ({
+    id: 'settings',
+    name: t('systemConfiguration'),
+    items: settingsGroups.flatMap((group) => group.items)
+      .map((item) => ({ name: item.name, href: `/settings/${item.id}`, icon: item.icon })),
+  }), [settingsGroups, t]);
+  const viewingConfiguration = routeNav.kind === 'settings';
+  const showSessionHistory = !viewingConfiguration && currentWorkspace === AGENT_WORKSPACE;
 
   const visibleSections = useMemo<NavSection[]>(() => {
-    if (currentWorkspace === AGENT_WORKSPACE) return [agentSection];
+    if (viewingConfiguration) return [settingsSection];
+    if (currentWorkspace === AGENT_WORKSPACE) return [workbenchSection];
+    if (currentWorkspace === AGENT_WORKSHOP) return workshopSections;
     return sceneSections.get(currentWorkspace) ?? [];
-  }, [agentSection, currentWorkspace, sceneSections]);
+  }, [viewingConfiguration, settingsSection, workbenchSection, workshopSections, currentWorkspace, sceneSections]);
 
   // ── Keep-alive panes: every visited nav href stays mounted ────────────────
   const allNavItems = useMemo<NavItem[]>(() => {
-    const items = [...agentSection.items];
+    const items = [...workbenchSection.items, ...workshopSections.flatMap((section) => section.items)];
     for (const groups of sceneSections.values()) for (const group of groups) items.push(...group.items);
     return items;
-  }, [agentSection, sceneSections]);
+  }, [workbenchSection, workshopSections, sceneSections]);
   const navItemsFlat = useMemo(() => {
-    // Account-menu destinations keep their pane alive too, though they are not
-    // in the sidebar.
-    const accountHrefs = ['/agents', '/skills', '/tools', '/workspace', '/devices', '/hub', '/models', '/channels'];
     const seen = new Set<string>();
     const items: NavItem[] = [];
-    for (const item of [...allNavItems, ...accountHrefs.map((href) => ({ name: href, href, icon: Home }))]) {
+    for (const item of allNavItems) {
       if (seen.has(item.href)) continue;
       seen.add(item.href);
       items.push(item);
@@ -732,6 +803,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, [allNavItems]);
 
   const isNavItemActive = useCallback((href: string) => {
+    if (href.startsWith('/settings/')) return location.pathname === href;
     const active = findActiveTabHref(navItemsFlat.map((item) => item.href), location.pathname, location.search);
     return active === href;
   }, [location.pathname, location.search, navItemsFlat]);
@@ -777,7 +849,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   // A scene whose workspace closed (uninstalled, disabled or license lapsed)
   // cannot stay on screen: fall back to its suite manager.
-  const routeSceneId = routeWorkspace ? sceneWorkspaceIdOf(routeWorkspace) : null;
+  // The SOC navigation module remains available even if its alert suite is removed.
+  // Validate the page's own suite, not the shared navigation module that contains it.
+  const routeSceneId = routeWorkspace && sceneWorkspaceIdOf(routeWorkspace)
+    ? workspaceIdFromPath(location.pathname) : null;
   useEffect(() => {
     if (!navStateReady || webuiContractNavError || viewingScenes || !routeSceneId) return;
     if (!openSceneWorkspaces.some((workspace) => workspace.id === routeSceneId)) {
@@ -787,9 +862,14 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   const selectWorkspace = useCallback((workspaceId: NavWorkspaceId) => {
     setSidebarOpen(false);
-    if (workspaceId === currentWorkspace && !viewingScenes) return;
+    if (workspaceId === AGENT_WORKSPACE && routeNav.kind === 'settings') {
+      navigate(AGENT_WORKSPACE_DEFAULT_PATH);
+      return;
+    }
+    if (workspaceId === currentWorkspace && routeNav.kind === 'workspace') return;
     const stored = workspacePathsRef.current[workspaceId];
-    if (stored) {
+    const storedRoute = stored ? resolveNavRoute(stored, webuiContractWorkspaces) : null;
+    if (stored && storedRoute?.kind === 'workspace' && storedRoute.workspace === workspaceId) {
       navigate(stored);
       return;
     }
@@ -797,10 +877,15 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       navigate(AGENT_WORKSPACE_DEFAULT_PATH);
       return;
     }
+    if (workspaceId === AGENT_WORKSHOP) {
+      navigate(AGENT_WORKSHOP_DEFAULT_PATH);
+      return;
+    }
     const sceneId = sceneWorkspaceIdOf(workspaceId);
     const workspace = openSceneWorkspaces.find((item) => item.id === sceneId);
     if (workspace) navigate(workspace.route);
-  }, [currentWorkspace, navigate, openSceneWorkspaces, viewingScenes]);
+    else if (sceneId === SOC_WORKSPACE_ID) navigate(SCENE_SUITES_PATH);
+  }, [currentWorkspace, navigate, openSceneWorkspaces, routeNav.kind, webuiContractWorkspaces]);
 
   const toggleNavSection = useCallback((sectionId: string) => {
     setCollapsedNavSectionIds((current) => {
@@ -842,7 +927,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const accountInitial = (user?.username || productName || 'F').trim().charAt(0).toUpperCase();
   const accountRoleLabel = user?.role === 'admin' ? tAuth('admin.roleAdmin') : tAuth('admin.roleMember');
   const hasVisibleUpdate = hasUpdate && canManageUpdates;
-  const headerUpdate = hasVisibleUpdate
+  const versionUpdate = hasVisibleUpdate
     ? { title: t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' }), onClick: requestUpdate }
     : null;
 
@@ -893,9 +978,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     );
   };
 
-  const sidebar = (
-    <div className="flex h-full flex-col overflow-hidden">
-      <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-3 ${collapsed ? 'px-2' : 'px-3'}`}>
+  const navigation = (
+      <nav aria-label={t('moduleNavigation')} className={`min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-3 ${collapsed ? 'px-2' : 'px-3'}`}>
         {visibleSections.map((section) => {
           const sectionCollapsed = !collapsed && Boolean(section.collapsible) && collapsedNavSectionIds.has(section.id);
           return (
@@ -916,28 +1000,44 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           );
         })}
       </nav>
-      {currentWorkspace === AGENT_WORKSPACE && (
-        <SessionHistoryPanel collapsed={collapsed} onExpandSidebar={() => setCollapsed(false)} onNavigate={() => setSidebarOpen(false)} />
-      )}
-      <AccountMenu
-        collapsed={collapsed}
-        username={user?.username || productName}
-        roleLabel={accountRoleLabel}
-        initial={accountInitial}
-        version={displayVersion}
-        isAdmin={isAdmin}
-        isPro={isFlocksproActive}
-        proProductName={proProductName}
-        hubName={t('hub', { productName })}
-        onNavigate={() => setSidebarOpen(false)}
-        onCheckUpdate={openManualUpdateCheck}
-        onLogout={() => void handleLogout()}
+  );
+
+  const sidebar = (
+    <div className="flex h-full flex-col overflow-hidden">
+      <SidebarHistorySplit
+        enabled={showSessionHistory && !collapsed}
+        navigation={navigation}
+        history={showSessionHistory ? (
+          <SessionHistoryPanel collapsed={collapsed} onExpandSidebar={() => setCollapsed(false)} onNavigate={() => setSidebarOpen(false)} />
+        ) : null}
       />
+      <div className={`shrink-0 border-t border-zinc-200 dark:border-zinc-800 ${collapsed ? 'p-2' : 'p-3'}`}>
+        <AccountMenu
+          collapsed={collapsed}
+          username={user?.username || productName}
+          roleLabel={accountRoleLabel}
+          initial={accountInitial}
+          version={displayVersion}
+          update={versionUpdate}
+          isAdmin={isAdmin}
+          isPro={isFlocksproActive}
+          proProductName={proProductName}
+          onCheckUpdate={openManualUpdateCheck}
+          onNavigate={() => setSidebarOpen(false)}
+          onLogout={() => void handleLogout()}
+        />
+      </div>
     </div>
   );
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
+    <div
+      className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100"
+      style={{
+        '--sidebar-width': `${collapsed ? 64 : sidebarResize.width}px`,
+        '--sidebar-expanded-width': `${sidebarResize.width}px`,
+      } as CSSProperties}
+    >
       <LazyLoadErrorBoundary mode="overlay">
         <Suspense fallback={null}>
           {onboardingOpen && <OnboardingModal onClose={() => setShowOnboarding(false)} />}
@@ -970,11 +1070,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       <WorkspaceHeader
         productName={productName}
         logoUrl={logoUrl}
-        update={headerUpdate}
         workspaces={headerWorkspaces}
-        currentWorkspace={navStateReady ? currentWorkspace : null}
+        currentWorkspace={navStateReady && routeNav.kind === 'workspace' ? currentWorkspace : null}
         onSelectWorkspace={selectWorkspace}
-        sceneManager={{ href: SCENE_SUITES_PATH, hasNew: hasUnseenSuites, active: viewingScenes }}
+        hasUnseenSuites={hasUnseenSuites}
+        onOpenSceneManager={() => setSidebarOpen(false)}
         notifications={notifications}
         onOpenNotification={(notification) => {
           setUpdateNotification(notification.id === updateNotification?.id ? notification : updateNotification);
@@ -988,22 +1088,38 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       {sidebarOpen && <div className="fixed inset-0 top-14 z-30 bg-zinc-900/40 lg:hidden" onClick={() => setSidebarOpen(false)} />}
 
       <aside
-        className={`fixed bottom-0 left-0 top-14 z-40 border-r border-zinc-200 bg-zinc-100 transition-transform dark:border-zinc-800 dark:bg-zinc-950 lg:translate-x-0 ${collapsed ? 'w-16' : 'w-64'} ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
+        id="layout-sidebar"
+        className={`fixed bottom-0 left-0 top-14 z-40 w-[var(--sidebar-width)] border-r border-zinc-200 bg-zinc-100 transition-transform dark:border-zinc-800 dark:bg-zinc-950 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
       >
         {sidebar}
+        {!collapsed && (
+          <div
+            role="separator"
+            tabIndex={0}
+            aria-label={t('resizeNav')}
+            aria-orientation="vertical"
+            aria-controls="layout-sidebar"
+            aria-valuemin={sidebarResize.minimum}
+            aria-valuemax={sidebarResize.maximum}
+            aria-valuenow={sidebarResize.width}
+            className="absolute inset-y-0 -right-1 z-10 hidden w-2 touch-none cursor-col-resize outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-zinc-400 lg:block"
+            {...sidebarResize.handleProps}
+          />
+        )}
         <button
           type="button"
           onClick={toggleCollapsed}
-          // Same handle in both states, centred on the sidebar edge so it stays put while pages scroll.
-          className="absolute -right-3 top-1/2 hidden h-9 w-6 -translate-y-1/2 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 shadow-sm transition-colors hover:text-zinc-800 lg:flex dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+          // A tall, narrow handle sits flush with the sidebar edge in both states.
+          className="absolute -right-px top-1/2 z-20 hidden h-[92px] w-[14px] -translate-y-1/2 items-center justify-center rounded-l-[10px] border border-zinc-200 bg-white text-zinc-500 shadow-[-3px_0_10px_rgba(15,23,42,0.06)] transition-colors hover:bg-zinc-50 hover:text-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400 lg:flex dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+          aria-expanded={!collapsed}
           aria-label={collapsed ? t('expandNav') : t('collapseNav')}
           title={collapsed ? t('expandNav') : t('collapseNav')}
         >
-          {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+          {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronLeft className="h-3 w-3" />}
         </button>
       </aside>
 
-      <div className={`flex h-screen flex-col pt-14 transition-[padding] ${collapsed ? 'lg:pl-16' : 'lg:pl-64'}`}>
+      <div className={`flex h-screen flex-col pt-14 lg:pl-[var(--sidebar-width)] ${sidebarResize.dragging ? '' : 'transition-[padding]'}`}>
         {/* In the flow under the fixed header: a fixed banner would either hide under it or cover it. */}
         <BackendStatusBanner inline />
         <main className="relative flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">

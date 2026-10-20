@@ -31,7 +31,7 @@ export default function FlocksproUpgradeCallbackPage() {
       try {
         await authApi.finishConsoleLogin(consoleLoginId, state, passportUid);
         if (!cancelled) {
-          navigate('/flockspro-upgrade?login=success', { replace: true });
+          navigate('/settings/flockspro?login=success', { replace: true });
         }
       } catch (err) {
         if (!cancelled) {
@@ -63,4 +63,3 @@ export default function FlocksproUpgradeCallbackPage() {
     </div>
   );
 }
-

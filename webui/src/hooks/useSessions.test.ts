@@ -1138,7 +1138,7 @@ describe('useSessions list loading', () => {
     });
   });
 
-  it('uses a custom page size for project session pagination', async () => {
+  it.each([undefined, 50])('uses the initial page size and load-more size %s for project pagination', async (loadMorePageSize) => {
     vi.mocked(sessionApi.list).mockImplementation(async (params: any) => (
       Array.from({ length: params.limit }, (_, index) => ({
         id: `${params.projectID}-${params.offset + index}`,
@@ -1153,6 +1153,7 @@ describe('useSessions list loading', () => {
     const { result } = renderHook(() => useSessions('', {
       projectIds: ['default', 'prj_labs'],
       pageSize: 6,
+      loadMorePageSize,
     }));
     await act(async () => {});
 
@@ -1178,9 +1179,22 @@ describe('useSessions list loading', () => {
 
     expect(sessionApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
       projectID: 'prj_labs',
-      limit: 6,
+      limit: loadMorePageSize ?? 6,
       offset: 6,
     }));
+    await act(async () => { await result.current.loadMore('prj_labs'); });
+    expect(sessionApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      limit: loadMorePageSize ?? 6,
+      offset: 6 + (loadMorePageSize ?? 6),
+    }));
+    const projectDepth = 6 + 2 * (loadMorePageSize ?? 6);
+    expect(result.current.sessions).toHaveLength(6 + projectDepth);
+    await act(async () => { await result.current.refetch(); });
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'prj_labs', limit: projectDepth, offset: 0,
+    }));
+    expect(result.current.sessions).toHaveLength(6 + projectDepth);
   });
 
   it('preserves each project loaded depth during a background refetch', async () => {

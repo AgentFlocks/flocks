@@ -395,22 +395,11 @@ it('restarts polling when the admin refreshes after a timeout', async () => {
     expect(await screen.findByText('channels page')).toBeInTheDocument();
   });
 
-  it('switches between management pages with tabs at the top, whatever the workspace sidebar shows', async () => {
-    const user = userEvent.setup();
-    const { container } = renderSettings('/settings/system-logs');
-
+  it('renders management content without a second set of navigation tabs', async () => {
+    renderSettings('/settings/system-logs');
     expect(await screen.findByText('system logs page')).toBeInTheDocument();
-    expect(container.querySelector('aside')).toBeNull();
-    const tabs = screen.getByRole('navigation', { name: 'settingsTitle' });
-    await waitFor(() => expect(within(tabs).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
-      'settingsPreferences', 'archivedData', 'accountManagement', 'securityConfig', 'systemLog', 'auditLogs',
-    ]));
-    expect(within(tabs).getByRole('tab', { name: 'systemLog' })).toHaveAttribute('aria-selected', 'true');
-    expect(within(tabs).queryByRole('tab', { name: /flocks/i })).not.toBeInTheDocument();
-
-    await user.click(within(tabs).getByRole('tab', { name: 'archivedData' }));
-    expect(await screen.findByText('archived data page')).toBeInTheDocument();
-    expect(within(tabs).getByRole('tab', { name: 'archivedData' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+    expect(screen.getByTestId('settings-content')).toContainElement(screen.getByText('system logs page'));
   });
 
   it('opens the Flocks Pro page on its own, without the management tabs', async () => {
@@ -423,16 +412,13 @@ it('restarts polling when the admin refreshes after a timeout', async () => {
     expect(container.querySelector('[data-testid="settings-content"]')).toContainElement(screen.getByText('flocks pro page'));
   });
 
-  it('lists only the tabs a member may open', async () => {
+  it('redirects members away from admin-only settings', async () => {
     useAuth.mockReturnValue({
       user: { id: 'user-2', username: 'member', role: 'member', status: 'active', must_reset_password: false },
     });
-    renderSettings('/settings/preferences');
-
-    const tabs = await screen.findByRole('navigation', { name: 'settingsTitle' });
-    expect(within(tabs).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
-      'settingsPreferences', 'archivedData', 'accountManagement', 'systemLog',
-    ]);
+    renderSettings('/settings/security-config');
+    expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
+    expect(screen.queryByText('security config page')).not.toBeInTheDocument();
   });
 
   it('renders security config in settings for Flocks Pro admins', async () => {

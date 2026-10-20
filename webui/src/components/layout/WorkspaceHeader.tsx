@@ -1,20 +1,25 @@
-import { Link, useNavigate } from 'react-router-dom';
+import { useContext } from 'react';
+import { ThemeContext, type ThemeMode } from '@/contexts/ThemeContext';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Bell,
   BookOpen,
-  Check,
-  ChevronDown,
   CircleHelp,
   Keyboard,
   ListTodo,
   Menu,
   MessageSquareWarning,
-  Settings2,
+  Languages,
+  Layers,
+  Monitor,
+  Sun,
+  Moon,
+  Check,
   type LucideIcon,
 } from 'lucide-react';
 import type { UserNotification } from '@/api/notifications';
-import type { NavWorkspaceId } from '@/utils/navPartitions';
+import { isSceneSuitesPath, SCENE_SUITES_PATH, type NavWorkspaceId } from '@/utils/navPartitions';
 import HeaderMenu, { MENU_ITEM_CLASS, MENU_LABEL_CLASS, MENU_SEPARATOR_CLASS } from './HeaderMenu';
 
 export const DOCS_URL = 'https://agentflocks.github.io/flocks-docs/';
@@ -24,18 +29,19 @@ export interface HeaderWorkspace {
   id: NavWorkspaceId;
   name: string;
   icon: LucideIcon;
+  separated?: boolean;
 }
 
 interface WorkspaceHeaderProps {
   productName: string;
   /** Without a logo the mark shows the product name's initial. */
   logoUrl?: string | null;
-  update?: { title: string; onClick: () => void } | null;
   workspaces: HeaderWorkspace[];
   /** Null while navigation data is loading. */
   currentWorkspace: NavWorkspaceId | null;
   onSelectWorkspace: (id: NavWorkspaceId) => void;
-  sceneManager: { href: string; hasNew: boolean; active: boolean };
+  hasUnseenSuites: boolean;
+  onOpenSceneManager: () => void;
   notifications: UserNotification[];
   onOpenNotification: (notification: UserNotification) => void;
   taskCounts?: { running: number; queued: number } | null;
@@ -44,38 +50,40 @@ interface WorkspaceHeaderProps {
 }
 
 const ICON_BUTTON_CLASS =
-  'relative flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100';
+  'relative flex h-8 w-8 shrink-0 sm:h-9 sm:w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100';
 
-function NewBadge({ label }: { label: string }) {
-  return (
-    <span className="ml-auto inline-flex shrink-0 items-center rounded px-1.5 text-[10px] font-semibold leading-4 text-red-700 bg-red-50 dark:bg-red-500/15 dark:text-red-300">
-      {label}
-    </span>
-  );
-}
+const moduleClassName = (selected: boolean, separated = false) =>
+  `relative flex shrink-0 items-center gap-1 border-b-2 px-3 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400 ${separated ? 'ml-3 before:absolute before:-left-1.5 before:top-4 before:h-6 before:border-l before:border-zinc-200 dark:before:border-zinc-700' : ''} ${selected ? 'border-red-600 font-semibold text-zinc-950 dark:text-white' : 'border-transparent text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white'}`;
 
 /**
- * The bar above sidebar and content: product name, the workspace switcher
- * (with the scene manager), notifications and help.
+ * The bar above sidebar and content: product name, module navigation,
+ * display preferences, notifications and help.
  */
 export default function WorkspaceHeader({
   productName,
   logoUrl,
-  update,
   workspaces,
   currentWorkspace,
   onSelectWorkspace,
-  sceneManager,
+  hasUnseenSuites,
+  onOpenSceneManager,
   notifications,
   onOpenNotification,
   taskCounts,
   onOpenShortcuts,
   onOpenMobileNav,
 }: WorkspaceHeaderProps) {
-  const { t } = useTranslation('nav');
+  const { t, i18n } = useTranslation('nav');
+  const { mode, setTheme } = useContext(ThemeContext);
+  const ThemeIcon = mode === 'system' ? Monitor : mode === 'dark' ? Moon : Sun;
+  const themeOptions: { mode: ThemeMode; label: string; icon: LucideIcon }[] = [
+    { mode: 'system', label: t('systemTheme'), icon: Monitor },
+    { mode: 'light', label: t('lightTheme'), icon: Sun },
+    { mode: 'dark', label: t('darkTheme'), icon: Moon },
+  ];
   const navigate = useNavigate();
-  const current = workspaces.find((workspace) => workspace.id === currentWorkspace) ?? null;
-  const CurrentIcon = current?.icon;
+  const location = useLocation();
+  const viewingScenes = isSceneSuitesPath(location.pathname);
   const activeTasks = (taskCounts?.running ?? 0) + (taskCounts?.queued ?? 0);
   const hasUnread = notifications.length > 0 || activeTasks > 0;
   const brandInitial = (productName.trim().charAt(0) || 'F').toUpperCase();
@@ -83,7 +91,7 @@ export default function WorkspaceHeader({
   return (
     <header
       data-workspace-header
-      className="fixed inset-x-0 top-0 z-50 flex h-14 items-center gap-2 border-b border-zinc-200 bg-white px-3 sm:gap-4 sm:px-5 dark:border-zinc-800 dark:bg-zinc-900"
+      className="fixed inset-x-0 top-0 z-50 flex h-14 items-center gap-1 border-b border-zinc-200 bg-white px-2 sm:gap-3 sm:px-5 lg:gap-0 lg:pl-0 dark:border-zinc-800 dark:bg-zinc-900"
     >
       <button
         type="button"
@@ -95,95 +103,90 @@ export default function WorkspaceHeader({
         <Menu className="h-5 w-5" />
       </button>
 
-      <Link to="/" className="flex min-w-0 shrink-0 items-center gap-2 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400" title={productName}>
+      <Link to="/" className="flex min-w-0 shrink-0 items-center gap-2 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 lg:w-[calc(var(--sidebar-expanded-width)-1px)] lg:px-5" title={productName}>
         {logoUrl ? (
-          <img src={logoUrl} alt="" aria-hidden="true" data-brand-logo className="hidden h-8 w-8 shrink-0 sm:block" />
+          <img src={logoUrl} alt="" aria-hidden="true" data-brand-logo className="h-8 w-8 shrink-0" />
         ) : (
-          <span aria-hidden="true" className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-600 text-base font-bold text-white sm:flex">
+          <span aria-hidden="true" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-600 text-base font-bold text-white sm:flex">
             {brandInitial}
           </span>
         )}
-        <span className="max-w-[9rem] truncate text-lg font-bold tracking-tight text-zinc-900 sm:max-w-[14rem] sm:text-xl dark:text-zinc-50">
+        <span className="hidden min-w-0 max-w-[9rem] truncate sm:inline text-lg font-bold tracking-tight text-zinc-900 sm:max-w-[14rem] sm:text-xl dark:text-zinc-50">
           {productName}
         </span>
       </Link>
-      {update && (
-        <button
-          type="button"
-          onClick={update.onClick}
-          title={update.title}
-          aria-label={update.title}
-          className="relative -ml-1 inline-flex h-4 shrink-0 items-center rounded-sm bg-amber-50 px-1 text-[10px] font-bold leading-none text-amber-600 transition-colors hover:bg-amber-100 dark:bg-amber-950/70 dark:text-amber-300 dark:hover:bg-amber-900"
-        >
-          {t('newVersion')}
-          <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-amber-400" />
-        </button>
-      )}
+
 
       <div className="h-6 shrink-0 border-l border-zinc-200 dark:border-zinc-800" aria-hidden="true" />
 
-      <HeaderMenu
-        label={t('switchWorkspace')}
-        title={current?.name ?? t('switchWorkspace')}
-        triggerClassName="flex h-9 min-w-0 max-w-[11rem] items-center gap-2 rounded-lg px-2 text-sm font-semibold text-zinc-800 transition-colors hover:bg-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 sm:max-w-xs sm:px-3 dark:text-zinc-100 dark:hover:bg-zinc-800"
-        trigger={(
-          <>
-            {CurrentIcon && <CurrentIcon className="hidden h-4 w-4 shrink-0 text-zinc-500 sm:block dark:text-zinc-400" />}
-            <span className="min-w-0 truncate" data-current-workspace>{current?.name ?? t('agentWorkspace')}</span>
-            {sceneManager.hasNew && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-red-500" aria-hidden="true" />}
-            <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400" />
-          </>
-        )}
-        menuClassName="w-64"
-      >
-        {(close) => (
-          <>
-            {workspaces.map((workspace) => {
-              const selected = workspace.id === currentWorkspace;
-              const Icon = workspace.icon;
-              return (
-                <button
-                  key={workspace.id}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={selected}
-                  onClick={() => {
-                    close();
-                    onSelectWorkspace(workspace.id);
-                  }}
-                  className={`${MENU_ITEM_CLASS} ${selected ? 'font-semibold text-zinc-950 dark:text-white' : ''}`}
-                >
-                  <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                    {selected && <Check className="h-4 w-4" />}
-                  </span>
-                  <Icon className="h-4 w-4 shrink-0 text-zinc-400" />
-                  <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
-                </button>
-              );
-            })}
-            <div className={MENU_SEPARATOR_CLASS} role="separator" />
+      <nav aria-label={t('modules')} className="flex h-full min-w-0 flex-1 items-stretch overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {workspaces.map((workspace) => {
+          const selected = workspace.id === currentWorkspace;
+          const Icon = workspace.icon;
+          return (
             <button
+              key={workspace.id}
               type="button"
-              role="menuitem"
-              aria-current={sceneManager.active ? 'page' : undefined}
-              onClick={() => {
-                close();
-                navigate(sceneManager.href);
-              }}
-              className={MENU_ITEM_CLASS}
+              onClick={() => onSelectWorkspace(workspace.id)}
+              aria-current={selected ? 'page' : undefined}
+              className={moduleClassName(selected, workspace.separated)}
             >
-              <span className="h-4 w-4 shrink-0" />
-              <Settings2 className="h-4 w-4 shrink-0 text-zinc-400" />
-              <span className="min-w-0 flex-1 truncate">{t('sceneManagement')}</span>
-              {sceneManager.hasNew && <NewBadge label={t('newBadge')} />}
+              <Icon className="hidden h-4 w-4 shrink-0 xl:block" />
+              <span className="whitespace-nowrap">{workspace.name}</span>
             </button>
-          </>
-        )}
-      </HeaderMenu>
+          );
+        })}
+        <Link
+          to={SCENE_SUITES_PATH}
+          onClick={onOpenSceneManager}
+          aria-label={t('sceneManagement')}
+          aria-current={viewingScenes ? 'page' : undefined}
+          className={moduleClassName(viewingScenes, true)}
+        >
+          <Layers className="hidden h-4 w-4 shrink-0 xl:block" />
+          <span className="whitespace-nowrap">{t('sceneManagement')}</span>
+          {hasUnseenSuites && <>
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-red-500" aria-hidden="true" />
+            <span className="sr-only">{t('newBadge')}</span>
+          </>}
+        </Link>
+      </nav>
 
-      <div className="flex-1" />
+      <div className="flex shrink-0 items-center sm:gap-0.5 lg:ml-3">
+        <HeaderMenu label={t('language')} align="right" menuClassName="w-40" triggerClassName={ICON_BUTTON_CLASS} trigger={<Languages className="h-[18px] w-[18px]" />}>
+          {(close) => (
+            <>
+              <div className={MENU_LABEL_CLASS}>{t('language')}</div>
+              {[{ code: 'zh-CN', label: '简体中文' }, { code: 'en-US', label: 'English' }].map((language) => {
+                const selected = i18n.language.startsWith(language.code.slice(0, 2));
+                return (
+                  <button key={language.code} type="button" role="menuitemradio" aria-checked={selected} className={MENU_ITEM_CLASS}
+                    onClick={() => { void i18n.changeLanguage(language.code); close(true); }}>
+                    <span className="flex-1">{language.label}</span>
+                    {selected && <Check className="h-4 w-4" />}
+                  </button>
+                );
+              })}
+            </>
+          )}
+        </HeaderMenu>
 
-      <div className="flex shrink-0 items-center gap-0.5">
+        <HeaderMenu label={t('theme')} align="right" menuClassName="w-40" triggerClassName={ICON_BUTTON_CLASS} trigger={<ThemeIcon className="h-[18px] w-[18px]" />}>
+          {(close) => (
+            <>
+              <div className={MENU_LABEL_CLASS}>{t('theme')}</div>
+              {themeOptions.map((option) => (
+                <button key={option.mode} type="button" role="menuitemradio" aria-checked={mode === option.mode} className={MENU_ITEM_CLASS}
+                  onClick={() => { setTheme(option.mode); close(true); }}>
+                  <option.icon className="h-4 w-4 shrink-0" />
+                  <span className="flex-1">{option.label}</span>
+                  {mode === option.mode && <Check className="h-4 w-4" />}
+                </button>
+              ))}
+            </>
+          )}
+        </HeaderMenu>
+
         <HeaderMenu
           label={t('notifications')}
           align="right"

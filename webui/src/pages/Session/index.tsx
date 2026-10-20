@@ -26,10 +26,9 @@ import { useLocation, useNavigate, useSearchParams, useParams } from 'react-rout
 import SessionComposerMenu, { SessionComposerMenuHeader, SessionModeOption } from './SessionComposerMenu';
 import { sessionPath } from '@/utils/sessionUrl';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
-import CopyButton from '@/components/common/CopyButton';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
-import SessionChat, { buildInstructionDisplayText, type ComposerPrefill, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import SessionChat, { buildInstructionDisplayText, type ComposerPrefill, type PromptDisplayOptions, type SendWelcomePrompt, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
 import SessionContextPanel from './SessionContextPanel';
 import { getInitialSidePanelWidth, getMaxSidePanelWidth, SIDE_PANEL_MIN_WIDTH } from '@/components/common/sidePanelSizing';
 import SuiteInstallProgressPanel, {
@@ -1794,9 +1793,11 @@ export default function SessionPage() {
     setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
   }, []);
 
-  const handleAlertOperationsSetup = useCallback(async () => {
-    if (installingSocWorkspace) return;
+  const handleAlertOperationsSetup = useCallback(async (sendPrompt: SendWelcomePrompt) => {
+    if (installingSocWorkspace || selectedSession?.canWrite === false) return;
 
+    const navigationKey = navigationRef.current.key;
+    const identity = currentReaIdentity();
     setInstallingSocWorkspace(true);
     let startedComponentInstall = false;
     try {
@@ -1816,20 +1817,26 @@ export default function SessionPage() {
         await hubAPI.installStream('component', SOC_WORKSPACE_COMPONENT_ID, handleSuiteInstallProgress);
       }
 
+      if (!mountedRef.current || !paneActiveRef.current || navigationRef.current.key !== navigationKey || currentReaIdentity() !== identity) return;
+      const options = { displayText: buildInstructionDisplayText(t('welcome.alertOperations')) };
+      if (selectedSessionId) {
+        await sendPrompt(t('welcome.alertOperationsSuggestion'), options);
+        return;
+      }
       await handleCreateAndSend(
         t('welcome.alertOperationsSuggestion'),
         [],
         undefined,
         selectedPromptModel,
-        { displayText: buildInstructionDisplayText(t('welcome.alertOperations')) },
+        options,
       );
     } catch (err: any) {
       const message = err?.message ?? t('welcome.socComponentInstallFailedDescription');
       if (startedComponentInstall) {
         setSuiteInstallProgress(current => failSuiteInstallProgress(current, {
           id: SOC_WORKSPACE_COMPONENT_ID,
-          name: 'SOC Workspace Component',
-          nameCn: 'SOC 工作区场景套件',
+          name: 'Alert Operations Suite',
+          nameCn: '告警运营套件',
         }, message));
       }
       toast.error(
@@ -1839,7 +1846,7 @@ export default function SessionPage() {
     } finally {
       setInstallingSocWorkspace(false);
     }
-  }, [handleCreateAndSend, handleSuiteInstallProgress, installingSocWorkspace, selectedPromptModel, t, toast]);
+  }, [handleCreateAndSend, handleSuiteInstallProgress, installingSocWorkspace, selectedPromptModel, selectedSession?.canWrite, selectedSessionId, t, toast]);
 
   // The 「REA 逆向分析」 shortcut (and the plugin square's actions): route by the
   // live plugin state. The install or the use prompt only fills the message box
@@ -1849,13 +1856,14 @@ export default function SessionPage() {
   // same way. Every await is checked against the account and the page the click
   // came from.
   const handleReaEntry = useCallback(async (requested?: ReaEntryAction) => {
-    if (startingReaRef.current) return;
+    if (startingReaRef.current || selectedSession?.canWrite === false) return;
     startingReaRef.current = true;
     setStartingRea(true);
     const identity = currentReaIdentity();
     const navigationKey = navigationRef.current.key;
     const stale = () => (
       !mountedRef.current
+      || !paneActiveRef.current
       || currentReaIdentity() !== identity
       || navigationRef.current.key !== navigationKey
     );
@@ -1927,6 +1935,7 @@ export default function SessionPage() {
     handleSelectExecutionMode,
     refreshReaStatus,
     selectSession,
+    selectedSession?.canWrite,
     t,
     toast,
   ]);
@@ -1980,10 +1989,6 @@ export default function SessionPage() {
               {selectedSession?.title || t('newSession')}
             </h2>
           </div>
-
-          {selectedSessionId && selectedSession && !activeSessionError && (
-            <CopyButton text={new URL(sessionPath(selectedSessionId), window.location.origin).href} label={t('copyLink')} />
-          )}
 
           {workbenchRefreshing && (
             <WorkbenchRefreshStatus label={workbenchRefreshLabel} />
@@ -2078,10 +2083,10 @@ export default function SessionPage() {
           onComposerPrefillApplied={handleReaComposerPrefillApplied}
           contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
           model={selectedPromptModel}
-          welcomeContent={(setInput) => (
+          welcomeContent={(setInput, sendPrompt) => (
             <WelcomeScreen
               onSuggestion={setInput}
-              onAlertOperationsSetup={() => void handleAlertOperationsSetup()}
+              onAlertOperationsSetup={() => void handleAlertOperationsSetup(sendPrompt)}
               alertOperationsBusy={installingSocWorkspace}
               reaShortcut={{
                 badge: Boolean(reaStatus?.badge),
