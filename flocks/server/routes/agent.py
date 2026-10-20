@@ -517,8 +517,12 @@ async def create_agent(req: AgentCreateRequest):
 async def _save_agent_group_override(agent: AgentInfoModel, group: Optional[str]) -> None:
     """Patch only the raw group field, preserving references and unknown config."""
     from flocks.config.config_writer import ConfigWriter
+    from flocks.config.references import contains_reference
 
     value = normalize_agent_group(group)
+    if contains_reference(value):
+        # flocks.json is reference-expanded on load, so this would show a secret as the group name.
+        raise HTTPException(status_code=400, detail="Agent 分组不能包含 {env:…}、{secret:…}、{file:…} 这类引用")
     if agent.group_readonly:
         if value != normalize_agent_group(agent.group):
             raise HTTPException(status_code=403, detail="System agent group is read-only")

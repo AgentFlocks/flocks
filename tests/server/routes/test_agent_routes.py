@@ -268,6 +268,21 @@ class TestAgentNativeGroup:
         assert response.status_code == 422, response.text
 
     @pytest.mark.asyncio
+    async def test_native_group_config_override_refuses_references(self, client, native_group_agents):
+        # The override lives in flocks.json, which is reference-expanded on load:
+        # a group like this would show the secret as the group name.
+        from flocks.config.config import AgentConfig, Config, ConfigInfo
+        from flocks.config.config_writer import ConfigWriter
+
+        await Config.update(ConfigInfo(agent={"yaml-demo": AgentConfig(group="Override")}))
+        await client.post("/api/agent/refresh")
+
+        response = await client.put("/api/agent/yaml-demo", json={"group": "{secret:server_api_token}"})
+        assert response.status_code == 400, response.text
+        assert ConfigWriter._read_raw()["agent"]["yaml-demo"]["group"] == "Override"
+        assert (await client.get("/api/agent/yaml-demo")).json()["group"] == "Override"
+
+    @pytest.mark.asyncio
     async def test_native_group_missing_agent_is_not_created(self, client, native_group_agents):
         response = await client.put("/api/agent/unknown", json={"group": "Team"})
         assert response.status_code == 404

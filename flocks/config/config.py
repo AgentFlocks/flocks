@@ -1288,6 +1288,8 @@ class Config:
     
     _global_config: Optional[GlobalConfig] = None
     _cached_config: Optional[ConfigInfo] = None
+    # Where the files behind the cached config store references (built from the same reads).
+    _cached_reference_places: Optional["ReferencePlaces"] = None
     
     @classmethod
     def get_global(cls) -> GlobalConfig:
@@ -1361,7 +1363,12 @@ class Config:
         target_dict = target.model_dump(by_alias=True, exclude_none=True)
         source_dict = source.model_dump(by_alias=True, exclude_none=True)
         
-        # Deep merge
+        # Convert back to ConfigInfo
+        return ConfigInfo.model_validate(cls.merge_config_dicts(target_dict, source_dict))
+
+    @classmethod
+    def merge_config_dicts(cls, target_dict: Dict[str, Any], source_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """``merge_config_concat_arrays`` on config dumps: deep merge, permission layers, array concatenation."""
         merged = cls.merge_deep(target_dict, source_dict)
 
         target_permission = target_dict.get("permission")
@@ -1373,14 +1380,11 @@ class Config:
             )
         
         # Special handling for arrays - concatenate instead of replace
-        if target.plugin and source.plugin:
-            merged["plugin"] = list(set(target.plugin + source.plugin))
-        
-        if target.instructions and source.instructions:
-            merged["instructions"] = list(set(target.instructions + source.instructions))
-        
-        # Convert back to ConfigInfo
-        return ConfigInfo.model_validate(merged)
+        for key in ("plugin", "instructions"):
+            target_items, source_items = target_dict.get(key), source_dict.get(key)
+            if target_items and source_items:
+                merged[key] = list(set(target_items + source_items))
+        return merged
     
     @staticmethod
     def _json_string_escape(value: str) -> str:
@@ -1505,7 +1509,7 @@ class Config:
         return text
     
     @classmethod
-    async def load_file(cls, filepath: Path) -> ConfigInfo:
+    async def load_file(cls, filepath: Path, stored_layers: Optional[List[Any]] = None) -> ConfigInfo:
         """
         Load configuration from a file
         
@@ -1514,6 +1518,8 @@ class Config:
         
         Args:
             filepath: Path to config file
+            stored_layers: When given, receives the file as stored, references
+                unexpanded (see ``load_text``).
             
         Returns:
             ConfigInfo instance
@@ -1530,7 +1536,7 @@ class Config:
         except Exception as e:
             raise ValueError(f"Failed to read config file {filepath}: {e}")
         
-        return await cls.load_text(text, filepath)
+        return await cls.load_text(text, filepath, stored_layers=stored_layers)
 
     @staticmethod
     def parse_jsonc(text: str, filepath: Path) -> Dict[str, Any]:
@@ -1594,17 +1600,22 @@ class Config:
         return data
     
     @classmethod
-    async def load_text(cls, text: str, filepath: Path) -> ConfigInfo:
+    async def load_text(cls, text: str, filepath: Path, stored_layers: Optional[List[Any]] = None) -> ConfigInfo:
         """
         Load configuration from text
         
         Args:
             text: Config text (JSON/JSONC)
             filepath: Source file path (for error messages and relative paths)
+            stored_layers: When given, receives the same text parsed without
+                expanding references, keys spelled as in a config dump; ``None``
+                when it cannot be read that way.
             
         Returns:
             ConfigInfo instance
         """
+        stored_text = text
+
         # Replace environment variables
         text = cls.replace_env_vars(text)
         
@@ -1615,6 +1626,10 @@ class Config:
         text = await cls.replace_file_refs(text, filepath.parent)
         
         data = cls.parse_jsonc(text, filepath)
+        if stored_layers is not None:
+            stored_layers.append(
+                await cls._stored_layer(stored_text, filepath, parsed=data if stored_text == text else None)
+            )
         
         # Validate and parse with Pydantic
         try:
@@ -1627,7 +1642,7 @@ class Config:
         return config
     
     @classmethod
-    async def load_global_config(cls) -> ConfigInfo:
+    async def load_global_config(cls, stored_layers: Optional[List[Any]] = None) -> ConfigInfo:
         """
         Load global user configuration
         
@@ -1643,7 +1658,7 @@ class Config:
         for filename in ["flocks.json", "flocks.jsonc", "config.json"]:
             filepath = global_cfg.config_dir / filename
             if filepath.exists():
-                loaded = await cls.load_file(filepath)
+                loaded = await cls.load_file(filepath, stored_layers=stored_layers)
                 result = cls.merge_config_concat_arrays(result, loaded)
         
         return result
@@ -1674,9 +1689,10 @@ class Config:
         
         global_cfg = cls.get_global()
         result = ConfigInfo()
+        stored_layers: List[Any] = []
         
         # 1. Global user config
-        result = cls.merge_config_concat_arrays(result, await cls.load_global_config())
+        result = cls.merge_config_concat_arrays(result, await cls.load_global_config(stored_layers=stored_layers))
         
         # 2. Custom config path
         if global_cfg.config_path:
@@ -1684,7 +1700,7 @@ class Config:
             if custom_path.exists():
                 result = cls.merge_config_concat_arrays(
                     result,
-                    await cls.load_file(custom_path)
+                    await cls.load_file(custom_path, stored_layers=stored_layers)
                 )
         
         # 3. Inline config content
@@ -1722,8 +1738,64 @@ class Config:
             except Exception:
                 pass
         
-        cls._cached_config = result
+        from flocks.config.references import ReferencePlaces
+
+        # One snapshot: the places always describe the cached config they came with.
+        cls._cached_config, cls._cached_reference_places = result, ReferencePlaces(stored_layers)
         return result
+
+    @classmethod
+    async def get_with_reference_places(cls) -> "tuple[ConfigInfo, ReferencePlaces]":
+        """The merged config and where its files store references, from the same load."""
+        from flocks.config.references import ReferencePlaces
+
+        config = await cls.get()
+        cached_config, places = cls._cached_config, cls._cached_reference_places
+        if cached_config is config and places is not None:
+            return config, places
+        # A runtime override: no stored files to tell apart.
+        return config, ReferencePlaces()
+
+    @classmethod
+    async def _stored_layer(
+        cls, text: str, filepath: Path, parsed: Optional[Dict[str, Any]] = None
+    ) -> "StoredLayer":
+        """Config text as stored: parsed without expanding references, keys as a config dump spells them.
+
+        ``parsed`` is the text already parsed, when it holds nothing to expand.
+        """
+        from flocks.config.references import StoredLayer, quote_bare_references, schema_normalize
+
+        if parsed is not None:
+            return StoredLayer(filepath, schema_normalize(parsed), {})
+        try:
+            data = schema_normalize(cls.parse_jsonc(quote_bare_references(text), filepath))
+        except Exception:
+            data = None
+        return StoredLayer(filepath, data, await cls._reference_values(text, filepath))
+
+    @classmethod
+    async def _reference_values(cls, text: str, filepath: Path) -> Dict[str, str]:
+        """What each reference written in ``text`` expands to, the way ``load_text`` expands it."""
+        from flocks.config.references import CONFIG_REFERENCE
+
+        values: Dict[str, str] = {}
+        for token in set(CONFIG_REFERENCE.findall(text)):
+            try:
+                expanded = cls.replace_secret_refs(cls.replace_env_vars(token))
+                expanded = await cls.replace_file_refs(expanded, filepath.parent)
+                # The replacements are escaped for splicing into a JSON string.
+                values[token] = json.loads(f'"{expanded}"')
+            except Exception:
+                continue
+        return values
+
+    @classmethod
+    def _read_unexpanded(cls, text: str, filepath: Path) -> "tuple[Dict[str, Any], Dict[Any, str]]":
+        """Config text parsed with its references as written, and where they stand outside strings."""
+        from flocks.config.references import quote_bare_references, strip_bare_marks
+
+        return strip_bare_marks(cls.parse_jsonc(quote_bare_references(text, mark=True), filepath))
     
     @classmethod
     async def resolve_default_llm(cls) -> Optional[Dict[str, str]]:
@@ -1794,14 +1866,49 @@ class Config:
         # Ensure parent directory exists
         config_file.parent.mkdir(parents=True, exist_ok=True)
         
-        # Load existing
-        existing = await cls.load_file(config_file) if config_file.exists() else ConfigInfo()
-        
-        # Merge
-        merged = cls.merge_config_concat_arrays(existing, config)
-        
-        # Write
-        config_data = merged.model_dump(by_alias=True, exclude_none=True, mode="json")
+        from flocks.config.references import (
+            ChangeRefused,
+            apply_changes,
+            contains_reference,
+            drop_unchanged,
+            write_unexpanded,
+        )
+
+        # Load existing: expanded, and as stored with its references unexpanded.
+        text = config_file.read_text(encoding="utf-8") if config_file.exists() else ""
+        existing = await cls.load_text(text, config_file) if config_file.exists() else ConfigInfo()
+        try:
+            stored, bare = cls._read_unexpanded(text, config_file) if config_file.exists() else ({}, {})
+        except ValueError as exc:
+            # Without the unexpanded file the save cannot keep its references,
+            # and would write secrets in plaintext.
+            raise ValueError(f"{config_file} cannot be read without expanding its references; not saving") from exc
+        existing_data = existing.model_dump(by_alias=True, exclude_none=True, mode="json")
+
+        # Write only what the caller changed against the config in force, the one
+        # it was shown, into flocks.json as stored. Everything else stays as the
+        # file has it, so stored references stay references and other config
+        # layers are not copied in.
+        current, places = await cls.get_with_reference_places()
+        seen = current.model_dump(by_alias=True, exclude_none=True, mode="json")
+        changes = drop_unchanged(config.model_dump(by_alias=True, exclude_none=True, mode="json"), seen)
+        config_data = apply_changes(
+            stored,
+            changes,
+            seen,
+            existing_data,
+            own_values=await cls._reference_values(text, config_file),
+            others=lambda path: places.values_at(path, exclude=config_file),
+        )
+        if isinstance(changes.get("permission"), dict) and isinstance(stored.get("permission"), dict):
+            # Permission layers merge by their own rules (a rule string under a
+            # pattern map becomes its "*" entry), as merge_config_dicts does.
+            if contains_reference(stored["permission"]):
+                raise ChangeRefused(("permission",))
+            config_data["permission"] = _merge_permission_layers(
+                _canonicalize_permission_dict(stored["permission"]),
+                _canonicalize_permission_dict(changes["permission"]),
+            )
         if channel_allow_from_deletions:
             channels = config_data.get("channels")
             if isinstance(channels, dict):
@@ -1809,10 +1916,14 @@ class Config:
                     channel_cfg = channels.get(channel_id)
                     if isinstance(channel_cfg, dict):
                         channel_cfg.pop("allowFrom", None)
+                        channel_cfg.pop("allow_from", None)
+        new_text = write_unexpanded(config_data, bare)
+        # Validate the file as it will load (references expanded).
+        await cls.load_text(new_text, config_file)
         from flocks.config.runtime import runtime_config
         if runtime_config.get() is not None:
             raise RuntimeError("Configuration writes are disabled during a runtime override")
-        config_file.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
+        config_file.write_text(new_text, encoding="utf-8")
         
         # Clear cache
         cls._cached_config = None
@@ -1821,6 +1932,7 @@ class Config:
     def clear_cache(cls) -> None:
         """Clear cached configuration"""
         cls._cached_config = None
+        cls._cached_reference_places = None
     
     @classmethod
     def get_data_path(cls) -> Path:
