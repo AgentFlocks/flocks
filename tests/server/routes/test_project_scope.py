@@ -14,6 +14,7 @@ def _entries():
         SimpleNamespace(id="legacy", scope=None),
         SimpleNamespace(id="ext-a", scope="extension-a"),
         SimpleNamespace(id="ext-b", scope="extension-b"),
+        SimpleNamespace(id="audit", scope="code-security"),
     ]
 
 
@@ -28,13 +29,22 @@ async def test_workbench_lists_only_its_own_projects(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_extension_scope_sees_workbench_folders_but_not_other_extensions(monkeypatch):
+@pytest.mark.parametrize(
+    ("scope", "expected_ids"),
+    [
+        ("extension-a", ["ext-a"]),
+        ("extension-b", ["ext-b"]),
+        ("code-security", ["audit"]),
+        ("unregistered-extension", []),
+    ],
+)
+async def test_extension_scope_lists_only_its_own_projects(monkeypatch, scope, expected_ids):
     monkeypatch.setattr(project, "require_user", lambda request: SimpleNamespace(id="owner"))
     monkeypatch.setattr(project, "_list_project_summaries", AsyncMock(return_value=_entries()))
 
-    listed = await project.list_projects(None, search=None, scope="extension-a")
+    listed = await project.list_projects(None, search=None, scope=scope)
 
-    assert [p.id for p in listed] == ["normal", "legacy", "ext-a"]
+    assert [p.id for p in listed] == expected_ids
 
 
 @pytest.mark.parametrize("scope", ["", "Upper", "has space", "-leading", "x" * 65])

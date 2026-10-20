@@ -6,9 +6,10 @@ Includes: auth, skill, command endpoints.
 """
 
 from typing import Dict, List, Any, Optional
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
+from flocks.server.auth import require_admin
 from flocks.utils.log import Log
 from flocks.provider.provider import Provider, ProviderConfig
 from flocks.server.auth import require_admin

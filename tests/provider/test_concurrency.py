@@ -297,6 +297,34 @@ def test_limit_resolution_prefers_provider_then_global_then_env_then_default(mon
 
 
 @pytest.mark.asyncio
+async def test_acquire_llm_slot_reports_the_session_while_it_is_queued(monkeypatch):
+    monkeypatch.setenv("FLOCKS_LLM_MAX_CONCURRENT_REQUESTS", "1")
+
+    async def fake_config():
+        return ConfigInfo()
+
+    monkeypatch.setattr("flocks.config.config.Config.get", fake_config)
+    first = await acquire_llm_slot("prov", session_id="ses_first")
+    assert not concurrency.is_waiting_for_llm_slot("ses_first")
+
+    queued = asyncio.create_task(acquire_llm_slot("prov", session_id="ses_queued"))
+    await asyncio.sleep(0.02)
+    assert concurrency.is_waiting_for_llm_slot("ses_queued")
+    first.release()
+    slot = await asyncio.wait_for(queued, timeout=0.5)
+    assert not concurrency.is_waiting_for_llm_slot("ses_queued")
+
+    cancelled = asyncio.create_task(acquire_llm_slot("prov", session_id="ses_cancelled"))
+    await asyncio.sleep(0.02)
+    assert concurrency.is_waiting_for_llm_slot("ses_cancelled")
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    assert not concurrency.is_waiting_for_llm_slot("ses_cancelled")
+    slot.release()
+
+
+@pytest.mark.asyncio
 async def test_acquire_llm_slot_uses_configured_limit(monkeypatch):
     monkeypatch.setenv("FLOCKS_LLM_MAX_CONCURRENT_REQUESTS", "1")
 

@@ -361,6 +361,53 @@ def test_console_manifest_release_identity_writes_product_and_core_versions(
     assert "version_info" not in pending
 
 
+def test_pro_bundle_install_marker_keeps_console_release_notes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    merged = updater._merge_console_manifest_release_identity(
+        {
+            "bundle_version": "v2026.10.16",
+            "core_version": "v2026.10.15",
+            "flockspro_component_version": "2026.10.16",
+            "release_notes": "notes packed in the bundle",
+        },
+        {
+            "bundle_version": "v2026.10.16",
+            "core_version": "v2026.10.15",
+            "flockspro_component_version": "2026.10.16",
+            "release_notes": "### Pro 2026.10.16\n\n- 报告中心不再列出空报告",
+        },
+    )
+    updater._write_pro_bundle_install_marker(merged)
+
+    marker = json.loads((tmp_path / "run" / "pro-bundle-installed.json").read_text(encoding="utf-8"))
+    assert marker["release_notes"] == "### Pro 2026.10.16\n\n- 报告中心不再列出空报告"
+    pending = json.loads((tmp_path / "run" / "pro-bundle-install-receipt-pending.json").read_text(encoding="utf-8"))
+    assert "release_notes" not in pending
+
+
+def test_pro_bundle_install_marker_keeps_bundle_notes_without_console_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    merged = updater._merge_console_manifest_release_identity(
+        {
+            "bundle_version": "v2026.10.16",
+            "core_version": "v2026.10.15",
+            "flockspro_component_version": "2026.10.16",
+            "notes": "offline bundle notes",
+        },
+        None,
+    )
+    updater._write_pro_bundle_install_marker(merged)
+
+    marker = json.loads((tmp_path / "run" / "pro-bundle-installed.json").read_text(encoding="utf-8"))
+    assert marker["release_notes"] == "offline bundle notes"
+
+
 def test_pro_bundle_install_marker_requires_all_runtime_versions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -1011,6 +1058,7 @@ async def test_perform_pro_bundle_install_keeps_newer_local_core_when_bundle_cor
                 "core_version": "v2026.6.13",
                 "flockspro_component_version": "v2026.6.2",
                 "build_id": "job_new_pro_old_core",
+                "release_notes": "new Pro on older core",
             },
         )
 
@@ -1047,6 +1095,7 @@ async def test_perform_pro_bundle_install_keeps_newer_local_core_when_bundle_cor
     assert marker_payload["bundle_version"] == "v2026.6.13"
     assert marker_payload["core_version"] == "v2026.6.18"
     assert marker_payload["flockspro_component_version"] == "v2026.6.2"
+    assert marker_payload["release_notes"] == "new Pro on older core"
 
 
 @pytest.mark.asyncio

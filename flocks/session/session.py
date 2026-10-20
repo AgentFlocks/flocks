@@ -284,7 +284,23 @@ class Session:
     @classmethod
     @asynccontextmanager
     async def active_operation(cls, session_id: str) -> AsyncIterator[SessionInfo]:
-        """Prevent lifecycle transitions while a synchronous operation is running."""
+        """Prevent lifecycle transitions while a synchronous operation is running.
+
+        Like a runner, it holds the session's execution lease (or the one this
+        context already holds), so no runner and no data retention in any
+        process takes the session meanwhile; ``SessionInactiveError`` while
+        another holds it.
+        """
+        from flocks.session.ownership import SessionExecutionLease, current_lease
+
+        if current_lease(session_id) is None:
+            lease = await SessionExecutionLease.acquire(session_id)
+            if lease is None:
+                raise SessionInactiveError(f"Session {session_id} is running; try again once that finished")
+            async with lease:
+                async with cls.active_operation(session_id) as session:
+                    yield session
+            return
 
         async with cls.lifecycle_lock(session_id):
             session = await cls.get_by_id_unfiltered(session_id)
@@ -1236,32 +1252,64 @@ class Session:
                 await cls._end_lifecycle_transition(sessions)
     
     @classmethod
-    async def delete(cls, project_id: str, session_id: str) -> bool:
-        """Permanently delete a session tree and all application-owned data."""
+    async def delete(
+        cls,
+        project_id: str,
+        session_id: str,
+        *,
+        precheck: Optional[Callable[[List["SessionInfo"]], bool]] = None,
+        verify: Optional[Callable[[Any], Awaitable[None]]] = None,
+    ) -> bool:
+        """Permanently delete a session tree and all application-owned data.
+
+        ``precheck`` lets data retention abort if the tree must be kept: it is
+        called with the freshly-collected tree while every session's lifecycle
+        lock is held and *before* the lifecycle generation is bumped or any abort
+        side effect runs, so returning ``False`` leaves the tree completely
+        untouched (nothing stopped, no queue cleared, no in-flight write rejected).
+        ``verify(db)`` runs first inside the deleting transaction; raising there
+        (e.g. the caller's execution leases were lost) rolls the delete back.
+        """
 
         from flocks.project.project import Project
 
         async with Project.lifecycle_guard(project_id):
-            return await cls._delete_locked(project_id, session_id)
+            return await cls._delete_locked(
+                project_id, session_id, precheck=precheck, verify=verify,
+            )
 
     @classmethod
-    async def _delete_locked(cls, project_id: str, session_id: str) -> bool:
+    async def _delete_locked(
+        cls,
+        project_id: str,
+        session_id: str,
+        *,
+        precheck: Optional[Callable[[List["SessionInfo"]], bool]] = None,
+        verify: Optional[Callable[[Any], Awaitable[None]]] = None,
+    ) -> bool:
         """
         Permanently delete a session tree and all application-owned data.
-        
+
         Also deletes child sessions.
-        
+
         Args:
             project_id: Project ID
             session_id: Session ID
-            
+
         Returns:
             True if deleted
         """
         from flocks.session.policy import SessionPolicy
 
         actor = get_current_auth_user()
-        sessions = await cls._begin_lifecycle_transition(project_id, session_id)
+        # ``precheck`` is evaluated inside _begin_lifecycle_transition — under the
+        # tree's lifecycle locks and before the generation bump — so a tree that
+        # must be kept is never claimed: no generation change, no abort side
+        # effects, no in-flight write wrongly rejected. Once claimed, the
+        # transition blocks new activity, so no further idle re-check is needed.
+        sessions = await cls._begin_lifecycle_transition(
+            project_id, session_id, precheck=precheck,
+        )
         if not sessions:
             return False
         deleted = False
@@ -1286,6 +1334,8 @@ class Session:
             permission_keys = await PermissionNext.deletion_storage_keys(session_ids)
 
             async def _lock_message_states(db) -> None:
+                if verify is not None:
+                    await verify(db)
                 ordered_ids = sorted(set(session_ids))
                 # Match Message writes: page state precedes runtime documents.
                 # Ensure absent rows too, so a first writer's uncommitted state
@@ -1768,8 +1818,15 @@ class Session:
         session_id: str,
         *,
         require_root: bool = False,
+        precheck: Optional[Callable[[List[SessionInfo]], bool]] = None,
     ) -> List[SessionInfo]:
-        """Claim a complete tree so ordinary writes cannot overtake its transition."""
+        """Claim a complete tree so ordinary writes cannot overtake its transition.
+
+        ``precheck`` (if given) is called with the tree re-read under all its
+        lifecycle locks, right before the claim: returning ``False`` abandons the
+        transition without marking it or bumping any generation, so a caller that
+        decides not to proceed leaves the tree exactly as it found it.
+        """
         async with cls._tree_lock:
             sessions = await cls.collect_tree(project_id, session_id)
             if not sessions or any(not cls._is_writable_to_current_user(item) for item in sessions):
@@ -1792,6 +1849,10 @@ class Session:
                     or ids & cls._lifecycle_transition_ids
                     or any(cls.has_active_operations(item_id) for item_id in ids)
                 ):
+                    return []
+                # Final caller veto before the claim: still under the locks, so no
+                # generation is bumped and no transition is marked if it declines.
+                if precheck is not None and not precheck(sessions):
                     return []
                 cls._lifecycle_transition_ids.update(ids)
                 for item_id in ids:

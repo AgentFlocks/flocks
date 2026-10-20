@@ -217,11 +217,7 @@ class OpenAIProvider(BaseProvider):
             model=response.model,
             content=text_content,
             finish_reason=choice.finish_reason or "stop",
-            usage={
-                "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-                "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-                "total_tokens": response.usage.total_tokens if response.usage else 0,
-            }
+            usage=_normalize_stream_usage(response.usage, response_id=response.id) or {},
         )
     
     async def chat_stream(
@@ -275,7 +271,9 @@ class OpenAIProvider(BaseProvider):
         async for chunk in stream:
             # Capture usage from the final chunk (OpenAI returns it in a chunk with no choices)
             if hasattr(chunk, 'usage') and chunk.usage:
-                stream_usage = _normalize_stream_usage(chunk.usage)
+                stream_usage = _normalize_stream_usage(
+                    chunk.usage, response_id=getattr(chunk, "id", None)
+                )
             
             if not chunk.choices:
                 continue

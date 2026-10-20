@@ -864,10 +864,14 @@ class SessionCompaction:
         if model_context == 0:
             return False
 
+        # ``input`` is the uncached part of the prompt; cache reads and writes
+        # are the rest of it (flocks.provider.token_usage).
         input_tokens = tokens.get("input", 0)
-        cache_read = tokens.get("cache", {}).get("read", 0) if isinstance(tokens.get("cache"), dict) else 0
+        cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+        cache_read = cache.get("read", 0) or 0
+        cache_write = cache.get("write", 0) or 0
         output_tokens = tokens.get("output", 0)
-        count = input_tokens + cache_read + output_tokens
+        count = input_tokens + cache_read + cache_write + output_tokens
 
         if policy is not None:
             is_over = count > policy.overflow_threshold

@@ -55,6 +55,7 @@ import ExtensionSlot from '@/components/extensions/ExtensionSlot';
 import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useConfirm } from '@/components/common/ConfirmDialog';
+import { BackendStatusBanner } from '@/components/common/BackendStatusBanner';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
@@ -139,17 +140,52 @@ function latestProductVersion(info: VersionInfo): string | null {
   return info.latest_version || null;
 }
 
-function buildUpdateNotification(info: VersionInfo | null, language: string): UserNotification | null {
+/** A bundle version written as `v<number>` (installers may record it as `pro-v<number>`). */
+function formatBundleVersion(version?: string | null): string | null {
+  const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
+  return normalized ? `v${normalized}` : null;
+}
+
+function buildUpdateNotification(
+  info: VersionInfo | null,
+  language: string,
+  productName: string,
+): UserNotification | null {
   const releaseNotes = getLocalizedReleaseNotes(info?.release_notes, language);
   if (!info || info.error || !releaseNotes) return null;
+  const isZh = language.toLowerCase().startsWith('zh');
+  const summary = isZh ? '这里是本次版本值得关注的新功能和变化。' : 'Here are the highlights from this version.';
+  if (info.edition && info.edition !== 'flocks') {
+    // An installed bundle announces its own release, under the name the install shows.
+    const bundleVersion = formatBundleVersion(info.current_bundle_version || info.latest_version || info.current_version);
+    if (!bundleVersion) return null;
+    // Own prefix: a bundle may share its number with a Core release. Core and component versions
+    // are part of the key: a component-only update keeps the bundle number.
+    const coreVersion = formatBundleVersion(info.current_core_version);
+    const componentVersion = formatBundleVersion(info.current_pro_component_version);
+    const releaseKey = [
+      bundleVersion,
+      coreVersion && `core-${coreVersion}`,
+      componentVersion && `pro-${componentVersion}`,
+    ].filter(Boolean).join('-');
+    return {
+      id: `whats-new-${info.edition}-${releaseKey}`,
+      kind: 'whats_new',
+      title: isZh ? `${productName} ${bundleVersion} 更新内容` : `What's new in ${productName} ${bundleVersion}`,
+      summary,
+      body: releaseNotes,
+      highlights: [],
+      version: bundleVersion,
+      priority: 20,
+    };
+  }
   const version = info.latest_version ?? info.current_version;
   if (!version || version === 'unknown') return null;
-  const isZh = language.toLowerCase().startsWith('zh');
   return {
     id: `whats-new-${version}`,
     kind: 'whats_new',
     title: isZh ? `Flocks ${formatUpdateVersion(version)} 更新内容` : `What's new in Flocks ${formatUpdateVersion(version)}`,
-    summary: isZh ? '这里是本次版本值得关注的新功能和变化。' : 'Here are the highlights from this version.',
+    summary,
     body: releaseNotes,
     highlights: [],
     version,
@@ -484,7 +520,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     if (!notificationGateReady || !currentReleaseReady) return;
 
     setUpdateNotificationReady(false);
-    const notification = buildUpdateNotification(currentRelease?.info ?? null, i18n.language);
+    const notification = buildUpdateNotification(currentRelease?.info ?? null, i18n.language, productName);
     if (!notification) {
       setUpdateNotification(null);
       setUpdateNotificationReady(true);
@@ -507,7 +543,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     return () => {
       cancelled = true;
     };
-  }, [currentRelease, currentReleaseReady, i18n.language, notificationGateReady, user?.id]);
+  }, [currentRelease, currentReleaseReady, i18n.language, notificationGateReady, productName, user?.id]);
 
   const allNotifications = updateNotification
     ? [...notifications, updateNotification].sort((a, b) => a.priority - b.priority)
@@ -994,6 +1030,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       </aside>
 
       <div className={`flex h-screen flex-col pt-14 transition-[padding] max-md:h-[100dvh] ${collapsed ? 'lg:pl-16' : 'lg:pl-64'}`}>
+        {/* In the flow under the fixed header: a fixed banner would either hide under it or cover it. */}
+        <BackendStatusBanner inline />
         <main className="relative flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
           <KeepAlivePanes panes={keepAlivePanes} activeHref={activePaneHref} location={location} routes={contentRoutes} />
         </main>

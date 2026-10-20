@@ -134,15 +134,14 @@ async def list_projects(
 ):
     """List user-registered project folders.
 
-    The default scope is the session manager's. Another scope lists that
-    extension's folders together with the workbench ones it may reuse.
+    The default scope is the session manager's. An extension scope lists only
+    that extension's projects; unscoped legacy entries belong to the workbench.
     """
 
     user = require_user(request)
     try:
         projects = await _list_project_summaries(user, search)
-        visible_scopes = {WORKBENCH_PROJECT_SCOPE, scope}
-        return [project for project in projects if (project.scope or WORKBENCH_PROJECT_SCOPE) in visible_scopes]
+        return [project for project in projects if (project.scope or WORKBENCH_PROJECT_SCOPE) == scope]
     except Exception as exc:
         log.error("project.list.error", {"error": str(exc)})
         raise HTTPException(status_code=500, detail=str(exc)) from exc

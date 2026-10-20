@@ -1,0 +1,165 @@
+{
+  "repository": "https://github.com/cloudflare/security-audit-skill",
+  "commit": "c1c8a8c1471069fb0e188eeaff69b8e8db6564a8",
+  "files": [
+    {
+      "path": "AI-AND-LLM.md",
+      "sourcePath": "skills/security-audit/AI-AND-LLM.md",
+      "gitBlob": "02ba9039eca4cec811fefc77bce0d7349b379aae",
+      "sha256": "7335a95c43554eadefcf03ece639291bb0e038c398a179299e3887ffe06bd2ef",
+      "size": 10617
+    },
+    {
+      "path": "ATTACK-CLASSES.md",
+      "sourcePath": "skills/security-audit/ATTACK-CLASSES.md",
+      "gitBlob": "18a2beb4dbb554fb52b0a0293b8bd9108207f8fa",
+      "sha256": "3ee4f00c6e8c9dcf6dd02dd5ac2a4ceb322e2085f3e9fbe79cf0c6330bc7ef83",
+      "size": 15695
+    },
+    {
+      "path": "CLIENT-SIDE.md",
+      "sourcePath": "skills/security-audit/CLIENT-SIDE.md",
+      "gitBlob": "8ba673e9e7e3d02f5518aa0219bcbeec7957531b",
+      "sha256": "613f6b98f86083e045525c5b60154ffdab122bac35f1e05eb17488e6e453370c",
+      "size": 8594
+    },
+    {
+      "path": "CLOUD-AND-DEPLOYMENT.md",
+      "sourcePath": "skills/security-audit/CLOUD-AND-DEPLOYMENT.md",
+      "gitBlob": "5569f76c7740744aa3f60aaa89eaefe275f2e6c9",
+      "sha256": "3c80f3088be22345e07b057c056d6ed99fe2b0304f794398964f7ccd5a496ca3",
+      "size": 8291
+    },
+    {
+      "path": "DATA-ISOLATION-AND-LIFECYCLE.md",
+      "sourcePath": "skills/security-audit/DATA-ISOLATION-AND-LIFECYCLE.md",
+      "gitBlob": "0cba1fa463b62c9b0caba710a201e29c1eecd0ec",
+      "sha256": "307dcb3e24d292715c4a041190e7bb135646a37eb6187619ae01d000a634a4ad",
+      "size": 7798
+    },
+    {
+      "path": "DESKTOP-MOBILE-AND-LOCAL-IPC.md",
+      "sourcePath": "skills/security-audit/DESKTOP-MOBILE-AND-LOCAL-IPC.md",
+      "gitBlob": "d6230098651bff6348d3868c11f566bfb1306e7f",
+      "sha256": "58eae8ee0ca6a46611c501ec5a3ab47fdff88dd7db0d8d74789bbf8bb19d8cb2",
+      "size": 8739
+    },
+    {
+      "path": "HUNTING.md",
+      "sourcePath": "skills/security-audit/HUNTING.md",
+      "gitBlob": "377d4dcfbe88a049379448cd7892717185401597",
+      "sha256": "71c121decea1322c47c718f6e110f1a892980bb4266bd7ac55ef043a213ade09",
+      "size": 22446
+    },
+    {
+      "path": "LICENSE",
+      "sourcePath": "LICENSE",
+      "gitBlob": "6dbc9ecb3a5b9080e95b962869e8c7ab16cfdc20",
+      "sha256": "e598e694aa506650c7192d5ea3be0e50aca0d356ea00551c53429f0b01eb6391",
+      "size": 1078
+    },
+    {
+      "path": "MEMORY-SAFETY-AND-BINARY.md",
+      "sourcePath": "skills/security-audit/MEMORY-SAFETY-AND-BINARY.md",
+      "gitBlob": "86ff4920752661fc4a31a35ca4f962ace5dd5f48",
+      "sha256": "7c8b0dccfb35315cca2455509674d49632b2fe37e1f3aac16c1a496a7e9924a7",
+      "size": 10513
+    },
+    {
+      "path": "PROTOCOLS-RPC-AND-MESSAGING.md",
+      "sourcePath": "skills/security-audit/PROTOCOLS-RPC-AND-MESSAGING.md",
+      "gitBlob": "b04ab88f852224838fdc9683d9fcccd858b0778a",
+      "sha256": "8b73816fa5b3697c9c40977f0c836b40f01d6e81929ff2720fe83ce089e9a619",
+      "size": 7483
+    },
+    {
+      "path": "RECONNAISSANCE.md",
+      "sourcePath": "skills/security-audit/RECONNAISSANCE.md",
+      "gitBlob": "1a170a93ab76b93dc5ac268a5b690beb423a8aa9",
+      "sha256": "02ca887aca84de8ae137f1891bd2f0a54f28d3fa6da92a27f54734382b3381a2",
+      "size": 15902
+    },
+    {
+      "path": "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md",
+      "sourcePath": "skills/security-audit/RESOURCE-EXHAUSTION-AND-AVAILABILITY.md",
+      "gitBlob": "6cbbd1e2cfa482068c8279c2f7da9db43d3f54b8",
+      "sha256": "4326fab5c92a0b4c420a70196254040105cd794026562130b59bf1a6db3e4baa",
+      "size": 7476
+    },
+    {
+      "path": "SKILL.md",
+      "sourcePath": "skills/security-audit/SKILL.md",
+      "gitBlob": "92178dad304d3f63e37582a297026a7874e12c62",
+      "sha256": "5e3e96a1e438d8f35fef0a1e38f02d4f00e2bdf910401b7dfe00e6779c6dac85",
+      "size": 22026
+    },
+    {
+      "path": "SUPPLY-CHAIN-AND-RELEASE.md",
+      "sourcePath": "skills/security-audit/SUPPLY-CHAIN-AND-RELEASE.md",
+      "gitBlob": "bf96aed0803bc07471483ab129dea86759c3e305",
+      "sha256": "f372e919940e335468ba1ae09f99026c3986a345f7fe26f8068f132e199f52a5",
+      "size": 7258
+    },
+    {
+      "path": "VALIDATION-AND-REPORTING.md",
+      "sourcePath": "skills/security-audit/VALIDATION-AND-REPORTING.md",
+      "gitBlob": "5e200d7387e665e53e0e4190fa4a5814c334c507",
+      "sha256": "b892470cb89bb31f33403e050d4bdfbe2cdaef940ade1496fa65e32b2e129449",
+      "size": 17843
+    },
+    {
+      "path": "WEB-PROTOCOL-AND-AUTH.md",
+      "sourcePath": "skills/security-audit/WEB-PROTOCOL-AND-AUTH.md",
+      "gitBlob": "1a099fa575cf52a61e9a627f91b61015120fa517",
+      "sha256": "4f3066dffa23c5635859187be9b96c32f2aff29a688186b91ff0c63e47d62b5c",
+      "size": 12300
+    },
+    {
+      "path": "report-schema.json",
+      "sourcePath": "skills/security-audit/report-schema.json",
+      "gitBlob": "55815a3687a45fff63d8ebf20068611bd6ad6d9a",
+      "sha256": "6575c9de4a62255699ea052ebf9a49ebfb373a32891bcd89af6f55cc84b35519",
+      "size": 14494
+    },
+    {
+      "path": "validate-coverage-ledger.cjs",
+      "sourcePath": "skills/security-audit/validate-coverage-ledger.cjs",
+      "gitBlob": "0ef58657bef18b26a92321df6c8e3d31bc8e6659",
+      "sha256": "2eb280bd2e33c002916f86db9b29f9edfedb6454e5db973c766290465b868ac8",
+      "size": 33522
+    },
+    {
+      "path": "validate-coverage-ledger.test.cjs",
+      "sourcePath": "skills/security-audit/validate-coverage-ledger.test.cjs",
+      "gitBlob": "b1444f57e1b021a61175733b8c356171861c8701",
+      "sha256": "cfb9df26b03469a4279a70e7664a2a5434dd6f8c2c204e91f9b0aeb9dd71e648",
+      "size": 28483
+    },
+    {
+      "path": "validate-findings.cjs",
+      "sourcePath": "skills/security-audit/validate-findings.cjs",
+      "gitBlob": "2843feceddb7e30bf10d6e4f7bbe6640e4c57799",
+      "sha256": "e85f232e36bfac0f866f244da50376692d6b45c690beadcb00608b0e6c8b5283",
+      "size": 28806
+    },
+    {
+      "path": "validate-findings.test.cjs",
+      "sourcePath": "skills/security-audit/validate-findings.test.cjs",
+      "gitBlob": "8d245b226bbe2fdf28b46b3203b99c2824039d2d",
+      "sha256": "b92001117a92c4161d43777a0ba2fa182a8a4d97f2304cc8c0cee5331497b73b",
+      "size": 26384
+    }
+  ],
+  "modifiedFiles": [
+    "SKILL.md",
+    "validate-findings.cjs"
+  ],
+  "adaptations": [
+    "Namespace the Flocks skill ID and declare the Node.js runtime dependency.",
+    "Map delegation roles, fresh verifier sessions, and companion paths to Flocks.",
+    "Use the execution-date Flocks output directory and retain sandbox requirements.",
+    "Declare the upstream validator platform limitation without weakening file protections.",
+    "Annotate the computed passingIndexes assignment as a reviewed secret-scanner false positive; validator behavior is unchanged.",
+    "Match Flocks v2026.10.13 interactive asynchronous delegation and require final child results before advancing dependent phases."
+  ]
+}

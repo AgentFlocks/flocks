@@ -29,7 +29,10 @@ const mocks = vi.hoisted(() => ({
   revealCredentials: vi.fn(),
   setCredentials: vi.fn(),
   testCredentials: vi.fn(),
+  deleteDefault: vi.fn(),
+  deleteDefinition: vi.fn(),
   sseOptions: null as null | { onReconnect?: () => void },
+  authUser: { role: 'admin' } as { role: 'admin' | 'member' },
 }));
 
 vi.mock('react-i18next', () => ({
@@ -76,6 +79,14 @@ vi.mock('react-i18next', () => ({
 vi.mock('@/hooks/useProviders', () => ({
   useProviders: mocks.useProviders,
 }));
+
+vi.mock('@/contexts/AuthContext', () => ({
+  useAuth: () => ({ user: mocks.authUser }),
+}));
+
+beforeEach(() => {
+  mocks.authUser = { role: 'admin' };
+});
 
 vi.mock('@/hooks/useSSE', () => ({
   useSSE: (options: { onReconnect?: () => void }) => {
@@ -137,7 +148,7 @@ vi.mock('@/api/provider', () => ({
   modelV2API: {
     listDefinitions: mocks.listDefinitions,
     createDefinition: mocks.createDefinition,
-    deleteDefinition: vi.fn(),
+    deleteDefinition: mocks.deleteDefinition,
   },
   usageAPI: {
     getSummary: mocks.getSummary,
@@ -156,7 +167,7 @@ vi.mock('@/api/provider', () => ({
     getResolved: mocks.getResolved,
     getFallbacks: mocks.getFallbacks,
     setFallbacks: mocks.setFallbacks,
-    delete: vi.fn(),
+    delete: mocks.deleteDefault,
     set: vi.fn(),
   },
 }));
@@ -534,6 +545,229 @@ describe('ModelPage configure provider dialog', () => {
     expect(mocks.setCredentials.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({
       api_key: 'sk-replacement-secret',
     }));
+  });
+});
+
+describe('ModelPage member access', () => {
+  const provider = {
+    id: 'threatbook-cn-llm',
+    name: 'ThreatBook-cn-llm',
+    source: 'config',
+    env: [],
+    key: null,
+    options: {},
+    models: {},
+    configured: true,
+    modelCount: 1,
+    category: 'connected',
+  };
+  const model = {
+    id: 'deepseek-v4-flash',
+    name: 'deepseek-v4-flash',
+    provider_id: 'threatbook-cn-llm',
+    model_type: 'llm',
+    status: 'active',
+    capabilities: {
+      features: [],
+      supports_streaming: true,
+      supports_tools: true,
+    },
+  };
+  // Same body shape as the backend's HTTPException handler (flocks/server/app.py).
+  const httpError = (status: number, message: string) => Object.assign(
+    new Error(`Request failed with status code ${status}`),
+    { response: { status, data: { error: 'HTTPException', message } } },
+  );
+  const forbidden = httpError(403, '仅管理员可执行该操作');
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    sessionStorage.clear();
+    mocks.useProviders.mockReturnValue({
+      providers: [provider],
+      connectedIds: [provider.id],
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.getSummary.mockResolvedValue({ data: null });
+    mocks.getResolved.mockResolvedValue({ data: null });
+    mocks.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.listDefinitions.mockResolvedValue({ data: { models: [model], total: 1 } });
+    mocks.getModelSettings.mockResolvedValue({ data: { enabled: true } });
+    mocks.createDefinition.mockResolvedValue({ data: { id: 'qwen3.8-max' } });
+    // Mirror the backend: these endpoints are require_admin.
+    mocks.getCredentials.mockRejectedValue(forbidden);
+    mocks.revealCredentials.mockRejectedValue(forbidden);
+    mocks.testCredentials.mockRejectedValue(forbidden);
+  });
+
+  it('lets members test models while every configuration change stays with admins', async () => {
+    const user = userEvent.setup();
+    mocks.authUser = { role: 'member' };
+    mocks.testCredentials.mockResolvedValue({
+      data: { success: true, message: 'ok', latency_ms: 12, answer: 'Paris' },
+    });
+    renderWithRouter(<ModelPage />);
+
+    expect(await screen.findByText('deepseek-v4-flash', { selector: 'h4' })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(mocks.getModelSettings).toHaveBeenCalledWith('threatbook-cn-llm', 'deepseek-v4-flash');
+    });
+    expect(screen.getByText('detail.configAdminOnly')).toBeInTheDocument();
+    // Nothing that changes providers, models or the default model.
+    expect(screen.queryByTitle('Configure')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add Provider' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'addModel' })).not.toBeInTheDocument();
+    expect(screen.queryByTitle('status.disabled')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Delete')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('dashboard.setDefaultModel')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('dashboard.editFallbackModels')).not.toBeInTheDocument();
+
+    await user.click(screen.getByTitle('form.testConnection'));
+    await waitFor(() => {
+      expect(mocks.testCredentials).toHaveBeenCalledWith('threatbook-cn-llm', 'deepseek-v4-flash');
+    });
+    expect(await screen.findByText('12ms')).toBeInTheDocument();
+
+    mocks.testCredentials.mockClear();
+    await user.click(screen.getByRole('button', { name: /detail\.batchTest/ }));
+    await waitFor(() => {
+      expect(mocks.testCredentials).toHaveBeenCalledWith('threatbook-cn-llm', 'deepseek-v4-flash');
+    });
+    expect(mocks.getCredentials).not.toHaveBeenCalled();
+    expect(mocks.revealCredentials).not.toHaveBeenCalled();
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+  });
+
+  it('shows members the model settings read-only', async () => {
+    const user = userEvent.setup();
+    mocks.authUser = { role: 'member' };
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByText('deepseek-v4-flash', { selector: 'h4' }));
+    const sheet = await screen.findByTestId('entity-sheet');
+    expect(within(sheet).getByText('detail.configAdminOnly')).toBeInTheDocument();
+    expect(within(sheet).getByRole('group')).toBeDisabled();
+    const save = within(sheet).getByRole('button', { name: 'Save' });
+    expect(save).toBeDisabled();
+    await user.click(save);
+    expect(mocks.createDefinition).not.toHaveBeenCalled();
+    expect(mocks.updateModelSettings).not.toHaveBeenCalled();
+  });
+
+  it('leaves an invalid default model for an admin to clear', async () => {
+    mocks.authUser = { role: 'member' };
+    mocks.getResolved.mockResolvedValue({ data: { provider_id: 'gone', model_id: 'gone-model' } });
+    renderWithRouter(<ModelPage />);
+
+    await waitFor(() => expect(mocks.toast.warning).toHaveBeenCalled());
+    // Nothing was cleared, so members are not told it was.
+    expect(mocks.toast.warning).toHaveBeenCalledWith('dashboard.defaultModelInvalidMember');
+    expect(mocks.toast.warning).not.toHaveBeenCalledWith('dashboard.defaultModelInvalid');
+    expect(mocks.deleteDefault).not.toHaveBeenCalled();
+  });
+
+  it('ignores connection failures cached while member tests were refused', async () => {
+    mocks.authUser = { role: 'member' };
+    // What the old page stored after a member's batch test came back 403.
+    localStorage.setItem('flocks_provider_connection_cache', JSON.stringify({
+      'threatbook-cn-llm': { status: 'failed', ts: Date.now() },
+    }));
+    renderWithRouter(<ModelPage />);
+
+    expect(await screen.findByText('deepseek-v4-flash', { selector: 'h4' })).toBeInTheDocument();
+    expect(screen.getByText('1 models')).toBeInTheDocument();
+    expect(screen.queryByText('status.connectionFailed')).not.toBeInTheDocument();
+    expect(localStorage.getItem('flocks_provider_connection_cache')).toBeNull();
+  });
+
+  it('still restores connection results cached by an admin test', async () => {
+    localStorage.setItem('flocks_provider_connection_cache_v2', JSON.stringify({
+      'threatbook-cn-llm': { status: 'failed', ts: Date.now() },
+    }));
+    mocks.getCredentials.mockResolvedValue({ data: null });
+    renderWithRouter(<ModelPage />);
+
+    expect(await screen.findByText('status.connectionFailed')).toBeInTheDocument();
+  });
+
+  it('tells members to ask an administrator when no provider is configured', async () => {
+    mocks.authUser = { role: 'member' };
+    mocks.useProviders.mockReturnValue({
+      providers: [],
+      connectedIds: [],
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    renderWithRouter(<ModelPage />);
+
+    expect(await screen.findByText('providerList.emptyHintMember')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add First Provider' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add Provider' })).not.toBeInTheDocument();
+  });
+
+  it('tells members to ask an administrator when a provider has no models', async () => {
+    mocks.authUser = { role: 'member' };
+    mocks.listDefinitions.mockResolvedValue({ data: { models: [], total: 0 } });
+    renderWithRouter(<ModelPage />);
+
+    expect(await screen.findByText('detail.noModelsMember')).toBeInTheDocument();
+    expect(screen.queryByText('detail.addModelHint')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'addModel' })).not.toBeInTheDocument();
+  });
+
+  it('keeps single-model and batch connection tests for admins', async () => {
+    const user = userEvent.setup();
+    mocks.getCredentials.mockResolvedValue({ data: null });
+    mocks.testCredentials.mockResolvedValue({
+      data: { success: true, message: 'ok', latency_ms: 12, answer: 'pong' },
+    });
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByTitle('form.testConnection'));
+    await waitFor(() => {
+      expect(mocks.testCredentials).toHaveBeenCalledWith('threatbook-cn-llm', 'deepseek-v4-flash');
+    });
+    expect(await screen.findByText('12ms')).toBeInTheDocument();
+
+    mocks.testCredentials.mockClear();
+    await user.click(screen.getByRole('button', { name: /detail\.batchTest/ }));
+    await waitFor(() => {
+      expect(mocks.testCredentials).toHaveBeenCalledWith('threatbook-cn-llm', 'deepseek-v4-flash');
+    });
+    expect(screen.queryByText('detail.configAdminOnly')).not.toBeInTheDocument();
+    expect(screen.getByTitle('Configure')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'addModel' })).toBeInTheDocument();
+    expect(screen.getByTitle('status.disabled')).toBeInTheDocument();
+    expect(mocks.getCredentials).toHaveBeenCalledWith('threatbook-cn-llm');
+  });
+
+  it('shows the backend reason instead of the bare status code when a model test is rejected', async () => {
+    const user = userEvent.setup();
+    mocks.getCredentials.mockResolvedValue({ data: null });
+    mocks.testCredentials.mockRejectedValue(httpError(500, 'upstream exploded'));
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByTitle('form.testConnection'));
+
+    const badge = await screen.findByText('detail.failed', { selector: 'span' });
+    expect(badge).toHaveAttribute('title', 'upstream exploded');
+  });
+
+  it('shows the backend reason when opening the provider configuration fails', async () => {
+    const user = userEvent.setup();
+    mocks.getCredentials.mockResolvedValue({ data: null });
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByTitle('Configure'));
+
+    await waitFor(() => {
+      expect(mocks.toast.error).toHaveBeenCalledWith('configFailed', '仅管理员可执行该操作');
+    });
+    expect(screen.queryByTestId('entity-sheet')).not.toBeInTheDocument();
   });
 });
 

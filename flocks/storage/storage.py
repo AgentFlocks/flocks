@@ -194,6 +194,7 @@ class Storage:
                     f"output_tokens {num} NOT NULL DEFAULT 0, "
                     f"cached_tokens {num} NOT NULL DEFAULT 0, "
                     f"cache_write_tokens {num} NOT NULL DEFAULT 0, "
+                    f"cache_reported {num}, "
                     f"reasoning_tokens {num} NOT NULL DEFAULT 0, "
                     f"total_tokens {num} NOT NULL DEFAULT 0, "
                     f"input_cost {money} NOT NULL DEFAULT 0, "
@@ -202,6 +203,7 @@ class Storage:
                     f"currency {text} NOT NULL DEFAULT 'USD', "
                     f"latency_ms {num}, "
                     f"source {text} NOT NULL DEFAULT 'live', "
+                    f"response_id {text}, "
                     f"created_at {text} NOT NULL, "
                     f"backfilled_at {text})"
                 )
@@ -221,6 +223,12 @@ class Storage:
                     ("cache_write_tokens", f"ADD COLUMN cache_write_tokens {num} NOT NULL DEFAULT 0"),
                     ("source", f"ADD COLUMN source {text} NOT NULL DEFAULT 'live'"),
                     ("backfilled_at", f"ADD COLUMN backfilled_at {text}"),
+                    # 1 / 0: the provider did / did not report cache usage;
+                    # NULL on rows written before this was tracked. IF NOT EXISTS:
+                    # another process upgrading the same database may add it after
+                    # the column list above was read.
+                    ("cache_reported", f"ADD COLUMN IF NOT EXISTS cache_reported {num}"),
+                    ("response_id", f"ADD COLUMN IF NOT EXISTS response_id {text}"),
                 ]
                 for column_name, clause in schema_additions:
                     if column_name in existing_columns:

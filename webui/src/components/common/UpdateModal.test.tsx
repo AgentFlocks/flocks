@@ -249,3 +249,52 @@ describe('UpdateModal terminal states', () => {
     expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
   });
 });
+
+describe('UpdateModal upgrade results', () => {
+  const updatable = { ...currentVersion, latest_version: '2026.10.13', has_update: true };
+  const uvMissing = 'Dependency sync failed: uv is required but was not found.';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkUpdate.mockResolvedValue(updatable);
+  });
+
+  it('stops showing the upgrade as running once it failed', async () => {
+    applyUpdate.mockImplementation(async (_version: string, onProgress: (progress: unknown) => void) => {
+      onProgress({
+        stage: 'fetching',
+        message: 'Downloading bundle',
+        bundle_filename: 'bundle-v2026.10.13.zip',
+        downloaded_bytes: 36 * 1024 * 1024,
+        total_bytes: 36 * 1024 * 1024,
+        percent: 100,
+      });
+      onProgress({ stage: 'error', message: uvMissing, success: false });
+      throw new Error(uvMissing);
+    });
+    const user = userEvent.setup();
+    render(<UpdateModal initialInfo={updatable} channel="bundle" onClose={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+
+    expect(await screen.findByText(uvMissing)).toBeInTheDocument();
+    expect(screen.getByText('upgradeFailed')).toBeInTheDocument();
+    expect(screen.queryByText('upgrading')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
+  });
+
+  it('stops showing the upgrade as running when the stream ends without a restart', async () => {
+    applyUpdate.mockImplementation(async (_version: string, onProgress: (progress: unknown) => void) => {
+      onProgress({ stage: 'done', message: 'Already up to date v2026.10.13', success: true });
+    });
+    const user = userEvent.setup();
+    render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+
+    expect(await screen.findByText('stageLabels.done')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText('upgrading')).not.toBeInTheDocument();
+    });
+  });
+});

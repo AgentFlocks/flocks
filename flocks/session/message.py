@@ -13,7 +13,7 @@ Key features:
 import asyncio
 import json
 from collections import OrderedDict
-from typing import List, Dict, Any, Optional, Literal, Union
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Union
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
 from enum import Enum
@@ -83,6 +83,13 @@ class TokenCache(BaseModel):
     """Token cache information"""
     read: int = Field(0, description="Cache read tokens")
     write: int = Field(0, description="Cache write tokens")
+    reported: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether the provider reported cache usage. False: read and write "
+            "are unknown, not zero. None: recorded before this was tracked."
+        ),
+    )
 
 
 class TokenUsage(BaseModel):
@@ -975,6 +982,7 @@ class Message:
                 normalized["cache"] = {
                     "read": cache_raw.get("read", 0),
                     "write": cache_raw.get("write", 0),
+                    "reported": cache_raw.get("reported"),
                 }
             return normalized
         return defaults
@@ -2148,7 +2156,127 @@ class Message:
                 log.info("message.deleted", {"id": message_id, "session_id": session_id})
                 return True
             return False
-    
+
+    @classmethod
+    async def delete_many(cls, session_id: str, message_ids: Sequence[str]) -> int:
+        """Delete several messages of one session in a single storage transaction.
+
+        Storage-authoritative: the kept list is computed from what is *stored*,
+        not from the in-memory cache, so a message that reached storage but not
+        this process's cache (e.g. another worker) is never dropped. Returns how
+        many messages were deleted.
+        """
+        targets = {message_id for message_id in message_ids if message_id}
+        if not targets:
+            return 0
+        async with _session_locks.get(session_id):
+            return await cls._delete_ids_locked(session_id, lambda stored: targets)
+
+    @classmethod
+    async def delete_selected(
+        cls,
+        session_id: str,
+        selector: "Callable[[List[Dict[str, Any]], Optional[Any]], Iterable[str]]",
+        *,
+        is_busy: "Optional[Callable[[Any], bool]]" = None,
+    ) -> int:
+        """Delete the messages ``selector`` picks, decided under the session lock.
+
+        ``selector(stored_messages, session)`` runs inside the lock on the
+        freshly-read stored message list and the live session, so a retention
+        decision (which turns are expired, the current revert point) can't be
+        stale by the time it deletes. Returns the count, or -1 if the session is
+        busy (left alone).
+
+        ``is_busy(session)`` is the authoritative "leave it alone" check (a
+        running loop, or a non-idle status such as compacting/dreaming that has
+        no live loop). Without it, only a running loop is treated as busy.
+        """
+        from flocks.session.session import Session
+        from flocks.session.session_loop import SessionLoop
+
+        # Hold the session lifecycle lock so a revert being set (Session.update)
+        # can't slip in between reading it and deleting. message.py never
+        # acquires this lock elsewhere, and the lifecycle lock is always taken
+        # before the message lock, so this order cannot deadlock.
+        async with Session.lifecycle_lock(session_id):
+            async with _session_locks.get(session_id):
+                session = await Session.get_by_id_unfiltered(session_id)
+                if is_busy is not None:
+                    if session is not None and is_busy(session):
+                        return -1
+                elif SessionLoop.is_running(session_id):
+                    return -1
+                return await cls._delete_ids_locked(
+                    session_id, lambda stored: selector(stored, session),
+                )
+
+    @classmethod
+    async def _delete_ids_locked(
+        cls,
+        session_id: str,
+        choose: "Callable[[List[Dict[str, Any]]], Iterable[str]]",
+    ) -> int:
+        """Delete the messages ``choose`` picks from the committed history. Lock held by caller.
+
+        ``choose`` sees the session's messages as the PostgreSQL message
+        directory holds them, read under ``lock_session`` in the transaction
+        that deletes, so a message another worker committed is never dropped
+        and the choice cannot go stale before it is applied. The directory, the
+        export document rebuilt from it, parts, turn diffs and search rows go
+        together, and the revision bump makes every worker's cache reload.
+        """
+        from flocks.session import message_pages
+        from flocks.session.ownership import require_current_ownership
+        from flocks.storage.session_search import delete_message_documents
+
+        removed_ids: List[str] = []
+        try:
+            async with Storage.transaction() as db:
+                await message_pages.lock_session(db, session_id)
+                await require_current_ownership(db, session_id)
+                rows = await db.fetch_all(
+                    "SELECT info FROM session_message_pages WHERE session_id = ? "
+                    "ORDER BY created_at, message_id",
+                    (session_id,),
+                )
+                stored = [json.loads(row[0]) if isinstance(row[0], str) else row[0] for row in rows]
+                targets = {message_id for message_id in choose(stored) if message_id} if stored else set()
+                removed_ids = [item["id"] for item in stored if item.get("id") in targets]
+                if not removed_ids:
+                    return 0
+                await db.execute(
+                    "DELETE FROM session_message_pages WHERE session_id = ? AND message_id = ANY(?::text[])",
+                    (session_id, removed_ids),
+                )
+                await message_pages.sync_document(db, session_id)
+                # Parts live per message, or in a legacy blob keyed by message id.
+                await db.execute(
+                    "DELETE FROM runtime_state WHERE key = ANY(?::text[])",
+                    ([cls._parts_item_key(session_id, message_id) for message_id in removed_ids]
+                     + [f"message_diff:{session_id}:{message_id}" for message_id in removed_ids],),
+                )
+                await db.execute(
+                    "UPDATE runtime_state SET value = value - ?::text[], updated_at = clock_timestamp() "
+                    "WHERE key = ? AND jsonb_typeof(value) = 'object'",
+                    (removed_ids, cls._parts_blob_key(session_id)),
+                )
+                if Storage.session_search_available():
+                    await delete_message_documents(db, session_id, removed_ids)
+                await message_pages.bump_revision(db, session_id)
+        except message_pages.SessionMessagesDeletedError:
+            return 0  # the session itself was deleted meanwhile
+        finally:
+            if removed_ids:
+                # Reload from storage on next access, whether or not the delete
+                # committed; a surgical prune could disagree with storage.
+                # (Retention only deletes from idle sessions, which have no
+                # pending part flush.)
+                cls._drop_cached_session(session_id, discard_lock=False)
+
+        log.info("message.deleted_many", {"session_id": session_id, "count": len(removed_ids)})
+        return len(removed_ids)
+
     @classmethod
     async def archive(cls, session_id: str, message_id: str) -> bool:
         """

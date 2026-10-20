@@ -9,6 +9,7 @@
     "setDefaultModel": "设置默认模型",
     "defaultModelUpdated": "默认模型已更新",
     "defaultModelInvalid": "当前默认模型「{{model}}」已不在可用列表中，已自动清除，请重新选择",
+    "defaultModelInvalidMember": "当前默认模型「{{model}}」已不在可用列表中，请联系管理员重新设置",
     "fallbackModels": "辅助模型",
     "noFallbackModels": "自动策略",
     "fallbackAvailability": "{{available}} / {{total}} 可用",
@@ -20,7 +21,14 @@
     "totalCost": "总费用",
     "noUsage": "暂无",
     "noCost": "暂无费用",
-    "toggleCurrency": "点击切换人民币 / 美元"
+    "toggleCurrency": "点击切换人民币 / 美元",
+    "cacheHit": "缓存命中 {{tokens}} · {{rate}}",
+    "cacheRead": "缓存命中 {{tokens}}",
+    "cacheUnreported": "缓存命中：未报告",
+    "cacheReadLegacy": "旧记录缓存命中 {{tokens}}",
+    "cacheLegacyHint": "这些缓存读数来自升级前的记录，当时没记下模型服务是否报告了缓存用量，输入的口径也不统一，所以命中率未知；之后的调用会单独统计",
+    "cacheUnreportedHint": "这些调用没有可用的缓存用量（模型服务没返回，或是升级前的记录），无法判断是否命中缓存，不等于命中为 0",
+    "cacheCoverageHint": "命中率按返回了缓存用量的 {{reported}} / {{total}} 次调用计算；其余调用没返回缓存用量，或是升级前的记录"
   },
   "fallbacks": {
     "title": "辅助模型",
@@ -50,6 +58,7 @@
   "providerList": {
     "empty": "尚未添加模型供应商",
     "emptyHint": "点击右上角「添加模型供应商」开始配置",
+    "emptyHintMember": "请联系管理员添加模型供应商",
     "addProvider": "添加模型供应商"
   },
   "detail": {
@@ -60,7 +69,9 @@
     "batchTest": "批量测试",
     "testing": "测试中",
     "success": "成功",
-    "failed": "失败"
+    "failed": "失败",
+    "configAdminOnly": "模型配置仅管理员可修改",
+    "noModelsMember": "请联系管理员添加模型"
   },
   "status": {
     "connected": "已连接",

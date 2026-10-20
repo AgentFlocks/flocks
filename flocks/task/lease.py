@@ -17,7 +17,8 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import time
-from typing import Optional
+from contextlib import contextmanager
+from typing import Iterator, Optional
 
 from flocks.task.node import process_owner_id, heartbeat_seconds, lease_seconds
 from flocks.utils.log import Log
@@ -39,6 +40,20 @@ def require_current_execution() -> None:
     lease = _current_lease.get()
     if lease is not None:
         lease.require_owned()
+
+
+@contextmanager
+def outside_task_execution() -> Iterator[None]:
+    """Start work that outlives the task execution it was started from.
+
+    The task counterpart of ``flocks.session.ownership.outside_execution``:
+    a task created inside keeps running after that execution's lease ends.
+    """
+    previous = _current_lease.set(None)
+    try:
+        yield
+    finally:
+        _current_lease.reset(previous)
 
 
 class ExecutionOwnershipError(RuntimeError):
@@ -238,5 +253,5 @@ class ExecutionLease:
 
 __all__ = [
     "ExecutionLease", "ExecutionOwnershipError", "current_execution_cancelled",
-    "require_current_execution",
+    "outside_task_execution", "require_current_execution",
 ]

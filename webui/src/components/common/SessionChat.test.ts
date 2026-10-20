@@ -2801,6 +2801,33 @@ describe('SessionChat composer controls', () => {
     expect(JSON.stringify(promptCall?.[1])).not.toContain('/Users/');
   });
 
+  it('attaches a reverse-engineering sample only when any file type is allowed', async () => {
+    clientPostMock.mockImplementation((url: string) => (url === '/api/workspace/upload'
+      ? Promise.resolve({
+        data: { uploaded: [{ uploadID: 'prt-sample', name: 'rea_demo', mime: 'application/octet-stream', size: 4, is_text_file: false }] },
+      })
+      : Promise.resolve({ data: {} })));
+    const sample = () => new File([new Uint8Array([0xcf, 0xfa, 0xed, 0xfe])], 'rea_demo', { type: 'application/octet-stream' });
+
+    const first = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    const docsOnly = first.container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(docsOnly.getAttribute('accept')).toContain('.pdf');
+    fireEvent.change(docsOnly, { target: { files: [sample()] } });
+    await screen.findByText('chat.upload.invalidType');
+    expect(clientPostMock).not.toHaveBeenCalledWith('/api/workspace/upload', expect.anything(), expect.anything());
+    first.unmount();
+
+    const second = render(React.createElement(SessionChat, { sessionId: 'sess-1', allowAnyUpload: true }));
+    const anyFile = second.container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(anyFile.hasAttribute('accept')).toBe(false);
+    fireEvent.change(anyFile, { target: { files: [sample()] } });
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith('/api/workspace/upload', expect.anything(), expect.anything());
+    });
+    expect(await screen.findByText('rea_demo')).toBeInTheDocument();
+    expect(screen.queryByText('chat.upload.invalidType')).not.toBeInTheDocument();
+  });
+
   it('deletes an abandoned staged document when the user removes it', async () => {
     clientPostMock.mockResolvedValue({
       data: {
@@ -5007,6 +5034,41 @@ describe('SessionChat composer references', () => {
         'build',
       );
     });
+  });
+
+  it('fills a guide into the message box once and sends only what the user sends (REA entry)', async () => {
+    const user = userEvent.setup();
+    const onCreateAndSend = vi.fn().mockResolvedValue('sess-created');
+    const onComposerPrefillApplied = vi.fn();
+    const guide = 'REA 安装指引\n安装原则：仅安装缺失组件\n安装执行前请再次和我确认你计划安装哪些模块？';
+    const props = {
+      sessionId: null,
+      agentName: 'rex',
+      onCreateAndSend,
+      composerPrefill: { id: 'guide-1', text: guide },
+      onComposerPrefillApplied,
+    };
+    const view = render(React.createElement(SessionChat, props));
+    const input = screen.getByPlaceholderText('请输入消息') as HTMLTextAreaElement;
+    await waitFor(() => expect(input).toHaveValue(guide));
+    expect(onComposerPrefillApplied).toHaveBeenCalledWith('guide-1');
+    // Ready to read from the top: focused, caret before the first line.
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.selectionStart).toBe(0);
+    expect(onCreateAndSend).not.toHaveBeenCalled();
+
+    // The same prefill on a later render does not overwrite what the user wrote.
+    await user.clear(input);
+    await user.type(input, '只装轻量档');
+    view.rerender(React.createElement(SessionChat, props));
+    expect(input).toHaveValue('只装轻量档');
+    // Shift+Enter is a new line; Enter sends.
+    await user.type(input, '{Shift>}{Enter}{/Shift}缺什么装什么');
+    expect(onCreateAndSend).not.toHaveBeenCalled();
+    await user.type(input, '{Enter}');
+    await waitFor(() => expect(onCreateAndSend).toHaveBeenCalledTimes(1));
+    expect(onCreateAndSend.mock.calls[0][0]).toBe('只装轻量档\n缺什么装什么');
+    expect(onComposerPrefillApplied).toHaveBeenCalledTimes(1);
   });
 
   it('queues streaming messages to the mentioned agent', async () => {

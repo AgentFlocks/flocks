@@ -2802,7 +2802,13 @@ async def unrevert_session(sessionID: str, http_request: Request) -> SessionResp
         )
     _require_session_write_access(session, current_user)
 
-    updated = await SessionRevert.unrevert(session_id=sessionID)
+    try:
+        updated = await SessionRevert.unrevert(session_id=sessionID)
+    except (ValueError, SessionInactiveError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     
     log.info("session.unreverted", {"session_id": sessionID})
     return await _session_to_response_with_goal(updated)
@@ -4155,7 +4161,25 @@ async def _resolve_compaction_context(
     return agent_name, provider_id, model_id
 
 
-async def _run_session_compaction(
+async def _run_session_compaction(session_id: str, **kwargs: Any) -> tuple[str, str, str]:
+    """Execute session compaction directly without routing through the LLM loop.
+
+    It holds the session's execution lease, as a runner does, for the whole
+    compaction: a runner in another process cannot start meanwhile, and data
+    retention there leaves the session alone. See ``_compact_session_owned``.
+    """
+    from flocks.session.ownership import SessionExecutionLease, current_lease
+
+    if current_lease(session_id) is not None:
+        return await _compact_session_owned(session_id, **kwargs)
+    lease = await SessionExecutionLease.acquire(session_id)
+    if lease is None:
+        raise ValueError(f"Session {session_id} is running; compact it once that finished")
+    async with lease:
+        return await _compact_session_owned(session_id, **kwargs)
+
+
+async def _compact_session_owned(
     session_id: str,
     *,
     requested_agent: Optional[str] = None,
@@ -4168,7 +4192,7 @@ async def _run_session_compaction(
     focus_instruction: Optional[str] = None,
     working_directory: Optional[str] = None,
 ) -> tuple[str, str, str]:
-    """Execute session compaction directly without routing through the LLM loop.
+    """The compaction itself, holding the session's execution lease.
 
     ``focus_instruction`` is forwarded verbatim to ``run_compaction`` so
     manual ``/compact <focus>`` invocations can bias what the

@@ -274,8 +274,16 @@ def main_callback(
         )
 
     # Initialize logging
+    async def _init_logging() -> None:
+        from flocks.retention import preload_log_retention
+
+        # A saved log period (dataRetention.logDays) must apply before the
+        # logger's first prune.
+        await preload_log_retention()
+        await Log.init(print=print_logs, dev=False, level=normalized_level)
+
     try:
-        asyncio.run(Log.init(print=print_logs, dev=False, level=normalized_level))
+        asyncio.run(_init_logging())
     except OSError as error:
         # Read-only / root-owned FLOCKS_ROOT: say so instead of dumping a traceback.
         console.print(

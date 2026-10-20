@@ -375,6 +375,33 @@ async def delete_message_document(
     return True
 
 
+async def delete_message_documents(
+    transaction: "Transaction",
+    session_id: str,
+    message_ids: Sequence[str],
+) -> int:
+    """Delete the derived transcript rows of several messages of one session."""
+    if not message_ids:
+        return 0
+    mark = transaction.dialect.placeholder
+    rows = await transaction.fetch_all(
+        "SELECT id FROM session_transcript_index_state "
+        f"WHERE session_id = {mark(1)} AND message_id = ANY({mark(2)}::text[])",
+        (session_id, list(message_ids)),
+    )
+    rowids = [row[0] for row in rows]
+    if not rowids:
+        return 0
+    index = search_index_for(transaction.dialect.name)
+    if index is not None:
+        await index.delete_rows(transaction, rowids)
+    await transaction.execute(
+        f"DELETE FROM session_transcript_index_state WHERE id = ANY({mark(1)}::bigint[])",
+        (rowids,),
+    )
+    return len(rowids)
+
+
 async def reconcile_session_index(
     *,
     project_id: Optional[str] = None,

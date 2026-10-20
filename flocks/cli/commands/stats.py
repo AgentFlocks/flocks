@@ -18,6 +18,7 @@ from flocks.provider.usage_service import (
     backfill_usage_records,
     get_usage_records,
     get_usage_stats,
+    usage_record_reports_cache,
 )
 from flocks.session.message import Message
 from flocks.session.session import Session, SessionInfo
@@ -37,6 +38,13 @@ class TokenStats:
     reasoning: int = 0
     cache_read: int = 0
     cache_write: int = 0
+    # Model calls, and those whose provider reported cache usage (with their
+    # cache reads and input tokens); the others did not say whether the cache
+    # was used, or were recorded before this was tracked.
+    requests: int = 0
+    cache_reported_requests: int = 0
+    cache_reported_read: int = 0
+    cache_reported_input: int = 0
 
     @property
     def total(self) -> int:
@@ -180,6 +188,11 @@ async def _aggregate_stats(days: Optional[int], project_filter: Optional[str]) -
         stats.total_tokens.reasoning += record.reasoning_tokens
         stats.total_tokens.cache_read += record.cached_tokens
         stats.total_tokens.cache_write += getattr(record, "cache_write_tokens", 0)
+        stats.total_tokens.requests += 1
+        if usage_record_reports_cache(record):
+            stats.total_tokens.cache_reported_requests += 1
+            stats.total_tokens.cache_reported_read += record.cached_tokens
+            stats.total_tokens.cache_reported_input += record.input_tokens
 
         if record.session_id:
             active_session_ids.add(record.session_id)
@@ -231,6 +244,34 @@ async def _aggregate_stats(days: Optional[int], project_filter: Optional[str]) -
     return stats
 
 
+def _cache_rows(tokens: TokenStats) -> List[tuple[str, str]]:
+    """Cache rows of the TOKENS table.
+
+    Calls whose provider did not report cache usage are not counted as cache
+    misses: with none reported and no cache tokens recorded, the cache is
+    shown as not reported.  The hit rate only covers calls that reported it.
+    """
+    if (
+        tokens.requests
+        and not tokens.cache_reported_requests
+        and not (tokens.cache_read or tokens.cache_write)
+    ):
+        return [("Cache Read", "not reported"), ("Cache Write", "not reported")]
+    rows = [
+        ("Cache Read", _format_number(tokens.cache_read)),
+        ("Cache Write", _format_number(tokens.cache_write)),
+    ]
+    if tokens.cache_reported_requests:
+        if tokens.cache_reported_input:
+            rate = tokens.cache_reported_read / tokens.cache_reported_input * 100
+            rows.append(("Cache Hit Rate", f"{rate:.1f}%"))
+        rows.append((
+            "Cache Reported",
+            f"{tokens.cache_reported_requests:,}/{tokens.requests:,} calls",
+        ))
+    return rows
+
+
 def _display_cost_section(stats: SessionStats, width: int) -> None:
     """Render grouped cost totals."""
     console.print("┌" + "─" * width + "┐")
@@ -271,8 +312,8 @@ def _display_stats(stats: SessionStats, tool_limit: Optional[int], model_limit: 
     console.print(_render_row("Output", _format_number(stats.total_tokens.output), width + 2))
     if stats.total_tokens.reasoning > 0:
         console.print(_render_row("Reasoning", _format_number(stats.total_tokens.reasoning), width + 2))
-    console.print(_render_row("Cache Read", _format_number(stats.total_tokens.cache_read), width + 2))
-    console.print(_render_row("Cache Write", _format_number(stats.total_tokens.cache_write), width + 2))
+    for label, value in _cache_rows(stats.total_tokens):
+        console.print(_render_row(label, value, width + 2))
     console.print("└" + "─" * width + "┘")
     console.print()
 

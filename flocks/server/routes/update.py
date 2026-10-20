@@ -3,10 +3,11 @@ Update routes — check version and apply self-upgrade via SSE stream
 """
 
 import asyncio
+import hashlib
 import json
 import re
 import time
-from typing import Annotated, Literal
+from typing import Annotated, Awaitable, Callable, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -15,7 +16,12 @@ from flocks.server.auth import require_admin, require_user
 from flocks.updater import check_update, perform_update, detect_deploy_mode
 from flocks.updater.deploy import update_refusal_reason
 from flocks.updater.models import VersionInfo
-from flocks.updater.updater import get_current_version, get_installed_release
+from flocks.updater.updater import (
+    get_current_version,
+    get_installed_pro_release,
+    get_installed_release,
+    read_installed_pro_bundle_marker,
+)
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -102,31 +108,37 @@ async def _check_update_cached(
     return info.model_copy(deep=True)
 
 
-async def _run_installed_release_for_cache(version: str) -> VersionInfo:
+async def _run_installed_release_for_cache(
+    key: str,
+    load: Callable[[], Awaitable[VersionInfo]],
+) -> VersionInfo:
     current_task = asyncio.current_task()
     try:
-        info = await get_installed_release(version)
+        info = await load()
         async with _update_check_lock:
-            if _installed_release_inflight.get(version) is current_task:
+            if _installed_release_inflight.get(key) is current_task:
                 ttl = _UPDATE_CHECK_CACHE_TTL_SECONDS if info.release_notes else _UPDATE_CHECK_ERROR_CACHE_TTL_SECONDS
-                _installed_release_cache[version] = (time.monotonic() + ttl, info.model_copy(deep=True))
+                _installed_release_cache[key] = (time.monotonic() + ttl, info.model_copy(deep=True))
         return info
     finally:
         async with _update_check_lock:
-            if _installed_release_inflight.get(version) is current_task:
-                _installed_release_inflight.pop(version, None)
+            if _installed_release_inflight.get(key) is current_task:
+                _installed_release_inflight.pop(key, None)
 
 
-async def _installed_release_cached(version: str) -> VersionInfo:
+async def _installed_release_cached(
+    key: str,
+    load: Callable[[], Awaitable[VersionInfo]],
+) -> VersionInfo:
     now = time.monotonic()
     async with _update_check_lock:
-        cached = _installed_release_cache.get(version)
+        cached = _installed_release_cache.get(key)
         if cached and cached[0] > now:
             return cached[1].model_copy(deep=True)
-        task = _installed_release_inflight.get(version)
+        task = _installed_release_inflight.get(key)
         if task is None:
-            task = asyncio.create_task(_run_installed_release_for_cache(version))
-            _installed_release_inflight[version] = task
+            task = asyncio.create_task(_run_installed_release_for_cache(key, load))
+            _installed_release_inflight[key] = task
 
     info = await asyncio.shield(task)
     return info.model_copy(deep=True)
@@ -135,11 +147,23 @@ async def _installed_release_cached(version: str) -> VersionInfo:
 @router.get(
     "/current-release",
     response_model=VersionInfo,
-    summary="Get release notes for the installed Flocks Core version",
+    summary="Get release notes for the installed Flocks Core version or Pro bundle",
 )
 async def current_release(request: Request) -> VersionInfo:
     require_user(request)
-    return await _installed_release_cached(get_current_version())
+    # A bundle install announces its own release; the Core tag's notes would replace it.
+    pro_marker = read_installed_pro_bundle_marker()
+    if pro_marker is not None:
+        # Keyed by the whole marker: a component-only update or repack keeps the bundle number.
+        marker_digest = hashlib.sha256(
+            json.dumps(pro_marker, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        return await _installed_release_cached(
+            f"bundle:{marker_digest}",
+            lambda: get_installed_pro_release(pro_marker),
+        )
+    version = get_current_version()
+    return await _installed_release_cached(version, lambda: get_installed_release(version))
 
 
 @router.get(

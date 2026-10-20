@@ -360,6 +360,24 @@ async def _publish_scene_suites_changed(plugin_type: PluginType, plugin_id: str,
         log.warning("hub.scene_suites.notify_failed", {"id": plugin_id, "action": action, "error": str(exc)})
 
 
+def _guard_guided_install(plugin_type: PluginType, plugin_id: str) -> None:
+    """Plugins installed through a Rex conversation have no file-copy install, update or uninstall."""
+
+    try:
+        manifest = load_manifest(plugin_type, plugin_id)
+    except Exception:
+        return
+    if getattr(manifest, "guidedInstall", None) is None:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "hub_guided_install",
+            "message": "该插件通过 Rex 会话安装：在插件广场点击安装后，由 Rex 在新会话中完成安装与验证。",
+        },
+    )
+
+
 async def _assert_edition_allowed(plugin_type: PluginType, plugin_id: str) -> None:
     """Pro-only suites stay listed in the catalog but only install under Pro,
     and each such suite only with its own suite licence."""
@@ -382,6 +400,7 @@ async def hub_install_plugin(
     _admin: object = Depends(require_admin),
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    _guard_guided_install(plugin_type, plugin_id)
     await _assert_edition_allowed(plugin_type, plugin_id)
     try:
         return await install_plugin(plugin_type, plugin_id, scope=req.scope)
@@ -402,6 +421,7 @@ async def hub_install_plugin_stream(
     _admin: object = Depends(require_admin),
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    _guard_guided_install(plugin_type, plugin_id)
     await _assert_edition_allowed(plugin_type, plugin_id)
     if plugin_type != "component":
         raise HTTPException(status_code=400, detail="Streaming install progress is only supported for components.")
@@ -457,6 +477,7 @@ async def hub_preview_update(
     _admin: object = Depends(require_admin),
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    _guard_guided_install(plugin_type, plugin_id)
     await _assert_edition_allowed(plugin_type, plugin_id)
     try:
         return public_plan(await preview_plan(plugin_type, plugin_id, req.scope))
@@ -472,6 +493,7 @@ async def hub_update_plugin(
     _admin: object = Depends(require_admin),
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    _guard_guided_install(plugin_type, plugin_id)
     await _assert_edition_allowed(plugin_type, plugin_id)
     try:
         return await update_plugin(plugin_type, plugin_id, scope=req.scope,
@@ -492,6 +514,7 @@ async def hub_uninstall_plugin(
     _admin: object = Depends(require_admin),
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    _guard_guided_install(plugin_type, plugin_id)
     try:
         removed = await uninstall_plugin(plugin_type, plugin_id)
         return {"removed": removed}

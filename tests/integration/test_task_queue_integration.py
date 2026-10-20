@@ -109,6 +109,23 @@ def manual_task_manager(monkeypatch: pytest.MonkeyPatch) -> TaskManager:
     return manager
 
 
+async def _stop_and_drain_execution_workers(timeout: float = 5.0) -> None:
+    """Stop dispatching, then wait for every TaskManager._run_execution to return.
+
+    A worker still running after the fixture closes TaskStore would reopen it
+    outside tmp_path (its status can read completed before the worker is done).
+    """
+    await TaskManager.stop()
+    workers = [
+        task
+        for task in asyncio.all_tasks()
+        if getattr(task.get_coro(), "__qualname__", "") == "TaskManager._run_execution"
+    ]
+    if workers:
+        _done, pending = await asyncio.wait(workers, timeout=timeout)
+        assert not pending, f"{len(pending)} execution workers still running"
+
+
 @pytest.mark.asyncio
 async def test_immediate_scheduler_runs_through_queue(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     async def fake_dispatch(execution, scheduler):
@@ -139,6 +156,115 @@ async def test_immediate_scheduler_runs_through_queue(monkeypatch: pytest.Monkey
     assert completed.completed_at is not None
     assert completed.queued_at <= completed.started_at <= completed.completed_at
     assert completed.result_summary == "立即执行链路 done"
+
+
+@pytest.mark.asyncio
+async def test_default_concurrency_runs_ten_executions_and_queues_the_eleventh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    release = asyncio.Event()
+    started: list[str] = []
+
+    async def fake_dispatch(execution, scheduler):
+        started.append(execution.id)
+        await release.wait()
+        execution.status = TaskStatus.COMPLETED
+        execution.completed_at = datetime.now(timezone.utc)
+        return await TaskStore.update_execution(execution)
+
+    monkeypatch.setattr(TaskExecutor, "dispatch", fake_dispatch)
+    try:
+        await TaskManager.start(poll_interval=0.01, scheduler_interval=999)
+        scheduler = await TaskManager.create_scheduler(
+            title="默认并发上限",
+            mode=SchedulerMode.ONCE,
+            trigger=TaskTrigger(run_immediately=False),
+            workspace_directory=str(tmp_path / "workspace"),
+        )
+        executions = [
+            await TaskManager.create_execution_from_scheduler(
+                scheduler,
+                trigger_type=ExecutionTriggerType.RUN_ONCE,
+                enqueue=True,
+            )
+            for _ in range(11)
+        ]
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 3.0
+        while len(started) < 10 and loop.time() < deadline:
+            await asyncio.sleep(0.02)
+        assert len(started) == 10
+        # Leave the loop many more polls to (wrongly) start the 11th execution.
+        await asyncio.sleep(0.3)
+        assert len(started) == 10
+
+        (waiting_id,) = {execution.id for execution in executions} - set(started)
+        waiting = await TaskManager.get_execution(waiting_id)
+        assert waiting is not None
+        assert waiting.status == TaskStatus.QUEUED
+        queue_status = await TaskManager.queue_status()
+        assert queue_status["max_concurrent"] == 10
+        assert queue_status["running"] == 10
+        assert queue_status["queued"] == 1
+
+        release.set()
+        await _wait_for_execution(waiting_id, status=TaskStatus.COMPLETED)
+        assert started[-1] == waiting_id
+    finally:
+        release.set()
+        await _stop_and_drain_execution_workers()
+
+
+@pytest.mark.asyncio
+async def test_one_poll_starts_every_execution_that_fits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    release = asyncio.Event()
+    started: list[str] = []
+
+    async def fake_dispatch(execution, scheduler):
+        started.append(execution.id)
+        await release.wait()
+        execution.status = TaskStatus.COMPLETED
+        execution.completed_at = datetime.now(timezone.utc)
+        return await TaskStore.update_execution(execution)
+
+    monkeypatch.setattr(TaskExecutor, "dispatch", fake_dispatch)
+    try:
+        scheduler = await TaskManager.create_scheduler(
+            title="一次轮询派满",
+            mode=SchedulerMode.ONCE,
+            trigger=TaskTrigger(run_immediately=False),
+            workspace_directory=str(tmp_path / "workspace"),
+        )
+        executions = [
+            await TaskManager.create_execution_from_scheduler(
+                scheduler,
+                trigger_type=ExecutionTriggerType.RUN_ONCE,
+                enqueue=True,
+            )
+            for _ in range(11)
+        ]
+
+        # The next poll is 999s away, so only the first one can start anything.
+        await TaskManager.start(poll_interval=999, scheduler_interval=999)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 3.0
+        while len(started) < 10 and loop.time() < deadline:
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.2)
+
+        assert len(started) == 10
+        (waiting_id,) = {execution.id for execution in executions} - set(started)
+        waiting = await TaskManager.get_execution(waiting_id)
+        assert waiting is not None
+        assert waiting.status == TaskStatus.QUEUED
+    finally:
+        release.set()
+        await _stop_and_drain_execution_workers()
 
 
 @pytest.mark.asyncio

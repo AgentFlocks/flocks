@@ -44,6 +44,7 @@ import { getCatalogDescription } from '@/utils/mcpCatalog';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { ReaHubActions, ReaStateBadge } from '@/features/rea/ReaHub';
 
 type ViewMode = 'table' | 'tree';
 
@@ -166,6 +167,7 @@ const HUB_TEXT = {
     workflowDiagram: 'Workflow 可视化流程图',
     selectFile: '点击左侧文件查看详情',
     actions: { install: '安装', repair: '补全安装', update: '更新', uninstall: '卸载' },
+    guidedInstallHint: '点击安装后，Rex 会在新会话中完成安装与验证。',
     states: {
       available: '可安装',
       installed: '已安装',
@@ -228,6 +230,7 @@ const HUB_TEXT = {
     workflowDiagram: 'Workflow diagram',
     selectFile: 'Select a file on the left to preview it',
     actions: { install: 'Install', repair: 'Complete installation', update: 'Update', uninstall: 'Uninstall' },
+    guidedInstallHint: 'Install opens a new session where Rex installs and verifies it.',
     states: {
       available: 'Available',
       installed: 'Installed',
@@ -492,6 +495,8 @@ export default function HubPage() {
 
   const runAction = async (entry: HubCatalogEntry, action: 'install' | 'update' | 'uninstall') => {
     if (!canManageHub) return;
+    // Installed by Rex in a conversation, not by copying files; its own actions handle it.
+    if (entry.guidedInstall) return;
     const key = `${entry.type}:${entry.id}:${action}`;
     setActionId(key);
     try {
@@ -914,7 +919,7 @@ function HubTable({ items, actionId, tagLabels, language, text, onSelect, onActi
                   ))}
                 </div>
               </td>
-              <td className="px-3 py-2"><StateBadge state={item.state} text={text} /></td>
+              <td className="px-3 py-2"><StateBadge state={item.state} text={text} guidedKind={item.guidedInstall?.kind} /></td>
               <td className="px-3 py-2 text-right"><ActionButtons item={item} actionId={actionId} text={text} onAction={onAction} /></td>
             </tr>
           ))}
@@ -1026,7 +1031,7 @@ function HubTreeNodeView({ node, depth, actionId, text, onSelect, onAction, root
             <span className="ml-2 text-xs text-gray-400">({countPluginNodes(node)})</span>
           </button>
         )}
-        {node.entry && <StateBadge state={node.entry.state} text={text} />}
+        {node.entry && <StateBadge state={node.entry.state} text={text} guidedKind={node.entry.guidedInstall?.kind} />}
         {node.entry && <ActionButtons item={node.entry} actionId={actionId} text={text} onAction={onAction} compact />}
       </div>
       {open && (
@@ -1111,7 +1116,7 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
         <div className="max-md:min-w-0">
           <div className="flex items-center gap-2 max-md:flex-wrap">
             <h2 className="text-lg font-semibold text-gray-900">{getHubName(entry, language)}</h2>
-            <StateBadge state={entry.state} text={text} />
+            <StateBadge state={entry.state} text={text} guidedKind={entry.guidedInstall?.kind} />
           </div>
           <p className="text-sm text-gray-500 mt-1">{getHubDescription(entry, language)}</p>
         </div>
@@ -1253,8 +1258,19 @@ function ActionButtons({ item, actionId, text, onAction, compact = false }: {
     ? 'p-1.5 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-50'
     : 'inline-flex items-center gap-1 whitespace-nowrap px-2 py-1 rounded-md border border-gray-200 text-xs hover:bg-gray-50 disabled:opacity-50';
   if (busy) return <Loader2 className="w-4 h-4 animate-spin text-gray-400" />;
+  // The REA plugin follows its own unified state; members may also use it once it is ready.
+  if (item.guidedInstall?.kind === 'rea') return <ReaHubActions compact={compact} />;
   if (user?.role !== 'admin') return null;
   if (item.native && item.state === 'installed') return null;
+  if (item.guidedInstall) {
+    // Rex installs and verifies it in a conversation; there is no file copy to update or remove.
+    if (item.state !== 'available' && item.state !== 'partial') return null;
+    return (
+      <button className={buttonClass} title={text.guidedInstallHint} onClick={() => onAction(item, 'install')}>
+        <Download className="w-3.5 h-3.5" />{!compact && text.actions.install}
+      </button>
+    );
+  }
   if (item.state === 'available') return <button className={buttonClass} onClick={() => onAction(item, 'install')}><Download className="w-3.5 h-3.5" />{!compact && text.actions.install}</button>;
   if (item.state === 'partial') return <button className={buttonClass} title={text.actions.repair} aria-label={text.actions.repair} onClick={() => onAction(item, 'install')}><Download className="w-3.5 h-3.5" />{!compact && text.actions.repair}</button>;
   if (item.state === 'updateAvailable') return <button className={buttonClass} onClick={() => onAction(item, 'update')}><RefreshCw className="w-3.5 h-3.5" />{!compact && text.actions.update}</button>;
@@ -1266,13 +1282,15 @@ function ActionButtons({ item, actionId, text, onAction, compact = false }: {
   return null;
 }
 
-function StateBadge({ state, text }: { state: string; text: HubText }) {
+function StateBadge({ state, text, guidedKind }: { state: string; text: HubText; guidedKind?: string }) {
   const cls = state === 'installed'
     ? 'bg-green-50 text-green-700 border-green-200'
     : state === 'available'
       ? 'bg-blue-50 text-blue-700 border-blue-200'
       : 'bg-amber-50 text-amber-700 border-amber-200';
-  return <span className={`inline-flex items-center gap-1 whitespace-nowrap px-2 py-0.5 rounded-full border text-xs ${cls}`}>{state === 'installed' && <CheckCircle className="w-3 h-3" />}{text.states[state as keyof HubText['states']] || state}</span>;
+  const badge = <span className={`inline-flex items-center gap-1 whitespace-nowrap px-2 py-0.5 rounded-full border text-xs ${cls}`}>{state === 'installed' && <CheckCircle className="w-3 h-3" />}{text.states[state as keyof HubText['states']] || state}</span>;
+  // REA shows the unified plugin state (未安装 … 卸载失败) once it is read.
+  return guidedKind === 'rea' ? <ReaStateBadge fallback={badge} /> : badge;
 }
 
 function Badge({ children, title }: { children: React.ReactNode; title?: string }) {

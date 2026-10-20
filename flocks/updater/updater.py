@@ -54,6 +54,13 @@ _NO_INPLACE_UPGRADE_MODES = ("docker", "managed", "offline")
 from flocks.updater.deploy import OFFLINE_UPGRADE_REFUSAL as OFFLINE_UPGRADE_REFUSED_MESSAGE  # noqa: E402
 from flocks.net.http import async_client
 
+_PROC_ROOT = Path("/proc")
+SYSTEMD_MAIN_PROCESS_REFUSED_MESSAGE = (
+    "后端由 systemd 直接以 flocks serve 运行，不支持页面内就地升级或降级：这一步要先退出当前进程，"
+    "systemd 会随之停掉整个服务，接手升级的进程也会被结束，服务就停了。"
+    "请用部署流程更新版本，或像离线安装包那样改用 flocks start 托管服务。"
+)
+
 _PRESERVE_NAMES: set[str] = {
     ".venv",
     "node_modules",
@@ -319,6 +326,51 @@ async def _validate_restart_runtime(
     if not python_exe.exists():
         return f"Restart runtime is missing: {python_exe}"
     return None
+
+
+def _running_as_systemd_service_main_process() -> bool:
+    """Return whether this process is the main process of a systemd service.
+
+    The upgrade restart handoff relies on this process exiting while a detached
+    helper finishes the work. When systemd runs ``flocks serve`` directly, that
+    exit stops the unit and systemd kills the helper with the rest of the cgroup.
+    systemd exports ``INVOCATION_ID`` to the processes it starts for a unit, and
+    a unit's main process is a direct child of the service manager (PID 1, or the
+    user's ``systemd --user``). Under ``flocks start`` the backend is a child of
+    the Flocks supervisor instead.
+    """
+    if not sys.platform.startswith("linux") or not os.environ.get("INVOCATION_ID"):
+        return False
+    parent_pid = os.getppid()
+    if parent_pid == 1:
+        return True
+    try:
+        return (_PROC_ROOT / str(parent_pid) / "comm").read_text(encoding="utf-8").strip() == "systemd"
+    except OSError:
+        return False
+
+
+def _install_write_blocker(*paths: Path) -> str | None:
+    """Return a refusal when an existing install path is not writable by this process."""
+    for path in paths:
+        if path.exists() and not os.access(path, os.W_OK | os.X_OK):
+            return (
+                f"安装目录 {path} 当前服务用户写不了（只读挂载或属主不对），无法就地升级。"
+                "请用部署流程更新版本，或给服务用户写权限后再升级。"
+            )
+    return None
+
+
+def _inplace_upgrade_blocker(install_root: Path, *, restart: bool, replaces_core: bool) -> str | None:
+    """Return why an in-place upgrade cannot run here, before anything is downloaded.
+
+    Whether a Pro bundle replaces the core is only known once it is extracted, so bundle
+    upgrades pass ``replaces_core=False`` here and check the install root again then.
+    """
+    if restart and _running_as_systemd_service_main_process():
+        return SYSTEMD_MAIN_PROCESS_REFUSED_MESSAGE
+    venv = install_root / ".venv"
+    return _install_write_blocker(install_root, venv) if replaces_core else _install_write_blocker(venv)
 
 
 def _build_uv_sync_env() -> dict[str, str] | None:
@@ -955,6 +1007,14 @@ def _console_manifest_bundle_version(data: dict[str, Any]) -> str:
     return str(data.get("bundle_version") or "").strip()
 
 
+def _manifest_release_notes(data: dict[str, Any]) -> str | None:
+    for key in ("release_notes", "notes"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
 def _pro_bundle_core_version(data: dict[str, Any]) -> str:
     return str(data.get("core_version") or "").strip()
 
@@ -995,8 +1055,15 @@ def _required_pro_bundle_marker_value(manifest: dict[str, Any], key: str) -> str
     return value
 
 
+# Bundle identity fields an install marker records and a published manifest carries.
+_BUNDLE_COMPONENT_VERSION_KEY = "flockspro_component_version"
+_BUNDLE_MARKER_REQUIRED_KEYS = ("bundle_version", "core_version", _BUNDLE_COMPONENT_VERSION_KEY)
+# The edition a bundle release reports (see VersionInfo.edition).
+_BUNDLE_EDITION = "flockspro"
+
+
 def _validate_pro_bundle_marker_manifest(manifest: dict[str, Any]) -> None:
-    for key in ("bundle_version", "core_version", "flockspro_component_version"):
+    for key in _BUNDLE_MARKER_REQUIRED_KEYS:
         _required_pro_bundle_marker_value(manifest, key)
 
 
@@ -1925,6 +1992,10 @@ def _merge_console_manifest_release_identity(
     core_version = console_manifest.get("core_version") or merged.get("core_version")
     if core_version:
         merged["core_version"] = core_version
+    # The "what's new" notice of a Pro install reads these notes back from the install marker.
+    release_notes = _manifest_release_notes(console_manifest)
+    if release_notes:
+        merged["release_notes"] = release_notes
     return merged
 
 
@@ -1945,6 +2016,7 @@ def _write_pro_bundle_install_marker(manifest: dict[str, Any], *, bundle_sha256:
         "build_id": manifest.get("build_id"),
         "bundle_sha256": bundle_sha256 or manifest.get("bundle_sha256"),
         "installed_at": datetime.now(timezone.utc).isoformat(),
+        "release_notes": _manifest_release_notes(manifest),
     }
     marker.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
     _write_pending_pro_bundle_install_receipt(payload)
@@ -2533,6 +2605,67 @@ async def get_installed_release(version: str) -> VersionInfo:
     return result
 
 
+def read_installed_pro_bundle_marker() -> dict[str, Any] | None:
+    """Return the Pro install marker when it names the installed bundle version."""
+    marker = _read_pro_bundle_install_marker()
+    return marker if str(marker.get("bundle_version") or "").strip() else None
+
+
+def _is_installed_pro_release(marker: dict[str, Any], manifest: dict[str, Any]) -> bool:
+    """Whether a Console manifest is the installed release, not just one with the same bundle number.
+
+    A bundle number is reused by component-only updates and repacks, so every identity field both
+    sides carry must agree. core_version is compared one way only: a bundle whose core is older
+    than the local one is recorded with the local core (see ``_effective_pro_bundle_manifest``), so
+    the marker's core may be newer than Console's, never older.
+    """
+    if _parse_version(_console_manifest_bundle_version(marker)) != _parse_version(
+        _console_manifest_bundle_version(manifest)
+    ):
+        return False
+    installed_core = _pro_bundle_core_version(marker)
+    published_core = _pro_bundle_core_version(manifest)
+    if installed_core and published_core and _parse_version(published_core) > _parse_version(installed_core):
+        return False
+    for key in (_BUNDLE_COMPONENT_VERSION_KEY, "build_id", "release_id", "bundle_release_id"):
+        installed_value = str(marker.get(key) or "").strip().lstrip("v")
+        published_value = str(manifest.get(key) or "").strip().lstrip("v")
+        if installed_value and published_value and installed_value != published_value:
+            return False
+    return True
+
+
+async def get_installed_pro_release(marker: dict[str, Any]) -> VersionInfo:
+    """Read the notes of the installed Pro bundle; the OSS Core tag's notes describe another release."""
+    # Kept as recorded: the WebUI formats it, and _version_label would turn "pro-v…" into "vpro-v…".
+    bundle_version = str(marker.get("bundle_version") or "").strip()
+    result = VersionInfo(
+        current_version=bundle_version,
+        latest_version=bundle_version,
+        current_core_version=_version_label(_pro_bundle_core_version_or_empty(marker)) or None,
+        current_bundle_version=bundle_version,
+        current_pro_component_version=str(marker.get(_BUNDLE_COMPONENT_VERSION_KEY) or "").strip() or None,
+        edition=_BUNDLE_EDITION,
+    )
+    release_notes = _manifest_release_notes(marker)
+    if release_notes:
+        return result.model_copy(update={"release_notes": release_notes})
+
+    # Markers written before the notes were recorded fall back to Console. It only serves the
+    # latest manifest, so its notes are used only when that release is the installed one.
+    ucfg = await _get_updater_config()
+    if not ucfg.enabled:
+        return result
+    try:
+        manifest_info = await _fetch_console_manifest_release_info()
+    except Exception as exc:
+        log.warning("updater.installed_pro_release.manifest_failed", {"error": str(exc)})
+        return result
+    if not _is_installed_pro_release(marker, manifest_info.manifest):
+        return result
+    return result.model_copy(update={"release_notes": _manifest_release_notes(manifest_info.manifest)})
+
+
 async def check_update(
     *,
     locale: str | None = None,
@@ -2640,7 +2773,7 @@ async def check_update(
         latest_bundle_version=latest_pro_state.bundle_version if latest_pro_state else None,
         current_pro_component_version=current_pro_state.pro_component_version if current_pro_state else None,
         latest_pro_component_version=latest_pro_state.pro_component_version if latest_pro_state else None,
-        edition="flockspro" if is_console_manifest else "flocks",
+        edition=_BUNDLE_EDITION if is_console_manifest else "flocks",
         has_update=has_update,
         release_notes=notes,
         release_url=url,
@@ -2937,6 +3070,10 @@ async def perform_pro_bundle_downgrade(
         return
 
     yield UpdateProgress(stage="checking", message="Checking local Pro installation...")
+    if restart and _running_as_systemd_service_main_process():
+        # The restart below exits this process; refuse before the Pro component is removed.
+        yield UpdateProgress(stage="error", message=SYSTEMD_MAIN_PROCESS_REFUSED_MESSAGE, success=False)
+        return
     uv_path = _find_executable("uv")
     if not uv_path:
         yield UpdateProgress(
@@ -3110,6 +3247,32 @@ async def perform_update(
     dependency_wheels_dir: Path | None = None
     console_manifest_info: ConsoleManifestRelease | None = None
     console_manifest_payload = console_manifest_payload if isinstance(console_manifest_payload, dict) else None
+
+    # Everything below needs a writable install, a restartable service and uv; check them
+    # before downloading a bundle that can take minutes and would be thrown away.
+    blocker = _inplace_upgrade_blocker(
+        install_root,
+        restart=restart,
+        replaces_core=profile.sources != ["console-manifest"],
+    )
+    if blocker is not None:
+        log.warning("updater.inplace_upgrade.refused", {"install_root": str(install_root), "reason": blocker})
+        _record_update_journal(f"ERROR {blocker}")
+        yield UpdateProgress(stage="error", message=blocker, success=False)
+        return
+    uv_path = _find_executable("uv")
+    if not uv_path:
+        hint = (
+            "Dependency sync failed: uv is required but was not found. "
+            "Please install uv (https://docs.astral.sh/uv/) and ensure it "
+            "is in PATH (e.g. add ~/.local/bin to PATH for systemd services)."
+        )
+        if sys.platform == "win32":
+            hint = "Dependency sync failed: uv is required to refresh the Windows project runtime."
+        _record_update_journal(f"ERROR {hint}")
+        yield UpdateProgress(stage="error", message=hint, success=False)
+        return
+
     fmt = _choose_archive_format(ucfg.archive_format)
     if local_bundle_path is not None:
         fmt = "dir" if local_bundle_path.is_dir() else _archive_format_for_url(local_bundle_path.name, bundle_format)
@@ -3294,22 +3457,16 @@ async def perform_update(
             )
         else:
             effective_update_version = _pro_bundle_core_version_for_marker(pro_bundle_manifest)
+            # Only now is it known that this bundle replaces files in the install root.
+            blocker = _install_write_blocker(install_root)
+            if blocker is not None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                log.warning("updater.inplace_upgrade.refused", {"install_root": str(install_root), "reason": blocker})
+                _record_update_journal(f"ERROR {blocker}")
+                yield UpdateProgress(stage="error", message=blocker, success=False)
+                return
     else:
         effective_update_version = latest_tag
-
-    uv_path = _find_executable("uv")
-    if not uv_path:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        hint = (
-            "Dependency sync failed: uv is required but was not found. "
-            "Please install uv (https://docs.astral.sh/uv/) and ensure it "
-            "is in PATH (e.g. add ~/.local/bin to PATH for systemd services)."
-        )
-        if sys.platform == "win32":
-            hint = "Dependency sync failed: uv is required to refresh the Windows project runtime."
-        _record_update_journal(f"ERROR {hint}")
-        yield UpdateProgress(stage="error", message=hint, success=False)
-        return
 
     sync_timeout = _dependency_sync_timeout_seconds()
     pro_bundle_manifest_path: Path | None = None

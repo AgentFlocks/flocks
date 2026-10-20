@@ -117,7 +117,9 @@ class LoopContext:
     memory_bootstrap_data: Optional[Dict[str, Any]] = field(default=None, repr=False)
     # Reusable runner artifacts that stay stable across steps in the same loop.
     runner_static_cache: Dict[str, Any] = field(default_factory=dict, repr=False)
-    # Overflow compaction attempt counter (matches OpenClaw MAX_OVERFLOW_COMPACTION_ATTEMPTS)
+    # Overflow compactions in a row that have not brought the prompt back under
+    # the threshold (matches OpenClaw MAX_OVERFLOW_COMPACTION_ATTEMPTS); reset
+    # once a later check finds the prompt under it.
     overflow_compaction_attempts: int = 0
     # Tool result truncation attempted once per run (matches OpenClaw toolResultTruncationAttempted)
     tool_result_truncation_attempted: bool = False
@@ -2350,7 +2352,22 @@ class SessionLoop:
                             model_context=model_context,
                             policy=compaction_policy,
                         )
-                        
+
+                        if not is_overflow and ctx.overflow_compaction_attempts:
+                            # Back under the threshold: the last compaction
+                            # worked, so a later overflow in this turn is new
+                            # output, not the same one coming back.  Counting
+                            # every compaction of the turn ended long tasks at
+                            # the fourth overflow although each one had worked.
+                            log.info("loop.overflow_compaction_attempts_reset", {
+                                "session_id": ctx.session.id,
+                                "step": ctx.step,
+                                "attempts": ctx.overflow_compaction_attempts,
+                                "effective_tokens": effective_tokens,
+                                "overflow_threshold": compaction_policy.overflow_threshold,
+                            })
+                            ctx.overflow_compaction_attempts = 0
+
                         if is_overflow:
                             log.info("loop.context_overflow_detected", {
                                 "session_id": ctx.session.id,

@@ -1,0 +1,71 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "rea",
+  "type": "skill",
+  "name": "REA Reverse Engineering",
+  "nameCn": "REA 逆向分析",
+  "description": "Reverse analysis tool based on Reverse Engineer Anything that helps recover key logic, algorithms or API flows. Installing opens a Rex conversation that installs the chosen tier and validates it with real tool calls.",
+  "descriptionCn": "基于 Reverse Engineer Anything 的逆向分析工具，帮助还原关键逻辑、算法或接口流程。",
+  "version": "6.4.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "https://github.com/morluto/rea#readme",
+  "category": "devtools",
+  "tags": [
+    "linux",
+    "windows",
+    "integration"
+  ],
+  "useCases": [
+    "endpoint-forensics",
+    "incident-response"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "file-analysis",
+    "llm-agent"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/rea"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": [
+      "rea-agents"
+    ]
+  },
+  "permissions": {
+    "tools": [],
+    "network": true,
+    "shell": true,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": [
+      "Installing runs rea-agents 6.4.0 through npx, installs the reverse-engineer-anything skill and registers the local MCP service rea; the full tier also installs JDK 21 and Ghidra 12.1.4."
+    ]
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "guidedInstall": {
+    "kind": "rea",
+    "title": "REA 逆向分析"
+  },
+  "checksums": {}
+}

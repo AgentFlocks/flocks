@@ -1022,7 +1022,8 @@ class ToolRegistry:
         # web/ — internet access
         ("flocks.tool.web", ["webfetch", "websearch"]),
         # Owner-scoped, read-only Knowledgebase retrieval (connection is lazy).
-        ("flocks.tool", ["knowledgebase"]),
+        # REA reverse-analysis cards and task progress (rea_analysis).
+        ("flocks.tool", ["knowledgebase", "rea"]),
         # agent/ — agent delegation/coordination
         ("flocks.tool.agent", ["delegate_task", "task", "communication"]),
         # task/ — task/workflow
@@ -1536,10 +1537,10 @@ class ToolRegistry:
             else:
                 result_metadata = result.metadata or {}
                 if (result_metadata.get("blocked_by_hook") or result_metadata.get("confirmation_required")
-                        or result_metadata.get("validated_input_guard_blocked")):
+                        or result_metadata.get("validated_input_guard_blocked") or result_metadata.get("transient")):
                     # A hook verdict (policy deny / confirmation) says nothing about
-                    # the tool itself; counting it would let a policy switch the
-                    # tool off for everyone after three refusals.
+                    # the tool itself, nor does a moment of being busy; counting
+                    # them would switch the tool off for everyone after three.
                     disabled = False
                 elif await cls._failure_auto_disable_enabled():
                     disabled = cls._record_failure(tool, kwargs, result.error)

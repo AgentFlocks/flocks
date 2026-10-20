@@ -63,6 +63,18 @@ class HubComponentRef(BaseModel):
     adoptExisting: bool = False
 
 
+class HubGuidedInstall(BaseModel):
+    """Install through a Rex conversation instead of copying files.
+
+    ``kind`` names a flow the WebUI knows (``rea``: the REA plugin). The Hub
+    starts that conversation, and the catalog reports the entry's state from
+    the product's own readiness check rather than from copied files.
+    """
+
+    kind: str
+    title: str = ""
+
+
 class HubPluginManifest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -91,6 +103,7 @@ class HubPluginManifest(BaseModel):
     entrypoints: list[str] = Field(default_factory=list)
     components: list[HubComponentRef] = Field(default_factory=list)
     checksums: dict[str, str] = Field(default_factory=dict)
+    guidedInstall: Optional[HubGuidedInstall] = None
 
 
 class HubIndexEntry(BaseModel):
@@ -108,6 +121,7 @@ class HubIndexEntry(BaseModel):
     riskLevel: str = "low"
     edition: PluginEdition = "oss"
     manifestPath: str
+    guidedInstall: Optional[HubGuidedInstall] = None
 
 
 class HubIndex(BaseModel):
@@ -183,6 +197,7 @@ class HubCatalogEntry(BaseModel):
     installPath: Optional[str] = None
     native: bool = False
     brokenReason: Optional[str] = None
+    guidedInstall: Optional[HubGuidedInstall] = None
 
 
 class HubTaxonomy(BaseModel):

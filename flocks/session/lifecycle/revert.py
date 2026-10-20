@@ -123,11 +123,14 @@ class SessionRevert:
         if not session:
             raise ValueError(f"Session {session_id} not found")
         
-        return await SessionRevertManager.unrevert(
-            project_id=session.project_id,
-            session_id=session_id,
-            worktree=session.directory,
-        )
+        # Restoring the snapshot takes a while and the revert state clears only at
+        # the end, so like revert it holds the session (no runner, no retention).
+        async with Session.active_operation(session_id) as active_session:
+            return await SessionRevertManager.unrevert(
+                project_id=active_session.project_id,
+                session_id=session_id,
+                worktree=active_session.directory,
+            )
     
     @classmethod
     async def cleanup(cls, session: SessionInfo) -> None:

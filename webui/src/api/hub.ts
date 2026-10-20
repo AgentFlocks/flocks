@@ -32,6 +32,8 @@ export interface HubCatalogEntry {
   installPath?: string;
   native: boolean;
   brokenReason?: string;
+  /** Installed through a Rex conversation instead of copying files (``rea``: the REA plugin). */
+  guidedInstall?: { kind: string; title?: string } | null;
 }
 
 export interface HubManifest extends HubCatalogEntry {

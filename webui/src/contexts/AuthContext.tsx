@@ -1,20 +1,7 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import i18n from '@/i18n';
 import { authApi, type LocalUser } from '@/api/auth';
-
-interface AuthContextValue {
-  loading: boolean;
-  bootstrapped: boolean | null;
-  error: string | null;
-  user: LocalUser | null;
-  refresh: () => Promise<void>;
-  login: (username: string, password: string) => Promise<void>;
-  bootstrapAdmin: (username: string, password: string) => Promise<void>;
-  logout: () => Promise<void>;
-  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
-}
-
-const AuthContext = createContext<AuthContextValue | null>(null);
+import { AuthContext, type AuthContextValue } from './authState';
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);

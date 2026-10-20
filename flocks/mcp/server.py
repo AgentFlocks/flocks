@@ -6,9 +6,11 @@ Manages MCP server lifecycle: connection, disconnection, status tracking, tool r
 
 import asyncio
 import time
-from typing import Dict, Optional, Any, List
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from typing import AsyncIterator, Dict, Optional, Any, List
 from flocks.mcp.client import McpClient
-from flocks.mcp.errors import McpServerNotConnectedError, is_method_not_found_error
+from flocks.mcp.errors import McpServerBusyError, McpServerNotConnectedError, is_method_not_found_error
 from flocks.mcp.types import (
     McpStatus,
     McpStatusInfo,
@@ -26,6 +28,26 @@ log = Log.create(service="mcp.server")
 
 # Retry configuration for failed connections at startup
 _RETRY_DELAYS = [5, 15, 30, 60, 120]  # seconds between retries
+
+# Servers whose state per connection one conversation must not share with
+# another get a connection per conversation (a root session with its
+# sub-agents). A server opts in with ``isolation: "session"`` in its config;
+# REA keeps its evidence ledger per connection (rea-agents MCP contract), so it
+# is isolated under a registration written before the field existed as well.
+_SESSION_ISOLATED_BY_DEFAULT = frozenset({"rea"})
+# Per isolated server and process. A new conversation over the limit takes the
+# place of the connection idle longest; one idle this long goes on the next use.
+MAX_SCOPED_CLIENTS = 4
+SCOPED_IDLE_SECONDS = 20 * 60
+
+
+@dataclass(eq=False)
+class _ScopedClient:
+    client: McpClient
+    config: Dict[str, Any]
+    in_flight: int = 0
+    last_used: float = field(default_factory=time.monotonic)
+    retired: bool = False
 
 
 class McpServerManager:
@@ -49,6 +71,11 @@ class McpServerManager:
         self._tools_cache: Dict[str, List[McpToolDef]] = {}
         self._resources_cache: Dict[str, List[McpResource]] = {}
         self._configs: Dict[str, Dict[str, Any]] = {}  # saved for retry
+        # Isolated servers: server -> conversation scope -> its own connection.
+        self._scoped: Dict[str, Dict[str, _ScopedClient]] = {}
+        self._scoped_locks: Dict[str, asyncio.Lock] = {}
+        # Moves whenever a server's conversation connections are retired.
+        self._scoped_generation: Dict[str, int] = {}
         self._lock = asyncio.Lock()
         self._init_lock = asyncio.Lock()
         self._initialized = False
@@ -195,24 +222,8 @@ class McpServerManager:
         try:
             log.info("mcp.connecting", {"server": name})
 
-            # Credentials are already resolved via {secret:xxx} in config loading.
-            # No separate injection needed.
-            server_env = config.get("environment")
-            if server_env is None:
-                server_env = config.get("env")
-
             # 1. Create client
-            client = McpClient(
-                name=name,
-                server_type=config['type'],
-                url=config.get('url'),
-                command=config.get('command'),
-                headers=config.get('headers'),
-                env=server_env,
-                auth_config=config.get('auth'),
-                transport=config.get('transport', 'auto'),
-                timeout=config.get('timeout', 30.0)
-            )
+            client = self._new_client(name, config)
 
             # 2. Connect
             await client.connect()
@@ -264,6 +275,128 @@ class McpServerManager:
                 error=str(e)
             )
             raise  # Propagate exception for gather to capture
+
+    @staticmethod
+    def _new_client(name: str, config: Dict[str, Any]) -> McpClient:
+        # Credentials are already resolved via {secret:xxx} in config loading.
+        server_env = config.get("environment")
+        if server_env is None:
+            server_env = config.get("env")
+        return McpClient(
+            name=name,
+            server_type=config['type'],
+            url=config.get('url'),
+            command=config.get('command'),
+            headers=config.get('headers'),
+            env=server_env,
+            auth_config=config.get('auth'),
+            transport=config.get('transport', 'auto'),
+            timeout=config.get('timeout', 30.0)
+        )
+
+    def server_config(self, name: str) -> Optional[Dict[str, Any]]:
+        """The configuration ``name`` was last connected (or tried) with in this process."""
+        return self._configs.get(name)
+
+    def isolation(self, name: str) -> Optional[str]:
+        """``"session"`` when each conversation gets its own connection to ``name``."""
+        configured = (self._configs.get(name) or {}).get("isolation")
+        if configured is not None:
+            return str(configured)
+        return "session" if name in _SESSION_ISOLATED_BY_DEFAULT else None
+
+    @asynccontextmanager
+    async def scoped_client(self, name: str, scope: str) -> AsyncIterator[McpClient]:
+        """The connection of conversation ``scope`` to the isolated server ``name``.
+
+        Opened on first use, from the configuration the server is connected
+        with; kept until it idles out, the server is reconnected or removed.
+        """
+        entry = await self._acquire_scoped(name, scope)
+        try:
+            yield entry.client
+        finally:
+            entry.in_flight -= 1
+            entry.last_used = time.monotonic()
+            if entry.retired and entry.in_flight == 0:
+                await self._close_scoped(name, entry)
+
+    async def _acquire_scoped(self, name: str, scope: str) -> _ScopedClient:
+        config = self._configs.get(name)
+        entry = self._scoped.get(name, {}).get(scope)
+        # No await between the lookup and the count: nothing can retire it in between.
+        if (entry is not None and not entry.retired and config is not None and entry.config is config
+                and name in self._clients):
+            entry.in_flight += 1
+            return entry
+        lock = self._scoped_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            # Everything a reconnect or removal could change is read before the first await.
+            generation = self._scoped_generation.get(name, 0)
+            config = self._configs.get(name)
+            if config is None or name not in self._clients:
+                raise McpServerNotConnectedError(f"Server not connected: {name}")
+            clients = self._scoped.setdefault(name, {})
+            now = time.monotonic()
+            closing = [
+                clients.pop(key) for key, item in list(clients.items())
+                if item.config is not config or (item.in_flight == 0 and now - item.last_used > SCOPED_IDLE_SECONDS)
+            ]
+            entry = clients.get(scope)
+            if entry is None and len(clients) >= MAX_SCOPED_CLIENTS:
+                idle = [key for key, item in clients.items() if item.in_flight == 0]
+                if not idle:
+                    for old in closing:
+                        old.retired = True
+                        if old.in_flight == 0:
+                            await self._close_scoped(name, old)
+                    raise McpServerBusyError(
+                        f"All {MAX_SCOPED_CLIENTS} conversation connections to {name} are in use; try again shortly"
+                    )
+                closing.append(clients.pop(min(idle, key=lambda key: clients[key].last_used)))
+            for old in closing:
+                old.retired = True
+                if old.in_flight == 0:
+                    await self._close_scoped(name, old)
+            created = entry is None
+            if created:
+                client = self._new_client(name, config)
+                await client.connect()
+                entry = _ScopedClient(client=client, config=config)
+            if (self._scoped_generation.get(name, 0) != generation or self._configs.get(name) is not config
+                    or name not in self._clients or self._scoped.get(name) is not clients or entry.retired):
+                # Removed or reconnected meanwhile: never hand out a connection the manager no longer tracks.
+                if created:
+                    await self._close_scoped(name, entry)
+                raise McpServerNotConnectedError(f"Server not connected: {name}")
+            if created:
+                clients[scope] = entry
+                log.info("mcp.scoped_connected", {"server": name, "connections": len(clients)})
+            entry.in_flight += 1
+            return entry
+
+    async def close_scope(self, name: str, scope: str) -> None:
+        """Close the connection of ``scope`` (once its calls finish)."""
+        entry = self._scoped.get(name, {}).pop(scope, None)
+        if entry is not None:
+            entry.retired = True
+            if entry.in_flight == 0:
+                await self._close_scoped(name, entry)
+
+    async def _retire_scoped(self, name: str) -> None:
+        """Close every conversation connection of ``name``; busy ones once their calls finish."""
+        self._scoped_generation[name] = self._scoped_generation.get(name, 0) + 1
+        for entry in list(self._scoped.pop(name, {}).values()):
+            entry.retired = True
+            if entry.in_flight == 0:
+                await self._close_scoped(name, entry)
+
+    @staticmethod
+    async def _close_scoped(name: str, entry: _ScopedClient) -> None:
+        try:
+            await entry.client.disconnect()
+        except Exception as e:
+            log.debug("mcp.scoped_disconnect_error", {"server": name, "error": str(e)})
 
     async def _register_tools(
         self,
@@ -420,6 +553,7 @@ class McpServerManager:
             return False
 
         try:
+            await self._retire_scoped(name)
             # Unregister tools
             tool_names = McpToolRegistry.untrack_server(name)
             from flocks.tool import ToolRegistry
@@ -461,6 +595,7 @@ class McpServerManager:
         """
         async with self._lock:
             try:
+                await self._retire_scoped(name)
                 # Disconnect client if connected
                 if name in self._clients:
                     client = self._clients.pop(name)
@@ -553,6 +688,8 @@ class McpServerManager:
                 pass
         self._retry_task = None
 
+        for name in list(self._scoped):
+            await self._retire_scoped(name)
         for name, client in list(self._clients.items()):
             try:
                 await client.disconnect()

@@ -26,6 +26,11 @@ export interface VersionInfo {
   latest_version: string | null;
   /** Channel the answer applies to (`default` unless the server reports another). */
   channel?: string;
+  /** What the installed release is: the Core (`flocks`) or a bundle installed on top of it. */
+  edition?: string;
+  current_core_version?: string | null;
+  current_bundle_version?: string | null;
+  current_pro_component_version?: string | null;
   has_update: boolean;
   release_notes: string | null;
   release_url: string | null;

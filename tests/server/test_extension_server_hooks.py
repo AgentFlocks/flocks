@@ -8,7 +8,13 @@ import pytest
 
 import flocks.extensions as extensions
 import flocks.server.auth as auth
-from flocks.extensions import register_public_path, register_shutdown_hook, run_shutdown_hooks
+from flocks.extensions import (
+    register_public_path,
+    register_shutdown_hook,
+    register_startup_hook,
+    run_shutdown_hooks,
+    run_startup_hooks,
+)
 from flocks.server.auth import auth_middleware_exempt, register_public_path_pattern
 
 WEBHOOK_PATTERN = r"^/api/ext/v1/webhooks/[A-Za-z0-9_-]{1,64}/?$"
@@ -18,6 +24,7 @@ WEBHOOK_PATTERN = r"^/api/ext/v1/webhooks/[A-Za-z0-9_-]{1,64}/?$"
 def isolated_registries(monkeypatch):
     monkeypatch.setattr(auth, "_EXTENSION_PUBLIC_PATH_REGEXES", [])
     monkeypatch.setattr(extensions, "_shutdown_hooks", [])
+    monkeypatch.setattr(extensions, "_startup_hooks", [])
 
 
 def test_registered_public_path_exempts_only_full_matches(isolated_registries):
@@ -231,3 +238,54 @@ async def test_cancelled_shutdown_still_reads_a_hook_failure_raised_while_cleani
     loop.set_exception_handler(None)
 
     assert not [context for context in reported if "never retrieved" in str(context.get("message"))]
+
+
+@pytest.mark.asyncio
+async def test_startup_hooks_run_apart_from_shutdown_hooks_and_never_stop_each_other(isolated_registries):
+    calls: list[str] = []
+
+    def failing() -> None:
+        calls.append("failing")
+        raise RuntimeError("boom")
+
+    async def slow() -> None:
+        calls.append("slow")
+        await asyncio.sleep(10)
+
+    async def service() -> None:
+        calls.append("service")
+
+    register_startup_hook("failing", failing)
+    register_startup_hook("slow", slow, timeout_seconds=0.05)
+    register_startup_hook("service", lambda: calls.append("replaced"))
+    register_startup_hook("service", service)
+    register_shutdown_hook("service", lambda: calls.append("stopped"))
+
+    await asyncio.wait_for(run_startup_hooks(), timeout=2)
+    assert calls == ["failing", "slow", "service"]
+
+    await asyncio.wait_for(run_shutdown_hooks(), timeout=2)
+    assert calls == ["failing", "slow", "service", "stopped"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_startup_ends_once_the_running_hook_has_cleaned_up(isolated_registries):
+    started, cleaned = asyncio.Event(), asyncio.Event()
+
+    async def starting() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        finally:
+            await asyncio.sleep(0.05)  # stopping what it had started
+            cleaned.set()
+
+    register_startup_hook("starting", starting)
+    startup = asyncio.create_task(run_startup_hooks())
+    await started.wait()
+    startup.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await startup
+
+    # The lifespan runs the shutdown hooks only after this, so they never overlap the cleanup.
+    assert cleaned.is_set()

@@ -118,6 +118,9 @@ async def lifespan(app: FastAPI):
     service_boot_id()
     # Ensure file logging when server is started without CLI (e.g. uvicorn app:app)
     if Log._writer is None:
+        from flocks.retention import preload_log_retention
+
+        await preload_log_retention()
         await Log.init(print=False, dev=False, level=LogLevel.INFO)
 
     log = Log.create(service="server")
@@ -236,6 +239,18 @@ async def lifespan(app: FastAPI):
         _schedule_startup_phase(app, log, "console.sync.start", _start_console_sync_phase)
     except Exception as e:
         log.warning("console.sync.start_failed", {"error": str(e)})
+
+    try:
+        from flocks.retention import DataRetentionScheduler
+
+        _schedule_startup_phase(
+            app,
+            log,
+            "data_retention.start",
+            DataRetentionScheduler.start,
+        )
+    except Exception as e:
+        log.warning("data_retention.start_failed", {"error": str(e)})
 
     # Ensure default device room exists, then migrate legacy device API
     # configs from flocks.json → device_integrations table.
@@ -516,6 +531,12 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         log.warning("knowledgebase.integration.start_failed", {"error_type": type(exc).__name__})
 
+    # Extension services (e.g. Pro's scheduled audits) start on this loop once
+    # the server is ready, without holding up requests.
+    from flocks.extensions import run_startup_hooks
+
+    _schedule_startup_phase(app, log, "extensions.startup_hooks", run_startup_hooks)
+
     blocking_startup_ms = int((time.perf_counter() - startup_started_at) * 1000)
     log.info("server.startup.ready", {
         "blocking_duration_ms": blocking_startup_ms,
@@ -553,6 +574,13 @@ async def lifespan(app: FastAPI):
         await ConsoleSyncScheduler.stop()
     except Exception as exc:
         log.warning("console.sync.stop_failed", {"error": str(exc)})
+
+    try:
+        from flocks.retention import DataRetentionScheduler
+
+        await DataRetentionScheduler.stop()
+    except Exception as exc:
+        log.warning("data_retention.stop_failed", {"error": str(exc)})
 
     try:
         from flocks.memory.evolution.scheduler import MemoryEvolutionScheduler
@@ -1306,6 +1334,8 @@ from flocks.server.routes.workflow import router as workflow_router, webhook_rou
 # WebUI: Skill & Command routes
 from flocks.server.routes.skill import router as skill_router
 from flocks.server.routes.hub import router as hub_router
+# REA reverse-analysis component install and session work
+from flocks.server.routes.rea import router as rea_router
 # WebUI: Hook management routes
 from flocks.server.routes.hooks import router as hooks_router
 # Model management: Default model, Usage routes
@@ -1365,6 +1395,7 @@ app.include_router(workflow_webhook_router, tags=["WorkflowWebhook"])
 app.include_router(skill_router, prefix="/api", tags=["Skill"])
 # WebUI: Hub routes
 app.include_router(hub_router, prefix="/api", tags=["Hub"])
+app.include_router(rea_router, prefix="/api", tags=["REA"])
 # WebUI: Hook management routes
 app.include_router(hooks_router, prefix="/api/hooks", tags=["Hooks"])
 # Model management: Default model routes

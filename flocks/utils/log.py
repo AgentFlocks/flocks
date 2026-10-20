@@ -51,9 +51,96 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+_log_retention_override: Optional[int] = None
+_log_cleanup_managed = False
+
+
+def set_log_retention_days_override(days: Optional[int]) -> None:
+    """Let the data retention policy in flocks.json win over FLOCKS_LOG_RETENTION_DAYS.
+
+    ``None`` drops the override; ``0`` keeps logs forever.
+    """
+    global _log_retention_override
+    _log_retention_override = days
+
+
+def set_log_cleanup_managed(managed: bool) -> None:
+    """Leave deleting old logs (startup and day rollover) to data retention.
+
+    Its scheduler deletes expired logs under the policy as every process saved
+    it last (see flocks.retention); this process's own copy of the period may
+    be older, so the logger does not delete on its own meanwhile.
+    """
+    global _log_cleanup_managed
+    _log_cleanup_managed = managed
+
+
+def log_cleanup_managed() -> bool:
+    """Whether data retention, not the logger, deletes this process's old logs."""
+    return _log_cleanup_managed
+
+
 def get_log_retention_days(default: int = _DEFAULT_LOG_RETENTION_DAYS) -> int:
     """Return how long daily log directories and legacy timestamp logs are retained."""
+    if _log_retention_override is not None:
+        return _log_retention_override
     return _env_int("FLOCKS_LOG_RETENTION_DAYS", default)
+
+
+def _timestamp_from_log_name(path: Path) -> Optional[datetime]:
+    stem = path.name.split(".log", 1)[0]
+    try:
+        return datetime.strptime(stem, "%Y-%m-%dT%H%M%S")
+    except ValueError:
+        return None
+
+
+def _date_from_log_dir(path: Path) -> Optional[date]:
+    try:
+        return datetime.strptime(path.name, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def list_expired_log_paths(
+    log_dir: Path,
+    retention_days: int,
+    *,
+    now: Optional[datetime] = None,
+) -> list[Path]:
+    """Return the daily directories and legacy timestamp logs older than ``retention_days``.
+
+    ``retention_days <= 0`` keeps everything. The startup / day-rollover cleanup
+    and the data retention preview both use this, so they count the same files.
+    """
+    if retention_days <= 0 or not log_dir.is_dir():
+        return []
+    cutoff = (now or datetime.now()) - timedelta(days=retention_days)
+    expired: list[Path] = []
+    for path in log_dir.iterdir():
+        if not path.is_dir():
+            continue
+        day = _date_from_log_dir(path)
+        if day is not None and day < cutoff.date():
+            expired.append(path)
+
+    # Base log files matching YYYY-MM-DDTHHMMSS.log. Rotated siblings go with
+    # their base file so old ``.log.1``/``.log.2`` files do not leak forever.
+    pattern = str(log_dir / "????-??-??T??????.log")
+    for path in sorted(Path(item) for item in file_glob.glob(pattern)):
+        timestamp = _timestamp_from_log_name(path)
+        if timestamp is not None and timestamp < cutoff:
+            expired.append(path)
+            expired.extend(sorted(path.parent.glob(f"{path.name}.*")))
+
+    rotated_pattern = str(log_dir / "????-??-??T??????.log.*")
+    for rotated_path in sorted(Path(item) for item in file_glob.glob(rotated_pattern)):
+        base_name = rotated_path.name.split(".log.", 1)[0] + ".log"
+        base_path = rotated_path.with_name(base_name)
+        timestamp = _timestamp_from_log_name(base_path)
+        if not base_path.exists() and timestamp is not None and timestamp < cutoff:
+            expired.append(rotated_path)
+    return expired
 
 
 class _AppendTextWriter:
@@ -406,8 +493,9 @@ class Log:
         log_dir = _log_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         
-        # Cleanup old logs
-        await cls._cleanup(log_dir)
+        # Cleanup old logs, unless data retention took that over (preload_log_retention)
+        if not _log_cleanup_managed:
+            await cls._cleanup(log_dir)
         
         with cls._state_lock:
             if print:
@@ -463,7 +551,8 @@ class Log:
         cls._writer = None
         cls._error_writer = None
         cls._open_daily_writers()
-        cls._cleanup_sync(cls._log_dir_path)
+        if not _log_cleanup_managed:
+            cls._cleanup_sync(cls._log_dir_path)
     
     @classmethod
     async def _cleanup(cls, log_dir: Path, retention_days: Optional[int] = None) -> None:
@@ -478,62 +567,18 @@ class Log:
     def _cleanup_sync(cls, log_dir: Path, retention_days: Optional[int] = None) -> None:
         """Clean up date directories and legacy timestamp logs by age."""
         days = get_log_retention_days() if retention_days is None else retention_days
-        if days <= 0:
-            return
-        cutoff = datetime.now() - timedelta(days=days)
-
-        def _timestamp_from_name(path: Path) -> Optional[datetime]:
-            stem = path.name.split(".log", 1)[0]
-            try:
-                return datetime.strptime(stem, "%Y-%m-%dT%H%M%S")
-            except ValueError:
-                return None
-
-        def _date_from_dir(path: Path) -> Optional[date]:
-            try:
-                return datetime.strptime(path.name, "%Y-%m-%d").date()
-            except ValueError:
-                return None
-
         try:
-            for path in log_dir.iterdir():
-                if not path.is_dir():
-                    continue
-                day = _date_from_dir(path)
-                if day is not None and day < cutoff.date():
-                    try:
-                        shutil.rmtree(path)
-                    except Exception:
-                        pass
-
-            # Find base log files matching pattern YYYY-MM-DDTHHMMSS.log.
-            # Rotated siblings are deleted together with their base file so
-            # old ``.log.1``/``.log.2`` files do not leak forever.
-            pattern = str(log_dir / "????-??-??T??????.log")
-            files = [Path(path) for path in sorted(file_glob.glob(pattern))]
-
-            for path in files:
-                timestamp = _timestamp_from_name(path)
-                if timestamp is not None and timestamp < cutoff:
-                    try:
-                        path.unlink(missing_ok=True)
-                        for rotated in path.parent.glob(f"{path.name}.*"):
-                            rotated.unlink(missing_ok=True)
-                    except Exception:
-                        pass  # Silently ignore deletion errors
-
-            rotated_pattern = str(log_dir / "????-??-??T??????.log.*")
-            for rotated_path in (Path(path) for path in file_glob.glob(rotated_pattern)):
-                base_name = rotated_path.name.split(".log.", 1)[0] + ".log"
-                base_path = rotated_path.with_name(base_name)
-                timestamp = _timestamp_from_name(base_path)
-                if not base_path.exists() and timestamp is not None and timestamp < cutoff:
-                    try:
-                        rotated_path.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+            expired = list_expired_log_paths(log_dir, days)
         except Exception:
-            pass  # Silently ignore cleanup errors
+            return  # Silently ignore cleanup errors
+        for path in expired:
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink(missing_ok=True)
+            except Exception:
+                pass  # Silently ignore deletion errors
     
     @classmethod
     def create(cls, service: str = None, **tags) -> Logger:

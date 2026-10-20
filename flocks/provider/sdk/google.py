@@ -16,6 +16,7 @@ from flocks.provider.provider import (
     ChatResponse,
     StreamChunk,
 )
+from flocks.provider.token_usage import normalize_gemini_usage
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.google")
@@ -352,11 +353,10 @@ class GoogleProvider(BaseProvider):
                 content = ""
         
         # Real usage metadata
-        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        if response.usage_metadata:
-            usage["prompt_tokens"] = response.usage_metadata.prompt_token_count or 0
-            usage["completion_tokens"] = response.usage_metadata.candidates_token_count or 0
-            usage["total_tokens"] = response.usage_metadata.total_token_count or 0
+        usage = normalize_gemini_usage(
+            response.usage_metadata,
+            response_id=getattr(response, "response_id", None),
+        ) or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         return ChatResponse(
             id="gemini-" + model_id, 
@@ -426,13 +426,10 @@ class GoogleProvider(BaseProvider):
                 if reason:
                     block_reason = getattr(reason, "name", None) or str(reason)
             
-            usage = None
-            if chunk.usage_metadata:
-                usage = {
-                    "prompt_tokens": chunk.usage_metadata.prompt_token_count or 0,
-                    "completion_tokens": chunk.usage_metadata.candidates_token_count or 0,
-                    "total_tokens": chunk.usage_metadata.total_token_count or 0,
-                }
+            usage = normalize_gemini_usage(
+                chunk.usage_metadata,
+                response_id=getattr(chunk, "response_id", None),
+            )
 
             # Emit reasoning, text and tool_calls as *separate* chunks so
             # consumers don't have to special-case mixed chunks (and so a

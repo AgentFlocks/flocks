@@ -109,7 +109,7 @@ async def test_task_queue_status_includes_diagnostics(client):
     response = await client.get("/api/task-system/queue/status")
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
-    assert data["max_concurrent"] == 4
+    assert data["max_concurrent"] == 10
     assert "running" in data
     assert "queued" in data
     assert "stale_running" in data

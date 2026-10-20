@@ -92,6 +92,17 @@ def _tool_declarations(tree):
             yield node
 
 
+def _literal(path, node):
+    """A keyword's literal value, or the module-level constant it names (``name=REA_TOOL_NAME``)."""
+    if isinstance(node, ast.Name):
+        for statement in _ast(path).body:
+            if isinstance(statement, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == node.id for target in statement.targets
+            ):
+                return ast.literal_eval(statement.value)
+    return ast.literal_eval(node)
+
+
 @pytest.mark.parametrize("directory", [ROOT / "flocks" / "agent" / "agents", PLUGINS / "agents"])
 def test_builtin_agent_groups(directory):
     # _iter_agent_dirs supports immediate agents and one nested collection level.
@@ -160,13 +171,13 @@ def test_core_python_tool_groups():
         and any(isinstance(target, ast.Name) and target.id == "_builtin_module_groups" for target in node.targets)
     )
     paths = [ROOT.joinpath(*package.split("."), f"{module}.py") for package, names in modules for module in names]
-    assert len(paths) == 41
+    assert len(paths) == 42
     # arch_v2 registers the internal ``invalid`` sentinel as a builtin module; catalogs and
     # callable schemas hide it by name, so it carries no group and is left out here.
     declarations = [
         (path, node) for path in paths if path.name != "invalid.py" for node in _tool_declarations(_ast(path))
     ]
-    assert len(declarations) == 43
+    assert len(declarations) == 44
     builtin_registration = next(
         node for node in registry_class.body
         if isinstance(node, ast.FunctionDef) and node.name == "_register_builtin_tools"
@@ -180,7 +191,7 @@ def test_core_python_tool_groups():
     non_native = set()
     for path, declaration in declarations:
         keywords = {kw.arg: kw.value for kw in declaration.keywords}
-        name = ast.literal_eval(keywords["name"])
+        name = _literal(path, keywords["name"])
         assert name not in names, (path, name)
         names.add(name)
         assert "group" in keywords, (path, name)
@@ -188,7 +199,7 @@ def test_core_python_tool_groups():
         _assert_group(ast.literal_eval(keywords["group"]), (path, name), TOOL_GROUPS)
         if "native" in keywords and ast.literal_eval(keywords["native"]) is False:
             non_native.add(name)
-    assert len(names) == 44
+    assert len(names) == 45
     assert {"task", "lsp", "list_providers", "add_provider", "add_model"} <= non_native
     assert "invalid" not in names  # Internal failure sentinel, not a registered builtin.
 

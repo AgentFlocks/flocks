@@ -582,6 +582,19 @@ def test_chat_upload_staging_binds_to_session(tmp_path, monkeypatch):
     assert not staged.exists()
 
 
+@pytest.mark.parametrize("filename", ["report.pdf", "rea_demo"])
+def test_a_bound_upload_resolves_again_for_a_retry(tmp_path, monkeypatch, filename):
+    """A retried submission finds the already bound file, also without an extension (REA samples)."""
+
+    monkeypatch.setenv("FLOCKS_DATA_DIR", str(tmp_path / "data"))
+    upload_id = "prt_upload_87654321"
+    create_chat_upload_target("usr_owner", upload_id, filename).write_bytes(b"\x7fELF")
+    bound = bind_staged_chat_upload("ses_context", "usr_owner", upload_id)
+
+    assert bind_staged_chat_upload("ses_context", "usr_owner", upload_id) == bound
+    assert bound.read_bytes() == b"\x7fELF"
+
+
 def _output_attachment(**updates):
     return {
         "id": "prt_output",

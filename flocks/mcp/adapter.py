@@ -9,6 +9,7 @@ from typing import Dict, Any
 
 from flocks.mcp.types import McpToolDef
 from flocks.mcp.client import McpClient
+from flocks.mcp.errors import McpServerBusyError
 from flocks.mcp.utils import (
     calculate_schema_hash,
     check_name_conflict,
@@ -27,6 +28,39 @@ from flocks.tool.registry import (
 from flocks.utils.log import Log
 
 log = Log.create(service="mcp.adapter")
+
+
+async def conversation_scope(ctx: ToolContext) -> str:
+    """The conversation a call belongs to: its root session, which its sub-agents share.
+
+    ``ctx.extra["mcp_scope"]`` names a scope of its own (e.g. a validation run).
+    """
+    explicit = (ctx.extra or {}).get("mcp_scope")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    from flocks.session.session import Session
+
+    session_id = ctx.session_id
+    seen: set = set()
+    while session_id and session_id not in seen:
+        seen.add(session_id)
+        session = await Session.get_by_id_unfiltered(session_id)
+        parent_id = getattr(session, "parent_id", None) if session is not None else None
+        if not parent_id:
+            break
+        session_id = parent_id
+    return f"session:{session_id}"
+
+
+async def call_mcp_tool(server_name: str, client: McpClient, ctx: ToolContext, tool: str, args: Dict[str, Any]):
+    """Call ``tool``; an isolated server answers on the conversation's own connection."""
+    from flocks.mcp import get_manager
+
+    manager = get_manager()
+    if manager.isolation(server_name) != "session":
+        return await client.call_tool(tool, args)
+    async with manager.scoped_client(server_name, await conversation_scope(ctx)) as scoped:
+        return await scoped.call_tool(tool, args)
 
 
 class McpToolAdapter:
@@ -109,7 +143,7 @@ class McpToolAdapter:
                 })
                 
                 # Call MCP tool
-                result = await client.call_tool(mcp_tool.name, kwargs)
+                result = await call_mcp_tool(server_name, client, ctx, mcp_tool.name, kwargs)
                 
                 # Check if it's an error
                 if hasattr(result, 'isError') and result.isError:
@@ -161,6 +195,10 @@ class McpToolAdapter:
                     }
                 )
                 
+            except McpServerBusyError as e:
+                # Busy for a moment, not broken: the repeated-failure switch must
+                # not turn the tool off for every conversation over it.
+                return ToolResult(success=False, error=str(e), metadata={"transient": True})
             except Exception as e:
                 if isinstance(e, FuturesTimeoutError):
                     raise
