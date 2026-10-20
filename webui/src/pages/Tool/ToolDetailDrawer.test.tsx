@@ -170,6 +170,53 @@ describe('ToolDetailDrawer', () => {
     await waitFor(() => expect(screen.queryByText('已自定义')).toBeNull());
   });
 
+  it('takes focus, closes on Escape and returns focus to the row that opened it', () => {
+    const onClose = vi.fn();
+
+    function Harness() {
+      const [open, setOpen] = React.useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>read</button>
+          <button type="button">background group</button>
+          {open && (
+            <ToolDetailDrawer
+              {...drawerProps}
+              onClose={() => {
+                onClose();
+                setOpen(false);
+              }}
+            />
+          )}
+        </>
+      );
+    }
+
+    render(<Harness />);
+    const trigger = screen.getByRole('button', { name: 'read' });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const drawer = screen.getByRole('dialog');
+    expect(drawer).toHaveAttribute('aria-modal', 'true');
+    expect(drawer).toContainElement(document.activeElement as HTMLElement);
+
+    // Tab from the last control wraps inside the drawer instead of reaching the page.
+    const background = screen.getByRole('button', { name: 'background group' });
+    background.focus();
+    expect(drawer).toContainElement(document.activeElement as HTMLElement);
+
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('names the close button for screen readers', () => {
+    render(<ToolDetailDrawer {...drawerProps} />);
+    expect(screen.getByRole('button', { name: '关闭' })).toBeInTheDocument();
+  });
+
   it('surfaces the backend message when toggling is rejected', async () => {
     const { toolAPI } = await import('@/api/tool');
     (toolAPI.setEnabled as any).mockRejectedValue({

@@ -237,6 +237,31 @@ async def _iter_with_chunk_timeout(
             pass
 
 
+async def _wait_through_cancel(task: asyncio.Future, timeout_s: float) -> bool:
+    """Wait up to *timeout_s* for *task* even while the caller is being cancelled.
+
+    True when it finished. Only for code already unwinding a cancellation
+    that it re-raises afterwards: a further cancel cannot change how that
+    ends, so it is not allowed to cut the wait short.
+    """
+    deadline = time.monotonic() + timeout_s
+    while not task.done():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            await asyncio.wait({task}, timeout=remaining)
+        except asyncio.CancelledError:
+            continue
+    return True
+
+
+def _read_outcome(task: asyncio.Future) -> None:
+    """Done callback: read the outcome so an unawaited failure is not reported as lost."""
+    if not task.cancelled():
+        task.exception()
+
+
 def _find_retryable_transport_exception(exception: Exception) -> Optional[Exception]:
     """Return a retryable HTTP transport error from an exception chain."""
     current: Optional[BaseException] = exception
@@ -315,6 +340,11 @@ BACKGROUND_SESSION_CATEGORIES = frozenset({"task"})
 # Applied the moment a 429 surfaces, before the slot is handed on; the retry
 # branch replaces it with the jittered delay once that is known.
 MIN_RATE_LIMIT_COOLDOWN_S = 1.0
+# How long a stopped step keeps waiting for the write of the text it had
+# already streamed, and then for that write to end once cancelled (see
+# SessionRunner._keep_interrupted_parts).
+_INTERRUPTED_PARTS_WRITE_TIMEOUT_S = 10.0
+_INTERRUPTED_PARTS_CANCEL_GRACE_S = 1.0
 
 
 @dataclass
@@ -3836,6 +3866,45 @@ class SessionRunner:
         
         return chat_messages
     
+    async def _keep_interrupted_parts(self, processor: Any, assistant_msg: MessageInfo) -> None:
+        """Store the text and reasoning a cancelled step had already streamed.
+
+        They are only written at text-end / reasoning-end, which a cancelled
+        stream never reaches, so the user's stopped reply was left empty.
+        Called while unwinding the cancellation, before the step ends: the
+        write is awaited through another stop, up to a bound, and is not left
+        running past it, since once the session is released it is refused.
+        Calling it again once the parts are stored writes nothing.
+        """
+        try:
+            write = asyncio.ensure_future(processor.persist_interrupted_parts())
+        except Exception as exc:
+            log.warn("runner.stream.interrupted_parts_persist_failed", {
+                "session_id": self.session.id,
+                "message_id": assistant_msg.id,
+                "error": str(exc),
+            })
+            return
+        timed_out = not await _wait_through_cancel(write, _INTERRUPTED_PARTS_WRITE_TIMEOUT_S)
+        if timed_out:
+            log.warn("runner.stream.interrupted_parts_persist_timeout", {
+                "session_id": self.session.id,
+                "message_id": assistant_msg.id,
+            })
+            write.cancel()
+            if not await _wait_through_cancel(write, _INTERRUPTED_PARTS_CANCEL_GRACE_S):
+                write.add_done_callback(_read_outcome)
+                return
+        try:
+            write.result()
+        except (Exception, asyncio.CancelledError) as exc:
+            if not timed_out:
+                log.warn("runner.stream.interrupted_parts_persist_failed", {
+                    "session_id": self.session.id,
+                    "message_id": assistant_msg.id,
+                    "error": str(exc) or type(exc).__name__,
+                })
+
     async def _call_llm(
         self,
         provider: Any,
@@ -4281,6 +4350,9 @@ class SessionRunner:
         self.execution_activity.update(
             state="waiting_model", request_started_at=time.time(), last_activity_at=time.time(),
         )
+        # Whatever a caller may be handling around this call: the finally
+        # below sees it in sys.exception() when nothing propagates from here.
+        caller_exception = sys.exception()
         try:
             await model_activity.start()
             async for chunk in _iter_with_chunk_timeout(
@@ -4485,8 +4557,11 @@ class SessionRunner:
                 from flocks.session.session_loop import SessionLoop
 
                 SessionLoop.end_cancelled_execution(self.session.id)
-            await model_activity.stop()
             self._release_llm_slot("cancelled")
+            # Before any other await, so a second stop cannot land in front
+            # of it (the finally below catches the rest).
+            await self._keep_interrupted_parts(processor, assistant_msg)
+            await model_activity.stop()
             # Foreground delegate tasks own child sessions. Let their
             # cancellation/finalization finish before unwinding this step.
             await processor.drain_parallel_tool_calls(execute_deferred=False)
@@ -4558,7 +4633,16 @@ class SessionRunner:
             # caller can start while the activity marker is persisted.
             self._release_llm_slot("stream_finished")
             self._release_budget_slot("stream_finished")
-            await model_activity.stop()
+            try:
+                await model_activity.stop()
+            finally:
+                # Every way out of the stream passes here. A stop landing on
+                # an await of the error branch, or on this one after the
+                # stream ended, skips both the cancel branch's write and the
+                # text-end below.
+                unwinding = sys.exception()
+                if unwinding is not caller_exception and isinstance(unwinding, asyncio.CancelledError):
+                    await self._keep_interrupted_parts(processor, assistant_msg)
 
         self.execution_activity.update(state="processing", last_activity_at=time.time())
         log.debug("runner.stream.summary", {
@@ -4656,7 +4740,12 @@ class SessionRunner:
             await processor.process_event(FinishEvent(
                 finish_reason=processor.get_finish_reason()
             ))
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                # Stopped while the finished stream was being closed (tool
+                # arguments, text-end running tool calls written in the text):
+                # the text is not stored yet here either.
+                await self._keep_interrupted_parts(processor, assistant_msg)
             await processor.drain_parallel_tool_calls(execute_deferred=False)
             if response_rewriter is not None and not response_rewriter_closed:
                 await response_rewriter.close()

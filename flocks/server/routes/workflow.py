@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal
 from fastapi import APIRouter, Body, HTTPException, Request, status, Query
 from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic_core import PydanticCustomError
 import uuid
 
 from flocks.workflow.models import Workflow, Node, Edge
@@ -167,6 +168,13 @@ _active_workflow_executions: Dict[str, ActiveWorkflowExecution] = {}
 # =============================================================================
 
 
+def _require_visible_workflow_name(value: Optional[str]) -> Optional[str]:
+    """A workflow name must show something: spaces or tabs alone are no name."""
+    if value is not None and not value.strip():
+        raise PydanticCustomError("workflow_name_blank", "Workflow name must not be blank")
+    return value
+
+
 class WorkflowCreateRequest(BaseModel):
     """Request to create a workflow"""
 
@@ -176,6 +184,7 @@ class WorkflowCreateRequest(BaseModel):
     _validate_group = field_validator("group", mode="before")(normalize_workflow_group)
 
     name: str = Field(..., min_length=1, description="Workflow name")
+    _validate_name = field_validator("name")(_require_visible_workflow_name)
     name_i18n: Optional[Dict[str, str]] = Field(None, alias="nameI18n", description="Localized workflow display names")
     description: Optional[str] = Field(None, description="Workflow description")
     category: Optional[str] = Field("default", description="Workflow category")
@@ -196,6 +205,7 @@ class WorkflowUpdateRequest(BaseModel):
     _validate_group = field_validator("group", mode="before")(normalize_workflow_group)
 
     name: Optional[str] = Field(None, description="Workflow name")
+    _validate_name = field_validator("name")(_require_visible_workflow_name)
     name_i18n: Optional[Dict[str, str]] = Field(None, alias="nameI18n", description="Localized workflow display names")
     description: Optional[str] = Field(None, description="Workflow description")
     category: Optional[str] = Field(None, description="Workflow category")
@@ -2482,7 +2492,9 @@ async def import_workflow(workflow_json: Dict[str, Any]):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         workflow_json["metadata"] = metadata
-        name = workflow_json.get("name", "Imported Workflow")
+        raw_name = workflow_json.get("name")
+        # Same rule as create: a blank name falls back to the default one.
+        name = raw_name if isinstance(raw_name, str) and raw_name.strip() else "Imported Workflow"
         description = metadata.get("description")
         category = metadata.get("category", "default")
 

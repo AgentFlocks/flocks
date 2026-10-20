@@ -4707,7 +4707,11 @@ export default function SessionChat({
     : fullWidth
       ? 'space-y-5 w-full px-12'
       : pageCanvas
-        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-7 max-md:px-4'
+        // The avatars sit 40px outside the column. The 28px padding plus the
+        // side margin must leave them 48px: when the chat area (100%) is
+        // under ~800px the padding grows to 48px, so they are not cut off or
+        // scroll the chat sideways. Phones hide the avatars and keep 16px.
+        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-[clamp(28px,calc(48px_-_(100%_-_760px)_/_2),48px)] max-md:px-4'
         : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
   const visibleGoalBanner = goalBanner && getGoalBannerKey(goalBanner) !== dismissedGoalKey
     ? goalBanner
@@ -6645,7 +6649,9 @@ function ChatMessageBubbleInner({
             {bubble}
             {footer}
           </div>
-          <div className="absolute -right-10 top-1">
+          {/* Hidden on phones like the assistant's: 40px outside the column it
+              made the whole chat scroll sideways. */}
+          <div className="absolute -right-10 top-1 max-md:hidden">
             {avatar}
           </div>
           {previewImage && (

@@ -102,3 +102,78 @@ def test_move_directory_into_itself_is_400(client):
     r = c.post("/api/workspace/move", json={"src": "a", "dst": "a/b/c"})
     assert r.status_code == 400 and "into itself" in r.text
     assert (ws / "a" / "b").is_dir()
+
+
+def test_dangling_symlink_does_not_fail_directory_listing(client, tmp_path):
+    """One broken link must not turn the whole listing (or tree) into a 500."""
+    c, ws, _ = client
+    folder = ws / "中文 空格"
+    folder.mkdir()
+    (folder / "note.txt").write_text("kept")
+    (folder / "outside-dir-link").symlink_to(tmp_path / "not-visible-to-the-server" / "gone")
+
+    listing = c.get("/api/workspace/list", params={"path": "中文 空格"})
+    assert listing.status_code == 200, listing.text
+    entries = {item["name"]: item for item in listing.json()}
+    assert entries["note.txt"]["type"] == "file"
+    assert entries["outside-dir-link"]["type"] == "file"
+
+    tree = c.get("/api/workspace/tree", params={"path": "中文 空格", "depth": 2})
+    assert tree.status_code == 200, tree.text
+    assert {child["name"] for child in tree.json()["children"]} == {"note.txt", "outside-dir-link"}
+
+
+@pytest.mark.parametrize("bad_name", [".", ".."])
+def test_upload_reports_dot_filenames_per_file(client, bad_name):
+    """A "." or ".." filename fails on its own; the rest of the batch keeps its results."""
+    c, ws, _ = client
+    r = c.post(
+        "/api/workspace/upload",
+        files=[
+            ("files", ("partial-ok.txt", b"ok", "text/plain")),
+            ("files", (bad_name, b"x", "text/plain")),
+            ("files", ("after.txt", b"after", "text/plain")),
+        ],
+    )
+    assert r.status_code == 200, r.text
+    first, bad, last = r.json()["uploaded"]
+    assert first["name"] == "partial-ok.txt" and "error" not in first
+    assert bad == {"name": bad_name, "error": "Filename is invalid"}
+    assert last["name"] == "after.txt" and "error" not in last
+    assert (ws / "partial-ok.txt").read_bytes() == b"ok"
+    assert (ws / "after.txt").read_bytes() == b"after"
+
+
+def test_upload_onto_existing_directory_reports_that_file(client):
+    c, ws, _ = client
+    (ws / "taken").mkdir()
+    r = c.post(
+        "/api/workspace/upload",
+        files=[("files", ("taken", b"x", "text/plain")), ("files", ("fine.txt", b"y", "text/plain"))],
+    )
+    assert r.status_code == 200, r.text
+    taken, fine = r.json()["uploaded"]
+    assert taken["name"] == "taken" and taken["error"].startswith("Failed to save upload")
+    assert str(ws) not in taken["error"]
+    assert fine["name"] == "fine.txt" and "error" not in fine
+    assert (ws / "taken").is_dir()
+
+
+def test_tree_skips_a_directory_removed_after_the_scan(client, monkeypatch):
+    """A child directory that vanishes between the scan and its own listing is left out."""
+    from flocks.server.routes import workspace as workspace_routes
+
+    c, ws, _ = client
+    (ws / "parent" / "kept").mkdir(parents=True)
+    (ws / "parent" / "gone").mkdir()
+    original = workspace_routes._visible_children
+
+    def vanishing(directory, root):
+        if directory.name == "gone":
+            directory.rmdir()  # removed by someone else between its stat and its listing
+        return original(directory, root)
+
+    monkeypatch.setattr(workspace_routes, "_visible_children", vanishing)
+    tree = c.get("/api/workspace/tree", params={"path": "parent", "depth": 3})
+    assert tree.status_code == 200, tree.text
+    assert [child["name"] for child in tree.json()["children"]] == ["kept"]

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, Field
@@ -32,6 +32,22 @@ _auto_backfill_lock = asyncio.Lock()
 # cache (Anthropic-style rows kept only the uncached part), so they cannot
 # go into a hit rate.  Keep in step with usage_record_reports_cache.
 _CACHE_REPORTED_SQL = "cache_reported = 1"
+
+# created_at is ISO text. The service writes UTC (+00:00), but rows posted to
+# /api/usage/record before it did may carry any offset Python accepts (under
+# ±24h, past the ±15:59 PostgreSQL's own parsing takes, hence the offset is
+# subtracted here) or none (UTC). Date bounds and the daily grouping
+# therefore use created_at in UTC; a text range widened by the largest offset
+# only narrows the scan, so idx_usage_time stays usable.
+_MAX_UTC_OFFSET = timedelta(hours=24)
+_CREATED_AT_OFFSET_RE = "[+-][0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?$"
+_CREATED_AT_UTC_SQL = (
+    "(CASE WHEN right(created_at, 6) = '+00:00' THEN left(created_at, -6)::timestamp"
+    f" WHEN created_at ~ '{_CREATED_AT_OFFSET_RE}'"
+    f" THEN regexp_replace(created_at, '{_CREATED_AT_OFFSET_RE}', '')::timestamp"
+    f" - substring(created_at from '({_CREATED_AT_OFFSET_RE})')::interval"
+    " ELSE rtrim(created_at, 'Z')::timestamp END)"
+)
 
 
 class RecordUsageRequest(BaseModel):
@@ -236,6 +252,16 @@ def _usage_record_from_row(row) -> UsageRecord:
     )
 
 
+def _utc(value: datetime) -> datetime:
+    """*value* in UTC; a value without an offset is taken as UTC."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _created_at_text_bound(value: datetime) -> str:
+    """*value* as the ISO text (to the second, no offset) a created_at range compares with."""
+    return value.replace(tzinfo=None).isoformat(timespec="seconds")
+
+
 def _build_filters(
     dialect,
     *,
@@ -248,15 +274,33 @@ def _build_filters(
     """Build SQL filters for usage queries.
 
     Markers come from Params rather than a literal ``?`` so the clause is
-    correct on a backend that numbers its parameters.
+    correct on a backend that numbers its parameters. Date bounds are ISO
+    strings; one without an offset is UTC.
     """
     params = Params(dialect)
     clauses: List[str] = []
 
     if start_date:
-        clauses.append(f"created_at >= {params.add(start_date)}")
+        start = _utc(datetime.fromisoformat(start_date))
+        try:
+            clauses.append(f"created_at >= {params.add(_created_at_text_bound(start - _MAX_UTC_OFFSET))}")
+        except OverflowError:
+            pass
+        clauses.append(
+            f"{_CREATED_AT_UTC_SQL} >= {params.add(start.replace(tzinfo=None).isoformat())}::text::timestamp"
+        )
     if end_date:
-        clauses.append(f"created_at <= {params.add(end_date)}")
+        end = _utc(datetime.fromisoformat(end_date))
+        try:
+            # Whole seconds: a stored value equal to the bound up to the
+            # seconds sorts after it whatever fraction or offset follows.
+            ceiling = end.replace(microsecond=0) + _MAX_UTC_OFFSET + timedelta(seconds=1)
+            clauses.append(f"created_at < {params.add(_created_at_text_bound(ceiling))}")
+        except OverflowError:
+            pass
+        clauses.append(
+            f"{_CREATED_AT_UTC_SQL} <= {params.add(end.replace(tzinfo=None).isoformat())}::text::timestamp"
+        )
     if provider_id:
         clauses.append(f"provider_id = {params.add(provider_id)}")
     if model_id:
@@ -333,7 +377,9 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
     await Storage._ensure_init()
 
     total_tokens = req.input_tokens + req.output_tokens + req.reasoning_tokens
-    created_at = req.created_at or datetime.now(UTC)
+    # Stored in one form, UTC, whatever offset the caller wrote it with: the
+    # daily grouping takes the date off the text.
+    created_at = _utc(req.created_at or datetime.now(UTC))
 
     if req.cost_override:
         input_cost = req.cost_override.input_cost
@@ -610,12 +656,12 @@ async def get_usage_stats(
             )
 
         daily_rows = await handle.fetch_all_mappings(
-            f"""SELECT {handle.dialect.date_of("created_at")} AS date, currency,
+            f"""SELECT {handle.dialect.date_of(_CREATED_AT_UTC_SQL)} AS date, currency,
                        COALESCE(SUM(total_tokens), 0) AS total_tokens,
                        COALESCE(SUM(total_cost), 0) AS total_cost,
                        COUNT(*) AS request_count
                 FROM usage_records{where_sql}
-                GROUP BY {handle.dialect.date_of("created_at")}, currency
+                GROUP BY {handle.dialect.date_of(_CREATED_AT_UTC_SQL)}, currency
                 ORDER BY date DESC, currency ASC
                 LIMIT 180""",
             params,

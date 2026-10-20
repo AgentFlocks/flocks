@@ -58,6 +58,12 @@ import PropertyPanel from './components/PropertyPanel';
 import EdgePropertyPanel from './components/EdgePropertyPanel';
 import NodeToolbar from './components/NodeToolbar';
 import { isTextEditingTarget, removeNodesWithEdges } from './graphEditing';
+import {
+  clearWorkflowDraft,
+  readWorkflowDraft,
+  useConfirmBeforeUnload,
+  writeWorkflowDraft,
+} from './unsavedChanges';
 import ExecutionPanel from './components/ExecutionPanel';
 import ExecuteDialog from './components/ExecuteDialog';
 
@@ -382,6 +388,36 @@ export default function WorkflowEditor() {
   const [currentExecution, setCurrentExecution] = useState<WorkflowExecution | null>(null);
   const [showExecutionPanel, setShowExecutionPanel] = useState(false);
   const [executionStopping, setExecutionStopping] = useState(false);
+  // What the canvas would save (node positions are not part of it) and the
+  // same for the last loaded or saved version: unequal means unsaved edits.
+  const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
+  const editedJson = useMemo(
+    () => (workflow ? convertToWorkflowJSON(nodes, edges, workflow) : null),
+    [nodes, edges, workflow],
+  );
+  const editedSnapshot = useMemo(() => (editedJson ? JSON.stringify(editedJson) : null), [editedJson]);
+  const hasUnsavedChanges = savedSnapshot !== null && editedSnapshot !== null && editedSnapshot !== savedSnapshot;
+
+  useConfirmBeforeUnload(hasUnsavedChanges);
+
+  // Keep unsaved edits for this tab: a reload, or a route change that unmounts
+  // the editor, offers them back; saved or unchanged canvases drop the copy.
+  // Keyed on the snapshot string, not editedJson: dragging a node makes a new
+  // object with the same content.
+  useEffect(() => {
+    if (!workflow || savedSnapshot === null || editedSnapshot === null) return;
+    if (editedSnapshot !== savedSnapshot && editedJson) {
+      writeWorkflowDraft(workflow.id, { baseUpdatedAt: workflow.updatedAt, workflowJson: editedJson });
+    } else {
+      clearWorkflowDraft(workflow.id);
+    }
+  }, [workflow, savedSnapshot, editedSnapshot]);
+
+  const leaveEditor = () => {
+    if (hasUnsavedChanges && !window.confirm(t('editor.unsavedLeaveConfirm'))) return;
+    if (workflow) clearWorkflowDraft(workflow.id);
+    navigate('/workflows');
+  };
 
   // 加载工作流数据
   useEffect(() => {
@@ -439,9 +475,27 @@ export default function WorkflowEditor() {
     try {
       setLoading(true);
       const response = await workflowAPI.get(id!);
-      setWorkflow(response.data);
-      
-      const { nodes: flowNodes, edges: flowEdges } = convertToReactFlowFormat(response.data.workflowJson, edgeTheme);
+      const loaded = response.data;
+      setWorkflow(loaded);
+
+      const { nodes: flowNodes, edges: flowEdges } = convertToReactFlowFormat(loaded.workflowJson, edgeTheme);
+      const loadedSnapshot = JSON.stringify(convertToWorkflowJSON(flowNodes, flowEdges, loaded));
+      setSavedSnapshot(loadedSnapshot);
+      // Edits left unsaved in this tab, on top of the version just loaded.
+      const draft = readWorkflowDraft(loaded.id);
+      if (draft && draft.baseUpdatedAt === loaded.updatedAt) {
+        const draftFlow = convertToReactFlowFormat(
+          { ...loaded.workflowJson, start: draft.workflowJson.start, nodes: draft.workflowJson.nodes, edges: draft.workflowJson.edges },
+          edgeTheme,
+        );
+        const draftSnapshot = JSON.stringify(convertToWorkflowJSON(draftFlow.nodes, draftFlow.edges, loaded));
+        if (draftSnapshot !== loadedSnapshot && window.confirm(t('editor.restoreDraftConfirm'))) {
+          setNodes(draftFlow.nodes);
+          setEdges(draftFlow.edges);
+          return;
+        }
+      }
+      clearWorkflowDraft(loaded.id);
       setNodes(flowNodes);
       setEdges(flowEdges);
     } catch (error: any) {
@@ -702,11 +756,15 @@ export default function WorkflowEditor() {
         },
       };
       const workflowJson = convertToWorkflowJSON(nodes, edges, workflowForSave);
-      await workflowAPI.update(id!, { workflowJson });
-      setWorkflow({
+      const saved = (await workflowAPI.update(id!, { workflowJson })).data;
+      const savedWorkflow: Workflow = {
         ...latestWorkflow,
         workflowJson,
-      });
+        // The version a later draft builds on is the one just written.
+        updatedAt: saved?.updatedAt ?? latestWorkflow.updatedAt,
+      };
+      setWorkflow(savedWorkflow);
+      setSavedSnapshot(JSON.stringify(convertToWorkflowJSON(nodes, edges, savedWorkflow)));
       alert(t('editor.saveSuccess'));
     } catch (error: any) {
       console.error('Failed to save workflow:', error);
@@ -828,7 +886,8 @@ export default function WorkflowEditor() {
       <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between dark:border-zinc-800 dark:bg-zinc-950 max-md:flex-wrap max-md:gap-2 max-md:px-4 max-md:py-3">
         <div className="flex items-center gap-4 max-md:min-w-0 max-md:gap-2">
           <button
-            onClick={() => navigate('/workflows')}
+            onClick={leaveEditor}
+            aria-label={t('editor.backToList')}
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors dark:text-zinc-300 dark:hover:bg-zinc-800"
           >
             <ArrowLeft className="w-5 h-5" />
@@ -981,18 +1040,20 @@ export default function WorkflowEditor() {
             style={{ backgroundColor: isDark ? '#303842' : '#f9fafb' }}
           />
           
-          {/* 图例 */}
-          <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30 max-md:hidden">
-            <h3 className="text-sm font-semibold text-gray-900 mb-3 dark:text-zinc-100">{t('editor.nodeTypesLabel')}</h3>
-            <div className="space-y-2">
-              {Object.entries(nodeColors).map(([type, colors]) => (
-                <div key={type} className="flex items-center gap-2">
-                  <div className={`w-4 h-4 rounded border-2 ${colors.border} ${colors.bg}`} />
-                  <span className="text-xs text-gray-700 capitalize dark:text-zinc-300">{type}</span>
-                </div>
-              ))}
-            </div>
-          </Panel>
+          {/* 图例：节点工具栏打开时它占着左上角，按钮本身已按类型配色 */}
+          {!showNodeToolbar && (
+            <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30 max-md:hidden">
+              <h3 className="text-sm font-semibold text-gray-900 mb-3 dark:text-zinc-100">{t('editor.nodeTypesLabel')}</h3>
+              <div className="space-y-2">
+                {Object.entries(nodeColors).map(([type, colors]) => (
+                  <div key={type} className="flex items-center gap-2">
+                    <div className={`w-4 h-4 rounded border-2 ${colors.border} ${colors.bg}`} />
+                    <span className="text-xs text-gray-700 capitalize dark:text-zinc-300">{type}</span>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+          )}
 
           {/* 统计信息 */}
           <Panel position="top-right" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30 max-md:hidden">

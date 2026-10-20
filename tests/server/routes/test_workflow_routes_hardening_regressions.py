@@ -147,6 +147,32 @@ async def test_create_workflow_rejects_empty_name(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("blank", [" ", "\t ", " 　\n"])
+async def test_create_workflow_rejects_whitespace_only_name(client: AsyncClient, blank: str) -> None:
+    response = await client.post("/api/workflow", json={"name": blank, "workflowJson": _wf_json()})
+    assert response.status_code == 422, response.text
+    assert ["body", "name"] in [d["loc"] for d in response.json()["details"]]
+    listed = await client.get("/api/workflow")
+    assert all(item["name"].strip() for item in listed.json())
+
+
+@pytest.mark.asyncio
+async def test_update_workflow_rejects_whitespace_only_name(client: AsyncClient) -> None:
+    created = await client.post("/api/workflow", json={"name": "named-flow", "workflowJson": _wf_json()})
+    assert created.status_code == 201, created.text
+    workflow_id = created.json()["id"]
+
+    rejected = await client.put(f"/api/workflow/{workflow_id}", json={"name": " \t"})
+    assert rejected.status_code == 422, rejected.text
+    current = await client.get(f"/api/workflow/{workflow_id}")
+    assert current.json()["name"] == "named-flow"
+
+    renamed = await client.put(f"/api/workflow/{workflow_id}", json={"name": "renamed flow"})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["name"] == "renamed flow"
+
+
+@pytest.mark.asyncio
 async def test_update_workflow_keeps_runtime_defaults_when_metadata_omitted(client: AsyncClient) -> None:
     created = await client.post("/api/workflow", json={"name": "keep-runtime", "workflowJson": _wf_json()})
     assert created.status_code == 201, created.text
@@ -182,6 +208,14 @@ async def test_import_workflow_runs_strict_edge_mapping_lint(client: AsyncClient
     response = await client.post("/api/workflow/import", json=body)
     assert response.status_code == 400
     assert response.json()["message"].startswith("Workflow strict edge mapping failed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blank", ["", "  \t", None])
+async def test_import_workflow_with_blank_name_uses_default_name(client: AsyncClient, blank) -> None:
+    response = await client.post("/api/workflow/import", json={**_wf_json(), "name": blank})
+    assert response.status_code == 201, response.text
+    assert response.json()["name"] == "Imported Workflow"
 
 
 @pytest.mark.asyncio

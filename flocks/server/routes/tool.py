@@ -172,6 +172,11 @@ _VERIFIED_CONTEXT_REQUIRED_MESSAGE = (
     "Direct HTTP execution for local or permission-gated tools requires a verified "
     "session-backed request with both sessionID and messageID."
 )
+_SESSION_TOOL_WRITE_REQUIRED_MESSAGE = (
+    "Running a tool in a session requires write access to that session; "
+    "a read-only share cannot run tools."
+)
+_SESSION_TOOL_ARCHIVED_MESSAGE = "Archived sessions cannot run tools; restore the session first."
 # ``Tool.execute`` turns a PermissionError raised inside the handler into a
 # failed ToolResult; the HTTP context records the refusal here so the route
 # can still answer 403 instead of a 200 with success=false.
@@ -458,6 +463,50 @@ def _requires_session_backed_context(tool_info: ToolInfo) -> bool:
     return source == "builtin"
 
 
+def _require_session_tool_write_access(session: Any) -> None:
+    """Running a tool in a session's context is a write to that session.
+
+    Seeing the session is not enough: an invited read-only user or a project
+    share can read it, but the tool would run under the session's execution
+    settings. In-process callers without an HTTP user keep their access, as
+    for other session writes.
+    """
+    from flocks.auth.context import get_current_auth_user
+    from flocks.session.policy import SessionPolicy
+
+    user = get_current_auth_user()
+    if user is None:
+        return
+    if not SessionPolicy.can_write(session, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_SESSION_TOOL_WRITE_REQUIRED_MESSAGE,
+        )
+    if getattr(session, "status", "active") != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_SESSION_TOOL_ARCHIVED_MESSAGE,
+        )
+
+
+def _http_actor_subject() -> Optional[Dict[str, str]]:
+    """The authenticated HTTP caller, as the actor of a tool run in a session.
+
+    Without it the execution payload (and its audit) would name the session
+    owner, not whoever ran the tool through this route.
+    """
+    from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, get_current_auth_user
+
+    user = get_current_auth_user()
+    subject_id = str(getattr(user, "id", "") or "").strip()
+    if not subject_id:
+        return None
+    return {
+        "id": subject_id,
+        "type": "service" if subject_id == API_TOKEN_SERVICE_USER_ID else "human",
+    }
+
+
 async def _validate_verified_session_message_context(
     *,
     requires_verified_context: bool,
@@ -487,6 +536,7 @@ async def _validate_verified_session_message_context(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session not found: {effective_session_id}",
         )
+    _require_session_tool_write_access(session)
 
     message = await Message.get(effective_session_id, effective_message_id)
     if not message:
@@ -551,12 +601,16 @@ def _build_http_tool_context(
                 denied_marker["message"] = message
                 raise PermissionError(message)
 
+        extra: Dict[str, Any] = {_HTTP_PERMISSION_DENIED_KEY: denied_marker}
+        actor = _http_actor_subject()
+        if actor is not None:
+            extra["actor_subject"] = actor
         return ToolContext(
             session_id=session_id,
             message_id=effective_message_id,
             agent=agent_name,
             call_id=call_id,
-            extra={_HTTP_PERMISSION_DENIED_KEY: denied_marker},
+            extra=extra,
             permission_callback=permission_callback,
         )
 

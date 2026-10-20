@@ -1792,6 +1792,33 @@ class StreamProcessor:
             
             self.current_text_part = None
 
+    async def persist_interrupted_parts(self) -> None:
+        """Store the text and reasoning streamed so far when the step is cancelled.
+
+        Text is written at ``text-end`` and reasoning at ``reasoning-end``. A
+        cancelled step (the stop button cancels its task) never reaches them,
+        so the stored text part stayed the empty placeholder from
+        ``text-start`` although the user had already seen the text. Keep what
+        was shown: the display-sanitized text, without running any tool call
+        embedded in it. The parts are taken before they are written, so a
+        write that was given up on is not attempted again.
+        """
+        now = int(datetime.now().timestamp() * 1000)
+        part, self.current_text_part = self.current_text_part, None
+        reasoning_parts = list(self.reasoning_parts.values())
+        self.reasoning_parts.clear()
+        if part is not None:
+            part.text = self._sanitize_streaming_text_for_display(part.text).rstrip()
+            if part.time and part.time.end is None:
+                part.time.end = now
+            await Message.store_part(self.session_id, self.assistant_message.id, part)
+        for reasoning in reasoning_parts:
+            reasoning.text = reasoning.text.strip()
+            if reasoning.time and reasoning.time.end is None:
+                reasoning.time.end = now
+            if reasoning.text:
+                await Message.store_part(self.session_id, self.assistant_message.id, reasoning)
+
     def _should_run_tool_call_parallel(self, event: ToolCallEvent) -> bool:
         """Return true for independent foreground subagent tool-calls."""
         if event.tool_name not in {"delegate_task", "task"}:

@@ -43,6 +43,7 @@ import {
 } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useDelayedVisible } from '@/hooks/useDelayedVisible';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
 import { useToolPage } from '@/hooks/useTools';
@@ -3750,6 +3751,9 @@ export function ToolDetailDrawer({
   const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
   const sourceLabel = getSourceLabel(tool.source, t);
   const canDirectTest = canDirectlyTestTool(tool);
+  // Escape closes, Tab stays inside, and focus returns to the row that opened it.
+  const drawerRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(drawerRef, true, onClose);
 
   useEffect(() => {
     setEnabled(tool.enabled);
@@ -3821,14 +3825,21 @@ export function ToolDetailDrawer({
     <>
       <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
 
-      <div className="fixed right-0 top-0 bottom-0 z-50 flex min-h-0 flex-col bg-white shadow-2xl w-[520px] max-w-full">
+      <div
+        ref={drawerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="tool-detail-drawer-title"
+        tabIndex={-1}
+        className="fixed right-0 top-0 bottom-0 z-50 flex min-h-0 flex-col bg-white shadow-2xl w-[520px] max-w-full outline-none"
+      >
         <div className="flex-shrink-0 border-b border-gray-200">
           <div className="flex items-center gap-3 px-6 py-4">
             <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0">
               <Wrench className="w-4 h-4 text-gray-600" />
             </div>
             <div className="flex-1 min-w-0">
-              <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
+              <h2 id="tool-detail-drawer-title" className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
               <div className="flex items-center gap-2 mt-0.5">
                 <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${sb.className}`}>
                   {sourceLabel}
@@ -3840,7 +3851,12 @@ export function ToolDetailDrawer({
               </div>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
-              <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 transition-colors">
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label={t('toolDetail.close')}
+                className="p-1 rounded hover:bg-gray-100 transition-colors"
+              >
                 <X className="w-5 h-5 text-gray-400" />
               </button>
             </div>

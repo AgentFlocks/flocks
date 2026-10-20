@@ -28,6 +28,29 @@ WORKFLOW_DB = "workflow_executions"
 SOC_UI_ROOT = Path.home() / ".flocks" / "plugins" / "contracts" / "webui" / "soc_ui"
 SOC_TZ = ZoneInfo("Asia/Shanghai")
 
+# The triage workflow stores its verdict in triage_attack_verdict /
+# triage_attack_success; the SOC overview and alert pages read those first.
+# Older records only carry the NDR fields (attach_result, threat_result,
+# attack_verdict). triage_status is the triage run's own status ("ok"), not a
+# verdict about the attack.
+_TRIAGE_VERDICT_SQL = "lower(btrim(record_json ->> 'triage_attack_verdict'))"
+_TRIAGE_SUCCESS_SQL = "lower(btrim(record_json ->> 'triage_attack_success'))"
+ATTACK_VERDICT_SQL = (
+    f"CASE WHEN COALESCE({_TRIAGE_VERDICT_SQL}, '') <> '' THEN "
+    f"CASE WHEN {_TRIAGE_VERDICT_SQL} IN ('attack', 'attack_success', 'attack_failed') THEN 'attack' "
+    f"WHEN {_TRIAGE_VERDICT_SQL} IN ('non_attack', 'benign') THEN 'non_attack' ELSE 'unknown' END "
+    "ELSE (record_json ->> 'attack_verdict') END"
+)
+ATTACK_RESULT_SQL = (
+    f"CASE WHEN COALESCE({_TRIAGE_VERDICT_SQL}, '') <> '' THEN "
+    f"CASE WHEN {_TRIAGE_VERDICT_SQL} NOT IN ('attack', 'attack_success', 'attack_failed') THEN 'unknown' "
+    f"WHEN {_TRIAGE_SUCCESS_SQL} IN ('success', 'failed', 'unknown') THEN {_TRIAGE_SUCCESS_SQL} "
+    f"WHEN {_TRIAGE_VERDICT_SQL} = 'attack_success' THEN 'success' "
+    f"WHEN {_TRIAGE_VERDICT_SQL} = 'attack_failed' THEN 'failed' "
+    f"WHEN {_TRIAGE_SUCCESS_SQL} IN ('1', 'true') THEN 'success' ELSE 'unknown' END "
+    "ELSE COALESCE((record_json ->> 'attach_result'), (record_json ->> 'threat_result'), (record_json ->> 'attack_verdict')) END"
+)
+
 ALERT_FIELDS = {
     "row_id": "row_id",
     "record_id": "record_id",
@@ -35,8 +58,8 @@ ALERT_FIELDS = {
     "threat_name": "COALESCE(threat_name, (record_json ->> 'threat_name'))",
     "threat_type": "(record_json ->> 'threat_type')",
     "threat_phase": "(record_json ->> 'threat_phase')",
-    "attack_result": "COALESCE((record_json ->> 'attach_result'), (record_json ->> 'threat_result'), (record_json ->> 'attack_verdict'))",
-    "attack_verdict": "(record_json ->> 'attack_verdict')",
+    "attack_result": ATTACK_RESULT_SQL,
+    "attack_verdict": ATTACK_VERDICT_SQL,
     "direction": "(record_json ->> 'direction')",
     "sip": "(record_json ->> 'sip')",
     "dip": "(record_json ->> 'dip')",
@@ -284,6 +307,11 @@ def _page_query_params(filters: dict[str, Any]) -> dict[str, Any]:
         value = filters.get(source)
         if value not in (None, ""):
             query[target] = value
+    # The page handlers read startTime/endTime as epoch seconds (what the SOC
+    # UI sends); the tool also accepts milliseconds and date-time strings.
+    for target in ("startTime", "endTime"):
+        if target in query:
+            query[target] = _required_epoch_seconds(target, query[target])
     return query
 
 
@@ -460,8 +488,8 @@ def _alert_where(filters: dict[str, Any]) -> tuple[str, list[Any], list[dict[str
         params.append(str(end_date))
         applied.append({"field": "endDate", "value": str(end_date)})
 
-    start_time = _to_epoch_seconds(filters.get("startTime", filters.get("start_time")))
-    end_time = _to_epoch_seconds(filters.get("endTime", filters.get("end_time")))
+    start_time = _required_epoch_seconds("startTime", filters.get("startTime", filters.get("start_time")))
+    end_time = _required_epoch_seconds("endTime", filters.get("endTime", filters.get("end_time")))
     if start_time is not None:
         clauses.append("event_time >= ?")
         params.append(start_time)
@@ -508,7 +536,7 @@ def _alert_facets(where: str, params: list[Any]) -> dict[str, list[dict[str, Any
         "threat_name": "COALESCE(threat_name, (record_json ->> 'threat_name'))",
         "threat_type": "(record_json ->> 'threat_type')",
         "threat_phase": "(record_json ->> 'threat_phase')",
-        "attack_result": "COALESCE((record_json ->> 'attach_result'), (record_json ->> 'threat_result'), (record_json ->> 'attack_verdict'))",
+        "attack_result": ATTACK_RESULT_SQL,
         "direction": "(record_json ->> 'direction')",
     }
     entries = ",".join(f"('{key}', ({expression})::text)" for key, expression in facet_fields.items())
@@ -533,7 +561,8 @@ def _alert_facets(where: str, params: list[Any]) -> dict[str, list[dict[str, Any
 
 def _normalize_alert_row(row: Any, include_raw: bool, include_reports: bool) -> dict[str, Any]:
     record = _loads(row["record_json"])
-    event_time = _safe_int(record.get("time"), _safe_int(row["event_time"]))
+    # event_time is stored in seconds; the raw "time" may be milliseconds.
+    event_time = _epoch_seconds(_safe_int(row["event_time"])) or _epoch_seconds(_safe_int(record.get("time")))
     threat_name = _clean(record.get("threat_name") or row["threat_name"] or "未知告警")
     attack_result = _attack_result(record)
     normalized = {
@@ -548,7 +577,7 @@ def _normalize_alert_row(row: Any, include_raw: bool, include_reports: bool) -> 
             "threatMessage": _clean(record.get("threat_msg")),
             "threatType": _clean(record.get("threat_type")),
             "threatPhase": _clean(record.get("threat_phase")),
-            "attackBehavior": _clean(record.get("attack_verdict") or record.get("triage_status") or "unknown"),
+            "attackBehavior": _attack_behavior(record),
             "attackResult": attack_result,
             "riskLevel": _clean(record.get("risk_level") or record.get("threat_level") or record.get("threat_severity")),
             "isDuplicate": bool(row["is_duplicate"]),
@@ -664,8 +693,8 @@ def _source_info() -> dict[str, Any]:
 
 
 def _workflow_time_range(filters: dict[str, Any]) -> tuple[int | None, int | None]:
-    start = _to_epoch_seconds(filters.get("startTime", filters.get("start_time")))
-    end = _to_epoch_seconds(filters.get("endTime", filters.get("end_time")))
+    start = _required_epoch_seconds("startTime", filters.get("startTime", filters.get("start_time")))
+    end = _required_epoch_seconds("endTime", filters.get("endTime", filters.get("end_time")))
     if start is None and filters.get("startDate"):
         start = _to_epoch_seconds(f"{filters['startDate']} 00:00:00")
     if end is None and filters.get("endDate"):
@@ -696,7 +725,67 @@ def _to_epoch_seconds(value: Any) -> int | None:
     return None
 
 
+def _required_epoch_seconds(name: str, value: Any) -> int | None:
+    """Epoch seconds for a time filter; a value given but not readable is an error.
+
+    Silently dropping it answered with unfiltered (or the latest day's) data.
+    """
+    seconds = _to_epoch_seconds(value)
+    if seconds is None and value not in (None, ""):
+        raise ValueError(
+            f"Invalid {name} {value!r}: use epoch seconds, epoch milliseconds or 'YYYY-MM-DD HH:MM:SS'"
+        )
+    return seconds
+
+
+def _epoch_seconds(value: int) -> int:
+    """Seconds for an epoch value that may be in milliseconds."""
+    return value // 1000 if value > 10_000_000_000 else value
+
+
+def _triage_attack_verdict(record: dict[str, Any]) -> str:
+    """The triage verdict as the SOC overview reads it."""
+    value = _clean(record.get("triage_attack_verdict")).lower()
+    if value in {"attack", "non_attack", "unknown"}:
+        return value
+    if value in {"attack_success", "attack_failed"}:
+        return "attack"
+    if value == "benign":
+        return "non_attack"
+    return "unknown"
+
+
+def _triage_attack_success(record: dict[str, Any]) -> str:
+    """The triage attack result as the SOC overview reads it."""
+    if _triage_attack_verdict(record) != "attack":
+        return "unknown"
+    raw = record.get("triage_attack_success")
+    value = _clean(raw).lower()
+    if value in {"success", "failed", "unknown"}:
+        return value
+    raw_verdict = _clean(record.get("triage_attack_verdict")).lower()
+    if raw_verdict == "attack_success":
+        return "success"
+    if raw_verdict == "attack_failed":
+        return "failed"
+    if raw is True or value in {"1", "true"}:
+        return "success"
+    return "unknown"
+
+
+def _has_triage_verdict(record: dict[str, Any]) -> bool:
+    return bool(_clean(record.get("triage_attack_verdict")))
+
+
+def _attack_behavior(record: dict[str, Any]) -> str:
+    if _has_triage_verdict(record):
+        return _triage_attack_verdict(record)
+    return _clean(record.get("attack_verdict") or "unknown")
+
+
 def _attack_result(record: dict[str, Any]) -> str:
+    if _has_triage_verdict(record):
+        return _triage_attack_success(record)
     for key in ("attach_result", "threat_result", "attack_success", "attack_verdict"):
         value = _clean(record.get(key))
         if value:
@@ -747,13 +836,17 @@ def _truthy(value: Any) -> bool:
 def _format_epoch(value: int) -> str:
     if not value:
         return ""
-    return datetime.fromtimestamp(value, SOC_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        return datetime.fromtimestamp(_epoch_seconds(value), SOC_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    except (OverflowError, OSError, ValueError):
+        # One unreadable timestamp must not fail the whole page.
+        return ""
 
 
 def _format_epoch_ms(value: int) -> str:
     if not value:
         return ""
-    return _format_epoch(value // 1000 if value > 10_000_000_000 else value)
+    return _format_epoch(_epoch_seconds(value))
 
 
 def _now() -> str:

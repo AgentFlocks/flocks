@@ -77,6 +77,88 @@ def _patch_session_user(monkeypatch: pytest.MonkeyPatch, role: str) -> None:
     monkeypatch.setattr(auth_module.AuthService, "get_user_by_session_id", _get_user_by_session_id)
 
 
+_TOOL_OWNER = AuthUser(
+    id="usr_tool_owner", username="tool-owner", role="member", status="active", must_reset_password=False,
+)
+_TOOL_READER = AuthUser(
+    id="usr_tool_reader", username="tool-reader", role="member", status="active", must_reset_password=False,
+)
+_TOOL_ADMIN = AuthUser(
+    id="usr_tool_admin", username="tool-admin", role="admin", status="active", must_reset_password=False,
+)
+
+
+def _patch_cookie_users(monkeypatch: pytest.MonkeyPatch, users: dict[str, AuthUser]) -> None:
+    """Resolve each ``flocks_session`` cookie value to the given user."""
+    from flocks.server import auth as auth_module
+
+    class _StoredUser:
+        def __init__(self, user: AuthUser) -> None:
+            self._user = user
+
+        def to_auth_user(self) -> AuthUser:
+            return self._user
+
+    async def _has_users():
+        return True
+
+    async def _get_user_by_session_id(cookie_value: str):
+        user = users.get(cookie_value)
+        return _StoredUser(user) if user is not None else None
+
+    monkeypatch.setattr(auth_module.AuthService, "has_users", _has_users)
+    monkeypatch.setattr(auth_module.AuthService, "get_user_by_session_id", _get_user_by_session_id)
+
+
+async def _create_owned_session_and_message(
+    title: str,
+    *,
+    owner: AuthUser | None,
+    shared_with: tuple[AuthUser, ...] = (),
+) -> tuple[str, str]:
+    extra = {"metadata": {"shared_read_access_user_ids": [user.id for user in shared_with]}} if shared_with else {}
+    session = await Session.create(
+        project_id="default",
+        directory=str(Path.cwd()),
+        title=title,
+        agent="rex",
+        owner_user_id=owner.id if owner else None,
+        owner_username=owner.username if owner else None,
+        **extra,
+    )
+    message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.USER,
+        content=f"{title} message",
+        agent="rex",
+    )
+    return session.id, message.id
+
+
+async def _post_tool_call(
+    client: AsyncClient,
+    *,
+    endpoint: str,
+    tool_name: str,
+    session_id: str,
+    message_id: str,
+    cookie: str,
+):
+    headers = {"cookie": f"flocks_session={cookie}"}
+    context = {"sessionID": session_id, "messageID": message_id, "agent": "rex"}
+    if endpoint == "batch":
+        return await client.post(
+            "/api/tools/batch",
+            headers=headers,
+            json={"calls": [{"name": tool_name, "params": {}}], "parallel": False, **context},
+        )
+    return await client.post(
+        f"/api/tools/{tool_name}/{endpoint}",
+        headers=headers,
+        json={"params": {}, **context},
+    )
+
+
 async def _create_session_and_message(title: str) -> tuple[str, str]:
     session = await Session.create(
         project_id="default",
@@ -412,6 +494,145 @@ class TestToolRouteSecurity:
         assert kwargs["session_id"] == session_id
         assert kwargs["metadata"]["messageID"] == message_id
         assert kwargs["tool"] == {"name": "http_batch_named_tool"}
+
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", ["execute", "test", "batch"])
+    async def test_shared_reader_cannot_run_tools_in_owner_session(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        endpoint: str,
+    ):
+        """A read-only share must not let the reader run tools in the owner's session."""
+        _patch_cookie_users(monkeypatch, {"reader-cookie": _TOOL_READER})
+        session_id, message_id = await _create_owned_session_and_message(
+            "shared-readonly-session", owner=_TOOL_OWNER, shared_with=(_TOOL_READER,),
+        )
+        calls: list[str] = []
+
+        async def handler(ctx) -> ToolResult:
+            calls.append(ctx.session_id)
+            return ToolResult(success=True, output="ran")
+
+        tool = Tool(
+            info=ToolInfo(
+                name="http_shared_reader_tool",
+                description="shared reader probe",
+                category=ToolCategory.SYSTEM,
+            ),
+            handler=handler,
+        )
+
+        with _temporary_tool(tool):
+            response = await _post_tool_call(
+                client,
+                endpoint=endpoint,
+                tool_name="http_shared_reader_tool",
+                session_id=session_id,
+                message_id=message_id,
+                cookie="reader-cookie",
+            )
+
+        assert response.status_code == 403, response.text
+        assert "write access" in response.json()["message"]
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_archived_session_cannot_run_tools(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        _patch_cookie_users(monkeypatch, {"owner-cookie": _TOOL_OWNER})
+        session_id, message_id = await _create_owned_session_and_message(
+            "archived-tool-session", owner=_TOOL_OWNER,
+        )
+        assert await Session.archive("default", session_id)
+        calls: list[str] = []
+
+        async def handler(ctx) -> ToolResult:
+            calls.append(ctx.session_id)
+            return ToolResult(success=True, output="ran")
+
+        tool = Tool(
+            info=ToolInfo(
+                name="http_archived_session_tool",
+                description="archived session probe",
+                category=ToolCategory.SYSTEM,
+            ),
+            handler=handler,
+        )
+
+        with _temporary_tool(tool):
+            response = await _post_tool_call(
+                client,
+                endpoint="execute",
+                tool_name="http_archived_session_tool",
+                session_id=session_id,
+                message_id=message_id,
+                cookie="owner-cookie",
+            )
+
+        assert response.status_code == 409, response.text
+        assert calls == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("caller", "owner"),
+        [(_TOOL_OWNER, _TOOL_OWNER), (_TOOL_ADMIN, None)],
+        ids=["owner", "admin-on-ownerless-session"],
+    )
+    async def test_session_tool_execution_names_the_http_caller_as_actor(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        caller: AuthUser,
+        owner: AuthUser | None,
+    ):
+        """The execution payload's actor is whoever ran the tool, not the session owner."""
+        from flocks.hooks import tool_gate
+
+        _patch_cookie_users(monkeypatch, {"caller-cookie": caller})
+        session_id, message_id = await _create_owned_session_and_message(
+            "actor-session", owner=owner,
+        )
+        payloads: list[dict] = []
+        original_gate = tool_gate.run_tool_gate
+
+        async def recording_gate(payload, *args, **kwargs):
+            payloads.append(payload)
+            return await original_gate(payload, *args, **kwargs)
+
+        monkeypatch.setattr(tool_gate, "run_tool_gate", recording_gate)
+
+        async def handler(ctx) -> ToolResult:
+            return ToolResult(success=True, output="ran")
+
+        tool = Tool(
+            info=ToolInfo(
+                name="http_actor_probe_tool",
+                description="actor probe",
+                category=ToolCategory.SYSTEM,
+            ),
+            handler=handler,
+        )
+
+        with _temporary_tool(tool):
+            response = await _post_tool_call(
+                client,
+                endpoint="execute",
+                tool_name="http_actor_probe_tool",
+                session_id=session_id,
+                message_id=message_id,
+                cookie="caller-cookie",
+            )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["success"] is True
+        assert payloads, "the tool gate never saw the execution"
+        subject = payloads[-1]["tool_execution"]["actor"]["subject"]
+        assert subject == {"id": caller.id, "type": "human"}
 
 
 class TestToolListPageRoute:

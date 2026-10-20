@@ -167,6 +167,12 @@ async def build_session_tool_execution_payload(
     permission_mode = str(profile.get("permission_mode") or "readonly").strip().lower()
     network_mode = str(profile.get("network_mode") or "require-confirm").strip().lower()
     actor_subject_id, actor_subject_type = _resolve_actor_subject(profile)
+    # An entry point that runs the tool on behalf of someone other than the
+    # session owner (the HTTP tool route) names that caller explicitly.
+    actor_override = extra.get("actor_subject")
+    if isinstance(actor_override, Mapping) and str(actor_override.get("id") or "").strip():
+        actor_subject_id = str(actor_override["id"]).strip()
+        actor_subject_type = str(actor_override.get("type") or "").strip().lower() or "human"
     workspace_root = str(
         (profile.get("workspace_dir") or extra.get("workspace_dir") or "")
     ).strip() or None

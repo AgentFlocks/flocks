@@ -302,10 +302,13 @@
   background-color: var(--flocks-dark-surface-raised);
 }
 
+/* Inverted controls (bg-zinc-950 + dark:bg-zinc-100 dark:text-zinc-950, e.g.
+   the selected preference option) keep their own light dark-mode fill: forcing
+   the surface here put their dark label on a dark background (1.7:1). */
 .dark .bg-zinc-900,
 .dark .bg-gray-900,
 .dark .bg-slate-900,
-.dark .bg-zinc-950,
+.dark .bg-zinc-950:not(.dark\:bg-zinc-100),
 .dark .bg-gray-950,
 .dark .bg-slate-950 {
   background-color: var(--flocks-dark-surface) !important;

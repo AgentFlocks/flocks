@@ -147,9 +147,15 @@ def _node_from_path(path: Path, root: Path) -> WorkspaceNode:
     """Build a WorkspaceNode from a filesystem path.
 
     Uses a single stat() call; type is derived from st_mode to avoid the
-    extra syscall that Path.is_dir() would issue internally.
+    extra syscall that Path.is_dir() would issue internally. An entry whose
+    target cannot be followed (a dangling symlink) is listed from lstat() as
+    a file, so one broken link does not fail the whole listing and can still
+    be seen and deleted.
     """
-    raw_stat = path.stat()
+    try:
+        raw_stat = path.stat()
+    except OSError:
+        raw_stat = path.lstat()
     is_dir = stat_module.S_ISDIR(raw_stat.st_mode)
 
     # Root node: relative_to returns Path('.'); normalise to '' so the
@@ -195,6 +201,14 @@ def _visible_children(directory: Path, root: Path) -> list[Path]:
     return directories + files
 
 
+def _child_node(child: Path, root: Path) -> Optional[WorkspaceNode]:
+    """Node for a listed child, or None when it vanished after the directory scan."""
+    try:
+        return _node_from_path(child, root)
+    except FileNotFoundError:
+        return None
+
+
 def _build_tree_sync(directory: Path, root: Path, depth: int, current: int = 0) -> WorkspaceNode:
     """Blocking recursive tree build — call via asyncio.to_thread."""
     node = _node_from_path(directory, root)
@@ -202,15 +216,21 @@ def _build_tree_sync(directory: Path, root: Path, depth: int, current: int = 0) 
         node.children = []
         for child in _visible_children(directory, root):
             if child.is_dir():
-                node.children.append(_build_tree_sync(child, root, depth, current + 1))
+                try:
+                    node.children.append(_build_tree_sync(child, root, depth, current + 1))
+                except FileNotFoundError:
+                    continue  # removed after the directory scan
             else:
-                node.children.append(_node_from_path(child, root))
+                child_node = _child_node(child, root)
+                if child_node is not None:
+                    node.children.append(child_node)
     return node
 
 
 def _list_dir_sync(directory: Path, root: Path) -> list[WorkspaceNode]:
     """Blocking single-level directory listing — call via asyncio.to_thread."""
-    return [_node_from_path(child, root) for child in _visible_children(directory, root)]
+    nodes = (_child_node(child, root) for child in _visible_children(directory, root))
+    return [node for node in nodes if node is not None]
 
 
 def _dir_stats_sync(root: Path):
@@ -478,6 +498,11 @@ async def upload_files(
             continue
 
         filename = Path(raw_name).name  # strip any dir component from client
+        if filename in {"", ".", ".."}:
+            # "." or ".." would name the destination directory itself (or its
+            # parent): report this file and go on with the rest of the batch.
+            results.append({"name": raw_name, "error": "Filename is invalid"})
+            continue
         # Read regular Workspace uploads in chunks before overwriting the
         # destination, so an oversized upload leaves existing content intact.
         chunks: list[bytes] = []
@@ -501,7 +526,16 @@ async def upload_files(
         # Keep regular Workspace paths stable across repeated uploads by
         # overwriting the existing file instead of auto-renaming it.
         target = dest_dir / filename
-        target.write_bytes(content)
+        try:
+            target.write_bytes(content)
+        except OSError as exc:
+            # e.g. a directory of that name already exists: this file fails,
+            # the files before and after it keep their own results.
+            results.append({
+                "name": raw_name,
+                "error": f"Failed to save upload: {exc.strerror or type(exc).__name__}",
+            })
+            continue
 
         is_text = WorkspaceManager.is_text_file(target)
         log.info("workspace.file.uploaded", {
