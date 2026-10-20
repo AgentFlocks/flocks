@@ -10,9 +10,9 @@ MAX_CARDS = 36
 MAX_RAW_BYTES = 24_000
 MAX_RECORDS = 36
 _MEANINGFUL = {'src_ip', 'dst_ip', 'domain', 'url', 'virus_name', 'file_name',
-               'file_path', 'file_md5', 'file_hash', 'process_name', 'command_line'}
+               'file_path', 'file_md5', 'file_hash', 'process_name', 'command_line', 'x_forwarded_for'}
 _ENTITY_CONTAINERS = {'entities', 'entity', 'host', 'file', 'process', 'ip', 'innerip',
-                      'dns', 'srcProcess', 'net', 'http'}
+                      'dns', 'srcProcess', 'net', 'http', 'originalAlert'}
 _ALERT_CONTAINERS = {'alertTimeLine', 'alertTimeline', 'alert', 'alerts'}
 
 
@@ -121,7 +121,7 @@ def _records(value, *, kind, fallback=(), context=None, identifiers=(), anchor=N
         # A generic UUID in an alert list identifies its row, not every nested
         # file/process/entity. An alert-proof query already identifies its target.
         row_identity = not entity and (alert_row or kind == 'alerts' and (
-            any(key in own for key in ('name', 'alert_time', 'src_ip', 'dst_ip', 'url'))
+            any(key in own for key in ('name', 'alert_time', 'src_ip', 'dst_ip', 'url', 'x_forwarded_for'))
             or 'proofType' in value))
         explicit = _identifiers(value, alert_row=row_identity)
         # normalize_basics supports old alert-* UUID payloads. That convention
@@ -207,6 +207,8 @@ def _summary(record, source, packets):
     elif domain:
         tag = _text(record.get('intelligenceTag') or record.get('threatDefineName') or record.get('threat.name'), 70)
         observed = f'记录关联域名 {domain}' + (f'，来源情报标记为「{tag}」' if tag else '')
+    elif record.get('x_forwarded_for'):
+        observed = f'记录 X-Forwarded-For 请求头原值「{_text(record["x_forwarded_for"], 140)}」'
     elif record.get('virus_name'):
         observed = f'记录威胁「{_text(record["virus_name"], 80)}」'
     elif name or packets:
@@ -220,6 +222,8 @@ def _summary(record, source, packets):
         contents.append('请求及响应报文' if request and response else '请求报文' if request else '响应报文')
     if record.get('url') and not observed.startswith('记录对 '):
         contents.append('访问地址')
+    if record.get('x_forwarded_for') and not observed.startswith('记录 X-Forwarded-For '):
+        contents.append('X-Forwarded-For 记录')
     if record.get('src_ip') and record.get('dst_ip') and (record.get('file_path') or record.get('file_name')):
         contents.append('文件信息')
     if record.get('process_name') or record.get('command_line'):
@@ -278,6 +282,9 @@ def evidence_cards(event, evidence, *, canonical=None):
                                'source': source, 'partial': False, 'boundaries': []}
             group = groups[key]
             group['partial'] |= bool(proof.get('partial') or clipped)
+            forwarded = record.get('x_forwarded_for')
+            forwarded_values = forwarded if isinstance(forwarded, list) else [forwarded]
+            group['partial'] |= any(isinstance(value, str) and '已截断' in value for value in forwarded_values)
             boundaries = []
             if cross:
                 boundaries.append('跨设备查询为候选关联，须核对是否为同一资产及同一时间范围。')

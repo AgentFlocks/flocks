@@ -2,7 +2,7 @@
 import json
 
 from flocks.monitoring.evidence_presenter import evidence_cards, MAX_CARDS, MAX_RECORDS
-from flocks.monitoring.event_details import build_story, readable_story
+from flocks.monitoring.event_details import build_story, readable_story, safe_facts
 from flocks.monitoring.investigation import fingerprint
 
 EVENT = {'id': 'incident-one', 'device': 'xdr-a', 'key': 'xdr-a:incident:incident-one',
@@ -335,3 +335,80 @@ def test_merged_query_and_raw_records_are_redacted_in_all_compatibility_fields()
     assert len(cards) == 1 and len(cards[0]['records']) == 2
     serialized = json.dumps(cards, ensure_ascii=False)
     assert 'PRIVATE_' not in serialized and 'visible response' in serialized and 'kept' in serialized
+
+
+def test_documented_alert_list_ip_info_and_xff_fields_merge_with_incident_timeline_proof():
+    listed = proof({'data': {'item': [{'uuId': 'alert-network', 'name': '可疑HTTP访问',
+        'srcIp': [], 'srcIpInfos': [{'ip': '192.0.2.10'}],
+        'dstIp': ['198.51.100.20'], 'dstIpInfos': [{'ip': '198.51.100.21'}],
+        'srcPort': [33001, 33002], 'dstPort': [443], 'xForwardedFor': ['203.0.113.1', '10.0.0.1']}]}})
+    timeline = proof({'data': [{'uuId': EVENT['id'], 'alertTimeLine': [
+        {'alertId': 'alert-network', 'name': '可疑HTTP访问', 'lastTime': 1791860390,
+         'proof': {'dataType': 'NDR', 'srcIps': ['192.0.2.11'], 'dstIps': ['198.51.100.22'],
+                   'xForwardedFor': ['203.0.113.2, 10.0.0.2'], 'requestBody': 'sample request'}}]}]},
+        id='evidence-timeline', kind='proof', query={'action': 'get_proof', 'uuid': EVENT['id']})
+    cards = evidence_cards(EVENT, [listed, timeline])
+    assert len(cards) == 1 and cards[0]['alert_id'] == 'alert-network'
+    fields = field_values(cards[0])
+    assert fields['src_ip'] == ['192.0.2.10', '192.0.2.11']
+    assert fields['dst_ip'] == ['198.51.100.20', '198.51.100.21', '198.51.100.22']
+    assert fields['src_port'] == [33001, 33002] and fields['dst_port'] == [443]
+    assert fields['x_forwarded_for'] == ['203.0.113.1', '10.0.0.1', '203.0.113.2, 10.0.0.2']
+    assert next(field['label'] for field in cards[0]['fields'] if field['key'] == 'x_forwarded_for') == 'X-Forwarded-For（请求头原值）'
+    assert cards[0]['records'][0]['raw']['srcIpInfos'] == [{'ip': '192.0.2.10'}]
+    assert len(cards[0]['records']) == 2
+
+
+def test_alert_proof_original_alert_ips_survive_and_header_recovers_only_explicit_xff():
+    cards = evidence_cards(EVENT, [proof({'data': {
+        'srcIp': ['192.0.2.10'], 'srcPort': [33001], 'dstIp': ['198.51.100.20'], 'dstPort': [443],
+        'proof': {'requestHead': 'GET / HTTP/1.1\nX-Forwarded-For: 203.0.113.2, 10.0.0.2\nAuthorization: PRIVATE',
+                  'responseHead': 'X-Forwarded-For: 203.0.113.99'},
+        'originalAlert': {'srcIp': '192.0.2.11', 'dstIp': '198.51.100.21', 'name': 'process entity'}}},
+        kind='alert_proof', query={'action': 'get_proof', 'uuid': 'alert-network'})])
+    assert len(cards) == 1 and cards[0]['alert_id'] == 'alert-network'
+    fields = field_values(cards[0])
+    assert fields['src_ip'] == ['192.0.2.10', '192.0.2.11']
+    assert fields['dst_ip'] == ['198.51.100.20', '198.51.100.21']
+    assert fields['x_forwarded_for'] == ['203.0.113.2, 10.0.0.2']
+    assert fields['src_port'] == [33001] and fields['dst_port'] == [443]
+    assert 'process entity' not in str(fields.get('name'))
+    assert 'PRIVATE' not in json.dumps(cards)
+
+
+def test_xff_only_facts_are_shown_without_becoming_observed_source_or_destination_ips():
+    cards = evidence_cards(EVENT, [proof({'data': {'item': [
+        {'uuId': 'alert-xff', 'xForwardedFor': ['203.0.113.1, 10.0.0.1']}]}})])
+    assert len(cards) == 1 and cards[0]['alert_id'] == 'alert-xff'
+    assert field_values(cards[0])['x_forwarded_for'] == ['203.0.113.1, 10.0.0.1']
+    assert not {'src_ip', 'dst_ip', 'host'}.intersection(field_values(cards[0]))
+    assert '请求头原值' in cards[0]['summary']
+    assert all(word not in cards[0]['summary'] for word in ('攻击源', '访问 ', '代理服务器'))
+
+
+def test_xff_fields_still_require_the_current_successful_bound_event_version():
+    facts = {'alertId': 'alert-xff', 'xForwardedFor': ['203.0.113.1']}
+    for changes in ({'success': False}, {'event': 'other-event'}, {'event_revision': 'old'}, {'device': 'xdr-other'}):
+        assert evidence_cards(EVENT, [proof(facts, **changes)]) == []
+
+
+def test_a_long_header_xff_value_keeps_its_original_raw_header_and_marks_display_limits():
+    header = 'X-Forwarded-For: ' + ', '.join(f'192.0.2.{n}' for n in range(100))
+    cards = evidence_cards(EVENT, [proof({'alertId': 'alert-xff', 'requestHead': header})])
+    assert len(cards) == 1 and cards[0]['partial']
+    assert cards[0]['raw']['requestHead'] == header
+    assert '已截断' in field_values(cards[0])['x_forwarded_for'][0]
+
+
+def test_all_bounded_explicit_xff_alias_values_survive_combining_more_than_fifty_addresses():
+    aliases = ('x_forwarded_for', 'xForwardedFor', 'X-Forwarded-For', 'x-forwarded-for')
+    raw = {'alertId': 'alert-xff', **{
+        alias: [f'192.0.{group}.{n}' for n in range(20)] for group, alias in enumerate(aliases)}}
+    facts, partial = safe_facts(raw)
+    assert not partial and all(len(facts[alias]) == 20 for alias in aliases)
+    cards = evidence_cards(EVENT, [proof(facts)])
+    expected = [address for alias in aliases for address in facts[alias]]
+    assert len(cards) == 1 and not cards[0]['partial']
+    assert field_values(cards[0])['x_forwarded_for'] == expected
+    assert len(expected) == 80
+    assert all(cards[0]['raw'][alias] == facts[alias] for alias in aliases)

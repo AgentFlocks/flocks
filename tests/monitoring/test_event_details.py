@@ -51,6 +51,116 @@ def test_basics_are_idempotent_and_keep_enum_names_separate():
     assert story['verdict'] == 'unknown'
 
 
+@pytest.mark.parametrize('empty', ['', [], None, '  ', [None, '', '  ']])
+def test_documented_ip_info_containers_fill_empty_ip_aliases_without_guessing_directions(empty):
+    raw = {'srcIp': empty, 'dstIp': empty,
+           'srcIpInfos': [{'ip': '192.0.2.10', 'branchName': 'source group'}],
+           'dstIpInfos': [{'ip': '198.51.100.20'}],
+           'srcPort': [33001, 33002], 'dstPort': [443]}
+    facts, partial = safe_facts(raw)
+    assert not partial
+    value = normalize_basics(facts)
+    assert value['src_ip'] == ['192.0.2.10'] and value['dst_ip'] == ['198.51.100.20']
+    assert value['src_port'] == [33001, 33002] and value['dst_port'] == [443]
+    assert normalize_basics(value) == value
+
+
+@pytest.mark.parametrize('empty', ['  ', [None, '', '  ']])
+def test_blank_ip_aliases_do_not_hide_the_next_explicit_ip_alias(empty):
+    value = normalize_basics({'src_ip': empty, 'srcIp': ['192.0.2.7'],
+                              'dst_ip': empty, 'dstIp': ['198.51.100.8']})
+    assert value['src_ip'] == ['192.0.2.7'] and value['dst_ip'] == ['198.51.100.8']
+
+
+def test_documented_flat_ips_and_ip_info_addresses_are_both_retained_without_pairing_ports():
+    value = normalize_basics({'srcIp': ['192.0.2.10'], 'srcIps': ['192.0.2.99'],
+        'srcIpInfos': [{'ip': '192.0.2.10'}, {'ip': '192.0.2.11'}],
+        'dstIp': '198.51.100.20', 'dstIpInfos': [{'ip': '198.51.100.21'}],
+        'srcPort': [33001], 'dstPort': [80, 443],
+        'ip': '203.0.113.50', 'proxyIp': '203.0.113.51',
+        'srcIpDesc': ['资产组/地域描述'], 'dstIpDesc': ['其他描述']})
+    assert value['src_ip'] == ['192.0.2.10', '192.0.2.11']
+    assert value['dst_ip'] == ['198.51.100.20', '198.51.100.21']
+    assert value['src_port'] == [33001] and value['dst_port'] == [80, 443]
+    assert '203.0.113.' not in json.dumps(value) and '资产组' not in json.dumps(value)
+
+
+def test_xdr_ip_forwarding_and_original_alert_contract_fields_survive_sanitizing():
+    raw = {'data': {'srcIp': ['192.0.2.10'], 'srcPort': [33001], 'dstIp': ['198.51.100.20'],
+        'dstPort': [443], 'xForwardedFor': ['203.0.113.3, 10.0.0.8', '203.0.113.4'],
+        'srcIpInfos': [{'ip': '192.0.2.11', 'Authorization': 'PRIVATE_INFO'}],
+        'dstIpInfos': [{'ip': '198.51.100.21'}], 'srcIpDesc': ['源地址所在组'], 'dstIpDesc': ['目的地址所在组'],
+        'originalAlert': {'srcIp': '192.0.2.12', 'dstIp': '198.51.100.22', 'token': 'PRIVATE_ORIGINAL'}}}
+    facts, partial = safe_facts(raw)
+    assert not partial
+    row = facts['data']
+    assert row['xForwardedFor'] == raw['data']['xForwardedFor']
+    assert row['srcIpInfos'] == [{'ip': '192.0.2.11'}]
+    assert row['srcIpDesc'] == ['源地址所在组'] and row['dstIpDesc'] == ['目的地址所在组']
+    assert row['originalAlert'] == {'srcIp': '192.0.2.12', 'dstIp': '198.51.100.22'}
+    assert 'PRIVATE_' not in json.dumps(facts)
+
+
+def test_xff_only_request_header_lines_are_preserved_as_original_values_without_ip_attribution():
+    raw = {'xForwardedFor': ['203.0.113.1', '10.0.0.1'],
+           'requestHead': 'GET / HTTP/1.1\r\nx-FoRwArDeD-fOr: 203.0.113.2, 10.0.0.2\r\n'
+                          'X-Forwarded-For: 203.0.113.3\r\nAuthorization: PRIVATE_HEADER\r\n'
+                          'Other: X-Forwarded-For: 203.0.113.99',
+           'requestBody': 'X-Forwarded-For: 203.0.113.98',
+           'responseHead': 'X-Forwarded-For: 203.0.113.97'}
+    facts, partial = safe_facts(raw)
+    assert not partial
+    value = normalize_basics(facts)
+    assert value['x_forwarded_for'] == ['203.0.113.1', '10.0.0.1', '203.0.113.2, 10.0.0.2', '203.0.113.3']
+    assert not {'src_ip', 'dst_ip', 'host'}.intersection(value)
+    assert all(text not in json.dumps(value) for text in ('203.0.113.99', '203.0.113.98', '203.0.113.97', 'PRIVATE_'))
+    assert normalize_basics(value) == value
+    from flocks.monitoring.assessment import has_behavior_facts
+    assert not has_behavior_facts({'facts': {'xForwardedFor': ['203.0.113.1']}})
+
+
+def test_all_explicit_xff_aliases_and_request_headers_are_retained_without_overwriting_chains():
+    value = normalize_basics({'x_forwarded_for': ['198.51.100.1'],
+                              'xForwardedFor': ['198.51.100.2, 10.0.0.2'],
+                              'requestHeader': 'X-Forwarded-For: 198.51.100.3\r\n'})
+    assert value['x_forwarded_for'] == ['198.51.100.1', '198.51.100.2, 10.0.0.2', '198.51.100.3']
+
+
+def test_a_body_after_the_header_separator_cannot_supply_an_xff_header():
+    facts, partial = safe_facts({'requestHeader': 'POST / HTTP/1.1\r\nContent-Length: 40\r\n\r\n'
+                                                'X-Forwarded-For: 198.51.100.66'})
+    assert not partial
+    assert 'x_forwarded_for' not in normalize_basics(facts)
+
+
+def test_supported_header_objects_keep_only_their_explicit_top_level_xff_values():
+    facts, partial = safe_facts({'requestHeader': {'x-FoRwArDeD-fOr': ['198.51.100.5', '198.51.100.6, 10.0.0.6'],
+                                                  'User-Agent': 'fixture', 'Authorization': 'PRIVATE',
+                                                  'body': {'X-Forwarded-For': '198.51.100.99'}}})
+    assert not partial
+    value = normalize_basics(facts)
+    assert value['x_forwarded_for'] == ['198.51.100.5', '198.51.100.6, 10.0.0.6']
+    assert '198.51.100.99' not in json.dumps(value) and 'PRIVATE' not in json.dumps(facts)
+
+
+def test_unknown_network_objects_and_proxy_fields_do_not_invent_a_destination():
+    value = normalize_basics({'srcIpInfos': [{'ip': '192.0.2.1'}],
+                              'ip': '198.51.100.1', 'proxyIp': '198.51.100.2',
+                              'srcIpDesc': ['198.51.100.3'], 'dstIpDesc': ['198.51.100.4']})
+    assert value['src_ip'] == ['192.0.2.1']
+    assert 'dst_ip' not in value and 'dst_port' not in value and 'host' not in value
+
+
+def test_xff_and_ip_info_lists_keep_the_existing_partial_and_total_fact_limits():
+    raw = {'xForwardedFor': [f'203.0.113.{n}' for n in range(30)],
+           'srcIpInfos': [{'ip': f'192.0.2.{n}'} for n in range(30)],
+           'originalAlert': {'requestBody': '中' * 9000}}
+    facts, partial = safe_facts(raw)
+    assert partial and len(facts['xForwardedFor']) == 20 and len(facts['srcIpInfos']) == 20
+    assert len(json.dumps(facts, ensure_ascii=False).encode()) <= MAX_FACT_BYTES
+    assert '已截断' in facts['originalAlert']['requestBody']
+
+
 def test_unknown_metadata_does_not_mean_evidence_is_partial():
     value, partial = safe_facts({'data': {'item': [{'name': 'file', 'hostIp': '10.0.0.1',
                                                 'debug': 'not-important', 'Authorization': 'PRIVATE'}]},

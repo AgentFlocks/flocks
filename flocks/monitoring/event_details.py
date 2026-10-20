@@ -33,6 +33,7 @@ BASIC_FIELDS = {
     'src_port': ('src_port', 'srcPort', 'sourcePort', 'net.src_port'),
     'dst_ip': ('dst_ip', 'dstIp', 'dstIps', 'destIp', 'destinationIp', 'net.dest_ip'),
     'dst_port': ('dst_port', 'dstPort', 'destPort', 'destinationPort', 'net.dest_port'),
+    'x_forwarded_for': ('x_forwarded_for', 'xForwardedFor', 'X-Forwarded-For', 'x-forwarded-for'),
     'virus_name': ('virus_name', 'virusName', 'malwareName', 'threatName'),
     'file_id': ('file_id', 'fileId', 'fileUuid'),
     'file_md5': ('file_md5', 'fileMd5', 'fileMD5', 'md5', 'virusFileMd5'),
@@ -56,6 +57,7 @@ FIELD_LABELS = {
     'start_time': '首次发生时间', 'end_time': '最近发生时间', 'severity': '来源风险等级值',
     'host': '影响主机', 'domain': '影响域名', 'data_source': '数据源', 'source_device': '采集设备',
     'src_ip': '源 IP', 'src_port': '源端口', 'dst_ip': '目的 IP', 'dst_port': '目的端口',
+    'x_forwarded_for': 'X-Forwarded-For（请求头原值）',
     'virus_name': '病毒名称', 'file_id': '文件编号', 'file_md5': '文件 MD5', 'file_hash': '文件哈希',
     'file_name': '文件名称', 'file_path': '文件路径', 'file_size': '文件大小（来源原值）',
     'file_created_at': '文件创建时间', 'process_name': '进程名称', 'command_line': '命令行',
@@ -75,7 +77,7 @@ _SECRET_NAME = r'(?:(?:x[_-])?(?:authorization|proxy-authorization|cookie|set-co
 _CONTAINERS = {'data', 'item', 'items', 'list', 'records', 'result', 'results', 'proof', 'proofs', 'alertTimeLine',
                'alertTimeline', 'timeline', 'attackStory', 'rootCauseAnalysis', 'detail', 'details', 'alert', 'alerts',
                'incident', 'entities', 'entity', 'host', 'file', 'process', 'ip', 'innerip', 'dns', 'net', 'http',
-               'srcProcess', 'aggregations'}
+               'srcProcess', 'aggregations', 'originalAlert', 'srcIpInfos', 'dstIpInfos'}
 _FACT_KEYS = (_CONTAINERS | {alias for aliases in BASIC_FIELDS.values() for alias in aliases}
               | {alias for aliases in PACKET_FIELDS.values() for alias in aliases}
               | {'total', 'count', 'code', 'success', 'status', 'gptResult', 'threatLevel', 'threatDefineName',
@@ -85,7 +87,8 @@ _FACT_KEYS = (_CONTAINERS | {alias for aliases in BASIC_FIELDS.values() for alia
                  'eventType', 'domainName', 'responseCode', 'respStatus', 'statusCode', 'httpStatus', 'bytes', 'protocol',
                  'proofType', 'kind', '_evidenceLimits',
                  'os', 'userName', 'parentProcessName', 'processId', 'pid', 'parentProcessId', 'ppid',
-                 'processType', 'nodeId', 'guid', 'parentPath', 'fileModifyTime', 'fileModifier', 'intelligenceTag'})
+                 'processType', 'nodeId', 'guid', 'parentPath', 'fileModifyTime', 'fileModifier', 'intelligenceTag',
+                 'srcIpDesc', 'dstIpDesc'})
 _PACKET_ALIASES = {alias: key for key, aliases in PACKET_FIELDS.items() for alias in aliases}
 _SQL = re.compile(r'@@version\b|\bunion\s+(?:all\s+)?select\b|\b(?:sleep|benchmark|load_file)\s*\(|\b(?:or|and)\s+[\'\"]?\d+[\'\"]?\s*=\s*[\'\"]?\d+|\bcase\s+when\b|\b(?:information_schema|xp_cmdshell)\b', re.I)
 
@@ -146,14 +149,62 @@ def normalize_basics(raw):
     if not isinstance(raw, dict):
         return {}
     normalized = {}
+    def selected_scalar(value, limit=MAX_TEXT):
+        safe = _scalar(value, limit)
+        if isinstance(safe, list):
+            safe = [item for item in safe if not isinstance(item, str) or item.strip()]
+        return None if safe in (None, '', []) or isinstance(safe, str) and not safe.strip() else safe
+
     for field, aliases in BASIC_FIELDS.items():
         for alias in aliases:
             value = raw.get(alias)
-            if value is not None and value != '' and not isinstance(value, dict):
-                safe = _scalar(value, 2000 if field == 'command_line' else MAX_TEXT)
+            if value not in (None, '', []) and not isinstance(value, dict):
+                safe = selected_scalar(value, 2000 if field == 'command_line' else MAX_TEXT)
                 if safe is not None:
                     normalized[field] = safe
-                break
+                    break
+    # The XDR response contract gives these containers an explicit direction.
+    # Do not recurse into arbitrary ip objects or pair IP/port arrays by index.
+    def merge_values(field, incoming):
+        previous = normalized.get(field)
+        values = previous if isinstance(previous, list) else [previous] if previous is not None else []
+        combined = list(values)
+        for value in incoming:
+            if value not in combined:
+                combined.append(value)
+        if combined != values:
+            normalized[field] = combined
+
+    for field, container in (('src_ip', 'srcIpInfos'), ('dst_ip', 'dstIpInfos')):
+        infos = raw.get(container)
+        if isinstance(infos, list):
+            merge_values(field, [_scalar(item['ip']) for item in infos[:50]
+                                 if isinstance(item, dict) and isinstance(item.get('ip'), str) and item['ip'].strip()])
+    for alias in BASIC_FIELDS['x_forwarded_for']:
+        supplied = selected_scalar(raw.get(alias))
+        if supplied is not None:
+            merge_values('x_forwarded_for', supplied if isinstance(supplied, list) else [supplied])
+    # Historical sanitized facts may retain the request header after dropping
+    # the structured XFF field. Preserve only explicit header lines as raw
+    # assertions; they do not identify the observed source or destination.
+    for alias in PACKET_FIELDS['requestHead']:
+        header = raw.get(alias)
+        if isinstance(header, str):
+            header = re.split(r'\r?\n[ \t]*\r?\n', header, maxsplit=1)[0]
+            forwarded = re.findall(r'(?im)^X-Forwarded-For[ \t]*:[ \t]*([^\r\n]*)', header)
+            merge_values('x_forwarded_for', [_scalar(value) for value in forwarded if value.strip()])
+            # safe_facts serializes supported header objects to JSON after
+            # masking secrets. Read only their explicit top-level XFF member.
+            try:
+                header = json.loads(header) if header.lstrip().startswith('{') else None
+            except (ValueError, TypeError, RecursionError):
+                header = None
+        if isinstance(header, dict):
+            for name, value in list(header.items())[:200]:
+                if isinstance(name, str) and name.casefold() == 'x-forwarded-for':
+                    forwarded = selected_scalar(value)
+                    if forwarded is not None:
+                        merge_values('x_forwarded_for', forwarded if isinstance(forwarded, list) else [forwarded])
     if raw.get('severity_field') in {'incidentSeverity', 'riskLevel', 'severity'}:
         normalized['severity_field'] = raw['severity_field']
     elif type(raw.get('incidentSeverity')) is int:

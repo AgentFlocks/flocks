@@ -31,6 +31,13 @@ const card: EventEvidenceCard = {
   raw: { dstIp: "192.0.2.22", token: "[已脱敏]" },
 };
 
+function openCardWithFields(fields: EventEvidenceCard["fields"]) {
+  render(<EvidenceCards cards={[{ ...card, fields }]} formatTime={String} />);
+  const synopsis = screen.getByText(card.summary).closest("summary")!;
+  fireEvent.click(synopsis);
+  return synopsis.closest("details")!;
+}
+
 describe("operator evidence cards", () => {
   it("keeps legacy cards expandable with plain-text packets and query provenance", () => {
     render(
@@ -209,6 +216,111 @@ describe("operator evidence cards", () => {
       '"evidence_id": "evidence-2"',
     );
   });
+
+  it("groups supplied source, destination, ports and forwarded header values without duplicate fields", () => {
+    const panel = openCardWithFields([
+      { key: "src_ip", label: "源 IP", value: ["203.0.113.7", "2001:db8::7"] },
+      { key: "src_port", label: "源端口", value: [50820, 50821] },
+      { key: "dst_ip", label: "目的 IP", value: "10.0.0.8" },
+      { key: "dst_port", label: "目的端口", value: 8443 },
+      {
+        key: "x_forwarded_for",
+        label: "X-Forwarded-For（请求头原值）",
+        value: ["198.51.100.9, 10.0.0.2", "198.51.100.10"],
+      },
+      { key: "file_name", label: "文件名称", value: "upload.jsp" },
+    ]);
+    const ip = within(panel).getByRole("region", { name: "IP信息" });
+    expect(within(ip).getByLabelText("源 IP值").textContent).toBe(
+      "203.0.113.7\n2001:db8::7",
+    );
+    expect(within(ip).getByLabelText("源端口值").textContent).toBe(
+      "50820\n50821",
+    );
+    expect(within(ip).getByLabelText("目的 IP值").textContent).toBe("10.0.0.8");
+    expect(within(ip).getByLabelText("目的端口值").textContent).toBe("8443");
+    expect(
+      within(ip).getByLabelText("X-Forwarded-For（请求头原值）值").textContent,
+    ).toBe("198.51.100.9, 10.0.0.2\n198.51.100.10");
+    for (const label of [
+      "源 IP",
+      "源端口",
+      "目的 IP",
+      "目的端口",
+      "X-Forwarded-For（请求头原值）",
+    ])
+      expect(within(panel).getAllByText(label)).toHaveLength(1);
+    expect(within(panel).getByText("upload.jsp")).toBeInTheDocument();
+    expect(ip).not.toHaveTextContent("攻击 IP");
+    expect(
+      screen.getByRole("list", { name: "告警证据" }).children,
+    ).toHaveLength(1);
+  });
+
+  it("shows a forwarded header alone without inventing source or destination addresses", () => {
+    const panel = openCardWithFields([
+      {
+        key: "x_forwarded_for",
+        label: "X-Forwarded-For（请求头原值）",
+        value: "198.51.100.9, 10.0.0.2",
+      },
+    ]);
+    const ip = within(panel).getByRole("region", { name: "IP信息" });
+    expect(ip).toHaveTextContent("198.51.100.9, 10.0.0.2");
+    expect(within(ip).queryByText("源 IP")).toBeNull();
+    expect(within(ip).queryByText("目的 IP")).toBeNull();
+    expect(within(ip).queryByText("源端口")).toBeNull();
+    expect(within(ip).queryByText("目的端口")).toBeNull();
+  });
+
+  it("keeps every supplied address in a scrollable selectable text block", () => {
+    const addresses = Array.from(
+      { length: 36 },
+      (_, index) => `2001:db8:1234:5678::${index + 1}`,
+    );
+    const panel = openCardWithFields([
+      { key: "dst_ip", label: "目的 IP", value: addresses },
+    ]);
+    const text = within(panel).getByLabelText("目的 IP值");
+    expect(text.textContent).toBe(addresses.join("\n"));
+    expect(text).toHaveClass("max-h-40", "overflow-auto", "select-text");
+    expect(text).toHaveAttribute("tabindex", "0");
+  });
+
+  it("renders forwarded header content as plain text", () => {
+    const panel = openCardWithFields([
+      {
+        key: "x_forwarded_for",
+        label: "X-Forwarded-For（请求头原值）",
+        value: '<script>alert("header")</script>',
+      },
+    ]);
+    const ip = within(panel).getByRole("region", { name: "IP信息" });
+    expect(
+      within(ip).getByText('<script>alert("header")</script>').tagName,
+    ).toBe("PRE");
+    expect(ip.querySelector("script")).toBeNull();
+  });
+
+  it.each([undefined, [], ["", "  ", null]])(
+    "does not create an IP section without address values (%j)",
+    (addresses) => {
+      const panel = openCardWithFields([
+        { key: "src_ip", label: "源 IP", value: addresses },
+        {
+          key: "x_forwarded_for",
+          label: "X-Forwarded-For（请求头原值）",
+          value: [],
+        },
+        { key: "dst_port", label: "目的端口", value: 8443 },
+      ]);
+      expect(
+        within(panel).queryByRole("region", { name: "IP信息" }),
+      ).toBeNull();
+      expect(within(panel).getByText("目的端口")).toBeInTheDocument();
+      expect(within(panel).getByText("8443")).toBeInTheDocument();
+    },
+  );
 
   it("does not fabricate usable evidence when binding rejected all records", () => {
     render(<EvidenceCards cards={[]} formatTime={() => "时间未提供"} />);

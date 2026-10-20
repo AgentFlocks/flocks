@@ -17,6 +17,21 @@ const hasValue = (value: unknown) =>
 const isTimeField = (key: string) => /(?:_time|_at)$/.test(key);
 const alertNameKeys = new Set(["name", "alert_name"]);
 const alertIdKeys = new Set(["alert_id", "alert_ids"]);
+const ipLabels: Record<string, string> = {
+  src_ip: "源 IP",
+  src_port: "源端口",
+  dst_ip: "目的 IP",
+  dst_port: "目的端口",
+  x_forwarded_for: "X-Forwarded-For（请求头原值）",
+};
+const ipAddressKeys = new Set(["src_ip", "dst_ip", "x_forwarded_for"]);
+const ipFieldKeys = new Set(Object.keys(ipLabels));
+const ipValueText = (value: unknown): string =>
+  Array.isArray(value)
+    ? value.map(ipValueText).filter(Boolean).join("\n")
+    : hasValue(value) && (typeof value !== "string" || value.trim())
+      ? valueText(value)
+      : "";
 
 function cardDetails(
   card: EventEvidenceCard,
@@ -37,11 +52,26 @@ function cardDetails(
     .filter(hasValue)
     .map(formatTime);
   const occurrenceTimes = [...new Set(times)];
+  const hasIpAddress = fields.some(
+    (field) => ipAddressKeys.has(field.key) && ipValueText(field.value),
+  );
+  const ipFields = hasIpAddress
+    ? Object.keys(ipLabels).flatMap((key) =>
+        fields
+          .filter((field) => field.key === key && ipValueText(field.value))
+          .map((field) => ({
+            key,
+            label: ipLabels[key],
+            text: ipValueText(field.value),
+          })),
+      )
+    : [];
   const otherFields = fields.flatMap((field) => {
     if (
       alertNameKeys.has(field.key) ||
       alertIdKeys.has(field.key) ||
-      field.key === "alert_time"
+      field.key === "alert_time" ||
+      (hasIpAddress && ipFieldKeys.has(field.key))
     )
       return [];
     if (field.key !== "start_time" && field.key !== "end_time") return [field];
@@ -56,6 +86,7 @@ function cardDetails(
       ? occurrenceTimes.join("、")
       : formatTime(undefined),
     fields: otherFields,
+    ipFields,
     alertId:
       card.alert_id ||
       fields.find((field) => alertIdKeys.has(field.key))?.value,
@@ -141,25 +172,60 @@ export function EvidenceCards({
                           {valueText(card.source)}
                         </dd>
                       </div>
-                      {detail.fields.map((field, position) => (
-                        <div
-                          key={`${field.key}-${position}`}
-                          className={
-                            field.key === "domain" ||
-                            field.key === "command_line"
-                              ? "sm:col-span-2"
-                              : ""
-                          }
-                        >
-                          <dt className="text-slate-500">{field.label}</dt>
-                          <dd className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all leading-6">
-                            {isTimeField(field.key)
-                              ? values(field.value).map(formatTime).join("、")
-                              : valueText(field.value)}
-                          </dd>
-                        </div>
-                      ))}
                     </dl>
+                    {detail.ipFields.length > 0 && (
+                      <section
+                        aria-label="IP信息"
+                        className="rounded-lg border border-slate-100 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900"
+                      >
+                        <h4 className="mb-3 text-xs font-semibold">IP信息</h4>
+                        <dl className="grid gap-x-5 gap-y-3 text-xs sm:grid-cols-2">
+                          {detail.ipFields.map((field, position) => (
+                            <div
+                              key={`${field.key}-${position}`}
+                              className={
+                                field.key === "x_forwarded_for"
+                                  ? "sm:col-span-2"
+                                  : ""
+                              }
+                            >
+                              <dt className="text-slate-500">{field.label}</dt>
+                              <dd className="mt-1">
+                                <pre
+                                  tabIndex={0}
+                                  aria-label={`${field.label}值`}
+                                  className="max-h-40 select-text overflow-auto whitespace-pre-wrap break-all font-mono leading-6"
+                                >
+                                  {field.text}
+                                </pre>
+                              </dd>
+                            </div>
+                          ))}
+                        </dl>
+                      </section>
+                    )}
+                    {detail.fields.length > 0 && (
+                      <dl className="grid gap-3 text-xs sm:grid-cols-2">
+                        {detail.fields.map((field, position) => (
+                          <div
+                            key={`${field.key}-${position}`}
+                            className={
+                              field.key === "domain" ||
+                              field.key === "command_line"
+                                ? "sm:col-span-2"
+                                : ""
+                            }
+                          >
+                            <dt className="text-slate-500">{field.label}</dt>
+                            <dd className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all leading-6">
+                              {isTimeField(field.key)
+                                ? values(field.value).map(formatTime).join("、")
+                                : valueText(field.value)}
+                            </dd>
+                          </div>
+                        ))}
+                      </dl>
+                    )}
                     {card.boundary && (
                       <p className="rounded-md bg-sky-50 px-3 py-2 text-xs leading-6 text-sky-800 dark:bg-sky-950 dark:text-sky-200">
                         {card.boundary}
