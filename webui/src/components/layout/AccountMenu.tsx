@@ -6,7 +6,6 @@ import {
   Blocks,
   Bot,
   Brain,
-  ChevronRight,
   ChevronUp,
   Crown,
   Gauge,
@@ -195,10 +194,10 @@ export default function AccountMenu({
           <div className={MENU_LABEL_CLASS}>{t('integrationsAndExtensions')}</div>
           {renderLinks(integrations)}
           <div className={MENU_SEPARATOR_CLASS} role="separator" />
+          {/* A plain link like the items above: no trailing chevron, which would promise a submenu. */}
           <Link to="/settings/preferences" role="menuitem" onClick={follow} className={MENU_ITEM_CLASS}>
             <Settings2 className="h-4 w-4 shrink-0 text-zinc-400" />
             <span className="min-w-0 flex-1 truncate">{t('systemManagement')}</span>
-            <ChevronRight className="h-4 w-4 shrink-0 text-zinc-400" />
           </Link>
           <div className={MENU_SEPARATOR_CLASS} role="separator" />
           <a href={FLOCKS_LLM_USAGE_URL} target="_blank" rel="noopener noreferrer" role="menuitem" onClick={close} className={MENU_ITEM_CLASS}>
