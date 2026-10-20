@@ -198,6 +198,73 @@ def test_file_creation_time_does_not_become_process_execution_time():
     assert '/tmp/worm.exe --persist' in evidence
 
 
+def test_a_merged_alert_keeps_each_mail_observation_without_splitting_the_story_card():
+    event, _ = sample()
+    listed = {'id': 'evidence-7', 'event': event['id'], 'event_revision': fingerprint(event),
+              'device': event['device'], 'source_name': '股份 XDR', 'kind': 'alerts', 'success': True,
+              'facts': {'alertId': 'alert-merged', 'name': '可疑程序外联',
+                        'srcIp': event['host'], 'dstIp': '192.0.2.22', 'dstPort': 443}}
+    detail = {**listed, 'id': 'evidence-8', 'kind': 'alert_proof',
+              'query': {'action': 'get_proof', 'uuid': 'alert-merged'},
+              'facts': {'proof': {'fileName': 'sample.exe', 'filePath': '/tmp/sample.exe',
+                                  'virusName': 'Synthetic.Worm', 'fileCreateTime': '2026-10-12T08:00:00Z',
+                                  'processName': 'sample.exe', 'commandLine': '/tmp/sample.exe --persist',
+                                  'url': '/sample-api', 'requestBody': 'PRIVATE_PACKET', 'responseBody': 'PRIVATE_RESPONSE'}}}
+    story = build_story(event, [listed, detail], {'verdict': 'risk', 'reason': '已确认恶意程序外联。'})
+    assert len(story['evidence_cards']) == 1
+    assert story['evidence_cards'][0]['kind'] == 'request'
+    assert len(story['evidence_cards'][0]['records']) == 2
+    message = render_notification(event, story)
+    evidence = message.text.split('关键证据\n', 1)[1].split('\n\n事件经过', 1)[0]
+    lines = evidence.splitlines()
+    assert len(lines) == 4
+    network = next(line for line in lines if '外联行为依据' in line)
+    assert '192.0.2.22' in network and '443' in network
+    file = next(line for line in lines if '定位到相关文件' in line)
+    assert all(value in file for value in ('sample.exe', '/tmp/sample.exe', 'Synthetic.Worm',
+                                          '文件创建于 2026-10-12 16:00:00（北京时间）'))
+    process = next(line for line in lines if '命令行' in line)
+    assert '/tmp/sample.exe --persist' in process and '发生时间不详（来源未提供）' in process
+    assert '文件创建于' not in process
+    request = next(line for line in lines if '请求与响应记录' in line)
+    assert '/sample-api' in request
+    assert all(value not in message.text and value not in message.html
+               for value in ('PRIVATE_PACKET', 'PRIVATE_RESPONSE', 'evidence-7', 'evidence-8', 'alert-merged'))
+    assert len(story['evidence_cards']) == 1
+
+
+def test_merged_card_records_keep_later_verified_timeline_and_alert_detail_references():
+    event, story = sample()
+    listed = {'id': 'evidence-7', 'event': event['id'], 'event_revision': fingerprint(event),
+              'device': event['device'], 'kind': 'alerts', 'success': True,
+              'facts': {'alertId': 'alert-merged', 'name': '初始告警',
+                        'srcIp': event['host'], 'dstIp': '192.0.2.22'}}
+    detail = {**listed, 'id': 'evidence-8', 'kind': 'alert_proof',
+              'query': {'action': 'get_proof', 'uuid': 'alert-merged'},
+              'facts': {'requestBody': 'verified request'}}
+    rejected = {**listed, 'id': 'evidence-9', 'event_revision': 'old-revision',
+                'facts': {'alertId': 'alert-rejected', 'name': '被拒绝的旧版本记录', 'requestBody': 'rejected'}}
+    story = build_story(event, [listed, detail, rejected], {'verdict': 'risk', 'reason': '已确认异常访问。'})
+    assert len(story['evidence_cards']) == 1
+    assert story['evidence_cards'][0]['evidence_id'] == 'evidence-7'
+    assert [item['evidence_id'] for item in story['evidence_cards'][0]['records']] == ['evidence-7', 'evidence-8']
+    story['timeline'] = [
+        {'time': '2026-10-13T03:00:00Z', 'text': '后续查询取得实际请求', 'evidence_id': 'evidence-8'},
+        {'time': '2026-10-13T03:01:00Z', 'text': '被拒绝的旧版本时间线', 'evidence_id': 'evidence-9'},
+    ]
+    story['alert_details'] = [
+        {'name': '后续真实告警', 'start_time': '2026-10-13T03:02:00Z', 'evidence_id': 'evidence-8'},
+        {'name': '被拒绝的旧版本告警', 'start_time': '2026-10-13T03:03:00Z', 'evidence_id': 'evidence-9'},
+    ]
+    message = render_notification(event, story)
+    timeline = message.text.split('事件经过\n', 1)[1].split('\n\n总结和处置建议', 1)[0]
+    assert '后续查询取得实际请求' in timeline and '后续真实告警' in timeline
+    assert '2026-10-13 11:00:00（北京时间）' in timeline
+    assert '2026-10-13 11:02:00（北京时间）' in timeline
+    assert '被拒绝的旧版本' not in timeline and 'evidence-' not in timeline
+    assert '后续查询取得实际请求' in message.html and '后续真实告警' in message.html
+
+
 def test_explicit_evidence_timestamp_and_request_fragment_are_preserved():
     event, story = sample()
     story['alert_details'] = []

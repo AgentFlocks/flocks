@@ -4,6 +4,8 @@ import {
   useState,
   useRef,
   type ReactNode,
+  type PointerEvent as ReactPointerEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import {
   Check,
@@ -18,6 +20,9 @@ import {
   RefreshCw,
   ShieldAlert,
   Settings2,
+  Maximize2,
+  Minimize2,
+  MoveDiagonal2,
   X,
 } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -311,25 +316,75 @@ function StatusBadge({ state }: { state: string }) {
   );
 }
 
+type SheetSize = { width: number; height: number };
+const sheetViewport = (): SheetSize => ({
+  width: Math.max(1, window.innerWidth - 32),
+  height: Math.max(1, window.innerHeight - 32),
+});
+const clampSheetSize = (size: SheetSize, viewport: SheetSize): SheetSize => ({
+  width: Math.min(
+    viewport.width,
+    Math.max(Math.min(560, viewport.width), size.width),
+  ),
+  height: Math.min(
+    viewport.height,
+    Math.max(Math.min(360, viewport.height), size.height),
+  ),
+});
+
 export function Sheet({
   title,
   close,
   children,
   centered = false,
   footer,
+  resizable = false,
 }: {
   title: string;
   close: () => void;
   children: ReactNode;
   centered?: boolean;
   footer?: ReactNode;
+  resizable?: boolean;
 }) {
   const ref = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
   const closeRef = useRef(close);
+  const [viewport, setViewport] = useState(sheetViewport);
+  const [size, setSize] = useState(() =>
+    clampSheetSize(
+      { width: 1120, height: window.innerHeight * 0.9 },
+      sheetViewport(),
+    ),
+  );
+  const [expanded, setExpanded] = useState(false);
+  const restoreSize = useRef(size);
+  const drag = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    size: SheetSize;
+  } | null>(null);
+  const displayedSize = expanded ? viewport : clampSheetSize(size, viewport);
   closeRef.current = close;
   useEffect(() => {
+    if (!resizable) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const updateViewport = () => {
+      const next = sheetViewport();
+      setViewport(next);
+      setSize((current) => clampSheetSize(current, next));
+    };
+    window.addEventListener("resize", updateViewport);
+    return () => {
+      window.removeEventListener("resize", updateViewport);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [resizable]);
+  useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
-    ref.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    closeButtonRef.current?.focus();
     function keydown(e: KeyboardEvent) {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -338,9 +393,24 @@ export function Sheet({
       if (e.key !== "Tab" || !ref.current) return;
       const controls = Array.from(
         ref.current.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]',
+          'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], summary, [tabindex="0"]',
         ),
-      );
+      ).filter((control) => {
+        if (control.closest("[hidden], [inert]")) return false;
+        for (
+          let parent = control.parentElement;
+          parent && parent !== ref.current;
+          parent = parent.parentElement
+        ) {
+          if (
+            parent instanceof HTMLDetailsElement &&
+            !parent.open &&
+            !parent.querySelector(":scope > summary")?.contains(control)
+          )
+            return false;
+        }
+        return true;
+      });
       const first = controls[0],
         last = controls[controls.length - 1];
       if (e.shiftKey && document.activeElement === first) {
@@ -358,9 +428,81 @@ export function Sheet({
       if (previous?.isConnected) previous.focus();
     };
   }, []);
+
+  function toggleExpanded() {
+    if (expanded) {
+      setSize(clampSheetSize(restoreSize.current, viewport));
+    } else {
+      restoreSize.current = displayedSize;
+    }
+    setExpanded((current) => !current);
+  }
+
+  function startResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.focus();
+    drag.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      size: displayedSize,
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function resizeFromPointer(event: ReactPointerEvent<HTMLButtonElement>) {
+    const start = drag.current;
+    if (!start || start.pointerId !== event.pointerId) return;
+    // The panel stays centered, so each edge moves half the size change.
+    setSize(
+      clampSheetSize(
+        {
+          width: start.size.width + (event.clientX - start.x) * 2,
+          height: start.size.height + (event.clientY - start.y) * 2,
+        },
+        sheetViewport(),
+      ),
+    );
+  }
+
+  function stopResize() {
+    drag.current = null;
+  }
+
+  function resizeFromKeyboard(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (
+      !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)
+    )
+      return;
+    event.preventDefault();
+    const step = event.shiftKey ? 80 : 32;
+    setSize(
+      clampSheetSize(
+        {
+          width:
+            displayedSize.width +
+            (event.key === "ArrowRight"
+              ? step
+              : event.key === "ArrowLeft"
+                ? -step
+                : 0),
+          height:
+            displayedSize.height +
+            (event.key === "ArrowDown"
+              ? step
+              : event.key === "ArrowUp"
+                ? -step
+                : 0),
+        },
+        viewport,
+      ),
+    );
+  }
+
   return (
     <div
-      className={`fixed inset-0 z-50 flex bg-gray-950/30 backdrop-blur-sm ${centered ? "items-center justify-center p-4" : "justify-end"}`}
+      className={`fixed inset-0 z-50 flex bg-gray-950/30 backdrop-blur-sm ${centered || resizable ? "items-center justify-center p-4" : "justify-end"}`}
       onClick={close}
     >
       <section
@@ -368,23 +510,68 @@ export function Sheet({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={`flex w-full flex-col bg-white shadow-2xl dark:bg-gray-900 ${centered ? "max-h-[90vh] max-w-md overflow-hidden rounded-2xl" : "h-full max-w-xl"}`}
+        className={`relative flex flex-col bg-white shadow-2xl dark:bg-gray-900 ${resizable ? "overflow-hidden rounded-2xl" : centered ? "w-full max-h-[90vh] max-w-md overflow-hidden rounded-2xl" : "h-full w-full max-w-xl"}`}
+        style={
+          resizable
+            ? { width: displayedSize.width, height: displayedSize.height }
+            : undefined
+        }
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="flex shrink-0 items-center justify-between border-b border-gray-100 px-6 py-5 dark:border-gray-800">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-gray-100 px-6 py-5 dark:border-gray-800">
+          <h2 className="min-w-0 break-words text-lg font-semibold text-gray-900 dark:text-gray-100">
             {title}
           </h2>
-          <button
-            onClick={close}
-            aria-label="关闭详情"
-            className="rounded-lg p-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
-          >
-            <X className="h-5 w-5" />
-          </button>
+          <div className="flex shrink-0 items-center gap-1">
+            {resizable && (
+              <button
+                type="button"
+                onClick={toggleExpanded}
+                aria-label={expanded ? "还原详情" : "放大详情"}
+                title={expanded ? "还原详情" : "放大详情"}
+                className="rounded-lg p-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
+              >
+                {expanded ? (
+                  <Minimize2 className="h-5 w-5" />
+                ) : (
+                  <Maximize2 className="h-5 w-5" />
+                )}
+              </button>
+            )}
+            <button
+              ref={closeButtonRef}
+              type="button"
+              onClick={close}
+              aria-label="关闭详情"
+              className="rounded-lg p-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
         </header>
-        <div className="min-h-0 flex-1 overflow-auto p-6">{children}</div>
+        <div
+          className={`min-h-0 flex-1 overflow-auto p-6 ${resizable ? "overscroll-contain" : ""}`}
+        >
+          {children}
+        </div>
         {footer}
+        {resizable && !expanded && (
+          <button
+            type="button"
+            aria-label="调整详情大小"
+            aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown"
+            title="拖动调整大小，或使用方向键调整"
+            onPointerDown={startResize}
+            onPointerMove={resizeFromPointer}
+            onPointerUp={stopResize}
+            onPointerCancel={stopResize}
+            onLostPointerCapture={stopResize}
+            onKeyDown={resizeFromKeyboard}
+            className="absolute bottom-0 right-0 flex h-8 w-8 touch-none cursor-se-resize items-center justify-center rounded-tl-lg bg-gray-100 text-gray-500 hover:bg-gray-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-500 dark:bg-gray-800 dark:hover:bg-gray-700"
+          >
+            <MoveDiagonal2 size={16} />
+          </button>
+        )}
       </section>
     </div>
   );

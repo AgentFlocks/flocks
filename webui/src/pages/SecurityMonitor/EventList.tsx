@@ -1757,6 +1757,7 @@ export default function EventList({
         <Sheet
           title={selected.grouped ? "同类事件组详情" : "事件详情"}
           close={closeDetail}
+          resizable
         >
           <div className="space-y-5">
             <header>

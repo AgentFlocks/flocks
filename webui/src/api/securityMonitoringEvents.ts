@@ -191,6 +191,13 @@ export interface EventEvidenceCard {
   query?: unknown;
   raw?: unknown;
   evidence_id?: string;
+  alert_id?: string;
+  records?: {
+    evidence_id?: string;
+    source?: string;
+    query?: unknown;
+    raw?: unknown;
+  }[];
 }
 export interface EventDetailResponse {
   story?: Record<string, unknown>;

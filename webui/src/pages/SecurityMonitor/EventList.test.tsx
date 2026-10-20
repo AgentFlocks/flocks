@@ -1224,6 +1224,12 @@ it("renders structured evidence summaries ahead of expandable original fields", 
   const synopsis = await within(dialog).findByText(
     "XDR记录主机持续查询随机域名，提供异常解析行为依据。",
   );
+  expect(
+    within(dialog).getByRole("button", { name: "放大详情" }),
+  ).toBeInTheDocument();
+  expect(
+    within(dialog).getByRole("button", { name: "调整详情大小" }),
+  ).toBeInTheDocument();
   const panel = synopsis.closest("details")!;
   expect(panel).not.toHaveAttribute("open");
   expect(synopsis).not.toHaveTextContent("alert-original");

@@ -134,7 +134,15 @@ def _conclusion(event, story, facts):
 
 def _timeline(story, timezone_name):
     cards = story.get('evidence_cards')
-    verified_refs = {card.get('evidence_id') for card in cards if isinstance(card, dict) and card.get('evidence_id')} if isinstance(cards, list) else None
+    verified_refs = set() if isinstance(cards, list) else None
+    for card in cards if isinstance(cards, list) else []:
+        if not isinstance(card, dict):
+            continue
+        sources = [card, *(card['records'] if isinstance(card.get('records'), list) else [])]
+        for source in sources:
+            reference = source.get('evidence_id') if isinstance(source, dict) else None
+            if isinstance(reference, str) and reference:
+                verified_refs.add(reference)
     entries = [item for item in story.get('timeline', [])[:40] if isinstance(item, dict)
                and (verified_refs is None or item.get('evidence_id') in verified_refs or item.get('evidence_id') == '事件基础信息')]
     # Alert first/last activity and concrete endpoints make the chronology
@@ -298,6 +306,35 @@ def _legacy_evidence(story, timezone_name):
     return result[:6]
 
 
+def _mail_observations(cards):
+    """Project a combined alert card into the mail's existing fact categories.
+
+    These are temporary views over verified fields. The incident story keeps
+    one card per alert, and private raw provenance never becomes mail content.
+    """
+    for card in cards[:30]:
+        if not isinstance(card, dict):
+            continue
+        if card.get('kind') not in {'network', 'domain', 'file', 'process', 'request'}:
+            yield card
+            continue
+        fields = {field.get('key'): field.get('value')
+                  for field in card.get('fields', []) if isinstance(field, dict)} if isinstance(card.get('fields'), list) else {}
+        kinds = []
+        if fields.get('src_ip') and fields.get('dst_ip'):
+            kinds.append('network')
+        elif fields.get('domain'):
+            kinds.append('domain')
+        if fields.get('file_name') or fields.get('file_path') or fields.get('virus_name'):
+            kinds.append('file')
+        if fields.get('process_name') or fields.get('command_line'):
+            kinds.append('process')
+        if fields.get('url') or card.get('packets') or card.get('kind') == 'request':
+            kinds.append('request')
+        for kind in kinds or [card.get('kind')]:
+            yield {**card, 'kind': kind}
+
+
 def _evidence(story, timezone_name):
     """One observation per line, with a short meaning followed by source facts."""
     cards = story.get('evidence_cards')
@@ -309,9 +346,7 @@ def _evidence(story, timezone_name):
                    '请求地址', 'URL', '文件名称', '文件路径', '病毒名称', '进程名称', '命令行',
                    '来源发生时间', '告警时间', '首次发生时间', '最近发生时间', '威胁子类型', '文件创建时间',
                    '来源情报标签', '来源威胁定义', '请求方法'}
-        for card in cards[:30]:
-            if not isinstance(card, dict):
-                continue
+        for card in _mail_observations(cards):
             summary = readable_text(card.get('summary'), 300)
             if not summary:
                 continue
