@@ -48,6 +48,7 @@ const HISTORY_LOAD_MORE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 250;
 const SEARCH_RESULT_LIMIT = 30;
 const REFRESH_DEBOUNCE_MS = 500;
+const SCROLLBAR_HIDE_DELAY_MS = 800;
 const REFRESH_EVENTS = new Set(['session.created', 'session.updated', 'session.deleted', 'session.archived', 'session.unarchived']);
 
 interface FolderInfo extends ProjectFolderSummary {
@@ -175,8 +176,23 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   const [selecting, setSelecting] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(() => new Set());
   const [archivingChecked, setArchivingChecked] = useState(false);
+  const [historyScrolling, setHistoryScrolling] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const refreshTimerRef = useRef<number | null>(null);
+  const scrollbarTimerRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (scrollbarTimerRef.current !== null) window.clearTimeout(scrollbarTimerRef.current);
+  }, []);
+
+  const handleHistoryScroll = useCallback(() => {
+    setHistoryScrolling(true);
+    if (scrollbarTimerRef.current !== null) window.clearTimeout(scrollbarTimerRef.current);
+    scrollbarTimerRef.current = window.setTimeout(() => {
+      setHistoryScrolling(false);
+      scrollbarTimerRef.current = null;
+    }, SCROLLBAR_HIDE_DELAY_MS);
+  }, []);
 
   useEffect(() => writeIdSet(collapsedKey, collapsedFolders), [collapsedFolders, collapsedKey]);
   useEffect(() => writeIdSet(pinnedKey, pinnedFolders), [pinnedFolders, pinnedKey]);
@@ -664,14 +680,14 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
     void fetchFolders();
   };
 
-  const iconButtonClass = 'grid h-7 w-7 shrink-0 place-items-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-200/70 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200';
-  const rowMenuButtonClass = 'grid h-6 w-6 shrink-0 place-items-center rounded text-zinc-400 opacity-0 transition-all hover:bg-black/[0.06] hover:text-zinc-700 focus:opacity-100 group-hover:opacity-100 dark:hover:bg-white/[0.08] dark:hover:text-zinc-200';
-  // Folder (project) actions are always visible: they are the project's entry points, not row extras.
-  const folderActionButtonClass = 'grid h-6 w-6 shrink-0 place-items-center rounded text-zinc-400 transition-colors hover:bg-black/[0.06] hover:text-zinc-700 disabled:opacity-50 dark:hover:bg-white/[0.08] dark:hover:text-zinc-200';
+  const iconButtonClass = 'grid h-7 w-7 shrink-0 place-items-center rounded-lg text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus';
+  const rowMenuButtonClass = 'grid h-6 w-6 shrink-0 place-items-center rounded text-ui-secondary opacity-0 transition-all hover:bg-ui-hover hover:text-ui-text focus:opacity-100 group-hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus';
+  // Reveal actions only for the hovered folder header, or for keyboard focus.
+  const folderActionButtonClass = 'pointer-events-none grid h-6 w-6 shrink-0 place-items-center rounded text-ui-secondary opacity-0 transition-all hover:bg-ui-hover hover:text-ui-text group-hover/folder:pointer-events-auto group-hover/folder:opacity-100 group-hover/folder:disabled:opacity-50 focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus';
 
   if (collapsed) {
     return (
-      <div className="flex flex-col items-center gap-1 border-t border-zinc-200 py-2 dark:border-zinc-800">
+      <div className="flex flex-col items-center gap-1 border-t border-ui-border py-2 [&_svg]:stroke-[1.75]">
         <button type="button" onClick={onExpandSidebar} className={iconButtonClass} title={t('history.title')} aria-label={t('history.title')} data-tip={t('history.title')}>
           <History className="h-[18px] w-[18px]" />
         </button>
@@ -698,7 +714,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
               if (event.key === 'Escape') { event.preventDefault(); setRenaming(null); }
             }}
             onBlur={() => void submitRename()}
-            className="h-8 w-full rounded-lg border border-red-400 bg-white px-2 text-sm text-zinc-900 outline-none dark:bg-zinc-950 dark:text-zinc-100"
+            className="h-8 w-full rounded-lg border border-ui-control bg-ui-surface px-2 text-sm text-ui-text shadow-ui-input outline-none focus:ring-2 focus:ring-ui-focus"
           />
         </div>
       );
@@ -706,16 +722,16 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
     if (selecting) {
       const checked = checkedIds.has(session.id);
       return (
-        <label key={session.id} className={`flex h-8 cursor-pointer items-center gap-2 rounded-lg px-2 text-[13px] ${inFolder ? 'ml-7' : ''} ${checked ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-50' : 'text-zinc-600 hover:bg-white/60 dark:text-zinc-300 dark:hover:bg-zinc-900'}`}>
-          <input type="checkbox" checked={checked} onChange={() => toggleChecked(session.id)} className="h-3.5 w-3.5 shrink-0 accent-red-600" />
+        <label key={session.id} className={`flex h-8 cursor-pointer items-center gap-2 rounded-lg px-2 text-sm transition-colors ${inFolder ? 'ml-7' : ''} ${checked ? 'bg-ui-selected font-medium text-ui-text' : 'font-normal text-ui-text hover:bg-ui-hover hover:text-ui-text'}`}>
+          <input type="checkbox" checked={checked} onChange={() => toggleChecked(session.id)} className="h-3.5 w-3.5 shrink-0 accent-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus" />
           <span className="min-w-0 flex-1 truncate" title={getSessionDisplayTitle(session)}>{getSessionDisplayTitle(session)}</span>
         </label>
       );
     }
     return (
-      <div key={session.id} className={`group flex items-center rounded-lg ${inFolder ? 'ml-7' : ''} ${selected ? 'bg-white shadow-sm dark:bg-zinc-800' : 'hover:bg-white/60 dark:hover:bg-zinc-900'}`}>
+      <div key={session.id} className={`group flex items-center rounded-lg transition-colors ${inFolder ? 'ml-7' : ''} ${selected ? 'bg-ui-selected' : 'hover:bg-ui-hover'}`}>
         <button type="button" onClick={() => openSession(session.id)} title={getSessionDisplayTitle(session)}
-          className={`flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-left text-[13px] ${selected ? 'font-medium text-zinc-900 dark:text-zinc-50' : 'text-zinc-600 dark:text-zinc-300'}`}>
+          className={`flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus ${selected ? 'font-medium text-ui-text' : 'font-normal text-ui-text group-hover:text-ui-text'}`}>
           {running && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-red-500" />}
           <ScrollingTitle text={getSessionDisplayTitle(session)} />
         </button>
@@ -741,7 +757,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
     const canCollapse = visibleCount > compactCount && list.length > compactCount;
     const loadingMore = loadingMoreProjectIds.has(sectionId);
     if (!canLoad && !canCollapse) return null;
-    const linkClass = 'flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:text-zinc-600 disabled:opacity-60 dark:hover:text-zinc-200';
+    const linkClass = 'flex items-center gap-1 rounded px-2 py-1 text-xs text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus';
     return (
       <div className={`flex items-center gap-1 ${indent ? 'ml-7' : ''}`}>
         {canLoad && (
@@ -768,47 +784,45 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   const moveTargets = folders.filter((folder) => folder.canWrite !== false && folder.pathStatus === 'available');
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col pt-2" aria-label={t('history.title')}>
+    <section className="flex min-h-0 flex-1 flex-col pt-2 [&_svg]:stroke-[1.75]" aria-label={t('history.title')}>
       <div className="flex items-center gap-0.5 px-2 pb-1.5">
-        <span className="flex-1 text-xs font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">{t('history.title')}</span>
+        <span className="flex-1 text-xs font-medium uppercase tracking-wide text-ui-secondary">{t('history.title')}</span>
         <button type="button" onClick={() => { setSearchOpen((open) => !open); setTimeout(() => searchInputRef.current?.focus(), 0); }} className={iconButtonClass} title={t('history.search')} aria-label={t('history.search')} aria-expanded={searchOpen}>
           <Search className="h-4 w-4" />
         </button>
         <button type="button" onClick={() => setFolderDialog({ mode: 'create' })} className={iconButtonClass} title={t('history.newFolder')} aria-label={t('history.newFolder')}>
           <FolderPlus className="h-4 w-4" />
         </button>
-        <button type="button" onClick={() => (selecting ? exitSelecting() : setSelecting(true))} className={`${iconButtonClass} ${selecting ? 'bg-zinc-200/70 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200' : ''}`}
+        <button type="button" onClick={() => (selecting ? exitSelecting() : setSelecting(true))} className={`${iconButtonClass} ${selecting ? 'bg-ui-selected text-ui-text' : ''}`}
           title={t('history.selectMode')} aria-label={t('history.selectMode')} aria-pressed={selecting}>
           <CheckSquare className="h-4 w-4" />
-        </button>
-        <button type="button" onClick={newChat} className={iconButtonClass} title={t('history.newChat')} aria-label={t('history.newChat')}>
-          <MessageSquarePlus className="h-4 w-4" />
         </button>
       </div>
 
       {searchOpen && (
         <div className="px-3 pb-2">
           <div className="relative">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ui-secondary" />
             <input ref={searchInputRef} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)}
               onKeyDown={(event) => { if (event.key === 'Escape') { setSearchOpen(false); setSearchQuery(''); } }}
               placeholder={t('history.searchPlaceholder')} aria-label={t('history.searchPlaceholder')}
-              className="h-8 w-full rounded-lg border border-zinc-300 bg-white pl-8 pr-2 text-sm text-zinc-900 outline-none focus:border-red-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100" />
+              className="h-8 w-full rounded-lg border border-ui-control bg-ui-surface pl-8 pr-2 text-sm text-ui-text shadow-ui-input outline-none placeholder:text-ui-muted focus:ring-2 focus:ring-ui-focus" />
           </div>
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+      <div className="session-history-scrollbar min-h-0 flex-1 overflow-y-auto px-2 pb-3"
+        onScroll={handleHistoryScroll} data-scrolling={historyScrolling}>
         {searchResults !== null ? (
           searchResults.length > 0 ? searchResults.map((session) => (
             <button key={session.id} type="button" onClick={() => { openSession(session.id); setSearchOpen(false); setSearchQuery(''); }}
-              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-zinc-600 hover:bg-white/60 dark:text-zinc-300 dark:hover:bg-zinc-900">
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm font-normal text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus">
               <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" />
               <span className="min-w-0 flex-1 truncate">{getSessionDisplayTitle(session)}</span>
             </button>
-          )) : <p className="px-3 py-6 text-center text-xs text-zinc-400">{t('history.noResults')}</p>
+          )) : <p className="px-3 py-6 text-center text-xs text-ui-muted">{t('history.noResults')}</p>
         ) : loading && sessions.length === 0 ? (
-          <div className="flex items-center gap-2 px-3 py-6 text-xs text-zinc-400"><Loader2 className="h-4 w-4 animate-spin" />{t('history.loading')}</div>
+          <div className="flex items-center gap-2 px-3 py-6 text-xs text-ui-muted"><Loader2 className="h-4 w-4 animate-spin" />{t('history.loading')}</div>
         ) : (
           <>
             {groups.folders.map(({ folder, sessions: folderSessions }) => {
@@ -816,14 +830,14 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
               const pinned = pinnedFolders.has(folder.id);
               const remoteMore = folderSessions.length < (folder.sessionCount ?? 0) || hasMoreByProject[folder.id];
               return (
-                <div key={folder.id} className="group/folder">
-                  <div className="flex items-center gap-0.5 rounded-lg px-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
+                <div key={folder.id}>
+                  <div className="group/folder flex items-center gap-0.5 rounded-lg px-1 transition-colors hover:bg-ui-hover">
                     <button type="button" onClick={() => toggleFolder(folder.id)} aria-expanded={!isCollapsed}
-                      className="flex h-8 min-w-0 flex-1 items-center gap-1.5 text-left text-[13px] font-medium text-zinc-600 dark:text-zinc-300">
-                      {isCollapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-400" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-400" />}
-                      <Folder className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-                      <span className={`min-w-0 truncate ${pinned ? 'font-semibold' : ''}`}>{folderLabel(folder)}</span>
-                      {pinned && <Pin className="h-3 w-3 shrink-0 text-zinc-400" />}
+                      className="flex h-8 min-w-0 flex-1 items-center gap-1.5 rounded-lg text-left text-[13px] font-normal text-ui-text hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus">
+                      {isCollapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ui-secondary" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-ui-secondary" />}
+                      <Folder className="h-3.5 w-3.5 shrink-0 text-ui-secondary" />
+                      <span className={`min-w-0 truncate ${pinned ? 'font-medium' : ''}`}>{folderLabel(folder)}</span>
+                      {pinned && <Pin className="h-3 w-3 shrink-0 text-ui-secondary" />}
                     </button>
                     <button type="button" aria-label={t('history.folderActions', { folder: folderLabel(folder) })} title={t('history.folderActions', { folder: folderLabel(folder) })} onClick={(event) => openMenu('folder', folder.id, event.currentTarget)} className={folderActionButtonClass}>
                       <MoreHorizontal className="h-3.5 w-3.5" />
@@ -835,17 +849,17 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
                   {!isCollapsed && (
                     <div className="space-y-0.5 py-0.5">
                       {visibleRows(folder.id, folderSessions, compactCount).map((session) => renderSessionRow(session, true))}
-                      {folderSessions.length === 0 && <p className="ml-7 px-2 py-1 text-xs text-zinc-400">{t('history.emptyFolder')}</p>}
+                      {folderSessions.length === 0 && <p className="ml-7 px-2 py-1 text-xs text-ui-muted">{t('history.emptyFolder')}</p>}
                       {renderListFooter(folder.id, folderSessions, compactCount, Boolean(remoteMore), true)}
                     </div>
                   )}
                 </div>
               );
             })}
-            <div className="px-2 pb-1 pt-3 text-[11px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">{t('history.ungrouped')}</div>
+            <div className="px-2 pb-1 pt-3 text-[11px] font-medium uppercase tracking-wide text-ui-secondary">{t('history.ungrouped')}</div>
             <div className="space-y-0.5">
               {visibleRows(UNGROUPED_ID, groups.ungrouped, compactCount).map((session) => renderSessionRow(session, false))}
-              {groups.ungrouped.length === 0 && <p className="px-2 py-1 text-xs text-zinc-400">{t('history.emptyUngrouped')}</p>}
+              {groups.ungrouped.length === 0 && <p className="px-2 py-1 text-xs text-ui-muted">{t('history.emptyUngrouped')}</p>}
               {renderListFooter(UNGROUPED_ID, groups.ungrouped, compactCount, Boolean(hasMoreByProject[UNGROUPED_ID]), false)}
             </div>
           </>
@@ -853,19 +867,19 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
       </div>
 
       {menu && activeSession && createPortal(
-        <div data-history-menu className="fixed z-[65] w-56 overflow-hidden rounded-xl border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900" style={{ top: menu.top, left: menu.left }}>
+        <div data-history-menu className="fixed z-[65] w-56 overflow-hidden rounded-xl border border-ui-border bg-ui-surface p-1 text-ui-text shadow-ui-panel [&_svg]:stroke-[1.75]" style={{ top: menu.top, left: menu.left }}>
           {menu.moving ? (
             <>
-              <button type="button" onClick={() => setMenu({ ...menu, moving: false })} className="mb-1 flex w-full items-center gap-1.5 border-b border-zinc-100 px-2 py-1.5 text-xs font-medium text-zinc-500 dark:border-zinc-800">
+              <button type="button" onClick={() => setMenu({ ...menu, moving: false })} className="mb-1 flex w-full items-center gap-1.5 border-b border-ui-border px-2 py-1.5 text-xs font-medium text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus">
                 <ChevronRight className="h-3.5 w-3.5 rotate-180" />{t('history.moveTo')}
               </button>
               <div className="max-h-56 overflow-y-auto">
-                {moveTargets.length === 0 ? <p className="px-2 py-3 text-center text-xs text-zinc-400">{t('history.noMoveTargets')}</p> : moveTargets.map((folder) => {
+                {moveTargets.length === 0 ? <p className="px-2 py-3 text-center text-xs text-ui-muted">{t('history.noMoveTargets')}</p> : moveTargets.map((folder) => {
                   const current = (activeSession.effectiveProjectID || activeSession.projectID) === folder.id;
                   return (
                     <button key={folder.id} type="button" disabled={current} onClick={() => void moveSession(activeSession, folder)}
-                      className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800">
-                      <Folder className="h-3.5 w-3.5 shrink-0 text-zinc-400" /><span className="min-w-0 flex-1 truncate">{folderLabel(folder)}</span>
+                      className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus">
+                      <Folder className="h-3.5 w-3.5 shrink-0 text-ui-secondary" /><span className="min-w-0 flex-1 truncate">{folderLabel(folder)}</span>
                     </button>
                   );
                 })}
@@ -873,12 +887,12 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
             </>
           ) : (
             <>
-              <button type="button" onClick={() => { setRenaming({ id: activeSession.id, value: activeSession.title }); closeMenu(); }} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"><Pencil className="h-4 w-4 text-zinc-400" />{t('history.rename')}</button>
-              <button type="button" onClick={() => { void exportSession(activeSession); closeMenu(); }} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"><Download className="h-4 w-4 text-zinc-400" />{t('history.downloadJson')}</button>
-              <button type="button" disabled={moveTargets.length === 0} onClick={() => setMenu({ ...menu, moving: true })} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"><FolderInput className="h-4 w-4 text-zinc-400" />{t('history.move')}</button>
-              <button type="button" onClick={() => { void toggleShare(activeSession); closeMenu(); }} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"><Share2 className="h-4 w-4 text-zinc-400" />{activeSession.isShared ? t('history.unshare') : t('history.share')}</button>
-              <div className="my-1 border-t border-zinc-100 dark:border-zinc-800" />
-              <button type="button" onClick={() => { closeMenu(); void archiveSession(activeSession); }} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-red-600 hover:bg-red-50 dark:text-red-300 dark:hover:bg-red-500/10"><Archive className="h-4 w-4" />{t('history.archive')}</button>
+              <button type="button" onClick={() => { setRenaming({ id: activeSession.id, value: activeSession.title }); closeMenu(); }} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus"><Pencil className="h-4 w-4 text-ui-secondary" />{t('history.rename')}</button>
+              <button type="button" onClick={() => { void exportSession(activeSession); closeMenu(); }} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus"><Download className="h-4 w-4 text-ui-secondary" />{t('history.downloadJson')}</button>
+              <button type="button" disabled={moveTargets.length === 0} onClick={() => setMenu({ ...menu, moving: true })} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus"><FolderInput className="h-4 w-4 text-ui-secondary" />{t('history.move')}</button>
+              <button type="button" onClick={() => { void toggleShare(activeSession); closeMenu(); }} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus"><Share2 className="h-4 w-4 text-ui-secondary" />{activeSession.isShared ? t('history.unshare') : t('history.share')}</button>
+              <div className="my-1 border-t border-ui-border" />
+              <button type="button" onClick={() => { closeMenu(); void archiveSession(activeSession); }} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus dark:text-red-300 dark:hover:bg-red-500/10"><Archive className="h-4 w-4" />{t('history.archive')}</button>
             </>
           )}
         </div>,
@@ -886,24 +900,24 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
       )}
 
       {menu && activeFolder && createPortal(
-        <div data-history-menu className="fixed z-[65] w-52 overflow-hidden rounded-xl border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900" style={{ top: menu.top, left: menu.left }}>
-          <button type="button" onClick={() => { setFolderDialog({ mode: 'rename', folder: activeFolder }); closeMenu(); }} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"><Pencil className="h-4 w-4 text-zinc-400" />{t('history.rename')}</button>
-          <button type="button" onClick={() => togglePin(activeFolder.id)} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800">{pinnedFolders.has(activeFolder.id) ? <PinOff className="h-4 w-4 text-zinc-400" /> : <Pin className="h-4 w-4 text-zinc-400" />}{pinnedFolders.has(activeFolder.id) ? t('history.unpin') : t('history.pin')}</button>
-          <button type="button" onClick={() => void copyFolderPath(activeFolder)} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"><Copy className="h-4 w-4 text-zinc-400" />{t('history.copyPath')}</button>
-          <button type="button" onClick={() => void toggleFolderShare(activeFolder)} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"><Share2 className="h-4 w-4 text-zinc-400" />{activeFolder.isShared ? t('history.unshare') : t('history.share')}</button>
-          <div className="my-1 border-t border-zinc-100 dark:border-zinc-800" />
-          <button type="button" onClick={() => void removeFolder(activeFolder)} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"><FolderInput className="h-4 w-4 text-zinc-400" />{t('history.removeFolder')}</button>
-          <button type="button" disabled={activeFolder.canDelete === false} onClick={() => void deleteFolder(activeFolder)} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-red-600 hover:bg-red-50 disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-500/10"><Trash2 className="h-4 w-4" />{t('history.deleteFolder')}</button>
+        <div data-history-menu className="fixed z-[65] w-52 overflow-hidden rounded-xl border border-ui-border bg-ui-surface p-1 text-ui-text shadow-ui-panel [&_svg]:stroke-[1.75]" style={{ top: menu.top, left: menu.left }}>
+          <button type="button" onClick={() => { setFolderDialog({ mode: 'rename', folder: activeFolder }); closeMenu(); }} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus"><Pencil className="h-4 w-4 text-ui-secondary" />{t('history.rename')}</button>
+          <button type="button" onClick={() => togglePin(activeFolder.id)} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus">{pinnedFolders.has(activeFolder.id) ? <PinOff className="h-4 w-4 text-ui-secondary" /> : <Pin className="h-4 w-4 text-ui-secondary" />}{pinnedFolders.has(activeFolder.id) ? t('history.unpin') : t('history.pin')}</button>
+          <button type="button" onClick={() => void copyFolderPath(activeFolder)} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus"><Copy className="h-4 w-4 text-ui-secondary" />{t('history.copyPath')}</button>
+          <button type="button" onClick={() => void toggleFolderShare(activeFolder)} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus"><Share2 className="h-4 w-4 text-ui-secondary" />{activeFolder.isShared ? t('history.unshare') : t('history.share')}</button>
+          <div className="my-1 border-t border-ui-border" />
+          <button type="button" onClick={() => void removeFolder(activeFolder)} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus"><FolderInput className="h-4 w-4 text-ui-secondary" />{t('history.removeFolder')}</button>
+          <button type="button" disabled={activeFolder.canDelete === false} onClick={() => void deleteFolder(activeFolder)} className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus dark:text-red-300 dark:hover:bg-red-500/10"><Trash2 className="h-4 w-4" />{t('history.deleteFolder')}</button>
         </div>,
         document.body,
       )}
 
       {selecting && (
-        <div className="flex items-center gap-2 border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
-          <span className="min-w-0 flex-1 truncate text-xs text-zinc-500 dark:text-zinc-400">{t('history.selectedCount', { count: checkedIds.size })}</span>
-          <button type="button" onClick={exitSelecting} className="h-7 rounded-lg px-2.5 text-xs text-zinc-600 hover:bg-zinc-200/70 dark:text-zinc-300 dark:hover:bg-zinc-800">{t('history.cancel')}</button>
+        <div className="flex items-center gap-2 border-t border-ui-border px-3 py-2">
+          <span className="min-w-0 flex-1 truncate text-xs text-ui-secondary">{t('history.selectedCount', { count: checkedIds.size })}</span>
+          <button type="button" onClick={exitSelecting} className="h-7 rounded-lg px-2.5 text-xs text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus">{t('history.cancel')}</button>
           <button type="button" disabled={checkedIds.size === 0 || archivingChecked} onClick={() => void archiveChecked()}
-            className="inline-flex h-7 items-center gap-1 rounded-lg bg-red-600 px-2.5 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50">
+            className="inline-flex h-7 items-center gap-1 rounded-lg bg-red-600 px-2.5 text-xs font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus">
             {archivingChecked ? <Loader2 className="h-3 w-3 animate-spin" /> : <Archive className="h-3 w-3" />}{t('history.archive')}
           </button>
         </div>

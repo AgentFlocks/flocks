@@ -1501,7 +1501,7 @@ describe('getMessageBubbleClassName', () => {
     });
 
     expect(className).toContain('w-full');
-    expect(className).toContain('text-[15px]');
+    expect(className).toContain('text-base');
   });
 
   it('fills the fixed compact assistant message column', () => {
@@ -1548,8 +1548,8 @@ describe('getMessageBubbleClassName', () => {
       isEditing: false,
     });
 
-    expect(className).toContain('bg-zinc-50');
-    expect(className).toContain(compact ? 'border-black/[0.07]' : 'border-black/[0.09]');
+    expect(className).toContain('bg-ui-subtle');
+    expect(className).toContain('border-ui-border/60');
     expect(className).not.toContain('bg-sky-50');
     expect(className).not.toContain('border-sky-100');
   });
@@ -1925,7 +1925,7 @@ describe('SessionChat standalone thinking indicator', () => {
     }));
 
     await user.type(screen.getByPlaceholderText('请输入消息'), '接入设备');
-    await user.click(container.querySelector('button[class*="bg-sky-500"]')!);
+    await user.click(container.querySelector('svg.lucide-arrow-up')!.closest('button')!);
 
     await waitFor(() => {
       expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
@@ -1970,7 +1970,7 @@ describe('SessionChat standalone thinking indicator', () => {
     }));
 
     await user.type(screen.getByPlaceholderText('请输入消息'), '已连接涉笔');
-    await user.click(container.querySelector('button[class*="bg-sky-500"]')!);
+    await user.click(container.querySelector('svg.lucide-arrow-up')!.closest('button')!);
 
     await waitFor(() => {
       expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
@@ -2227,7 +2227,7 @@ describe('SessionChat delegated work stop controls', () => {
 
     fireEvent.change(screen.getByPlaceholderText('请输入消息'), { target: { value: 'Follow up' } });
     expect(screen.queryByTitle('chat.queue.enqueue')).not.toBeInTheDocument();
-    fireEvent.click(container.querySelector('button[class*="bg-sky-500"]')!);
+    fireEvent.click(container.querySelector('svg.lucide-arrow-up')!.closest('button')!);
     await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
       '/api/session/sess-1/prompt_async', expect.any(Object),
     ));
@@ -2308,7 +2308,7 @@ describe('SessionChat delegated work stop controls', () => {
       expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
       fireEvent.change(screen.getByPlaceholderText('请输入消息'), { target: { value: 'Try again' } });
       expect(screen.queryByTitle('chat.queue.enqueue')).not.toBeInTheDocument();
-      fireEvent.click(container.querySelector('button[class*="bg-sky-500"]')!);
+      fireEvent.click(container.querySelector('svg.lucide-arrow-up')!.closest('button')!);
       await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
         '/api/session/sess-1/prompt_async', expect.any(Object),
       ));
@@ -2736,9 +2736,9 @@ describe('SessionChat composer controls', () => {
     const disabledButtons = Array.from(container.querySelectorAll('button:disabled'));
     const sendButton = disabledButtons.find((button) => button.querySelector('svg'));
 
-    expect(sendButton?.className).toContain('dark:bg-[#46515e]');
-    expect(sendButton?.className).toContain('dark:text-[#b8c2cc]');
-    expect(sendButton?.className).toContain('dark:border-[#5a6573]');
+    expect(sendButton?.className).toContain('bg-ui-subtle');
+    expect(sendButton?.className).toContain('text-ui-muted');
+    expect(sendButton?.className).toContain('border-ui-border');
   });
 
   it('groups attachment and injected actions in the Add menu', async () => {
@@ -5462,7 +5462,7 @@ describe('ChatMessageBubble session typography', () => {
       compact: false,
     }));
 
-    expect(screen.getByText('Rex')).toHaveClass('text-base', 'font-semibold', 'text-[#3f444a]');
+    expect(screen.getByText('Rex')).toHaveClass('text-base', 'font-medium', 'text-ui-text');
   });
 });
 

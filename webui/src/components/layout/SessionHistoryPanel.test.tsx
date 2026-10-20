@@ -164,11 +164,14 @@ describe('SessionHistoryPanel', () => {
     expect(screen.queryByText('history.ungrouped')).not.toBeInTheDocument();
   });
 
-  it('keeps folder actions visible without hovering', async () => {
+  it('reveals folder actions only on their header hover or keyboard focus', async () => {
     renderPanel();
     await waitFor(() => expect(screen.getByText('产品设计')).toBeInTheDocument());
     for (const name of ['history.folderActions:产品设计', 'history.newSessionIn:产品设计']) {
-      expect(screen.getByRole('button', { name }).className).not.toMatch(/opacity-0/);
+      const button = screen.getByRole('button', { name });
+      expect(button).toHaveClass('opacity-0', 'pointer-events-none', 'group-hover/folder:opacity-100', 'focus-visible:opacity-100');
+      expect(button.parentElement).toHaveClass('group/folder');
+      expect(button.parentElement).not.toContainElement(screen.getByText('会话一'));
     }
   });
 
