@@ -46,3 +46,9 @@ def sealed_suites():
 
     with registered_sealed_source() as source:
         yield source
+
+
+@pytest.fixture(autouse=True)
+def _suites_announced_by_an_extension(announced_suites):
+    """Every hub test sees the licensed suites an extension lists (see tests/conftest.py)."""
+    yield announced_suites

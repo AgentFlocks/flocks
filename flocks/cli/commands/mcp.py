@@ -774,6 +774,9 @@ def mcp_serve(
     max_budget: Optional[float] = typer.Option(None, "--max-budget"),
 ):
     """Expose Flocks as an MCP server over stdin/stdout (no HTTP service needed)."""
+    from flocks.cli.managed import refuse_local_runtime_when_managed
+
+    refuse_local_runtime_when_managed("flocks mcp serve")
     import math
     from pathlib import Path
     from flocks.cli.commands.exec import PermissionMode, SandboxMode, split_tools

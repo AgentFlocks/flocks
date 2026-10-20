@@ -1359,6 +1359,7 @@ class InboundDispatcher:
 
             file_part: Optional[FilePart] = None
             if media is not None:
+                await _share_channel_media(media.url)
                 file_part = FilePart(
                     sessionID=session_id,
                     messageID=message.id,
@@ -1390,6 +1391,7 @@ class InboundDispatcher:
                     or "application/octet-stream"
                 )
                 file_uri = Path(local_path).resolve().as_uri()
+                await _share_channel_media(file_uri)
                 file_part = FilePart(
                     sessionID=session_id,
                     messageID=message.id,
@@ -1716,6 +1718,24 @@ try:
     register_inbound_media_downloader("slack", _slack_inbound_media.download_inbound_media)
 except Exception:  # pragma: no cover
     pass
+
+
+async def _share_channel_media(url: str) -> None:
+    """Keep channel media in the database too, so every instance can read it.
+
+    Failing to share is not failing the message: the file is still here.
+    """
+    if not str(url or "").startswith("file:"):
+        return
+    try:
+        from pathlib import Path
+
+        from flocks.session.files import store_channel_media
+        from flocks.session.utils.file_extractor import file_url_to_path
+
+        await store_channel_media(Path(file_url_to_path(url)))
+    except Exception as exc:
+        log.warning("dispatcher.inbound_media_share_failed", {"error_type": type(exc).__name__})
 
 
 async def _download_channel_media(msg: "InboundMessage", config: dict) -> Any:

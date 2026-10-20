@@ -2,9 +2,8 @@
 #
 # Acceptance checks for an installed offline package, run ON the target host as root
 # (no docker). Mirrors smoke-test.sh but against the real machine: service, systemd,
-# firewalld, admin bootstrap, offline Pro bundle install (packages that ship one), restart,
-# optional re-run of the installer. Prints one PASS/FAIL line per check and a final summary.
-# On an open-source package (no bundle/ in the install root) upgrades go online: the script only
+# firewalld, admin bootstrap, restart, optional re-run of the installer. Prints one
+# PASS/FAIL line per check and a final summary. Upgrades go online, so the script only
 # reads the update status and never starts an upgrade. The layout (default, or below a base
 # directory set with FLOCKS_OFFLINE_BASE) is read from the /usr/local/bin/flocks the installer wrote;
 # --rerun leaves FLOCKS_OFFLINE_BASE out, the installer has to find the install by itself.
@@ -12,7 +11,7 @@
 # Usage (as root):
 #   packaging/linux/verify-install.sh [--port <port>] [--rerun /var/tmp/flocks-offline.run]
 #     --port defaults to the FLOCKS_PORT in the env file (5173 when nothing is installed)
-#       [--admin-user admin] [--admin-pass '<password>'] [--skip-pro]
+#       [--admin-user admin] [--admin-pass '<password>']
 #
 # The admin account is created only when the instance has not been bootstrapped yet;
 # without --admin-pass a random password is generated and printed at the end. Pass the
@@ -24,14 +23,12 @@ PORT=""
 RERUN=""
 ADMIN_USER="admin"
 ADMIN_PASS=""
-SKIP_PRO=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --port) PORT="$2"; shift 2 ;;
     --rerun) RERUN="$2"; shift 2 ;;
     --admin-user) ADMIN_USER="$2"; shift 2 ;;
     --admin-pass) ADMIN_PASS="$2"; shift 2 ;;
-    --skip-pro) SKIP_PRO=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -121,11 +118,6 @@ index_ok() { curl -fsSL --max-time 10 -H 'Accept: text/html' "$BASE/" | grep -qi
 listening_ok() { ss -ltn | grep -q "0.0.0.0:${PORT} "; }
 status_ok() { flocks status | grep 'PID=' >/dev/null; }  # no -q: let the CLI finish writing (pipefail)
 restart_ok() { systemctl restart flocks && curl -fsS --max-time 10 "$BASE/api/health"; }
-pro_not_installed() { api "$BASE/api/console/pro-package-status" | grep -q '"runtime_importable": *false'; }
-pro_installed() { login && api "$BASE/api/console/pro-package-status" | grep -q '"runtime_importable": *true'; }
-pro_license_route() { api "$BASE/api/flockspro/license/status" | grep -qv flockspro_not_installed; }
-pro_log_local() { grep -q 'Using local Flocks Pro bundle' /tmp/verify-pro.log && ! grep -qi 'Downloading Flocks Pro bundle\|uv sync' /tmp/verify-pro.log; }
-server_restart_ok() { flocks restart --server-only && curl -fsS --max-time 10 "$BASE/api/health"; }
 parked_ok() { ls -d "$IR"/flocks.bak-* "$IR"/tools.bak-*; }
 
 [[ "$(id -u)" -eq 0 ]] || { echo "run as root" >&2; exit 2; }
@@ -165,14 +157,6 @@ else
   check "log in with existing admin" login
 fi
 check "session valid (/api/auth/me)" me_ok
-offline_mode_ok() {
-  api "$BASE/api/update/check?edition=flocks&force=true" | grep -q '"deploy_mode": *"offline"' \
-    && api "$BASE/api/update/check?edition=flocks" | grep -q '"update_allowed": *false'
-}
-upgrade_refused_ok() {
-  curl -sS -N --max-time 20 -b "$COOKIE" -X POST "$BASE/api/update/apply?edition=flocks" | grep -q 'flocks-offline.run' \
-    && test -f "$IR/flocks/pyproject.toml"
-}
 online_env_ok() {
   grep -q '^FLOCKS_DEPLOY_MODE=source$' "$ENV_FILE" \
     && ! grep -Eq '^(FLOCKS_OFFLINE_INSTALL|FLOCKS_UPDATE_CHANNEL|FLOCKS_PRO_BUNDLE_DIR|UV_OFFLINE|npm_config_offline)=' "$ENV_FILE"
@@ -183,35 +167,9 @@ source_mode_ok() {
   out="$(curl -fsS --max-time 90 -b "$COOKIE" "$BASE/api/update/check?edition=flocks")"
   grep -q '"deploy_mode": *"source"' <<<"$out" && grep -q '"update_allowed": *true' <<<"$out"
 }
-if [[ -f "$IR/bundle/manifest.json" ]]; then
-  check "update check reports offline deploy mode, upgrade not allowed" offline_mode_ok
-  check "network upgrade refused before touching files" upgrade_refused_ok
-else
-  say "open-source package: upgrades (Pro in the WebUI, core updates) go online"
-  check "env file has no offline pins (FLOCKS_DEPLOY_MODE=source)" online_env_ok
-  check "update check reports source deploy mode, upgrade allowed" source_mode_ok
-fi
-
-# ---------------------------------------------------------------- Pro bundle from disk (what 开始升级 does without Console)
-if [[ "$SKIP_PRO" -eq 0 && -f "$IR/bundle/manifest.json" ]]; then
-  if api "$BASE/api/console/pro-package-status" | grep -q '"runtime_importable": *true'; then
-    say "Pro component already installed; skipping local bundle install"
-  else
-    check "Pro not installed before upgrade" pro_not_installed
-    if flocks update --pro-bundle --no-restart > /tmp/verify-pro.log 2>&1; then
-      record PASS "flocks update --pro-bundle installs from $IR/bundle"
-    else
-      record FAIL "flocks update --pro-bundle installs from $IR/bundle"
-      tail -n 20 /tmp/verify-pro.log
-    fi
-    check "Pro install used the local bundle, no download / uv sync" pro_log_local
-    check "marker written" test -s "$DH/.flocks/run/pro-bundle-installed.json"
-    check "flockspro importable in the venv" "$IR/flocks/.venv/bin/python" -c 'import flockspro'
-    check "backend restart after Pro install" server_restart_ok
-  fi
-  check "Pro package reported as installed" pro_installed
-  check "license status served by the Pro runtime" pro_license_route
-fi
+say "upgrades go online like a source install"
+check "env file has no offline pins (FLOCKS_DEPLOY_MODE=source)" online_env_ok
+check "update check reports source deploy mode, upgrade allowed" source_mode_ok
 
 # ---------------------------------------------------------------- optional: re-run the installer (upgrade / repair)
 if [[ -n "$RERUN" ]]; then
@@ -225,9 +183,6 @@ if [[ -n "$RERUN" ]]; then
   check "old program dirs parked, not deleted" parked_ok
   check "data survived the re-run (admin login)" login
   check "service healthy after re-run" curl -fsS --max-time 10 "$BASE/api/health"
-  if [[ -f "$IR/bundle/manifest.json" && "$SKIP_PRO" -eq 0 ]]; then
-    check "Pro component re-installed into the new venv" "$IR/flocks/.venv/bin/python" -c 'import flockspro'
-  fi
 fi
 
 say "----"

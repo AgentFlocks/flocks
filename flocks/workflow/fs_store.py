@@ -268,9 +268,156 @@ def patch_workflow_metadata(
     return meta
 
 
+#: ``source`` of a workflow a deployment content source serves (flocks.content.managed).
+MANAGED_WORKFLOW_SOURCE = "managed"
+
+# Keys of read_workflow_dir()'s result that are derived, never taken from a
+# managed definition's metadata.
+_DERIVED_KEYS = frozenset({
+    "id", "source", "group_readonly", "managed", "version",
+    "workflowJson", "markdownContent", "editMarkdownContent", "stats",
+})
+
+
+class ManagedWorkflowReadOnly(PermissionError):
+    """A write was aimed at a workflow the deployment manages."""
+
+
+def is_managed_workflow(workflow_id: str) -> bool:
+    """Whether the deployment manages *workflow_id* (usable definition or not)."""
+    from flocks.content.managed import managed_ids
+
+    return workflow_id in managed_ids("workflow")
+
+
+def refuse_managed_workflow_write(workflow_id: str) -> None:
+    """Raise :class:`ManagedWorkflowReadOnly` for a managed *workflow_id*.
+
+    Every write of a definition goes through here: writing one would put the
+    deployment's definition on disk and leave a local copy under its id.
+    """
+    if is_managed_workflow(workflow_id):
+        raise ManagedWorkflowReadOnly(
+            f"Workflow {workflow_id} is managed by the deployment and is read-only"
+        )
+
+
+def managed_workflow_id_for_path(path: Any) -> Optional[str]:
+    """The managed workflow a file path names, if it names one.
+
+    A file inside ``<workflow root>/<id>/`` whose id the deployment manages is
+    a local copy of that workflow; whoever hands its path over means the
+    managed workflow, not the copy.
+    """
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, TypeError, ValueError):
+        return None
+    for root, _source in workflow_scan_dirs():
+        try:
+            relative = resolved.relative_to(root.resolve())
+        except (OSError, ValueError):
+            continue
+        parts = relative.parts
+        if parts and is_safe_workflow_id(parts[0]) and is_managed_workflow(parts[0]):
+            return parts[0]
+    return None
+
+
+def managed_workflow_data(workflow_id: str) -> Optional[Dict[str, Any]]:
+    """A managed workflow in read_workflow_dir()'s shape, or None when unusable.
+
+    The definition is the workflow JSON as YAML or JSON, or an envelope
+    ``{workflowJson, markdownContent, meta}``.  It is read-only: there is no
+    directory behind it.
+    """
+    import yaml
+
+    from flocks.content.managed import ManagedContent, managed_entry
+
+    # A run keeps the version it first read (flocks.content.managed.task_scope).
+    body = ManagedContent.task_body("workflow", workflow_id)
+    if body is None:
+        return None
+    try:
+        raw = yaml.safe_load(body.as_text())
+        if not isinstance(raw, dict):
+            raise ValueError("the definition is not a mapping")
+        if "workflowJson" in raw:
+            workflow_json, markdown, meta = raw.get("workflowJson"), raw.get("markdownContent"), raw.get("meta") or {}
+        else:
+            workflow_json, markdown, meta = raw, None, {}
+        if not isinstance(workflow_json, dict) or not isinstance(meta, dict):
+            raise ValueError("workflowJson and meta must be mappings")
+        if markdown is not None and not isinstance(markdown, str):
+            raise ValueError("markdownContent must be text")
+    except Exception as exc:
+        from flocks.content.managed import describe_parse_error
+
+        # Never the message: a YAML error quotes the protected definition.
+        log.error("workflow.managed.invalid", {"id": workflow_id, "source": body.source, **describe_parse_error(exc)})
+        return None
+
+    workflow_json = dict(workflow_json)
+    if isinstance(workflow_json.get("metadata"), dict):
+        workflow_json["metadata"] = {k: v for k, v in workflow_json["metadata"].items() if k != "group"}
+    entry = managed_entry("workflow", workflow_id)
+    data: Dict[str, Any] = {
+        "name": workflow_json.get("name") or (entry.name if entry else "") or _markdown_title(markdown, workflow_id),
+        "description": workflow_json.get("description") or (entry.summary if entry else None),
+        "category": workflow_json.get("category", "default"),
+        "status": "active",
+        "createdBy": None,
+        "createdAt": 0,
+        "updatedAt": 0,
+    }
+    data.update({k: v for k, v in meta.items() if k not in _DERIVED_KEYS})
+    if "group" in data:
+        try:
+            data["group"] = normalize_workflow_group(data["group"])
+        except (ValueError, PydanticCustomError):
+            data.pop("group", None)
+    name_i18n = _workflow_name_i18n(workflow_json, data)
+    if name_i18n:
+        data["nameI18n"] = name_i18n
+    return {
+        **data,
+        "id": workflow_id,
+        "source": MANAGED_WORKFLOW_SOURCE,
+        "group_readonly": False,
+        "managed": True,
+        "version": body.ref.version,
+        "workflowJson": workflow_json,
+        "markdownContent": markdown,
+        "editMarkdownContent": markdown,
+    }
+
+
+def overlay_managed_workflows(by_id: Dict[str, Dict[str, Any]]) -> None:
+    """Replace local workflows in a listing with the managed ones of the same id.
+
+    A managed id never lists its local copy -- even when the managed definition
+    is unusable, so a dropped-in directory cannot stand in for it.
+    """
+    from flocks.content.managed import managed_ids
+
+    for workflow_id in managed_ids("workflow"):
+        by_id.pop(workflow_id, None)
+        data = managed_workflow_data(workflow_id)
+        if data is not None:
+            by_id[workflow_id] = data
+
+
 def resolve_workflow_from_fs(workflow_id: str) -> Optional[tuple[Path, Dict[str, Any]]]:
-    """Resolve the selected directory and its data in one discovery pass."""
+    """Resolve the selected directory and its data in one discovery pass.
+
+    A managed workflow resolves to nothing: it has no directory a writer
+    could use, and no local directory may answer for its id.  Readers use
+    :func:`read_workflow_from_fs`, which serves the managed definition.
+    """
     if not is_safe_workflow_id(workflow_id):
+        return None
+    if is_managed_workflow(workflow_id):
         return None
     for root, source in reversed(workflow_scan_dirs()):
         wf_dir = root / workflow_id
@@ -281,7 +428,9 @@ def resolve_workflow_from_fs(workflow_id: str) -> Optional[tuple[Path, Dict[str,
 
 
 def read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:
-    """Resolve a workflow by ID from workflow directories on disk."""
+    """Resolve a workflow by ID: the managed definition, else workflow directories on disk."""
+    if is_safe_workflow_id(workflow_id) and is_managed_workflow(workflow_id):
+        return managed_workflow_data(workflow_id)
     selected = resolve_workflow_from_fs(workflow_id)
     return selected[1] if selected is not None else None
 

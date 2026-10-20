@@ -513,6 +513,23 @@ async def retry_execution(execution_id: str):
     return execution.model_dump(mode="json", by_alias=True)
 
 
+@router.post("/task-executions/{execution_id}/continue")
+async def continue_execution(execution_id: str):
+    """Go on with a run held for verification, in the session it ran in.
+
+    Not the pause/resume of a running execution, which no longer exists.
+    """
+    from flocks.task.manager import TaskManager
+
+    try:
+        execution = await TaskManager.resume_execution(execution_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    if not execution:
+        raise HTTPException(404, "Task execution not found")
+    return execution.model_dump(mode="json", by_alias=True)
+
+
 @router.post("/task-executions/{execution_id}/rerun")
 async def rerun_execution(execution_id: str):
     from flocks.task.manager import TaskManager

@@ -1105,8 +1105,14 @@ Do not repeat an identical tool call in the same response."""
     async def _build_agent_skills_prompt(
         cls,
         skill_names: Iterable[str],
+        *,
+        session_id: Optional[str] = None,
     ) -> str:
-        """Load host-selected Agent skills as trusted system instructions."""
+        """Load host-selected Agent skills as trusted system instructions.
+
+        A managed skill keeps the version this session first read, the same
+        one the skill tool hands the session (flocks.content.managed).
+        """
         from flocks.skill.skill import Skill
 
         names = list(dict.fromkeys(
@@ -1118,13 +1124,13 @@ Do not repeat an identical tool call in the same response."""
             if skill is None or Skill.is_disabled(name):
                 raise ValueError(f"Configured Agent skill is unavailable: {name}")
             try:
-                content = Path(skill.location).read_text(encoding="utf-8").strip()
-            except OSError as exc:
+                content = (await Skill.read_body(skill, scope=session_id)).strip()
+            except Exception as exc:
                 raise ValueError(f"Failed to load configured Agent skill {name}: {exc}") from exc
             if content:
                 sections.append("\n".join([
                     f"## Trusted Agent Skill: {name}",
-                    f"Base directory: {Path(skill.location).parent}",
+                    f"Base directory: {Skill.base_directory(skill) or '(managed skill: no files on disk)'}",
                     content,
                 ]))
         return cls._join_prompt_parts(sections)
@@ -1301,6 +1307,7 @@ Do not repeat an identical tool call in the same response."""
         ))
         agent_skills_prompt = await cls._build_agent_skills_prompt(
             normalized_agent_skill_names,
+            session_id=session_id,
         )
         if prompt_profile == "isolated":
             values = [

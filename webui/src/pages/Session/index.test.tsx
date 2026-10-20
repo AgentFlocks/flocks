@@ -12,6 +12,19 @@ import SessionPage from './index';
 import type { SessionContextFile, SessionContextSnapshot } from '@/api/session';
 import type { SessionContextPanelProps } from './SessionContextPanel';
 import type { SSEChatEvent } from '@/features/session-chat/sseRouting';
+import { __resetExtensionSlotCacheForTesting } from '@/components/extensions/ExtensionSlot';
+import type { SessionStartHook } from '@/extensions/registry';
+
+// Extensions see the session page only through its slots; tests register
+// slot components here and clear them again.
+const extensionRegistry = vi.hoisted(() => ({
+  routes: [],
+  navItems: [],
+  settingsSections: [],
+  slots: [] as Array<{ id: string; slot: string; component: React.ComponentType<{ context: Record<string, unknown> }> }>,
+  i18n: {},
+}));
+vi.mock('@ext/registry', () => ({ __esModule: true, default: extensionRegistry }));
 
 const sessionChatSSERef = vi.hoisted(() => ({ current: undefined as ((event: SSEChatEvent) => void) | undefined }));
 const contextPanelPropsRef = vi.hoisted(() => ({ current: null as SessionContextPanelProps | null }));
@@ -1577,7 +1590,7 @@ describe('SessionPage session actions menu', () => {
     expect(screen.queryByRole('menu', { name: 'executionMode.title' })).not.toBeInTheDocument();
   });
 
-  it('uses the same width for execution, model and security menus with full hover text', async () => {
+  it('uses the same width for execution and model menus with full hover text', async () => {
     const user = userEvent.setup();
     useProviders.mockReturnValue({
       providers: modelProviders,
@@ -1588,10 +1601,8 @@ describe('SessionPage session actions menu', () => {
     });
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
-    client.get.mockImplementation((url: string) => Promise.resolve({
-      data: url === '/api/flockspro/license/status'
-        ? { pro_enabled: true }
-        : [{ id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true, pathStatus: 'available', sessionCount: 1 }],
+    client.get.mockImplementation(() => Promise.resolve({
+      data: [{ id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true, pathStatus: 'available', sessionCount: 1 }],
     }));
     renderSessionPage();
 
@@ -1617,26 +1628,9 @@ describe('SessionPage session actions menu', () => {
     expect(within(modelMenu).getByRole('button', { name: 'modelPicker.addModel' })).toBeInTheDocument();
     await user.click(document.body);
     expect(screen.queryByText('modelPicker.title')).not.toBeInTheDocument();
-
-    await user.click(await screen.findByRole('button', { name: 'permissionMode.requireConfirm' }));
-    const securityMenu = screen.getByText('permissionMode.runtimeTitle').closest('[data-permission-mode-selector]') as HTMLElement;
-    expect(securityMenu.parentElement).toBe(document.body);
-    expect(securityMenu.style.width).toBe(menuWidth);
-    for (const [label, description] of [
-      ['permissionMode.runtimeExe', 'permissionMode.runtimeExeDesc'],
-      ['permissionMode.networkAutoDenyAll', 'permissionMode.networkAutoDenyAllDesc'],
-      ['permissionMode.autoAllowAll', 'permissionMode.autoAllowAllDesc'],
-    ]) {
-      const option = within(securityMenu).getByRole('button', { name: new RegExp(label) });
-      await user.hover(option);
-      expect(option).toHaveAttribute('title', `${label}\n${description}`);
-    }
-    await user.click(document.body);
-    expect(screen.queryByText('permissionMode.runtimeTitle')).not.toBeInTheDocument();
   });
 
   it.each([
-    ['permissionMode.requireConfirm', 'permissionMode.viewDetails', '/settings/security-config'],
     ['GPT-4o', 'modelPicker.addModel', '/models'],
   ])('keeps navigation from the %s popup working', async (triggerName, actionName, destination) => {
     const user = userEvent.setup();
@@ -1649,10 +1643,8 @@ describe('SessionPage session actions menu', () => {
     });
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
-    client.get.mockImplementation((url: string) => Promise.resolve({
-      data: url === '/api/flockspro/license/status'
-        ? { pro_enabled: true }
-        : [{ id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true, pathStatus: 'available', sessionCount: 1 }],
+    client.get.mockImplementation(() => Promise.resolve({
+      data: [{ id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true, pathStatus: 'available', sessionCount: 1 }],
     }));
     function LocationProbe() {
       return <output data-testid="location">{useLocation().pathname}</output>;
@@ -1745,73 +1737,146 @@ describe('SessionPage session actions menu', () => {
     expect(localStorage.getItem('flocks:session-execution-mode:draft')).toBeNull();
   });
 
-  it('writes Pro execution settings before sending a new session’s first prompt', async () => {
+  it('runs the work a session.settings extension registered before a new session’s first prompt', async () => {
     const user = userEvent.setup();
-    const settings = deferred<{ data: {
-      permissionMode: 'require-confirm';
-      runtimeMode: 'dev-mode';
-      networkMode: 'require-confirm';
-      networkModeDefault: 'require-confirm';
-      networkModeOverridden: false;
-      entry: 'webui';
-      revision: 1;
-    } }>();
-    client.get.mockImplementation((url: string) => {
-      if (url === '/api/flockspro/license/status') {
-        return Promise.resolve({ data: { pro_enabled: true } });
-      }
-      return Promise.resolve({
-        data: [{
-          id: 'default',
-          worktree: '/tmp/project',
-          name: '默认',
-          isDefault: true,
-          pathStatus: 'available',
-          sessionCount: 0,
-        }],
+    const started = deferred<void>();
+    const seen: string[] = [];
+    function StartHook({ context }: { context: Record<string, unknown> }) {
+      const register = context.onSessionStart as (hook: SessionStartHook) => () => void;
+      React.useEffect(() => register(() => async (sessionId) => {
+        seen.push(sessionId);
+        await started.promise;
+      }), [register]);
+      return <output data-testid="session-settings-slot">{String(context.sessionId ?? 'draft')}</output>;
+    }
+    extensionRegistry.slots = [{ id: 'test-session-start', slot: 'session.settings', component: StartHook }];
+    __resetExtensionSlotCacheForTesting();
+    try {
+      renderSessionPage();
+      expect(await screen.findByTestId('session-settings-slot')).toHaveTextContent('draft');
+      await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+
+      await waitFor(() => expect(seen).toEqual(['session-2']));
+      expect(client.post).not.toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything());
+
+      started.resolve();
+      await waitFor(() => {
+        expect(client.post).toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything());
       });
-    });
-    client.patch.mockReturnValue(settings.promise);
+    } finally {
+      extensionRegistry.slots = [];
+      __resetExtensionSlotCacheForTesting();
+    }
+  });
 
-    renderSessionPage();
-    await waitFor(() => {
-      expect(client.get).toHaveBeenCalledWith('/api/flockspro/license/status');
-    });
-    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+  it('does not send a new session’s first prompt when a session.settings extension refuses it', async () => {
+    const user = userEvent.setup();
+    function RefusingHook({ context }: { context: Record<string, unknown> }) {
+      const register = context.onSessionStart as (hook: SessionStartHook) => () => void;
+      React.useEffect(() => register(() => async () => {
+        throw new Error('settings rejected');
+      }), [register]);
+      return null;
+    }
+    extensionRegistry.slots = [{ id: 'test-session-refuse', slot: 'session.settings', component: RefusingHook }];
+    __resetExtensionSlotCacheForTesting();
+    try {
+      renderSessionPage();
+      await user.click(await screen.findByRole('button', { name: 'mock-create-and-send' }));
 
-    await waitFor(() => {
-      expect(client.patch).toHaveBeenCalledWith(
-        '/api/flockspro/policy/sessions/session-2/execution-settings',
-        {
-          permissionMode: 'require-confirm',
-          runtimeMode: 'dev-mode',
-          networkMode: 'require-confirm',
-        },
-      );
-    });
-    expect(client.post).not.toHaveBeenCalledWith(
-      '/api/session/session-2/prompt_async',
-      expect.anything(),
-    );
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith('chat.sendFailed', 'settings rejected'));
+      expect(client.post).not.toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything());
+    } finally {
+      extensionRegistry.slots = [];
+      __resetExtensionSlotCacheForTesting();
+    }
+  });
 
-    settings.resolve({
-      data: {
-        permissionMode: 'require-confirm',
-        runtimeMode: 'dev-mode',
-        networkMode: 'require-confirm',
-        networkModeDefault: 'require-confirm',
-        networkModeOverridden: false,
-        entry: 'webui',
-        revision: 1,
-      },
-    });
+  it('takes what a session.settings extension needs when the first message is sent, before the session exists', async () => {
+    const request = deferred<{ data: typeof secondSession }>();
+    client.post.mockImplementation((url: string) => url === '/api/session' ? request.promise : Promise.resolve({ data: {} }));
+    const user = userEvent.setup();
+    const ran: Array<[string, string]> = [];
+    function PickedAtSend({ context }: { context: Record<string, unknown> }) {
+      const register = context.onSessionStart as (hook: SessionStartHook) => () => void;
+      const shownRef = React.useRef('draft');
+      shownRef.current = String(context.sessionId ?? 'draft');
+      React.useEffect(() => register(() => {
+        const picked = shownRef.current;
+        return async (sessionId) => { ran.push([picked, sessionId]); };
+      }), [register]);
+      return <output data-testid="session-settings-slot">{shownRef.current}</output>;
+    }
+    extensionRegistry.slots = [{ id: 'test-session-picked', slot: 'session.settings', component: PickedAtSend }];
+    __resetExtensionSlotCacheForTesting();
+    try {
+      renderSessionPage();
+      expect(await screen.findByTestId('session-settings-slot')).toHaveTextContent('draft');
+      await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+      expect(client.post).toHaveBeenCalledWith('/api/session', expect.anything());
+      // Another session is opened while this one is being created.
+      await user.click(screen.getByText('return-to-first'));
+      expect(await screen.findByTestId('session-settings-slot')).toHaveTextContent('session-1');
 
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith(
-        '/api/session/session-2/prompt_async',
-        expect.anything(),
-      );
+      await act(async () => { request.resolve({ data: secondSession }); await request.promise; });
+      await waitFor(() => {
+        expect(client.post).toHaveBeenCalledWith('/api/session/session-2/prompt_async', expect.anything());
+      });
+      expect(ran).toEqual([['draft', 'session-2']]);
+    } finally {
+      extensionRegistry.slots = [];
+      __resetExtensionSlotCacheForTesting();
+    }
+  });
+
+  it('still prepares a new session when the extension went away while it was being created', async () => {
+    const request = deferred<{ data: typeof secondSession }>();
+    const user = userEvent.setup();
+    const order: string[] = [];
+    function GoneHook({ context }: { context: Record<string, unknown> }) {
+      const register = context.onSessionStart as (hook: SessionStartHook) => () => void;
+      React.useEffect(() => register(() => async (sessionId) => { order.push(`prepared ${sessionId}`); }), [register]);
+      return <output data-testid="session-settings-slot" />;
+    }
+    extensionRegistry.slots = [{ id: 'test-session-gone', slot: 'session.settings', component: GoneHook }];
+    __resetExtensionSlotCacheForTesting();
+    client.post.mockImplementation((url: string) => {
+      if (url === '/api/session') return request.promise;
+      if (url.endsWith('/prompt_async')) order.push(`prompt ${url}`);
+      return Promise.resolve({ data: {} });
     });
+    try {
+      renderSessionPage();
+      expect(await screen.findByTestId('session-settings-slot')).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+      // Leaving the page unmounts the extension, which withdraws its hook.
+      await user.click(screen.getByText('leave-session-page'));
+      expect(screen.queryByTestId('session-settings-slot')).not.toBeInTheDocument();
+
+      await act(async () => { request.resolve({ data: secondSession }); await request.promise; });
+      await waitFor(() => expect(order).toEqual([
+        'prepared session-2',
+        'prompt /api/session/session-2/prompt_async',
+      ]));
+    } finally {
+      extensionRegistry.slots = [];
+      __resetExtensionSlotCacheForTesting();
+    }
+  });
+
+  it('hands the selected session to session.settings extensions', async () => {
+    function SessionProbe({ context }: { context: Record<string, unknown> }) {
+      return <output data-testid="session-settings-slot">{String(context.sessionId ?? 'draft')}</output>;
+    }
+    extensionRegistry.slots = [{ id: 'test-session-probe', slot: 'session.settings', component: SessionProbe }];
+    __resetExtensionSlotCacheForTesting();
+    try {
+      renderSessionPage('/sessions?session=session-1');
+      expect(await screen.findByTestId('session-settings-slot')).toHaveTextContent('session-1');
+    } finally {
+      extensionRegistry.slots = [];
+      __resetExtensionSlotCacheForTesting();
+    }
   });
 
   it('keeps the first new-session message optimistic with the persisted message id', async () => {
@@ -3030,113 +3095,6 @@ describe('SessionPage session actions menu', () => {
     await user.click(await screen.findByRole('button', { name: /diagnose/i }));
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('skill:diagnose');
     expect(screen.getByText('chat.addMenu.selectSkill')).toBeInTheDocument();
-  });
-
-  it('updates permission, runtime and network independently from portaled menus with the current revision', async () => {
-    const user = userEvent.setup();
-    client.get.mockImplementation((url: string) => {
-      if (url === '/api/flockspro/license/status') {
-        return Promise.resolve({ data: { pro_enabled: true } });
-      }
-      if (url.endsWith('/execution-settings')) {
-        return Promise.resolve({
-          data: {
-            permissionMode: 'require-confirm',
-            runtimeMode: 'dev-mode',
-            networkMode: 'require-confirm',
-            networkModeDefault: 'require-confirm',
-            networkModeOverridden: false,
-            entry: 'webui',
-            revision: 7,
-          },
-        });
-      }
-      return Promise.resolve({
-        data: [{
-          id: 'default',
-          worktree: '/tmp/project',
-          name: '默认',
-          isDefault: true,
-          pathStatus: 'available',
-          sessionCount: 1,
-        }],
-      });
-    });
-    client.patch
-      .mockResolvedValueOnce({
-        data: {
-          permissionMode: 'readonly',
-          runtimeMode: 'dev-mode',
-          networkMode: 'require-confirm',
-          networkModeDefault: 'require-confirm',
-          networkModeOverridden: false,
-          entry: 'webui',
-          revision: 8,
-        },
-      })
-      .mockResolvedValueOnce({
-        data: {
-          permissionMode: 'readonly',
-          runtimeMode: 'exe-mode',
-          networkMode: 'require-confirm',
-          networkModeDefault: 'require-confirm',
-          networkModeOverridden: false,
-          entry: 'webui',
-          revision: 9,
-        },
-      })
-      .mockResolvedValueOnce({
-        data: {
-          permissionMode: 'readonly',
-          runtimeMode: 'exe-mode',
-          networkMode: 'auto-deny-all',
-          networkModeDefault: 'require-confirm',
-          networkModeOverridden: true,
-          entry: 'webui',
-          revision: 10,
-        },
-      });
-
-    renderSessionPage('/sessions?session=session-1');
-
-    const selector = await waitFor(() => {
-      const element = document.querySelector('[data-permission-mode-selector]');
-      expect(element).not.toBeNull();
-      return element as HTMLElement;
-    });
-    await user.click(within(selector).getByRole('button', { name: /permissionMode\.requireConfirm/ }));
-    await user.click(screen.getByRole('button', { name: /permissionMode\.readonlyDesc/ }));
-
-    await waitFor(() => {
-      expect(client.patch).toHaveBeenNthCalledWith(
-        1,
-        '/api/flockspro/policy/sessions/session-1/execution-settings',
-        { permissionMode: 'readonly', revision: 7 },
-      );
-    });
-
-    await user.click(within(selector).getByRole('button', { name: /permissionMode\.readonly/ }));
-    await user.click(screen.getByRole('button', { name: /permissionMode\.runtimeExeDesc/ }));
-
-    await waitFor(() => {
-      expect(client.patch).toHaveBeenNthCalledWith(
-        2,
-        '/api/flockspro/policy/sessions/session-1/execution-settings',
-        { runtimeMode: 'exe-mode', revision: 8 },
-      );
-    });
-
-    await user.click(within(selector).getByRole('button', { name: /permissionMode\.readonly/ }));
-    await user.click(screen.getByRole('button', { name: /permissionMode\.networkAutoDenyAllDesc/ }));
-
-    await waitFor(() => {
-      expect(client.patch).toHaveBeenNthCalledWith(
-        3,
-        '/api/flockspro/policy/sessions/session-1/execution-settings',
-        { networkMode: 'auto-deny-all', revision: 9 },
-      );
-    });
-    expect(screen.queryByText('permissionMode.runtimeTitle')).not.toBeInTheDocument();
   });
 
   describe('live connection indicator', () => {

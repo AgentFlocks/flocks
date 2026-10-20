@@ -15,7 +15,7 @@ const { registryMock, useAuth } = vi.hoisted(() => {
       { id: 'ext-agent-hub', href: '/ext/agent-hub', labelKey: 'extAgentHub', icon: Icon, placement: 'sidebar', order: 5 },
       { id: 'ext-workbench', href: '/ext/workbench', labelKey: 'extWorkbench', icon: Icon, placement: 'sidebar', section: 'aiWorkbench' },
       { id: 'ext-admin', href: '/ext/admin', labelKey: 'extAdminOnly', icon: Icon, placement: 'sidebar', adminOnly: true },
-      { id: 'ext-menu', href: '/ext/menu', labelKey: 'extMenu', icon: Icon, placement: 'accountMenu', highlight: true, badge: 'PRO' },
+      { id: 'ext-menu', href: '/ext/menu', labelKey: 'extMenu', icon: Icon, placement: 'accountMenu', highlight: true, badge: 'NEW' },
     ],
     settingsSections: [],
     slots: [
@@ -180,7 +180,7 @@ describe('Layout extension registry integration', () => {
     const entry = within(openAccountMenu()).getByRole('menuitem', { name: /extMenu/ });
     expect(entry).toHaveAttribute('href', '/ext/menu');
     expect(entry.className).toContain('bg-gradient-to-r');
-    expect(within(entry).getByText('PRO')).toBeInTheDocument();
+    expect(within(entry).getByText('NEW')).toBeInTheDocument();
   });
 
   it('drops admin-only entries for members', async () => {

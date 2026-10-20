@@ -3,7 +3,7 @@ import { Link, Navigate, useLocation, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
-import { hubAPI, type HubSceneSuite } from '@/api/hub';
+import { editionNeedsLicence, hubAPI, type HubSceneSuite } from '@/api/hub';
 import { useDelayedVisible } from '@/hooks/useDelayedVisible';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
@@ -79,23 +79,23 @@ export default function WebUIContractWorkspaceHost() {
     return () => setTemporaryThemeOverride(null);
   }, [paneActive, setTemporaryThemeOverride, temporaryThemeOverride]);
 
-  const proOnlyNotice = (
+  const editionRequiredNotice = (
     <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
       <AlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
       <div>
-        <div className="font-medium">{t('workspace.proOnlyTitle')}</div>
-        <div className="mt-1 text-sm">{t('workspace.proOnlyBody')}</div>
+        <div className="font-medium">{t('workspace.editionRequiredTitle')}</div>
+        <div className="mt-1 text-sm">{t('workspace.editionRequiredBody')}</div>
         <Link
           to="/scenes/suites"
           className="mt-3 inline-flex rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm text-amber-900 hover:bg-amber-100 dark:border-amber-800 dark:bg-transparent dark:text-amber-200"
         >
-          {t('workspace.proOnlyAction')}
+          {t('workspace.editionRequiredAction')}
         </Link>
       </div>
     </div>
   );
 
-  // Pro is active, but this suite is licensed on its own and that licence is not in force.
+  // The edition is licensed, but this suite is licensed on its own and that licence is not in force.
   const unlicensedNotice = (
     <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
       <AlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
@@ -157,20 +157,20 @@ export default function WebUIContractWorkspaceHost() {
               to="/scenes/suites"
               className="mt-3 inline-flex rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:bg-transparent dark:text-zinc-200"
             >
-              {t('workspace.proOnlyAction')}
+              {t('workspace.editionRequiredAction')}
             </Link>
           </div>
         </div>
       );
     }
-    if (missingSuite?.edition === 'pro' && missingSuite.licensed === false) return unlicensedNotice;
-    if (missingSuite?.edition === 'pro') return proOnlyNotice;
+    if (editionNeedsLicence(missingSuite?.edition) && missingSuite?.licensed === false) return unlicensedNotice;
+    if (editionNeedsLicence(missingSuite?.edition)) return editionRequiredNotice;
     return <div className="text-sm text-zinc-500">{t('workspace.notFound')}</div>;
   }
 
-  // Installed, but locked: its suite needs a Pro license that is not active,
+  // Installed, but locked: its suite needs an edition licence that is not active,
   // or its own suite licence, which is not in force.
-  if (workspace.locked) return workspace.licensed === false ? unlicensedNotice : proOnlyNotice;
+  if (workspace.locked) return workspace.licensed === false ? unlicensedNotice : editionRequiredNotice;
 
   if (pages.length === 0) {
     return <div className="text-sm text-zinc-500">{t('workspace.empty')}</div>;

@@ -397,7 +397,6 @@ def test_upgrade_start_failure_records_process_output_and_keeps_temp(
     monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
     monkeypatch.setattr(restart_handoff, "_apply_new_source", lambda _args: None)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda _args: None)
-    monkeypatch.setattr(restart_handoff, "_report_pending_pro_bundle_install_receipt", lambda _args: None)
     monkeypatch.setattr(
         restart_handoff,
         "_start_service_after_upgrade",
@@ -911,55 +910,46 @@ def test_restart_only_waits_for_port_after_parent_exit(
     ]
 
 
-def test_run_reports_pending_install_receipt_after_pro_bundle_tasks(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    events: list[str] = []
-    restart_argv = ["python.exe", "-m", "flocks.cli.main", "serve"]
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text("{}", encoding="utf-8")
-    args = _handoff_args(tmp_path, restart_argv)
+def test_component_arguments_reach_the_installer(monkeypatch, tmp_path: Path) -> None:
+    """What an update channel planned -- extra wheels, files to put in place -- survives the handoff."""
+    captured: dict[str, object] = {}
+    wheel = tmp_path / "component.whl"
+    staged = tmp_path / "staged-marker.json"
+    destination = tmp_path / "run" / "marker.json"
+    args = _handoff_args(tmp_path, ["python.exe", "-m", "flocks.cli.main", "start"])
     separator_index = args.index("--")
-    args[separator_index:separator_index] = ["--pro-bundle-manifest-path", str(manifest)]
+    args[separator_index:separator_index] = [
+        "--extra-wheel",
+        str(wheel),
+        "--success-file",
+        json.dumps([str(staged), str(destination)]),
+    ]
 
-    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
-    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda parent_pid: True)
-    monkeypatch.setattr(restart_handoff, "_stop_supervisor_before_restart", lambda **_kwargs: True)
-    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port: True)
-    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: events.append("tasks") or None)
-    monkeypatch.setattr(
-        restart_handoff,
-        "_report_pending_pro_bundle_install_receipt",
-        lambda args: events.append("receipt"),
-    )
-    monkeypatch.setattr(
-        restart_handoff.subprocess,
-        "Popen",
-        lambda argv, cwd=None, close_fds=False: events.append(f"spawn:{list(argv)}") or SimpleNamespace(pid=4321),
-    )
-    code = restart_handoff.run(args)
+    async def fake_install(**kwargs):
+        captured.update(kwargs)
 
-    assert code == 0
-    assert events.index("tasks") < events.index("receipt")
-    assert any(event.startswith("spawn:") for event in events)
+    monkeypatch.setattr(restart_handoff.updater_module, "install_or_repair_source", fake_install)
+
+    assert restart_handoff._run_upgrade_tasks(restart_handoff._parse_args(args)) is None
+    assert captured["extra_wheels"] == [wheel]
+    assert captured["success_files"] == [(staged, destination)]
 
 
-def test_pro_bundle_handoff_stops_supervisor_before_port_check_and_install(
+def test_component_handoff_stops_supervisor_before_port_check_and_install(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
     restart_argv = ["python.exe", "-m", "flocks.cli.main", "start"]
-    pro_wheel = tmp_path / "flockspro.whl"
-    manifest = tmp_path / "manifest.json"
+    wheel = tmp_path / "component.whl"
+    marker = tmp_path / "marker.json"
     args = _handoff_args(tmp_path, restart_argv)
     separator_index = args.index("--")
     args[separator_index:separator_index] = [
-        "--pro-wheel-path",
-        str(pro_wheel),
-        "--pro-bundle-manifest-path",
-        str(manifest),
+        "--extra-wheel",
+        str(wheel),
+        "--success-file",
+        json.dumps([str(marker), str(tmp_path / "run" / "marker.json")]),
     ]
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
@@ -983,7 +973,6 @@ def test_pro_bundle_handoff_stops_supervisor_before_port_check_and_install(
         "_run_upgrade_tasks",
         lambda _args: events.append("install") or None,
     )
-    monkeypatch.setattr(restart_handoff, "_report_pending_pro_bundle_install_receipt", lambda _args: None)
     monkeypatch.setattr(
         restart_handoff.subprocess,
         "Popen",

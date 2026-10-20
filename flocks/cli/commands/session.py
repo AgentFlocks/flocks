@@ -390,6 +390,9 @@ def session_resume(
 def _invoke_session(prompt, directory, model, agent, output_format, **kwargs):
     from pathlib import Path
     import sys
+    from flocks.cli.managed import refuse_local_runtime_when_managed
+
+    refuse_local_runtime_when_managed("flocks session new/resume")
     from flocks.cli.commands.exec import OutputFormat, invoke_headless
     from flocks.cli.headless import ExecOptions
 

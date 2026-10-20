@@ -128,6 +128,31 @@ def test_service_runtime_interrupted_plugin_load_follows_fail_closed_rule(
         init_mock.assert_awaited_once()
 
 
+def test_service_runtime_refuses_to_start_without_a_declared_requirement(monkeypatch) -> None:
+    """The same declared requirements as the main server: a missing one stops the start."""
+    from flocks.plugin import PluginLoader
+    from flocks.plugin.readiness import ENV_REQUIRED_CAPABILITIES, StartupRequirementsUnmet
+
+    init_mock = AsyncMock()
+    monkeypatch.setenv(ENV_REQUIRED_CAPABILITIES, "response_transform")
+    monkeypatch.setattr(PluginLoader, "load_all", classmethod(lambda cls, **_kwargs: SimpleNamespace(
+        has_critical_entrypoint_failure=False, critical_entrypoint_failures=[],
+    )))
+    monkeypatch.setattr(service_runtime.MCP, "init", init_mock)
+    monkeypatch.setattr(service_runtime, "get_manager", lambda: SimpleNamespace(shutdown=AsyncMock()))
+
+    app = service_runtime.create_service_app(
+        workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
+        workflow_id="wf-1",
+        release_id="rel-1",
+    )
+
+    with pytest.raises(StartupRequirementsUnmet):
+        with TestClient(app, raise_server_exceptions=True):
+            pass
+    init_mock.assert_not_awaited()
+
+
 def test_service_runtime_invoke_builds_real_tool_context(
     monkeypatch,
 ) -> None:

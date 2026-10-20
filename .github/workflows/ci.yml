@@ -50,8 +50,27 @@ jobs:
       - name: Validate bundled Hub
         run: uv run python scripts/validate_flockshub.py
 
+      # The public source must not grow new references to a separate commercial
+      # build; the baseline only goes down.
+      - name: OSS boundary
+        run: python3 scripts/oss_boundary_check.py
+
       - name: Python test
         run: uv run --no-sync pytest tests/scripts tests/hub tests/net tests/db tests/voice
+
+      # Architecture V1.2 guarantees: caller identity, model call ids, workflow
+      # code gates, page secrets, pinned UI directory, managed-install CLI and
+      # startup declarations. Listed by file until the whole suite runs here.
+      - name: Python test (architecture guarantees)
+        run: >-
+          uv run --no-sync pytest
+          tests/session/test_v12_call_identity.py
+          tests/workflow/test_v12_workflow_gates.py
+          tests/contracts/webui/test_page_api_secrets.py
+          tests/server/test_static_webui.py
+          tests/plugin/test_v12_readiness_declarations.py
+          tests/cli/test_v12_managed_cli.py
+          tests/transform/test_response_transform.py
 
 
   frontend:

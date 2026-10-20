@@ -26,6 +26,7 @@ from flocks.tool.registry import (
     ToolRegistry,
     ToolResult,
 )
+from flocks.updater.deploy import declared_managed
 from flocks.utils.log import Log
 
 
@@ -83,6 +84,10 @@ _ERROR_HINTS = {
     "uninstalling": "REA is being uninstalled; install again when the uninstall finished.",
     "busy": "Another Flocks process on this host is installing or uninstalling REA; try again when it finished.",
     "tasks_unreadable": "A busy conversation could not be read, so it can be neither confirmed nor stopped from here.",
+    "managed": (
+        "This is a managed install: REA is installed and removed with the deployment's release. "
+        "Tell the user to ask whoever runs the deployment."
+    ),
 }
 
 
@@ -649,6 +654,13 @@ async def _install(ctx: ToolContext, tier: Optional[str], confirmed: bool) -> To
             success=False,
             error="Only administrators can install the REA plugin. Tell the user to ask an administrator.",
             metadata={"rea": {"action": "install", "phase": "failed", "ok": False, "errorCode": "forbidden"}},
+        )
+    if declared_managed():
+        # Refused before a plan is shown: the install would be refused at its start anyway.
+        return ToolResult(
+            success=False,
+            error=_ERROR_HINTS["managed"],
+            metadata={"rea": {"action": "install", "phase": "failed", "ok": False, "errorCode": "managed"}},
         )
     if _plan_mode(ctx):
         return ToolResult(

@@ -754,6 +754,11 @@ async def migrate(paths: list[Path], *, report_dir: Path, dsn: str | None = None
 
 
 def main() -> int:
+    # Run on its own (python -m flocks.db.migrate): connection errors carry
+    # DSNs, and the database drivers log through the standard library.
+    from flocks.utils.log import install_log_record_scrubber
+
+    install_log_record_scrubber()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, action="append", required=True, help="Explicit legacy database or directory (repeatable)")
     parser.add_argument("--report-dir", type=Path, required=True, help="Private directory for retained snapshots and reports")

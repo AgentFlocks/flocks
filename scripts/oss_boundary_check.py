@@ -46,15 +46,32 @@ SKIP_DIR_NAMES = {
 }
 
 #: Names of a separate commercial build, and the shapes that branch on it.
-#
+#:
 #: ``flockspro`` is matched case-insensitively but must not be the start of a
 #: longer camelCase word: ``flocksProvider`` and ``flocksProcess`` are ordinary
 #: identifiers that happen to put "flocks" next to "Pro", and counting them as
-#: boundary violations made the number impossible to drive to zero.
+#: boundary violations made the number impossible to drive to zero.  Only the
+#: name is case-insensitive; the check after it is not, so ``flocksproPolicyApi``
+#: (lower case, then a capital) still counts.
 MARKER_PATTERNS = [
-    re.compile(r"flockspro(?![a-z])", re.IGNORECASE),
-    re.compile(r"flocks[\s_-]+pro\b", re.IGNORECASE),
+    re.compile(r"(?i:flockspro)(?![a-z])"),
+    re.compile(r"(?i:flocks[\s_-]+pro)\b"),
+    # The edition protocol of one particular build: branching on its edition
+    # name, naming helpers after it, or reading its version prefix.  The open
+    # source speaks of the open edition and "any edition a licence grants".
+    re.compile(r"""edition\s*[!=]==?\s*['"]pro['"]|['"]pro['"]\s*[!=]==?\s*\w*edition""", re.IGNORECASE),
+    re.compile(r"""Literal\[[^\]]*['"]pro['"]"""),
+    re.compile(r"(?<![A-Za-z0-9])(?:is_pro|pro_platform|pro_suite|owning_pro|pro_active|pro_edition|maybe_pro)(?![a-z])"),
+    re.compile(r"(?<![A-Za-z0-9])(?:isPro|proOnly|proSuite|proEdition|upgradePro)(?![a-z])"),
+    re.compile(r"\bpro-v(?=\d|\b)", re.IGNORECASE),
 ]
+
+#: The product word itself, in code and prose.  Model names use it too
+#: ("Gemini 2.5 Pro", "ChatGPT Plus/Pro"), so the provider catalogues and the
+#: terminal client, which list models and nothing else of the kind, are not
+#: searched for it.
+PRODUCT_WORD_PATTERN = re.compile(r"(?<![A-Za-z0-9_])(?:Pro|PRO)(?![A-Za-z0-9])")
+PRODUCT_WORD_EXEMPT_PREFIXES = ("flocks/provider/", "tui/")
 
 
 @dataclass(frozen=True)
@@ -86,8 +103,12 @@ def scan() -> List[Occurrence]:
             content = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        product_word = not relative.startswith(PRODUCT_WORD_EXEMPT_PREFIXES)
         for number, line in enumerate(content.splitlines(), start=1):
-            if any(pattern.search(line) for pattern in MARKER_PATTERNS):
+            if any(pattern.search(line) for pattern in MARKER_PATTERNS) or (
+                product_word and PRODUCT_WORD_PATTERN.search(line)
+            ):
                 found.append(
                     Occurrence(
                         path=str(path.relative_to(REPO_ROOT)),

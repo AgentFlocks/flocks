@@ -948,6 +948,30 @@ async def get_session_status_by_id(
 
 
 @router.get(
+    "/{sessionID}/turn/{turnID}",
+    summary="Get how a turn stands",
+    description="The receipt of a prompt or command sent with turnID: accepted, queued, running, done, failed, removed, or lost",
+    operation_id="session.turnById",
+)
+async def get_session_turn(sessionID: str, turnID: str, request: Request, response: Response) -> Dict[str, Any]:
+    """How a prompt or command the client sent stands, whichever worker runs it."""
+    from flocks.session import turn_receipt
+
+    response.headers["Cache-Control"] = "no-store"
+    current_user = require_user(request)
+    session = await _get_session_by_id_unfiltered(sessionID)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session {sessionID} not found")
+    _require_session_read_access(session, current_user)
+    receipt = await turn_receipt.get(sessionID, turnID)
+    if receipt is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Turn {turnID} not found")
+    if turn_receipt.is_stale(receipt):
+        receipt["state"] = turn_receipt.LOST
+    return {"turnID": turnID, "sessionID": sessionID, **receipt}
+
+
+@router.get(
     "",
     response_model=List[Union[SessionResponse, SessionListItem]],
     summary="List sessions",
@@ -2441,6 +2465,8 @@ async def unshare_session_local(sessionID: str, http_request: Request) -> Sessio
 async def _abort_session_processing(sessionID: str) -> bool:
     """Abort active processing for a session and notify subscribers.
 
+    Returns whether anything of the session was running in this process.
+
     Aborts both the SessionLoop (sets abort_event so the next step check
     stops the loop) and the SessionRunner (stops the current LLM stream).
     Also auto-rejects any pending Question tool requests so the question
@@ -2456,7 +2482,9 @@ async def _abort_session_processing(sessionID: str) -> bool:
     # Abort the loop-level context (propagates to runner via shared abort_event)
     loop_aborted = SessionLoop.abort(sessionID)
 
-    # Also cancel through the runner's own path (sets status to idle)
+    # Also cancel through the runner's own path (sets status to idle; it
+    # reports True whether or not a runner was there, so ask first).
+    runner_cancelled = sessionID in SessionRunner._active_sessions
     SessionRunner.cancel(sessionID)
 
     # Unblock any pending Question tool waiting for user input
@@ -2493,15 +2521,31 @@ async def _abort_session_processing(sessionID: str) -> bool:
     except Exception as exc:
         log.warn("session.abort.event_error", {"error": str(exc)})
 
-    return True
+    return bool(loop_aborted or runner_cancelled or children_loops_aborted or children_runners_cancelled or bg_cancelled)
+
+
+class AbortSessionResult(BaseModel):
+    """What an abort came to.
+
+    ``stopped``: the run has ended.  ``requested``: the node running it took
+    the request and is stopping it.  ``unconfirmed``: the request was recorded
+    (or could not be), but no node answered for the run -- its node may be
+    gone, and the run is released when its lease expires.  ``not_running``:
+    nothing of the session was executing.
+    """
+
+    status: Literal["stopped", "requested", "unconfirmed", "not_running"]
+    #: The run the request named (its execution lease generation), when one ran.
+    generation: Optional[int] = None
 
 
 @router.post(
     "/{sessionID}/abort",
     summary="Abort session",
-    description="Abort an active session and stop any ongoing processing",
+    description="Abort an active session and stop any ongoing processing, on whichever node runs it",
+    response_model=AbortSessionResult,
 )
-async def abort_session(sessionID: str, http_request: Request = None) -> bool:
+async def abort_session(sessionID: str, http_request: Request = None) -> AbortSessionResult:
     """Abort session processing."""
     if http_request is not None:
         current_user = require_user(http_request)
@@ -2512,7 +2556,34 @@ async def abort_session(sessionID: str, http_request: Request = None) -> bool:
                 detail=f"Session {sessionID} not found",
             )
         _require_session_write_access(session, current_user)
-    return await _abort_session_processing(sessionID)
+    from flocks.session import ownership
+
+    ran_here = await _abort_session_processing(sessionID)
+    # The run may be on another node; whoever holds its lease aborts it there.
+    try:
+        target = await ownership.request_abort_of_run(sessionID)
+    except Exception as exc:
+        log.warn("session.abort.remote_request_failed", {"session_id": sessionID, "error": str(exc)})
+        return AbortSessionResult(status="stopped" if ran_here else "unconfirmed")
+    if target is None:
+        return AbortSessionResult(status="stopped" if ran_here else "not_running")
+    try:
+        outcome = await ownership.confirm_abort(target)
+    except Exception as exc:
+        log.warn("session.abort.confirm_failed", {"session_id": sessionID, "error": str(exc)})
+        outcome = ownership.ABORT_UNCONFIRMED
+    log.info("session.abort.outcome", {"session_id": sessionID, "generation": target.generation, "status": outcome})
+    return AbortSessionResult(status=outcome, generation=target.generation)
+
+
+def install_remote_abort_handler() -> None:
+    """Abort sessions this process runs when another node asks (flocks.session.ownership).
+
+    Called by the server as it starts (flocks.server.app), not on import.
+    """
+    from flocks.session.ownership import set_abort_handler
+
+    set_abort_handler(_abort_session_processing)
 
 
 class ForkRequest(BaseModel):
@@ -2869,6 +2940,11 @@ class PromptRequest(BaseModel):
         SessionExecutionMode.BUILD,
         alias="executionMode",
         description="Execution mode for this user turn",
+    )
+    turn_id: Optional[str] = Field(
+        None,
+        alias="turnID",
+        description="Client-chosen id of this turn; GET /session/{id}/turn/{turnID} says how it stands",
     )
 
 
@@ -4328,8 +4404,8 @@ def _check_session_aborted(sessionID: str, checkpoint: str, step: int, **extra_c
     return False
 
 
-def _validate_chat_upload_parts(session_id: str, owner_id: Optional[str], parts: List[Dict[str, Any]]) -> None:
-    from flocks.session.files import resolve_chat_upload
+async def _validate_chat_upload_parts(session_id: str, owner_id: Optional[str], parts: List[Dict[str, Any]]) -> None:
+    from flocks.session.files import resolve_chat_upload, restore_chat_upload_source
 
     for part in parts:
         upload_id = str(part.get("uploadID") or "").strip()
@@ -4340,6 +4416,8 @@ def _validate_chat_upload_parts(session_id: str, owner_id: Optional[str], parts:
         if part.get("type") != "file" or not isinstance(part.get("mime"), str) or not part["mime"]:
             raise HTTPException(status_code=400, detail="Chat upload requires a file part and MIME type")
         try:
+            # The upload may have been staged through another instance.
+            await restore_chat_upload_source(session_id, owner_id, upload_id)
             resolve_chat_upload(session_id, owner_id, upload_id)
         except (FileNotFoundError, OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -4356,7 +4434,7 @@ async def _process_session_message(
 ):
     from flocks.session.interaction_queue import InteractionQueue
 
-    _validate_chat_upload_parts(sessionID, uploader_user_id, request.parts or [])
+    await _validate_chat_upload_parts(sessionID, uploader_user_id, request.parts or [])
     hold = InteractionQueue.hold_uploads(sessionID, uploader_user_id or "", request.parts or [])
     try:
         return await _process_session_message_impl(
@@ -4508,9 +4586,12 @@ async def _process_session_message_impl(
     # ------------------------------------------------------------------
     # 3. Create user message and publish SSE events
     # ------------------------------------------------------------------
+    from flocks.session import turn_receipt
+
     now_ms = int(time.time() * 1000)
     user_message_id = request.messageID or Identifier.create("message")
     user_part_id = Identifier.create("part")
+    turn_receipt.note_user_message(user_message_id)
 
     # display_text (optional) is UI-only. The stored text part must stay as the
     # real prompt so SessionLoop, hooks, title generation, and queued prompts keep
@@ -4603,17 +4684,27 @@ async def _process_session_message_impl(
                     raw_part.get("filename"),
                     failure_event="session.message.file_part.materialize_failed",
                 )
+                await _store_materialized_part(url)
             file_part_id = raw_part.get("id") or upload_id or Identifier.create("part")
             async def persist_file_part():
                 nonlocal url, source
-                from flocks.session.files import bind_staged_chat_upload, resolve_chat_upload, restore_chat_upload
+                from flocks.session.files import (
+                    bind_staged_chat_upload,
+                    move_stored_upload,
+                    resolve_chat_upload,
+                    restore_chat_upload,
+                    restore_chat_upload_source,
+                )
 
                 original = None
                 target = None
                 try:
                     if upload_id:
+                        await restore_chat_upload_source(sessionID, uploader_user_id or "", upload_id)
                         original = resolve_chat_upload(sessionID, uploader_user_id or "", upload_id)
                         target = bind_staged_chat_upload(sessionID, uploader_user_id or "", upload_id)
+                        if original != target:
+                            await move_stored_upload(original, target)
                         url = target.as_uri()
                         source = {"root": "session-upload", "path": target.name}
                     file_part = FilePart(
@@ -4637,6 +4728,13 @@ async def _process_session_message_impl(
                         )
                         if not referenced:
                             restore_chat_upload(original, target)
+                            try:
+                                await move_stored_upload(target, original)
+                            except Exception as exc:
+                                log.warn("session.upload.store_restore_failed", {
+                                    "sessionID": sessionID,
+                                    "error_type": type(exc).__name__,
+                                })
                     raise
 
             try:
@@ -5140,6 +5238,16 @@ async def _publish_prompt_queue(session_id: str) -> None:
     })
 
 
+async def _store_materialized_part(url: str) -> None:
+    """Keep a data URL that was written to the uploads directory in the database too."""
+    if not url.startswith("file:"):
+        return
+    from flocks.session.files import store_upload
+    from flocks.session.utils.file_extractor import file_url_to_path
+
+    await store_upload(Path(file_url_to_path(url)))
+
+
 def _materialize_queued_parts(session_id: str, parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Persist queued data URLs so large base64 payloads do not sit in memory."""
     prepared: List[Dict[str, Any]] = []
@@ -5185,10 +5293,15 @@ def _event_from_queued_prompt(item, working_directory: str):
     )
 
 
+class _QueuedSessionMissing(RuntimeError):
+    """A queued prompt's session is gone by the time its turn comes."""
+
+
 async def _drain_prompt_queue_locked(session_id: str, working_directory: str) -> bool:
     from flocks.hooks.execution import execution_context_scope
     from flocks.project.bootstrap import instance_bootstrap
     from flocks.project.instance import Instance
+    from flocks.session import turn_receipt
     from flocks.session.interaction_queue import InteractionQueue
     from flocks.session.session_loop import SessionLoop
 
@@ -5202,36 +5315,43 @@ async def _drain_prompt_queue_locked(session_id: str, working_directory: str) ->
             return True
 
         owner_id = str((item.execution_context or {}).get("_uploaderUserID") or "")
+        # A queue item may be dispatched by a different worker task than the
+        # request that submitted it. Restore the item's captured context (e.g.
+        # trusted identity transfer) and never inherit unrelated worker state.
+        captured = dict(item.execution_context or {})
+        turn_id = captured.pop("_turnID", None)
         hold = InteractionQueue.hold_uploads(session_id, owner_id, item.parts)
         try:
             await _publish_prompt_queue(session_id)
-            session = await Session.get_by_id(session_id)
-            if not session:
-                log.warn("session.prompt_queue.session_missing", {"sessionID": session_id, "queueID": item.id})
-                continue
+            # The item's receipt moves on from the moment it left the queue:
+            # a failure while getting it ready ends its turn as failed.
+            async with turn_receipt.running(session_id, turn_id):
+                session = await Session.get_by_id(session_id)
+                if not session:
+                    raise _QueuedSessionMissing(session_id)
 
-            event = _event_from_queued_prompt(item, working_directory)
-            session, _ = await _prepare_session_agent_before_bootstrap(
-                session,
-                event.agent,
-            )
-            item_working_directory = await _resolve_session_working_directory(session)
-            event.working_directory = item_working_directory
-            log.info("session.prompt_queue.dispatch", {
-                "sessionID": session_id,
-                "queueID": item.id,
-            })
-            # A queue item may be dispatched by a different worker task than the
-            # request that submitted it. Restore the item's captured context (e.g.
-            # trusted identity transfer) and never inherit unrelated worker state.
-            with execution_context_scope(item.execution_context or {}, inherit=False):
-                await Instance.provide(
-                    directory=item_working_directory,
-                    init=instance_bootstrap,
-                    fn=lambda: _dispatch_sse_input(
-                        session_id, session, event, item_working_directory
-                    ),
+                event = _event_from_queued_prompt(item, working_directory)
+                session, _ = await _prepare_session_agent_before_bootstrap(
+                    session,
+                    event.agent,
                 )
+                item_working_directory = await _resolve_session_working_directory(session)
+                event.working_directory = item_working_directory
+                log.info("session.prompt_queue.dispatch", {
+                    "sessionID": session_id,
+                    "queueID": item.id,
+                })
+                with execution_context_scope(captured, inherit=False):
+                    await Instance.provide(
+                        directory=item_working_directory,
+                        init=instance_bootstrap,
+                        fn=lambda: _dispatch_sse_input(
+                            session_id, session, event, item_working_directory
+                        ),
+                    )
+        except _QueuedSessionMissing:
+            log.warn("session.prompt_queue.session_missing", {"sessionID": session_id, "queueID": item.id})
+            continue
         finally:
             InteractionQueue.release_uploads(hold)
 
@@ -5239,16 +5359,18 @@ async def _drain_prompt_queue_locked(session_id: str, working_directory: str) ->
 async def _run_prompt_event_chain(session_id: str, session, event, working_directory: str) -> None:
     from flocks.project.bootstrap import instance_bootstrap
     from flocks.project.instance import Instance
+    from flocks.session import turn_receipt
 
     try:
         async with _prompt_queue_lock(session_id):
             dispatch_failed = False
             try:
-                await Instance.provide(
-                    directory=working_directory,
-                    init=instance_bootstrap,
-                    fn=lambda: _dispatch_sse_input(session_id, session, event, working_directory),
-                )
+                async with turn_receipt.running(session_id, (event.metadata or {}).get("_turnID")):
+                    await Instance.provide(
+                        directory=working_directory,
+                        init=instance_bootstrap,
+                        fn=lambda: _dispatch_sse_input(session_id, session, event, working_directory),
+                    )
             except Exception:
                 dispatch_failed = True
                 raise
@@ -5371,9 +5493,12 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         agent_override: Optional[str] = None,
         ignored: Optional[bool] = None,
     ) -> str:
+        from flocks.session import turn_receipt
+
         now_ms = int(_time.time() * 1000)
         user_msg_id = event.message_id or Identifier.create("message")
         user_part_id = Identifier.create("part")
+        turn_receipt.note_user_message(user_msg_id)
         message_agent = agent_override or agent_name
         await _persist_active_session_write(
             sessionID,
@@ -5576,22 +5701,29 @@ async def _enqueue_prompt_request(
     *,
     expected_generation: Optional[int] = None,
     uploader_user_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
 ):
     from flocks.session.interaction_queue import InteractionQueue
     from flocks.hooks.execution import current_execution_context
 
     _validate_execution_mode_request(request)
-    _validate_chat_upload_parts(session_id, uploader_user_id, request.parts)
+    await _validate_chat_upload_parts(session_id, uploader_user_id, request.parts)
     hold = InteractionQueue.hold_uploads(session_id, uploader_user_id or "", request.parts)
     try:
         if expected_generation is None:
             expected_generation = Session.lifecycle_generation(session_id)
         await _require_agent_usable_for_chat(request.agent)
         model = request.model.model_dump(by_alias=True) if request.model else None
-        parts = _materialize_queued_parts(session_id, [dict(part) for part in request.parts])
+        originals = [dict(part) for part in request.parts]
+        parts = _materialize_queued_parts(session_id, originals)
+        for original, part in zip(originals, parts):
+            if str(original.get("url") or "").startswith("data:"):
+                await _store_materialized_part(str(part.get("url") or ""))
         execution_context = current_execution_context()
         if uploader_user_id:
             execution_context = {**execution_context, "_uploaderUserID": uploader_user_id}
+        if turn_id:
+            execution_context = {**execution_context, "_turnID": turn_id}
         return await _persist_active_session_write(
             session_id,
             lambda: InteractionQueue.enqueue(
@@ -5718,15 +5850,20 @@ async def remove_prompt_queue_item(
         removed_item = await InteractionQueue.remove(sessionID, queueID)
     except QueueItemNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    removed_turn = (removed_item.execution_context or {}).get("_turnID") if isinstance(removed_item.execution_context, dict) else None
+    if removed_turn:
+        from flocks.session import turn_receipt
+
+        await turn_receipt.advance_quietly(sessionID, removed_turn, turn_receipt.REMOVED, queueID=queueID)
     uploader_user_id = (
         str((removed_item.execution_context or {}).get("_uploaderUserID") or "").strip()
         if isinstance(removed_item.execution_context, dict)
         else ""
     )
     if uploader_user_id:
-        from flocks.session.files import remove_staged_chat_uploads_from_parts
+        from flocks.session.files import discard_staged_chat_uploads_from_parts
 
-        remove_staged_chat_uploads_from_parts(
+        await discard_staged_chat_uploads_from_parts(
             uploader_user_id,
             removed_item.parts,
         )
@@ -5786,9 +5923,14 @@ async def send_session_message_async(
     """Send message asynchronously - returns 202 immediately, response via SSE"""
     import os
     from flocks.input.events import UserInputEvent
+    from flocks.session import turn_receipt
     from flocks.session.interaction_queue import InteractionQueue, QueueFullError
     from flocks.session.session_loop import SessionLoop
 
+    try:
+        turn_id = turn_receipt.turn_id_from(request.turn_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
@@ -5835,6 +5977,7 @@ async def send_session_message_async(
         variant=request.variant,
         metadata={
             "_sessionLifecycleGeneration": lifecycle_generation,
+            **({"_turnID": turn_id} if turn_id else {}),
             **({"_uploaderUserID": uploader_user_id} if uploader_user_id else {}),
         },
         display_text=event_display_text,
@@ -5847,25 +5990,47 @@ async def send_session_message_async(
         working_directory=working_directory,
     )
 
-    _validate_chat_upload_parts(sessionID, uploader_user_id, request.parts)
+    await _validate_chat_upload_parts(sessionID, uploader_user_id, request.parts)
     hold = InteractionQueue.hold_uploads(sessionID, uploader_user_id or "", request.parts)
     try:
         existing_queue = await InteractionQueue.list(sessionID)
         if SessionLoop.is_running(sessionID) or existing_queue or _is_prompt_chain_active(sessionID):
+            if turn_id:
+                # Written before the item is in the queue: the turn running now
+                # may take it the moment it is, and its receipt moves on from here.
+                await _create_turn_receipt(sessionID, turn_id, turn_receipt.QUEUED)
             try:
                 item = await _enqueue_prompt_request(
                     sessionID,
                     request,
                     expected_generation=lifecycle_generation,
                     uploader_user_id=uploader_user_id,
+                    turn_id=turn_id,
                 )
-            except QueueFullError as exc:
-                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+            except BaseException as exc:
+                if turn_id:
+                    await turn_receipt.advance_quietly(
+                        sessionID, turn_id, turn_receipt.FAILED, error=f"{type(exc).__name__}: {exc}"[:500],
+                    )
+                if isinstance(exc, QueueFullError):
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+                raise
+            if turn_id:
+                try:
+                    await turn_receipt.name_queue_item(sessionID, turn_id, item.id)
+                except Exception as exc:
+                    log.warn("session.turn_receipt.queue_item_not_named", {"sessionID": sessionID, "error": str(exc)})
+                turn_receipt.ensure_queue_keeper()
             await _publish_prompt_queue(sessionID)
             if not SessionLoop.is_running(sessionID):
                 await _schedule_prompt_queue_drain(sessionID, working_directory)
-            return {"status": "queued", "sessionID": sessionID, "queueID": item.id}
+            return {
+                "status": "queued", "sessionID": sessionID, "queueID": item.id,
+                **({"turnID": turn_id} if turn_id else {}),
+            }
 
+        if turn_id:
+            await _create_turn_receipt(sessionID, turn_id, turn_receipt.ACCEPTED)
         _set_prompt_chain_active(sessionID, True)
         task = _schedule_background_coro(
             _run_prompt_event_chain(sessionID, session, event, working_directory),
@@ -5877,9 +6042,25 @@ async def send_session_message_async(
             # enters its coroutine and therefore before its finally can run.
             task.add_done_callback(lambda _task, token=hold: InteractionQueue.release_uploads(token))
             hold = ""
-        return {"status": "accepted", "sessionID": sessionID}
+        return {"status": "accepted", "sessionID": sessionID, **({"turnID": turn_id} if turn_id else {})}
     finally:
         InteractionQueue.release_uploads(hold)
+
+
+async def _create_turn_receipt(session_id: str, turn_id: str, state: str) -> None:
+    """The receipt of a turn its client follows, before the turn is dispatched (turn_receipt.create)."""
+    from flocks.session import turn_receipt
+
+    try:
+        await turn_receipt.create(session_id, turn_id, state)
+    except turn_receipt.TurnIdInUse as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except Exception as exc:
+        log.warn("session.turn_receipt.create_failed", {"sessionID": session_id, "error_type": type(exc).__name__})
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="the turn could not be recorded, so it was not started",
+        ) from exc
 
 
 class CommandRequest(BaseModel):
@@ -5894,6 +6075,11 @@ class CommandRequest(BaseModel):
     model: Optional[str] = Field(None, description="Model string (provider/model)")
     variant: Optional[str] = Field(None, description="Model variant")
     parts: Optional[List[Dict[str, Any]]] = Field(None, description="Additional parts")
+    turn_id: Optional[str] = Field(
+        None,
+        alias="turnID",
+        description="Client-chosen id of this turn; GET /session/{id}/turn/{turnID} says how it stands",
+    )
 
 
 @router.post(
@@ -5923,7 +6109,12 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
     import os
 
     from flocks.input.events import UserInputEvent
+    from flocks.session import turn_receipt
 
+    try:
+        turn_id = turn_receipt.turn_id_from(request.turn_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
@@ -5947,6 +6138,9 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
     command_metadata["_sessionLifecycleGeneration"] = lifecycle_generation
     if request.arguments_json is not None:
         command_metadata["commandArgumentsJson"] = request.arguments_json
+    if turn_id:
+        command_metadata["_turnID"] = turn_id
+        await _create_turn_receipt(sessionID, turn_id, turn_receipt.ACCEPTED)
 
     _schedule_slash_command(
         sessionID,
@@ -5967,7 +6161,7 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
         "command": request.command,
     })
 
-    return {"status": "accepted", "sessionID": sessionID}
+    return {"status": "accepted", "sessionID": sessionID, **({"turnID": turn_id} if turn_id else {})}
 
 
 def _schedule_slash_command(
@@ -6019,12 +6213,14 @@ def _schedule_slash_command(
         try:
             from flocks.project.instance import Instance
             from flocks.project.bootstrap import instance_bootstrap
+            from flocks.session import turn_receipt
 
-            await Instance.provide(
-                directory=working_directory,
-                init=instance_bootstrap,
-                fn=lambda: _dispatch_sse_input(sessionID, session, event, working_directory),
-            )
+            async with turn_receipt.running(sessionID, command_metadata.get("_turnID")):
+                await Instance.provide(
+                    directory=working_directory,
+                    init=instance_bootstrap,
+                    fn=lambda: _dispatch_sse_input(sessionID, session, event, working_directory),
+                )
 
         except Exception as exc:
             import traceback

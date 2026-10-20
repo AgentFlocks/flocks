@@ -154,6 +154,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
           await taskAPI.cancelExecution(taskId);
           break;
         case 'retry':  await taskAPI.retryExecution(taskId);  break;
+        case 'continue': await taskAPI.continueExecution(taskId); break;
         case 'rerun':
           await taskAPI.rerunExecution(taskId);
           break;
@@ -446,9 +447,21 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
             </div>
           )}
 
+          {task.status === 'failed' && task.retry?.blockedReason === 'unverified_effects' && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+              <p>{t('queued.heldForVerification')}</p>
+              {(task.retry.unverifiedEffects?.length ?? 0) > 0 && (
+                <p className="mt-1 break-all font-mono">{task.retry.unverifiedEffects!.join(', ')}</p>
+              )}
+            </div>
+          )}
+
           <div className="flex flex-wrap gap-1.5">
             {!['completed', 'cancelled', 'failed'].includes(task.status) && (
               <ActionButton icon={<XCircle className="w-3 h-3" />} label={t('queued.actionCancel')} onClick={() => onAction('cancel', task.id)} color="gray" />
+            )}
+            {task.status === 'failed' && task.retry?.blockedReason === 'unverified_effects' && task.sessionID && (
+              <ActionButton icon={<Play className="w-3 h-3" />} label={t('queued.actionResume')} onClick={() => onAction('continue', task.id)} color="blue" />
             )}
             {task.status === 'failed' && (
               <ActionButton icon={<RotateCcw className="w-3 h-3" />} label={t('queued.actionRetry')} onClick={() => onAction('retry', task.id)} color="blue" />

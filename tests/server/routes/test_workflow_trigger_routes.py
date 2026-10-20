@@ -952,7 +952,6 @@ async def test_trigger_routes_answer_extension_stop_with_403_and_reason(
         _must_not_run,
     )
     # Webhook replays are remembered per process; start from a clean window.
-    monkeypatch.setattr(workflow_routes, "_webhook_deliveries", {})
 
     response = await client.post(path, **request_kwargs)
 
@@ -1010,7 +1009,6 @@ async def test_webhook_stopped_after_the_run_is_not_run_again_on_retry(
         return {"matched": True, "executed": True, "inputs": {}}
 
     monkeypatch.setattr(workflow_routes.default_trigger_runtime, "_execute_workflow_effect", _run)
-    monkeypatch.setattr(workflow_routes, "_webhook_deliveries", {})
     request_kwargs = {"headers": {"x-api-key": "demo-secret"}, "json": {"severity": "high"}}
 
     try:
@@ -1088,7 +1086,6 @@ async def test_verified_webhook_runs_with_its_verified_auth_under_headless_ident
         "_read_workflow_from_fs",
         lambda workflow_id: _webhook_workflow({"type": "api_key", "apiKey": "ledger-secret"}),
     )
-    monkeypatch.setattr(workflow_routes, "_webhook_deliveries", {})
 
     response = await client.post(
         "/webhook/workflows/wf-1/hook-default",
@@ -1126,7 +1123,6 @@ async def test_hmac_webhook_carries_its_verified_scheme(
         lambda workflow_id: _webhook_workflow({"type": "hmac", "secretRef": "hook_secret"}),
     )
     monkeypatch.setattr(workflow_routes, "_resolve_trigger_secret", lambda ref: "hmac-secret")
-    monkeypatch.setattr(workflow_routes, "_webhook_deliveries", {})
     raw = json.dumps({"alert": "synthetic"}).encode("utf-8")
     signature = hmac.new(b"hmac-secret", raw, hashlib.sha256).hexdigest()
 
@@ -1227,7 +1223,6 @@ async def test_refused_run_record_never_stores_the_extension_detail(
         "_read_workflow_from_fs",
         lambda workflow_id: _webhook_workflow({"type": "api_key", "apiKey": "ledger-secret"}),
     )
-    monkeypatch.setattr(workflow_routes, "_webhook_deliveries", {})
     try:
         response = await client.post(
             "/webhook/workflows/wf-1/hook-default",
@@ -1261,7 +1256,6 @@ async def test_stop_after_the_run_does_not_add_a_refused_record(
         "_read_workflow_from_fs",
         lambda workflow_id: _webhook_workflow({"type": "api_key", "apiKey": "ledger-secret"}),
     )
-    monkeypatch.setattr(workflow_routes, "_webhook_deliveries", {})
     try:
         await client.post(
             "/webhook/workflows/wf-1/hook-default",

@@ -19,7 +19,7 @@ describe('update transport contract', () => {
   beforeEach(() => vi.clearAllMocks());
   afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
-  it.each([undefined, 'default'])('keeps the server default edition for %s', async (channel) => {
+  it.each([undefined, 'default'])('keeps the server default channel for %s', async (channel) => {
     vi.mocked(client.get).mockResolvedValue({ data: {} });
     await checkUpdate('zh-CN', channel, true);
     expect(client.get).toHaveBeenCalledWith('/api/update/check', { params: { locale: 'zh-CN', force: true } });
@@ -28,13 +28,13 @@ describe('update transport contract', () => {
     expect(fetch).toHaveBeenCalledWith('/api/update/apply?target_version=2026.09.20&locale=zh-CN', expect.objectContaining({ method: 'POST', signal: expect.anything() }));
   });
 
-  it('sends an extension channel through the edition parameter accepted by the server', async () => {
+  it('sends an extension channel as the channel parameter', async () => {
     vi.mocked(client.get).mockResolvedValue({ data: {} });
-    await checkUpdate('en-US', 'extension-edition');
-    expect(client.get).toHaveBeenCalledWith('/api/update/check', { params: { locale: 'en-US', edition: 'extension-edition' } });
+    await checkUpdate('en-US', 'extension-channel');
+    expect(client.get).toHaveBeenCalledWith('/api/update/check', { params: { locale: 'en-US', channel: 'extension-channel' } });
     stream([event('done', 'Complete', true)]);
-    await applyUpdate('2026.09.20', vi.fn(), undefined, 'extension-edition');
-    expect(fetch).toHaveBeenCalledWith('/api/update/apply?target_version=2026.09.20&edition=extension-edition', expect.objectContaining({ method: 'POST', signal: expect.anything() }));
+    await applyUpdate('2026.09.20', vi.fn(), undefined, 'extension-channel');
+    expect(fetch).toHaveBeenCalledWith('/api/update/apply?target_version=2026.09.20&channel=extension-channel', expect.objectContaining({ method: 'POST', signal: expect.anything() }));
   });
 
   it('reads split events and a final done event without a trailing newline', async () => {

@@ -2,6 +2,12 @@
 
 This mirrors the Kafka/syslog managers: one background poller task per workflow
 id that periodically triggers ``run_workflow`` with configured inputs.
+
+Every instance on the database runs the same pollers.  A scheduled time --
+the cron's next time, or for an interval schedule the start of each interval
+counted from the epoch -- runs on whichever instance claims it first
+(WorkflowStore.claim_schedule_slot); the others skip it, also when the
+winner's run already finished.
 """
 
 from __future__ import annotations
@@ -29,7 +35,7 @@ from flocks.workflow.models import Workflow
 from flocks.workflow._async_runtime import register_primary_loop
 from flocks.workflow.runner import RunWorkflowResult, _validate_lint_results, run_workflow
 from flocks.workflow.store import WorkflowStore
-from flocks.workflow.ownership import WorkflowAlreadyRunning, execution_cancelled
+from flocks.workflow.ownership import WorkflowAlreadyRunning, execution_cancelled, process_owner_id
 from flocks.workflow.tool_context import (
     build_workflow_tool_context,
     cleanup_workflow_tool_context,
@@ -192,7 +198,45 @@ class WorkflowPollerManager:
                 tz=timezone.utc,
             )
             return int(croniter(cron_expression, base).get_next(float) * 1000)
-        return _now_ms() + int(config["intervalSeconds"]) * 1000
+        return self._interval_slot_ms(config) + int(config["intervalSeconds"]) * 1000
+
+    @staticmethod
+    def _interval_slot_ms(config: Dict[str, Any], at_ms: int | None = None) -> int:
+        """The start of the interval *at_ms* falls in, counted from the epoch.
+
+        Every instance computes the same one, so they claim the same time.
+        """
+        interval_ms = max(1, int(config["intervalSeconds"])) * 1000
+        now = _now_ms() if at_ms is None else at_ms
+        return (now // interval_ms) * interval_ms
+
+    async def _claim(self, workflow_id: str, config: Dict[str, Any], slot_ms: int) -> bool:
+        """Claim scheduled time *slot_ms* for this instance; False when another one has it.
+
+        A claim that cannot be recorded is not made: running without one
+        could run the same time twice.
+        """
+        from flocks.db.health import execution_allowed
+
+        if not execution_allowed():
+            # Not claimed: an instance whose database is usable runs it.
+            current = self._status.get(workflow_id) or self._base_status(workflow_id)
+            current["lastStatus"] = "skipped"
+            current["lastError"] = "database_not_ready"
+            self._status[workflow_id] = current
+            return False
+        trigger_id = config.get("triggerId") or DEFAULT_SCHEDULE_TRIGGER_ID
+        try:
+            claimed = await WorkflowStore.claim_schedule_slot(workflow_id, trigger_id, slot_ms, process_owner_id())
+        except Exception as exc:
+            log.warning("poller.claim_failed", {"workflow_id": workflow_id, "slot": slot_ms, "error": str(exc)})
+            claimed = False
+        if not claimed:
+            current = self._status.get(workflow_id) or self._base_status(workflow_id)
+            current["lastStatus"] = "skipped"
+            current["lastError"] = "scheduled_time_claimed_elsewhere"
+            self._status[workflow_id] = current
+        return claimed
 
     def get_status(self, workflow_id: str) -> Dict[str, Any]:
         status = dict(self._base_status(workflow_id))
@@ -395,6 +439,9 @@ class WorkflowPollerManager:
     ) -> None:
         cron_expression = str(config.get("cronExpression") or "").strip()
         try:
+            # An interval schedule runs the interval it is started in at once
+            # (unless another instance already ran it), then each next one.
+            slot_ms = None if cron_expression else self._interval_slot_ms(config)
             while not abort_event.is_set():
                 current = self._status.get(workflow_id) or self._base_status(workflow_id)
                 if cron_expression:
@@ -408,17 +455,25 @@ class WorkflowPollerManager:
                         continue
                     except asyncio.TimeoutError:
                         pass
-                    await self._schedule_run(workflow_id, workflow_json, config)
+                    if await self._claim(workflow_id, config, next_run_at):
+                        await self._schedule_run(workflow_id, workflow_json, config)
                     continue
 
-                await self._schedule_run(workflow_id, workflow_json, config)
-                next_run_at = self._compute_next_run_at_ms(config)
+                if await self._claim(workflow_id, config, slot_ms):
+                    await self._schedule_run(workflow_id, workflow_json, config)
+                next_run_at = slot_ms + int(config["intervalSeconds"]) * 1000
+                current = self._status.get(workflow_id) or self._base_status(workflow_id)
                 current["nextRunAt"] = next_run_at
                 current["activeRuns"] = self._cleanup_done_runs(workflow_id)
                 self._status[workflow_id] = current
                 try:
-                    await asyncio.wait_for(abort_event.wait(), timeout=config["intervalSeconds"])
+                    await asyncio.wait_for(
+                        abort_event.wait(), timeout=max(0.0, (next_run_at - _now_ms()) / 1000.0),
+                    )
                 except asyncio.TimeoutError:
+                    # Woken late (a busy loop, a suspended host): the interval
+                    # it is now in, not one already over.
+                    slot_ms = max(next_run_at, self._interval_slot_ms(config))
                     continue
         except asyncio.CancelledError:
             raise
@@ -445,6 +500,14 @@ class WorkflowPollerManager:
         workflow_json: Any,
         config: Dict[str, Any],
     ) -> None:
+        from flocks.db.health import execution_allowed
+
+        if not execution_allowed():
+            current = self._status.get(workflow_id) or self._base_status(workflow_id)
+            current["lastStatus"] = "skipped"
+            current["lastError"] = "database_not_ready"
+            self._status[workflow_id] = current
+            return
         active_runs = self._cleanup_done_runs(workflow_id)
         if config.get("noOverlap", True) and active_runs > 0:
             current = self._status.get(workflow_id) or self._base_status(workflow_id)

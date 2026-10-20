@@ -33,6 +33,9 @@ def _is_user_managed_skill(skill: SkillInfo) -> bool:
     deleted through the API.  Skills discovered from project .flocks/ directories
     or other system locations are read-only from the API's perspective.
     """
+    if Skill.is_managed(skill):
+        # Served by the deployment's content source, never a user's file.
+        return False
     try:
         return Path(skill.location).resolve().is_relative_to(_user_skills_root().resolve())
     except (ValueError, OSError):
@@ -259,9 +262,9 @@ def _skill_to_response(
     skill: SkillInfo,
     include_content: bool = False,
     disabled_set: Optional[Set[str]] = None,
+    content: Optional[str] = None,
 ) -> SkillResponse:
-    content = None
-    if include_content:
+    if include_content and content is None and not Skill.is_managed(skill):
         try:
             content = Path(skill.location).read_bytes().decode("utf-8")
         except Exception:
@@ -436,7 +439,13 @@ async def get_skill(name: str):
 
         checked = Skill.check_eligibility(skill)
         disabled_set = Skill.load_disabled()
-        return _skill_to_response(checked, include_content=True, disabled_set=disabled_set)
+        content = None
+        if Skill.is_managed(checked):
+            try:
+                content = await Skill.read_body(checked)
+            except Exception as exc:
+                log.warn("skill.managed.view_failed", {"name": name, "error": str(exc)})
+        return _skill_to_response(checked, include_content=True, disabled_set=disabled_set, content=content)
     except HTTPException:
         raise
     except Exception as e:

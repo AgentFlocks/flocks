@@ -485,6 +485,9 @@ class TaskManager:
             return execution
         execution.retry.retry_count += 1
         execution.retry.retry_after = None
+        # A person asked for it to start over: whatever held it is their call.
+        execution.retry.blocked_reason = None
+        execution.retry.unverified_effects = []
         execution.status = TaskStatus.QUEUED
         execution.queued_at = datetime.now(timezone.utc)
         execution.started_at = None
@@ -494,6 +497,31 @@ class TaskManager:
         execution.result_summary = None
         execution.session_id = None
         return await cls._enqueue_execution(execution)
+
+    @classmethod
+    async def resume_execution(cls, execution_id: str) -> Optional[TaskExecution]:
+        """Go on with a run held for verification, in the session it ran in.
+
+        For a person who checked what the held run did: the run continues
+        from its persisted session, told which actions to check before it
+        repeats any.  Raises ValueError for a run that is not held, or has no
+        session to go on in (a workflow run is retried instead).
+        """
+        from flocks.task.outcome import BLOCKED_UNVERIFIED_EFFECTS
+
+        execution = await TaskStore.get_execution(execution_id)
+        if execution is None:
+            return None
+        if execution.status != TaskStatus.FAILED or execution.retry.blocked_reason != BLOCKED_UNVERIFIED_EFFECTS:
+            raise ValueError("only a run held for verification can be resumed")
+        if execution.execution_mode != ExecutionMode.AGENT or not execution.session_id:
+            raise ValueError("this run has no session to go on in; retry it instead")
+        execution.retry.blocked_reason = None
+        execution.retry.retry_after = None
+        return await TaskStore.requeue_execution(
+            execution, expected_generation=execution.owner_generation,
+            expected_status=TaskStatus.FAILED, keep_session=True,
+        )
 
     @classmethod
     async def rerun_execution(
@@ -639,8 +667,16 @@ class TaskManager:
     async def _execution_loop(self) -> None:
         import time
 
+        from flocks.db.health import execution_allowed
+
         while self._running:
             try:
+                if not execution_allowed():
+                    # The database is down, a standby, or only just back:
+                    # work started now would fail half-way. Leases already keep
+                    # two nodes off one run; this keeps a node off all of them.
+                    await asyncio.sleep(self._poll_interval)
+                    continue
                 now = time.monotonic()
                 if now - self._last_retry_check >= _RETRY_CHECK_INTERVAL_S:
                     self._last_retry_check = now
@@ -698,13 +734,30 @@ class TaskManager:
             if current is not None:
                 execution = current
             if not execution.is_terminal:
-                should_finish_queue_ref = False
-                try:
-                    execution = await self._requeue_execution(execution, expected_generation=generation)
-                except ExecutionOwnershipError:
-                    pass
+                from flocks.task.outcome import run_outcome
+
+                outcome = await run_outcome(execution)
+                TaskExecutor.forget_workflow_started(execution.id)
+                if outcome.safe_to_retry:
+                    should_finish_queue_ref = False
+                    try:
+                        execution = await self._requeue_execution(execution, expected_generation=generation)
+                    except ExecutionOwnershipError:
+                        pass
+                    else:
+                        await self._publish_execution_update(execution)
                 else:
-                    await self._publish_execution_update(execution)
+                    # Interrupted (a shutdown) after starting work whose
+                    # effects nobody confirmed: not started over by itself.
+                    try:
+                        execution = await self._mark_execution_failed(
+                            execution, self._interrupted_unverified_message(),
+                            expected_generation=generation, hold=outcome,
+                        )
+                    except ExecutionOwnershipError:
+                        should_finish_queue_ref = False
+                    else:
+                        await self._publish_execution_update(execution)
             raise
         except asyncio.TimeoutError:
             current = await TaskStore.get_execution(execution.id)
@@ -757,6 +810,20 @@ class TaskManager:
         )
 
     async def _handle_failure(self, execution: TaskExecution) -> None:
+        from flocks.task.outcome import hold_for_verification, run_outcome
+
+        outcome = await run_outcome(execution)
+        TaskExecutor.forget_workflow_started(execution.id)
+        if not outcome.safe_to_retry:
+            # Running it again could repeat what it already did: a person
+            # checks, then resumes it in its session or retries it.
+            hold_for_verification(execution, outcome)
+            await TaskStore.update_execution(execution)
+            log.warn("manager.execution_held_for_verification", {
+                "id": execution.id, "effects": list(outcome.effects)[:20],
+            })
+            await self._publish_event("task.needs_verification", execution.id, execution.status.value, execution.title)
+            return
         if execution.retry.retry_count < execution.retry.max_retries:
             delay = execution.retry.retry_delay_seconds
             execution.retry.retry_count += 1
@@ -785,44 +852,21 @@ class TaskManager:
                 continue
 
     async def _recover_orphaned_executions(self) -> int:
-        """Requeue expired work, leaving every live lease alone.
+        """Settle expired work at startup, leaving every live lease alone.
 
         Every ``running`` execution used to be treated as this node's leftover.
         With two instances on one database that is wrong in the dangerous
         direction: restarting one node put the other node's in-progress
         executions back in the queue, and the same task ran twice. Only expiry
         or an old unclaimed row is evidence that execution was abandoned.
-        """
 
-        node_id = process_owner_id()
-        orphans = await TaskStore.list_reclaimable_executions(
-            node_id=node_id,
-            # A peer may have dequeued a row and not claimed it yet. Startup
-            # obeys the same grace period as periodic recovery.
-            stale_before=datetime.now(timezone.utc) - timedelta(seconds=_RUNNING_RECOVERY_TIMEOUT_S),
-            include_own_live=False,
-        )
-        recovered = 0
-        for execution in orphans:
-            claimed = await TaskStore.claim_execution(
-                execution.id, node_id=node_id, lease_seconds=lease_seconds(),
-                expected_generation=execution.owner_generation,
-            )
-            if claimed is None:
-                continue
-            try:
-                await self._requeue_execution(
-                    claimed, expected_generation=claimed.owner_generation,
-                    expected_status=TaskStatus.RUNNING,
-                )
-                recovered += 1
-            except ExecutionOwnershipError:
-                continue
-            finally:
-                await TaskStore.release_execution_lease(
-                    claimed.id, node_id=node_id, expected_generation=claimed.owner_generation,
-                )
-        return recovered
+        An abandoned execution is failed, not run again from the start: it may
+        have done part of its work (sent a message, written a record), and
+        whether it did is unknown. Running it again is a decision for its
+        retry policy (the retry queue honours one) or for a person -- the same
+        outcome the periodic recovery reaches for the same evidence.
+        """
+        return await self._recover_stale_active_executions()
 
     async def _recover_orphaned_queued_executions(self) -> int:
         orphans = await TaskStore.list_orphaned_queued_executions()
@@ -894,9 +938,13 @@ class TaskManager:
             if claimed is None:
                 continue
             try:
+                from flocks.task.outcome import run_outcome
+
                 await self._cancel_execution_runtime(claimed, expected_generation=claimed.owner_generation)
+                outcome = await run_outcome(claimed)
                 await self._mark_execution_failed(
                     claimed, self._stale_execution_message(), expected_generation=claimed.owner_generation,
+                    hold=None if outcome.safe_to_retry else outcome,
                 )
                 self.queue.mark_finished(claimed.id)
                 await TaskStore.finish_queue_ref(claimed.id, expected_generation=claimed.owner_generation)
@@ -954,6 +1002,13 @@ class TaskManager:
         )
 
     @staticmethod
+    def _interrupted_unverified_message() -> str:
+        return (
+            "Task execution was interrupted after starting actions whose effects were not "
+            "confirmed; it is not started again automatically. Check them, then resume or retry it."
+        )
+
+    @staticmethod
     def _stale_execution_message() -> str:
         return (
             "Task execution was still marked running with no live owner "
@@ -1008,7 +1063,9 @@ class TaskManager:
         error: str,
         *,
         expected_generation: Optional[int] = None,
+        hold: Any = None,
     ) -> TaskExecution:
+        """Fail the run; *hold* (a flocks.task.outcome.RunOutcome) keeps it from automatic retries."""
         current = await TaskStore.get_execution(execution.id)
         if current is not None:
             if expected_generation is not None and current.owner_generation != expected_generation:
@@ -1016,6 +1073,10 @@ class TaskManager:
             execution = current
             if execution.is_terminal:
                 return execution
+        if hold is not None:
+            from flocks.task.outcome import hold_for_verification
+
+            hold_for_verification(execution, hold)
 
         completed_at = datetime.now(timezone.utc)
         execution.status = TaskStatus.FAILED

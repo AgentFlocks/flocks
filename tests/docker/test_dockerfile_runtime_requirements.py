@@ -84,6 +84,7 @@ def test_runtime_image_points_static_webui_at_built_dist() -> None:
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
     static_webui = (REPO_ROOT / "flocks" / "server" / "static_webui.py").read_text(encoding="utf-8")
 
-    assert 'os.getenv("FLOCKS_WEBUI_DIST_DIR")' in static_webui
+    assert 'DIST_DIR_ENV = "FLOCKS_WEBUI_DIST_DIR"' in static_webui
+    assert "os.getenv(DIST_DIR_ENV)" in static_webui
     assert "FLOCKS_WEBUI_DIST_DIR=/opt/flocks/webui/dist" in dockerfile
     assert "FLOCKS_FRONTEND_DIST_DIR" not in dockerfile

@@ -71,6 +71,22 @@ class ReaInstallError(Exception):
         self.blockers = blockers or []
 
 
+def refuse_when_managed() -> None:
+    """A managed install changes no runtime from inside the service.
+
+    Installing or removing REA runs package managers and downloads in the
+    service's own process, past the checks a deployment puts on every command a
+    tool runs; in a managed install the deployment ships REA with its release
+    instead.
+    """
+    from flocks.updater.deploy import declared_managed
+
+    if declared_managed():
+        raise ReaInstallError(
+            "managed", "REA is installed and removed with the deployment's release in a managed install",
+        )
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -257,6 +273,7 @@ class ReaInstaller:
 
         from flocks.rea.uninstaller import ReaUninstaller
 
+        refuse_when_managed()
         await refresh_jobs()
         current = cls.current_job()
         if current is not None and current.status == "running":

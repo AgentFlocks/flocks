@@ -18,10 +18,8 @@ from flocks.utils.log import Log
 from flocks.session.prompt import SessionPrompt
 from flocks.session.response_rewriter import transform_complete_response
 from flocks.session.llm_hook_utils import (
-    apply_hook_request_output,
-    restore_text_with_replacements,
-    serialize_chat_message,
-    stream_text_replacements_from_hook_output,
+    model_call_hook_metadata,
+    run_llm_before_for_call,
     strip_think_blocks,
 )
 from .models import DEFAULT_COMPACTION_PROMPT_WITH_PREVIOUS
@@ -183,42 +181,23 @@ async def _llm_chat_with_timeout(
     }
     if session_id:
         try:
-            from flocks.hooks.pipeline import HookPipeline, HookStage
-
             provider_id = (
                 getattr(provider_client, "provider_id", None)
                 or getattr(provider_client, "id", None)
                 or provider_client.__class__.__name__
             )
-            llm_hook_metadata = {
-                "sessionID": session_id,
-                "agent": "session.compaction",
-                "step": None,
-                "model": {
-                    "providerID": provider_id,
-                    "modelID": model_id,
-                },
-                "purpose": purpose,
-            }
-            if await HookPipeline.has_stage_handlers(HookStage.LLM_BEFORE, llm_hook_metadata):
-                llm_before_ctx = await HookPipeline.run_llm_before({
-                    **llm_hook_metadata,
-                    "request": {
-                        "messageCount": len(messages),
-                        "messages": [serialize_chat_message(message) for message in messages],
-                        "toolCount": 0,
-                        "tools": [],
-                        "providerOptions": dict(provider_options),
-                        "providerToolsEnabled": False,
-                    },
-                })
-                hook_output = getattr(llm_before_ctx, "output", None) or {}
-                messages, provider_options = apply_hook_request_output(
-                    messages,
-                    provider_options,
-                    hook_output,
-                )
-                replacements = stream_text_replacements_from_hook_output(hook_output)
+            llm_hook_metadata = await model_call_hook_metadata(
+                session_id=session_id,
+                agent="session.compaction",
+                purpose=purpose,
+                provider_id=provider_id,
+                model_id=model_id,
+            )
+            messages, provider_options, replacements = await run_llm_before_for_call(
+                llm_hook_metadata,
+                messages,
+                provider_options,
+            )
         except Exception as hook_err:
             log.error("compaction.llm_before_hook.error", {
                 "session_id": session_id,

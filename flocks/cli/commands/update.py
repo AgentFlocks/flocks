@@ -15,7 +15,7 @@ console = Console()
 
 
 def update_command(
-    check: bool = typer.Option(False, "--check", help="仅检查是否有新版本，不执行升级（与 --pro-bundle 连用时只显示将安装的 Pro bundle，不安装）"),
+    check: bool = typer.Option(False, "--check", help="仅检查是否有新版本，不执行升级（与 --channel 连用时只显示该通道将安装什么，不安装）"),
     yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认直接升级"),
     force: bool = typer.Option(False, "--force", "-f", help="即使已是最新版本也强制重新安装"),
     region: str | None = typer.Option(
@@ -23,15 +23,15 @@ def update_command(
         "--region",
         help="升级镜像区域。设置为 cn 时优先使用中国大陆镜像源。",
     ),
-    pro_bundle: bool = typer.Option(
-        False,
-        "--pro-bundle",
-        help="安装 Flocks Pro bundle（离线安装包设置了 FLOCKS_PRO_BUNDLE_DIR 时用本地包，否则从 Console 下载）",
+    channel: str | None = typer.Option(
+        None,
+        "--channel",
+        help="改用已安装扩展提供的更新通道（不加就是本项目自己的发布）",
     ),
     no_restart: bool = typer.Option(
         False,
         "--no-restart",
-        help="与 --pro-bundle 连用：只安装组件，不自动重启服务（之后自行执行 flocks restart --server-only）",
+        help="与 --channel 连用：只安装不替换源码的部分，不自动重启服务（之后自行执行 flocks restart --server-only）",
     ),
 ):
     """
@@ -39,65 +39,83 @@ def update_command(
 
     Downloads the latest Release source archive from GitHub, backs up the
     current version to ~/.flocks/version/, extracts and replaces source files,
-    re-syncs dependencies, then restarts the service automatically.
+    re-syncs dependencies, then restarts the service automatically.  With
+    --channel, an update channel an installed extension provides decides what
+    gets installed.
     """
-    if pro_bundle:
+    if channel:
         if check:
-            asyncio.run(_check_pro_bundle())
+            asyncio.run(_check_channel(channel))
         else:
-            asyncio.run(_install_pro_bundle(restart=not no_restart))
+            asyncio.run(_install_from_channel(channel, restart=not no_restart))
         return
     asyncio.run(_update(check=check, yes=yes, force=force, region=region))
 
 
-async def _check_pro_bundle() -> None:
-    """Show what --pro-bundle would install; never installs or restarts."""
-    from flocks.updater import describe_pro_bundle
+def _channel_or_exit(name: str):
+    from flocks.updater import get_update_channel, update_channel_names
 
+    update_channel = get_update_channel(name)
+    if update_channel is None:
+        known = "、".join(update_channel_names()) or "无"
+        console.print(f"[red]没有名为 {name} 的更新通道（已安装的扩展提供的通道：{known}）[/red]")
+        raise typer.Exit(1)
+    return update_channel
+
+
+async def _check_channel(name: str) -> None:
+    """Show what a channel would install; never installs or restarts."""
+    update_channel = _channel_or_exit(name)
+    describe = getattr(update_channel, "describe", None)
     try:
-        info = await describe_pro_bundle()
+        rows = await describe() if describe is not None else None
     except Exception as exc:
         console.print(f"[red]检查失败：{exc}[/red]")
         raise typer.Exit(1)
+    if rows is None:
+        from flocks.updater import check_update
+
+        info = await check_update(channel=name)
+        if info.error:
+            append_upgrade_text_log(f"ERROR cli_channel_check channel={name}: {info.error}")
+            console.print(f"[red]检查失败：{info.error}[/red]")
+            raise typer.Exit(1)
+        _print_version_table(info)
+        console.print(f"[yellow]运行 [bold]flocks update --channel {name}[/bold] 安装（只检查，本次未安装任何东西）[/yellow]")
+        return
 
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column(style="dim")
     table.add_column()
-    table.add_row("来源", ("本地离线包 " if info["source"] == "local" else "Console ") + str(info["location"]))
-    table.add_row("Pro bundle 版本", str(info["bundle_version"]))
-    if info.get("component_version"):
-        table.add_row("Pro 组件版本", str(info["component_version"]))
-    if info.get("core_version"):
-        table.add_row("对应核心版本", f"{info['core_version']}（当前 v{info['current_core_version']}）")
-    if info.get("release_id"):
-        table.add_row("release id", str(info["release_id"]))
-    if info["installed"]:
-        installed = info.get("installed_component_version") or info.get("installed_bundle_version") or "版本未知"
-        table.add_row("当前 Pro 组件", f"已安装（{installed}）")
-    else:
-        table.add_row("当前 Pro 组件", "未安装")
+    for label, value in rows:
+        table.add_row(str(label), str(value))
     console.print(table)
-    if info["installed"] and info.get("installed_component_version") and info.get("component_version") == info.get("installed_component_version"):
-        console.print("[green]✓ 已安装同一版本的 Pro 组件；flocks update --pro-bundle 会原样重装[/green]")
-    else:
-        console.print("[yellow]运行 [bold]flocks update --pro-bundle[/bold] 安装（只检查，本次未安装任何东西）[/yellow]")
+    console.print(f"[yellow]运行 [bold]flocks update --channel {name}[/bold] 安装（只检查，本次未安装任何东西）[/yellow]")
 
 
-async def _install_pro_bundle(*, restart: bool) -> None:
-    """Install the Pro bundle (local offline bundle first, Console otherwise)."""
-    from flocks.updater import perform_pro_bundle_install
+async def _install_from_channel(name: str, *, restart: bool) -> None:
+    """Install what a channel offers now."""
+    from flocks.updater import perform_update
 
-    async for progress in perform_pro_bundle_install(restart=restart):
+    update_channel = _channel_or_exit(name)
+    try:
+        release = await update_channel.release(version=None)
+    except Exception as exc:
+        append_upgrade_text_log(f"ERROR cli_channel_release channel={name}: {exc}")
+        console.print(f"[red]✗ 取不到 {name} 通道的发布：{exc}[/red]")
+        raise typer.Exit(1)
+
+    async for progress in perform_update(release.version, release=release, restart=restart):
         if progress.stage == "error":
-            append_upgrade_text_log(f"ERROR cli_pro_bundle: {progress.message}")
-            console.print(f"[red]✗ Pro 组件安装失败：{progress.message}[/red]")
+            append_upgrade_text_log(f"ERROR cli_channel_install channel={name}: {progress.message}")
+            console.print(f"[red]✗ 安装失败：{progress.message}[/red]")
             raise typer.Exit(1)
         if progress.stage == "fetching" and progress.percent is not None:
             continue
         console.print(f"[cyan]{progress.stage}[/cyan] {progress.message}")
         if progress.stage == "done":
-            append_upgrade_text_log("OK cli_pro_bundle_installed")
-            console.print("[green]✓ Pro 组件已安装[/green]")
+            append_upgrade_text_log(f"OK cli_channel_installed channel={name}")
+            console.print(f"[green]✓ 已安装 {release.label} {release.version}[/green]")
 
 
 async def _update(check: bool, yes: bool, force: bool = False, region: str | None = None) -> None:

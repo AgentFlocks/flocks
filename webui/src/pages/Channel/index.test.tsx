@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 
 import ChannelPage from './index';
 
-const { client, toast, useAgents, flocksproUsersApi } = vi.hoisted(() => ({
+const { client, toast, useAgents } = vi.hoisted(() => ({
   client: {
     get: vi.fn(),
     patch: vi.fn(),
@@ -15,9 +15,6 @@ const { client, toast, useAgents, flocksproUsersApi } = vi.hoisted(() => ({
     error: vi.fn(),
   },
   useAgents: vi.fn(),
-  flocksproUsersApi: {
-    hasCapability: vi.fn(),
-  },
 }));
 
 vi.mock('@/api/client', () => ({ default: client }));
@@ -28,10 +25,6 @@ vi.mock('@/components/common/Toast', () => ({
 
 vi.mock('@/hooks/useAgents', () => ({
   useAgents: () => useAgents(),
-}));
-
-vi.mock('@/api/flocksproUsers', () => ({
-  flocksproUsersApi,
 }));
 
 vi.mock('react-i18next', () => ({
@@ -45,7 +38,6 @@ describe('ChannelPage WeCom configuration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useAgents.mockReturnValue({ agents: [] });
-    flocksproUsersApi.hasCapability.mockResolvedValue(false);
     client.patch.mockResolvedValue({ data: {} });
     client.post.mockResolvedValue({ data: {} });
     client.get.mockImplementation((url: string) => {

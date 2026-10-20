@@ -1,7 +1,7 @@
 """Opaque sandbox tool-policy metadata transport.
 
 Flocks deliberately does not interpret ``sandbox.tools`` as an authorization
-decision.  The optional Pro policy gate receives the raw global and agent
+decision.  An optional policy gate receives the raw global and agent
 configuration and is the sole owner of validation, merging, and enforcement.
 """
 

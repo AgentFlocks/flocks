@@ -7,6 +7,7 @@ Main HTTP API server for AI-Native SecOps Platform
 import asyncio
 import inspect
 import os
+import threading
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -132,6 +133,13 @@ async def lifespan(app: FastAPI):
     # Startup
     log.info("server.startup", {"version": "0.2.0"})
 
+    # Extensions before anything else starts: discover and register the installed
+    # plugins (their entry points shake hands with what they depend on), check the
+    # capabilities the deployment requires, mount the routes they contributed.  A
+    # missing or failed requirement stops the start here, before any business
+    # service runs.
+    await _run_startup_phase(log, "extensions.prepare", lambda: _prepare_during_startup(app))
+
     # Outbound proxy policy first: every client built later (providers, channels,
     # hub, updater, MCP, child processes) reads the environment this writes.
     def _apply_network_proxy() -> dict:
@@ -207,6 +215,41 @@ async def lifespan(app: FastAPI):
     
     # Initialize storage
     await _run_startup_phase(log, "storage.init", Storage.init)
+    # Abort requests another node leaves for a session this process runs.
+    from flocks.server.routes.session import install_remote_abort_handler
+
+    install_remote_abort_handler()
+
+    # /ready answers for the database too: a node whose database is gone or
+    # has turned into a standby keeps running but cannot save anything; one
+    # that just came back is let in once it stayed writable for a while. The
+    # monitor keeps that answer -- and the gate background work checks --
+    # current when no load balancer asks.
+    from flocks.db.health import DATABASE_PROBE, check_database, run_database_monitor
+    from flocks.plugin.readiness import register_readiness_probe
+
+    register_readiness_probe(DATABASE_PROBE, check_database)
+    app.state.startup_background_tasks.append(
+        asyncio.create_task(run_database_monitor(), name="db.health.monitor")
+    )
+    # Whether the log collector still ships this node's logs: alerts only,
+    # never readiness (flocks.observability.log_shipping).
+    from flocks.observability.log_shipping import run_log_shipping_monitor
+
+    app.state.startup_background_tasks.append(
+        asyncio.create_task(run_log_shipping_monitor(), name="observability.log_shipping")
+    )
+
+    # Content the deployment manages (flocks.content.managed): loaded before
+    # anything reads agents, skills or workflows -- a start that cannot list
+    # it fails rather than serve local copies in its place -- then kept current.
+    from flocks.content.managed import ManagedContent, run_refresher
+
+    if ManagedContent.active():
+        await _run_startup_phase(log, "content.managed.load", ManagedContent.ensure_loaded)
+        app.state.startup_background_tasks.append(
+            asyncio.create_task(run_refresher(), name="content.managed.refresher")
+        )
     from flocks.notifications.token_policy import TokenPolicyService
 
     try:
@@ -531,8 +574,9 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         log.warning("knowledgebase.integration.start_failed", {"error_type": type(exc).__name__})
 
-    # Extension services (e.g. Pro's scheduled audits) start on this loop once
-    # the server is ready, without holding up requests.
+    # Extension services (e.g. scheduled audits, or replaying a spool of
+    # results an earlier process left unreported) start on this loop once the
+    # server is ready, without holding up requests.
     from flocks.extensions import run_startup_hooks
 
     _schedule_startup_phase(app, log, "extensions.startup_hooks", run_startup_hooks)
@@ -559,7 +603,7 @@ async def lifespan(app: FastAPI):
     if background_tasks:
         await asyncio.gather(*background_tasks, return_exceptions=True)
 
-    # Extension services (e.g. Pro webhook consumers) stop while sessions and
+    # Extension services (e.g. webhook consumers) stop while sessions and
     # storage are still available to them.
     try:
         from flocks.extensions import run_shutdown_hooks
@@ -1171,7 +1215,7 @@ class _AuthGuardMiddleware:
         # HTTP ingress identity is created by the authentication lifecycle.
         # Keep its generic scope and opaque context alive through the endpoint:
         # prompt execution is often spawned from the endpoint in a child task,
-        # where the Pro gate must be able to restore that verified identity.
+        # where a policy gate must be able to restore that verified identity.
         with execution_lifecycle_scope():
             try:
                 await _run_http_middleware_hooks(request, {"stage": "before_auth"})
@@ -1274,6 +1318,15 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     )
 
 
+from flocks.workflow.fs_store import ManagedWorkflowReadOnly  # noqa: E402
+
+
+@app.exception_handler(ManagedWorkflowReadOnly)
+async def managed_workflow_read_only_handler(request: Request, exc: ManagedWorkflowReadOnly):
+    """A write aimed at a workflow the deployment manages is refused, not a server error."""
+    return JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content={"detail": str(exc)})
+
+
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     """Handle all other exceptions"""
@@ -1363,7 +1416,6 @@ from flocks.server.routes.auth import router as auth_router
 from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
 from flocks.server.routes.device import router as device_router
-from flocks.server.routes.console_upgrade import router as console_upgrade_router
 from flocks.server.routes.license import router as license_router
 from flocks.server.routes.webui import router as webui_pages_router
 from flocks.server.routes.contracts import router as contracts_router
@@ -1432,7 +1484,6 @@ app.include_router(admin_users_router, prefix="/api/admin", tags=["Admin"])
 app.include_router(notifications_router, prefix="/api/notifications", tags=["Notifications"])
 # Device integration (named instances, SQL-backed)
 app.include_router(device_router, prefix="/api/devices", tags=["Device"])
-app.include_router(console_upgrade_router, prefix="/api/console", tags=["ConsoleUpgrade"])
 app.include_router(webui_pages_router, prefix="/api", tags=["WebUI"])
 app.include_router(contracts_router, prefix="/api", tags=["AccessContracts"])
 app.include_router(voice_router, prefix="/api/voice", tags=["Voice"])
@@ -1568,6 +1619,10 @@ def _enforce_startup_requirements() -> None:
     app.state.startup_readiness = report
     enforce_startup_readiness(report)
 
+    from flocks.server.static_webui import enforce_pinned_webui_dist
+
+    enforce_pinned_webui_dist()
+
 
 def _route_registered(path: str, method: str) -> bool:
     target_method = method.upper()
@@ -1595,8 +1650,48 @@ def _install_extension_routes() -> None:
         log.info("server.routes.extensions_installed", {"providers": installed})
 
 
-_load_installed_package_plugins()
-_install_extension_routes()
+_prepare_lock = threading.Lock()
+_prepared = False
+
+
+def prepare_app() -> None:
+    """Explicit startup of the extension layer, in this order: discover and register
+    the installed plugins (their entry points do any version handshake), verify the
+    capabilities the deployment requires, mount the routes extensions contributed.
+
+    Importing this module does none of it; the lifespan calls this first, before any
+    business service starts.  Idempotent: later calls return at once.  A failure
+    raises and leaves the app unprepared, so the server does not start.
+    """
+    global _prepared
+    with _prepare_lock:
+        if _prepared:
+            return
+        _load_installed_package_plugins()
+        _install_extension_routes()
+        _prepared = True
+
+
+def app_prepared() -> bool:
+    """Whether :func:`prepare_app` has completed in this process."""
+    return _prepared
+
+
+async def _prepare_during_startup(application: FastAPI) -> None:
+    """:func:`prepare_app` from the lifespan, off the loop (entry points may block).
+
+    The server runs this lifespan through a middleware stack it has already
+    built, yet an extension may still add middleware of its own while it
+    registers.  Let it, and build the stack again for the requests that follow:
+    none has been served yet, so nothing is lost with the stack replaced.
+    """
+    built = getattr(application, "middleware_stack", None) is not None
+    application.middleware_stack = None
+    try:
+        await asyncio.to_thread(prepare_app)
+    finally:
+        if built:
+            application.middleware_stack = application.build_middleware_stack()
 
 
 @app.get("/", tags=["Root"])

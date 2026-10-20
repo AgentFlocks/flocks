@@ -248,8 +248,16 @@ class WorkflowStore:
     async def start_execution(
         cls, exec_data: Dict[str, Any], *, owner_node_id: str,
         lease_seconds: int, scope_key: Optional[str] = None,
+        delivery: Optional[Tuple[str, str]] = None,
     ) -> Dict[str, Any]:
-        """Atomically acquire a run and, optionally, its no-overlap scope."""
+        """Atomically acquire a run and, optionally, its no-overlap scope.
+
+        *delivery* is the webhook delivery the run is for, as ``(key, claim
+        token)``: the run is bound to it in the same transaction, so a
+        delivery is either handled by exactly this run or still open for a
+        retry -- never claimed by a run that did not start.  When the claim was
+        taken over meanwhile, nothing is started.
+        """
         from flocks.workflow.ownership import WorkflowAlreadyRunning, WorkflowOwnershipError
 
         db = await cls._db()
@@ -290,7 +298,40 @@ class WorkflowStore:
             owned.update(leaseKey=execution_id, ownerNodeId=owner_node_id, ownerGeneration=claimed["generation"])
             _, _, row = cls._execution_row(owned)
             await tx.execute(cls._execution_upsert_sql(tx.dialect), row)
+            if delivery is not None:
+                bound = await tx.fetch_one(
+                    "UPDATE workflow_webhook_deliveries SET exec_id = ? "
+                    "WHERE key = ? AND claim_token = ? AND exec_id IS NULL RETURNING key",
+                    (execution_id, delivery[0], delivery[1]),
+                )
+                if bound is None:
+                    raise WorkflowOwnershipError("the webhook delivery was taken over by another request")
         return owned
+
+    @classmethod
+    async def claim_schedule_slot(
+        cls, workflow_id: str, trigger_id: str, slot_ms: int, owner: str, *, keep_days: int = 7,
+    ) -> bool:
+        """Claim one scheduled time of a workflow's schedule for this instance.
+
+        Every instance runs the schedule's loop; the one whose claim is
+        recorded first runs that time, the others skip it -- also when the
+        winner's run already finished (a no-overlap lease alone would let a
+        later instance start the same time again).  Claims older than
+        *keep_days* are dropped as new ones are made.
+        """
+        db = await cls._db()
+        async with db.transaction() as tx:
+            await tx.execute(
+                "DELETE FROM workflow_schedule_claims WHERE workflow_id = ? AND trigger_id = ? AND slot_ms < ?",
+                (workflow_id, trigger_id, int(slot_ms) - keep_days * 86_400_000),
+            )
+            row = await tx.fetch_one(
+                "INSERT INTO workflow_schedule_claims (workflow_id, trigger_id, slot_ms, claimed_by, claimed_at) "
+                "VALUES (?, ?, ?, ?, clock_timestamp()) ON CONFLICT DO NOTHING RETURNING slot_ms",
+                (workflow_id, trigger_id, int(slot_ms), owner),
+            )
+        return row is not None
 
     @classmethod
     async def _check_execution_owner(cls, tx, exec_data: Dict[str, Any]) -> bool:
@@ -773,6 +814,67 @@ class WorkflowStore:
                 cur = await tx.execute("DELETE FROM workflow_configs WHERE workflow_id = ?", (workflow_id,))
         return cur.rowcount
 
+    #: A delivery claimed this long ago that never started a run was dropped
+    #: (its process died between the claim and the run); a retry may take it.
+    WEBHOOK_TAKEOVER_S = 60.0
+
+    @classmethod
+    async def claim_webhook_delivery(
+        cls, key: str, delivery_id: str, window_s: float, claim_token: str = "",
+    ) -> Optional[str]:
+        """Record a webhook delivery unless the same one is still within its window.
+
+        Returns ``None`` when this call recorded it -- go ahead and run -- or
+        the first delivery's id when *key* is a replay.  Atomic across every
+        instance on the database: two copies arriving at two nodes at once
+        resolve to exactly one recorded delivery.  *claim_token* identifies
+        this claim (and only this one) to :meth:`release_webhook_delivery`
+        and to the run it starts (:meth:`start_execution`'s ``delivery``).
+
+        A claim whose run never started -- no execution was bound to it within
+        ``WEBHOOK_TAKEOVER_S`` -- is not a delivery that was handled: a
+        retry takes it over instead of being answered as a duplicate.
+        """
+        db = await cls._db()
+        async with db.transaction() as tx:
+            # Rows past their window are only kept long enough to be harmless.
+            await tx.execute(
+                "DELETE FROM workflow_webhook_deliveries WHERE expires_at < clock_timestamp() - interval '1 hour'"
+            )
+            claimed = await tx.execute(
+                "INSERT INTO workflow_webhook_deliveries (key, delivery_id, expires_at, claim_token, claimed_at, exec_id) "
+                "VALUES (?, ?, clock_timestamp() + (? * interval '1 second'), ?, clock_timestamp(), NULL) "
+                "ON CONFLICT (key) DO UPDATE SET delivery_id = EXCLUDED.delivery_id, expires_at = EXCLUDED.expires_at, "
+                "claim_token = EXCLUDED.claim_token, "  # secret-guard: allow 误报：SQL 片段 EXCLUDED.claim_token
+                "claimed_at = EXCLUDED.claimed_at, exec_id = NULL "
+                "WHERE workflow_webhook_deliveries.expires_at <= clock_timestamp() "
+                "OR (workflow_webhook_deliveries.exec_id IS NULL "
+                "AND workflow_webhook_deliveries.claimed_at <= clock_timestamp() - (? * interval '1 second')) "
+                "RETURNING delivery_id",
+                (key, delivery_id, float(window_s), claim_token, float(cls.WEBHOOK_TAKEOVER_S)),
+            )
+            if await claimed.fetchone() is not None:
+                return None
+            existing = await tx.execute("SELECT delivery_id FROM workflow_webhook_deliveries WHERE key = ?", (key,))
+            row = await existing.fetchone()
+        return str(row["delivery_id"]) if row is not None else ""
+
+    @classmethod
+    async def release_webhook_delivery(cls, key: str, claim_token: str) -> None:
+        """Forget the delivery one claim recorded, so the same one may be sent again.
+
+        Only that claim: a later claim of the same key (after this one's window
+        ran out) carries another token and stays.
+        """
+        if not claim_token:
+            return
+        db = await cls._db()
+        async with db.transaction() as tx:
+            await tx.execute(
+                "DELETE FROM workflow_webhook_deliveries WHERE key = ? AND claim_token = ?",
+                (key, claim_token),
+            )
+
     @classmethod
     async def kv_put(cls, key: str, value: Any, value_type: str = _JSON_TYPE) -> None:
         db = await cls._db()
@@ -878,6 +980,20 @@ def _workflow_ddl(dialect) -> list[str]:
         f"""CREATE TABLE IF NOT EXISTS workflow_kv (
             key {text} PRIMARY KEY, value {text} NOT NULL, type {text} NOT NULL,
             created_at {text} NOT NULL, updated_at {text} NOT NULL)""",
+        # Webhook deliveries seen recently, shared by every instance on the
+        # database so a replay is recognised wherever it lands.
+        f"""CREATE TABLE IF NOT EXISTS workflow_webhook_deliveries (
+            key {text} PRIMARY KEY, delivery_id {text} NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL, claim_token {text} NOT NULL DEFAULT '')""",
+        "ALTER TABLE workflow_webhook_deliveries ADD COLUMN IF NOT EXISTS claim_token TEXT NOT NULL DEFAULT ''",
+        # The run a delivery started, bound in the run's own start transaction.
+        "ALTER TABLE workflow_webhook_deliveries ADD COLUMN IF NOT EXISTS exec_id TEXT",
+        "ALTER TABLE workflow_webhook_deliveries ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()",
+        # One row per scheduled time a schedule ran, so only one instance runs it.
+        f"""CREATE TABLE IF NOT EXISTS workflow_schedule_claims (
+            workflow_id {text} NOT NULL, trigger_id {text} NOT NULL, slot_ms BIGINT NOT NULL,
+            claimed_by {text} NOT NULL, claimed_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (workflow_id, trigger_id, slot_ms))""",
     ]
 
 _INDEX_STMTS = [
@@ -887,4 +1003,5 @@ _INDEX_STMTS = [
     "CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow_status ON workflow_executions(workflow_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_executions_trigger ON workflow_executions(workflow_id, trigger_type, trigger_id)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_execution_steps_exec_step ON workflow_execution_steps(exec_id, step_index)",
+    "CREATE INDEX IF NOT EXISTS idx_workflow_webhook_deliveries_expiry ON workflow_webhook_deliveries(expires_at)",
 ]

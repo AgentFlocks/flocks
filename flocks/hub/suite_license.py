@@ -1,14 +1,15 @@
-"""Licensing of "pro" edition scene suites.
+"""Licensing of scene suites of a licensed edition.
 
-Each pro-edition scene suite is licensed on its own: the registered licence
+A suite whose manifest names an edition other than the open one
+(``edition_needs_licence``) is licensed on its own: the registered licence
 checker answers for it under the feature ``scene_suite:<suite id>``. Whether
 the installation's own licence also has to be in force for a suite is the
 checker's decision, not this module's.
 
-The built-in checker (status "oss") licenses no suite: a pro-edition suite
-does not install under it, and one already present (a development checkout,
-typically) is left alone at run time. Suite licences are enforced on use only
-when a checker that licenses suites is registered.
+The built-in checker (status "oss") licenses no suite: a licensed-edition
+suite does not install under it, and one already present (a development
+checkout, typically) is left alone at run time. Suite licences are enforced on
+use only when a checker that licenses suites is registered.
 """
 
 from __future__ import annotations
@@ -21,8 +22,9 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from flocks.hub.catalog import list_catalog, load_manifest, manifest_path, scene_suite_workspace_owners
+from flocks.hub.models import OPEN_EDITION, edition_needs_licence
 from flocks.hub.sealed import sealed_page_ids, sealed_signature
-from flocks.license import is_pro_edition_status, license_feature_status, license_status
+from flocks.license import is_licensed_edition_status, license_feature_status, license_status
 from flocks.utils.log import Log
 
 log = Log.create(service="hub.suite-license")
@@ -59,8 +61,9 @@ def is_open_edition(status: dict[str, Any]) -> bool:
     return str(status.get("status") or "").lower() == "oss"
 
 
-def pro_platform_active(status: dict[str, Any]) -> bool:
-    return is_pro_edition_status(status)
+def licensed_edition_active(status: dict[str, Any]) -> bool:
+    """Whether the platform licence grants a licensed edition."""
+    return is_licensed_edition_status(status)
 
 
 async def suite_license(suite_id: str) -> SuiteLicense:
@@ -81,7 +84,7 @@ async def suite_license(suite_id: str) -> SuiteLicense:
 
 
 class SuiteOwnershipUnknown(RuntimeError):
-    """Whether something belongs to a pro-edition suite could not be decided.
+    """Whether something belongs to a licensed-edition suite could not be decided.
 
     Kept apart from "belongs to no such suite": when a licence is enforced,
     an undecided question must not read as "no licence needed".
@@ -95,7 +98,7 @@ def _plugin_edition(plugin_type: str, plugin_id: str) -> Optional[str]:
     cannot be read: that is undecided, not "open edition".
     """
     try:
-        return getattr(load_manifest(plugin_type, plugin_id), "edition", "oss")
+        return getattr(load_manifest(plugin_type, plugin_id), "edition", OPEN_EDITION)
     except FileNotFoundError:
         return None
     except Exception as exc:
@@ -105,7 +108,7 @@ def _plugin_edition(plugin_type: str, plugin_id: str) -> Optional[str]:
 def _suite_edition(suite_id: str) -> str:
     """A suite's edition; raises SuiteOwnershipUnknown when it cannot be read."""
     try:
-        return getattr(load_manifest("component", suite_id), "edition", "oss")
+        return getattr(load_manifest("component", suite_id), "edition", OPEN_EDITION)
     except Exception as exc:
         raise SuiteOwnershipUnknown(f"suite {suite_id}: {exc}") from exc
 
@@ -118,13 +121,13 @@ def _suite_name(suite_id: str) -> str:
     return manifest.nameCn or manifest.name or suite_id
 
 
-def owning_pro_suites(plugin_type: str, plugin_id: str, edition: Optional[str] = None) -> list[str]:
-    """The pro-edition suites whose licence covers this plugin.
+def owning_licensed_suites(plugin_type: str, plugin_id: str, edition: Optional[str] = None) -> list[str]:
+    """The licensed-edition suites whose licence covers this plugin.
 
-    A pro-edition suite covers itself. A pro-edition plugin shipped inside
-    such suites is covered by those suites; one shipped by no suite needs only
-    the installation's licence. An open-edition plugin is never gated, even
-    when a pro-edition suite also ships it.
+    A licensed-edition suite covers itself. A licensed-edition plugin shipped
+    inside such suites is covered by those suites; one shipped by no suite
+    needs only the installation's licence. An open-edition plugin is never
+    gated, even when a licensed-edition suite also ships it.
 
     *edition* is the plugin's edition when the caller has read it already;
     otherwise it is read here, and a manifest that cannot be read raises
@@ -132,18 +135,18 @@ def owning_pro_suites(plugin_type: str, plugin_id: str, edition: Optional[str] =
     """
     if edition is None:
         edition = _plugin_edition(plugin_type, plugin_id)
-    if edition != "pro":
+    if not edition_needs_licence(edition):
         return []
     if plugin_type == "component":
         return [plugin_id]
     owners: list[str] = []
     for entry in list_catalog(plugin_type="component"):
-        if entry.edition != "pro":
+        if not edition_needs_licence(entry.edition):
             continue
         try:
             refs = load_manifest("component", entry.id).components
         except Exception as exc:
-            # A pro suite whose manifest cannot be read might own this plugin.
+            # A licensed suite whose manifest cannot be read might own this plugin.
             raise SuiteOwnershipUnknown(f"suite {entry.id}: {exc}") from exc
         if any((ref.type, ref.id) == (plugin_type, plugin_id) for ref in refs):
             owners.append(entry.id)
@@ -160,9 +163,9 @@ class InstallDecision:
 async def install_decision(plugin_type: str, plugin_id: str) -> InstallDecision:
     """May this plugin be installed or updated now?
 
-    Pro-edition plugins need an active licence from a registered checker;
-    those that belong to pro-edition suites need each of those suites
-    licensed as well. The caller words the edition refusal.
+    Licensed-edition plugins need an active licence from a registered
+    checker; those that belong to licensed-edition suites need each of those
+    suites licensed as well. The caller words the edition refusal.
     """
     status = await edition_status()
     try:
@@ -176,15 +179,15 @@ async def install_decision(plugin_type: str, plugin_id: str) -> InstallDecision:
             reason="ownership_unknown",
             message="暂时无法确认这个插件属于哪个场景套件，请稍后重试。",
         )
-    if edition != "pro":
+    if not edition_needs_licence(edition):
         return InstallDecision(allowed=True)
-    if not pro_platform_active(status):
+    if not licensed_edition_active(status):
         return InstallDecision(allowed=False, reason="edition_required")
     # Reads every suite manifest in the catalog: off the event loop.
     try:
         # The edition read above, not a second read that could fail
         # differently and come back as "open edition".
-        owners = await asyncio.to_thread(owning_pro_suites, plugin_type, plugin_id, edition)
+        owners = await asyncio.to_thread(owning_licensed_suites, plugin_type, plugin_id, edition)
     except SuiteOwnershipUnknown as exc:
         log.warning("hub.suite_license.ownership_unknown", {"type": plugin_type, "id": plugin_id, "error": str(exc)})
         return InstallDecision(
@@ -217,7 +220,7 @@ _page_suite_cache: dict[str, tuple[float, tuple, Optional[str]]] = {}
 
 
 class _PageIndex(dict):
-    """Page id -> the pro-edition suite shipping it, as read at ``read_at``
+    """Page id -> the licensed-edition suite shipping it, as read at ``read_at``
     (``time.monotonic()``). The read time travels with the index, so an
     answer taken from it expires with it, whichever index is cached by the
     time that answer is stored."""
@@ -227,7 +230,7 @@ class _PageIndex(dict):
         self.read_at = read_at
 
 
-# Page ids each pro-edition suite ships, read from the hub's packages and the
+# Page ids each licensed-edition suite ships, read from the hub's packages and the
 # installed workspaces, with the ownership signature they were read under.
 # The signature catches changes to what the hub ships; pages added to an
 # installed workspace (or copied out of one) change none of it, so the index
@@ -240,7 +243,7 @@ _cache_lock = threading.Lock()
 
 
 def _ownership_signature() -> tuple:
-    """What decides which pages the pro-edition suites ship: the sealed
+    """What decides which pages the licensed-edition suites ship: the sealed
     packages on offer, every hub index (the bundled one and each registered
     extension root, so registering or dropping a root counts) and the install
     records. Read from shared state on every lookup, so a change made by
@@ -259,20 +262,20 @@ def clear_page_suite_cache() -> None:
         _shipped_generation += 1
 
 
-def is_pro_suite(suite_id: Optional[str]) -> bool:
-    """Whether the suite is a pro-edition one, licensed on its own.
+def is_licensed_suite(suite_id: Optional[str]) -> bool:
+    """Whether the suite is of a licensed edition, licensed on its own.
 
     Raises SuiteOwnershipUnknown when the suite's manifest cannot be read.
     """
-    return bool(suite_id) and _suite_edition(suite_id) == "pro"
+    return bool(suite_id) and edition_needs_licence(_suite_edition(suite_id))
 
 
-def pro_suite_for_workspace(workspace_id: Optional[str]) -> Optional[str]:
-    """The pro-edition suite that ships this workspace, if one does."""
+def licensed_suite_for_workspace(workspace_id: Optional[str]) -> Optional[str]:
+    """The licensed-edition suite that ships this workspace, if one does."""
     if not workspace_id:
         return None
     suite_id = scene_suite_workspace_owners().get(workspace_id)
-    return suite_id if is_pro_suite(suite_id) else None
+    return suite_id if is_licensed_suite(suite_id) else None
 
 
 def _bundled_page_ids(webui_id: str) -> set[str]:
@@ -306,7 +309,7 @@ def _installed_page_ids(workspace_id: str, store: Any) -> set[str]:
 
 
 def shipped_page_owners(store: Any) -> dict[str, str]:
-    """Page id -> pro-edition suite, for every page such a suite ships.
+    """Page id -> licensed-edition suite, for every page such a suite ships.
 
     Ownership follows the page id, not where the page happens to live: a
     suite page copied to the user root on save, or imported again as a
@@ -329,7 +332,7 @@ def shipped_page_owners(store: Any) -> dict[str, str]:
     owners = _PageIndex(read_at)
     try:
         for entry in list_catalog(plugin_type="component"):
-            if entry.edition != "pro":
+            if not edition_needs_licence(entry.edition):
                 continue
             for ref in load_manifest("component", entry.id).components:
                 if ref.type == "webui":
@@ -343,8 +346,8 @@ def shipped_page_owners(store: Any) -> dict[str, str]:
     return owners
 
 
-def pro_suite_for_page(page_id: str, store: Any) -> Optional[str]:
-    """The pro-edition suite a page belongs to, or None when it belongs to none.
+def licensed_suite_for_page(page_id: str, store: Any) -> Optional[str]:
+    """The licensed-edition suite a page belongs to, or None when it belongs to none.
 
     Raises SuiteOwnershipUnknown when that cannot be decided; nothing
     undecided is cached.
@@ -362,7 +365,7 @@ def pro_suite_for_page(page_id: str, store: Any) -> Optional[str]:
         owners = shipped_page_owners(store)
         suite_id = owners.get(page_id)
         if suite_id is None:
-            suite_id = pro_suite_for_workspace(store.workspace_id_for_page(page_id))
+            suite_id = licensed_suite_for_workspace(store.workspace_id_for_page(page_id))
         exists = suite_id is not None or store.page_exists(page_id)
     except SuiteOwnershipUnknown:
         raise
@@ -386,7 +389,7 @@ def pro_suite_for_page(page_id: str, store: Any) -> Optional[str]:
 
 
 async def runtime_suite_license(suite_id: str, status: Optional[dict[str, Any]] = None) -> Optional[SuiteLicense]:
-    """A pro-edition suite's verdict for using it now; None when nothing is enforced.
+    """A licensed-edition suite's verdict for using it now; None when nothing is enforced.
 
     Nothing is enforced under the built-in checker (see the module docstring).
     """

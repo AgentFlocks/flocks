@@ -1332,6 +1332,13 @@ class Session:
             from flocks.storage.session_search import delete_session_documents
 
             permission_keys = await PermissionNext.deletion_storage_keys(session_ids)
+            # Their uploads become candidates in the delete's own transaction;
+            # one that cannot be listed stops the delete rather than be left
+            # behind with no record.
+            from flocks.session.files import session_upload_candidates
+            from flocks.session.message import register_upload_candidates
+
+            upload_candidates = await session_upload_candidates(session_ids)
 
             async def _lock_message_states(db) -> None:
                 if verify is not None:
@@ -1369,6 +1376,8 @@ class Session:
             async def _delete_search_index(db) -> None:
                 from flocks.session.message_pages import remove_sessions
                 await remove_sessions(db, session_ids)
+                for owner, relatives in upload_candidates.items():
+                    await register_upload_candidates(db, owner, relatives)
                 if not Storage.session_search_available():
                     return
                 await delete_session_documents(db, session_ids)
@@ -1414,16 +1423,20 @@ class Session:
                 Message.invalidate_cache(session.id)
                 invalidate_session_callable_tools_cache(session.id)
 
-                try:
-                    from flocks.session.files import remove_session_uploads
+            try:
+                # Their uploads go, except ones another session still names
+                # (an older copy of one of them): those stay candidates.
+                from flocks.session.files import sweep_deleted_session_uploads
 
-                    if await asyncio.to_thread(remove_session_uploads, session.id):
-                        log.info("session.uploads.cleaned", {"session_id": session.id})
-                except Exception as exc:
-                    log.warn("session.uploads.cleanup_failed", {
-                        "session_id": session.id,
-                        "error": str(exc),
-                    })
+                removed = await sweep_deleted_session_uploads(upload_candidates)
+                if removed:
+                    log.info("session.uploads.cleaned", {"session_ids": list(upload_candidates), "removed": removed})
+            except Exception as exc:
+                # The candidates are recorded; a later sweep takes them.
+                log.warn("session.uploads.cleanup_failed", {
+                    "session_ids": list(upload_candidates),
+                    "error": str(exc),
+                })
 
             for session in reversed(sessions):
                 try:
@@ -1973,6 +1986,12 @@ class Session:
                     part_data["id"] = Identifier.ascending("part")
                     part_data["sessionID"] = new_session.id
                     part_data["messageID"] = new_id
+                    if part.type == "file" and part_data.get("url"):
+                        # The fork's own copy: trimming or deleting the
+                        # original then takes nothing the fork still shows.
+                        from flocks.session.files import adopt_session_upload
+
+                        part_data["url"] = await adopt_session_upload(new_session.id, part_data["url"])
                     cloned_part = Message.deserialize_part(part_data)
                     await Message.store_part(new_session.id, new_id, cloned_part)
 

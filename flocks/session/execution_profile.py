@@ -96,7 +96,7 @@ def default_network_mode(entry: str | None) -> str:
     if normalized == "unknown":
         return "require-confirm"
     if normalized == "delegate":
-        # Delegate sessions inherit their mode from the parent in Pro.
+        # Delegate sessions inherit their mode from the parent under a policy extension.
         return "require-confirm"
     return "require-confirm"
 

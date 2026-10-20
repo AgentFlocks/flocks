@@ -372,7 +372,7 @@ class PermissionNext:
             return "allow"
 
         if "delegationChain" not in metadata:
-            # Every caller (session runner, Pro confirmations, tool routes)
+            # Every caller (session runner, extension confirmations, tool routes)
             # gets it, so the sessions that delegated this one show it too.
             chain = await cls._delegation_chain(session_id)
             if chain:
@@ -456,8 +456,8 @@ class PermissionNext:
                 })
             except Exception as exc:
                 log.debug("permission.replied.publish_failed", {"error": str(exc)})
-        # OSS only transports the reply; Pro decides whether it means a
-        # denial, one-time grant, or durable authorization.
+        # Flocks only transports the reply; the policy extension decides whether
+        # it means a denial, one-time grant, or durable authorization.
         return str(reply)
 
     @classmethod

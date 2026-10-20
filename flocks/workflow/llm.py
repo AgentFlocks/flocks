@@ -81,9 +81,10 @@ def llm_hook_context_from_registry(registry: Any) -> Dict[str, Any]:
 
     ``messageID`` is deliberately left empty: hook implementations restore
     redaction placeholders by rewriting the session message with that id,
-    and a workflow must never overwrite a parent chat message. Placeholder
-    restoration for workflow responses is applied locally from the
-    ``llm.before`` output instead.
+    and a workflow must never overwrite a parent chat message. Each call gets
+    a ``model_call_id`` of its own instead (see ``_model_call_metadata``), which
+    is what a registered response transform pairs the response with; without
+    one, the ``llm.before`` replacements are restored locally.
     """
     meta = dict(_DEFAULT_LLM_HOOK_CONTEXT)
     # ``workspace`` lets the pipeline resolve project hooks without a session
@@ -108,12 +109,32 @@ def llm_hook_context_from_registry(registry: Any) -> Dict[str, Any]:
     return meta
 
 
+async def _model_call_metadata(hook_meta: Dict[str, Any]) -> Dict[str, Any]:
+    """``hook_meta`` for one model call: a call id of its own plus the caller.
+
+    A workflow node has no message to name the call by, and every retry is a
+    separate call to an extension that pairs a request with its response, so
+    each attempt gets a fresh id.  ``"workflow"`` is the placeholder session of
+    a run nobody's session started; its caller is the system one.
+    """
+
+    from flocks.session.caller import session_caller
+    from flocks.session.llm_hook_utils import new_model_call_id
+
+    meta = dict(hook_meta)
+    meta["model_call_id"] = new_model_call_id("workflow_llm")
+    session_id = str(meta.get("sessionID") or "").strip()
+    caller = await session_caller(None if session_id in {"", "workflow"} else session_id)
+    meta.update(caller.as_metadata())
+    return meta
+
+
 async def _run_llm_before_stage(
     hook_meta: Dict[str, Any],
     messages: list,
     provider_options: Dict[str, Any],
 ) -> tuple[list, list, Dict[str, Any]]:
-    """Run ``llm.before`` hooks (Pro registers prompt redaction here).
+    """Run ``llm.before`` hooks (an extension registers prompt redaction here).
 
     Returns rewritten messages, placeholder replacements, and effective
     provider options. Mirrors the session runner's request shape.
@@ -707,6 +728,7 @@ class LLMClient:
                 from flocks.session.response_rewriter import transform_complete_response
                 from flocks.provider.options import build_provider_options
 
+                call_meta = await _model_call_metadata(hook_meta)
                 messages = [ChatMessage(role="user", content=prompt + "请使用中文输出。")]
                 # Options belong to the actual attempt's target. The common
                 # hook pipeline must see and be able to transform them too.
@@ -725,7 +747,7 @@ class LLMClient:
                 # ``llm.before`` is the redaction call point; a failing hook must
                 # not let the raw prompt through (same fail-closed rule as sessions).
                 messages, replacements, provider_options = await _run_llm_before_stage(
-                    hook_meta, messages, provider_options,
+                    call_meta, messages, provider_options,
                 )
                 started = time.perf_counter()
                 try:
@@ -740,7 +762,7 @@ class LLMClient:
                 except Exception as exc:
                     try:
                         await _run_llm_after_stage(
-                            hook_meta,
+                            call_meta,
                             content="",
                             duration_ms=int((time.perf_counter() - started) * 1000),
                             error=exc,
@@ -750,12 +772,12 @@ class LLMClient:
                     raise
                 raw_content = str(getattr(response, "content", "") or "")
                 # Same post-processing as every other model call site: a
-                # registered response transform (Pro placeholder restoration /
+                # registered response transform (placeholder restoration /
                 # rewriting) wins, otherwise the llm.before replacements are
                 # restored locally.
                 content = await transform_complete_response(
                     raw_content,
-                    hook_meta,
+                    call_meta,
                     legacy_replacements=replacements,
                 )
                 if content != raw_content:
@@ -765,7 +787,7 @@ class LLMClient:
                         pass
                 try:
                     await _run_llm_after_stage(
-                        hook_meta,
+                        call_meta,
                         content=content,
                         duration_ms=int((time.perf_counter() - started) * 1000),
                     )

@@ -504,7 +504,7 @@ function AgentSection({
 // Agent Card
 // ============================================================================
 
-/** Shipped with the product rather than made by the user: core built-ins and sealed (Pro) agents. */
+/** Shipped with the product rather than made by the user: core built-ins and sealed extension agents. */
 function isBuiltinAgent(agent: Agent): boolean {
   return !!agent.native || !!agent.promptProtected;
 }

@@ -32,7 +32,7 @@ def plugin_root(plugin_type: PluginType, plugin_id: str, *, prefer_bundled: bool
         # The release payload of a sealed plugin exists only while an
         # operation has it unsealed; outside one there is nothing to install
         # from: not the bundled listing of it (if any), nor -- while the
-        # sources cannot answer -- another listing of an id the open hub
+        # sources cannot answer -- another listing of an id a hub listing
         # announces as sealed.
         staged = staged_root(plugin_type, plugin_id)
         if staged is not None:
@@ -90,8 +90,8 @@ def _preview_root(plugin_type: PluginType, plugin_id: str) -> Path:
 
     A plugin delivered sealed has no readable payload outside an install (the
     unsealed copy, while one runs) or a local install of it; a listing of the
-    same id elsewhere -- an extension's sources, the open hub's announcement
-    -- is not that plugin, and is not shown in its place.
+    same id elsewhere -- an extension's sources, the listing announcing it --
+    is not that plugin, and is not shown in its place.
     """
     from flocks.hub.catalog import _system_plugin_roots
     from flocks.hub.sealed import delivered_sealed, staged_root

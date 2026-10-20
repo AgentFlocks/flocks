@@ -98,6 +98,8 @@
     "workflowJsonFormat": "JSON format",
     "actionCancel": "取消",
     "actionRetry": "重试",
+    "actionResume": "在原会话继续",
+    "heldForVerification": "这次运行在动作效果没确认的情况下中断了，不会自动重跑。请先核对下面这些调用是否已经生效，再选择在原会话继续或重试。",
     "actionRerun": "重跑",
     "actionDelete": "删除",
     "confirmDelete": "确定要删除这个任务吗？",

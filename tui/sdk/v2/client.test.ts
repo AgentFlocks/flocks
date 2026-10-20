@@ -52,3 +52,43 @@ describe("createFlocksClient token handling", () => {
     expect(seen).toEqual([{ authorization: null, alt: "abc" }])
   })
 })
+
+describe("createFlocksClient identity (G05)", () => {
+  const prevSession = process.env.FLOCKS_SESSION
+  const prevToken = process.env.FLOCKS_API_TOKEN
+
+  afterEach(() => {
+    if (prevSession === undefined) delete process.env.FLOCKS_SESSION
+    else process.env.FLOCKS_SESSION = prevSession
+    if (prevToken === undefined) delete process.env.FLOCKS_API_TOKEN
+    else process.env.FLOCKS_API_TOKEN = prevToken
+  })
+
+  function recordingFetch(seen: Record<string, string | null>[]): any {
+    return async (req: Request) => {
+      seen.push({ authorization: req.headers.get("authorization"), cookie: req.headers.get("cookie") })
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } })
+    }
+  }
+
+  test("a login session goes as the user's cookie, never with the machine token", async () => {
+    const { createFlocksClient } = await import("./client.ts")
+    writeSecret("machine-token", 1_700_000_000)
+    process.env.FLOCKS_SESSION = "sess-user-1"
+    const seen: Record<string, string | null>[] = []
+    const client = createFlocksClient({ baseUrl: "http://127.0.0.1:9", fetch: recordingFetch(seen) })
+    await client.config.get()
+    expect(seen).toEqual([{ authorization: null, cookie: "flocks_session=sess-user-1" }])
+  })
+
+  test("an explicit token wins over the stored one", async () => {
+    const { createFlocksClient } = await import("./client.ts")
+    writeSecret("machine-token", 1_700_000_000)
+    delete process.env.FLOCKS_SESSION
+    process.env.FLOCKS_API_TOKEN = "tok-explicit"
+    const seen: Record<string, string | null>[] = []
+    const client = createFlocksClient({ baseUrl: "http://127.0.0.1:9", fetch: recordingFetch(seen) })
+    await client.config.get()
+    expect(seen).toEqual([{ authorization: "Bearer tok-explicit", cookie: null }])
+  })
+})

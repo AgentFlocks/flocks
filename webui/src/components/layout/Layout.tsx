@@ -43,7 +43,7 @@ const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/On
 const UpdateModal = lazyLayoutComponent(() => import('@/components/common/UpdateModal'), ['update']);
 const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
 const TokenPolicyNotice = lazyLayoutComponent(() => import('@/components/common/TokenPolicyNotice'), ['notification']);
-import { checkUpdate, getCurrentRelease, type VersionInfo } from '@/api/update';
+import { DEFAULT_UPDATE_CHANNEL, checkUpdate, getCurrentRelease, type VersionInfo } from '@/api/update';
 import {
   ackNotification,
   getActiveNotifications,
@@ -129,7 +129,7 @@ interface LayoutProps {
 function formatUpdateVersion(version?: string | null): string | null {
   const raw = (version || '').trim();
   if (!raw) return null;
-  return /^(pro-)?v/i.test(raw) ? raw : `v${raw}`;
+  return /^([a-z]+-)?v/i.test(raw) ? raw : `v${raw}`;
 }
 
 function currentProductVersion(info: VersionInfo): string | null {
@@ -140,9 +140,9 @@ function latestProductVersion(info: VersionInfo): string | null {
   return info.latest_version || null;
 }
 
-/** A bundle version written as `v<number>` (installers may record it as `pro-v<number>`). */
+/** A bundle version written as `v<number>` (installers may record it as `<edition>-v<number>`). */
 function formatBundleVersion(version?: string | null): string | null {
-  const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
+  const normalized = (version || '').trim().replace(/^[a-z]+-v(?=\d)/i, '').replace(/^v/i, '');
   return normalized ? `v${normalized}` : null;
 }
 
@@ -155,21 +155,21 @@ function buildUpdateNotification(
   if (!info || info.error || !releaseNotes) return null;
   const isZh = language.toLowerCase().startsWith('zh');
   const summary = isZh ? '这里是本次版本值得关注的新功能和变化。' : 'Here are the highlights from this version.';
-  if (info.edition && info.edition !== 'flocks') {
-    // An installed bundle announces its own release, under the name the install shows.
+  if (info.channel && info.channel !== 'flocks' && info.channel !== DEFAULT_UPDATE_CHANNEL) {
+    // A release an update channel installed announces itself, under the name the install shows.
     const bundleVersion = formatBundleVersion(info.current_bundle_version || info.latest_version || info.current_version);
     if (!bundleVersion) return null;
     // Own prefix: a bundle may share its number with a Core release. Core and component versions
     // are part of the key: a component-only update keeps the bundle number.
     const coreVersion = formatBundleVersion(info.current_core_version);
-    const componentVersion = formatBundleVersion(info.current_pro_component_version);
+    const componentVersion = formatBundleVersion(info.current_component_version);
     const releaseKey = [
       bundleVersion,
       coreVersion && `core-${coreVersion}`,
-      componentVersion && `pro-${componentVersion}`,
+      componentVersion && `component-${componentVersion}`,
     ].filter(Boolean).join('-');
     return {
-      id: `whats-new-${info.edition}-${releaseKey}`,
+      id: `whats-new-${info.channel}-${releaseKey}`,
       kind: 'whats_new',
       title: isZh ? `${productName} ${bundleVersion} 更新内容` : `What's new in ${productName} ${bundleVersion}`,
       summary,

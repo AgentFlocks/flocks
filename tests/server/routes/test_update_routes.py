@@ -4,7 +4,6 @@ import os
 import asyncio
 import json
 import secrets
-from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
 import pytest
@@ -97,7 +96,42 @@ async def test_normalize_manual_branch_target_accepts_archive_urls():
     ) == "fix/session-mixed-parts-read-merge"
 
 
-async def test_check_version_requires_admin_for_flockspro(monkeypatch: pytest.MonkeyPatch):
+class _ExtensionChannel:
+    """An update channel an installed extension would register."""
+
+    name = "extension"
+
+    def __init__(self):
+        self.released: list[str | None] = []
+
+    async def check(self, *, locale=None, remote=True):
+        from flocks.updater.models import VersionInfo
+
+        return VersionInfo(current_version="v1", latest_version="v2", has_update=True)
+
+    async def release(self, *, version=None):
+        from flocks.updater.channels import ChannelRelease, InstallPlan
+
+        self.released.append(version)
+        return ChannelRelease(
+            version=version or "v2",
+            plan=lambda root, current, work: InstallPlan(source_root=None, version=current),
+            archive_url="https://releases.example.test/extension-v2.tar.gz",
+            label="extension bundle",
+        )
+
+
+@pytest.fixture
+def extension_channel():
+    from flocks.updater.channels import register_update_channel, unregister_update_channel
+
+    channel = _ExtensionChannel()
+    register_update_channel(channel)
+    yield channel
+    unregister_update_channel(channel.name)
+
+
+async def test_check_version_requires_admin_for_an_extension_channel(monkeypatch: pytest.MonkeyPatch, extension_channel):
     from flocks.server.routes import update as update_routes
 
     called = False
@@ -108,16 +142,86 @@ async def test_check_version_requires_admin_for_flockspro(monkeypatch: pytest.Mo
     async def _fake_check_update(**kwargs):
         nonlocal called
         called = True
-        raise AssertionError("Pro update checks must not reach updater before admin auth")
+        raise AssertionError("Extension channel checks must not reach updater before admin auth")
 
     monkeypatch.setattr(update_routes, "require_admin", _deny_admin)
     monkeypatch.setattr(update_routes, "check_update", _fake_check_update)
 
-    with pytest.raises(HTTPException) as exc:
-        await update_routes.check_version(_request(), locale=None, edition="flockspro")
-
-    assert exc.value.status_code == status.HTTP_401_UNAUTHORIZED
+    # ``edition`` is the name older clients still send.
+    for params in ({"channel": "extension"}, {"edition": "extension"}):
+        with pytest.raises(HTTPException) as exc:
+            await update_routes.check_version(_request(), locale=None, **params)
+        assert exc.value.status_code == status.HTTP_401_UNAUTHORIZED
     assert called is False
+
+
+async def test_an_unknown_channel_is_refused(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import update as update_routes
+
+    async def _fake_check_update(**kwargs):
+        raise AssertionError("an unknown channel must not reach the updater")
+
+    monkeypatch.setattr(update_routes, "require_admin", lambda _request: object())
+    monkeypatch.setattr(update_routes, "check_update", _fake_check_update)
+
+    for call in (
+        update_routes.check_version(_request(), locale=None, channel="nobody"),
+        update_routes.apply_update(_request(), target_version=None, locale=None, channel="nobody"),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await call
+        assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+
+
+async def test_apply_installs_what_the_extension_channel_releases(monkeypatch: pytest.MonkeyPatch, extension_channel):
+    from flocks.server.routes import update as update_routes
+    from flocks.updater.models import UpdateProgress, VersionInfo
+
+    seen: dict[str, object] = {}
+
+    async def _fake_check_update(**kwargs):
+        seen["check"] = kwargs
+        return VersionInfo(current_version="v1", latest_version="v2", has_update=True)
+
+    async def _fake_perform_update(version, **kwargs):
+        seen["perform"] = (version, kwargs)
+        yield UpdateProgress(stage="done", message="ok", success=True)
+
+    monkeypatch.setattr(update_routes, "require_admin", lambda _request: object())
+    monkeypatch.setattr(update_routes, "detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(update_routes, "check_update", _fake_check_update)
+    monkeypatch.setattr(update_routes, "perform_update", _fake_perform_update)
+
+    response = await update_routes.apply_update(_request(), target_version=None, locale=None, channel="extension")
+    body = "".join([chunk async for chunk in response.body_iterator])
+
+    assert '"stage":"done"' in body
+    assert seen["check"] == {"locale": None, "channel": "extension"}
+    version, kwargs = seen["perform"]
+    assert version == "v2"
+    assert extension_channel.released == ["v2"]
+    assert kwargs["release"].label == "extension bundle"
+
+
+async def test_apply_reports_a_channel_that_cannot_release(monkeypatch: pytest.MonkeyPatch, extension_channel):
+    from flocks.server.routes import update as update_routes
+
+    async def _refuse(*, version=None):
+        raise ValueError("manifest frozen")
+
+    async def _fake_perform_update(version, **kwargs):
+        raise AssertionError("nothing to install without a release")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(extension_channel, "release", _refuse)
+    monkeypatch.setattr(update_routes, "require_admin", lambda _request: object())
+    monkeypatch.setattr(update_routes, "detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(update_routes, "perform_update", _fake_perform_update)
+
+    response = await update_routes.apply_update(_request(), target_version="v2", locale=None, channel="extension")
+    body = "".join([chunk async for chunk in response.body_iterator])
+
+    assert '"stage": "error"' in body and "manifest frozen" in body
 
 
 async def test_check_version_keeps_flocks_channel_public(monkeypatch: pytest.MonkeyPatch):
@@ -128,7 +232,7 @@ async def test_check_version_keeps_flocks_channel_public(monkeypatch: pytest.Mon
         raise AssertionError("Flocks channel check should not require admin at route level")
 
     async def _fake_check_update(**kwargs):
-        assert kwargs == {"locale": "zh-CN", "force_console_manifest": False}
+        assert kwargs == {"locale": "zh-CN", "channel": None}
         return VersionInfo(current_version="v2026.5.9")
 
     monkeypatch.setattr(update_routes, "require_admin", _deny_admin)
@@ -227,103 +331,169 @@ async def test_current_release_http_allows_logged_in_member(client, monkeypatch:
     assert response.json()["release_notes"] == "Full official notes by @author in #749"
 
 
-def _write_pro_install_marker(**fields) -> None:
-    marker = Path(os.environ["FLOCKS_ROOT"]) / "run" / "pro-bundle-installed.json"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "bundle_version": "v2026.10.16",
-        "core_version": "v2026.10.15",
-        "flockspro_component_version": "2026.10.16",
-        **fields,
-    }
-    marker.write_text(json.dumps(payload), encoding="utf-8")
+class _InstalledChannel:
+    """An update channel that installed a release of its own here."""
+
+    name = "bundle"
+
+    def __init__(self):
+        self.key: str | None = "component-1"
+        self.looked_up: list[tuple[str | None, bool]] = []
+
+    async def check(self, *, locale=None, remote=True):
+        from flocks.updater.models import VersionInfo
+
+        return VersionInfo(current_version="v2026.10.16")
+
+    async def release(self, *, version=None):
+        raise AssertionError("nothing is installed here")
+
+    def installed_release_key(self):
+        return self.key
+
+    async def installed_release(self, *, remote=True):
+        from flocks.updater.models import VersionInfo
+
+        self.looked_up.append((self.key, remote))
+        return VersionInfo(
+            current_version="v2026.10.16",
+            latest_version="v2026.10.16",
+            current_bundle_version="v2026.10.16",
+            current_core_version="v2026.10.15",
+            current_component_version=self.key,
+            release_notes=f"notes for {self.key}",
+        )
 
 
-async def test_current_release_announces_installed_pro_bundle_notes(monkeypatch: pytest.MonkeyPatch):
+@pytest.fixture
+def installed_channel():
+    from flocks.updater.channels import register_update_channel, unregister_update_channel
+
+    channel = _InstalledChannel()
+    register_update_channel(channel)
+    yield channel
+    unregister_update_channel(channel.name)
+
+
+async def test_current_release_announces_what_a_channel_installed(monkeypatch: pytest.MonkeyPatch, installed_channel):
     from flocks.server.routes import update as update_routes
 
-    _write_pro_install_marker(release_notes="### Flocks Pro\n\n- 报告中心不再列出空报告")
-
-    async def _oss_release(_version):
-        raise AssertionError("a Pro install must not announce the OSS Core notes")
+    async def _core_release(_version):
+        raise AssertionError("a channel's install must not be announced with the Core notes")
 
     monkeypatch.setattr(update_routes, "require_user", lambda _request: object())
-    monkeypatch.setattr(update_routes, "get_current_version", lambda: "2026.10.15")
-    monkeypatch.setattr(update_routes, "get_installed_release", _oss_release)
+    monkeypatch.setattr(update_routes, "get_installed_release", _core_release)
 
     info = await update_routes.current_release(_request())
 
-    assert info.edition == "flockspro"
+    assert info.channel == "bundle"
     assert info.current_version == info.latest_version == "v2026.10.16"
     assert info.current_bundle_version == "v2026.10.16"
     assert info.current_core_version == "v2026.10.15"
-    assert info.release_notes == "### Flocks Pro\n\n- 报告中心不再列出空报告"
+    assert info.release_notes == "notes for component-1"
 
 
-async def test_current_release_caches_pro_lookup_per_install_marker(monkeypatch: pytest.MonkeyPatch):
+async def test_current_release_asks_a_channel_once_per_installed_release(
+    monkeypatch: pytest.MonkeyPatch, installed_channel
+):
+    from flocks.server.routes import update as update_routes
+
+    monkeypatch.setattr(update_routes, "require_user", lambda _request: object())
+
+    await asyncio.gather(*[update_routes.current_release(_request()) for _ in range(3)])
+    await update_routes.current_release(_request())
+    # What the channel installed changed without a new version number (a component-only update).
+    installed_channel.key = "component-2"
+    second = await update_routes.current_release(_request())
+
+    assert [key for key, _remote in installed_channel.looked_up] == ["component-1", "component-2"]
+    assert second.current_component_version == "component-2"
+    assert second.release_notes == "notes for component-2"
+
+
+async def test_current_release_channel_lookup_follows_the_updater_switch(
+    monkeypatch: pytest.MonkeyPatch, installed_channel
+):
+    from flocks.config.config import UpdaterConfig
+    from flocks.server.routes import update as update_routes
+    from flocks.updater import updater
+
+    async def _disabled():
+        return UpdaterConfig(enabled=False)
+
+    monkeypatch.setattr(update_routes, "require_user", lambda _request: object())
+    monkeypatch.setattr(updater, "_get_updater_config", _disabled)
+
+    await update_routes.current_release(_request())
+
+    assert installed_channel.looked_up == [("component-1", False)]
+
+
+@pytest.mark.parametrize("failure", ["installed_nothing", "key_failed"])
+async def test_current_release_falls_back_to_the_core_notes(
+    monkeypatch: pytest.MonkeyPatch, installed_channel, failure
+):
     from flocks.server.routes import update as update_routes
     from flocks.updater.models import VersionInfo
 
-    looked_up: list[tuple[str, str]] = []
+    if failure == "installed_nothing":
+        installed_channel.key = None
+    else:
+        def _broken_key():
+            raise OSError("marker unreadable")
 
-    async def _pro_release(marker):
-        looked_up.append((marker["bundle_version"], marker["flockspro_component_version"]))
-        return VersionInfo(
-            current_version=marker["bundle_version"],
-            latest_version=marker["bundle_version"],
-            edition="flockspro",
-            release_notes="Pro notes",
-        )
+        monkeypatch.setattr(installed_channel, "installed_release_key", _broken_key)
+
+    async def _core_release(version):
+        return VersionInfo(current_version=version, latest_version=version, release_notes="Core notes")
 
     monkeypatch.setattr(update_routes, "require_user", lambda _request: object())
-    monkeypatch.setattr(update_routes, "get_installed_pro_release", _pro_release)
+    monkeypatch.setattr(update_routes, "get_current_version", lambda: "2026.10.15")
+    monkeypatch.setattr(update_routes, "get_installed_release", _core_release)
 
-    _write_pro_install_marker()
-    await asyncio.gather(*[update_routes.current_release(_request()) for _ in range(3)])
-    await update_routes.current_release(_request())
-    _write_pro_install_marker(flockspro_component_version="2026.10.17")
-    await update_routes.current_release(_request())
-    _write_pro_install_marker(bundle_version="v2026.10.20")
-    upgraded = await update_routes.current_release(_request())
+    info = await update_routes.current_release(_request())
 
-    assert looked_up == [
-        ("v2026.10.16", "2026.10.16"),
-        ("v2026.10.16", "2026.10.17"),
-        ("v2026.10.20", "2026.10.16"),
-    ]
-    assert upgraded.latest_version == "v2026.10.20"
+    assert info.channel == "flocks"
+    assert info.release_notes == "Core notes"
+    assert installed_channel.looked_up == []
 
 
-async def test_current_release_refreshes_after_a_same_number_component_update(monkeypatch: pytest.MonkeyPatch):
+async def test_current_release_reports_a_failed_channel_lookup_without_notes(
+    monkeypatch: pytest.MonkeyPatch, installed_channel
+):
     from flocks.server.routes import update as update_routes
 
+    async def _failing(*, remote=True):
+        raise RuntimeError("console unreachable")
+
+    async def _core_release(_version):
+        raise AssertionError("a channel's install must not be announced with the Core notes")
+
     monkeypatch.setattr(update_routes, "require_user", lambda _request: object())
+    monkeypatch.setattr(update_routes, "get_installed_release", _core_release)
+    monkeypatch.setattr(installed_channel, "installed_release", _failing)
 
-    _write_pro_install_marker(flockspro_component_version="v2026.6.1", release_notes="组件 v2026.6.1 的说明")
-    first = await update_routes.current_release(_request())
-    _write_pro_install_marker(flockspro_component_version="v2026.6.2", release_notes="组件 v2026.6.2 的说明")
-    second = await update_routes.current_release(_request())
+    info = await update_routes.current_release(_request())
 
-    assert first.release_notes == "组件 v2026.6.1 的说明"
-    assert second.current_bundle_version == first.current_bundle_version == "v2026.10.16"
-    assert second.current_pro_component_version == "v2026.6.2"
-    assert second.release_notes == "组件 v2026.6.2 的说明"
+    assert info.channel == "bundle"
+    assert info.release_notes is None
 
 
-async def test_current_release_http_returns_pro_notes_to_members(client, monkeypatch: pytest.MonkeyPatch):
+async def test_current_release_http_returns_channel_notes_to_members(
+    client, monkeypatch: pytest.MonkeyPatch, installed_channel
+):
     from flocks.auth.service import AuthService
     from flocks.server.routes import update as update_routes
 
     password = secrets.token_urlsafe(18)  # secret-guard: allow - generated test credential
-    await AuthService.bootstrap_admin(username="pro-release-admin", password=password)
-    member = await AuthService._create_user_internal(username="pro-release-member", password=password)
+    await AuthService.bootstrap_admin(username="channel-release-admin", password=password)
+    member = await AuthService._create_user_internal(username="channel-release-member", password=password)
     browser_headers = {"sec-fetch-mode": "cors"}
 
-    async def _oss_release(_version):
-        raise AssertionError("a Pro install must not announce the OSS Core notes")
+    async def _core_release(_version):
+        raise AssertionError("a channel's install must not be announced with the Core notes")
 
-    monkeypatch.setattr(update_routes, "get_installed_release", _oss_release)
-    _write_pro_install_marker(release_notes="Pro notes for members")
+    monkeypatch.setattr(update_routes, "get_installed_release", _core_release)
 
     login = await client.post(
         "/api/auth/login",
@@ -335,9 +505,9 @@ async def test_current_release_http_returns_pro_notes_to_members(client, monkeyp
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["edition"] == "flockspro"
+    assert body["channel"] == "bundle"
     assert body["current_bundle_version"] == "v2026.10.16"
-    assert body["release_notes"] == "Pro notes for members"
+    assert body["release_notes"] == "notes for component-1"
 
 
 async def test_check_version_reuses_cached_flocks_result(monkeypatch: pytest.MonkeyPatch):
@@ -349,7 +519,7 @@ async def test_check_version_reuses_cached_flocks_result(monkeypatch: pytest.Mon
     async def _fake_check_update(**kwargs):
         nonlocal calls
         calls += 1
-        assert kwargs == {"locale": "zh-CN", "force_console_manifest": False}
+        assert kwargs == {"locale": "zh-CN", "channel": None}
         return VersionInfo(current_version=f"v{calls}")
 
     monkeypatch.setattr(update_routes, "check_update", _fake_check_update)
@@ -526,7 +696,7 @@ async def test_manual_webui_apply_update_upgrades_to_confirmed_branch(
         )
 
     async def _manual_branch_update_info(**kwargs):
-        assert kwargs["force_console_manifest"] is False
+        assert kwargs.get("channel") is None
         return VersionInfo(
             current_version="manual-real-upgrade-test",
             latest_version=version_label,

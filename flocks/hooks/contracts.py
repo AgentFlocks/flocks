@@ -79,7 +79,7 @@ def merge_redacted_rewrite(original: Any, rewritten: Any) -> Any:
     A hook written against the flat legacy ``tool.input`` rewrites it in place,
     outside the ``redact_sensitive`` view that policies judge.  A value at a
     redacted position reads ``[REDACTED]`` to every policy before and after such
-    a rewrite, so it can be taken over (the Pro redaction hook restores secrets
+    a rewrite, so it can be taken over (a redaction hook restores secrets
     this way); anything a policy can see has to arrive as
     ``validated_input_patch``.  Keys the rewrite added or dropped are ignored.
     """

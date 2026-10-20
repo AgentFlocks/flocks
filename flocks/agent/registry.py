@@ -21,6 +21,7 @@ import importlib
 import json
 import os
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -377,6 +378,11 @@ class Agent:
                 log.warn("agent.registry.permission_to_tools.error", {"error": str(exc)})
                 return []
 
+        from flocks.agent.managed import managed_agent_ids, managed_agents
+
+        managed_names = managed_agent_ids()
+        disabled_by_config: Set[str] = set()
+
         if cfg.agent:
             for key, value in cfg.agent.items():
                 alias_key = AGENT_ALIASES.get(key, key)
@@ -385,6 +391,16 @@ class Agent:
                 key = alias_key
                 if value.disable:
                     result.pop(key, None)
+                    disabled_by_config.add(key)
+                    continue
+                if key in managed_names:
+                    # The deployment's definition is not overlaid; only
+                    # disabling it (above) and its group (below) are local.
+                    if any(
+                        field != "group" and setting not in (None, {}, [])
+                        for field, setting in value.model_dump(exclude_defaults=True).items()
+                    ):
+                        log.warn("agent.managed.config_override_ignored", {"name": key})
                     continue
 
                 item = result.get(key)
@@ -439,6 +455,22 @@ class Agent:
                     if isinstance(value.permission, dict):
                         item.tools = _permission_dict_to_tools(value.permission)
 
+        # ── ③b Managed agents ─────────────────────────────────────────────
+        # What the deployment manages (flocks.content.managed) replaces every
+        # local agent of the same name -- YAML, plugin, Storage or config --
+        # and a name whose definition is unusable stays reserved instead of
+        # falling back to a local copy.
+        for name in managed_names:
+            result.pop(name, None)
+        for name, info in managed_agents().items():
+            if name in disabled_by_config:
+                continue
+            if user_perms or cli_overrides:
+                # The global and CLI restrictions bind a managed agent like
+                # any YAML one (step ②); only its definition is the deployment's.
+                info = info.model_copy(update={"permission": merge(info.permission, user_perms, cli_overrides)})
+            result[name] = info
+
         _apply_delegatable_overrides(result)
 
         # enabled_agents whitelist filter
@@ -454,8 +486,13 @@ class Agent:
             available_workflows,
         )
 
-        # Merge runtime-registered custom agents
-        result.update(Agent._custom_agents)
+        # Merge runtime-registered custom agents -- except over a managed name,
+        # which no in-process registration may take over either.
+        for name, info in Agent._custom_agents.items():
+            if name in managed_names:
+                log.warn("agent.managed.registration_ignored", {"name": name})
+                continue
+            result[name] = info
 
         # Group overlays also apply to runtime/Storage registrations. Copy the
         # result rather than mutating the registered source definition.
@@ -516,6 +553,19 @@ class Agent:
         except Exception:
             pass
 
+    # Generation of the managed-content snapshot the cached agents were built
+    # from (flocks.content.managed); a refresh that changed it rebuilds them.
+    _managed_generation: int = -1
+
+    @classmethod
+    def _sync_managed_content_cache(cls) -> None:
+        from flocks.content.managed import ManagedContent
+
+        generation = ManagedContent.generation()
+        if generation != cls._managed_generation:
+            cls._managed_generation = generation
+            cls.invalidate_cache()
+
     @classmethod
     def _sync_delegatable_settings_cache(cls) -> None:
         """Invalidate in-process agent cache when delegatable overrides change on disk."""
@@ -543,6 +593,7 @@ class Agent:
         # Detect cross-worker skill-settings changes before serving cached state.
         Agent._sync_skill_settings_cache()
         Agent._sync_delegatable_settings_cache()
+        Agent._sync_managed_content_cache()
         key = Instance.get_directory() or "default"
         if Agent._state_generations.get(key) != Agent._cache_generation:
             Agent._state_accessor.invalidate()  # type: ignore[attr-defined]
@@ -575,11 +626,51 @@ class Agent:
 
     # ── Lookup ──────────────────────────────────────────────────────────────
 
+    #: Managed agents as each task first got them: (task scope, name) -> agent.
+    #: scope -> agent name -> the definition that task got first; dropped when the task ends.
+    _task_agents: "dict[str, dict[str, AgentInfo]]" = {}
+    _task_agents_hooked = False
+
     @classmethod
     async def get(cls, agent: str) -> Optional[AgentInfo]:
         agents = await cls.state()
         resolved = AGENT_ALIASES.get(agent, agent)
-        return agents.get(resolved)
+        return cls._as_the_task_got_it(resolved, agents.get(resolved))
+
+    @classmethod
+    def _as_the_task_got_it(cls, name: str, current: Optional[AgentInfo]) -> Optional[AgentInfo]:
+        """A managed agent stays as the running task first got it.
+
+        A refresh of the managed content rebuilds every agent; a run already
+        using one keeps the definition it started with (see
+        flocks.content.managed.task_scope).  One the deployment no longer
+        offers is not served, not even as the run got it earlier.
+        """
+        from flocks.agent.managed import managed_agent_ids
+        from flocks.content.managed import ManagedContent, current_task_scope
+        from flocks.content.models import ContentKind
+
+        scope = current_task_scope()
+        if scope is None or name not in managed_agent_ids():
+            return current
+        if name not in ManagedContent.available_ids(ContentKind.AGENT):
+            return None
+        if not cls._task_agents_hooked:
+            from flocks.content.managed import on_task_scope_end
+
+            on_task_scope_end(cls._release_task_agents)
+            cls._task_agents_hooked = True
+        held = cls._task_agents.setdefault(scope, {})
+        pinned = held.get(name)
+        if pinned is not None:
+            return pinned
+        if current is not None:
+            held[name] = current
+        return current
+
+    @classmethod
+    def _release_task_agents(cls, scope: str) -> None:
+        cls._task_agents.pop(scope, None)
 
     @classmethod
     async def get_group_definition(cls, name: str) -> Optional[AgentInfo]:
@@ -587,12 +678,19 @@ class Agent:
 
         There is no separate ownership cache: active agents reuse their loaded
         metadata; disabled definitions use the same first-wins native discovery.
+        A name the deployment manages has no local definition: a file of that
+        name is not the managed agent, whether that one is available or not.
         """
+        from flocks.agent.managed import managed_agent_ids
+
         agent = await cls.get(name)
         if agent is not None:
             return agent
+        resolved = AGENT_ALIASES.get(name, name)
+        if resolved in managed_agent_ids():
+            return None
         definitions = await asyncio.to_thread(scan_and_load)
-        return definitions.get(AGENT_ALIASES.get(name, name))
+        return definitions.get(resolved)
 
     @classmethod
     async def validate_group_settings(cls, updates: Dict[str, Any]) -> None:

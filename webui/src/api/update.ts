@@ -24,13 +24,15 @@ export const DEFAULT_UPDATE_CHANNEL = 'default';
 export interface VersionInfo {
   current_version: string;
   latest_version: string | null;
-  /** Channel the answer applies to (`default` unless the server reports another). */
+  /**
+   * Channel the answer applies to (`default` unless the server reports another).
+   * For the installed release: `flocks` for this project's own, else the update
+   * channel that installed a release of its own on top of it.
+   */
   channel?: string;
-  /** What the installed release is: the Core (`flocks`) or a bundle installed on top of it. */
-  edition?: string;
   current_core_version?: string | null;
   current_bundle_version?: string | null;
-  current_pro_component_version?: string | null;
+  current_component_version?: string | null;
   has_update: boolean;
   release_notes: string | null;
   release_url: string | null;
@@ -62,7 +64,7 @@ export const checkUpdate = async (
   const response = await client.get<VersionInfo>('/api/update/check', {
     params: {
       ...(locale ? { locale } : {}),
-      ...(channel && channel !== DEFAULT_UPDATE_CHANNEL ? { edition: channel } : {}),
+      ...(channel && channel !== DEFAULT_UPDATE_CHANNEL ? { channel } : {}),
       ...(force ? { force: true } : {}),
     },
   });
@@ -105,7 +107,7 @@ export const applyUpdate = async (
 ): Promise<void> => {
   const params = new URLSearchParams({ target_version: targetVersion });
   if (locale) params.set('locale', locale);
-  if (channel && channel !== DEFAULT_UPDATE_CHANNEL) params.set('edition', channel);
+  if (channel && channel !== DEFAULT_UPDATE_CHANNEL) params.set('channel', channel);
   const url = `/api/update/apply?${params.toString()}`;
   const controller = new AbortController();
   // Long-running updates may take many minutes, but each silent wait is bounded.

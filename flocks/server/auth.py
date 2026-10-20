@@ -16,7 +16,9 @@ from starlette.requests import HTTPConnection
 from flocks.auth.context import (
     API_TOKEN_SERVICE_USER_ID,
     AuthUser,
+    reset_current_auth_session,
     reset_current_auth_user,
+    set_current_auth_session,
     set_current_auth_user,
 )
 from flocks.auth.service import AuthService
@@ -349,8 +351,8 @@ async def _apply_auth_for_request(request: HTTPConnection):
     (see `PUBLIC_PATHS` / `PUBLIC_PREFIXES`) bypass auth.
     """
     if auth_middleware_exempt(request.url.path, request.scope.get("method")):
-        token = set_current_auth_user(None)
-        return None, token, None
+        bound = _bind_auth_context(None)
+        return None, bound, None
 
     if _has_session_cookie(request):
         bootstrapped = await AuthService.has_users()
@@ -375,8 +377,8 @@ async def _apply_auth_for_request(request: HTTPConnection):
                 detail="当前账号必须先修改密码后才能继续使用",
             )
         request.state.auth_user = auth_user
-        token = set_current_auth_user(auth_user)
-        return None, token, auth_user
+        bound = _bind_auth_context(auth_user, session_id)
+        return None, bound, auth_user
 
     # Non-browser clients must authenticate with an API token because
     # localhost is not a reliable auth boundary.
@@ -390,8 +392,8 @@ async def _apply_auth_for_request(request: HTTPConnection):
                 )
             token_user = _build_api_token_user()
             request.state.auth_user = token_user
-            token = set_current_auth_user(token_user)
-            return None, token, token_user
+            bound = _bind_auth_context(token_user)
+            return None, bound, token_user
 
         expected = _get_expected_api_token()
         if not expected:
@@ -428,9 +430,27 @@ async def _apply_auth_for_request(request: HTTPConnection):
             detail="当前账号必须先修改密码后才能继续使用",
         )
     request.state.auth_user = auth_user
-    token = set_current_auth_user(auth_user)
-    return None, token, auth_user
+    bound = _bind_auth_context(auth_user, session_id)
+    return None, bound, auth_user
+
+
+class _AuthContextToken:
+    """Both context values a request sets: who it is, and the login session it came with."""
+
+    __slots__ = ("user", "session")
+
+    def __init__(self, user, session) -> None:
+        self.user = user
+        self.session = session
+
+
+def _bind_auth_context(user: Optional[AuthUser], session_id: Optional[str] = None) -> _AuthContextToken:
+    return _AuthContextToken(set_current_auth_user(user), set_current_auth_session(session_id))
 
 
 def clear_auth_context(token) -> None:
+    if isinstance(token, _AuthContextToken):
+        reset_current_auth_session(token.session)
+        reset_current_auth_user(token.user)
+        return
     reset_current_auth_user(token)

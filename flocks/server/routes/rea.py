@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from flocks.rea import service
+from flocks.rea.installer import ReaInstallError
 from flocks.rea.uninstaller import (
     OperationRunning,
     ReaUninstaller,
@@ -74,5 +75,8 @@ async def rea_uninstall(body: UninstallRequest, request: Request):
                 "message": "Another Flocks process on this host is installing or uninstalling REA; try again when it finished.",
             },
         ) from exc
+    except ReaInstallError as exc:
+        # A managed install: REA comes and goes with the deployment's release.
+        raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc)}) from exc
     log.info("rea.uninstall.started", {"stop_tasks": body.stopTasks})
     return await service.build_status(user)

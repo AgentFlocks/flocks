@@ -285,11 +285,11 @@ def _declared_sealed(plugin_type: str, plugin_id: str) -> bool:
         return False
 
 
-def _bundled_manifest(plugin_type: str, plugin_id: str) -> Optional[dict]:
+def _listed_manifest(root: Path, plugin_type: str, plugin_id: str) -> Optional[dict]:
+    """The manifest one hub root lists for this plugin, read from that root alone."""
     from flocks.hub.catalog import _direct_manifest_path
-    from flocks.hub.paths import get_bundled_hub_root
 
-    path = _direct_manifest_path(get_bundled_hub_root(), plugin_type, plugin_id)
+    path = _direct_manifest_path(root, plugin_type, plugin_id)
     if path is None:
         return None
     try:
@@ -303,24 +303,18 @@ def _announces_sealed(manifest: Optional[dict]) -> bool:
     return bool(manifest) and (manifest.get("source") or {}).get("kind") == "sealed"
 
 
-def announced_sealed(plugin_type: str, plugin_id: str) -> bool:
-    """Whether the open hub announces this plugin as delivered sealed --
-    whatever an extension root lists under the same id. Read from the bundled
-    hub only: the plugin's own manifest there says so or, when the open hub
-    has none for it, a suite announced as sealed lists it as a part."""
-    own = _bundled_manifest(plugin_type, plugin_id)
+def _root_announces_sealed(root: Path, plugin_type: str, plugin_id: str) -> bool:
+    own = _listed_manifest(root, plugin_type, plugin_id)
     if own is not None:
         return _announces_sealed(own)
-    from flocks.hub.paths import get_bundled_hub_root
-
     try:
-        index = json.loads((get_bundled_hub_root() / "index.json").read_text(encoding="utf-8"))
+        index = json.loads((root / "index.json").read_text(encoding="utf-8"))
     except Exception:
         return False
     for entry in index.get("plugins") or []:
         if not isinstance(entry, dict) or entry.get("type") != "component":
             continue
-        suite = _bundled_manifest("component", str(entry.get("id") or ""))
+        suite = _listed_manifest(root, "component", str(entry.get("id") or ""))
         if not _announces_sealed(suite):
             continue
         for ref in suite.get("components") or []:
@@ -329,12 +323,24 @@ def announced_sealed(plugin_type: str, plugin_id: str) -> bool:
     return False
 
 
+def announced_sealed(plugin_type: str, plugin_id: str) -> bool:
+    """Whether a hub listing announces this plugin as delivered sealed --
+    whatever another root lists under the same id. Each root is read on its
+    own (the bundled hub and every extension root), not the merged catalog,
+    where a later root's plain sources would hide the announcement: in a
+    root, the plugin's own manifest says so or, when that root has none for
+    it, a suite it announces as sealed lists it as a part."""
+    from flocks.hub.paths import hub_roots
+
+    return any(_root_announces_sealed(root, plugin_type, plugin_id) for root in hub_roots())
+
+
 def delivered_sealed(plugin_type: str, plugin_id: str) -> bool:
     """Whether this plugin is delivered sealed, as far as can be told now.
 
     A source provides it, or the manifest in effect says so. While the
     sources cannot answer, the catalog falls back to other listings of the
-    same id, so what the open hub announces as sealed counts as sealed then.
+    same id, so what a hub listing announces as sealed counts as sealed then.
     The sources are asked first: a listing the catalog read while they could
     not answer is not taken for theirs, whatever they answer a moment later.
     """
@@ -366,13 +372,17 @@ def _plan(plugin_type: str, plugin_id: str) -> list[tuple[list[SealedPlugin], bo
             refs = load_manifest("component", plugin_id).components
         except Exception:
             refs = []  # the install itself reports an unreadable suite
+        from flocks.hub.installer import _is_managed_ref
+
         for ref in refs:
+            if _is_managed_ref(ref.type, ref.id):
+                continue  # served by the deployment: nothing to unseal for it
             (optional if ref.optional else required).append((ref.type, ref.id))
 
     try:
         plugins = sealed_plugins()
     except SealedSourceUnavailable as exc:
-        # What the sources deliver is unknown right now. A plugin the open hub
+        # What the sources deliver is unknown right now. A plugin a hub listing
         # announces as sealed waits for them rather than be installed from
         # another listing of the same id (an extension's sources, say).
         if any(_declared_sealed(*key) or announced_sealed(*key) for key in required):

@@ -297,14 +297,51 @@ async def extract_and_save(
     memory_text: Optional[str] = None
     extraction_completed = False
     try:
+        # The prompt carries the conversation itself, so it goes through the
+        # same request and response stages as every other model call: an
+        # extension that processes outgoing prompts must see this one too, and
+        # undo that processing on what comes back.  A failing stage raises
+        # before anything is sent, and the summary is saved instead.
+        from flocks.session.llm_hook_utils import (
+            model_call_hook_metadata,
+            run_llm_before_for_call,
+        )
+        from flocks.session.response_rewriter import transform_complete_response
+
+        hook_metadata = await model_call_hook_metadata(
+            session_id=session_id,
+            agent="memory.flush",
+            purpose="memory_extraction",
+            provider_id=(
+                getattr(provider, "provider_id", None)
+                or getattr(provider, "id", None)
+                or provider.__class__.__name__
+            ),
+            model_id=model_id,
+        )
+        request_messages, provider_options, replacements = await run_llm_before_for_call(
+            hook_metadata,
+            [ChatMessage(role="user", content=memory_prompt)],
+            {"max_tokens": 1500},
+        )
+        provider_options.setdefault("max_tokens", 1500)
         mem_response = await provider.chat(
             model_id=model_id,
-            messages=[ChatMessage(role="user", content=memory_prompt)],
-            max_tokens=1500,
+            messages=request_messages,
+            **provider_options,
         )
         if mem_response and mem_response.content:
+            # Completed only once the response has been processed too: if the
+            # transform fails, nothing from this response is saved and the
+            # summary below stands in for it.
+            content = (
+                await transform_complete_response(
+                    mem_response.content,
+                    hook_metadata,
+                    legacy_replacements=replacements,
+                )
+            ).strip()
             extraction_completed = True
-            content = mem_response.content.strip()
             if content.upper() != "NOTHING":
                 memory_text = content
     except Exception as e:

@@ -742,7 +742,7 @@ class AuthService(metaclass=_AuthServiceFacadeMeta):
     """
     Authentication facade.
 
-    The OSS default backend is ``LocalAuthBackend``. Flocks Pro packages can
+    The default backend is ``LocalAuthBackend``. An installed extension can
     swap in a compatible backend via ``register_backend``.
     """
 
@@ -781,6 +781,33 @@ class AuthService(metaclass=_AuthServiceFacadeMeta):
             if hasattr(backend, attr):
                 setattr(backend, attr, getattr(cls, attr))
         log.info("auth.backend.registered", {"backend": getattr(backend, "__name__", str(backend))})
+
+    #: Entry points through which an installed extension names the account
+    #: backend its installation uses, for processes that do not load
+    #: extensions (the ``flocks admin`` commands).  Each is a callable taking
+    #: no arguments that returns a backend, or None when this install keeps
+    #: its accounts in the runtime; it may be a coroutine function.
+    BACKEND_ENTRYPOINT_GROUP = "flocks.auth.backends"
+
+    @classmethod
+    async def use_installed_backend(cls) -> bool:
+        """Switch to the account backend an installed extension provides; whether one did.
+
+        The server gets that backend when its extensions load.  A command that
+        reads or repairs accounts outside the server asks here, or it would work
+        on the runtime's own account tables while the accounts live elsewhere.
+        """
+        import importlib.metadata
+        import inspect
+
+        for entry_point in importlib.metadata.entry_points(group=cls.BACKEND_ENTRYPOINT_GROUP):
+            backend = entry_point.load()()
+            if inspect.isawaitable(backend):
+                backend = await backend
+            if backend is not None:
+                cls.register_backend(backend)
+                return True
+        return False
 
     @classmethod
     def reset_backend(cls) -> None:

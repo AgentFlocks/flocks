@@ -112,7 +112,10 @@ async def test_same_hostname_process_startup_preserves_live_then_recovers_expire
     second = await worker(tmp_path, execution.id)
     assert second["owner"] != first["owner"] and second["count"] == 1
     current = await TaskStore.get_execution(execution.id)
-    assert current.status == TaskStatus.QUEUED and current.owner_generation == claim.owner_generation + 1
+    # Abandoned, so failed -- not started again from scratch: whether it did
+    # part of its work is unknown (the retry policy decides about a rerun).
+    assert current.status == TaskStatus.FAILED and current.owner_generation > claim.owner_generation
+    assert "no live owner" in (current.error or "")
 
 
 @pytest.mark.parametrize("recovery", ["_recover_orphaned_executions", "_recover_stale_active_executions"])

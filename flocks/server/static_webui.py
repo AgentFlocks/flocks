@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -46,10 +47,47 @@ def packaged_webui_dist_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "webui_static"
 
 
+#: Set by a deployment that ships its interface in one verified directory.  The
+#: server then serves ``FLOCKS_WEBUI_DIST_DIR`` and nothing else: a missing or
+#: empty directory is a failed start, never a fallback to another build.
+DIST_DIR_ENV = "FLOCKS_WEBUI_DIST_DIR"
+DIST_STRICT_ENV = "FLOCKS_WEBUI_DIST_STRICT"
+
+
+def webui_dist_pinned() -> bool:
+    """Whether the interface comes from ``FLOCKS_WEBUI_DIST_DIR`` and nowhere else.
+
+    A deployment says so with ``FLOCKS_WEBUI_DIST_STRICT``; a managed
+    installation always does, whatever that variable says: its supervisor
+    checked that one directory, and any other build on the way (a source
+    checkout's, the packaged one) was not checked.  An open-source install
+    keeps its search order.
+    """
+    if (os.getenv(DIST_STRICT_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    return _declared_managed(os.getenv("FLOCKS_DEPLOY_MODE", ""), os.getenv("FLOCKS_ROOT", ""))
+
+
+@lru_cache(maxsize=8)
+def _declared_managed(_deploy_mode: str, _root: str) -> bool:
+    """``declared_managed()``, once per environment it is asked under: static
+    files are served per request, and the answer depends only on these two
+    variables and the descriptor they point at, which the supervisor writes
+    before the runtime starts."""
+    from flocks.updater.deploy import declared_managed
+
+    return declared_managed()
+
+
 def resolve_webui_dist_dir() -> Path | None:
     """Return the first usable WebUI dist directory."""
+    override = os.getenv(DIST_DIR_ENV)
+    if webui_dist_pinned():
+        if not override:
+            return None
+        pinned = Path(override).expanduser()
+        return pinned.resolve() if (pinned / "index.html").is_file() else None
     candidates: list[Path] = []
-    override = os.getenv("FLOCKS_WEBUI_DIST_DIR")
     if override:
         candidates.append(Path(override).expanduser())
     candidates.extend([source_webui_dist_dir(), packaged_webui_dist_dir()])
@@ -57,6 +95,22 @@ def resolve_webui_dist_dir() -> Path | None:
         if (candidate / "index.html").is_file():
             return candidate.resolve()
     return None
+
+
+def enforce_pinned_webui_dist() -> None:
+    """Refuse to start when the interface is pinned to a directory that is not there.
+
+    Without a pin this does nothing: a source checkout may well run with no
+    build at all.
+    """
+    if not webui_dist_pinned():
+        return
+    if resolve_webui_dist_dir() is None:
+        reason = DIST_STRICT_ENV if (os.getenv(DIST_STRICT_ENV) or "").strip() else "a managed installation"
+        raise WebUIDistMissingError(
+            f"the interface is pinned ({reason}) but {DIST_DIR_ENV} "
+            f"({os.getenv(DIST_DIR_ENV) or 'unset'}) has no index.html; refusing to serve another build"
+        )
 
 
 def ensure_webui_dist_dir() -> Path:

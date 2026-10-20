@@ -48,3 +48,24 @@ def test_unknown_current_version_does_not_block() -> None:
     assert updater._downgrade_refusal("v2026.8.10") is not None
     updater.get_current_version = lambda: ""
     assert updater._downgrade_refusal("v2026.8.10") is None
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("v2026.10.16", (2026, 10, 16)),
+        ("2026.10.16", (2026, 10, 16)),
+        ("refs/tags/v2026.10.16", (2026, 10, 16)),
+        # A channel's own tags: an edition name in front, with or without the "v".
+        ("acme-v2026.10.16", (2026, 10, 16)),
+        ("team-2026.10.17", (2026, 10, 17)),
+        # Only letters make a prefix: a date written with dashes stays a date.
+        ("v2026-10-18", (2026, 10, 18)),
+    ],
+)
+def test_versions_compare_whatever_edition_tagged_them(tag, expected):
+    from flocks.updater.updater import _is_newer_version, _parse_version
+
+    assert _parse_version(tag) == expected
+    assert _is_newer_version("acme-v2026.10.17", "v2026.10.16")
+    assert not _is_newer_version("acme-v2026.10.16", "2026.10.16")

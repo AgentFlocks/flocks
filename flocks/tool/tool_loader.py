@@ -673,6 +673,11 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
         source = None
 
     vendor: Optional[str] = provider_cfg.get("vendor") if provider_cfg else None
+    # What a call may change outside the run (flocks.task.outcome); a value
+    # the loader does not know reads as unknown, the safe side.
+    side_effect = raw.get("side_effect")
+    if side_effect not in ("none", "idempotent", "queryable", "unknown"):
+        side_effect = None
 
     info = ToolInfo(
         name=name,
@@ -688,6 +693,7 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
         provider_version=provider_version,
         source=source,
         vendor=vendor,
+        side_effect=side_effect,
     )
 
     tool = Tool(info=info, handler=handler)

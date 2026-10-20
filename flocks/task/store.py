@@ -697,15 +697,20 @@ class TaskStore:
     @classmethod
     async def requeue_execution(
         cls, execution: TaskExecution, *, expected_generation: Optional[int] = None,
-        expected_status: Optional[TaskStatus] = None,
+        expected_status: Optional[TaskStatus] = None, keep_session: bool = False,
     ) -> TaskExecution:
-        """Commit the execution and its queue reference as one transition."""
+        """Commit the execution and its queue reference as one transition.
+
+        *keep_session* queues it to go on in the session it ran in (a resume);
+        otherwise it starts over in a new one.
+        """
         execution.status = TaskStatus.QUEUED
         execution.queued_at = datetime.now(timezone.utc)
         execution.started_at = None
         execution.completed_at = None
         execution.duration_ms = None
-        execution.session_id = None
+        if not keep_session:
+            execution.session_id = None
         execution.result_summary = None
         execution.error = None
         db = await cls._db()

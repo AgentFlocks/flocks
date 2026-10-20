@@ -32,10 +32,10 @@ vi.mock('react-i18next', () => ({
       'badge.delegatable': '可委托',
       'badge.delete': '删除',
       'badge.edit': '编辑',
-      'badge.protected': 'Pro 内置',
-      'badge.protectedDeleteDisabled': 'Pro 内置不可删',
+      'badge.protected': '扩展内置',
+      'badge.protectedDeleteDisabled': '扩展内置不可删',
       'badge.protectedEditDisabled': '提示词受保护',
-      'badge.protectedDelegateDisabled': 'Pro 内置不可改委托',
+      'badge.protectedDelegateDisabled': '扩展内置不可改委托',
       'form.enabled': '启用',
       'form.enabledTip': '允许委派',
       'form.disabledTip': '禁止委派',
@@ -125,13 +125,13 @@ describe('AgentPage protected prompts', () => {
     listMock.mockResolvedValue({ data: [sealed, custom] });
     render(<AgentPage />);
     const card = await screen.findByTestId('agent-card-code-security');
-    expect(within(card).getByText('Pro 内置')).toBeInTheDocument();
+    expect(within(card).getByText('扩展内置')).toBeInTheDocument();
     const edit = within(card).getByRole('button', { name: '编辑' });
     const remove = within(card).getByRole('button', { name: '删除' });
     expect(edit).toBeDisabled();
     expect(edit).toHaveAttribute('title', '提示词受保护');
     expect(remove).toBeDisabled();
-    expect(remove).toHaveAttribute('title', 'Pro 内置不可删');
+    expect(remove).toHaveAttribute('title', '扩展内置不可删');
     fireEvent.click(edit);
     fireEvent.click(within(card).getByText('代码安全审计'));
     expect(screen.queryByRole('dialog', { name: '编辑 Agent' })).not.toBeInTheDocument();
@@ -150,7 +150,7 @@ describe('AgentPage protected prompts', () => {
     const sealedCard = await screen.findByTestId('agent-card-sealed-sub');
     const sealedSwitch = within(sealedCard).getByRole('switch', { name: '启用' });
     expect(sealedSwitch).toBeDisabled();
-    expect(sealedSwitch).toHaveAttribute('aria-description', 'Pro 内置不可改委托');
+    expect(sealedSwitch).toHaveAttribute('aria-description', '扩展内置不可改委托');
     expect(within(sealedCard).getByText('enabledBadge.disabled')).toBeInTheDocument();
     fireEvent.click(sealedSwitch);
     expect(within(screen.getByTestId('agent-card-open-sub')).getByRole('switch')).toBeEnabled();

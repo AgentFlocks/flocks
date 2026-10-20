@@ -107,7 +107,7 @@ async def build_workflow_tool_context(
 
     try:
         # Workflow runtime carries provenance metadata only; mode resolution is
-        # fully Pro-owned.
+        # owned entirely by the policy extension.
         await upsert_session_execution_profile(
             effective_session_id,
             patch={

@@ -178,7 +178,7 @@ class WorkspaceManager:
         Return and create the default outputs directory.
 
         - OSS default: ``workspace/outputs/<today>``
-        - Pro-style override when username provided:
+        - per-user override when username provided:
           ``workspace/users/<username>/outputs/<today>``
         """
         if username or user_id:

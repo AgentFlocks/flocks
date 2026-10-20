@@ -35,7 +35,7 @@ def suites(monkeypatch):
 
 def test_pro_workspace_is_locked_without_license(suites):
     result = {item.id: item for item in webui_routes._attach_scene_suites(
-        [_workspace("free_ui"), _workspace("pro_ui")], pro_active=False,
+        [_workspace("free_ui"), _workspace("pro_ui")], edition_active=False,
     )}
 
     assert result["free_ui"].locked is False
@@ -47,7 +47,7 @@ def test_pro_workspace_is_locked_without_license(suites):
 
 def test_pro_workspace_opens_with_license(suites):
     result = {item.id: item for item in webui_routes._attach_scene_suites(
-        [_workspace("pro_ui")], pro_active=True,
+        [_workspace("pro_ui")], edition_active=True,
     )}
 
     assert result["pro_ui"].locked is False

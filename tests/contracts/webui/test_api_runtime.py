@@ -140,6 +140,10 @@ async def test_sync_handler_timeout_keeps_event_loop_responsive(runtime_store, r
     )
     runtime = WebUIPageApiRuntime(runtime_store)
     await runtime.list_routes("runtime-page")
+    # The approval lookup creates its table on first use; time the handler, not that.
+    from flocks.contracts.webui.approvals import get_approval
+
+    await get_approval("runtime-page")
 
     @runtime_app.get("/slow")
     async def dispatch(request: Request):

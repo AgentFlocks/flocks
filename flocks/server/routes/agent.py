@@ -93,6 +93,15 @@ PROTECTED_PROMPT_DETAIL = "This agent's prompt is protected and cannot be read o
 
 async def _protected_agent(name: str) -> Optional[AgentInfoModel]:
     """The sealed definition behind *name*, also when ``enabled_agents`` hides it."""
+    from flocks.agent.managed import managed_agent_ids, managed_agents
+
+    if name in managed_agent_ids():
+        # The deployment manages this name (flocks.content.managed): sealed
+        # even when hidden or when its definition is unusable, so nothing
+        # local can be created, edited or deleted under it.
+        return managed_agents().get(name) or AgentInfoModel(
+            name=name, native=True, prompt_protected=True,
+        )
     registered = Agent.registered(name)
     if registered is not None and registered.prompt_protected:
         return registered

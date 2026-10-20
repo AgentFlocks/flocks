@@ -140,7 +140,6 @@
   "systemManagement": "System management",
   "modelUsage": "Model usage",
   "modelUsageHint": "Balance and usage",
-  "upgradePro": "Upgrade {{name}}",
   "logoutConfirm": "Sign out of the current account?",
   "shortcutsTitle": "Keyboard shortcuts",
   "shortcutsBody": "In menus: Up / Down to move; Enter to open; Esc to close; Tab to move focus.",

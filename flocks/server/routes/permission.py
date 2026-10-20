@@ -66,7 +66,7 @@ _NETWORK_TRUST_RESPONSES = {
 
 
 def _network_confirm_options(metadata: Dict[str, Any]) -> set[str]:
-    """Return the explicit network trust responses offered by Pro."""
+    """Return the explicit network trust responses the policy extension offers."""
     raw_options = metadata.get("network_confirm_options")
     if not isinstance(raw_options, list):
         return set()
@@ -344,8 +344,9 @@ async def reply_permission(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Network trust response is not allowed for this permission request",
             )
-        # Keep the Pro-defined reply verb intact.  Pro applies subject-scoped
-        # trust rules; OSS must not reinterpret a network grant as `always`.
+        # Keep the extension-defined reply verb intact.  The extension applies
+        # subject-scoped trust rules; Flocks must not reinterpret a network
+        # grant as `always`.
         reply = request.response
     elif _is_network_confirmation(info.metadata) and request.always:
         raise HTTPException(

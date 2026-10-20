@@ -457,7 +457,13 @@ class MemoryBootstrap:
         Returns:
             Dict with loaded files and instructions
         """
+        from flocks.memory.sync.mirror import reconcile_quietly
+
+        # The shared notes first: another instance may have written them, and
+        # a template created below must not stand in for a note that exists.
+        await reconcile_quietly(self.memory_dir)
         await self.create_memory_structure()
+        await reconcile_quietly(self.memory_dir)
         
         now = datetime.now()
         today_str = now.strftime("%Y-%m-%d")

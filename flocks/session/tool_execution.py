@@ -7,7 +7,6 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar
 
-from flocks.auth.context import API_TOKEN_SERVICE_USER_ID
 from flocks.hooks.execution import current_execution_context
 from flocks.hooks.contracts import (
     ToolExecutionActor,
@@ -23,6 +22,7 @@ from flocks.hooks.contracts import (
     schema_digest,
     utc_now_iso,
 )
+from flocks.session.caller import caller_from_subject, resolve_actor_subject
 from flocks.session.execution_profile import get_session_execution_profile
 from flocks.utils.log import Log
 
@@ -32,25 +32,9 @@ log = Log.create(service="session.tool_lifecycle")
 T = TypeVar("T")
 
 
-def _resolve_actor_subject(profile: Mapping[str, Any]) -> tuple[str | None, str | None]:
-    subject_id = (
-        str(
-            profile.get("subject_id")
-            or profile.get("owner_user_id")
-            or profile.get("owner_username")
-            or ""
-        )
-        .strip()
-        or None
-    )
-    explicit_type = str(profile.get("subject_type") or "").strip().lower()
-    if explicit_type:
-        return subject_id, explicit_type
-    if subject_id is None:
-        return None, None
-    if subject_id == API_TOKEN_SERVICE_USER_ID:
-        return subject_id, "service"
-    return subject_id, "human"
+#: Kept under its old name; the subject resolution moved to flocks.session.caller
+#: so model-call hooks derive their caller from the same rule.
+_resolve_actor_subject = resolve_actor_subject
 
 
 class ToolExecutionConfirmationRequired(RuntimeError):
@@ -218,7 +202,7 @@ async def build_session_tool_execution_payload(
             permission_mode=permission_mode,
             network_mode=network_mode,
         ),
-        # The opaque ingress carrier (e.g. a Pro identity transfer token) must
+        # The opaque ingress carrier (e.g. an identity transfer token) must
         # ride along with the tool contract: tool calls run in child tasks of
         # the request, so the gate can only restore the verified identity from
         # this field. Callers rarely fill it explicitly, so default to the
@@ -231,5 +215,9 @@ async def build_session_tool_execution_payload(
     )
     return {
         "operation": "tool.execute",
+        # The same caller the session's model-call hooks carry, so an extension
+        # that keyed state to the caller while rewriting the prompt finds it
+        # again when the model's tool call arrives.
+        **caller_from_subject(actor_subject_id, actor_subject_type).as_metadata(),
         "tool_execution": context.model_dump(mode="json"),
     }

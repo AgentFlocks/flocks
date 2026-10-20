@@ -124,6 +124,18 @@ async def read_file(path: str = Query(..., description="File path")):
 @router.get("/download", summary="Download file")
 async def download_file(path: str = Query(..., description="File path")):
     try:
+        # Channel media another instance received is fetched from the
+        # database first, under this instance's data directory whatever path
+        # the other one wrote into the URL; the access check below still decides.
+        from flocks.session.files import local_channel_media_path, restore_channel_media
+
+        media = local_channel_media_path(Path(path).expanduser())
+        if media is not None:
+            path = str(media)
+            try:
+                await restore_channel_media([media])
+            except Exception as exc:
+                log.warning("http_file.download.restore_failed", {"error_type": type(exc).__name__})
         cfg = await Config.get()
         safe_path = await resolve_path_for_http_file_access(path, cfg)
         target = Path(safe_path)

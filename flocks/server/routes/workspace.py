@@ -414,7 +414,7 @@ async def upload_files(
             continue
 
         if purpose == "chat":
-            from flocks.session.files import create_chat_upload_target, remove_staged_chat_upload
+            from flocks.session.files import create_chat_upload_target, remove_staged_chat_upload, store_upload
             from flocks.utils.id import Identifier
 
             filename = sanitize_filename(unquote(raw_name), fallback="")
@@ -449,6 +449,9 @@ async def upload_files(
                 if total > max_bytes:
                     results.append({"name": filename, "error": f"File too large (max {max_mb} MB)"})
                     continue
+                # Kept in the database too: the message that uses it may
+                # reach another instance.
+                await store_upload(target)
                 completed = True
             except Exception as exc:
                 results.append({"name": filename, "error": f"Failed to stage upload: {exc}"})
@@ -525,11 +528,11 @@ async def upload_files(
 
 @router.delete("/upload/chat/{upload_id}", summary="Discard staged chat upload")
 async def discard_chat_upload(upload_id: str, request: Request):
-    from flocks.session.files import remove_staged_chat_upload
+    from flocks.session.files import discard_staged_chat_upload
 
     current_user = require_user(request)
     try:
-        removed = remove_staged_chat_upload(current_user.id, upload_id)
+        removed = await discard_staged_chat_upload(current_user.id, upload_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"uploadID": upload_id, "removed": removed}
@@ -835,10 +838,26 @@ def _list_memory_sync(
     ]
 
 
+async def _settle_memory_note(mgr: WorkspaceManager, target: Path) -> None:
+    """The shared copy of a memory note, before this instance serves it."""
+    from flocks.memory.sync.mirror import reconcile_note
+
+    if target.suffix.lower() != ".md":
+        return
+    try:
+        await reconcile_note(mgr.get_memory_dir(), target)
+    except ValueError:
+        pass
+
+
 @router.get("/memory/list", response_model=List[WorkspaceNode], summary="List memory files")
 async def list_memory(request: Request):
+    from flocks.memory.sync.mirror import reconcile_quietly
+
     mgr = _get_manager()
     memory_dir = mgr.get_memory_dir()
+    # Notes written through other instances show up here too.
+    await reconcile_quietly(memory_dir)
     if not memory_dir.exists():
         return []
     user = get_optional_user(request)
@@ -855,6 +874,7 @@ async def read_memory_file(
         target = mgr.resolve_memory_path(path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await _settle_memory_note(mgr, target)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"Memory file not found: {path}")
     if not target.is_file():
@@ -898,11 +918,25 @@ async def write_memory_file(request: Request, body: FileWriteRequest):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Memory file is read-only",
         )
+    from flocks.memory.sync.mirror import reconcile_note
+
+    mirrored = target.suffix.lower() == ".md"
+    if mirrored:
+        # The stored note first (another instance may have changed it), then
+        # this edit, then the stored copy brought up to date.
+        await reconcile_note(mgr.get_memory_dir(), target)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         target.write_text(body.content, encoding="utf-8")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    if mirrored and not await reconcile_note(mgr.get_memory_dir(), target):
+        # Saved here, but not in the shared store: say so rather than report
+        # a write the other instances will not see.
+        raise HTTPException(
+            status_code=503,
+            detail="Saved on this server only; the shared memory store is unavailable. It is stored once it is back.",
+        )
     log.info("workspace.memory_file.written", {"path": body.path, "size": len(body.content)})
     return {"path": body.path, "written": True}
 
@@ -916,6 +950,7 @@ async def preview_memory_file(
         target = mgr.resolve_memory_path(path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await _settle_memory_note(mgr, target)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"Memory file not found: {path}")
     if not target.is_file():
@@ -932,6 +967,7 @@ async def download_memory_file(
         target = mgr.resolve_memory_path(path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await _settle_memory_note(mgr, target)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"Memory file not found: {path}")
     if not target.is_file():
