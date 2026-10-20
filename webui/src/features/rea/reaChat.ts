@@ -13,6 +13,8 @@ export interface ReaChatContextValue {
   latestCardPartId: string | null;
   /** Send a message into this conversation (queued while Rex is busy), shown as typed. */
   submitPrompt: (text: string) => Promise<void>;
+  /** Put a guide into this conversation's message box; the user edits and sends it. */
+  fillComposer: (text: string) => void;
 }
 
 export const ReaChatContext = createContext<ReaChatContextValue | null>(null);

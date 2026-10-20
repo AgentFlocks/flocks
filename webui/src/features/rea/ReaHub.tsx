@@ -35,7 +35,8 @@ const TEXT = {
       repair: '排查并修复', retryUninstall: '重试卸载', details: '查看详情',
     },
     hints: {
-      install: '在 Rex 会话中按《REA 安装指引》安装并验证',
+      install: '在 Rex 新会话的输入框里填入《REA 安装指引》，由你检查后发送',
+      use: '在 Rex 新会话的输入框里填入使用引导语，上传附件后由你发送',
       degraded: 'REA 曾通过验证，当前服务或配置不可用',
       installFailed: '安装或首次验证没有通过',
     },
@@ -131,7 +132,8 @@ const TEXT = {
       repair: 'Troubleshoot and repair', retryUninstall: 'Retry uninstall', details: 'View details',
     },
     hints: {
-      install: 'Installs and validates REA in a Rex session following the REA install guide',
+      install: 'Fills the REA install guide into the message box of a new Rex conversation, for you to review and send',
+      use: 'Fills the analysis prompt into the message box of a new Rex conversation; attach the files and send it',
       degraded: 'REA passed validation before; its service or configuration is not usable now',
       installFailed: 'The install or its first validation did not pass',
     },
@@ -316,7 +318,7 @@ export function ReaHubActions({ compact = false }: { compact?: boolean }) {
       buttons.push(button('progress', text.actions.progress, <Eye className="h-3.5 w-3.5" />, () => setDialog('uninstallProgress')));
       break;
     case 'ready':
-      buttons.push(button('use', text.actions.use, <Play className="h-3.5 w-3.5" />, () => open('use')));
+      buttons.push(button('use', text.actions.use, <Play className="h-3.5 w-3.5" />, () => open('use'), text.hints.use));
       if (admin) buttons.push(button('uninstall', text.actions.uninstall, <Trash2 className="h-3.5 w-3.5" />, () => setDialog('uninstall')));
       // e.g. an upgrade to the full tier that did not pass while the light tier keeps working
       if (admin && hasDiagnostics(status)) {

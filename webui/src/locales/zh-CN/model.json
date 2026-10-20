@@ -9,6 +9,7 @@
     "setDefaultModel": "设置默认模型",
     "defaultModelUpdated": "默认模型已更新",
     "defaultModelInvalid": "当前默认模型「{{model}}」已不在可用列表中，已自动清除，请重新选择",
+    "defaultModelInvalidMember": "当前默认模型「{{model}}」已不在可用列表中，请联系管理员重新设置",
     "fallbackModels": "辅助模型",
     "noFallbackModels": "自动策略",
     "fallbackAvailability": "{{available}} / {{total}} 可用",
@@ -57,6 +58,7 @@
   "providerList": {
     "empty": "尚未添加模型供应商",
     "emptyHint": "点击右上角「添加模型供应商」开始配置",
+    "emptyHintMember": "请联系管理员添加模型供应商",
     "addProvider": "添加模型供应商"
   },
   "detail": {
@@ -67,7 +69,9 @@
     "batchTest": "批量测试",
     "testing": "测试中",
     "success": "成功",
-    "failed": "失败"
+    "failed": "失败",
+    "configAdminOnly": "模型配置仅管理员可修改",
+    "noModelsMember": "请联系管理员添加模型"
   },
   "status": {
     "connected": "已连接",

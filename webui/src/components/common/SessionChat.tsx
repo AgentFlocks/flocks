@@ -320,6 +320,18 @@ export interface SessionChatProps {
    * samples once the REA plugin is installed; the server applies the same rule).
    */
   allowAnyUpload?: boolean;
+  /**
+   * Text to put into the message box once per ``id`` (the REA entry's guide):
+   * the user edits and sends it, nothing is sent here.
+   */
+  composerPrefill?: ComposerPrefill | null;
+  /** Called with the ``id`` once ``composerPrefill`` is in the message box. */
+  onComposerPrefillApplied?: (id: string) => void;
+}
+
+export interface ComposerPrefill {
+  id: string;
+  text: string;
 }
 
 type AttachmentStatus = 'uploading' | 'success' | 'error';
@@ -1928,6 +1940,8 @@ export default function SessionChat({
   onOpenContext,
   supportsVision,
   allowAnyUpload = false,
+  composerPrefill,
+  onComposerPrefillApplied,
   toolbarSlot,
   composerAddMenuSlot,
   onComposerAddMenuOpenChange,
@@ -4632,12 +4646,35 @@ export default function SessionChat({
     await sendText(text, [], agentName);
   };
   const submitReaPrompt = useCallback((text: string) => reaSubmitRef.current(text), []);
+  // Puts a guide into the message box for the user to read, edit and send:
+  // caret before its first line and the box scrolled to its top.
+  const fillComposer = useCallback((text: string) => {
+    setInput(text);
+    setShowCommandDropdown(false);
+    setMentionRange(null);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(0, 0);
+      el.scrollTop = 0;
+    });
+  }, []);
+  // After the draft restore above, so the restored (empty) draft does not replace it.
+  const appliedPrefillRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!composerPrefill || appliedPrefillRef.current === composerPrefill.id) return;
+    appliedPrefillRef.current = composerPrefill.id;
+    fillComposer(composerPrefill.text);
+    onComposerPrefillApplied?.(composerPrefill.id);
+  }, [composerPrefill, fillComposer, onComposerPrefillApplied]);
   const reaChatContext = useMemo<ReaChatContextValue>(() => ({
     sessionId: sessionId ?? null,
     readOnly: hideInput || Boolean(transport) || !sessionId,
     latestCardPartId: latestReaCardPartId,
     submitPrompt: submitReaPrompt,
-  }), [hideInput, latestReaCardPartId, sessionId, submitReaPrompt, transport]);
+    fillComposer,
+  }), [fillComposer, hideInput, latestReaCardPartId, sessionId, submitReaPrompt, transport]);
   const stopButton = canStop && (
     <button
       onClick={handleAbort}

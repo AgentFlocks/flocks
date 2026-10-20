@@ -135,7 +135,7 @@ export interface ReaStatus {
   /** Show the 「新」 badge on the Rex shortcut. */
   badge: boolean;
   firstInstallCompleted: boolean;
-  /** A recent install conversation this administrator can reopen instead of starting another. */
+  /** This administrator's install conversation, while the install runs and shortly after (recorded by Rex's install). */
   installSessionId?: string | null;
   /** Something of REA is in place that an uninstall would remove. */
   removable: boolean;
@@ -156,11 +156,6 @@ export interface ReaUninstallPreview {
   removes: string[];
   keeps: string[];
   tasks: ReaUninstallTask[];
-}
-
-export interface ReaInstallReservation {
-  decision: 'open' | 'create' | 'pending';
-  sessionId?: string | null;
 }
 
 export interface ReaReportEntry {
@@ -209,12 +204,6 @@ async function call<T>(request: Promise<{ data: T }>): Promise<T> {
 export const reaApi = {
   status: (refresh = false) => call<ReaStatus>(
     client.get('/api/rea/status', { params: refresh ? { refresh: true } : undefined }),
-  ),
-  /** Whether this click opens the account's install conversation, creates one, or waits for another tab. */
-  reserveInstallSession: () => call<ReaInstallReservation>(client.post('/api/rea/install-session/reserve')),
-  /** Remember the conversation that installs REA, so the next click reopens it. */
-  recordInstallSession: (sessionId: string) => call<ReaStatus>(
-    client.post('/api/rea/install-session', { sessionId }),
   ),
   uninstallPreview: () => call<ReaUninstallPreview>(client.get('/api/rea/uninstall/preview')),
   /** 409 ``tasks_running`` (with ``details.tasks``) while related tasks run and ``stopTasks`` is false. */

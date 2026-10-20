@@ -31,7 +31,9 @@ vi.mock('@/components/common/FilePreview', () => ({
 }));
 
 const initialActionProbe = vi.hoisted(() => ({ enabled: false, delivered: vi.fn() }));
-const emptySessionWelcome = vi.hoisted(() => ({ enabled: false }));
+// SessionChat shows the welcome screen for any conversation without messages; the mock does so for
+// conversations with an id only when a test asks for it.
+const welcomeProbe = vi.hoisted(() => ({ forSessions: false }));
 const sendWelcomePrompt = vi.hoisted(() => vi.fn());
 
 const sessionStatusSSEOptionsRef = vi.hoisted(() => ({
@@ -208,7 +210,11 @@ vi.mock('@/components/common/SessionChat', () => ({
     contextWindowTokens,
     display,
     hideInput,
+    composerPrefill,
+    onComposerPrefillApplied,
   }: {
+    composerPrefill?: { id: string; text: string } | null;
+    onComposerPrefillApplied?: (id: string) => void;
     onInitialMessageConsumed?: () => void;
     sessionId?: string | null;
     agentName?: string;
@@ -261,7 +267,15 @@ vi.mock('@/components/common/SessionChat', () => ({
     onSseStatusChange?: (status: 'connected' | 'disconnected') => void;
   }) {
     sessionChatSSERef.current = onSSEEvent;
-    const [input, setInput] = React.useState('');
+    // Like SessionChat: an existing conversation starts from its saved draft.
+    const [input, setInput] = React.useState(() => (
+      sessionId ? window.localStorage.getItem(`flocks:chat-draft:${sessionId}`) ?? '' : ''
+    ));
+    React.useEffect(() => {
+      if (!composerPrefill) return;
+      setInput(composerPrefill.text);
+      onComposerPrefillApplied?.(composerPrefill.id);
+    }, [composerPrefill, onComposerPrefillApplied]);
     const delivered = React.useRef(false);
     React.useEffect(() => {
       if (!initialActionProbe.enabled || !initialMessage || delivered.current) return;
@@ -309,7 +323,7 @@ vi.mock('@/components/common/SessionChat', () => ({
           : composerAddMenuSlot}
         {toolbarSlot}
         {centerToolbarSlot}
-        {(!sessionId || emptySessionWelcome.enabled) && welcomeContent ? (
+        {(!sessionId || welcomeProbe.forSessions) && welcomeContent ? (
           typeof welcomeContent === 'function'
             ? welcomeContent(setInput, (text, options) => sendWelcomePrompt(sessionId, text, options))
             : welcomeContent
@@ -557,7 +571,7 @@ describe('SessionPage session actions menu', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     initialActionProbe.enabled = false;
-    emptySessionWelcome.enabled = false;
+    welcomeProbe.forSessions = false;
     sendWelcomePrompt.mockReset().mockResolvedValue(true);
     __resetChatModelResourcesForTesting();
     sessionStatusSSEOptionsRef.current = null;
@@ -1944,7 +1958,7 @@ describe('SessionPage session actions menu', () => {
   });
 
   it('starts alert operations in the existing empty session without creating or moving a session', async () => {
-    emptySessionWelcome.enabled = true;
+    welcomeProbe.forSessions = true;
     renderSessionPage('/sessions/session-1');
     await userEvent.setup().click(await screen.findByRole('button', { name: 'welcome.alertOperations' }));
     await waitFor(() => expect(sendWelcomePrompt).toHaveBeenCalledWith(
@@ -3163,29 +3177,29 @@ describe('SessionPage session actions menu', () => {
       ...overrides,
     });
 
-    function mockRea(overrides: Record<string, unknown> = {}, reservation: Record<string, unknown> = { decision: 'create', sessionId: null }) {
-      const current = { value: reaStatus(overrides), reservation };
+    function mockRea(overrides: Record<string, unknown> = {}) {
+      const current = { value: reaStatus(overrides) };
       const fallbackGet = client.get.getMockImplementation();
       client.get.mockImplementation((url: string, ...rest: unknown[]) => (
         url === '/api/rea/status'
           ? Promise.resolve({ data: current.value })
           : fallbackGet ? fallbackGet(url, ...rest) : Promise.resolve({ data: [] })
       ));
-      client.post.mockImplementation((url: string, body?: { sessionId: string }) => {
-        if (url === '/api/rea/install-session/reserve') return Promise.resolve({ data: current.reservation });
-        if (url === '/api/rea/install-session') {
-          current.value = { ...current.value, installSessionId: body?.sessionId };
-          return Promise.resolve({ data: current.value });
-        }
-        return Promise.resolve({ data: secondSession });
-      });
       return current;
     }
 
-    const promptOf = (sessionId: string) => client.post.mock.calls.find(([url]) => url === `/api/session/${sessionId}/prompt_async`);
+    const composerText = () => screen.getByTestId('mock-chat-input').textContent;
+    // PRD v0.7: clicking the entry adds no message, conversation or install.
+    const expectNothingSent = () => {
+      expect(client.post.mock.calls.filter(([url]) => (
+        url === '/api/session' || String(url).includes('/prompt_async') || String(url).startsWith('/api/rea/')
+      ))).toEqual([]);
+    };
 
     beforeEach(() => {
       __resetReaStateForTesting();
+      window.localStorage.clear();
+      welcomeProbe.forSessions = false;
     });
 
     it('sits in the shortcut row with the plug icon and the 「新」 badge', async () => {
@@ -3208,135 +3222,177 @@ describe('SessionPage session actions menu', () => {
       expect(within(shortcut).queryByTestId('rea-new-badge')).not.toBeInTheDocument();
     });
 
-    it('sends the full install guide as the first message of a new Rex conversation', async () => {
+    it('fills the full install guide into the message box of the new conversation and sends nothing', async () => {
       const user = userEvent.setup();
       mockRea();
       renderSessionPage();
       await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(client.post).toHaveBeenCalledWith('/api/rea/install-session/reserve'));
-      await waitFor(() => {
-        expect(client.post).toHaveBeenCalledWith('/api/session', expect.objectContaining({ title: 'rea.sessionTitle' }));
-      });
-      await waitFor(() => expect(promptOf('session-2')).toBeTruthy());
-      expect(promptOf('session-2')?.[1]).toEqual(expect.objectContaining({
-        agent: 'rex',
-        executionMode: 'build',
-        parts: expect.arrayContaining([expect.objectContaining({ type: 'text', text: 'rea.installPrompt' })]),
-      }));
-      // The whole guide is the visible user message, not a hidden instruction.
-      expect(promptOf('session-2')?.[1]).not.toHaveProperty('displayText');
-      await waitFor(() => expect(client.post).toHaveBeenCalledWith('/api/rea/install-session', { sessionId: 'session-2' }));
-      expect(client.post.mock.calls.filter(([url]) => url === '/api/session')).toHaveLength(1);
+      await waitFor(() => expect(composerText()).toBe('rea.installPrompt'));
+      expectNothingSent();
+      expect(screen.getByTestId('session-location')).toHaveTextContent(/^\/sessions$/);
+      const chat = screen.getByTestId('session-chat');
+      expect(chat).toHaveTextContent('no-session');
+      // What the user sends goes to Rex in Build mode, the same as the guide was meant for.
+      expect(chat).toHaveAttribute('data-agent-name', 'rex');
+      expect(chat).toHaveAttribute('data-execution-mode', 'build');
     });
 
-    it('sends the analysis prompt once REA is ready, to members too', async () => {
+    it('switches a plan-mode draft to Build when it fills the guide in', async () => {
+      const user = userEvent.setup();
+      window.localStorage.setItem('flocks:session-execution-mode:draft', 'plan');
+      mockRea();
+      renderSessionPage();
+      expect(await screen.findByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'plan');
+      await user.click(await screen.findByTestId('rea-shortcut'));
+      await waitFor(() => expect(composerText()).toBe('rea.installPrompt'));
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
+    });
+
+    it('fills the analysis prompt in once REA is ready, for members too', async () => {
       const user = userEvent.setup();
       mockRea({ state: 'ready', installed: true, badge: false, canInstall: false });
       renderSessionPage();
       await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(promptOf('session-2')).toBeTruthy());
-      expect(promptOf('session-2')?.[1]).toEqual(expect.objectContaining({
-        parts: expect.arrayContaining([expect.objectContaining({ text: 'rea.usePrompt' })]),
-      }));
-      expect(client.post).not.toHaveBeenCalledWith('/api/rea/install-session/reserve');
+      await waitFor(() => expect(composerText()).toBe('rea.usePrompt'));
+      expectNothingSent();
     });
 
     it.each([
       ['install', 'not_installed', true, 'rea.installPrompt'],
       ['use', 'ready', true, 'rea.usePrompt'],
       ['install from a session missing in the list', 'not_installed', false, 'rea.installPrompt'],
-      ['repair after a failed install', 'install_failed', true, 'rea.repairPrompt'],
       ['use when degraded', 'degraded', true, 'rea.usePrompt'],
-    ])('uses the current session without creating or moving a session for REA %s', async (_label, state, listed, prompt) => {
-      emptySessionWelcome.enabled = true;
+    ])('prefills the current session without creating, sending or moving a session for REA %s', async (_label, state, listed, prompt) => {
+      welcomeProbe.forSessions = true;
       const folderSession = { ...session, projectID: 'prj_demo', effectiveProjectID: 'prj_demo' };
       useSessions.mockReturnValue({
         ...useSessions(), sessions: listed ? [folderSession] : [],
       });
       sessionApi.get.mockResolvedValue(folderSession);
-      mockRea({ state, installSessionId: 'session-old' }, { decision: 'open', sessionId: 'session-old' });
+      mockRea({ state, installSessionId: 'session-old' });
       renderSessionPage('/sessions/session-1');
       await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1'));
       await userEvent.setup().click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(sendWelcomePrompt).toHaveBeenCalledWith(
-        'session-1', prompt, { agent: 'rex', executionMode: 'build' },
-      ));
-      expect(sendWelcomePrompt).toHaveBeenCalledTimes(1);
-      expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
-      expect(client.post).not.toHaveBeenCalledWith('/api/rea/install-session/reserve');
+      await waitFor(() => expect(composerText()).toBe(prompt));
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-agent-name', 'rex');
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
+      expect(sendWelcomePrompt).not.toHaveBeenCalled();
+      expectNothingSent();
       expect(client.patch).not.toHaveBeenCalled();
       expect(sessionApi.moveToProject).not.toHaveBeenCalled();
       expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
-      if (state === 'not_installed' || state === 'install_failed') {
-        await waitFor(() => expect(client.post).toHaveBeenCalledWith('/api/rea/install-session', { sessionId: 'session-1' }));
-      }
     });
 
-    it.each(['installing', 'validating'])('stays in the current session when REA is %s elsewhere', async (state) => {
-      emptySessionWelcome.enabled = true;
+    it.each(['installing', 'validating', 'install_failed'])('opens the existing install conversation when REA is %s elsewhere', async (state) => {
+      welcomeProbe.forSessions = true;
+      useSessions.mockReturnValue({
+        ...useSessions(), sessions: [session, { ...secondSession, id: 'session-old' }],
+      });
       mockRea({ state, installSessionId: 'session-old' });
       renderSessionPage('/sessions/session-1');
       await userEvent.setup().click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(toast.info).toHaveBeenCalledWith('rea.entry.installing'));
-      expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
+      await waitFor(() => expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-old'));
+      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-old'));
+      expect(composerText()).toBe(state === 'install_failed' ? 'rea.repairPrompt' : '');
       expect(sendWelcomePrompt).not.toHaveBeenCalled();
-      expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
+      expectNothingSent();
     });
 
-    it('does not record an install session when the chat declines the send', async () => {
-      emptySessionWelcome.enabled = true;
-      sendWelcomePrompt.mockResolvedValue(false);
-      mockRea();
-      renderSessionPage('/sessions/session-1');
-      await userEvent.setup().click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(sendWelcomePrompt).toHaveBeenCalledTimes(1));
-      expect(client.post).not.toHaveBeenCalledWith('/api/rea/install-session', expect.anything());
-      expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
-    });
-
-    it('does not send a shortcut to a read-only session', async () => {
-      emptySessionWelcome.enabled = true;
+    it('does not prefill or send a shortcut to a read-only session', async () => {
+      welcomeProbe.forSessions = true;
       useSessions.mockReturnValue({ ...useSessions(), sessions: [{ ...session, canWrite: false }] });
       mockRea();
       renderSessionPage('/sessions/session-1');
       await userEvent.setup().click(await screen.findByTestId('rea-shortcut'));
+      expect(composerText()).toBe('');
       expect(sendWelcomePrompt).not.toHaveBeenCalled();
       expect(client.post).not.toHaveBeenCalled();
     });
 
-    it('opens an analysis conversation that repairs first when REA broke after passing', async () => {
+    it('fills the analysis prompt in when REA broke after passing (Rex repairs first)', async () => {
       const user = userEvent.setup();
       mockRea({ state: 'degraded', badge: false });
       renderSessionPage();
       await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(promptOf('session-2')).toBeTruthy());
-      expect(promptOf('session-2')?.[1]).toEqual(expect.objectContaining({
-        parts: expect.arrayContaining([expect.objectContaining({ text: 'rea.usePrompt' })]),
-      }));
+      await waitFor(() => expect(composerText()).toBe('rea.usePrompt'));
+      expectNothingSent();
     });
 
-    it('reopens the recent install conversation instead of starting another', async () => {
+    it('fills the guide in again after a failed install without a recent install conversation', async () => {
       const user = userEvent.setup();
-      mockRea({}, { decision: 'open', sessionId: 'session-1' });
+      mockRea({ state: 'install_failed' });
+      renderSessionPage();
+      await user.click(await screen.findByTestId('rea-shortcut'));
+      await waitFor(() => expect(composerText()).toBe('rea.installPrompt'));
+      expectNothingSent();
+    });
+
+    it('hands the install conversation over in Build mode even when it was left in Plan mode', async () => {
+      const user = userEvent.setup();
+      window.localStorage.setItem('flocks:session-execution-mode:session-1', 'plan');
+      mockRea({ state: 'install_failed', installSessionId: 'session-1' });
       renderSessionPage();
       await user.click(await screen.findByTestId('rea-shortcut'));
       await waitFor(() => expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1'));
-      expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
-      expect(promptOf('session-1')).toBeUndefined();  // the guide is already there
+      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build'));
+      expect(window.localStorage.getItem('flocks:session-execution-mode:session-1')).toBeNull();
+      expectNothingSent();
     });
 
-    it('continues troubleshooting in the install conversation after a failure', async () => {
+    it('fills the repair request in when the install conversation is the one on screen', async () => {
       const user = userEvent.setup();
-      mockRea({ state: 'install_failed' }, { decision: 'open', sessionId: 'session-1' });
+      // e.g. the install conversation was cleared, so it shows the shortcut again, and left in Plan mode
+      welcomeProbe.forSessions = true;
+      window.localStorage.setItem('flocks:session-execution-mode:session-1', 'plan');
+      mockRea({ state: 'install_failed', installSessionId: 'session-1' });
+      renderSessionPage('/sessions/session-1');
+      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'plan'));
+      await user.click(await screen.findByTestId('rea-shortcut'));
+      await waitFor(() => expect(composerText()).toBe('rea.repairPrompt'));
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
+      expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
+      expectNothingSent();
+    });
+
+    it('continues a failed install in its conversation, with the repair request in the message box', async () => {
+      const user = userEvent.setup();
+      mockRea({ state: 'install_failed', installSessionId: 'session-1' });
       renderSessionPage();
       await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(promptOf('session-1')).toBeTruthy());
-      expect(promptOf('session-1')?.[1]).toEqual(expect.objectContaining({
-        agent: 'rex',
-        executionMode: 'build',
-        parts: expect.arrayContaining([expect.objectContaining({ text: 'rea.repairPrompt' })]),
-      }));
       await waitFor(() => expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1'));
+      expect(window.localStorage.getItem('flocks:chat-draft:session-1')).toBe('rea.repairPrompt');
+      await waitFor(() => expect(composerText()).toBe('rea.repairPrompt'));
+      expectNothingSent();
+    });
+
+    it('fills the guide into an empty conversation that already has an id, and only there', async () => {
+      const user = userEvent.setup();
+      welcomeProbe.forSessions = true;
+      mockRea();
+      renderSessionPage('/sessions/session-1');
+      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1'));
+      await user.click(await screen.findByTestId('rea-shortcut'));
+      await waitFor(() => expect(composerText()).toBe('rea.installPrompt'));
+      expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
+      expectNothingSent();
+      await user.click(screen.getByText('start-new-session'));
+      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session'));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+      expect(composerText()).toBe('');
+    });
+
+    it('does not carry the filled guide into another conversation', async () => {
+      const user = userEvent.setup();
+      mockRea();
+      renderSessionPage();
+      await user.click(await screen.findByTestId('rea-shortcut'));
+      await waitFor(() => expect(composerText()).toBe('rea.installPrompt'));
+      await user.click(screen.getByText('return-to-first'));
+      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1'));
+      expect(composerText()).toBe('');
+      await user.click(screen.getByText('start-new-session'));
+      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session'));
+      expect(composerText()).toBe('');
     });
 
     it.each([
@@ -3345,14 +3401,14 @@ describe('SessionPage session actions menu', () => {
       ['uninstalling', { state: 'uninstalling' }, 'info', 'rea.entry.uninstalling'],
       ['uninstall failed', { state: 'uninstall_failed', uninstallJob: { residues: ['x'] } }, 'warning', 'rea.entry.uninstallFailed'],
       ['installing elsewhere', { state: 'installing', job: { stage: 'components', progress: 10 } }, 'info', 'rea.entry.installing'],
-      ['another tab creating it', {}, 'info', 'rea.entry.pending'],
-    ])('does not start a conversation when %s', async (label, overrides, kind, message) => {
+    ])('fills nothing in when %s', async (_label, overrides, kind, message) => {
       const user = userEvent.setup();
-      mockRea(overrides, label === 'another tab creating it' ? { decision: 'pending', sessionId: null } : undefined);
+      mockRea(overrides);
       renderSessionPage();
       await user.click(await screen.findByTestId('rea-shortcut'));
       await waitFor(() => expect((toast as Record<string, ReturnType<typeof vi.fn>>)[kind]).toHaveBeenCalledWith(message));
-      expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
+      expect(composerText()).toBe('');
+      expectNothingSent();
     });
 
     it('opens the running install conversation of this administrator', async () => {
@@ -3361,7 +3417,8 @@ describe('SessionPage session actions menu', () => {
       renderSessionPage();
       await user.click(await screen.findByTestId('rea-shortcut'));
       await waitFor(() => expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1'));
-      expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
+      expect(window.localStorage.getItem('flocks:chat-draft:session-1')).toBeNull();
+      expectNothingSent();
     });
 
     it('runs the plugin square action once per navigation', async () => {
@@ -3370,30 +3427,36 @@ describe('SessionPage session actions menu', () => {
         pathname: '/sessions',
         state: { skipLastSelectedSessionRestore: true, reaEntry: 'install' },
       });
-      await waitFor(() => {
-        expect(client.post).toHaveBeenCalledWith('/api/rea/install-session', { sessionId: 'session-2' });
-      });
-      expect(client.post.mock.calls.filter(([url]) => url === '/api/session')).toHaveLength(1);
+      await waitFor(() => expect(composerText()).toBe('rea.installPrompt'));
+      expectNothingSent();
       view.unmount();
-      // Remounting the same history entry (as after a reload) does not send it again.
+      // Remounting the same history entry (as after a reload) does not fill it in again.
       renderSessionPage({
         pathname: '/sessions',
         state: { skipLastSelectedSessionRestore: true, reaEntry: 'install' },
       });
       await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
-      expect(client.post.mock.calls.filter(([url]) => url === '/api/session')).toHaveLength(1);
+      expect(composerText()).toBe('');
     });
 
-    it('repairs a broken REA from the plugin square with the repair request', async () => {
+    it('fills the analysis prompt in for the plugin square 「使用」', async () => {
+      mockRea({ state: 'ready', installed: true, badge: false });
+      renderSessionPage({
+        pathname: '/sessions',
+        state: { skipLastSelectedSessionRestore: true, reaEntry: 'use' },
+      });
+      await waitFor(() => expect(composerText()).toBe('rea.usePrompt'));
+      expectNothingSent();
+    });
+
+    it('fills the repair request in for a broken REA from the plugin square', async () => {
       mockRea({ state: 'degraded', badge: false });
       renderSessionPage({
         pathname: '/sessions',
         state: { skipLastSelectedSessionRestore: true, reaEntry: 'repair' },
       });
-      await waitFor(() => expect(promptOf('session-2')).toBeTruthy());
-      expect(promptOf('session-2')?.[1]).toEqual(expect.objectContaining({
-        parts: expect.arrayContaining([expect.objectContaining({ text: 'rea.repairPrompt' })]),
-      }));
+      await waitFor(() => expect(composerText()).toBe('rea.repairPrompt'));
+      expectNothingSent();
     });
   });
 });

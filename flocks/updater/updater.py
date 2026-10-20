@@ -967,6 +967,14 @@ def _console_manifest_bundle_version(data: dict[str, Any]) -> str:
     return str(data.get("bundle_version") or "").strip()
 
 
+def _manifest_release_notes(data: dict[str, Any]) -> str | None:
+    for key in ("release_notes", "notes"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
 def _pro_bundle_core_version(data: dict[str, Any]) -> str:
     return str(data.get("core_version") or "").strip()
 
@@ -1932,6 +1940,10 @@ def _merge_console_manifest_release_identity(
     core_version = console_manifest.get("core_version") or merged.get("core_version")
     if core_version:
         merged["core_version"] = core_version
+    # The "what's new" notice of a Pro install reads these notes back from the install marker.
+    release_notes = _manifest_release_notes(console_manifest)
+    if release_notes:
+        merged["release_notes"] = release_notes
     return merged
 
 
@@ -1952,6 +1964,7 @@ def _write_pro_bundle_install_marker(manifest: dict[str, Any], *, bundle_sha256:
         "build_id": manifest.get("build_id"),
         "bundle_sha256": bundle_sha256 or manifest.get("bundle_sha256"),
         "installed_at": datetime.now(timezone.utc).isoformat(),
+        "release_notes": _manifest_release_notes(manifest),
     }
     marker.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
     _write_pending_pro_bundle_install_receipt(payload)
@@ -2523,6 +2536,67 @@ async def get_installed_release(version: str) -> VersionInfo:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     return result
+
+
+def read_installed_pro_bundle_marker() -> dict[str, Any] | None:
+    """Return the Pro install marker when it names the installed bundle version."""
+    marker = _read_pro_bundle_install_marker()
+    return marker if str(marker.get("bundle_version") or "").strip() else None
+
+
+def _is_installed_pro_release(marker: dict[str, Any], manifest: dict[str, Any]) -> bool:
+    """Whether a Console manifest is the installed release, not just one with the same bundle number.
+
+    A bundle number is reused by component-only updates and repacks, so every identity field both
+    sides carry must agree. core_version is compared one way only: a bundle whose core is older
+    than the local one is recorded with the local core (see ``_effective_pro_bundle_manifest``), so
+    the marker's core may be newer than Console's, never older.
+    """
+    if _parse_version(_console_manifest_bundle_version(marker)) != _parse_version(
+        _console_manifest_bundle_version(manifest)
+    ):
+        return False
+    installed_core = _pro_bundle_core_version(marker)
+    published_core = _pro_bundle_core_version(manifest)
+    if installed_core and published_core and _parse_version(published_core) > _parse_version(installed_core):
+        return False
+    for key in ("flockspro_component_version", "build_id", "release_id", "bundle_release_id"):
+        installed_value = str(marker.get(key) or "").strip().lstrip("v")
+        published_value = str(manifest.get(key) or "").strip().lstrip("v")
+        if installed_value and published_value and installed_value != published_value:
+            return False
+    return True
+
+
+async def get_installed_pro_release(marker: dict[str, Any]) -> VersionInfo:
+    """Read the notes of the installed Pro bundle; the OSS Core tag's notes describe another release."""
+    # Kept as recorded: the WebUI formats it, and _version_label would turn "pro-v…" into "vpro-v…".
+    bundle_version = str(marker.get("bundle_version") or "").strip()
+    result = VersionInfo(
+        current_version=bundle_version,
+        latest_version=bundle_version,
+        current_core_version=_version_label(_pro_bundle_core_version_or_empty(marker)) or None,
+        current_bundle_version=bundle_version,
+        current_pro_component_version=str(marker.get("flockspro_component_version") or "").strip() or None,
+        edition="flockspro",
+    )
+    release_notes = _manifest_release_notes(marker)
+    if release_notes:
+        return result.model_copy(update={"release_notes": release_notes})
+
+    # Markers written before the notes were recorded fall back to Console. It only serves the
+    # latest manifest, so its notes are used only when that release is the installed one.
+    ucfg = await _get_updater_config()
+    if not ucfg.enabled:
+        return result
+    try:
+        manifest_info = await _fetch_console_manifest_release_info()
+    except Exception as exc:
+        log.warning("updater.installed_pro_release.manifest_failed", {"error": str(exc)})
+        return result
+    if not _is_installed_pro_release(marker, manifest_info.manifest):
+        return result
+    return result.model_copy(update={"release_notes": _manifest_release_notes(manifest_info.manifest)})
 
 
 async def check_update(

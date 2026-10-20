@@ -912,3 +912,55 @@ class TestTestCredentialsInlineConfigFallback:
             assert result["model_id"] == "unsaved-prod-deployment"
             provider.chat.assert_awaited_once()
             assert provider.chat.await_args.args[0] == "unsaved-prod-deployment"
+
+
+class TestTestCredentialsHideTheKeyInErrors:
+    """Members see these results now, and some gateways echo the key back in auth errors."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("key", ["sk-echoed-secret-1234", "pw123"])
+    async def test_echoed_key_is_hidden_in_chat_errors(self, key):
+        from flocks.server.routes.provider import test_provider_credentials
+
+        provider = MagicMock()
+        provider.chat = AsyncMock(side_effect=Exception(f"401 Incorrect API key provided: {key}"))
+        model = MagicMock()
+        model.id = "gateway-model"
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = key
+
+        with (
+            patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+            patch(_PATCH_CONFIG_GET, new_callable=AsyncMock, return_value=MagicMock()),
+            patch(_PATCH_PROVIDER) as mock_provider_cls,
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+            mock_provider_cls.apply_config = AsyncMock()
+            mock_provider_cls.get.return_value = provider
+            mock_provider_cls.list_models.return_value = [model]
+
+            result = await test_provider_credentials("gateway")
+
+        assert result["success"] is False
+        assert key not in result["message"] and key not in result["error"]
+        assert "***" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_echoed_key_is_hidden_when_the_test_itself_fails(self):
+        from flocks.server.routes.provider import test_provider_credentials
+
+        key = "sk-echoed-secret-5678"
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = key
+
+        with (
+            patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+            patch(_PATCH_CONFIG_GET, new_callable=AsyncMock, side_effect=RuntimeError(f"bad key {key}")),
+            patch(_PATCH_PROVIDER) as mock_provider_cls,
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+
+            result = await test_provider_credentials("gateway")
+
+        assert result["success"] is False
+        assert key not in result["message"] and key not in result["error"]

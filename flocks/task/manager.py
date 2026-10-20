@@ -28,7 +28,7 @@ from .models import (
     TaskTrigger,
     validate_cron_expression,
 )
-from .queue import TaskQueue
+from .queue import DEFAULT_MAX_CONCURRENT, TaskQueue
 from .scheduler import TaskScheduler as SchedulerLoop
 from .store import TaskStore
 
@@ -56,7 +56,7 @@ class TaskManager:
     def __init__(
         self,
         *,
-        max_concurrent: int = 4,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT,
         poll_interval: int = 5,
         scheduler_interval: int = 30,
         default_retry: Optional[RetryConfig] = None,
@@ -80,7 +80,7 @@ class TaskManager:
     async def start(
         cls,
         *,
-        max_concurrent: int = 4,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT,
         poll_interval: int = 5,
         scheduler_interval: int = 30,
     ) -> "TaskManager":
@@ -559,7 +559,7 @@ class TaskManager:
         if not mgr:
             return {
                 "paused": False,
-                "max_concurrent": 4,
+                "max_concurrent": DEFAULT_MAX_CONCURRENT,
                 "running": 0,
                 "queued": 0,
                 "stale_running": 0,
@@ -653,8 +653,13 @@ class TaskManager:
                 ):
                     self._last_orphaned_queue_recovery_check = now
                     await self._recover_orphaned_queued_executions()
-                execution = await self.queue.dequeue()
-                if execution:
+                # Fill every free slot in one pass: one execution per poll kept
+                # the rest of a burst queued for up to
+                # (max_concurrent - 1) * poll_interval seconds.
+                while True:
+                    execution = await self.queue.dequeue()
+                    if not execution:
+                        break
                     task = asyncio.create_task(self._run_execution(execution))
                     task.add_done_callback(self._on_task_done)
             except Exception as exc:

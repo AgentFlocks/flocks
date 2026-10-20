@@ -1,6 +1,6 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Navigate, Route, Routes, useLocation, type RouteObject } from 'react-router-dom';
 import Layout from './Layout';
 import { ThemeProvider } from '@/contexts/ThemeContext';
@@ -11,7 +11,7 @@ const {
   getActiveNotifications, ackNotification, getNotificationAckStatus,
   flocksproUsersApi, consoleUpgradeApi, productNameContextValue,
   useAuth, useWebUIContractPages, useSceneSuiteUpdates, useTaskDashboard,
-  confirmMock, tokenPolicy, changeLanguage, finishConsoleLogin,
+  confirmMock, tokenPolicy, changeLanguage, finishConsoleLogin, notificationModal,
 } = vi.hoisted(() => ({
   changeLanguage: vi.fn(),
   finishConsoleLogin: vi.fn(),
@@ -31,6 +31,7 @@ const {
   useTaskDashboard: vi.fn(() => ({ counts: { running: 1, queued: 2 } })),
   confirmMock: vi.fn(() => Promise.resolve(true)),
   tokenPolicy: { ready: true, notice: null, close: vi.fn(), onPresented: vi.fn() },
+  notificationModal: vi.fn(),
 }));
 
 vi.mock('@/api/update', () => ({ checkUpdate, getCurrentRelease }));
@@ -59,8 +60,16 @@ vi.mock('@/components/common/UpdateModal', () => {
   return { default: UpdateModalMock };
 });
 vi.mock('@/components/common/OnboardingModal', () => ({ default: () => <div role="dialog" aria-label="onboarding" /> }));
-vi.mock('@/components/common/NotificationModal', () => ({ default: () => null }));
+vi.mock('@/components/common/NotificationModal', () => ({
+  default: (props: Record<string, unknown>) => {
+    notificationModal(props);
+    return null;
+  },
+}));
 vi.mock('@/components/common/TokenPolicyNotice', () => ({ default: () => null }));
+vi.mock('@/components/common/BackendStatusBanner', () => ({
+  BackendStatusBanner: ({ inline }: { inline?: boolean }) => <div data-testid="backend-status-banner" data-inline={String(Boolean(inline))} />,
+}));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, options?: Record<string, string>) => {
@@ -170,6 +179,15 @@ describe('Layout chrome', () => {
     expect(screen.queryByRole('separator', { name: 'resizeNav' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'expandNav' }));
     expect(layout.style.getPropertyValue('--sidebar-width')).toBe('208px');
+  });
+
+  it('puts the backend status banner in the content column, right above the page', () => {
+    renderAt('/');
+    const banner = screen.getByTestId('backend-status-banner');
+    const main = document.querySelector('main') as HTMLElement;
+    expect(banner).toHaveAttribute('data-inline', 'true');
+    expect(banner.parentElement).toBe(main.parentElement);
+    expect(banner.nextElementSibling).toBe(main);
   });
 
   it('shows the Flocks logo beside the product name', () => {
@@ -553,6 +571,78 @@ describe('Layout chrome', () => {
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument());
   });
 
+  const proRelease = (component: string, notes: string) => ({
+    edition: 'flockspro',
+    current_version: 'v2026.10.16',
+    latest_version: 'v2026.10.16',
+    current_bundle_version: 'v2026.10.16',
+    current_core_version: 'v2026.10.15',
+    current_pro_component_version: component,
+    has_update: false,
+    release_notes: notes,
+    release_url: null,
+    error: null,
+  });
+
+  it('announces an installed Pro bundle with its own release notes', async () => {
+    getCurrentRelease.mockResolvedValue(proRelease('2026.10.16', 'Pro 报告中心不再列出空报告'));
+    getNotificationAckStatus.mockResolvedValue({ acknowledged: false });
+    renderAt('/');
+    await waitFor(() => expect(notificationModal).toHaveBeenCalled());
+    const id = 'whats-new-flockspro-v2026.10.16-core-v2026.10.15-pro-v2026.10.16';
+    expect(getNotificationAckStatus).toHaveBeenCalledWith(id);
+    expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
+      expect.objectContaining({
+        id,
+        kind: 'whats_new',
+        title: 'Flocks Pro v2026.10.16 更新内容',
+        body: 'Pro 报告中心不再列出空报告',
+        version: 'v2026.10.16',
+      }),
+    ]);
+  });
+
+  it('does not let a dismissed Pro component hide a same-number component update', async () => {
+    getCurrentRelease.mockResolvedValue(proRelease('2026.10.16', '组件 2026.10.16 的说明'));
+    getNotificationAckStatus.mockResolvedValue({ acknowledged: false });
+    const first = renderAt('/');
+    await waitFor(() => expect(getNotificationAckStatus).toHaveBeenCalled());
+    const dismissedId = getNotificationAckStatus.mock.calls[0][0];
+    first.unmount();
+    vi.clearAllMocks();
+
+    getCurrentRelease.mockResolvedValue(proRelease('2026.10.17', '组件 2026.10.17 的说明'));
+    getNotificationAckStatus.mockImplementation(async (id: string) => ({ acknowledged: id === dismissedId }));
+    renderAt('/');
+    await waitFor(() => expect(notificationModal).toHaveBeenCalled());
+    expect(getNotificationAckStatus).not.toHaveBeenCalledWith(dismissedId);
+    expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
+      expect.objectContaining({ body: '组件 2026.10.17 的说明', title: 'Flocks Pro v2026.10.16 更新内容' }),
+    ]);
+  });
+
+  it('keeps the Core release notice for an OSS install', async () => {
+    getCurrentRelease.mockResolvedValue({
+      current_version: '2026.10.15',
+      latest_version: '2026.10.15',
+      has_update: false,
+      release_notes: 'OSS 2026.10.15 notes',
+      release_url: null,
+      error: null,
+    });
+    getNotificationAckStatus.mockResolvedValue({ acknowledged: false });
+    renderAt('/');
+    await waitFor(() => expect(notificationModal).toHaveBeenCalled());
+    expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-2026.10.15');
+    expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
+      expect.objectContaining({
+        id: 'whats-new-2026.10.15',
+        title: 'Flocks v2026.10.15 更新内容',
+        body: 'OSS 2026.10.15 notes',
+      }),
+    ]);
+  });
+
   it('surfaces active tasks and backend notifications in the bell menu', async () => {
     getActiveNotifications.mockResolvedValue([{ id: 'n1', kind: 'announcement', title: '系统公告', summary: '内容', highlights: [], priority: 10 }]);
     const { container } = renderAt('/');
@@ -567,5 +657,38 @@ describe('Layout chrome', () => {
     renderAt('/');
     fireEvent.click(screen.getByRole('button', { name: 'newChat' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/sessions'));
+  });
+});
+
+describe('Layout onboarding', () => {
+  it('opens onboarding for an admin when the first-run setup is not complete', async () => {
+    onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });
+    renderAt('/');
+    expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+  });
+
+  it('keeps onboarding away from members: no status check, no prompt, no event opener', async () => {
+    useAuth.mockReturnValue({ user: { id: 'u2', username: 'member', role: 'member' }, logout: vi.fn() });
+    onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });
+    renderAt('/');
+    await act(async () => {
+      window.dispatchEvent(new Event('flocks:open-onboarding'));
+    });
+    expect(onboardingAPI.getStatus).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
+  });
+
+  it('closes onboarding when the signed-in user is no longer an admin', async () => {
+    onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });
+    const { rerender } = renderAt('/');
+    expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+
+    useAuth.mockReturnValue({ user: { id: 'u2', username: 'member', role: 'member' }, logout: vi.fn() });
+    rerender(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes><Route path="/*" element={<Layout contentRoutes={routes} />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
   });
 });

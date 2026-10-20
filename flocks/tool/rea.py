@@ -14,7 +14,7 @@ import re
 import secrets
 from typing import Any, Optional
 
-from flocks.rea import components, runtime, service, validation
+from flocks.rea import attachment_guard, components, runtime, service, validation
 from flocks.rea.installer import ReaInstaller, ReaInstallError, ReaInstallJob
 from flocks.rea.uninstaller import ReaUninstaller, sessions_using_rea, stop_tasks
 from flocks.tool.registry import (
@@ -53,11 +53,11 @@ Use it for an actual reverse-engineering job on a concrete target (a binary, mal
 
 This tool carries out the 「REA 安装指引」. When a message asks to install, check, repair or troubleshoot REA (including the full 「REA 安装指引」 text), call action="install" right away: do not call status first and never run the guide's commands (npx, dnf, curl, unzip, editing flocks.json) yourself. The tool reuses what exists and installs only the missing components of the chosen tier, in parallel.
 
-- action="install" (administrators): the first call returns the plan of both tiers and the user sees a card to choose 轻量档 (JavaScript / .NET / ZIP; no JDK, no Ghidra) or 完整档 (adds JDK 21 and Ghidra 12.1.4 for native ELF/PE decompilation) and to confirm system package installs and Flocks configuration writes. Ask the user in one short sentence to choose and confirm, then stop and wait; do not ask for files or analysis goals at this stage. If other conversations are using REA, install first lists them (phase "tasks"): ask whether to stop them and continue, and call install again only after the user chose that on the card. When the user has confirmed a tier on the card, call install with that tier and confirmed=true: the tool accepts only when the user's latest message is the card's confirmation of that tier, so answer questions or other replies and leave the plan open. It then waits until the components, the single MCP registration "rea" (npx -y rea-agents@6.4.0 --mcp) and the tier validation are done: real REA tool calls on generated JavaScript, .NET and ZIP samples, and for the full tier a small C program through open_binary and procedure_pseudo_code. Report briefly: tier, reused and new components, the registration, which capabilities passed (static analysis and runtime check separately), failed or were not verified. On a failure or a blocker (root rights, a read-only directory) give the cause and the exact action for the user, fix what you can, and call install again (everything in place is reused).
+- action="install" (administrators): the first call returns the plan of both tiers and the user sees a card to choose 轻量档 (JavaScript / .NET / ZIP; no JDK, no Ghidra) or 完整档 (adds JDK 21 and Ghidra 12.1.4 for native ELF/PE decompilation) and to confirm system package installs and Flocks configuration writes. The card lists per tier what is installed, downloaded or reused and the registration: it is the confirmation the guide asks for before installing (sending the guide is not one). Ask the user in one short sentence to choose and confirm, then stop and wait; do not ask for files or analysis goals at this stage. If other conversations are using REA, install first lists them (phase "tasks"): ask whether to stop them and continue, and call install again only after the user chose that on the card. When the user has confirmed a tier on the card, call install with that tier and confirmed=true: the tool accepts only when the user's latest message is the card's confirmation of that tier, so answer questions or other replies and leave the plan open. It then waits until the components, the single MCP registration "rea" (npx -y rea-agents@6.4.0 --mcp) and the tier validation are done: real REA tool calls on generated JavaScript, .NET and ZIP samples, and for the full tier a small C program through open_binary and procedure_pseudo_code. Report briefly: tier, reused and new components, the registration, which capabilities passed (static analysis and runtime check separately), failed or were not verified. On a failure or a blocker (root rights, a read-only directory) give the cause and the exact action for the user, fix what you can, and call install again (everything in place is reused).
 - action="status": the unified plugin state and what to do next; call it before a reverse-engineering task when you have not installed REA in this conversation.
 - action="report": shows the analysis result as a card: summary (answer to the user's question), entries (key principle, evidence tied to file/function/address/source, verification method and result), facts (verified), inferences, open_items. Also save the full report with the write tool in the outputs directory.
 
-After the install passed, ask for the target (file, download link or website URL) and the question unless the user already gave them; a prompt with placeholders such as 【目标文件、下载链接或网站 URL】 or [target file] is not a target. Only files the user attached to this conversation or named explicitly are targets: never look for them on the host, in other conversations' uploads or in the Flocks data directory. For the analysis use the REA MCP tools: they are named rea_<tool> and are deferred, so load the ones you need with tool_search (select:rea_inspect_artifact,...) before calling them; the skill reverse-engineer-anything has the workflow when it is enabled. Check and add target-specific tools only when the target needs them, and ask before installing system packages or large tools. Run an untrusted sample only with the user's consent, preferably in an isolated sandbox, never casually on the Flocks host. Keep verified facts, inferences and unfinished items apart; a passed install is not proof that every analysis capability works. Talk to the user in plain words: tool names, actions and parameters (action="install", tier="full", confirmed=true) are for you, never show them to the user."""
+After the install passed, ask for the file, download link or website URL to analyze and what the user wants to find out, unless they already gave them. 「帮我使用 REA 逆向工具分析上传的附件文件」 (the REA shortcut's prompt) asks to analyze the files attached to this conversation: when they are there, start with them and ask about the focus only if it is unclear; when none is attached, ask the user to attach them with the + button and stop. Only files the user attached to this conversation or named explicitly are targets: never look for them on the host, in other conversations' uploads or in the Flocks data directory. For the analysis use the REA MCP tools: they are named rea_<tool> and are deferred, so load the ones you need with tool_search (select:rea_inspect_artifact,...) before calling them; the skill reverse-engineer-anything has the workflow when it is enabled. Check and add target-specific tools only when the target needs them, and ask before installing system packages or large tools. Run an untrusted sample only with the user's consent, preferably in an isolated sandbox, never casually on the Flocks host. Keep verified facts, inferences and unfinished items apart; a passed install is not proof that every analysis capability works. Talk to the user in plain words: tool names, actions and parameters (action="install", tier="full", confirmed=true) are for you, never show them to the user."""
 
 _CAPABILITY_LABELS = {
     "javascript": "JavaScript",
@@ -726,7 +726,15 @@ async def _install(ctx: ToolContext, tier: Optional[str], confirmed: bool) -> To
 # ── status ──
 
 
-def _status_text(state: str, *, admin: bool) -> str:
+def _attachments_line(attached: Optional[int]) -> list[str]:
+    if attached is None:
+        return []
+    if attached == 0:
+        return ["No file is attached to this conversation yet."]
+    return [f"The user attached {attached} file(s) to this conversation."]
+
+
+def _status_text(state: str, *, admin: bool, attached: Optional[int] = None) -> str:
     if state == "ready":
         record = runtime.read_install_record() or {}
         tier = record.get("tier")
@@ -744,10 +752,13 @@ def _status_text(state: str, *, admin: bool) -> str:
                 "plain words that the 完整档 (adds JDK 21 and Ghidra) covers it and an administrator can install it; "
                 "call install with the full tier only when an administrator asks for it."
             )
+        lines += _attachments_line(attached)
         lines.append(
-            "Continue the user's task with REA. If the target (file, download link or website URL) or the question "
-            "is missing, ask for them first; placeholders in the prompt are not input, and files are only those "
-            "attached to this conversation or named by the user: do not search the host or other conversations."
+            "Continue the user's task with REA on the files attached to this conversation or the link, URL or path "
+            "the user named. If there is nothing to analyze yet, ask the user to attach the file(s) with the + "
+            "button or to give a link, then stop; ask what they want to find out only when that is unclear. Files "
+            "are only those attached to this conversation or named by the user: do not search the host or other "
+            "conversations."
         )
         return "\n".join(lines)
     if state in ("installing", "validating"):
@@ -804,13 +815,26 @@ def _status_text(state: str, *, admin: bool) -> str:
     return "\n".join(lines)
 
 
+async def _attached_files(session_id: Optional[str]) -> Optional[int]:
+    """How many files the user attached to this conversation (None when it cannot be read)."""
+
+    if not session_id:
+        return None
+    try:
+        return await attachment_guard.attached_file_count(session_id)
+    except Exception as exc:
+        log.debug("rea.status.attachments_unreadable", {"error": str(exc)})
+        return None
+
+
 async def _status(ctx: ToolContext) -> ToolResult:
     user = _current_user()
     state = service.install_state()
     admin = service.can_install(user)
+    attached = await _attached_files(ctx.session_id) if state == "ready" else None
     return ToolResult(
         success=True,
-        output=_status_text(state, admin=admin),
+        output=_status_text(state, admin=admin, attached=attached),
         title="REA 逆向分析插件",
         metadata={"rea": {"action": "status", "state": state, "canInstall": admin}},
     )
