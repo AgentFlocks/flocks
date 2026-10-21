@@ -303,6 +303,58 @@ describe('OnboardingModal', () => {
     expect(onboardingAPI.validate).not.toHaveBeenCalled();
   });
 
+  it('retains entered credentials and allows retry when dismiss draft saving fails', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    onboardingAPI.saveDraft.mockRejectedValueOnce(new Error('Network unavailable'));
+    renderOnboarding(onClose);
+
+    await screen.findByRole('button', { name: 'onboarding.bootstrap.savePrimary' });
+    await user.selectOptions(screen.getByRole('combobox'), 'openai-compatible');
+    const key = screen.getByPlaceholderText('onboarding.bootstrap.thirdPartyKeyPlaceholder');
+    await user.type(key, 'retry-this-key');
+    await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.dontShowAgain' }));
+
+    expect(await screen.findByText('onboarding.bootstrap.saveError')).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(key).toHaveValue('retry-this-key');
+    expect(screen.getByRole('combobox')).toHaveValue('openai-compatible');
+    await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.dontShowAgain' }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(onboardingAPI.saveDraft).toHaveBeenLastCalledWith(expect.objectContaining({
+      dismissed: true,
+      model: expect.objectContaining({
+        third_party_llm: expect.objectContaining({ provider_id: 'openai-compatible', api_key: 'retry-this-key' }),
+      }),
+    }));
+  });
+
+  it('prevents input changes and duplicate actions while the next-step draft save is pending', async () => {
+    const user = userEvent.setup();
+    const save = deferred<{ data: ReturnType<typeof makeDraft> }>();
+    onboardingAPI.saveDraft.mockReturnValueOnce(save.promise);
+    renderOnboarding();
+
+    const key = await screen.findByPlaceholderText('onboarding.bootstrap.modelKeyPlaceholder');
+    await user.type(key, 'pending-model-key');
+    const next = screen.getByRole('button', { name: 'onboarding.bootstrap.nextStep' });
+    await user.click(next);
+
+    expect(key).toBeDisabled();
+    expect(next).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'onboarding.bootstrap.dontShowAgain' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'close' })).toBeDisabled();
+    await user.click(next);
+    expect(onboardingAPI.saveDraft).toHaveBeenCalledOnce();
+
+    await act(async () => { save.resolve({ data: makeDraft() }); });
+    expect(await screen.findByText('onboarding.bootstrap.intelPageTitle')).toBeInTheDocument();
+    expect(onboardingAPI.saveDraft).toHaveBeenCalledWith(expect.objectContaining({
+      model: expect.objectContaining({ threatbook_api_key: 'pending-model-key' }),
+    }));
+  });
+
   it('saves the selected provider and key when advancing without running validation', async () => {
     const user = userEvent.setup();
     renderOnboarding();
@@ -582,7 +634,7 @@ describe('OnboardingModal', () => {
     await waitFor(() => expect(onboardingAPI.apply).toHaveBeenCalledWith(expect.objectContaining({ third_party_llm: expectedModel })));
   });
 
-  it('preserves the configured Azure endpoint when editing and advancing', async () => {
+  it.each([false, true])('preserves the configured Azure endpoint after returning to details: %s', async (returnToDetails) => {
     const user = userEvent.setup();
     const endpoint = 'https://production-resource.openai.azure.com';
     const azureProvider = {
@@ -606,6 +658,13 @@ describe('OnboardingModal', () => {
     await user.click(await screen.findByRole('button', { name: 'onboarding.bootstrap.editPrimary' }));
     expect(providerAPI.getCredentials).toHaveBeenCalledWith('azure');
     expect(screen.getByPlaceholderText('onboarding.bootstrap.thirdPartyBaseUrlPlaceholder')).toHaveValue(endpoint);
+    if (returnToDetails) {
+      await user.clear(screen.getByPlaceholderText('onboarding.bootstrap.thirdPartyBaseUrlPlaceholder'));
+      await user.type(screen.getByPlaceholderText('onboarding.bootstrap.thirdPartyBaseUrlPlaceholder'), 'https://discarded-resource.openai.azure.com');
+      await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.backToConfiguredDetails' }));
+      await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.editPrimary' }));
+      expect(screen.getByPlaceholderText('onboarding.bootstrap.thirdPartyBaseUrlPlaceholder')).toHaveValue(endpoint);
+    }
     await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.nextStep' }));
 
     expect(await screen.findByText('onboarding.bootstrap.intelPageTitle')).toBeInTheDocument();
@@ -619,6 +678,33 @@ describe('OnboardingModal', () => {
       }),
     }));
     expect(onboardingAPI.validate).not.toHaveBeenCalled();
+  });
+
+  it('reuses a configured MCP-only intelligence key when saving without revealing it first', async () => {
+    const user = userEvent.setup();
+    const status = makeStatus();
+    Object.assign(status.threatbook_intel, {
+      configured: true,
+      region: 'cn',
+      api_configured: false,
+      mcp_configured: true,
+      mcp_name: 'threatbook_mcp',
+    });
+    onboardingAPI.getStatus.mockResolvedValue({ data: status });
+    providerAPI.revealServiceCredentials.mockResolvedValue({ data: { has_credential: false, api_key: null } });
+    renderOnboarding();
+
+    await user.click(await screen.findByRole('button', { name: 'onboarding.bootstrap.nextStep' }));
+    await user.click(await screen.findByRole('button', { name: 'onboarding.bootstrap.editIntel' }));
+    await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.saveIntel' }));
+
+    await waitFor(() => expect(onboardingAPI.validate).toHaveBeenCalledWith(expect.objectContaining({
+      region: 'cn',
+      threatbook_api_key: 'saved-intel-mcp-key',
+      threatbook_services_only: true,
+    })));
+    expect(mcpAPI.revealCredentials).toHaveBeenCalledWith('threatbook_mcp');
+    expect(providerAPI.revealServiceCredentials).not.toHaveBeenCalled();
   });
 
   it('saves ThreatBook model setup without applying intelligence API or MCP services', async () => {

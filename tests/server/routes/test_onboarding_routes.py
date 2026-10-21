@@ -61,11 +61,15 @@ def draft_secrets(monkeypatch: pytest.MonkeyPatch):
         def _load(self):
             return dict(self.values)
 
+        def _save(self, values):
+            self.values = dict(values)
+
     secrets = Secrets()
     monkeypatch.setattr(security, "get_secret_manager", lambda: secrets)
     monkeypatch.setattr(onboarding_routes, "get_secret_manager", lambda: secrets)
     monkeypatch.setattr(provider_routes, "_ensure_provider_initialized", AsyncMock())
     monkeypatch.setattr(onboarding_routes.Provider, "get", lambda _provider_id: None)
+    monkeypatch.setattr(onboarding_routes.Provider, "_models", dict(onboarding_routes.Provider._models))
     return secrets
 
 
@@ -245,6 +249,111 @@ class TestOnboardingDraftRoutes:
         assert draft["model"] is None
         assert draft["intel"] is not None
         assert draft["dismissed"] is True
+
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_point", ["intel", "draft_storage", "response"])
+    async def test_draft_save_failure_rolls_back_config_secrets_and_runtime(
+        self, monkeypatch: pytest.MonkeyPatch, draft_secrets, failure_point
+    ):
+        from fastapi import HTTPException
+
+        draft_secrets.set("unrelated_key", "keep-me")
+        original_config = onboarding_routes.ConfigWriter._read_raw()
+        original_models = dict(onboarding_routes.Provider._models)
+        original_storage_write = onboarding_routes.Storage.write
+        storage_write = AsyncMock(wraps=original_storage_write)
+        monkeypatch.setattr(onboarding_routes.Storage, "write", storage_write)
+        monkeypatch.setattr(onboarding_routes, "_reload_runtime_state", AsyncMock())
+        if failure_point == "intel":
+            failure = HTTPException(status_code=500, detail="secret store failure")
+            monkeypatch.setattr(onboarding_routes, "set_service_credentials", AsyncMock(side_effect=failure))
+        elif failure_point == "draft_storage":
+            failure = RuntimeError("draft store unavailable")
+            storage_write.side_effect = failure
+        else:
+            failure = RuntimeError("cannot build draft response")
+            monkeypatch.setattr(onboarding_routes, "_draft_response", AsyncMock(side_effect=failure))
+
+        request = onboarding_routes.OnboardingDraftRequest.model_validate({
+            "model": {
+                "region": "global", "use_threatbook_model": False,
+                "third_party_llm": {
+                    "provider_id": "azure-openai", "api_key": "new-model-key",
+                    "model_id": "rollback-deployment", "base_url": "https://example.test/",
+                },
+            },
+            "intel": {
+                "region": "cn", "use_threatbook_model": False,
+                "threatbook_api_key": "new-intel-key", "threatbook_services_only": True,
+            },
+            "dismissed": True,
+        })
+        with pytest.raises(type(failure)):
+            await onboarding_routes.save_onboarding_draft(
+                request, _admin=AuthUser(id="alice", username="alice", role="admin"),
+            )
+
+        assert onboarding_routes.ConfigWriter._read_raw() == original_config
+        assert draft_secrets.values == {"unrelated_key": "keep-me"}
+        assert onboarding_routes.Provider._models == original_models
+        assert await onboarding_routes.Storage.read(["onboarding", "draft", "alice"]) is None
+        if failure_point != "draft_storage":
+            storage_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_point", ["read", "write"])
+    async def test_committed_apply_stays_successful_if_draft_cleanup_fails(
+        self, monkeypatch: pytest.MonkeyPatch, failure_point
+    ):
+        applied = onboarding_routes.OnboardingApplyResponse(
+            success=True, message="ok", region="cn", threatbook_enabled=True,
+            configured=["threatbook_llm", "default_llm"], skipped=[],
+        )
+        monkeypatch.setattr(onboarding_routes, "_apply_onboarding", AsyncMock(return_value=applied))
+        if failure_point == "read":
+            monkeypatch.setattr(onboarding_routes, "_read_draft", AsyncMock(side_effect=RuntimeError("store unavailable")))
+        else:
+            monkeypatch.setattr(onboarding_routes.Storage, "write", AsyncMock(side_effect=RuntimeError("store unavailable")))
+        response = await onboarding_routes.apply_onboarding(
+            onboarding_routes.OnboardingValidateRequest(
+                region="cn", threatbook_api_key="already-applied", threatbook_model_only=True,
+            ),
+            _admin=AuthUser(id="alice", username="alice", role="admin"),
+        )
+        assert response is applied
+
+
+@pytest.mark.asyncio
+async def test_apply_rollback_restores_provider_registries_and_previous_instance_config(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.provider.provider import BaseProvider, ProviderConfig
+
+    provider = BaseProvider("existing-provider", "Original name")
+    original_credentials = ProviderConfig(provider_id="existing-provider", api_key="original-key")
+    provider._config = original_credentials
+    old_model = object()
+    monkeypatch.setattr(onboarding_routes.Provider, "_providers", {provider.id: provider})
+    monkeypatch.setattr(onboarding_routes.Provider, "_models", {"original-model": old_model})
+    monkeypatch.setattr(onboarding_routes.Provider, "_initialized", True)
+    monkeypatch.setattr(onboarding_routes, "_snapshot_config_and_secret_state", lambda: ({}, {}))
+    monkeypatch.setattr(onboarding_routes, "_restore_config_and_secret_state", AsyncMock())
+
+    with pytest.raises(RuntimeError, match="failed after mutation"):
+        async with onboarding_routes._rollback_on_apply_failure():
+            provider.configure(ProviderConfig(provider_id=provider.id, api_key="rejected-key"))
+            provider.name = "Changed name"
+            provider._config_models = [object()]
+            onboarding_routes.Provider._providers["new-provider"] = BaseProvider("new-provider", "New")
+            onboarding_routes.Provider._models["new-model"] = object()
+            raise RuntimeError("failed after mutation")
+
+    assert onboarding_routes.Provider._providers == {provider.id: provider}
+    assert onboarding_routes.Provider._models == {"original-model": old_model}
+    assert provider._config is original_credentials
+    assert provider._config_models == []
+    assert provider.name == "Original name"
 
 
 @pytest.mark.asyncio

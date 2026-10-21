@@ -388,6 +388,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const [draftIntelRegion, setDraftIntelRegion] = useState<OnboardingRegion | null>(null);
 
   const [resolvedDefaultModel, setResolvedDefaultModel] = useState<ResolvedDefaultModel | null>(null);
+  const [resolvedPrimaryBaseUrl, setResolvedPrimaryBaseUrl] = useState('');
   const [primaryProviderId, setPrimaryProviderId] = useState<string>('threatbook-cn-llm');
   const [primaryModelId, setPrimaryModelId] = useState('');
   const [primaryApiKey, setPrimaryApiKey] = useState('');
@@ -436,7 +437,9 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
           if (!isThreatBookProvider(defaultModel.provider_id)) {
             try {
               const credentials = await providerAPI.getCredentials(defaultModel.provider_id);
-              setPrimaryBaseUrl(credentials.data.base_url || '');
+              const baseUrl = credentials.data.base_url || '';
+              setPrimaryBaseUrl(baseUrl);
+              setResolvedPrimaryBaseUrl(baseUrl);
             } catch {
               // Keep the current endpoint if credential metadata is temporarily unavailable.
             }
@@ -841,14 +844,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       try {
         setIntelKeyRevealing(true);
         setIntelStatus(null);
-        let apiKey: string | null | undefined;
-        if (draftIntelRegion === intelRegion || intelRuntimeStatus?.api_configured) {
-          const response = await providerAPI.revealServiceCredentials(intelKeyServiceId);
-          apiKey = response.data.api_key;
-        } else if (intelRuntimeStatus?.mcp_configured && intelRuntimeStatus.mcp_name) {
-          const response = await mcpAPI.revealCredentials(intelRuntimeStatus.mcp_name);
-          apiKey = response.data.api_key;
-        }
+        const apiKey = await revealStoredIntelKey();
         if (!apiKey) throw new Error(t('onboarding.bootstrap.revealIntelKeyError'));
         setIntelApiKey(apiKey);
         setIntelKeyRevealed(true);
@@ -864,6 +860,18 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     }
 
     setIntelKeyVisible(true);
+  };
+
+  const revealStoredIntelKey = async () => {
+    if (draftIntelRegion === intelRegion || intelRuntimeStatus?.api_configured) {
+      const response = await providerAPI.revealServiceCredentials(intelKeyServiceId);
+      return response.data.api_key;
+    }
+    if (intelRuntimeStatus?.region === intelRegion && intelRuntimeStatus.mcp_configured && intelRuntimeStatus.mcp_name) {
+      const response = await mcpAPI.revealCredentials(intelRuntimeStatus.mcp_name);
+      return response.data.api_key;
+    }
+    return undefined;
   };
 
   const handleSavePrimary = async () => {
@@ -964,9 +972,9 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       let payload = buildIntelPayload();
       await onboardingAPI.saveDraft({ intel: payload });
       if (hasStoredIntelKey && !intelApiKey.trim()) {
-        const { data } = await providerAPI.revealServiceCredentials(intelKeyServiceId);
-        if (!data.api_key) throw new Error(t('onboarding.bootstrap.revealIntelKeyError'));
-        payload.threatbook_api_key = data.api_key;
+        const apiKey = await revealStoredIntelKey();
+        if (!apiKey) throw new Error(t('onboarding.bootstrap.revealIntelKeyError'));
+        payload.threatbook_api_key = apiKey;
       }
       let validateRes = await onboardingAPI.validate(payload);
       let validateData = validateRes.data;
@@ -1219,7 +1227,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                   setPrimaryApiKey('');
                   setPrimaryKeyVisible(false);
                   setPrimaryKeyRevealed(false);
-                  setPrimaryBaseUrl('');
+                  setPrimaryBaseUrl(resolvedPrimaryBaseUrl);
                   setPrimaryStatus(null);
                   setPrimaryEditing(false);
                 }}

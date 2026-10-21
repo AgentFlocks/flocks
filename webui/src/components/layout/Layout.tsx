@@ -230,6 +230,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const sidebarResize = useSidebarResize(!collapsed);
   const isHome = location.pathname === '/';
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const onboardingCheckGeneration = useRef(0);
   // Onboarding writes model credentials and the default model, so only admins get it
   // (and a session that drops to member does not keep the dialog).
   const canOnboard = user?.role === 'admin';
@@ -299,12 +300,15 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   useEffect(() => {
     if (!isHome || !canOnboard) return undefined;
     let cancelled = false;
+    const generation = ++onboardingCheckGeneration.current;
     onboardingAPI.getStatus()
       .then((res) => {
-        if (!cancelled && !res.data.completed && !res.data.dismissed) setShowOnboarding(true);
+        if (!cancelled && generation === onboardingCheckGeneration.current
+          && !res.data.completed && !res.data.dismissed) setShowOnboarding(true);
       })
       .catch(() => {
-        if (!cancelled) setShowOnboarding(true);
+        // Only open automatically when the server confirms setup is needed.
+        // An unavailable status must not bypass a saved dismissal preference.
       });
     return () => {
       cancelled = true;
@@ -312,8 +316,16 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, [isHome, canOnboard, user?.id]);
 
   const handleOpenOnboarding = useCallback(() => {
-    if (canOnboard) setShowOnboarding(true);
+    if (canOnboard) {
+      onboardingCheckGeneration.current += 1;
+      setShowOnboarding(true);
+    }
   }, [canOnboard]);
+
+  const handleCloseOnboarding = useCallback(() => {
+    onboardingCheckGeneration.current += 1;
+    setShowOnboarding(false);
+  }, []);
 
   useEffect(() => {
     window.addEventListener('flocks:open-onboarding', handleOpenOnboarding);
@@ -1040,7 +1052,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     >
       <LazyLoadErrorBoundary mode="overlay">
         <Suspense fallback={null}>
-          {onboardingOpen && <OnboardingModal onClose={() => setShowOnboarding(false)} />}
+          {onboardingOpen && <OnboardingModal onClose={handleCloseOnboarding} />}
           {tokenPolicy.notice && !onboardingOpen && updateState !== 'visible' && (
             <TokenPolicyNotice onClose={tokenPolicy.close} onPresented={tokenPolicy.onPresented} />
           )}

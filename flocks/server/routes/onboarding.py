@@ -417,6 +417,20 @@ async def _temporary_config_and_secret_state():
 async def _rollback_on_apply_failure(mcp_name: Optional[str] = None):
     """Rollback onboarding writes if apply fails part-way through."""
     config_snapshot, secret_snapshot = _snapshot_config_and_secret_state()
+    # Reloading restored disk config cannot remove providers/models first added
+    # by this transaction, or reset a provider whose original config was absent.
+    providers_snapshot = dict(Provider._providers)
+    models_snapshot = dict(Provider._models)
+    initialized_snapshot = Provider._initialized
+    provider_state_snapshot = {
+        provider_id: (
+            provider._config,
+            list(provider._config_models),
+            list(provider._custom_models) if hasattr(provider, "_custom_models") else None,
+            provider.name,
+        )
+        for provider_id, provider in providers_snapshot.items()
+    }
     previous_mcp_config = (
         copy.deepcopy(_load_raw_mcp_server_config(mcp_name)) if mcp_name else None
     )
@@ -445,6 +459,18 @@ async def _rollback_on_apply_failure(mcp_name: Optional[str] = None):
             await _reload_runtime_state()
         else:
             await _restore_config_and_secret_state(config_snapshot, secret_snapshot)
+        Provider._providers = providers_snapshot
+        Provider._models = models_snapshot
+        Provider._initialized = initialized_snapshot
+        for provider_id, provider in providers_snapshot.items():
+            original_config, original_models, original_custom_models, original_name = provider_state_snapshot[provider_id]
+            provider._config = original_config
+            provider._config_models = original_models
+            if original_custom_models is not None:
+                provider._custom_models = original_custom_models
+            provider.name = original_name
+            if hasattr(provider, "_client"):
+                provider._client = None
         raise
 
 
@@ -1038,47 +1064,49 @@ async def save_onboarding_draft(
     stored = await _read_draft(_admin)
     if request.model and request.model.third_party_llm and not request.model.use_threatbook_model:
         _known_draft_provider(request.model.third_party_llm.provider_id)
-    for section in ("model", "intel"):
-        value = getattr(request, section)
-        if value is None:
-            continue
-        preset = ONBOARDING_REGION_PRESETS[value.region]
-        if section == "model":
-            if value.use_threatbook_model:
-                if key := (value.threatbook_api_key or "").strip():
-                    await set_provider_credentials(
-                        preset["threatbook_llm_provider_id"], ProviderCredentialRequest(api_key=key),
-                    )
-            elif value.third_party_llm:
-                third_party = value.third_party_llm
-                _persist_draft_model(third_party)
-                if key := third_party.api_key.strip():
-                    await set_provider_credentials(
-                        third_party.provider_id,
-                        ProviderCredentialRequest(
-                            api_key=key,
-                            base_url=third_party.base_url,
-                            provider_name=third_party.provider_name,
-                        ),
-                    )
-        elif key := (value.threatbook_api_key or "").strip():
-            await set_service_credentials(
-                preset["threatbook_api_service_id"], ProviderCredentialRequest(api_key=key),
-            )
+    async with _rollback_on_apply_failure():
+        for section in ("model", "intel"):
+            value = getattr(request, section)
+            if value is None:
+                continue
+            preset = ONBOARDING_REGION_PRESETS[value.region]
+            if section == "model":
+                if value.use_threatbook_model:
+                    if key := (value.threatbook_api_key or "").strip():
+                        await set_provider_credentials(
+                            preset["threatbook_llm_provider_id"], ProviderCredentialRequest(api_key=key),
+                        )
+                elif value.third_party_llm:
+                    third_party = value.third_party_llm
+                    _persist_draft_model(third_party)
+                    if key := third_party.api_key.strip():
+                        await set_provider_credentials(
+                            third_party.provider_id,
+                            ProviderCredentialRequest(
+                                api_key=key,
+                                base_url=third_party.base_url,
+                                provider_name=third_party.provider_name,
+                            ),
+                        )
+            elif key := (value.threatbook_api_key or "").strip():
+                await set_service_credentials(
+                    preset["threatbook_api_service_id"], ProviderCredentialRequest(api_key=key),
+                )
 
-        updates = _redact_draft(value).model_dump(exclude_unset=True, exclude_none=True)
-        previous = stored.get(section) or {}
-        previous_third_party = previous.get("third_party_llm") or {}
-        new_third_party = updates.get("third_party_llm")
-        if new_third_party and previous_third_party.get("provider_id") == new_third_party.get("provider_id"):
-            updates["third_party_llm"] = {**previous_third_party, **new_third_party}
-        stored[section] = _redact_draft(OnboardingValidateRequest.model_validate(
-            {**previous, **updates}
-        )).model_dump(mode="json")
-    if request.dismissed is not None:
-        stored["dismissed"] = request.dismissed
-    await Storage.write(_draft_storage_key(_admin), stored)
-    return await _draft_response(stored)
+            updates = _redact_draft(value).model_dump(exclude_unset=True, exclude_none=True)
+            previous = stored.get(section) or {}
+            previous_third_party = previous.get("third_party_llm") or {}
+            new_third_party = updates.get("third_party_llm")
+            if new_third_party and previous_third_party.get("provider_id") == new_third_party.get("provider_id"):
+                updates["third_party_llm"] = {**previous_third_party, **new_third_party}
+            stored[section] = _redact_draft(OnboardingValidateRequest.model_validate(
+                {**previous, **updates}
+            )).model_dump(mode="json")
+        if request.dismissed is not None:
+            stored["dismissed"] = request.dismissed
+        response = await _draft_response(stored)
+        await Storage.write(_draft_storage_key(_admin), stored)
+        return response
 
 
 @router.get(
@@ -1143,12 +1171,17 @@ async def apply_onboarding(
     _admin: object = Depends(require_admin),
 ) -> OnboardingApplyResponse:
     response = await _apply_onboarding(request)
-    stored = await _read_draft(_admin)
-    if request.use_threatbook_model or (request.third_party_llm and not request.threatbook_services_only):
-        stored.pop("model", None)
-    if not request.threatbook_model_only and (request.threatbook_api_key or "").strip():
-        stored.pop("intel", None)
-    await Storage.write(_draft_storage_key(_admin), stored)
+    try:
+        stored = await _read_draft(_admin)
+        if request.use_threatbook_model or (request.third_party_llm and not request.threatbook_services_only):
+            stored.pop("model", None)
+        if not request.threatbook_model_only and (request.threatbook_api_key or "").strip():
+            stored.pop("intel", None)
+        await Storage.write(_draft_storage_key(_admin), stored)
+    except Exception as exc:
+        # Configuration has already committed successfully. A stale draft must
+        # not turn that success into a failed save or trigger repeated probes.
+        log.warning("onboarding.draft.cleanup_failed", {"error": str(exc)})
     return response
 
 

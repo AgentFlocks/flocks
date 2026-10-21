@@ -59,7 +59,11 @@ vi.mock('@/components/common/UpdateModal', () => {
   }
   return { default: UpdateModalMock };
 });
-vi.mock('@/components/common/OnboardingModal', () => ({ default: () => <div role="dialog" aria-label="onboarding" /> }));
+vi.mock('@/components/common/OnboardingModal', () => ({
+  default: ({ onClose }: { onClose: () => void }) => (
+    <div role="dialog" aria-label="onboarding"><button onClick={onClose}>close-onboarding</button></div>
+  ),
+}));
 vi.mock('@/components/common/NotificationModal', () => ({
   default: (props: Record<string, unknown>) => {
     notificationModal(props);
@@ -689,6 +693,31 @@ describe('Layout onboarding', () => {
       window.dispatchEvent(new Event('flocks:open-onboarding'));
     });
     expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+  });
+
+  it('does not bypass a dismissal when the status request fails, while manual opening still works', async () => {
+    onboardingAPI.getStatus.mockRejectedValue(new Error('temporary network failure'));
+    renderAt('/');
+    await act(async () => {});
+    expect(onboardingAPI.getStatus).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
+
+    await act(async () => { window.dispatchEvent(new Event('flocks:open-onboarding')); });
+    expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+  });
+
+  it('does not reopen a manually closed guide when an earlier automatic status response arrives', async () => {
+    let resolveStatus!: (value: { data: { completed: boolean } }) => void;
+    onboardingAPI.getStatus.mockReturnValue(new Promise((resolve) => { resolveStatus = resolve; }));
+    renderAt('/');
+    await waitFor(() => expect(onboardingAPI.getStatus).toHaveBeenCalledOnce());
+    await act(async () => { window.dispatchEvent(new Event('flocks:open-onboarding')); });
+    expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'close-onboarding' }));
+    expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
+
+    await act(async () => { resolveStatus({ data: { completed: false } }); });
+    expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
   });
 
   it('keeps onboarding away from members: no status check, no prompt, no event opener', async () => {
