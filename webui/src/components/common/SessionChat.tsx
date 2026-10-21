@@ -426,29 +426,6 @@ function getProcessPartInterval(part: MessagePart, activeNowMs?: number): Proces
   return { start: time.start, end };
 }
 
-function sumMergedProcessIntervals(intervals: ProcessTimeInterval[]): number {
-  if (intervals.length === 0) return 0;
-
-  const sorted = [...intervals].sort((a, b) => a.start - b.start);
-  let total = 0;
-  let currentStart = sorted[0].start;
-  let currentEnd = sorted[0].end;
-
-  for (let index = 1; index < sorted.length; index += 1) {
-    const interval = sorted[index];
-    if (interval.start <= currentEnd) {
-      currentEnd = Math.max(currentEnd, interval.end);
-      continue;
-    }
-
-    total += currentEnd - currentStart;
-    currentStart = interval.start;
-    currentEnd = interval.end;
-  }
-
-  return total + currentEnd - currentStart;
-}
-
 function isModelActivityPart(part: MessagePart): boolean {
   return part.type === 'step-start' && !!part.time && Number.isFinite(part.time.start);
 }
@@ -456,36 +433,16 @@ function isModelActivityPart(part: MessagePart): boolean {
 export function getProcessGroupDurationMs(
   parts: readonly MessagePart[],
   activeNowMs?: number,
-  activePartId?: string,
-  activeScope?: { messageId?: string; modelPartId?: string },
+  startedAtMs?: number,
 ): number | null {
-  const belongsToActiveMessage = (part: MessagePart) => (
-    !activeScope?.messageId || part.messageID === activeScope.messageId
-  );
-  const canExtend = (part: MessagePart) => {
-    const time = getProcessPartTime(part);
-    return activeNowMs !== undefined && belongsToActiveMessage(part)
-      && !!time && Number.isFinite(time.start) && !Number.isFinite(time.end)
-      && time.start <= activeNowMs;
-  };
-  // Only the latest model marker may be open. A lost close event on an older
-  // attempt must not extend it through a retry/backoff or a later model call.
-  const modelPart = [...parts].reverse().find(isModelActivityPart);
-  const activePart = activePartId
-    ? parts.find((part) => part.id === activePartId)
-    : [...parts].reverse().find((part) => canExtend(part)
-      && (part.type !== 'tool' || isActiveToolPart(part)));
-  const intervals = parts.map((part) => {
-    const active = canExtend(part) && (
-      part.type === 'tool' ? isActiveToolPart(part)
-        : isModelActivityPart(part) ? part.id === (activeScope?.modelPartId ?? modelPart?.id)
-          : !modelPart && part === activePart
-    );
-    return getProcessPartInterval(part, active ? activeNowMs : undefined);
-  }).filter((interval): interval is ProcessTimeInterval => interval !== null);
-
-  if (intervals.length === 0) return null;
-  return sumMergedProcessIntervals(intervals);
+  const intervals = parts.map((part) => getProcessPartInterval(part, activeNowMs))
+    .filter((interval): interval is ProcessTimeInterval => interval !== null);
+  // Measure the user's elapsed wait, including gaps and retry backoff.
+  const start = typeof startedAtMs === 'number' && Number.isFinite(startedAtMs) && startedAtMs > 0
+    ? startedAtMs
+    : Math.min(...intervals.map((interval) => interval.start));
+  const end = Math.max(activeNowMs ?? -Infinity, ...intervals.map((interval) => interval.end));
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
 }
 
 export function formatProcessDuration(durationMs: number): string {
@@ -495,17 +452,36 @@ export function formatProcessDuration(durationMs: number): string {
   return `${minutes}m${totalSeconds % 60}s`;
 }
 
-function useProcessElapsedClock(enabled: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
+function readObservedProcessEnd(storageKey: string): number | undefined {
+  try {
+    const value = Number(window.sessionStorage.getItem(storageKey));
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function useProcessElapsedClock(enabled: boolean, storageKey: string): number | undefined {
+  const [clock, setClock] = useState(() => ({
+    key: storageKey,
+    value: enabled ? Date.now() : readObservedProcessEnd(storageKey),
+  }));
 
   useEffect(() => {
     if (!enabled) return undefined;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    const tick = () => {
+      const value = Date.now();
+      setClock({ key: storageKey, value });
+      // Keep the last displayed end across Stop, timeline remounts and tab reloads.
+      // This is only a local lower bound; later recorded part ends still win.
+      try { window.sessionStorage.setItem(storageKey, String(value)); } catch { /* Storage may be disabled. */ }
+    };
+    tick();
+    const timer = window.setInterval(tick, 1_000);
     return () => window.clearInterval(timer);
-  }, [enabled]);
+  }, [enabled, storageKey]);
 
-  return now;
+  return clock.key === storageKey ? clock.value : readObservedProcessEnd(storageKey);
 }
 
 const StreamingReasoningText = memo(function StreamingReasoningText({
@@ -5742,7 +5718,13 @@ function ChatMessageBubbleInner({
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
   const sender = getAgentSender(parts);
   const isUser = message.role === 'user' && !sender;
-  const processElapsedClock = useProcessElapsedClock(isActive && collapseIntermediateSteps);
+  const processElapsedClock = useProcessElapsedClock(
+    isActive && (collapseIntermediateSteps || showTimestamp),
+    `flocks:session:${message.sessionID}:message:${message.id}:observedEnd`,
+  );
+  const processStartedAt = Number.isFinite(message.timestamp) && message.timestamp > 0
+    ? message.timestamp
+    : Math.min(...parts.map((part) => getProcessPartInterval(part, processElapsedClock)?.start ?? Infinity));
   const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
   // Lightbox state for inline image previews. Browsers block top-level
   // navigation to ``data:`` URLs (the format we send for chat images), so a
@@ -5907,12 +5889,6 @@ function ChatMessageBubbleInner({
           const activeTailPart = isActive
             ? [...displayParts].reverse().find(isRenderableDisplayPart)
             : undefined;
-          const activeMessageId = displayParts[displayParts.length - 1]?.messageID;
-          const latestModelPart = [...displayParts].reverse().find(isModelActivityPart);
-          const activeOutputPart = [...displayParts].reverse().find((part) => (
-            ['text', 'reasoning', 'thinking'].includes(part.type)
-            && (!activeMessageId || part.messageID === activeMessageId)
-          ));
           const renderPart = (part: MessagePart, i: number, isVisible = true, processStep = false) => (
             // Spacing between consecutive parts is owned by this wrapper,
             // not by individual part components. Each part used to set its
@@ -6077,15 +6053,16 @@ function ChatMessageBubbleInner({
             group: Array<{ part: MessagePart; index: number }>,
             groupIndex: number,
             timingParts: MessagePart[],
+            isLastGroup: boolean,
           ) => {
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
             const processGroupKey = `${message.id}:process:${groupIndex}`;
             const durationParts = [...group.map(({ part }) => part), ...timingParts];
+            // Summaries show elapsed time since the reply began; only the last one ticks.
             const processDurationMs = getProcessGroupDurationMs(
               durationParts,
-              isActive ? processElapsedClock : undefined,
-              activeOutputPart?.id,
-              { messageId: activeMessageId, modelPartId: latestModelPart?.id },
+              isLastGroup ? processElapsedClock : undefined,
+              processStartedAt,
             );
             const hasStoredOpenState = !!processGroupOpenState
               && Object.prototype.hasOwnProperty.call(processGroupOpenState, processGroupKey);
@@ -6145,7 +6122,9 @@ function ChatMessageBubbleInner({
             const flushProcessGroup = () => {
               if (!processGroup) return;
               const group = processGroup;
-              nodes.push(() => renderProcessGroup(group.steps, group.index, group.timing));
+              nodes.push(() => renderProcessGroup(
+                group.steps, group.index, group.timing, group.index === processGroupIndex - 1,
+              ));
               lastGroup = group;
               processGroup = undefined;
             };
@@ -6165,7 +6144,7 @@ function ChatMessageBubbleInner({
                 return;
               }
               // Empty output is still timed, but never adds a visible step.
-              if ((isActive || latestModelPart) && ['text', 'reasoning', 'thinking'].includes(part.type)) {
+              if (['text', 'reasoning', 'thinking'].includes(part.type)) {
                 const group = processGroup || lastGroup;
                 if (group) group.timing.push(part);
                 else pendingTiming.push(part);
@@ -6341,8 +6320,14 @@ function ChatMessageBubbleInner({
       )}
     </div>
   );
+  // Use the same elapsed time as the process summary, including the final output.
+  const displayTimestamp = message.timestamp + (
+    message.role === 'assistant'
+      ? (getProcessGroupDurationMs(parts, processElapsedClock, message.timestamp) ?? 0)
+      : 0
+  );
   const footerTimestamp = showTimestamp && message.timestamp
-    ? <span className="select-none text-[11px] text-[#8b929d] dark:text-[#9aa7b4]">{formatSmartTime(message.timestamp, i18n.language)}</span>
+    ? <span className="select-none text-[11px] text-[#8b929d] dark:text-[#9aa7b4]">{formatSmartTime(displayTimestamp, i18n.language)}</span>
     : null;
   const footer = !compact && showActions && visiblePartCount > 0 && !isEditing ? (
     <div className={`mt-1.5 flex items-center ${
@@ -7251,6 +7236,8 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.onOpenContextFile !== next.onOpenContextFile) return false;
   if (prev.onOpenContext !== next.onOpenContext) return false;
   if (prev.message.finish !== next.message.finish) return false;
+  if (prev.message.id !== next.message.id || prev.message.sessionID !== next.message.sessionID) return false;
+  if (prev.message.timestamp !== next.message.timestamp) return false;
   if (prev.message.role !== next.message.role || prev.message.agent !== next.message.agent) return false;
   const prevParts = prev.message.parts as any[] | undefined;
   const nextParts = next.message.parts as any[] | undefined;
