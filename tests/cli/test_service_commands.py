@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from typer.testing import CliRunner
 
 import flocks.cli.main as cli_main
@@ -115,6 +116,43 @@ def test_serve_exposes_runtime_server_port(monkeypatch) -> None:
     cli_main.serve(host="127.0.0.1", port=5173, reload=False)
 
     assert os.environ["_FLOCKS_SERVER_PORT"] == "5173"
+
+
+@pytest.mark.parametrize("exit_error", [None, SystemExit(1)])
+def test_serve_records_own_pid_for_supervisor_cleanup(monkeypatch, tmp_path, exit_error) -> None:
+    import json
+
+    import uvicorn
+
+    from flocks.cli import service_manager
+
+    record_dir = tmp_path / "run" / service_manager.BACKEND_RUNTIME_DIRNAME
+    record_path = record_dir / f"{os.getpid()}.json"
+    seen: dict[str, object] = {}
+
+    def fake_run(*_args, **_kwargs):
+        seen["record"] = json.loads(record_path.read_text(encoding="utf-8"))
+        seen["inherited_env"] = os.environ.get(service_manager.BACKEND_RUNTIME_DIR_ENV)
+        if exit_error is not None:
+            raise exit_error
+
+    monkeypatch.delenv("_FLOCKS_SERVER_PORT", raising=False)
+    monkeypatch.delenv("_FLOCKS_SERVICE_BOOT_ID", raising=False)
+    monkeypatch.setenv(service_manager.BACKEND_RUNTIME_DIR_ENV, str(record_dir))
+    monkeypatch.setattr(service_manager, "_process_identity", lambda pid: f"test:{pid}")
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+
+    if exit_error is None:
+        cli_main.serve(host="127.0.0.1", port=18673, reload=False)
+    else:
+        with pytest.raises(SystemExit):
+            cli_main.serve(host="127.0.0.1", port=18673, reload=False)
+
+    assert seen["record"]["pid"] == os.getpid()
+    assert seen["record"]["port"] == 18673
+    assert seen["record"]["process_identity"] == f"test:{os.getpid()}"
+    assert seen["inherited_env"] is None
+    assert not record_path.exists()
 
 
 def test_tui_starts_hidden_serve_command(monkeypatch, tmp_path) -> None:
