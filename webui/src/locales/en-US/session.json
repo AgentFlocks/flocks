@@ -240,6 +240,10 @@
       "countdown": ", next try in ~{{seconds}}s",
       "unknownReason": "temporary error"
     },
+    "stopReason": {
+      "title": "Task stopped",
+      "toolExecuted": "A tool had already run in this step, so the request was not retried automatically to avoid running it twice."
+    },
     "process": {
       "title": "View {{count}} steps",
       "duration": "Processed in {{duration}}",

@@ -19,6 +19,7 @@ import {
   getCompactionDividerClassName,
   getEditingActionBarClassName,
   getMessageBubbleClassName,
+  getMessageErrorNoteKey,
   getMessageErrorText,
   getMessageGroupClassName,
   getProcessGroupDurationMs,
@@ -78,6 +79,8 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.retryNotice.transient': '模型请求失败（{{reason}}），正在第 {{attempt}} 次重试',
   'chat.retryNotice.countdown': '，约 {{seconds}} 秒后',
   'chat.retryNotice.unknownReason': '临时错误',
+  'chat.stopReason.title': '任务已停止',
+  'chat.stopReason.toolExecuted': '这一步已经执行过工具，为避免重复执行，没有自动重试这次请求。',
   'chat.contextCompressed': '上下文已压缩',
   'chat.contextUsage.title': 'Context Usage',
   'chat.contextUsage.close': 'Close',
@@ -3703,6 +3706,46 @@ describe('getMessageErrorText', () => {
       error: { code: 'SessionError' } as any,
     }))).toBe('SessionError');
   });
+
+  it('explains a retry the backend held back because a tool had already run', () => {
+    expect(getMessageErrorNoteKey(makeMessage({
+      id: 'assistant-error',
+      error: { name: 'APIError', data: { message: 'timed out', retrySuppressed: 'tool_execution_started' } } as any,
+    }))).toBe('chat.stopReason.toolExecuted');
+    expect(getMessageErrorNoteKey(makeMessage({
+      id: 'assistant-error',
+      error: { name: 'APIError', data: { message: 'timed out' } } as any,
+    }))).toBeNull();
+    expect(getMessageErrorNoteKey(makeMessage({ id: 'assistant-ok' }))).toBeNull();
+  });
+});
+
+describe('mergeConsecutiveAssistantMessages error ownership', () => {
+  const step = (id: string, overrides: Partial<Message> = {}) => makeMessage({
+    id, role: 'assistant', finish: 'tool-calls',
+    parts: [{ id: `${id}-text`, type: 'text', text: id }] as Message['parts'],
+    ...overrides,
+  });
+  const timeout = { name: 'APIError', message: 'LLM stream timed out', data: { message: 'LLM stream timed out' } } as any;
+
+  it('keeps the error of the step that stopped the turn', () => {
+    const [merged] = mergeConsecutiveAssistantMessages([
+      step('first'),
+      step('last', { finish: 'error', error: timeout }),
+    ]);
+    expect(merged.id).toBe('first');
+    expect(merged.finish).toBe('error');
+    expect(merged.error).toBe(timeout);
+  });
+
+  it('drops an earlier error once a later step carried on', () => {
+    const [merged] = mergeConsecutiveAssistantMessages([
+      step('first', { finish: 'error', error: timeout }),
+      step('last', { finish: 'stop' }),
+    ]);
+    expect(merged.finish).toBe('stop');
+    expect(merged.error).toBeUndefined();
+  });
 });
 
 describe('shouldForwardSSEEventToParent', () => {
@@ -3902,6 +3945,63 @@ describe('SessionChat error rendering', () => {
 
     expect(screen.getByText('Model returned an empty response.')).toBeInTheDocument();
     expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+  });
+
+  const toolStep = (id: string, text: string) => [
+    { id: `${id}-text`, type: 'text', text },
+    { id: `${id}-tool`, type: 'tool', tool: 'bash', callID: `${id}-call`, state: {
+      status: 'completed', input: { command: `echo ${id}` }, output: id, time: { start: 0, end: 10 },
+    } },
+  ] as Message['parts'];
+  const mockMessages = (messages: Message[]) => useSessionMessagesMock.mockReturnValue({
+    messages,
+    loading: false,
+    refetch: vi.fn(),
+    addMessage: vi.fn(),
+    updateMessage: vi.fn(),
+    updateMessagePart: vi.fn(),
+    replaceMessageText: vi.fn(),
+    truncateAfterMessage: vi.fn(),
+  });
+
+  it('keeps why a multi-step turn stopped after a tool already ran', () => {
+    // Regression (INC-BCFF390A): the last step's error was dropped when the
+    // steps were merged, and a reply with text or tools never showed it.
+    const timeout = 'LLM stream timed out after 300s (mid-stream). The model may be overloaded or incompatible. Please try again or switch models.';
+    mockMessages([
+      makeMessage({ id: 'user-1', role: 'user', parts: [{ id: 'ask', type: 'text', text: '检查样式结构' }] as Message['parts'] }),
+      makeMessage({ id: 'step-1', role: 'assistant', finish: 'tool-calls', parts: toolStep('step-1', '我先看一下样式结构。') }),
+      makeMessage({
+        id: 'step-2', role: 'assistant', finish: 'error', parts: toolStep('step-2', '再检查一下视图文件。'),
+        error: { name: 'APIError', message: timeout, data: { message: timeout, retrySuppressed: 'tool_execution_started' } } as any,
+      }),
+    ]);
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('任务已停止');
+    expect(alert).toHaveTextContent(timeout);
+    expect(alert).toHaveTextContent('这一步已经执行过工具，为避免重复执行，没有自动重试这次请求。');
+    expect(screen.getByText('再检查一下视图文件。')).toBeInTheDocument();
+  });
+
+  it('shows an error the backend also stored as reply text only once', () => {
+    const unavailable = 'Model is unavailable. Please check the provider connection and model configuration.';
+    mockMessages([
+      makeMessage({ id: 'user-1', role: 'user', parts: [{ id: 'ask', type: 'text', text: '继续' }] as Message['parts'] }),
+      makeMessage({
+        id: 'step-1', role: 'assistant', finish: 'error',
+        parts: [...toolStep('step-1', '').slice(1), { id: 'echo', type: 'text', text: unavailable }] as Message['parts'],
+        error: { name: 'APIError', message: 'Connection error.', data: { message: 'Connection error.', displayMessage: unavailable } } as any,
+      }),
+    ]);
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getAllByText(unavailable)).toHaveLength(1);
+    expect(screen.getByRole('alert')).toHaveTextContent(unavailable);
+    expect(screen.getByRole('alert')).not.toHaveTextContent('没有自动重试');
   });
 });
 

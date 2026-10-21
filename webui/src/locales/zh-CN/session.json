@@ -241,6 +241,10 @@
       "countdown": "，约 {{seconds}} 秒后",
       "unknownReason": "临时错误"
     },
+    "stopReason": {
+      "title": "任务已停止",
+      "toolExecuted": "这一步已经执行过工具，为避免重复执行，没有自动重试这次请求。"
+    },
     "process": {
       "title": "查看 {{count}} 个步骤",
       "duration": "已处理 {{duration}}",
