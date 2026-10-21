@@ -52,3 +52,5 @@ class UpdateProgress(BaseModel):
     downloaded_bytes: int | None = None
     total_bytes: int | None = None
     percent: int | None = None
+    # Restart stage only: lets the upgrade dialog read error details from the handoff.
+    progress_token: str | None = None

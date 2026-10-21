@@ -15,6 +15,7 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,7 @@ from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 
+from flocks.updater.handoff_progress import UPGRADE_PROGRESS_TOKEN_ENV
 from flocks.updater.models import UpdateProgress, VersionInfo
 from flocks.utils.log import Log
 
@@ -1831,6 +1833,7 @@ async def install_or_repair_source(
     bundle_sha256: str | None = None,
     prebuilt: bool = False,
     dependency_wheels_dir: Path | None = None,
+    on_step: Callable[[str], None] | None = None,
 ) -> None:
     """Install or repair the active source tree after managed services stop.
 
@@ -1838,10 +1841,24 @@ async def install_or_repair_source(
     the Python environment is either untouched (Pro-only change) or refreshed from
     ``dependency_wheels_dir`` without network access. The default (``False``) is
     the online behaviour: ``uv sync`` against the index and ``npm run build``.
+
+    ``on_step`` is told the step about to run (``check_runtime``, ``sync_dependencies``,
+    ``install_pro``, ``build_webui``, ``finalize``) so the upgrade dialog can show it.
     """
+
+    def report(step: str) -> None:
+        if on_step is None:
+            return
+        try:
+            on_step(step)
+        except Exception as exc:
+            log.warning("updater.install.step_report_failed", {"step": step, "error": str(exc)})
+
     install_webui_dir = install_root / "webui"
     if not prebuilt and install_webui_dir.is_dir() and (install_webui_dir / "package.json").exists():
         from flocks.cli import service_manager
+
+        report("check_runtime")
 
         install_script = "scripts/install.ps1" if sys.platform == "win32" else "scripts/install.sh"
         if service_manager.resolve_npm_executable() is None:
@@ -1857,6 +1874,7 @@ async def install_or_repair_source(
     sync_env = _build_uv_sync_env()
     if prebuilt:
         if dependency_wheels_dir is not None:
+            report("sync_dependencies")
             sync_error = await _sync_prebuilt_dependencies(
                 uv_path=uv_path,
                 install_root=install_root,
@@ -1869,6 +1887,7 @@ async def install_or_repair_source(
         else:
             log.info("updater.dependencies.sync_skipped_prebuilt", {"install_root": str(install_root)})
     else:
+        report("sync_dependencies")
         sync_error = await _sync_project_dependencies(
             uv_path=uv_path,
             install_root=install_root,
@@ -1888,6 +1907,7 @@ async def install_or_repair_source(
         log.info("updater.frontend.build_skipped_prebuilt", {"dist": str(dist_index)})
 
     if pro_wheel_path is not None:
+        report("install_pro")
         python_path = _venv_python_path(install_root)
         install_cmd = [uv_path, "pip", "install", "--python", str(python_path), "--no-deps", str(pro_wheel_path)]
         code, _, err = await _run_async(
@@ -1900,6 +1920,7 @@ async def install_or_repair_source(
             raise RuntimeError(f"Flocks Pro component install failed: {err}")
 
     if not prebuilt and install_webui_dir.is_dir() and (install_webui_dir / "package.json").exists():
+        report("build_webui")
         frontend_error = await _build_frontend_workspace(
             install_webui_dir,
             npm_registry=npm_registry,
@@ -1907,6 +1928,7 @@ async def install_or_repair_source(
         if frontend_error is not None:
             raise RuntimeError(frontend_error)
 
+    report("finalize")
     validation_error = await _validate_restart_runtime(install_root)
     if validation_error:
         raise RuntimeError(validation_error)
@@ -2136,6 +2158,7 @@ def _spawn_detached_process(
     *,
     cwd: Path,
     log_path: Path,
+    env: dict[str, str] | None = None,
 ) -> subprocess.Popen:
     creationflags = 0
     kwargs: dict[str, object] = {}
@@ -2156,6 +2179,7 @@ def _spawn_detached_process(
         return subprocess.Popen(
             command,
             cwd=cwd,
+            env=env,
             stdout=handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -2166,11 +2190,17 @@ def _spawn_detached_process(
         handle.close()
 
 
-def _spawn_restart_handoff(command: list[str], *, cwd: Path) -> subprocess.Popen:
+def _spawn_restart_handoff(
+    command: list[str],
+    *,
+    cwd: Path,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.Popen:
     return _spawn_detached_process(
         command,
         cwd=cwd,
         log_path=_flocks_root() / "logs" / "backend.log",
+        env={**os.environ, **extra_env} if extra_env else None,
     )
 
 
@@ -3486,7 +3516,10 @@ async def perform_update(
         )
         return
 
-    yield UpdateProgress(stage="restarting", message="Restarting service...")
+    # The upgrade dialog sends this token to the handoff's progress responder to read the
+    # error text of a failed step; only the CLI waits for the handoff itself.
+    progress_token = None if wait_for_handoff else secrets.token_urlsafe(24)
+    yield UpdateProgress(stage="restarting", message="Restarting service...", progress_token=progress_token)
 
     log.info(
         "updater.restart",
@@ -3512,7 +3545,11 @@ async def perform_update(
                 "restart_argv": restart_argv,
             },
         )
-        handoff_process = _spawn_restart_handoff(handoff_argv, cwd=install_root)
+        handoff_process = _spawn_restart_handoff(
+            handoff_argv,
+            cwd=install_root,
+            extra_env={UPGRADE_PROGRESS_TOKEN_ENV: progress_token} if progress_token else None,
+        )
         if wait_for_handoff:
             returncode = await asyncio.to_thread(handoff_process.wait)
             if returncode != 0:

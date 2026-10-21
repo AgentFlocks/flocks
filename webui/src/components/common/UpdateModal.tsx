@@ -14,14 +14,24 @@ import {
 } from 'lucide-react';
 import NoticeCard, { NoticePrimaryAction } from './NoticeCard';
 import { useTranslation } from 'react-i18next';
-import { checkUpdate, applyUpdate, VersionInfo, UpdateProgress, type UpdateEdition } from '@/api/update';
+import {
+  checkUpdate,
+  applyUpdate,
+  VersionInfo,
+  UpdateProgress,
+  type UpdateEdition,
+  type UpgradeHandoffProgress,
+} from '@/api/update';
 import { checkRestartReadiness } from '@/utils/restartPolling';
+import UpgradeHandoffSteps, { useHandoffFailureMessage } from './UpgradeHandoffSteps';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
 
 // ------------------------------------------------------------------ //
 
 const HEALTH_POLL_INTERVAL = 2000;
 const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
+// Upper bound while the upgrade handoff keeps answering; each of its steps times out within 5 minutes.
+const HANDOFF_MAX_WAIT = 30 * 60 * 1000;
 
 export { UPDATE_DISMISSED_KEY };
 
@@ -80,6 +90,9 @@ export default function UpdateModal({
   const [steps, setSteps] = useState<UpdateProgress[]>([]);
   const [error, setError] = useState<string | null>(initialInfo?.error ?? null);
   const [restarting, setRestarting] = useState(false);
+  const [handoffProgress, setHandoffProgress] = useState<UpgradeHandoffProgress | null>(null);
+  const describeHandoffFailure = useHandoffFailureMessage();
+  const progressTokenRef = useRef<string | null>(null);
   const modalTitle = edition === 'flockspro' ? t('proTitle') : t('title');
   const currentDisplayVersion = edition === 'flockspro'
     ? info?.current_bundle_version || null
@@ -136,6 +149,8 @@ export default function UpdateModal({
         });
         if (progress.stage === 'restarting') {
           restartFailureReasonRef.current = '';
+          progressTokenRef.current = progress.progress_token ?? null;
+          setHandoffProgress(null);
           setRestartingSync(true);
           pollUntilReady();
         }
@@ -164,10 +179,14 @@ export default function UpdateModal({
   };
 
   const pollUntilReady = () => {
-    const start = Date.now();
+    // A handoff that answers is still working (a WebUI build alone can take minutes), so
+    // each answer restarts the wait for the service, up to HANDOFF_MAX_WAIT in total.
+    const restartStartedAt = Date.now();
+    let lastAnswerAt = restartStartedAt;
     let lastPollFailure = '';
     const poll = async () => {
-      if (Date.now() - start > HEALTH_POLL_TIMEOUT) {
+      const now = Date.now();
+      if (now - lastAnswerAt > HEALTH_POLL_TIMEOUT || now - restartStartedAt > HANDOFF_MAX_WAIT) {
         const reason = restartFailureReasonRef.current || lastPollFailure || t('restartUnknown');
         setError(t('restartTimeout', { reason }));
         setRestartingSync(false);
@@ -175,10 +194,21 @@ export default function UpdateModal({
         return;
       }
 
-      const readiness = await checkRestartReadiness();
+      const readiness = await checkRestartReadiness(progressTokenRef.current);
       if (readiness.ready) {
         window.location.reload();
         return;
+      }
+      const upgrade = readiness.upgrade;
+      if (upgrade) {
+        setHandoffProgress(upgrade);
+        if (upgrade.phase === 'failed') {
+          setError(describeHandoffFailure(upgrade));
+          setRestartingSync(false);
+          setUpgrading(false);
+          return;
+        }
+        lastAnswerAt = Date.now();
       }
       lastPollFailure = readiness.reason || lastPollFailure;
 
@@ -195,8 +225,9 @@ export default function UpdateModal({
     const label = edition === 'flockspro' && step.stage === 'fetching'
       ? t('stageLabels.fetchingPro')
       : t(`stageLabels.${step.stage}`, { defaultValue: step.stage });
-    const isError = step.stage === 'error';
-    const isSpinning = step.stage === 'restarting';
+    const restartFailed = step.stage === 'restarting' && handoffProgress?.phase === 'failed';
+    const isError = step.stage === 'error' || restartFailed;
+    const isSpinning = step.stage === 'restarting' && !restartFailed;
     const downloadPercent = clampPercent(step.percent);
     const hasDownloadProgress = step.stage === 'fetching' && typeof step.downloaded_bytes === 'number';
     const detail = step.pro_component_filename || step.bundle_filename || step.message;
@@ -215,6 +246,7 @@ export default function UpdateModal({
               <span className="min-w-0 truncate text-xs text-gray-400">{detail}</span>
             )}
           </div>
+          {step.stage === 'restarting' && handoffProgress && <UpgradeHandoffSteps progress={handoffProgress} />}
           {hasDownloadProgress && (
             <div className="mt-1.5 max-w-xs space-y-1">
               <div className="text-xs text-gray-500">
@@ -253,7 +285,7 @@ export default function UpdateModal({
 
         <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
           <div
-            className="pointer-events-auto w-full max-w-md mx-4 bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden"
+            className="pointer-events-auto w-full max-w-md mx-4 max-h-[calc(100dvh-2rem)] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-gray-200"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
@@ -310,7 +342,7 @@ export default function UpdateModal({
               <div className="px-4 pb-3">
                 <div className="flex items-start gap-2 text-xs text-red-600 bg-red-50 rounded-lg p-2.5">
                   <XCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-                  <span>{error}</span>
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{error}</span>
                 </div>
               </div>
             )}

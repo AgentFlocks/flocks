@@ -138,6 +138,29 @@ def test_spawn_restart_handoff_redirects_output_to_backend_log(
     assert "handoff stderr" in backend_output
 
 
+def test_spawn_restart_handoff_passes_extra_env_to_the_real_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-root"))
+    monkeypatch.setenv("FLOCKS_TEST_INHERITED", "kept")
+    command = [
+        sys.executable,
+        "-c",
+        "import os; print(os.environ['FLOCKS_UPGRADE_PROGRESS_TOKEN'], os.environ['FLOCKS_TEST_INHERITED'])",
+    ]
+
+    process = updater._spawn_restart_handoff(
+        command,
+        cwd=tmp_path,
+        extra_env={"FLOCKS_UPGRADE_PROGRESS_TOKEN": "tok-123"},
+    )
+
+    assert process.wait(timeout=10) == 0
+    backend_output = (tmp_path / "flocks-root" / "logs" / "backend.log").read_text(encoding="utf-8")
+    assert "tok-123 kept" in backend_output
+
+
 def test_capture_service_snapshot_allows_stopped_service_without_control_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1712,6 +1735,82 @@ async def test_perform_update_does_not_prepare_handover_before_spawning_handoff(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("wait_for_handoff", [False, True])
+async def test_perform_update_hands_the_progress_token_to_dialog_and_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    wait_for_handoff: bool,
+) -> None:
+    from flocks.updater.handoff_progress import UPGRADE_PROGRESS_TOKEN_ENV
+
+    archive_path = tmp_path / "flocks.zip"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    (staged_root / "webui").mkdir(parents=True)
+    install_root = tmp_path / "install-root"
+    install_root.mkdir()
+    spawns: list[dict[str, object]] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="zip",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    async def fake_sleep(_seconds) -> None:
+        return None
+
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_find_executable", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: ["/usr/bin/python3", "-m", "flocks.cli.main", "start"])
+    monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        updater,
+        "_capture_service_snapshot",
+        lambda: updater.ServiceSnapshot(config=service_manager.ServiceConfig(), daemon_pid=None, was_running=False),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_spawn_restart_handoff",
+        lambda argv, **kwargs: spawns.append({"argv": list(argv), **kwargs}) or SimpleNamespace(pid=4321, wait=lambda: 0),
+    )
+    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+
+    progresses = []
+    if wait_for_handoff:
+        progresses = [step async for step in updater.perform_update("2026.4.1", wait_for_handoff=True)]
+    else:
+        with pytest.raises(SystemExit, match="0"):
+            async for step in updater.perform_update("2026.4.1"):
+                progresses.append(step)
+
+    restarting = next(step for step in progresses if step.stage == "restarting")
+    assert len(spawns) == 1
+    if wait_for_handoff:
+        # the CLI waits for the handoff itself; no browser polls the service port
+        assert restarting.progress_token is None
+        assert spawns[0]["extra_env"] is None
+        assert progresses[-1].stage == "done"
+    else:
+        assert isinstance(restarting.progress_token, str) and len(restarting.progress_token) >= 24
+        assert spawns[0]["extra_env"] == {UPGRADE_PROGRESS_TOKEN_ENV: restarting.progress_token}
+
+
+@pytest.mark.asyncio
 async def test_perform_update_rejects_source_update_without_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3145,7 +3244,7 @@ async def test_perform_update_spawns_restart_process_on_windows(
     monkeypatch.setattr(
         updater,
         "_spawn_restart_handoff",
-        lambda argv, cwd=None: popen_calls.append((list(argv), cwd)) or SimpleNamespace(pid=4321),
+        lambda argv, cwd=None, **_kwargs: popen_calls.append((list(argv), cwd)) or SimpleNamespace(pid=4321),
     )
     monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
     monkeypatch.setattr(updater.os, "execv", lambda *_args: events.append("execv"))
