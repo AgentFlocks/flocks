@@ -102,13 +102,17 @@ describe('navPartitions', () => {
     expect(isOpenSceneWorkspace(scene({ placement: 'aiWorkbench' }))).toBe(false);
   });
 
-  it('assigns code audit to SOC independently of the alert suite', () => {
+  it('assigns code audit to SOC only while the alert suite workspace is open', () => {
     const audit = scene({ id: 'code_audit_ui', route: '/contracts/webui/workspaces/code_audit_ui' });
     const path = `${audit.route}/audit-home?view=audits`;
-    for (const workspaces of [[scene({}), audit], [audit], [scene({ enabled: false }), audit], [scene({ locked: true }), audit]]) {
-      expect(resolveNavRoute(path, workspaces)).toEqual({ kind: 'workspace', workspace: sceneNavWorkspace('soc_ui') });
-    }
-    for (const workspaces of [[scene({}), { ...audit, locked: true }], [{ ...audit, enabled: false }]]) {
+    expect(resolveNavRoute(path, [scene({}), audit])).toEqual({ kind: 'workspace', workspace: sceneNavWorkspace('soc_ui') });
+    for (const workspaces of [
+      [audit],
+      [scene({ enabled: false }), audit],
+      [scene({ locked: true }), audit],
+      [scene({}), { ...audit, locked: true }],
+      [{ ...audit, enabled: false }],
+    ]) {
       expect(resolveNavRoute(path, workspaces)).toEqual({ kind: 'workspace', workspace: sceneNavWorkspace('code_audit_ui') });
     }
   });

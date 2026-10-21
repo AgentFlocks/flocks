@@ -239,7 +239,7 @@ describe('Layout chrome', () => {
     expect(sceneMgmt).not.toHaveAttribute('aria-current');
   });
 
-  it.each(['missing', 'disabled', 'locked', 'loading'])('keeps scene management reachable in the header when the SOC suite is %s', async (state) => {
+  it.each(['missing', 'disabled', 'locked', 'loading'])('hides SOC but keeps scene management when the SOC suite is %s', async (state) => {
     useWebUIContractPages.mockReturnValue({
       pages: [], loading: state === 'loading', error: null, refetch: vi.fn(),
       workspaces: state === 'missing' || state === 'loading' ? [] : [sceneWorkspace('soc_ui', 'SOC 工作区', {
@@ -248,28 +248,29 @@ describe('Layout chrome', () => {
     });
     renderAt('/');
     const menu = screen.getByRole('navigation', { name: 'modules' });
-    expect(within(menu).getByRole('button', { name: 'socWorkspace' })).toBeInTheDocument();
+    expect(within(menu).queryByRole('button', { name: 'socWorkspace' })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole('button', { name: 'SOC 工作区' })).not.toBeInTheDocument();
     fireEvent.click(within(menu).getByRole('link', { name: 'sceneManagement' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/scenes/suites'));
-    expect(within(menu).getByRole('button', { name: 'socWorkspace' })).not.toHaveAttribute('aria-current');
     expect(screen.queryByRole('heading', { name: 'moreScenes' })).not.toBeInTheDocument();
     expect(within(menu).getByRole('link', { name: 'sceneManagement' })).toHaveAttribute('aria-current', 'page');
   });
 
-  it('keeps SOC and scene management after all installed scenes are removed', async () => {
+  it('drops SOC from the header but keeps scene management after all installed scenes are removed', async () => {
     useWebUIContractPages.mockReturnValue({
       pages: [], loading: false, error: null, refetch: vi.fn(),
       workspaces: [sceneWorkspace('soc_ui', 'SOC 工作区'), sceneWorkspace('code_audit_ui', '代码漏洞审计工作区'), sceneWorkspace('ai_redteam_ui', 'AI 渗透')],
     });
     const view = renderAt('/scenes/suites');
+    expect(screen.getByRole('button', { name: 'SOC 工作区' })).toBeInTheDocument();
     useWebUIContractPages.mockReturnValue({ pages: [], workspaces: [], loading: false, error: null, refetch: vi.fn() });
     fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
-    fireEvent.click(screen.getByRole('button', { name: 'socWorkspace' }));
-    await waitFor(() => expect(activeProbe().textContent).toBe('/scenes/suites'));
-    expect(screen.getByRole('link', { name: 'sceneManagement' })).toHaveAttribute('aria-current', 'page');
+    await waitFor(() => expect(activeProbe().textContent).toBe('/'));
+    expect(screen.queryByRole('button', { name: 'SOC 工作区' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'socWorkspace' })).not.toBeInTheDocument();
     view.unmount();
     renderAt('/scenes/suites');
-    expect(screen.getByRole('button', { name: 'socWorkspace' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'socWorkspace' })).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'sceneManagement' })).toHaveAttribute('aria-current', 'page');
   });
 
@@ -345,7 +346,7 @@ describe('Layout chrome', () => {
     expect(screen.queryByRole('button', { name: '代码漏洞审计工作区' })).not.toBeInTheDocument();
   });
 
-  it('keeps code-audit sections under SOC without the alert suite', async () => {
+  it('shows code audit as its own module without the alert suite', async () => {
     const page = (id: string, title: string) => ({
       id, title, route: `/contracts/webui/${id}`, icon: 'ShieldCheck', order: 10, enabled: true,
       placement: 'home.after', buildHash: 'r', buildStatus: 'ready', workspaceId: 'code_audit_ui',
@@ -373,15 +374,16 @@ describe('Layout chrome', () => {
     expect(screen.queryByRole('button', { name: '首页' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '任务列表' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: '代码审计首页' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'socWorkspace' })).toHaveAttribute('aria-current', 'page');
-    expect(screen.queryByRole('button', { name: '代码漏洞审计工作区' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'codeAudit' })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: '代码漏洞审计工作区' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.queryByRole('button', { name: 'socWorkspace' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'codeAudit' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '报告' })).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByRole('link', { name: '报告中心' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'sceneManagement' })).toBeInTheDocument();
     await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/code_audit_ui/audit-home?view=audits'));
   });
 
-  it.each(['uninstalled', 'disabled', 'locked'])('keeps the active audit page and SOC links when the alert suite becomes %s', async (state) => {
+  it.each(['uninstalled', 'disabled', 'locked'])('keeps the active audit page as its own module when the alert suite becomes %s', async (state) => {
     const audit = sceneWorkspace('code_audit_ui', '代码漏洞审计工作区');
     const nav = {
       pages: [], loading: false, error: null, refetch: vi.fn(),
@@ -399,14 +401,130 @@ describe('Layout chrome', () => {
         <Routes><Route path="/*" element={<Layout contentRoutes={routes} />} /></Routes>
       </MemoryRouter>,
     );
-    await waitFor(() => expect(screen.getByRole('button', { name: 'socWorkspace' })).toHaveAttribute('aria-current', 'page'));
+    await waitFor(() => expect(screen.getByRole('button', { name: '代码漏洞审计工作区' })).toHaveAttribute('aria-current', 'page'));
     expect(activeProbe().textContent).toBe(path);
     expect(screen.getByRole('link', { name: '代码漏洞审计工作区 概览' })).toHaveAttribute('aria-current', 'page');
     expect(screen.getByRole('link', { name: 'sceneManagement' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '代码漏洞审计工作区' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'SOC 工作区' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'socWorkspace' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
-    fireEvent.click(screen.getByRole('button', { name: 'socWorkspace' }));
+    fireEvent.click(screen.getByRole('button', { name: '代码漏洞审计工作区' }));
     await waitFor(() => expect(activeProbe().textContent).toBe(path));
+  });
+
+  it.each([
+    { from: 'both suites', to: 'code audit alone', before: true, after: false },
+    { from: 'code audit alone', to: 'both suites', before: false, after: true },
+  ])('returns to the remembered audit page when its module moves from $from to $to', async ({ before, after }) => {
+    const audit = sceneWorkspace('code_audit_ui', '代码漏洞审计工作区');
+    const soc = sceneWorkspace('soc_ui', 'SOC 工作区');
+    const nav = { pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: before ? [soc, audit] : [audit] };
+    useWebUIContractPages.mockReturnValue(nav);
+    const path = `${audit.route}/code_audit_ui-overview?view=audits`;
+    const view = renderAt(path);
+    await waitFor(() => expect(activeProbe().textContent).toBe(path));
+    fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/'));
+    nav.workspaces = after ? [soc, audit] : [{ ...soc, enabled: false }, audit];
+    view.rerender(
+      <MemoryRouter initialEntries={[path]}>
+        <Routes><Route path="/*" element={<Layout contentRoutes={routes} />} /></Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: after ? 'SOC 工作区' : '代码漏洞审计工作区' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe(path));
+  });
+
+  it('returns to the latest audit page while code audit moves out of SOC and back', async () => {
+    const page = (id: string, title: string) => ({
+      id, title, route: `/contracts/webui/${id}`, icon: 'ShieldCheck', order: 10, enabled: true,
+      placement: 'home.after', buildHash: 'r', buildStatus: 'ready', workspaceId: 'code_audit_ui',
+    });
+    const audit = sceneWorkspace('code_audit_ui', '代码漏洞审计工作区', {
+      defaultPageId: 'audit-home',
+      pages: [page('audit-home', '代码审计首页')],
+      sections: [
+        { id: 'home', label: '首页', flat: true, pageIds: ['audit-home'], defaultPageId: 'audit-home' },
+        { id: 'audits', label: '任务列表', flat: true, pageIds: ['audit-home'], defaultPageId: 'audit-home', query: { view: 'audits' } },
+      ],
+    });
+    const soc = sceneWorkspace('soc_ui', 'SOC 工作区');
+    const nav = { pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: [soc, audit] };
+    useWebUIContractPages.mockReturnValue(nav);
+    const home = `${audit.route}/audit-home`;
+    const tasks = `${audit.route}/audit-home?view=audits`;
+    const view = renderAt(home);
+    const rerenderNav = (workspaces: any[]) => {
+      nav.workspaces = workspaces;
+      view.rerender(
+        <MemoryRouter initialEntries={[home]}>
+          <Routes><Route path="/*" element={<Layout contentRoutes={routes} />} /></Routes>
+        </MemoryRouter>,
+      );
+    };
+    await waitFor(() => expect(activeProbe().textContent).toBe(home));
+    fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/'));
+
+    // SOC off: the audit module opens on the page last seen inside SOC, then moves on.
+    rerenderNav([{ ...soc, enabled: false }, audit]);
+    fireEvent.click(screen.getByRole('button', { name: '代码漏洞审计工作区' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe(home));
+    fireEvent.click(screen.getByRole('link', { name: '任务列表' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe(tasks));
+    fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/'));
+
+    // SOC back: the newer audit page wins over the older one remembered under SOC.
+    rerenderNav([soc, audit]);
+    fireEvent.click(screen.getByRole('button', { name: 'SOC 工作区' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe(tasks));
+    fireEvent.click(screen.getByRole('link', { name: 'codeAuditProjects' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe(home));
+    fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/'));
+
+    // SOC off again: the audit module follows the page visited under SOC.
+    rerenderNav([{ ...soc, enabled: false }, audit]);
+    fireEvent.click(screen.getByRole('button', { name: '代码漏洞审计工作区' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe(home));
+  });
+
+  it.each(['disabled', 'locked', 'uninstalled'])('keeps the SOC page memory when an old link opens a %s audit suite', async (state) => {
+    const socPage = '/contracts/webui/workspaces/soc_ui/soc_ui-overview?severity=high';
+    localStorage.setItem('flocks_layout_workspace_paths', JSON.stringify({ 'scene:soc_ui': socPage }));
+    const audit = sceneWorkspace('code_audit_ui', '代码漏洞审计工作区', {
+      enabled: state !== 'disabled', locked: state === 'locked',
+    });
+    useWebUIContractPages.mockReturnValue({
+      pages: [], loading: false, error: null, refetch: vi.fn(),
+      workspaces: state === 'uninstalled' ? [sceneWorkspace('soc_ui', 'SOC 工作区')] : [sceneWorkspace('soc_ui', 'SOC 工作区'), audit],
+    });
+    renderAt('/contracts/webui/workspaces/code_audit_ui/code_audit_ui-overview?view=audits');
+    await waitFor(() => expect(activeProbe().textContent).toBe('/scenes/suites'));
+    fireEvent.click(screen.getByRole('button', { name: 'SOC 工作区' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe(socPage));
+  });
+
+  it('keeps scene management on the audit module after SOC is disabled', async () => {
+    const audit = sceneWorkspace('code_audit_ui', '代码漏洞审计工作区');
+    const soc = sceneWorkspace('soc_ui', 'SOC 工作区');
+    const nav = { pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: [soc, audit] };
+    useWebUIContractPages.mockReturnValue(nav);
+    const path = `${audit.route}/code_audit_ui-overview`;
+    const view = renderAt(path);
+    await waitFor(() => expect(activeProbe().textContent).toBe(path));
+    fireEvent.click(screen.getByRole('link', { name: 'sceneManagement' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/scenes/suites'));
+    nav.workspaces = [{ ...soc, enabled: false }, audit];
+    view.rerender(
+      <MemoryRouter initialEntries={[path]}>
+        <Routes><Route path="/*" element={<Layout contentRoutes={routes} />} /></Routes>
+      </MemoryRouter>,
+    );
+    const sidebar = screen.getByRole('navigation', { name: 'moduleNavigation' });
+    await waitFor(() => expect(within(sidebar).getByRole('link', { name: '代码漏洞审计工作区 概览' })).toBeInTheDocument());
+    expect(within(sidebar).queryByRole('link', { name: 'newChat' })).not.toBeInTheDocument();
   });
 
   it('hides the history panel outside the Agent workspace', async () => {

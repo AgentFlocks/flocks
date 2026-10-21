@@ -608,17 +608,14 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     [sceneWorkspaces],
   );
   const headerWorkspaces = useMemo<HeaderWorkspace[]>(() => {
-    const socWorkspace = openSceneWorkspaces.find((workspace) => workspace.id === SOC_WORKSPACE_ID);
+    // Scene modules, SOC included, are shown only while their suite is installed, enabled
+    // and unlocked; SOC keeps its place right after the workbench.
+    const socWorkspaces = openSceneWorkspaces.filter((workspace) => workspace.id === SOC_WORKSPACE_ID);
+    const otherSceneWorkspaces = openSceneWorkspaces.filter((workspace) => workspace.id !== SOC_WORKSPACE_ID
+      && sceneNavigationOwner(workspace.id, openSceneWorkspaces) === workspace.id);
     return [
       { id: AGENT_WORKSPACE, name: t('workbench'), icon: Home },
-      // SOC is a permanent module, including when none of its scene suites are installed.
-      {
-        id: sceneNavWorkspace(SOC_WORKSPACE_ID),
-        name: socWorkspace ? getLocalizedWebUIContractTitle(socWorkspace, i18n.language) : t('socWorkspace'),
-        icon: socWorkspace ? sceneHeaderIcon(socWorkspace) : ShieldCheck,
-      },
-      ...openSceneWorkspaces.filter((workspace) => workspace.id !== SOC_WORKSPACE_ID
-        && sceneNavigationOwner(workspace.id, openSceneWorkspaces) === workspace.id).map((workspace) => ({
+      ...[...socWorkspaces, ...otherSceneWorkspaces].map((workspace) => ({
         id: sceneNavWorkspace(workspace.id),
         name: getLocalizedWebUIContractTitle(workspace, i18n.language),
         icon: sceneHeaderIcon(workspace),
@@ -631,31 +628,53 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     || webuiContractWorkspaces.length > 0
     || webuiContractPages.length > 0;
 
+  // Last path visited inside each workspace, so switching back lands there.
+  const workspacePathsRef = useRef<NavWorkspacePaths>(readWorkspacePaths());
+  // The module a remembered path belongs to now: code audit pages move between SOC and
+  // their own module as the alert suite is installed, enabled or removed.
+  const pathNavigation = useCallback((path: string | undefined): NavWorkspaceId | null => {
+    if (!path) return null;
+    const route = resolveNavRoute(path, webuiContractWorkspaces);
+    return route.kind === 'workspace' ? route.workspace : null;
+  }, [webuiContractWorkspaces]);
+
   // Remember the module to return to when leaving settings or scene management.
   const routeNav = resolveNavRoute(`${location.pathname}${location.search}`, navStateReady ? webuiContractWorkspaces : null);
   const [rememberedWorkspace, setRememberedWorkspace] = useState<NavWorkspaceId>(readCurrentWorkspace);
   const routeWorkspace = routeNav.kind === 'workspace' ? routeNav.workspace : null;
   const rememberedSceneId = sceneWorkspaceIdOf(rememberedWorkspace);
-  const rememberedNavigation = rememberedSceneId
+  const rememberedOwner = rememberedSceneId
     ? sceneNavWorkspace(sceneNavigationOwner(rememberedSceneId, openSceneWorkspaces)) : rememberedWorkspace;
-  const currentWorkspace = routeWorkspace ?? (headerWorkspaces.some((workspace) => workspace.id === rememberedNavigation) ? rememberedNavigation : AGENT_WORKSPACE);
+  const inHeader = (workspaceId: NavWorkspaceId | null) => headerWorkspaces.some((workspace) => workspace.id === workspaceId);
+  const rememberedPathOwner = rememberedSceneId && navStateReady
+    ? pathNavigation(workspacePathsRef.current[rememberedWorkspace]) : null;
+  const rememberedNavigation = !inHeader(rememberedOwner) && inHeader(rememberedPathOwner)
+    ? rememberedPathOwner as NavWorkspaceId : rememberedOwner;
+  const currentWorkspace = routeWorkspace ?? (inHeader(rememberedNavigation) ? rememberedNavigation : AGENT_WORKSPACE);
   useEffect(() => {
     if (!routeWorkspace || !navStateReady) return;
-    // SOC is permanent; other scenes must be open.
+    // Only remember scene modules that are open.
     const sceneId = sceneWorkspaceIdOf(routeWorkspace);
-    if (sceneId && sceneId !== SOC_WORKSPACE_ID && !openSceneWorkspaces.some((workspace) => workspace.id === sceneId)) return;
+    if (sceneId && !openSceneWorkspaces.some((workspace) => workspace.id === sceneId)) return;
     setRememberedWorkspace(routeWorkspace);
     saveCurrentWorkspace(routeWorkspace);
   }, [navStateReady, openSceneWorkspaces, routeWorkspace]);
 
-  // Last path visited inside each workspace, so switching back lands there.
-  const workspacePathsRef = useRef<NavWorkspacePaths>(readWorkspacePaths());
   useEffect(() => {
     if (!routeWorkspace || !navStateReady) return;
-    const next = { ...workspacePathsRef.current, [routeWorkspace]: `${location.pathname}${location.search}` };
+    const path = `${location.pathname}${location.search}`;
+    const next = { ...workspacePathsRef.current, [routeWorkspace]: path };
+    // An open audit page is the latest page of both modules that can own it (SOC or code
+    // audit on its own), so whichever owns it next returns here, not to an older page.
+    // A closed audit suite's page is about to be redirected and must not replace SOC's.
+    if (workspaceIdFromPath(location.pathname) === CODE_AUDIT_WORKSPACE_ID
+      && openSceneWorkspaces.some((workspace) => workspace.id === CODE_AUDIT_WORKSPACE_ID)) {
+      next[sceneNavWorkspace(SOC_WORKSPACE_ID)] = path;
+      next[sceneNavWorkspace(CODE_AUDIT_WORKSPACE_ID)] = path;
+    }
     workspacePathsRef.current = next;
     saveWorkspacePaths(next);
-  }, [location.pathname, location.search, navStateReady, routeWorkspace]);
+  }, [location.pathname, location.search, navStateReady, openSceneWorkspaces, routeWorkspace]);
 
   const newChat = useCallback(() => {
     setSidebarOpen(false);
@@ -861,7 +880,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   // A scene whose workspace closed (uninstalled, disabled or license lapsed)
   // cannot stay on screen: fall back to its suite manager.
-  // The SOC navigation module remains available even if its alert suite is removed.
   // Validate the page's own suite, not the shared navigation module that contains it.
   const routeSceneId = routeWorkspace && sceneWorkspaceIdOf(routeWorkspace)
     ? workspaceIdFromPath(location.pathname) : null;
@@ -879,9 +897,12 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       return;
     }
     if (workspaceId === currentWorkspace && routeNav.kind === 'workspace') return;
-    const stored = workspacePathsRef.current[workspaceId];
-    const storedRoute = stored ? resolveNavRoute(stored, webuiContractWorkspaces) : null;
-    if (stored && storedRoute?.kind === 'workspace' && storedRoute.workspace === workspaceId) {
+    const paths = workspacePathsRef.current;
+    // A scene module also takes a page remembered under the module that owned it before
+    // (code audit under SOC, or the other way round).
+    const candidates = sceneWorkspaceIdOf(workspaceId) ? [paths[workspaceId], ...Object.values(paths)] : [paths[workspaceId]];
+    const stored = candidates.find((path) => pathNavigation(path) === workspaceId);
+    if (stored) {
       navigate(stored);
       return;
     }
@@ -896,8 +917,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     const sceneId = sceneWorkspaceIdOf(workspaceId);
     const workspace = openSceneWorkspaces.find((item) => item.id === sceneId);
     if (workspace) navigate(workspace.route);
-    else if (sceneId === SOC_WORKSPACE_ID) navigate(SCENE_SUITES_PATH);
-  }, [currentWorkspace, navigate, openSceneWorkspaces, routeNav.kind, webuiContractWorkspaces]);
+  }, [currentWorkspace, navigate, openSceneWorkspaces, pathNavigation, routeNav.kind]);
 
   const toggleNavSection = useCallback((sectionId: string) => {
     setCollapsedNavSectionIds((current) => {
