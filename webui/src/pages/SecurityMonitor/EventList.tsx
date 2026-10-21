@@ -31,7 +31,6 @@ import { MONITOR_PATH } from "@/api/securityMonitoring";
 import {
   monitoringEventsApi,
   type EventAssessmentStatus,
-  type EventEvidenceCard,
   type EventDetailResponse,
   type EventListResponse,
   type EventListRow,
@@ -47,6 +46,14 @@ import {
 } from "./EventAssessment";
 import { MONITOR_PAGE_SIZE } from "./Pagination";
 import { EvidenceCards } from "./EvidenceCards";
+import {
+  eventDetailView,
+  eventSourceStatus,
+  investigationLabels,
+  xdrLabels,
+} from "./eventDetailView";
+import { EventTimeline } from "./EventTimeline";
+import { EventDetailDownload } from "./EventDetailDownload";
 
 type Period = "day" | "week" | "month" | "custom";
 type Props = {
@@ -62,23 +69,7 @@ const field =
   "min-w-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-sky-900";
 const button =
   "inline-flex items-center justify-center gap-1.5 rounded-lg border border-sky-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-sky-900 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-sky-950";
-const handlingLabels: Record<string, string> = {
-  open: "未闭环",
-  closed: "已处置",
-  ignored: "已忽略",
-  contained: "已遏制 · 需跟进",
-  ended: "源端关闭",
-};
-const investigationLabels: Record<string, string> = {
-  stale: "历史版本待核对",
-  ready: "已有调查结论",
-  pending: "等待调查",
-  deferred: "待续查",
-  system_wait: "等待服务恢复",
-  needs_review: "证据不足",
-  retry_exhausted: "调查暂未完成",
-  running: "调查中",
-};
+
 const mailLabels: Record<string, string> = {
   sent: "已发送",
   queued: "待发送",
@@ -96,15 +87,7 @@ const mailLabels: Record<string, string> = {
   handled: "已处置",
   monitoring_ended: "源端关闭",
 };
-const xdrLabels: Record<string, string> = {
-  "0": "待处置",
-  "10": "处置中",
-  "30": "已防护",
-  "40": "已处置",
-  "50": "已挂起",
-  "60": "忽略",
-  "70": "已遏制",
-};
+
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -231,128 +214,32 @@ function StoryDetails({
   detail: EventDetailResponse;
   timezone: string;
 }) {
-  const result = record(detail.investigation?.result);
-  const state =
-    detail.event.investigation?.state || detail.investigation?.state || "";
-  const retainedRisk =
-    detail.event.assessment?.confirmed_risk_retained === true ||
-    detail.overview?.confirmed_risk_retained === true;
-  const confirmedRisk =
-    retainedRisk ||
-    (detail.event.assessment?.verdict === "risk" &&
-      detail.event.assessment?.evidence_supported === true);
-  const historical =
-    !retainedRisk &&
-    (state === "stale" ||
-      (detail.event.investigation?.is_current === false &&
-        state !== "pending" &&
-        Object.keys(result).length > 0));
-  const history = record(
-    detail.investigation?.historical_result ||
-      (historical && detail.investigation?.state !== "stale" ? result : null),
-  );
-  const story = historical
-    ? {}
-    : record(detail.story || result.story || detail.event.story);
-  const overview = historical ? {} : record(detail.overview);
-  const basics = record(overview.basics || story.basics || detail.event.basics);
-  const basicLabels: Record<string, string> = {
-    name: "事件名称",
-    device: "监测设备",
-    alert_time: "告警时间",
-    start_time: "首次发生",
-    end_time: "最近发生",
-    host: "关联主机",
-    severity: "来源风险等级",
-    data_source: "数据来源",
-    source_device: "来源设备",
-    src_ip: "源 IP",
-    dst_ip: "目标 IP",
-    src_port: "源端口",
-    dst_port: "目标端口",
-    url: "请求 URL",
-    method: "请求方法",
-    domain: "域名",
-    virus_name: "病毒名称",
-    file_name: "文件名称",
-    file_path: "文件路径",
-    file_md5: "文件 MD5",
-    process_name: "进程",
-    command_line: "命令行",
-  };
-  const timeline = records(overview.timeline || story.timeline);
-  const evidence = records(overview.evidence || story.key_evidence);
-  const packets = records(story.packets);
-  const confirmedStory = retainedRisk ? record(detail.confirmed_story) : {};
-  const historicalEvidenceCards = records(
-    confirmedStory.evidence_cards,
-  ) as unknown as EventEvidenceCard[];
-  const currentEvidenceCards = records(
-    overview.evidence_cards || story.evidence_cards,
-  ) as unknown as EventEvidenceCard[];
-  const hasEvidenceCards =
-    retainedRisk ||
-    Array.isArray(overview.evidence_cards) ||
-    Array.isArray(story.evidence_cards);
-  const evidenceCards = retainedRisk
-    ? historicalEvidenceCards
-    : currentEvidenceCards;
-  const originalGaps = Array.isArray(overview.gaps)
-    ? strings(overview.gaps)
-    : [...strings(story.gaps), ...strings(result.gaps)];
-  const gaps = [
-    ...new Set(
-      (retainedRisk ? strings(overview.missing_evidence) : originalGaps).filter(
-        (gap) =>
-          !confirmedRisk ||
-          !/调查尚未形成最终结论|尚未形成.*结论|调查未完成/.test(gap),
-      ),
-    ),
-  ];
-  const recheckState = !eventEnded(detail.event)
-    ? text(overview.recheck_state || detail.event.assessment?.recheck_state, "")
-    : "";
-  const recheckReason = text(
-    overview.recheck_reason || detail.event.assessment?.recheck_reason,
-    "",
-  );
-  const originalExplanation = text(
-    historical
-      ? detail.event.investigation?.reason ||
-          "原事件已更新，旧调查结论仅供历史查看；当前事件仍需重新核对。"
-      : result.reason || detail.event.reason || story.conclusion,
-    "尚未形成有证据支持的调查结论。",
-  );
-  const explanation =
-    readableEvidence(text(overview.conclusion, originalExplanation)) ||
-    "尚未形成可读的调查结论。";
-  const canShowOperatorCopy =
-    state === "ready" &&
-    !historical &&
-    result.confidence === "high" &&
-    detail.event.assessment?.is_current === true &&
-    detail.event.assessment?.evidence_supported === true &&
-    detail.event.assessment.verdict !== "unknown";
-  const operatorSummary = canShowOperatorCopy
-    ? readableEvidence(
-        text(overview.operator_summary || story.operator_summary, ""),
-      )
-    : "";
-  const operatorExplanation = canShowOperatorCopy
-    ? strings(overview.operator_explanation || story.operator_explanation)
-        .map(readableEvidence)
-        .filter(Boolean)
-        .slice(0, 3)
-    : [];
-  const conciseSummary = readableEvidence(text(overview.summary, ""));
-  const findings = strings(overview.findings)
-    .map(readableEvidence)
-    .filter(Boolean)
-    .slice(0, 2);
-  const missingEvidence = strings(overview.missing_evidence)
-    .map(readableEvidence)
-    .filter(Boolean)
-    .slice(0, 3);
+  const {
+    state,
+    retainedRisk,
+    historical,
+    history,
+    story,
+    basics,
+    basicLabels,
+    timeline,
+    otherTimeline,
+    timelineTruncated,
+    hasAlertTimeline,
+    evidence,
+    packets,
+    hasEvidenceCards,
+    evidenceCards,
+    gaps,
+    recheckState,
+    recheckReason,
+    explanation,
+    operatorSummary,
+    operatorExplanation,
+    conciseSummary,
+    findings,
+    missingEvidence,
+  } = eventDetailView(detail);
   return (
     <div className="space-y-5">
       <section className="rounded-xl border border-sky-100 bg-sky-50/60 p-4 dark:border-sky-900 dark:bg-sky-950/30">
@@ -480,24 +367,15 @@ function StoryDetails({
           </dl>
         </section>
       )}
-      {timeline.length > 0 && (
-        <section>
-          <h3 className="mb-3 text-sm font-semibold">事件发生时间线</h3>
-          <ol className="ml-1 space-y-4 border-l border-sky-200 pl-5 dark:border-sky-800">
-            {timeline.map((item, index) => (
-              <li key={index} className="relative">
-                <span className="absolute -left-[25px] top-1.5 h-2 w-2 rounded-full bg-emerald-500" />
-                <time className="text-xs font-medium text-sky-700 dark:text-sky-300">
-                  {formatTime(item.time, timezone)}
-                </time>
-                <p className="mt-1 break-words text-sm leading-6">
-                  {readableEvidence(text(item.text))}
-                </p>
-              </li>
-            ))}
-          </ol>
-        </section>
-      )}
+      <EventTimeline
+        key={`${detail.event.key}:${retainedRisk ? `confirmed:${detail.confirmed_evidence_scope || detail.event.assessment?.risk_scope || "current"}` : historical ? "historical" : "current"}`}
+        timeline={timeline}
+        otherTimeline={otherTimeline}
+        grouped={hasAlertTimeline}
+        retainedRisk={retainedRisk}
+        truncated={timelineTruncated}
+        formatTime={(value) => formatTime(value, timezone)}
+      />
       {hasEvidenceCards && (
         <EvidenceCards
           cards={evidenceCards}
@@ -596,11 +474,14 @@ function StoryDetails({
           {strings(story.boundaries).join(" ")}
         </p>
       )}
-      {!retainedRisk && !evidence.length && !timeline.length && (
-        <p className="text-xs leading-6 text-slate-500">
-          此记录尚无可展开的关键证据或事件时间线。可打开关联监测对话，查看当时查询结果与缺口。
-        </p>
-      )}
+      {!retainedRisk &&
+        !evidence.length &&
+        !timeline.length &&
+        !otherTimeline.length && (
+          <p className="text-xs leading-6 text-slate-500">
+            此记录尚无可展开的关键证据或事件时间线。可打开关联监测对话，查看当时查询结果与缺口。
+          </p>
+        )}
     </div>
   );
 }
@@ -1724,6 +1605,20 @@ export default function EventList({
         <Sheet
           title={selected.grouped ? "同类事件组详情" : "事件详情"}
           close={closeDetail}
+          headerActions={
+            <EventDetailDownload
+              key={memberKey}
+              detail={detail}
+              enabled={
+                !!detail &&
+                !detailLoading &&
+                !detailError &&
+                detail.event.key === memberKey
+              }
+              timezone={sourceTimezone}
+              formatTime={(value) => formatTime(value, sourceTimezone)}
+            />
+          }
           resizable
         >
           <div className="space-y-5">
@@ -1815,42 +1710,17 @@ export default function EventList({
                     )}
                   <span className="text-xs text-slate-500">
                     XDR 状态：
-                    {xdrLabels[
-                      String(
-                        detail?.event.deal_status ?? currentMember.deal_status,
-                      )
-                    ] ||
-                      (monitoringEnded(detail?.event || currentMember)
-                        ? "当前未核验"
-                        : undefined) ||
-                      handlingLabels[
-                        detail?.event.handling || currentMember.handling
-                      ]}
-                    {monitoringEnded(detail?.event || currentMember) &&
-                      (detail?.event || currentMember).assessment
-                        ?.source_closure_basis !== "source_status" &&
-                      (detail?.event.deal_status ??
-                        currentMember.deal_status) != null &&
-                      "（历史记录，当前未核验）"}
+                    {eventSourceStatus(detail?.event || currentMember).label}
                   </span>
                   <span className="text-xs text-slate-500">
                     <MemberConclusion member={detail?.event || currentMember} />
                   </span>
                 </div>
                 <p className="mt-2 text-xs text-slate-500">
-                  {monitoringEnded(detail?.event || currentMember)
-                    ? (detail?.event || currentMember).assessment
-                        ?.source_closure_basis === "source_status"
-                      ? "XDR 状态已关闭，保留原研判记录。"
-                      : "XDR本轮查询未返回此事件，保留原研判和历史记录，不再自动观察或跟进。"
-                    : (detail?.event.handling_source ||
-                          currentMember.handling_source) === "monitor_verified"
-                      ? "处置来源：套件写回并回查确认"
-                      : (detail
-                            ? detail.event.deal_status
-                            : currentMember.deal_status) == null
-                        ? "尚未取得 XDR 处置状态，按未闭环跟踪。"
-                        : "处置来源：最近保存的 XDR 状态，非套件执行修复"}
+                  {
+                    eventSourceStatus(detail?.event || currentMember)
+                      .explanation
+                  }
                 </p>
                 <p className="mt-2 text-xs text-slate-500">
                   发生时间：

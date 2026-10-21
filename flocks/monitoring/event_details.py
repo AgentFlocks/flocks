@@ -428,6 +428,82 @@ def behavior_description(record, fallback=None):
     return _readable_text((f'主机{host}出现' if host else '来源检测到') + f'「{name}」告警。', 180)
 
 
+def timeline_projection(story, *, other_events=None):
+    """Add one source-time range per verified card without rewriting its audit.
+
+    Cards already carry the event/version and device boundaries. Do not merge
+    them again by name, time or alert ID, and never date them by query time.
+    """
+    story = story if isinstance(story, dict) else {}
+
+    def pick(value, latest=False):
+        values = value if isinstance(value, list) else [value]
+        dated = [(stamp, item) for item in values if (stamp := _when(item)) is not None]
+        return (max if latest else min)(dated, key=lambda item: item[0])[1] if dated else None
+
+    basics = story.get('basics') if isinstance(story.get('basics'), dict) else {}
+    projection = {'event_time_range': {'first_time': pick(basics.get('start_time')),
+                                       'end_time': pick(basics.get('end_time'), True)}}
+    cards = story.get('evidence_cards')
+    if not isinstance(cards, list):
+        return projection  # Older saved stories keep their original timeline.
+    alerts, references = [], set()
+    for index, card in enumerate(cards):
+        if not isinstance(card, dict):
+            continue
+        fields = {field.get('key'): field.get('value') for field in card.get('fields', [])
+                  if isinstance(field, dict)} if isinstance(card.get('fields'), list) else {}
+        first, end = pick(fields.get('start_time')), pick(fields.get('end_time'), True)
+        if first is None and end is None:
+            observed = fields.get('alert_time')
+            if pick(observed) is None:
+                observed = card.get('time')
+            first, end = pick(observed), pick(observed, True)
+        source = _readable_text(card.get('source') or '', 160)
+        card_id = _text(card.get('id') or '', 200) or f'card-{index + 1}'
+        alert_id = _text(card['alert_id'], 1000) if isinstance(card.get('alert_id'), str) else ''
+        name = _readable_text(fields.get('name') or '', 100) if alert_id else '取证记录'
+        kind_labels = {'network': '网络访问记录', 'domain': '域名关联记录', 'file': '文件取证记录',
+                       'process': '进程取证记录', 'request': '请求与响应记录'}
+        text = name if alert_id and name else kind_labels.get(card.get('kind'), '来源取证记录')
+        records = card.get('records') if isinstance(card.get('records'), list) else []
+        refs = list(dict.fromkeys(_text(record.get('evidence_id'), 100) for record in [card, *records]
+                                 if isinstance(record, dict) and record.get('evidence_id')))
+        references.update(refs)
+        alerts.append({'id': f'alert-timeline-{index + 1}-{card_id}', 'card_id': card_id,
+                       'kind': 'alert' if alert_id else 'observation',
+                       **({'alert_id': alert_id} if alert_id else {}),
+                       'first_time': first, 'end_time': end, 'time': first if first is not None else end,
+                       'name': name,
+                       'text': text[:240], 'source': source, 'evidence_ids': refs,
+                       'partial': bool(card.get('partial')), 'boundary': _text(card.get('boundary') or '', 600)})
+    alerts.sort(key=lambda row: (_when(row['time']) if _when(row['time']) is not None else float('inf'), row['id']))
+    if other_events is None:
+        other_events = story.get('other_timeline')
+        if not isinstance(other_events, list):
+            legacy = story.get('timeline') if isinstance(story.get('timeline'), list) else []
+            other_events = [entry for entry in legacy if isinstance(entry, dict)
+                            and entry.get('evidence_id') in references
+                            and (entry.get('kind') == 'file_created' or '来源记录文件创建' in str(entry.get('text', '')))]
+    other, seen = [], set()
+    for entry in other_events:
+        if not isinstance(entry, dict) or _when(entry.get('time')) is None:
+            continue
+        text = _readable_text(entry.get('text') or '', 600)
+        marker = (_when(entry['time']), text)
+        if not text or marker in seen:
+            continue
+        seen.add(marker)
+        other.append({'id': f'other-timeline-{len(other) + 1}', 'kind': 'file_created',
+                      'time': entry['time'], 'text': text, 'evidence_id': _text(entry.get('evidence_id') or '', 100)})
+    other.sort(key=lambda row: _when(row['time']))
+    truncated = bool(story.get('timeline_truncated')) or len(other) > 40
+    if len(other) > 40:
+        other = [*other[:20], *other[-20:]]
+    projection.update(alert_timeline=alerts, other_timeline=other, timeline_truncated=truncated)
+    return projection
+
+
 def build_story(event, evidence, result=None, *, canonical=None):
     """Build an evidence-linked story, keeping collection and event times apart."""
     event = event if isinstance(event, dict) else {}
@@ -443,6 +519,7 @@ def build_story(event, evidence, result=None, *, canonical=None):
              'conclusion': _text(result.get('reason') or '尚未形成有证据支持的调查结论', 1800),
              'verdict': result.get('verdict', 'unknown'), 'boundaries': []}
     seen, timeline_seen, alerts_seen = set(), set(), set()
+    other_events = []
     is_web_event = any(term in str(event.get('name', '')).lower() for term in ('sql', 'web', 'http', '注入', '跨站', '目录遍历'))
     packet_groups = {}
 
@@ -518,7 +595,9 @@ def build_story(event, evidence, result=None, *, canonical=None):
             if details:
                 key_fact(ref, source + '；' + '；'.join(details))
             if record.get('file_created_at') is not None:
-                timeline(record['file_created_at'], f'{source}：来源记录文件创建，文件 {_text(record.get("file_path") or record.get("file_name") or "标识未提供", 300)}（不等于告警发生时间）', ref)
+                text = f'{source}：来源记录文件创建，文件 {_text(record.get("file_path") or record.get("file_name") or "标识未提供", 300)}（不等于告警发生时间）'
+                timeline(record['file_created_at'], text, ref)
+                other_events.append((proof, {'kind': 'file_created', 'time': record['file_created_at'], 'text': text, 'evidence_id': ref}))
             description = behavior_description(record, basics)
             prefix = source + '关联记录：' if proof.get('device') != event.get('device') else ''
             for time_key, phase, title in (('start_time', 'first', '首次检出：'), ('end_time', 'latest', '最近检出：')):
@@ -591,8 +670,10 @@ def build_story(event, evidence, result=None, *, canonical=None):
     if isinstance(requested, list) and any(str(ref) not in refs for ref in requested):
         gap('调查结论引用了未取得成功结果的证据；该结论需继续核对')
     story['evidence_ids'] = [str(ref) for ref in requested if str(ref) in refs] if isinstance(requested, list) else []
-    from .evidence_presenter import evidence_cards
+    from .evidence_presenter import bound_evidence, evidence_cards
     story['evidence_cards'] = evidence_cards(event, evidence, canonical=canonical)
+    bound = {id(proof) for proof in bound_evidence(event, evidence, canonical=canonical)}
+    story.update(timeline_projection(story, other_events=[entry for proof, entry in other_events if id(proof) in bound]))
     story['operator_summary'] = _readable_text(result.get('operator_summary') or '', 200)
     story['operator_explanation'] = [_readable_text(v, 400) for v in result.get('operator_explanation', [])[:3]
                                      if isinstance(v, str)] if isinstance(result.get('operator_explanation'), list) else []
@@ -749,4 +830,4 @@ def readable_story(story):
             'evidence_cards': story.get('evidence_cards', []),
             'operator_summary': story.get('operator_summary', ''),
             'operator_explanation': story.get('operator_explanation', []),
-            'timeline': timeline, 'gaps': gaps}
+            'timeline': timeline, 'gaps': gaps, **timeline_projection(story)}

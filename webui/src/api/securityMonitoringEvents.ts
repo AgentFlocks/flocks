@@ -216,6 +216,27 @@ export interface EventDetailResponse {
     evidence?: { text: string; time?: string | number }[];
     evidence_cards?: EventEvidenceCard[];
     timeline?: { time: string | number; text: string }[];
+    alert_timeline?: {
+      id: string;
+      card_id?: string;
+      alert_id?: string;
+      kind?: "alert" | "observation";
+      time?: string | number | null;
+      first_time?: string | number | null;
+      end_time?: string | number | null;
+      name?: string;
+      text: string;
+      source?: string;
+      evidence_ids?: string[];
+      partial?: boolean;
+      boundary?: string;
+    }[];
+    event_time_range?: {
+      first_time?: string | number | null;
+      end_time?: string | number | null;
+    };
+    other_timeline?: { time: string | number; text: string }[];
+    timeline_truncated?: boolean;
     gaps?: string[];
     recheck_state?: string;
     recheck_reason?: string;

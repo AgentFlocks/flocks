@@ -338,6 +338,7 @@ export function Sheet({
   children,
   centered = false,
   footer,
+  headerActions,
   resizable = false,
 }: {
   title: string;
@@ -345,6 +346,7 @@ export function Sheet({
   children: ReactNode;
   centered?: boolean;
   footer?: ReactNode;
+  headerActions?: ReactNode;
   resizable?: boolean;
 }) {
   const ref = useRef<HTMLElement>(null);
@@ -523,6 +525,7 @@ export function Sheet({
             {title}
           </h2>
           <div className="flex shrink-0 items-center gap-1">
+            {headerActions}
             {resizable && (
               <button
                 type="button"

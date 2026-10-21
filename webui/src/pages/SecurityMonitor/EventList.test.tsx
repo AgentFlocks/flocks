@@ -242,6 +242,132 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+it("shows five compact alert ranges before expanding all distinct alert identities", async () => {
+  vi.mocked(monitoringEventsApi.detail).mockResolvedValue(
+    detail({
+      overview: {
+        basics: {
+          start_time: "2026-07-12T04:30:06Z",
+          end_time: "2026-10-21T00:00:00Z",
+        },
+        alert_timeline: Array.from({ length: 6 }, (_, index) => ({
+          id: `card-${index}`,
+          alert_id: `alert-${index}`,
+          first_time: "2026-07-12T08:33:47Z",
+          end_time: "2026-07-14T08:22:05Z",
+          text: "phishing 告警",
+          partial: true,
+          ...(index === 0 && { boundary: "此记录仅为候选关联，尚未核实。" }),
+        })),
+        timeline: [
+          { time: "2026-07-14T08:22:05Z", text: "不应重复展示的原始节点" },
+        ],
+        timeline_truncated: false,
+      },
+    }) as never,
+  );
+  renderPage();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+  );
+  const timeline = await screen.findByRole("region", {
+    name: "事件发生时间线",
+  });
+  expect(within(timeline).getAllByRole("listitem")).toHaveLength(5);
+  expect(within(timeline).getAllByText("phishing 告警")).toHaveLength(5);
+  expect(
+    within(timeline).getAllByText("2026/7/12 16:33:47 — 2026/7/14 16:22:05"),
+  ).toHaveLength(5);
+  expect(
+    within(timeline).queryByText("不应重复展示的原始节点"),
+  ).not.toBeInTheDocument();
+  expect(
+    within(timeline).queryByText(/当前时间线可能不完整/),
+  ).not.toBeInTheDocument();
+  expect(
+    within(timeline).getAllByText(/以下时间范围不代表完整历史/),
+  ).toHaveLength(1);
+  expect(
+    within(timeline).getByText("此记录仅为候选关联，尚未核实。"),
+  ).toBeInTheDocument();
+  fireEvent.click(
+    within(timeline).getByRole("button", { name: "展开全部 6 条" }),
+  );
+  expect(within(timeline).getAllByRole("listitem")).toHaveLength(6);
+  fireEvent.click(within(timeline).getByRole("button", { name: "收起时间线" }));
+  expect(within(timeline).getAllByRole("listitem")).toHaveLength(5);
+});
+
+it("disables downloading during member changes and downloads only the loaded selected event without another query", async () => {
+  let finishSecond!: (value: ReturnType<typeof detail>) => void;
+  vi.mocked(monitoringEventsApi.detail)
+    .mockResolvedValueOnce(detail() as never)
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishSecond = resolve;
+        }) as never,
+    );
+  const createUrl = vi.fn(() => "blob:event-detail");
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    value: createUrl,
+  });
+  Object.defineProperty(URL, "revokeObjectURL", {
+    configurable: true,
+    value: vi.fn(),
+  });
+  let filename = "";
+  const click = vi
+    .spyOn(HTMLAnchorElement.prototype, "click")
+    .mockImplementation(function (this: HTMLAnchorElement) {
+      filename = this.download;
+    });
+  try {
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    const download = () =>
+      within(dialog).getByRole("button", { name: "下载详情" });
+    await waitFor(() => expect(download()).toBeEnabled());
+    fireEvent.click(download());
+    expect(filename).toMatch(/^事件详情-主机异常外联-.*\.md$/);
+    expect(monitoringEventsApi.detail).toHaveBeenCalledTimes(1);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /相同域名外联/ }),
+    );
+    expect(download()).toBeDisabled();
+    fireEvent.click(download());
+    expect(click).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      finishSecond(
+        detail({
+          event: member({
+            key: "device-a:incident:event-2",
+            id: "event-2",
+            name: "第二条详情",
+          }),
+        }),
+      ),
+    );
+    await waitFor(() => expect(download()).toBeEnabled());
+    fireEvent.click(download());
+    expect(filename).toMatch(/^事件详情-第二条详情-.*\.md$/);
+    fireEvent.click(within(dialog).getByLabelText("选择详情下载格式"));
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "下载脱敏 JSON" }),
+    );
+    expect(filename).toMatch(/^事件详情-第二条详情-.*\.json$/);
+    expect(monitoringEventsApi.detail).toHaveBeenCalledTimes(2);
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭详情" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  } finally {
+    click.mockRestore();
+  }
+});
+
 it("defaults to this week and 24-hour aggregation with ten rows and the latest event conclusion", async () => {
   renderPage();
   await screen.findByText("同类事件聚合");
