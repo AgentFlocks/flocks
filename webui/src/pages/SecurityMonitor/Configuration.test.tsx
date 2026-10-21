@@ -188,8 +188,121 @@ it("limits configuration to twenty devices", async () => {
   await screen.findByLabelText("设备 2 的责任人邮箱");
   for (let i = 2; i < 20; i++)
     fireEvent.click(screen.getByRole("button", { name: "添加设备" }));
-  expect(screen.getAllByRole("combobox")).toHaveLength(20);
+  expect(
+    screen.getAllByRole("combobox", { name: /XDR 设备名称/ }),
+  ).toHaveLength(20);
   expect(screen.getByRole("button", { name: "添加设备" })).toBeDisabled();
+});
+
+it("binds correlation devices by source XDR and allows explicit empty or legacy mode", async () => {
+  mocks.configuration.mockResolvedValue({
+    data: {
+      ...config,
+      targets: config.targets.map((target, index) => ({
+        ...target,
+        correlation_device_ids: index ? null : ["tdp-a"],
+      })),
+      correlation_devices: [
+        {
+          id: "tdp-a",
+          name: "总部 TDP",
+          product: "tdp",
+          available: true,
+          reason: null,
+        },
+        {
+          id: "sig-a",
+          name: "总部 SIG",
+          product: "sig",
+          available: true,
+          reason: null,
+        },
+      ],
+    },
+  });
+  render(<Configuration />);
+  await screen.findByLabelText("设备 2 的联动设置");
+  expect(screen.getByLabelText("设备 1 联动 总部 TDP")).toBeChecked();
+  fireEvent.click(screen.getByLabelText("设备 1 联动 总部 SIG"));
+  fireEvent.change(screen.getByLabelText("设备 2 的联动设置"), {
+    target: { value: "manual" },
+  });
+  expect(screen.getByLabelText("设备 2 联动 总部 TDP")).not.toBeChecked();
+  fireEvent.click(save());
+  await waitFor(() =>
+    expect(mocks.saveConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targets: [
+          expect.objectContaining({
+            device_id: "device-a",
+            correlation_device_ids: ["tdp-a", "sig-a"],
+          }),
+          expect.objectContaining({
+            device_id: "device-b",
+            correlation_device_ids: [],
+          }),
+        ],
+      }),
+    ),
+  );
+  fireEvent.change(screen.getByLabelText("设备 1 的联动设置"), {
+    target: { value: "legacy" },
+  });
+  fireEvent.click(save());
+  await waitFor(() =>
+    expect(mocks.saveConfiguration).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        targets: [
+          expect.objectContaining({
+            device_id: "device-a",
+            correlation_device_ids: null,
+          }),
+          expect.objectContaining({
+            device_id: "device-b",
+            correlation_device_ids: [],
+          }),
+        ],
+      }),
+    ),
+  );
+});
+
+it("requires removal of unavailable bindings and caps manual selection at four devices", async () => {
+  const correlations = Array.from({ length: 6 }, (_, index) => ({
+    id: `tdp-${index}`,
+    name: `网络设备${index}`,
+    product: "tdp",
+    available: index > 0,
+    reason: index ? null : "已停用",
+  }));
+  mocks.configuration.mockResolvedValue({
+    data: {
+      ...config,
+      targets: [{ ...config.targets[0], correlation_device_ids: ["tdp-0"] }],
+      correlation_devices: correlations,
+    },
+  });
+  render(<Configuration />);
+  const old = await screen.findByLabelText("设备 1 联动 网络设备0");
+  expect(save()).toBeDisabled();
+  expect(old).toBeEnabled();
+  fireEvent.click(old);
+  for (let index = 1; index < 5; index++)
+    fireEvent.click(screen.getByLabelText(`设备 1 联动 网络设备${index}`));
+  expect(screen.getByLabelText("设备 1 联动 网络设备5")).toBeDisabled();
+  expect(save()).toBeEnabled();
+  fireEvent.click(save());
+  await waitFor(() =>
+    expect(mocks.saveConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targets: [
+          expect.objectContaining({
+            correlation_device_ids: ["tdp-1", "tdp-2", "tdp-3", "tdp-4"],
+          }),
+        ],
+      }),
+    ),
+  );
 });
 
 it("marks a missing saved device unavailable instead of silently selecting another", async () => {

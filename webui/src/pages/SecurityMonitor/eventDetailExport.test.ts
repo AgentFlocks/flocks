@@ -213,3 +213,93 @@ it("does not present a lone latest timestamp as a known first-to-latest range", 
   ).toBe("首次 200（最近时间未提供）");
   expect(timelineTime({ time: 100 }, formatTime)).toBe("100");
 });
+
+it("exports every correlation query and its sanitized facts even when it produced no alert card", () => {
+  const value = snapshot();
+  value.overview!.evidence_cards = [];
+  value.overview!.correlation_results = [
+    {
+      id: "tdp-empty",
+      source: "无匹配 TDP",
+      product: "tdp",
+      status: "no_match",
+      returned_count: 0,
+      window: { start: 10, end: 20 },
+      query: { sql: "host filter" },
+      facts: { data: [] },
+    },
+    {
+      id: "sig-assets",
+      source: "资产 SIG",
+      product: "sig",
+      status: "success",
+      returned_count: 1,
+      facts: { items: [{ ip: "192.0.2.0/24", name: "资产网段标记" }] },
+      boundary: "资产资料不等于威胁告警。",
+    },
+    {
+      id: "tdp-failed",
+      source: "失败 TDP",
+      product: "tdp",
+      status: "failed",
+      summary: "服务暂不可用",
+      error: "接口回查超时",
+      partial: true,
+    },
+  ];
+  const report = render(value);
+  expect(report).toContain("## 联动核查");
+  expect(report).toContain("明确无匹配");
+  expect(report).toContain("返回 0 条记录");
+  expect(report).toContain("10 — 20");
+  expect(report).toContain("资产 SIG · OneSIG · 资产核查");
+  expect(report).toContain("资产查询未提供发生时间范围");
+  expect(report).toContain("资产网段标记");
+  expect(report).toContain("查询失败");
+  expect(report).toContain("失败原因：接口回查超时");
+  expect(report).toContain("返回数未提供");
+  expect(report).toContain("仅取得部分资料，不能按完整核查处理。");
+});
+
+it("keeps current rechecks and prior confirmation correlations separate in the readable export", () => {
+  const value = snapshot();
+  value.event.assessment = {
+    status: "risk_open",
+    label: "有风险",
+    verdict: "risk",
+    reason: "此前确认",
+    notify_eligible: true,
+    confirmed_risk_retained: true,
+  };
+  value.overview!.correlation_results = [
+    {
+      id: "now",
+      source: "当前来源",
+      product: "tdp",
+      status: "failed",
+      summary: "当前查询失败",
+    },
+  ];
+  value.confirmed_story = {
+    correlation_results: [
+      {
+        id: "prior",
+        source: "此前来源",
+        product: "tdp",
+        status: "candidate",
+        summary: "此前候选记录",
+        returned_count: 2,
+      },
+    ],
+  };
+  const report = render(value);
+  const current = report.slice(
+    report.indexOf("### 当前补充核查"),
+    report.indexOf("### 此前确证时的联动记录"),
+  );
+  expect(current).toContain("当前查询失败");
+  expect(current).not.toContain("此前候选记录");
+  const prior = report.slice(report.indexOf("### 此前确证时的联动记录"));
+  expect(prior).toContain("此前候选记录");
+  expect(prior).toContain("不代表当前补充核查已完成");
+});

@@ -20,6 +20,8 @@ from flocks.task.manager import TaskManager
 from flocks.task.models import SchedulerMode, SchedulerStatus, TaskTrigger
 from flocks.task.store import TaskStore
 
+real_correlation_catalog = c.correlation_catalog
+
 
 def request(*, email_a='a@example.com', devices=('a', 'b'), enabled=True):
     return c.ConfigurationRequest(enabled=enabled, targets=[{
@@ -43,6 +45,10 @@ async def setup(tmp_path, monkeypatch):
                 ('owner', policy.scope, project.id, 'a@example.com', '旧负责人', 1, 'legacy-revision', 'mailbox', m.d.stamp()))
     catalog = [{'id': device, 'name': '机房' + device, 'available': True, 'reason': None, 'tool': 'tool-' + device} for device in ('a', 'b', 'c')]
     monkeypatch.setattr(c.adapter, 'device_catalog', AsyncMock(side_effect=lambda: copy.deepcopy(catalog)))
+    correlations = [{'id': 'tdp-a', 'name': '机房a TDP', 'product': 'tdp', 'available': True, 'reason': None},
+                    {'id': 'sig-a', 'name': '机房a SIG', 'product': 'sig', 'available': True, 'reason': None},
+                    {'id': 'tdp-off', 'name': '已停用 TDP', 'product': 'tdp', 'available': False, 'reason': '已停用'}]
+    monkeypatch.setattr(c, 'correlation_catalog', AsyncMock(side_effect=lambda policy: copy.deepcopy(correlations)))
     monkeypatch.setattr(Config, 'resolve_default_llm', AsyncMock(return_value={'model_id': 'fixture'}))
     monkeypatch.setattr(m.transport, 'transport', lambda recipient: (None, {}))
     monkeypatch.setattr(m.transport, 'mailbox_key', lambda cfg: 'mailbox')
@@ -55,7 +61,7 @@ async def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(m, 'health_snapshot', AsyncMock(return_value={
         'enabled': True, 'send': {'state': 'healthy'}, 'receive': {'state': 'healthy'}, 'errors': [],
     }))
-    return SimpleNamespace(policy=policy, scheduler=scheduler, catalog=catalog)
+    return SimpleNamespace(policy=policy, scheduler=scheduler, catalog=catalog, correlations=correlations)
 
 
 async def saved_policy():
@@ -154,6 +160,60 @@ async def test_save_two_targets_atomically_and_migrate_single_recipient(setup):
     assert policy.device_names['a'] == '机房A新名称'
 
 
+async def test_correlation_bindings_are_explicit_and_legacy_saves_preserve_them(setup):
+    body = request()
+    body.targets[0].correlation_device_ids = ['tdp-a', 'sig-a']
+    body.targets[1].correlation_device_ids = []
+    result = await c.configure('owner', body)
+    assert (await saved_policy()).correlation_bindings == {'a': ['tdp-a', 'sig-a'], 'b': []}
+    assert (await saved_policy()).correlation_devices == ['sig-a', 'tdp-a']
+    assert result['targets'][0]['correlation_device_ids'] == ['tdp-a', 'sig-a']
+    assert result['targets'][1]['correlation_configured']
+    assert not (await c.snapshot('owner'))['running']
+    await c.configure('owner', request(email_a='new@example.com'))
+    assert (await saved_policy()).correlation_bindings == {'a': ['tdp-a', 'sig-a'], 'b': []}
+    body = request(devices=('a',))
+    body.targets[0].correlation_device_ids = None
+    await c.configure('owner', body)
+    assert (await saved_policy()).correlation_bindings == {}
+
+
+@pytest.mark.parametrize('ids', [['tdp-a', 'tdp-a'], [''], ['x' * 201], ['1', '2', '3', '4', '5']])
+def test_correlation_binding_input_is_bounded_and_unique(ids):
+    body = request().model_dump()
+    body['targets'][0]['correlation_device_ids'] = ids
+    with pytest.raises(ValidationError):
+        c.ConfigurationRequest.model_validate(body)
+
+
+@pytest.mark.parametrize('device_id', ['tdp-off', 'missing', 'a'])
+async def test_unavailable_or_non_correlation_binding_is_rejected_atomically(setup, device_id):
+    body = request()
+    body.targets[0].correlation_device_ids = [device_id]
+    with pytest.raises(ValueError, match='联动设备不可用'):
+        await c.configure('owner', body)
+    assert not await rows('SELECT * FROM monitor_device_targets')
+    assert (await saved_policy()).correlation_bindings == {}
+
+
+async def test_correlation_catalog_excludes_other_products_and_retains_deleted_ids(setup, monkeypatch):
+    from flocks.monitoring.capabilities import Capability
+    # Use only local metadata; discovery is stubbed and no tool query runs.
+    monkeypatch.setattr('flocks.monitoring.capabilities.discover', AsyncMock(return_value=([
+        Capability('cap-1', 'tdp-a', 'tdp_log_search', 'tdp', '同名设备', 'unknown'),
+        Capability('cap-2', 'a', 'xdr', 'xdr', 'XDR', 'unknown'),
+    ], [])))
+    monkeypatch.setattr('flocks.tool.device.store.list_devices', AsyncMock(return_value=[
+        SimpleNamespace(id='tdp-a', name='同名设备', service_id='tdp_api', enabled=True),
+        SimpleNamespace(id='sig-off', name='同名设备', service_id='onesig_api', enabled=False),
+        SimpleNamespace(id='edr', name='EDR', service_id='edr', enabled=True),
+    ]))
+    setup.policy.correlation_bindings = {'a': ['deleted']}
+    result = await real_correlation_catalog(setup.policy)
+    assert [(item['id'], item['available']) for item in result] == [('tdp-a', True), ('sig-off', False), ('deleted', False)]
+    assert '删除' in result[-1]['reason']
+
+
 @pytest.mark.parametrize('change', ['duplicate', 'blank_name', 'blank_email', 'bad_email', 'spoof_name'])
 def test_reject_invalid_configuration_input(change):
     body = request().model_dump()
@@ -250,6 +310,9 @@ async def test_save_is_all_or_nothing_when_recipient_conflicts(setup):
 async def test_start_uses_selected_devices_and_reports_missing_device(setup, monkeypatch):
     from flocks.hub import catalog
     await c.configure('owner', request())
+    policy = await saved_policy()
+    policy.correlation_bindings = {'a': ['tdp-a'], 'b': []}
+    await write('UPDATE monitor_installations SET policy=?', (encode(policy.model_dump()),))
     monkeypatch.setattr(lifecycle, 'validate_manifest', lambda *args: None)
     monkeypatch.setattr(catalog, 'load_manifest', lambda *args: None)
     monkeypatch.setattr('flocks.hub.local.get_record', lambda *args: SimpleNamespace(enabled=True, installPath=setup.policy.directory))
@@ -258,6 +321,7 @@ async def test_start_uses_selected_devices_and_reports_missing_device(setup, mon
     monkeypatch.setattr(lifecycle, 'discover', AsyncMock(side_effect=AssertionError('must not rediscover all devices')))
     await lifecycle.start_monitoring('owner')
     assert (await saved_policy()).devices == ['a', 'b']
+    assert (await saved_policy()).correlation_bindings == {'a': ['tdp-a'], 'b': []}
     lifecycle.start_immediately.assert_awaited_once()
     setup.catalog.pop(1)
     with pytest.raises(ValueError, match='机房b'):
@@ -286,6 +350,9 @@ async def test_config_survives_real_hub_reinstall_and_startup(monkeypatch):
     catalog = [{'id': device, 'name': '机房' + device, 'available': True, 'reason': None, 'tool': 'tool-' + device} for device in ('a', 'b')]
     monkeypatch.setattr(c.adapter, 'device_catalog', AsyncMock(return_value=catalog))
     await installer.install_plugin('component', COMPONENT_ID)
+    configured = await saved_policy()
+    configured.correlation_bindings = {'a': ['bound-tdp'], 'b': []}
+    await write('UPDATE monitor_installations SET policy=?', (encode(configured.model_dump()),))
     result = await c.configure('owner', request(enabled=False))
     assert len(result['targets']) == 2 and not result['running']
     original = await saved_policy()
@@ -294,6 +361,7 @@ async def test_config_survives_real_hub_reinstall_and_startup(monkeypatch):
     await lifecycle.reconcile()
     current = await saved_policy()
     assert current.devices == original.devices and current.device_tools == original.device_tools
+    assert current.correlation_bindings == {'a': ['bound-tdp'], 'b': []}
     assert current.project == original.project
     assert await rows('SELECT * FROM monitor_device_targets') == original_targets
     assert not (await c.snapshot('owner'))['running']

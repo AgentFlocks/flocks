@@ -1,6 +1,7 @@
 """Next-round intent durability and observation safety; no external devices."""
 import asyncio
 import copy
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -140,6 +141,85 @@ async def test_valid_cached_conclusion_counts_after_successful_source_recheck(ca
     case.event['investigation']['attempted_this_round'] = False
     item = await f.observe(case.policy, case.event, 'source-rechecked')
     assert item['watch_count'] == 1
+
+
+async def correlation_decision(case, *, bindings, products=('tdp', 'sig'), change=None, plan=None):
+    """Save program-owned correlation coverage independently of a risk card."""
+    from flocks.monitoring.correlation import response_metadata
+    await decision(case)
+    saved = (await rows('SELECT evidence,result FROM monitor_investigations'))[0]
+    evidence, result = json.loads(saved['evidence']), json.loads(saved['result'])
+    result['correlation_scope'] = {'device': case.event['device'], 'bindings': bindings}
+    if plan is not None:
+        result['correlation_plan'] = plan
+    for product in products:
+        raw = {'data': {'items': [{'subnet': '10.1.1.0/24'}] if product == 'sig' else [
+            {'net': {'src_ip': case.event['host'], 'dest_ip': '192.0.2.1'}}], 'total': 1}}
+        proof = {**evidence[0], 'id': 'evidence-' + product, 'kind': 'related', 'device': product,
+                 'product': product, 'tool': 'tdp_log_search' if product == 'tdp' else 'onesig_strategy_api_query',
+                 'facts': raw, 'result_meta': response_metadata(raw, product)}
+        if change is not None:
+            change(proof)
+        evidence.append(proof)
+    await write('UPDATE monitor_investigations SET evidence=?,result=?', (encode(evidence), encode(result)))
+
+
+async def test_explicit_bound_network_and_sig_asset_queries_allow_complete_observation(case):
+    await correlation_decision(case, bindings=['tdp', 'sig'])
+    item = await f.observe(case.policy, case.event, 'checked')
+    assert item['watch_count'] == 1 and item['state'] == 'watching'
+
+
+@pytest.mark.parametrize('bindings', [None, []])
+async def test_legacy_or_explicitly_disabled_correlations_keep_observation_behavior(case, bindings):
+    await correlation_decision(case, bindings=bindings, products=())
+    assert (await f.observe(case.policy, case.event, 'checked'))['watch_count'] == 1
+
+
+@pytest.mark.parametrize('status', ['not_queried', 'unavailable'])
+async def test_unfinished_bound_plan_cannot_accumulate_observation_or_ignore(case, status):
+    await correlation_decision(case, bindings=['tdp'], products=(),
+                               plan=[{'device': 'tdp', 'status': status}])
+    for index in range(6):
+        item = await f.observe(case.policy, case.event, f'round-{index}')
+        assert item['watch_count'] == 0 and item['state'] == 'watching'
+    assert (await consume(case, 'after'))['processed'] == 0
+    assert not mutations(case)
+
+
+@pytest.mark.parametrize('change', ['missing', 'other_event', 'other_revision', 'partial',
+    'metadata_partial', 'inconsistent', 'unknown_structure', 'missing_records', 'failed'])
+async def test_bound_query_must_be_successful_current_complete_and_structured(case, change):
+    def modify(proof):
+        if change == 'other_event':
+            proof['event'] = 'another-event'
+        elif change == 'other_revision':
+            proof['event_revision'] = 'another-revision'
+        elif change == 'partial':
+            proof['partial'] = True
+        elif change == 'metadata_partial':
+            proof['result_meta']['partial'] = True
+        elif change == 'inconsistent':
+            proof['result_meta']['inconsistent'] = True
+        elif change in {'unknown_structure', 'missing_records'}:
+            from flocks.monitoring.correlation import response_metadata
+            proof['facts'] = {'opaque': 'success'} if change == 'unknown_structure' else {'total': 5}
+            proof['result_meta'] = response_metadata(proof['facts'], 'tdp')
+        elif change == 'failed':
+            proof['success'] = False
+    await correlation_decision(case, bindings=['tdp'], products=() if change == 'missing' else ('tdp',), change=modify)
+    item = await f.observe(case.policy, case.event, 'checked')
+    assert item['watch_count'] == 0 and item['state'] == 'watching'
+
+
+async def test_explicit_empty_bound_query_is_complete_without_proving_safety(case):
+    def empty(proof):
+        from flocks.monitoring.correlation import response_metadata
+        proof['facts'] = {'data': {'items': [], 'total': 0}}
+        proof['result_meta'] = response_metadata(proof['facts'], 'tdp')
+    await correlation_decision(case, bindings=['tdp'], products=('tdp',), change=empty)
+    item = await f.observe(case.policy, case.event, 'checked')
+    assert item['watch_count'] == 1 and item['state'] == 'watching'
 
 
 @pytest.mark.parametrize('level,source', [(3, 'incidentSeverity'), (4, 'incidentSeverity'), (-1, 'incidentSeverity'), (None, None), (0, 'riskLevel'), (1, 'riskLevel'), (5, 'riskLevel')])

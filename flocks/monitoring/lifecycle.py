@@ -87,6 +87,8 @@ async def install(manifest):
                                   devices=devices, tool=tool or 'sangfor_xdr_incidents')
         if old:
             previous = MonitoringPolicy.model_validate_json(old[0]['policy'])
+            if previous.project == project.id:
+                policy.correlation_bindings = previous.correlation_bindings
             if previous.targets_configured and previous.project == project.id:
                 from .configuration import resolve_targets
                 policy = previous
@@ -97,7 +99,7 @@ async def install(manifest):
                 reason = '原监测设备接入已变化，请在监测配置中确认设备与责任人对应关系'
         from .capabilities import discover as discover_investigation
         catalog, notes = await discover_investigation(policy, include_unbound=True)
-        policy.correlation_devices = sorted({cap.device for cap in catalog if cap.kind != 'xdr'})
+        policy.correlation_devices = sorted({cap.device for cap in catalog if cap.kind in {'tdp', 'sig'}})
         policy.correlation_notes = notes
         key = f'monitor:{user.id}:{project.id}:{COMPONENT_ID}'
         existing = await TaskStore.get_scheduler_by_dedup_key(key)
@@ -334,7 +336,7 @@ async def set_investigation_engine(owner, engine):
         await resolve()
         from .capabilities import discover as discover_investigation
         catalog, notes = await discover_investigation(policy, include_unbound=True)
-        policy.correlation_devices = sorted({cap.device for cap in catalog if cap.kind != 'xdr'})
+        policy.correlation_devices = sorted({cap.device for cap in catalog if cap.kind in {'tdp', 'sig'}})
         policy.correlation_notes = notes
         from .store import connection
         async with connection() as db:

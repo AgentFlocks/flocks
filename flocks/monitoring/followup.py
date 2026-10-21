@@ -78,6 +78,50 @@ def _suspected(event, persisted=None):
             or result.get('suspected_risk') is True or event.get('suspected_risk') is True)
 
 
+def _complete_correlations(event, result, evidence):
+    """A declared source must finish its query before observation can advance.
+
+    This checks query coverage, not an absence of threats. SIG asset records
+    need no alert card, but opaque success objects cannot establish coverage.
+    """
+    scope = result.get('correlation_scope')
+    if not isinstance(scope, dict) or scope.get('bindings') is None:
+        return True  # Existing unbound policies keep their observation behavior.
+    bindings = scope['bindings']
+    if not isinstance(bindings, list):
+        return False
+    if not bindings:
+        return True  # Explicitly disabled cross-product checks.
+    if (scope.get('device') != event.get('device')
+            or any(not isinstance(identifier, str) or not identifier for identifier in bindings)):
+        return False
+    from .correlation import _metadata, product_of
+    from .investigation import fingerprint
+    revision = fingerprint(event)
+    plan = result.get('correlation_plan', [])
+    plan = plan if isinstance(plan, list) else []
+    if any(isinstance(row, dict) and row.get('device') in bindings
+           and row.get('status') in {'not_queried', 'unavailable'}
+           for row in plan):
+        return False
+    completed = set()
+    for proof in evidence:
+        if (not isinstance(proof, dict) or proof.get('kind') != 'related'
+                or proof.get('device') not in bindings or proof.get('success') not in (True, 1)
+                or proof.get('partial') or proof.get('event') != event.get('id')
+                or proof.get('event_revision') != revision):
+            continue
+        product = product_of(proof)
+        if product not in {'tdp', 'sig'}:
+            continue
+        meta = _metadata(proof, proof.get('facts', {}), product)
+        if meta.get('partial') or meta.get('inconsistent'):
+            continue
+        if meta.get('explicit_empty') or (meta.get('returned_count') or 0) > 0:
+            completed.add(proof['device'])
+    return set(bindings) <= completed
+
+
 def _complete_observation(event, query_complete, persisted=None):
     attached = event.get('investigation') or {}
     case = persisted or attached
@@ -107,6 +151,7 @@ def _complete_observation(event, query_complete, persisted=None):
                 and attached.get('state', 'ready') == 'ready'
                 and event_version(canonical) == event_version(event)
                 and bool(evidence) and fresh_evidence(evidence, canonical) == evidence
+                and _complete_correlations(canonical, result, evidence)
                 and not case.get('error_kind') and not result.get('error_kind')
                 and not any(not proof.get('success') or proof.get('partial') for proof in evidence
                             if isinstance(proof, dict)))

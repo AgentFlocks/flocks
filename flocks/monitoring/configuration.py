@@ -14,6 +14,15 @@ class DeviceTargetRequest(BaseModel):
     device_id: str = Field(min_length=1, max_length=200)
     responsible_name: str = Field(min_length=1, max_length=80)
     recipient_email: str = Field(min_length=1, max_length=254)
+    correlation_device_ids: list[str] | None = Field(default=None, max_length=4)
+
+    @field_validator('correlation_device_ids')
+    @classmethod
+    def correlation_ids(cls, value):
+        if value is not None and (any(not item or len(item) > 200 or item != item.strip() for item in value)
+                                  or len(set(value)) != len(value)):
+            raise ValueError('联动设备编号不能为空或重复，最多选择 4 台')
+        return value
 
     @field_validator('recipient_email')
     @classmethod
@@ -66,6 +75,32 @@ async def resolve_targets(policy):
     return None
 
 
+async def correlation_catalog(policy):
+    """Local read capability metadata only; never connect to a product here."""
+    from .capabilities import discover
+    from flocks.tool.device.store import list_devices
+    capabilities, notes = await discover(policy, include_unbound=True)
+    supported = {cap.device: cap for cap in capabilities if cap.kind in {'tdp', 'sig'}}
+    catalog = []
+    for device in await list_devices():
+        product = {'tdp_api': 'tdp', 'onesig_api': 'sig'}.get(device.service_id)
+        if not product:
+            continue
+        cap = supported.get(device.id)
+        reason = None if cap else ('设备已停用' if not device.enabled else
+                  next((note for note in notes if note.startswith(device.name + '：')),
+                       '只读查询工具、认证配置或使用技能不可用'))
+        catalog.append({'id': device.id, 'name': device.name, 'product': product,
+                        'available': cap is not None, 'reason': reason})
+    # Preserve deleted bindings visibly so they cannot become an implicit empty
+    # selection after a refresh or a recipient-only edit.
+    known = {device['id'] for device in catalog}
+    for device_id in sorted({item for items in policy.correlation_bindings.values() for item in items} - known):
+        catalog.append({'id': device_id, 'name': device_id, 'product': 'unknown',
+                        'available': False, 'reason': '原联动设备已删除或不再支持 TDP / SIG 查询'})
+    return catalog
+
+
 async def snapshot(owner):
     from .lifecycle import _owned_installation
     from flocks.task.models import SchedulerStatus
@@ -73,6 +108,7 @@ async def snapshot(owner):
     _, scheduler, policy = await _owned_installation(owner)
     config = await mailflow.settings(owner)
     catalog = await adapter.device_catalog()
+    correlations = await correlation_catalog(policy)
     by_id = {device['id']: device for device in catalog}
     targets = await selected_targets(policy) if policy.targets_configured else []
     if not policy.targets_configured and len(policy.devices) == 1:
@@ -83,10 +119,13 @@ async def snapshot(owner):
         'running': scheduler.status == SchedulerStatus.ACTIVE or bool(await TaskStore.list_active_executions_for_scheduler(scheduler.id)),
         'targets': [{'device_id': target['device'], 'device_name': by_id.get(target['device'], {}).get('name', target['device_name']),
                      'responsible_name': target['responsible_name'], 'recipient_email': target['recipient'],
+                     'correlation_device_ids': policy.correlation_bindings.get(target['device']),
+                     'correlation_configured': target['device'] in policy.correlation_bindings,
                      'available': bool(by_id.get(target['device'], {}).get('available')),
                      'reason': by_id.get(target['device'], {}).get('reason', '设备已删除或不再是 XDR 接入')}
                     for target in targets],
         'devices': [{key: device[key] for key in ('id', 'name', 'available', 'reason')} for device in catalog],
+        'correlation_devices': correlations,
         'sender_verification_required': mailflow.transport.REQUIRE_AUTHENTICATED_FEEDBACK,
     }
 
@@ -110,6 +149,23 @@ async def configure(owner, body):
             device = catalog.get(target.device_id)
             if not device or not device['available']:
                 raise ValueError('所选 XDR 设备不可用：' + (device['name'] + '；' + str(device['reason']) if device else target.device_id))
+        bindings = {key: list(value) for key, value in policy.correlation_bindings.items()
+                    if key in {target.device_id for target in body.targets}}
+        if any('correlation_device_ids' in target.model_fields_set for target in body.targets):
+            correlations = {device['id']: device for device in await correlation_catalog(policy)}
+            policy.correlation_devices = sorted(device_id for device_id, device in correlations.items()
+                                                if device['available'] and device['product'] in {'tdp', 'sig'})
+            for target in body.targets:
+                if 'correlation_device_ids' not in target.model_fields_set:
+                    continue  # Legacy clients saving recipients preserve saved bindings.
+                if target.correlation_device_ids is None:
+                    bindings.pop(target.device_id, None)
+                    continue
+                for device_id in target.correlation_device_ids:
+                    device = correlations.get(device_id)
+                    if not device or not device['available'] or device['product'] not in {'tdp', 'sig'}:
+                        raise ValueError('所选联动设备不可用：' + (device['name'] + '；' + str(device['reason']) if device else device_id))
+                bindings[target.device_id] = list(target.correlation_device_ids)
         current = await mailflow.settings(owner)
         existing = {target['device']: target for target in await selected_targets(policy)}
         mailbox = current['mailbox']
@@ -134,6 +190,7 @@ async def configure(owner, body):
             records.append((owner, COMPONENT_ID, policy.project, target.device_id, catalog[target.device_id]['name'],
                             target.recipient_email, target.responsible_name, revision, mailbox, timestamp))
         policy.targets_configured = True
+        policy.correlation_bindings = bindings
         policy.devices = [target.device_id for target in body.targets]
         policy.device_tools = {device: catalog[device]['tool'] for device in policy.devices}
         policy.device_names = {device: catalog[device]['name'] for device in policy.devices}

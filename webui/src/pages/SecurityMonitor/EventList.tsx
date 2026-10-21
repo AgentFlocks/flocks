@@ -54,6 +54,7 @@ import {
 } from "./eventDetailView";
 import { EventTimeline } from "./EventTimeline";
 import { EventDetailDownload } from "./EventDetailDownload";
+import { CorrelationResults } from "./CorrelationResults";
 
 type Period = "day" | "week" | "month" | "custom";
 type Props = {
@@ -239,6 +240,8 @@ function StoryDetails({
     conciseSummary,
     findings,
     missingEvidence,
+    correlationGroups,
+    otherQueries,
   } = eventDetailView(detail);
   return (
     <div className="space-y-5">
@@ -445,13 +448,17 @@ function StoryDetails({
           </div>
         </section>
       )}
-      {strings(story.other_queries).length > 0 && (
+      <CorrelationResults
+        groups={correlationGroups}
+        formatTime={(value) => formatTime(value, timezone)}
+      />
+      {otherQueries.length > 0 && (
         <details className="rounded-lg bg-slate-50 p-3 dark:bg-slate-900">
           <summary className="cursor-pointer text-sm font-medium">
             其他已执行的关联查询
           </summary>
           <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-6 text-slate-500">
-            {strings(story.other_queries).map((item, index) => (
+            {otherQueries.map((item, index) => (
               <li key={index}>{item}</li>
             ))}
           </ul>

@@ -19,21 +19,21 @@ _REDACTED = '[已脱敏]'
 # Each value is the first explicitly supplied alias, never a guessed value.
 BASIC_FIELDS = {
     'event_id': ('event_id', 'incidentId', 'incidentUuid', 'uuId', 'uuid', 'id'),
-    'alert_ids': ('alert_ids', 'alertIds', 'alertId'),
-    'name': ('name', 'alertName', 'incidentName'),
+    'alert_ids': ('alert_ids', 'alertIds', 'alertId', 'threat.id'),
+    'name': ('name', 'alertName', 'incidentName', 'threat.name'),
     'alert_time': ('alert_time', 'alertTime', 'eventTime', 'timestamp', 'time', 'lastTime', 'firstTime', 'firstTimestamp', 'startTime'),
     'start_time': ('start_time', 'startTime', 'firstTime', 'firstTimestamp'),
     'end_time': ('end_time', 'endTime', 'lastTime', 'lastTimestamp'),
     'severity': ('severity', 'incidentSeverity', 'riskLevel', 'threatLevel'),
     'host': ('host', 'hostIp', 'hostIP', 'assetIp'),
-    'domain': ('domain', 'hostDomain', 'destDomain', 'dstDomain'),
+    'domain': ('domain', 'hostDomain', 'destDomain', 'dstDomain', 'net.dns.rrname', 'net.http.domain', 'net.http.reqs_host'),
     'data_source': ('data_source', 'dataSource', 'dataType', 'sourceType', 'deviceType', 'devUidDesc'),
     'source_device': ('source_device', 'devSourceName', 'devSourceNames', 'deviceName', 'sensorName', 'sourceDeviceName'),
     'src_ip': ('src_ip', 'srcIp', 'srcIps', 'sourceIp', 'net.src_ip'),
     'src_port': ('src_port', 'srcPort', 'sourcePort', 'net.src_port'),
     'dst_ip': ('dst_ip', 'dstIp', 'dstIps', 'destIp', 'destinationIp', 'net.dest_ip'),
     'dst_port': ('dst_port', 'dstPort', 'destPort', 'destinationPort', 'net.dest_port'),
-    'x_forwarded_for': ('x_forwarded_for', 'xForwardedFor', 'X-Forwarded-For', 'x-forwarded-for'),
+    'x_forwarded_for': ('x_forwarded_for', 'xForwardedFor', 'X-Forwarded-For', 'x-forwarded-for', 'net.http_xff'),
     'virus_name': ('virus_name', 'virusName', 'malwareName', 'threatName'),
     'file_id': ('file_id', 'fileId', 'fileUuid'),
     'file_md5': ('file_md5', 'fileMd5', 'fileMD5', 'md5', 'virusFileMd5'),
@@ -44,8 +44,17 @@ BASIC_FIELDS = {
     'file_created_at': ('file_created_at', 'fileCreateTime', 'fileCreatedTime', 'createTime', 'creationTime'),
     'process_name': ('process_name', 'processName', 'pName'),
     'command_line': ('command_line', 'commandLine', 'cmdLine', 'processCommandLine'),
-    'url': ('url', 'requestUrl', 'uri'),
-    'method': ('method', 'requestMethod', 'httpMethod'),
+    'url': ('url', 'requestUrl', 'uri', 'net.http.url'),
+    'method': ('method', 'requestMethod', 'httpMethod', 'net.http.method'),
+    'threat_message': ('threat_message', 'threat.msg'),
+    'tdp_level': ('tdp_level', 'threat.level'),
+    'tdp_result': ('tdp_result', 'threat.result'),
+    'http_status': ('http_status', 'net.http.status'),
+    'request_line': ('request_line', 'net.http.reqs_line'),
+    'response_line': ('response_line', 'net.http.resp_line'),
+    'dns_type': ('dns_type', 'net.dns.type'),
+    'dns_query_type': ('dns_query_type', 'net.dns.rrtype'),
+    'dns_answers': ('dns_answers', 'net.dns.rdata'),
     'deal_status': ('deal_status', 'dealStatus'),
     'attack_state': ('attack_state', 'attackState'),
     'attack_result': ('attack_result', 'attackResult'),
@@ -62,24 +71,39 @@ FIELD_LABELS = {
     'file_name': '文件名称', 'file_path': '文件路径', 'file_size': '文件大小（来源原值）',
     'file_created_at': '文件创建时间', 'process_name': '进程名称', 'command_line': '命令行',
     'url': 'URL', 'method': '请求方法', 'deal_status': '来源处置状态值',
+    'threat_message': 'TDP 威胁信息（来源原文）', 'tdp_level': 'TDP 行为类型原值',
+    'tdp_result': 'TDP 攻击结果原值', 'http_status': 'HTTP 返回码',
+    'request_line': 'HTTP 请求行', 'response_line': 'HTTP 响应行',
+    'dns_type': 'DNS 请求/应答方向', 'dns_query_type': 'DNS 查询类型', 'dns_answers': 'DNS 返回结果',
     'attack_state': 'XDR attackState', 'attack_result': 'XDR attackResult',
     'threat_subtype': '威胁子类型', 'stage': '来源阶段值',
 }
 PACKET_FIELDS = {
-    'requestHead': ('requestHead', 'requestHeader', 'requestHeaders', 'request_head', 'request_headers'),
-    'requestBody': ('requestBody', 'request_body'),
-    'responseHead': ('responseHead', 'responseHeader', 'responseHeaders', 'response_head', 'response_headers'),
-    'responseBody': ('responseBody', 'response_body'),
+    'requestHead': ('requestHead', 'requestHeader', 'requestHeaders', 'request_head', 'request_headers', 'net.http.reqs_header', 'reqs_header'),
+    'requestBody': ('requestBody', 'request_body', 'net.http.reqs_body', 'reqs_body'),
+    'responseHead': ('responseHead', 'responseHeader', 'responseHeaders', 'response_head', 'response_headers', 'net.http.resp_header', 'resp_header'),
+    'responseBody': ('responseBody', 'response_body', 'net.http.resp_body', 'resp_body'),
 }
 PACKET_LABELS = {'requestHead': '请求头', 'requestBody': '请求正文', 'responseHead': '响应头', 'responseBody': '响应正文'}
 _SENSITIVE = re.compile(r'^(?:authorization|proxyauthorization|cookie|setcookie|password|passwd|pwd|token|accesstoken|refreshtoken|idtoken|authtoken|apikey|secret|clientsecret|authcode|credential|sessionkey)$', re.I)
 _SECRET_NAME = r'(?:(?:x[_-])?(?:authorization|proxy-authorization|cookie|set-cookie|password|passwd|pwd|(?:(?:access|refresh|id|auth)[_-]?)?token|api[_-]?key|secret|client[_-]?secret|auth[_-]?code|credential|session[_-]?key))'
-_CONTAINERS = {'data', 'item', 'items', 'list', 'records', 'result', 'results', 'proof', 'proofs', 'alertTimeLine',
+_CONTAINERS = {'data', 'item', 'items', 'list', 'records', 'rows', 'result', 'results', 'proof', 'proofs', 'alertTimeLine',
                'alertTimeline', 'timeline', 'attackStory', 'rootCauseAnalysis', 'detail', 'details', 'alert', 'alerts',
                'incident', 'entities', 'entity', 'host', 'file', 'process', 'ip', 'innerip', 'dns', 'net', 'http',
-               'srcProcess', 'aggregations', 'originalAlert', 'srcIpInfos', 'dstIpInfos'}
+               'srcProcess', 'aggregations', 'originalAlert', 'srcIpInfos', 'dstIpInfos', 'threat'}
+_TDP_THREAT_FIELDS = {'id', 'name', 'msg', 'level', 'result'}
+_TDP_HTTP_FIELDS = {'method', 'status', 'reqs_header', 'reqs_host', 'reqs_cookie', 'reqs_body',
+                    'reqs_line', 'reqs_referer', 'url', 'reqs_user_agent', 'resp_header', 'resp_line',
+                    'resp_body', 'reqs_content_length', 'resp_content_length', 'domain'}
+_TDP_DNS_FIELDS = {'type', 'rrname', 'rrtype', 'rdata'}
+_TDP_NET_FIELDS = {'src_ip', 'dest_ip', 'src_port', 'dest_port', 'http_xff'}
+_TDP_KEYS = ({f'threat.{key}' for key in _TDP_THREAT_FIELDS}
+             | {f'net.http.{key}' for key in _TDP_HTTP_FIELDS}
+             | {f'net.dns.{key}' for key in _TDP_DNS_FIELDS}
+             | {f'net.{key}' for key in _TDP_NET_FIELDS})
 _FACT_KEYS = (_CONTAINERS | {alias for aliases in BASIC_FIELDS.values() for alias in aliases}
               | {alias for aliases in PACKET_FIELDS.values() for alias in aliases}
+              | _TDP_KEYS | _TDP_THREAT_FIELDS | _TDP_HTTP_FIELDS | _TDP_DNS_FIELDS | _TDP_NET_FIELDS
               | {'total', 'count', 'code', 'success', 'status', 'gptResult', 'threatLevel', 'threatDefineName',
                  'edrDealStatusInfo', 'ndrDealStatusInfo', 'isPermanent', 'expireTime', 'hostId', 'hostName',
                  'incidentThreatClass', 'incidentThreatType', 'threat.name', 'threat.level', 'threat.result',
@@ -91,6 +115,29 @@ _FACT_KEYS = (_CONTAINERS | {alias for aliases in BASIC_FIELDS.values() for alia
                  'srcIpDesc', 'dstIpDesc'})
 _PACKET_ALIASES = {alias: key for key, aliases in PACKET_FIELDS.items() for alias in aliases}
 _SQL = re.compile(r'@@version\b|\bunion\s+(?:all\s+)?select\b|\b(?:sleep|benchmark|load_file)\s*\(|\b(?:or|and)\s+[\'\"]?\d+[\'\"]?\s*=\s*[\'\"]?\d+|\bcase\s+when\b|\b(?:information_schema|xp_cmdshell)\b', re.I)
+
+
+def documented_fields(raw):
+    """Expose only documented TDP paths, plus the observed nested HTTP form.
+
+    This is a shallow view; it neither walks arbitrary objects nor guesses IP
+    roles from DNS answers, forwarded headers or asset addresses.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    fields = dict(raw)
+    for name, keys in (('threat', _TDP_THREAT_FIELDS), ('net', _TDP_NET_FIELDS)):
+        nested = raw.get(name)
+        if isinstance(nested, dict):
+            for key in keys & nested.keys():
+                fields.setdefault(f'{name}.{key}', nested[key])
+    net = raw.get('net') if isinstance(raw.get('net'), dict) else {}
+    for name, keys in (('http', _TDP_HTTP_FIELDS), ('dns', _TDP_DNS_FIELDS)):
+        nested = net.get(name, raw.get(name))
+        if isinstance(nested, dict):
+            for key in keys & nested.keys():
+                fields.setdefault(f'net.{name}.{key}', nested[key])
+    return fields
 
 
 def _clean(text):
@@ -148,6 +195,7 @@ def normalize_basics(raw):
     """Normalize the supplied host/Web fields; absent values stay absent."""
     if not isinstance(raw, dict):
         return {}
+    raw = documented_fields(raw)
     normalized = {}
     def selected_scalar(value, limit=MAX_TEXT):
         safe = _scalar(value, limit)
@@ -216,9 +264,13 @@ def normalize_basics(raw):
     elif 'severity' in normalized:
         normalized['severity_field'] = 'severity'
     identifier = raw.get('uuId') or raw.get('uuid') or raw.get('id')
-    if isinstance(identifier, str) and identifier.startswith('alert-'):
+    tdp_threat = any(key in raw for key in _TDP_KEYS if key.startswith('threat.'))
+    if isinstance(identifier, str) and identifier.startswith('alert-') and not tdp_threat:
         normalized.pop('event_id', None)
         normalized.setdefault('alert_ids', [identifier])
+    if tdp_threat:
+        # TDP's generic id is a log-document ID, not the incident or alert ID.
+        normalized.pop('event_id', None)
     return normalized
 
 
@@ -283,8 +335,11 @@ def safe_facts(value):
             if any(item.get(key) is True for key in ('partial', 'truncated', 'incomplete')):
                 note('来源明确标注返回不完整')
             output = {}
-            if any(key in item and item[key] is None for key in ('item', 'items', 'list', 'records')):
+            list_keys = ('item', 'items', 'list', 'records', 'rows')
+            if any(key in item and item[key] is None for key in list_keys):
                 note('来源实体列表为空值，未取得完整结果')
+            if any(key in item and item[key] is not None and not isinstance(item[key], list) for key in list_keys):
+                note('来源列表结构不可核对，未取得完整结果')
             for prior_note in item.get('_evidenceLimits', []) if isinstance(item.get('_evidenceLimits'), list) else []:
                 note(_text(prior_note, 160))
             if len(item) > 2000:
@@ -296,11 +351,13 @@ def safe_facts(value):
                     note('总事实预算已用完，内容不完整')
                     break
                 remaining[0] -= len(json.dumps(key).encode('utf-8')) + 2
-                if key in _PACKET_ALIASES:
+                if key in {'net.http.reqs_cookie', 'reqs_cookie'}:
+                    output[key] = charge(_REDACTED)
+                elif key in _PACKET_ALIASES:
                     output[key] = packet_value(nested, _PACKET_ALIASES[key])
                 else:
                     output[key] = keep(nested, depth+1)
-            listed = [v for k, v in item.items() if k in {'item', 'items', 'list', 'records'} and isinstance(v, list)]
+            listed = [v for k, v in item.items() if k in set(list_keys) and isinstance(v, list)]
             if type(item.get('total')) is int and any(item['total'] > len(v) for v in listed):
                 note('返回数量少于来源总数，仅取得部分记录')
             return output
@@ -347,22 +404,22 @@ def safe_facts(value):
     return safe, bool(notes)
 
 
-def _walk(value, alert_id='', alerts_mode=False):
+def _walk(value, alert_id='', alerts_mode=False, allow_generic_alert_ids=True):
     if isinstance(value, dict):
-        explicit = value.get('alertId')
+        explicit = value.get('alertId') or documented_fields(value).get('threat.id')
         identifier = value.get('uuId') or value.get('uuid') or value.get('id')
         if isinstance(explicit, str) and explicit:
             alert_id = explicit
-        elif isinstance(identifier, str) and not identifier.startswith('incident-') and (
+        elif allow_generic_alert_ids and isinstance(identifier, str) and not identifier.startswith('incident-') and (
                 identifier.startswith('alert-') or alerts_mode or 'proofType' in value):
             alert_id = identifier
         yield value, alert_id
         for nested in value.values():
             if isinstance(nested, (dict, list)):
-                yield from _walk(nested, alert_id, alerts_mode)
+                yield from _walk(nested, alert_id, alerts_mode, allow_generic_alert_ids)
     elif isinstance(value, list):
         for nested in value:
-            yield from _walk(nested, alert_id, alerts_mode)
+            yield from _walk(nested, alert_id, alerts_mode, allow_generic_alert_ids)
 
 
 def _when(value):
@@ -572,8 +629,15 @@ def build_story(event, evidence, result=None, *, canonical=None):
         for note in [*prior_notes, *facts.get('_evidenceLimits', [])]:
             gap(f'{ref}：{note}')
         before = len(story['key_evidence'])
-        for row, alert_id in _walk(facts, alerts_mode=kind in {'alerts', 'alert', 'alert_proof', 'alert-proof'}):
+        is_tdp = proof.get('product') == 'tdp' or str(proof.get('tool', '')).startswith('tdp_')
+        for row, alert_id in _walk(facts, alerts_mode=kind in {'alerts', 'alert', 'alert_proof', 'alert-proof'},
+                                   allow_generic_alert_ids=not is_tdp):
+            row = documented_fields(row)
             record = normalize_basics(row)
+            if is_tdp:
+                record.pop('event_id', None)
+                if not any(key in row for key in ('alertId', 'alertIds', 'alert_ids', 'threat.id')):
+                    record.pop('alert_ids', None)
             if alert_id:
                 record.pop('event_id', None)
                 record.setdefault('alert_ids', [alert_id])
@@ -671,7 +735,10 @@ def build_story(event, evidence, result=None, *, canonical=None):
         gap('调查结论引用了未取得成功结果的证据；该结论需继续核对')
     story['evidence_ids'] = [str(ref) for ref in requested if str(ref) in refs] if isinstance(requested, list) else []
     from .evidence_presenter import bound_evidence, evidence_cards
+    from .correlation import correlation_results
     story['evidence_cards'] = evidence_cards(event, evidence, canonical=canonical)
+    story['correlation_results'] = correlation_results(event, evidence, canonical=canonical,
+        plan=result.get('correlation_plan'), cards=story['evidence_cards'])
     bound = {id(proof) for proof in bound_evidence(event, evidence, canonical=canonical)}
     story.update(timeline_projection(story, other_events=[entry for proof, entry in other_events if id(proof) in bound]))
     story['operator_summary'] = _readable_text(result.get('operator_summary') or '', 200)
@@ -828,6 +895,7 @@ def readable_story(story):
     return {'basics': selected, 'conclusion': _readable_text(story.get('conclusion'), 1200),
             'verdict': story.get('verdict', 'unknown'), 'evidence': evidence,
             'evidence_cards': story.get('evidence_cards', []),
+            'correlation_results': story.get('correlation_results', []),
             'operator_summary': story.get('operator_summary', ''),
             'operator_explanation': story.get('operator_explanation', []),
             'timeline': timeline, 'gaps': gaps, **timeline_projection(story)}

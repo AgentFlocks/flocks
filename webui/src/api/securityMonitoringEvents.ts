@@ -199,6 +199,36 @@ export interface EventEvidenceCard {
     raw?: unknown;
   }[];
 }
+export interface EventCorrelationResult {
+  id: string;
+  evidence_id?: string;
+  device?: string;
+  source?: string;
+  product?: string;
+  kind?: string;
+  status:
+    | "not_queried"
+    | "failed"
+    | "no_match"
+    | "candidate"
+    | "insufficient"
+    | "legacy"
+    | "unknown"
+    | "success"
+    | "unavailable"
+    | "skipped";
+  summary?: string;
+  reason?: string;
+  error?: string;
+  host?: string;
+  window?: { start?: string | number | null; end?: string | number | null };
+  returned_count?: number;
+  total_count?: number;
+  partial?: boolean;
+  boundary?: string;
+  query?: unknown;
+  facts?: unknown;
+}
 export interface EventDetailResponse {
   story?: Record<string, unknown>;
   confirmed_story?: Record<string, unknown>;
@@ -215,6 +245,7 @@ export interface EventDetailResponse {
     verdict?: string;
     evidence?: { text: string; time?: string | number }[];
     evidence_cards?: EventEvidenceCard[];
+    correlation_results?: EventCorrelationResult[];
     timeline?: { time: string | number; text: string }[];
     alert_timeline?: {
       id: string;

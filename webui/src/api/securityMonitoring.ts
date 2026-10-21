@@ -74,16 +74,19 @@ export interface MonitorSnapshot {
 export interface MonitorConfigurationTarget {
   device_id: string; device_name: string; responsible_name: string; recipient_email: string;
   available: boolean; reason: string | null;
+  correlation_device_ids?: string[] | null;
+  correlation_configured?: boolean;
 }
 export interface MonitorConfiguration {
   enabled: boolean; running: boolean;
   targets: MonitorConfigurationTarget[];
   devices: { id: string; name: string; available: boolean; reason: string | null }[];
+  correlation_devices?: { id: string; name: string; product: string; available: boolean; reason: string | null }[];
   sender_verification_required: boolean;
 }
 export interface MonitorConfigurationInput {
   enabled: boolean;
-  targets: Pick<MonitorConfigurationTarget, 'device_id' | 'responsible_name' | 'recipient_email'>[];
+  targets: Pick<MonitorConfigurationTarget, 'device_id' | 'responsible_name' | 'recipient_email' | 'correlation_device_ids'>[];
 }
 export interface MailManualStatus {
   available: boolean;

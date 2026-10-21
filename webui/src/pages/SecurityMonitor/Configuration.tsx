@@ -12,6 +12,7 @@ type TargetDraft = MonitorConfigurationInput["targets"][number] & {
 };
 type Draft = { enabled: boolean; targets: TargetDraft[] };
 const MAX_TARGETS = 20;
+const MAX_CORRELATIONS = 4;
 const button =
   "inline-flex items-center justify-center gap-1.5 rounded-lg border border-sky-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-sky-900 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-sky-950";
 const field =
@@ -49,6 +50,18 @@ function validateTarget(
   )
     return "此设备已重复选择，每台设备只能配置一位责任人";
   if (!target.responsible_name.trim()) return "请填写责任人名称";
+  if (target.correlation_device_ids) {
+    if (target.correlation_device_ids.length > MAX_CORRELATIONS)
+      return "每台 XDR 最多选择 4 台联动设备";
+    if (
+      target.correlation_device_ids.some(
+        (id) =>
+          !config.correlation_devices?.find((device) => device.id === id)
+            ?.available,
+      )
+    )
+      return "所选联动设备不可用，请取消选择或检查设备接入";
+  }
   if (
     !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(
       target.recipient_email.trim(),
@@ -87,6 +100,9 @@ export default function Configuration({
         device_id: target.device_id,
         responsible_name: target.responsible_name,
         recipient_email: target.recipient_email,
+        ...("correlation_device_ids" in target
+          ? { correlation_device_ids: target.correlation_device_ids }
+          : {}),
       })),
     }),
     [],
@@ -194,6 +210,9 @@ export default function Configuration({
           device_id: target.device_id,
           responsible_name: target.responsible_name.trim(),
           recipient_email: target.recipient_email.trim(),
+          ...("correlation_device_ids" in target
+            ? { correlation_device_ids: target.correlation_device_ids }
+            : {}),
         })),
       });
       if (!mounted.current) return;
@@ -224,7 +243,7 @@ export default function Configuration({
             </h2>
             <p className="mt-2 text-sm leading-6 text-slate-500">
               选择需要监测的 XDR
-              设备，并为每台设备指定责任人和邮箱。告警通知按来源设备发送。
+              设备，并为每台设备指定责任人、邮箱及同环境的联动设备。告警通知按来源设备发送。
             </p>
           </div>
           <button
@@ -362,6 +381,10 @@ export default function Configuration({
                                 onChange={(event) =>
                                   update(target.rowKey, {
                                     device_id: event.target.value,
+                                    correlation_device_ids: config.targets.find(
+                                      (item) =>
+                                        item.device_id === event.target.value,
+                                    )?.correlation_device_ids,
                                   })
                                 }
                               >
@@ -438,6 +461,99 @@ export default function Configuration({
                               <Trash2 size={15} />
                               <span className="md:sr-only">移除</span>
                             </button>
+                          </div>
+                          <div className="mt-4 border-t border-slate-100 pt-4 dark:border-slate-800">
+                            <label className="block text-sm font-medium">
+                              联动核查设备
+                              <select
+                                aria-label={`设备 ${index + 1} 的联动设置`}
+                                className={field}
+                                value={
+                                  target.correlation_device_ids == null
+                                    ? "legacy"
+                                    : "manual"
+                                }
+                                onChange={(event) =>
+                                  update(target.rowKey, {
+                                    correlation_device_ids:
+                                      event.target.value === "legacy"
+                                        ? null
+                                        : [],
+                                  })
+                                }
+                              >
+                                <option value="legacy">
+                                  沿用旧目录（未绑定）
+                                </option>
+                                <option value="manual">手动选择联动设备</option>
+                              </select>
+                            </label>
+                            <p className="mt-2 text-xs leading-5 text-slate-500">
+                              {target.correlation_device_ids == null
+                                ? "尚未明确绑定。沿用旧版由智能体选择的目录策略，不保证每轮执行联动。"
+                                : "请选择与此 XDR 属于同一环境的 TDP / SIG，最多 4 台。未选择表示此 XDR 不联动。SIG 仅补充资产资料。"}
+                            </p>
+                            {target.correlation_device_ids != null && (
+                              <div className="mt-3 space-y-2">
+                                {!config.correlation_devices?.length && (
+                                  <p className="text-xs text-slate-500">
+                                    暂无 TDP / SIG
+                                    只读查询设备，请检查设备接入后刷新。
+                                  </p>
+                                )}
+                                {(config.correlation_devices || []).map(
+                                  (device) => {
+                                    const checked =
+                                      target.correlation_device_ids!.includes(
+                                        device.id,
+                                      );
+                                    return (
+                                      <label
+                                        key={device.id}
+                                        className="flex items-start gap-2 text-sm"
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          aria-label={`设备 ${index + 1} 联动 ${device.name}`}
+                                          className="mt-1 accent-emerald-600"
+                                          checked={checked}
+                                          disabled={
+                                            !checked &&
+                                            (!device.available ||
+                                              target.correlation_device_ids!
+                                                .length >= MAX_CORRELATIONS)
+                                          }
+                                          onChange={(event) =>
+                                            update(target.rowKey, {
+                                              correlation_device_ids: event
+                                                .target.checked
+                                                ? [
+                                                    ...target.correlation_device_ids!,
+                                                    device.id,
+                                                  ]
+                                                : target.correlation_device_ids!.filter(
+                                                    (id) => id !== device.id,
+                                                  ),
+                                            })
+                                          }
+                                        />
+                                        <span className="min-w-0 break-words">
+                                          {device.name}{" "}
+                                          <span className="text-xs text-slate-500">
+                                            {device.product.toUpperCase()}
+                                          </span>
+                                          <span className="mt-0.5 block break-all text-xs text-slate-500">
+                                            ID: {device.id}
+                                            {!device.available &&
+                                              ` · ${device.reason || "不可用"}`}
+                                          </span>
+                                        </span>
+                                      </label>
+                                    );
+                                  },
+                                )}
+                              </div>
+                            )}
                           </div>
                           {!!target.device_id && (
                             <p className="mt-3 break-all text-xs text-slate-500">

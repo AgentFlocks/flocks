@@ -25,6 +25,7 @@ from .query_time import QueryTimeError, normalize_window
 from .store import rows, write, encode, connection
 from .summaries import Summary, event_label, label, ENTITY_LABELS
 from .event_details import build_story, story_sections, story_text
+from .correlation import response_metadata
 
 ENGINE = 'agent-v1'
 EVIDENCE_SCHEMA = 3
@@ -146,7 +147,7 @@ def model_evidence(event, evidence):
     result = []
     for proof in evidence:
         item = {k: proof[k] for k in ('id', 'query_key', 'device', 'source_name', 'kind', 'event',
-                'success', 'partial', 'retrieved_at', 'attempt_id', 'error') if k in proof}
+                'product', 'result_meta', 'success', 'partial', 'retrieved_at', 'attempt_id', 'error') if k in proof}
         facts = proof.get('facts', {})
         if len(encode(facts)) > allowance:
             story = build_story(event, [proof])
@@ -639,6 +640,36 @@ class Investigator:
         self.advice = []
         self.attempt_id = uuid4().hex
         self.context_incomplete = False
+        self.correlation_plan = []
+
+    def plan_correlations(self, catalog):
+        """Program-owned intent; model prose cannot fabricate completed checks."""
+        bound = self.policy.correlation_bindings.get(self.event['device'])
+        sources = [cap for cap in catalog if cap.kind in {'tdp', 'sig'}]
+        common = {'event': self.event['id'], 'event_device': self.event['device'],
+                  'event_revision': fingerprint(self.event), 'host': self.event.get('host')}
+        if bound == []:
+            self.correlation_plan = [{**common, 'id': 'correlation-disabled', 'device': '', 'source': '联动配置',
+                'product': 'unknown', 'status': 'skipped', 'reason': '此 XDR 已明确配置为不执行跨产品联动查询'}]
+            return
+        self.correlation_plan = [{**common, 'id': f'correlation-{cap.id}', 'device': cap.device,
+            'source': cap.name, 'product': cap.kind, 'tool': cap.tool, 'status': 'not_queried',
+            'reason': ('已绑定此设备；本轮尚未执行联动查询' if bound is not None else
+                       '尚未按本 XDR 明确绑定；沿用旧目录，由智能体按需选择，本事件尚未查询此来源')}
+            for cap in sources]
+        if bound is not None:
+            available = {cap.device for cap in sources}
+            self.correlation_plan += [{**common, 'id': f'correlation-unavailable-{index}',
+                'device': identifier, 'source': identifier, 'product': 'unknown', 'status': 'unavailable',
+                'reason': '已绑定的设备当前没有可用查询能力；请检查设备、工具、认证配置及所需技能'}
+                for index, identifier in enumerate(bound) if identifier not in available]
+        elif not sources:
+            self.correlation_plan = [{**common, 'id': 'correlation-unconfigured', 'device': '', 'source': '联动配置',
+                'product': 'unknown', 'status': 'not_queried', 'reason': '尚未绑定联动设备，旧目录中也未发现可用 TDP/SIG 查询能力'}]
+
+    def pending_correlations(self):
+        attempted = {(p.get('device'), p.get('tool')) for p in self.evidence if p.get('kind') == 'related'}
+        return [dict(row) for row in self.correlation_plan if (row.get('device'), row.get('tool')) not in attempted]
 
     async def collect(self, capability, entity, *, alert_id=''):
         """One authorized query, one shared budget unit, one persisted record."""
@@ -661,6 +692,8 @@ class Investigator:
                      'retrieved_at': now().isoformat(), 'success': False, 'partial': True, 'facts': {}}
             if alert_id:
                 proof['alert_id'] = alert_id
+            if capability.kind in {'tdp', 'sig'}:
+                proof['product'] = capability.kind
             failure = None
             trace_fields = {}
             try:
@@ -668,6 +701,8 @@ class Investigator:
                 options = {'alert_id': alert_id} if entity == 'alert_proof' else {}
                 value, params = await capabilities.query(self.policy, self.recorder.session_id, message_id,
                                                         capability, target, entity, **options)
+                if capability.kind in {'tdp', 'sig'}:
+                    proof['result_meta'] = response_metadata(value, capability.kind)
                 safe, partial = capabilities.facts(value)
                 proof.update(success=True, partial=partial, facts=safe, query=params)
             except Exception as exc:
@@ -698,7 +733,10 @@ class Investigator:
             if proof['partial']:
                 sections.append({'label': '证据与缺口', 'text': '本次返回存在截断、缺失或覆盖不足，不能据此排除风险。' + '；'.join(proof['facts'].get('_evidenceLimits', []))})
             if capability.kind not in {'xdr', 'xdr_alerts'}:
-                sections.append({'label': '关联边界', 'text': '以上为同主机IP、同调查时间范围的候选，须核对资产身份和事件特征；不只凭IP合并事件。'})
+                sections.append({'label': '关联边界', 'text': (
+                    '以上为按原主机 IP 搜索的资产候选，SIG 接口不支持事件时间过滤；须核对资产身份，不代表同一安全事件。'
+                    if capability.kind == 'sig' else
+                    '以上为同主机IP、查询时间范围内的网络候选，须核对资产身份和事件特征；不只凭IP合并事件。')})
             return proof, {'evidence': proof['id'], 'success': True, 'partial': proof['partial']}, Summary(
                 f'{capability.name}：{content}已保存 [{proof["id"]}]。' + ('存在证据缺口，详见下方。' if proof['partial'] else ''),
                 story_text({**story, 'packets': []}), sections=sections, packets=story['packets'])
@@ -715,17 +753,30 @@ class Investigator:
         """Acquire core details before asking the model to interpret an event."""
         # Legacy records without either field remain readable. Newly queried
         # incidents always have basics, including when all optional fields lack.
-        if 'basics' not in self.event and not self.event.get('alertIds'):
-            return
+        core = 'basics' in self.event or bool(self.event.get('alertIds'))
         def available():
             return self.budget.calls < self.policy.investigation_calls and len(self.evidence) < 24
         incident = next((c for c in catalog if c.kind == 'xdr'), None)
-        if incident and available():
+        if core and incident and available():
             await self.collect(incident, 'proof')
         identifiers = trusted_alert_ids(self.event, self.evidence)
         alerts = next((c for c in catalog if c.kind == 'xdr_alerts'), None)
-        if alerts and identifiers and available():
+        if core and alerts and identifiers and available():
             await self.collect(alerts, 'alerts')
+        # Explicitly selected devices get a bounded check before optional XDR
+        # packet queries or a model finish can consume the remaining budget.
+        # Legacy unbound catalogs retain their previous on-demand behavior.
+        if self.policy.correlation_bindings.get(self.event['device']):
+            for source in (cap for cap in catalog if cap.kind in {'tdp', 'sig'}):
+                try:
+                    await self.collect(source, 'related')
+                except InvestigationError as exc:
+                    if exc.kind == 'budget':
+                        for row in self.correlation_plan:
+                            if row['status'] == 'not_queried':
+                                row['reason'] = '已绑定此设备；本轮调查预算已用完，已保存进度，后续轮次继续联动查询'
+                    raise
+        if core and alerts and identifiers:
             for identifier in identifiers[:2]:
                 if not available():
                     break
@@ -748,12 +799,15 @@ class Investigator:
         return gaps
 
     async def drive(self, agent_name='security-monitor', *, depth=0):
-        await preflight_model(agent_name, self.policy, self.event, self.budget)
         self.catalog, self.unavailable = await capabilities.discover(self.policy)
+        allowed_catalog = capabilities.for_event(self.catalog, self.event, self.policy)
+        if not depth:
+            self.plan_correlations(allowed_catalog)
+            await self.save(self.evidence, {'specialists': self.advice}, 'pending')
+        await preflight_model(agent_name, self.policy, self.event, self.budget)
         self.unavailable = list(dict.fromkeys(self.unavailable + self.policy.correlation_notes))[:30]
         agents = [a for a in await Agent.list() if a.delegatable and not a.hidden and 'security' in a.tags
                   and any(c.tool in (a.tools or []) for c in self.catalog)] if not depth else []
-        allowed_catalog = capabilities.for_event(self.catalog, self.event)
         if depth:
             selected = await Agent.get(agent_name)
             allowed_catalog = [c for c in allowed_catalog if c.tool in (selected.tools or [])] if selected else []
@@ -788,6 +842,7 @@ class Investigator:
                     'agents': [{'name': a.name, 'description': (a.description or '')[:300]} for a in agents],
                     'evidence': bounded_evidence, 'remaining_calls': self.policy.investigation_calls - self.budget.calls,
                     'specialist_assessments': self.advice,
+                    'correlation_plan': self.pending_correlations(),
                     'purpose': '真实事件调查', 'attempt_id': self.attempt_id,
                     'action_feedback': action_feedback,
                 }
@@ -836,11 +891,16 @@ class Investigator:
                     raise InvestigationError('调查结论缺少可核实的成功查询依据，保留待续查', 'model_format')
                 detail_gaps = build_story(self.event, self.evidence, choice.model_dump())['gaps'] if 'basics' in self.event else []
                 choice.gaps = [gap[:300] for gap in dict.fromkeys([*choice.gaps, *self.coverage_gaps(), *detail_gaps])][:12]
+                correlation_gaps = ([row['reason'] for row in self.pending_correlations()
+                                     if row['status'] in {'unavailable', 'not_queried'}]
+                                    if self.policy.correlation_bindings.get(self.event['device']) else [])
+                choice.gaps = list(dict.fromkeys([*correlation_gaps, *choice.gaps]))[:12]
                 if self.context_incomplete:
                     choice.gaps = list(dict.fromkeys([*choice.gaps, '模型使用了证据摘录，未读取完整报文；未读取部分不能排除风险']))[:12]
                 # Partial data cannot support an all-clear conclusion. A model's
                 # benign opinion never authorizes mail suppression/status writes.
                 if choice.verdict == 'benign' and (choice.blocking_gaps or self.context_incomplete
+                                                 or correlation_gaps
                                                  or any(e['partial'] or not e['success'] for e in self.evidence)):
                     choice.verdict = 'unknown'
                     choice.reason = '模型提出的安全判断仍有关键证据缺口，暂不通知，尚未排除风险。'
@@ -907,6 +967,8 @@ async def investigate(policy, event, recorder, budget=None):
         raise InvestigationError('调查事件版本已变化，等待下一轮重新读取', 'system')
     event['investigationWindow'] = canonical.get('investigationWindow')
     evidence, result = json.loads(case['evidence']), json.loads(case['result'])
+    correlation_scope = {'device': event['device'],
+                         'bindings': policy.correlation_bindings.get(event['device'])}
     state, next_retry_at, error_kind = case['state'], case['next_retry_at'], case['error_kind']
     exhausted, failures = bool(case['retry_exhausted']), case['failure_count']
     if (state in {'deferred', 'system_wait'} and result.get('failure_stage') == 'model'
@@ -923,10 +985,19 @@ async def investigate(policy, event, recorder, budget=None):
     due = not exhausted and (not next_retry_at or (parse_time(next_retry_at) or at) <= at)
     if state in ('pending', 'deferred', 'system_wait', 'ready') and due:
         usable = fresh_evidence(evidence, canonical, at)
+        if correlation_scope['bindings'] is not None:
+            # Correcting a site/device binding must also revoke cached related
+            # records from the current model context, not just future calls.
+            # archive() below preserves the prior version for audit/history.
+            usable = [proof for proof in usable if proof.get('kind') != 'related'
+                      or proof.get('device') in correlation_scope['bindings']]
         # Fresh failed records explain gaps; retry bounds count only calls in
         # the current attempt, so they never permanently block a recovered tool.
         rebind = fingerprint(canonical) != fingerprint(event)
-        if usable != evidence or state == 'ready' and result.get('evidence_schema') != EVIDENCE_SCHEMA or rebind and state != 'ready':
+        changed_scope = (result.get('correlation_scope') != correlation_scope
+                         and (correlation_scope['bindings'] is not None or 'correlation_scope' in result))
+        if (usable != evidence or changed_scope or state == 'ready' and result.get('evidence_schema') != EVIDENCE_SCHEMA
+                or rebind and state != 'ready'):
             async with connection() as db:
                 await archive(db, policy, case, at.isoformat())
                 if rebind:
@@ -940,6 +1011,9 @@ async def investigate(policy, event, recorder, budget=None):
             if state == 'ready':
                 state = 'pending'
     async def save(evidence, result, new_state):
+        if worker is not None:
+            result['correlation_plan'] = worker.pending_correlations()
+            result['correlation_scope'] = correlation_scope
         await write('UPDATE monitor_investigations SET evidence=?,result=?,state=?,updated_at=? '
                     'WHERE owner=? AND project=? AND event_key=?',
                     (encode(evidence), encode(result), new_state, now().isoformat(),
@@ -949,6 +1023,9 @@ async def investigate(policy, event, recorder, budget=None):
         # Result and its recovery schedule are one fact. A crash must never
         # leave a system failure without backoff, or ready without its result.
         result['evidence_schema'] = EVIDENCE_SCHEMA
+        if worker is not None:
+            result['correlation_plan'] = worker.pending_correlations()
+            result['correlation_scope'] = correlation_scope
         result['story'] = build_story({**event, 'alertIds': trusted_alert_ids(event, evidence)}, evidence, result)
         confirmed_risk = capture_case({'event': canonical, 'evidence': evidence, 'result': result,
             'state': state, 'revision': revision, 'updated_at': now().isoformat()}, confirmed_risk)
@@ -961,6 +1038,7 @@ async def investigate(policy, event, recorder, budget=None):
                    failure_count=failures, retry_exhausted=exhausted, revision=revision,
                    **{key: result[key] for key in ('failure_stage', 'model_failure', 'http_status', 'error_type',
                         'error_code', 'time_field', 'model_provider', 'model_id') if key in result})
+    worker = None
     if state in ('pending', 'deferred', 'system_wait') and due:
         attempted_this_round = True
         await write('UPDATE monitor_investigations SET attempts=attempts+1 WHERE owner=? AND project=? AND event_key=?',

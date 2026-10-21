@@ -41,6 +41,9 @@ class MonitoringPolicy(BaseModel):
         return 'agent-v1' if value == 'rules' else value
     investigation_calls: int = Field(default=12, ge=1, le=24)
     correlation_devices: list[str] = Field(default_factory=list)
+    # Missing XDR key retains legacy catalog selection; [] explicitly disables
+    # cross-product queries for that source. Device IDs are never name guesses.
+    correlation_bindings: dict[str, list[str]] = Field(default_factory=dict)
     correlation_notes: list[str] = Field(default_factory=list)
     max_pages: int = Field(default=1000, ge=1, le=10000)
     # Distinct, complete observation rounds before accepting uncertain low/medium risk.

@@ -33,9 +33,12 @@ class Capability:
         return ('host', 'file', 'process', 'ip', 'innerip', 'dns', 'proof') if self.kind == 'xdr' else ('related',)
 
 
-def for_event(catalog, event):
-    """Never advertise another XDR device as a source for this event's UUID."""
-    return [cap for cap in catalog if cap.kind not in {'xdr', 'xdr_alerts'} or cap.device == event.get('device')]
+def for_event(catalog, event, policy=None):
+    """Pin XDR IDs and honor the source's explicit cross-product device scope."""
+    bound = policy.correlation_bindings.get(event.get('device')) if policy else None
+    return [cap for cap in catalog
+            if (cap.kind not in {'xdr', 'xdr_alerts'} or cap.device == event.get('device'))
+            and (cap.kind not in {'tdp', 'sig'} or bound is None or cap.device in bound)]
 
 
 def resolve_choice(catalog, event, name):
@@ -72,10 +75,11 @@ async def discover(policy, *, include_unbound=False):
     from flocks.tool.device.store import list_devices, get_device_tool_enabled
     await ToolRegistry.init_async()
     capabilities, unavailable = [], []
+    bound_devices = {identifier for identifiers in policy.correlation_bindings.values() for identifier in identifiers}
     for device in await list_devices():
         if not device.enabled:
             continue
-        if not include_unbound and device.id not in {*policy.devices, *policy.correlation_devices}:
+        if not include_unbound and device.id not in {*policy.devices, *policy.correlation_devices, *bound_devices}:
             continue
         candidates = [t for t in ToolRegistry.list_tools() if t.enabled and t.source == 'device'
                       and t.provider == device.storage_key and not t.requires_confirmation]
@@ -223,6 +227,9 @@ def _bound_incident_proof(value, identifier):
 
 async def query(policy, session_id, message_id, capability, event, kind, *, alert_id=''):
     await assert_active(policy)
+    bound = policy.correlation_bindings.get(event.get('device'))
+    if capability.kind in {'tdp', 'sig'} and bound is not None and capability.device not in bound:
+        raise ContractError('联动设备不在本 XDR 明确绑定的范围内，未执行查询')
     current, _ = await discover(policy)
     if not any((c.device, c.tool, c.kind) == (capability.device, capability.tool, capability.kind) for c in current):
         raise ContractError('数据源或工具已停用，未执行查询')

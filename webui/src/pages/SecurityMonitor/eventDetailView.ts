@@ -4,6 +4,7 @@ import type {
   EventMember,
 } from "@/api/securityMonitoringEvents";
 import { readableEvidence } from "./EventAssessment";
+import { eventCorrelationGroups } from "./correlationDetails";
 
 export const handlingLabels: Record<string, string> = {
   open: "未闭环",
@@ -248,6 +249,18 @@ export function eventDetailView(detail: EventDetailResponse) {
     .map(readableEvidence)
     .filter(Boolean)
     .slice(0, 3);
+  const correlationGroups = eventCorrelationGroups(detail, {
+    historical,
+    retainedRisk,
+  });
+  const currentCorrelationIds = correlationGroups
+    .filter((group) => group.scope === "current")
+    .flatMap((group) =>
+      group.results.map((row) => row.evidence_id).filter(Boolean),
+    );
+  const otherQueries = strings(story.other_queries).filter(
+    (line) => !currentCorrelationIds.some((id) => line.startsWith(`${id} ·`)),
+  );
   return {
     state,
     retainedRisk,
@@ -275,5 +288,7 @@ export function eventDetailView(detail: EventDetailResponse) {
     conciseSummary,
     findings,
     missingEvidence,
+    correlationGroups,
+    otherQueries,
   };
 }

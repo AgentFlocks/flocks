@@ -4,15 +4,16 @@ import re
 from urllib.parse import unquote
 
 from .event_details import (FIELD_LABELS, PACKET_FIELDS, PACKET_LABELS,
-                            _SECRET_NAME, _SQL, normalize_basics, redact_text, safe_facts)
+                            _SECRET_NAME, _SQL, documented_fields, normalize_basics, redact_text, safe_facts)
 
 MAX_CARDS = 36
 MAX_RAW_BYTES = 24_000
 MAX_RECORDS = 36
 _MEANINGFUL = {'src_ip', 'dst_ip', 'domain', 'url', 'virus_name', 'file_name',
-               'file_path', 'file_md5', 'file_hash', 'process_name', 'command_line', 'x_forwarded_for'}
+               'file_path', 'file_md5', 'file_hash', 'process_name', 'command_line', 'x_forwarded_for',
+               'threat_message', 'request_line', 'response_line'}
 _ENTITY_CONTAINERS = {'entities', 'entity', 'host', 'file', 'process', 'ip', 'innerip',
-                      'dns', 'srcProcess', 'net', 'http', 'originalAlert'}
+                      'dns', 'srcProcess', 'net', 'http', 'originalAlert', 'threat'}
 _ALERT_CONTAINERS = {'alertTimeLine', 'alertTimeline', 'alert', 'alerts'}
 
 
@@ -46,7 +47,7 @@ def _bounded(value, limit=MAX_RAW_BYTES):
     return value
 
 
-def bound_evidence(event, evidence, *, canonical=None):
+def bound_evidence(event, evidence, *, canonical=None, include_failed=False):
     """Successful queries must bind the original incident and saved revision.
 
     Cross-device searches may use another source device. Their correlation
@@ -61,7 +62,7 @@ def bound_evidence(event, evidence, *, canonical=None):
     revision = fingerprint(canonical)
     result = []
     for proof in evidence[:24] if isinstance(evidence, list) else []:
-        if (not isinstance(proof, dict) or proof.get('success') not in (True, 1)
+        if (not isinstance(proof, dict) or not include_failed and proof.get('success') not in (True, 1)
                 or proof.get('event') != event.get('id') or proof.get('event_revision') != revision):
             continue
         if not isinstance(proof.get('kind'), str):
@@ -81,7 +82,8 @@ def bound_evidence(event, evidence, *, canonical=None):
 def _identifiers(value, *, alert_row=False):
     """Only alert fields/records identify an alert; entity UUIDs never do."""
     identifiers = []
-    for key in ('alertId', 'alert_ids', 'alertIds'):
+    value = documented_fields(value)
+    for key in ('alertId', 'alert_ids', 'alertIds', 'threat.id'):
         supplied = value.get(key)
         values = supplied if isinstance(supplied, list) else [supplied]
         identifiers.extend(_text(item, 1000) for item in values if isinstance(item, str) and item)
@@ -110,7 +112,7 @@ def _descendant_alerts(value):
 
 
 def _records(value, *, kind, fallback=(), context=None, identifiers=(), anchor=None,
-             path=(), entity=False, alert_row=False, aggregate=None):
+             path=(), entity=False, alert_row=False, aggregate=None, allow_generic_alert_ids=True):
     """Walk one source tree while retaining its alert and parent-record scope."""
     context = context or {}
     if isinstance(value, dict):
@@ -120,7 +122,7 @@ def _records(value, *, kind, fallback=(), context=None, identifiers=(), anchor=N
             own['domain'] = value['domainName']
         # A generic UUID in an alert list identifies its row, not every nested
         # file/process/entity. An alert-proof query already identifies its target.
-        row_identity = not entity and (alert_row or kind == 'alerts' and (
+        row_identity = allow_generic_alert_ids and not entity and (alert_row or kind == 'alerts' and (
             any(key in own for key in ('name', 'alert_time', 'src_ip', 'dst_ip', 'url', 'x_forwarded_for'))
             or 'proofType' in value))
         explicit = _identifiers(value, alert_row=row_identity)
@@ -153,7 +155,7 @@ def _records(value, *, kind, fallback=(), context=None, identifiers=(), anchor=N
             merged['alert_ids'] = list(identifiers)
         if len(explicit) > 1 and set(explicit).issubset(_descendant_alerts(value)):
             aggregate = (value, path, set(explicit))
-        packet = any(alias in value for aliases in PACKET_FIELDS.values() for alias in aliases)
+        packet = any(alias in documented_fields(value) for aliases in PACKET_FIELDS.values() for alias in aliases)
         meaningful = any(own.get(key) not in (None, '', []) for key in _MEANINGFUL) or packet
         named_proof = own.get('name') and any(isinstance(value.get(key), dict) for key in ('proof', 'detail', 'details'))
         if anchor is None and (meaningful or named_proof):
@@ -166,12 +168,14 @@ def _records(value, *, kind, fallback=(), context=None, identifiers=(), anchor=N
                 yield from _records(nested, kind=kind, fallback=fallback, context=merged,
                                     identifiers=identifiers, anchor=anchor, path=(*path, key),
                                     entity=entity or key in _ENTITY_CONTAINERS,
-                                    alert_row=key in _ALERT_CONTAINERS, aggregate=aggregate)
+                                    alert_row=key in _ALERT_CONTAINERS, aggregate=aggregate,
+                                    allow_generic_alert_ids=allow_generic_alert_ids)
     elif isinstance(value, list):
         for index, item in enumerate(value[:100]):
             yield from _records(item, kind=kind, fallback=fallback, context=context,
                                 identifiers=identifiers, anchor=anchor, path=(*path, index),
-                                entity=entity, alert_row=alert_row, aggregate=aggregate)
+                                entity=entity, alert_row=alert_row, aggregate=aggregate,
+                                allow_generic_alert_ids=allow_generic_alert_ids)
 
 
 def _summary(record, source, packets):
@@ -192,7 +196,7 @@ def _summary(record, source, packets):
                 observed += f'（目的端口 {_text(port, 45)}）'
         if name:
             observed += f'，来源记录为「{name}」'
-        tag = _text(record.get('intelligenceTag') or record.get('threatDefineName') or record.get('threat.name'), 70)
+        tag = _text(record.get('intelligenceTag') or record.get('threatDefineName'), 70)
         if tag:
             observed += f'，来源情报标记为「{tag}」'
     elif record.get('file_path') or record.get('file_name'):
@@ -205,12 +209,16 @@ def _summary(record, source, packets):
     elif record.get('url'):
         observed = f'记录对 {_text(record["url"], 110)} 的访问'
     elif domain:
-        tag = _text(record.get('intelligenceTag') or record.get('threatDefineName') or record.get('threat.name'), 70)
+        tag = _text(record.get('intelligenceTag') or record.get('threatDefineName'), 70)
         observed = f'记录关联域名 {domain}' + (f'，来源情报标记为「{tag}」' if tag else '')
     elif record.get('x_forwarded_for'):
         observed = f'记录 X-Forwarded-For 请求头原值「{_text(record["x_forwarded_for"], 140)}」'
     elif record.get('virus_name'):
         observed = f'记录威胁「{_text(record["virus_name"], 80)}」'
+    elif record.get('threat_message'):
+        observed = '保留来源威胁信息'
+    elif record.get('request_line') or record.get('response_line'):
+        observed = '保留 HTTP 请求或响应行'
     elif name or packets:
         observed = f'记录「{name}」告警' if name else '保存告警举证'
     else:
@@ -238,7 +246,7 @@ def _summary(record, source, packets):
 
 
 def _kind(record, packets):
-    if packets or record.get('url'):
+    if packets or record.get('url') or record.get('request_line') or record.get('response_line'):
         return 'request'
     if record.get('process_name') or record.get('command_line'):
         return 'process'
@@ -266,6 +274,10 @@ def evidence_cards(event, evidence, *, canonical=None):
     """One card per source device and alert, with bounded query provenance."""
     groups, limited = {}, False
     for proof_index, proof in enumerate(bound_evidence(event, evidence, canonical=canonical)):
+        # The current OneSIG Strategy API supplies asset/policy configuration,
+        # not threat logs. Its results belong to the correlation query view.
+        if proof.get('product') == 'sig' or str(proof.get('tool', '')).startswith('onesig_'):
+            continue
         facts, clipped = safe_facts(proof.get('facts', {}))
         source = _text(proof.get('source_name') or proof.get('device_name') or proof.get('tool') or proof['device'], 100)
         cross = proof.get('device') != event.get('device')
@@ -273,7 +285,9 @@ def evidence_cards(event, evidence, *, canonical=None):
         fallback = ((_text(query['uuid'], 1000),) if proof.get('kind') == 'alert_proof'
                     and query.get('action') == 'get_proof' and isinstance(query.get('uuid'), str)
                     and query['uuid'] else ())
-        for row, record, identifiers, anchor, path, aggregate in _records(facts, kind=proof['kind'], fallback=fallback):
+        is_tdp = proof.get('product') == 'tdp' or str(proof.get('tool', '')).startswith('tdp_')
+        for row, record, identifiers, anchor, path, aggregate in _records(facts, kind=proof['kind'], fallback=fallback,
+                                                                         allow_generic_alert_ids=not is_tdp):
             single = len(identifiers) == 1
             key = (proof['device'], identifiers[0]) if single else (proof['device'], proof_index, anchor)
             if key not in groups:
@@ -303,13 +317,14 @@ def evidence_cards(event, evidence, *, canonical=None):
             for name in ('intelligenceTag', 'threatDefineName', 'gptResult', 'threatLevel', 'threat.name'):
                 if row.get(name) is not None:
                     _merge_field(group['fields'], name, row[name])
+            packet_row = documented_fields(row)
             for field, aliases in PACKET_FIELDS.items():
-                alias = next((name for name in aliases if name in row), None)
-                if alias and isinstance(row[alias], str):
-                    packet = {'field': field, 'label': PACKET_LABELS[field], 'text': row[alias],
-                              'truncated': '已截断' in row[alias]}
-                    if packet not in group['packets']:
-                        group['packets'].append(packet)
+                for alias in aliases:
+                    if alias in packet_row and isinstance(packet_row[alias], str):
+                        packet = {'field': field, 'label': PACKET_LABELS[field], 'text': packet_row[alias],
+                                  'truncated': '已截断' in packet_row[alias]}
+                        if packet not in group['packets']:
+                            group['packets'].append(packet)
             source_row, source_path = (aggregate[0], aggregate[1]) if aggregate else (row, path)
             if any(index == proof_index and source_path[:len(parent)] == parent for index, parent in group['paths']):
                 continue
