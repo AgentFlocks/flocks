@@ -667,6 +667,30 @@ describe('Layout onboarding', () => {
     expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
   });
 
+  it('does not automatically reopen dismissed onboarding, including after a fresh mount', async () => {
+    onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false, dismissed: true } });
+    const firstView = renderAt('/');
+    await waitFor(() => expect(onboardingAPI.getStatus).toHaveBeenCalledOnce());
+    expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
+    firstView.unmount();
+
+    renderAt('/');
+    await waitFor(() => expect(onboardingAPI.getStatus).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
+  });
+
+  it('lets admins manually reopen dismissed onboarding', async () => {
+    onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false, dismissed: true } });
+    renderAt('/');
+    await waitFor(() => expect(onboardingAPI.getStatus).toHaveBeenCalledOnce());
+    expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
+
+    await act(async () => {
+      window.dispatchEvent(new Event('flocks:open-onboarding'));
+    });
+    expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+  });
+
   it('keeps onboarding away from members: no status check, no prompt, no event opener', async () => {
     useAuth.mockReturnValue({ user: { id: 'u2', username: 'member', role: 'member' }, logout: vi.fn() });
     onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });

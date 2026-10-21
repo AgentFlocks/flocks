@@ -301,7 +301,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     let cancelled = false;
     onboardingAPI.getStatus()
       .then((res) => {
-        if (!cancelled && !res.data.completed) setShowOnboarding(true);
+        if (!cancelled && !res.data.completed && !res.data.dismissed) setShowOnboarding(true);
       })
       .catch(() => {
         if (!cancelled) setShowOnboarding(true);
@@ -309,7 +309,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     return () => {
       cancelled = true;
     };
-  }, [isHome, canOnboard]);
+  }, [isHome, canOnboard, user?.id]);
 
   const handleOpenOnboarding = useCallback(() => {
     if (canOnboard) setShowOnboarding(true);

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, AuthUser
 from flocks.server.routes import onboarding as onboarding_routes
 
 
@@ -36,6 +38,213 @@ def default_threatbook_intel_status(monkeypatch: pytest.MonkeyPatch):
         return _intel_status()
 
     monkeypatch.setattr(onboarding_routes, "_build_threatbook_intel_status", fake_status)
+
+
+@pytest.fixture
+def draft_secrets(monkeypatch: pytest.MonkeyPatch):
+    from flocks import security
+    from flocks.server.routes import provider as provider_routes
+
+    class Secrets:
+        def __init__(self):
+            self.values = {}
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def set(self, key, value):
+            self.values[key] = value
+
+        def delete(self, key):
+            return self.values.pop(key, None) is not None
+
+        def _load(self):
+            return dict(self.values)
+
+    secrets = Secrets()
+    monkeypatch.setattr(security, "get_secret_manager", lambda: secrets)
+    monkeypatch.setattr(onboarding_routes, "get_secret_manager", lambda: secrets)
+    monkeypatch.setattr(provider_routes, "_ensure_provider_initialized", AsyncMock())
+    monkeypatch.setattr(onboarding_routes.Provider, "get", lambda _provider_id: None)
+    return secrets
+
+
+class TestOnboardingDraftRoutes:
+    @pytest.mark.asyncio
+    async def test_invalid_keys_are_saved_without_validation_or_default_model(
+        self, client, monkeypatch: pytest.MonkeyPatch, draft_secrets
+    ):
+        validate = AsyncMock(side_effect=AssertionError("draft must not validate"))
+        connect = AsyncMock(side_effect=AssertionError("draft must not connect MCP"))
+        set_default = AsyncMock(side_effect=AssertionError("draft must not set a default"))
+        monkeypatch.setattr(onboarding_routes, "_validate_onboarding_request", validate)
+        monkeypatch.setattr(onboarding_routes, "connect_mcp_server", connect)
+        monkeypatch.setattr(onboarding_routes, "set_default_model", set_default)
+
+        response = await client.post("/api/onboarding/draft", json={
+            "model": {
+                "region": "cn", "use_threatbook_model": True,
+                "threatbook_api_key": "invalid-model-key", "threatbook_model_only": True,
+            },
+            "intel": {
+                "region": "cn", "use_threatbook_model": False,
+                "threatbook_api_key": "invalid-intel-key", "threatbook_services_only": True,
+            },
+        })
+        assert response.status_code == 200, response.text
+        assert response.json()["model_has_key"] is True
+        assert response.json()["intel_has_key"] is True
+        assert draft_secrets.get("threatbook-cn-llm_llm_key") == "invalid-model-key"
+        assert draft_secrets.get("threatbook_cn_api_key") == "invalid-intel-key"
+        assert onboarding_routes.ConfigWriter.get_default_model("llm") is None
+        assert onboarding_routes.ConfigWriter.get_mcp_server("threatbook_mcp") is None
+        assert onboarding_routes.ConfigWriter.get_api_service_raw("threatbook-cn").get("enabled") is not True
+        saved = await onboarding_routes.Storage.read(["onboarding", "draft", API_TOKEN_SERVICE_USER_ID])
+        assert "invalid-model-key" not in json.dumps(saved)
+        assert "invalid-intel-key" not in json.dumps(saved)
+        reopened = await client.get("/api/onboarding/draft")
+        assert reopened.json() == response.json()
+        assert "invalid-model-key" not in reopened.text
+        assert "invalid-intel-key" not in reopened.text
+        validate.assert_not_awaited()
+        connect.assert_not_awaited()
+        set_default.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_draft_can_dismiss_and_reenable_onboarding(self, client):
+        response = await client.post("/api/onboarding/draft", json={"dismissed": True})
+        assert response.status_code == 200, response.text
+        assert response.json() == {
+            "model": None, "intel": None, "model_has_key": False,
+            "intel_has_key": False, "dismissed": True,
+        }
+        assert (await client.get("/api/onboarding/status")).json()["dismissed"] is True
+        response = await client.post("/api/onboarding/draft", json={"dismissed": False})
+        assert response.json()["dismissed"] is False
+
+    @pytest.mark.asyncio
+    async def test_preferences_are_scoped_to_current_user(self, monkeypatch: pytest.MonkeyPatch):
+        alice = AuthUser(id="alice", username="alice", role="admin")
+        bob = AuthUser(id="bob", username="bob", role="admin")
+        monkeypatch.setattr(onboarding_routes.Config, "resolve_default_llm", AsyncMock(return_value=None))
+        await onboarding_routes.save_onboarding_draft(
+            onboarding_routes.OnboardingDraftRequest(dismissed=True), _admin=alice,
+        )
+        assert (await onboarding_routes.get_onboarding_draft(_admin=alice)).dismissed is True
+        assert (await onboarding_routes.get_onboarding_draft(_admin=bob)).dismissed is False
+        assert (await onboarding_routes.get_onboarding_status(_user=alice)).dismissed is True
+        assert (await onboarding_routes.get_onboarding_status(_user=bob)).dismissed is False
+
+    @pytest.mark.asyncio
+    async def test_partial_updates_and_blank_keys_preserve_saved_configuration(self, client, draft_secrets):
+        model = {
+            "region": "cn", "use_threatbook_model": False,
+            "third_party_llm": {
+                "provider_id": "openai-compatible", "api_key": "saved-key", "model_id": "custom-model",
+                "base_url": "https://models.example.test/v1", "provider_name": "My provider",
+            },
+        }
+        response = await client.post("/api/onboarding/draft", json={"model": model, "dismissed": True})
+        assert response.status_code == 200, response.text
+        model["third_party_llm"] = {
+            "provider_id": "openai-compatible", "api_key": "", "model_id": "custom-model",
+        }
+        response = await client.post("/api/onboarding/draft", json={"model": model, "intel": None})
+        assert response.status_code == 200, response.text
+        assert response.json()["model"]["third_party_llm"]["base_url"] == "https://models.example.test/v1"
+        assert response.json()["model"]["third_party_llm"]["provider_name"] == "My provider"
+        assert response.json()["model_has_key"] is True
+        assert response.json()["dismissed"] is True
+        assert draft_secrets.get("openai-compatible_llm_key") == "saved-key"
+        response = await client.post("/api/onboarding/draft", json={"model": None, "dismissed": False})
+        assert response.json()["model"]["third_party_llm"]["model_id"] == "custom-model"
+
+    @pytest.mark.asyncio
+    async def test_unknown_provider_is_rejected_before_saving_credentials(self, client, draft_secrets):
+        response = await client.post("/api/onboarding/draft", json={"model": {
+            "region": "cn", "use_threatbook_model": False,
+            "third_party_llm": {"provider_id": "invented-provider", "api_key": "bad-key", "model_id": "model"},
+        }})
+        assert response.status_code == 400, response.text
+        assert draft_secrets.values == {}
+        assert onboarding_routes.ConfigWriter.get_provider_raw("invented-provider") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider_id", ["azure-openai", "azure", "openai-compatible"])
+    async def test_manual_model_or_azure_deployment_is_saved_without_setting_default(
+        self, client, draft_secrets, provider_id
+    ):
+        response = await client.post("/api/onboarding/draft", json={"model": {
+            "region": "global", "use_threatbook_model": False,
+            "third_party_llm": {
+                "provider_id": provider_id, "api_key": "candidate-key",
+                "model_id": "my-production-deployment", "base_url": "https://resource.openai.azure.com/",
+            },
+        }})
+        assert response.status_code == 200, response.text
+        raw = onboarding_routes.ConfigWriter.get_provider_raw(provider_id)
+        assert "my-production-deployment" in raw["models"]
+        assert raw["options"]["baseURL"] == "https://resource.openai.azure.com/"
+        if provider_id in {"azure", "azure-openai"}:
+            assert raw["npm"] == "@ai-sdk/azure"
+        assert onboarding_routes.ConfigWriter.get_default_model("llm") is None
+
+    @pytest.mark.asyncio
+    async def test_key_can_be_saved_before_manual_model_is_entered(self, client, draft_secrets):
+        response = await client.post("/api/onboarding/draft", json={"model": {
+            "region": "global", "use_threatbook_model": False,
+            "third_party_llm": {"provider_id": "azure-openai", "api_key": "early-key", "model_id": ""},
+        }})
+        assert response.status_code == 200, response.text
+        assert response.json()["model_has_key"] is True
+        assert draft_secrets.get("azure-openai_llm_key") == "early-key"
+        assert onboarding_routes.ConfigWriter.get_default_model("llm") is None
+
+    @pytest.mark.asyncio
+    async def test_apply_validates_azure_deployment_then_registers_it_as_default(
+        self, client, monkeypatch: pytest.MonkeyPatch, draft_secrets
+    ):
+        probe = AsyncMock(return_value={"success": True, "message": "ok"})
+        monkeypatch.setattr(onboarding_routes, "_test_provider_or_service_with_temp_credentials", probe)
+        response = await client.post("/api/onboarding/apply", json={
+            "region": "global", "use_threatbook_model": False,
+            "third_party_llm": {
+                "provider_id": "azure-openai", "api_key": "valid-key",
+                "model_id": "my-deployment", "base_url": "https://resource.openai.azure.com/",
+            },
+        })
+        assert response.status_code == 200, response.text
+        probe.assert_awaited_once_with(
+            "azure-openai", "valid-key", model_id="my-deployment",
+            base_url="https://resource.openai.azure.com/", provider_name=None,
+        )
+        assert "my-deployment" in onboarding_routes.ConfigWriter.get_provider_raw("azure-openai")["models"]
+        assert onboarding_routes.ConfigWriter.get_default_model("llm") == {
+            "provider_id": "azure-openai", "model_id": "my-deployment",
+        }
+
+    @pytest.mark.asyncio
+    async def test_successful_apply_clears_only_corresponding_draft_section(
+        self, client, monkeypatch: pytest.MonkeyPatch, draft_secrets
+    ):
+        model = {
+            "region": "cn", "use_threatbook_model": True,
+            "threatbook_api_key": "model-key", "threatbook_model_only": True,
+        }
+        intel = {
+            "region": "cn", "use_threatbook_model": False,
+            "threatbook_api_key": "intel-key", "threatbook_services_only": True,
+        }
+        await client.post("/api/onboarding/draft", json={"model": model, "intel": intel, "dismissed": True})
+        monkeypatch.setattr(onboarding_routes, "_apply_onboarding", AsyncMock(return_value=onboarding_routes.OnboardingApplyResponse(
+            success=True, message="ok", region="cn", threatbook_enabled=True, configured=["threatbook_llm"], skipped=[],
+        )))
+        response = await client.post("/api/onboarding/apply", json=model)
+        assert response.status_code == 200, response.text
+        draft = (await client.get("/api/onboarding/draft")).json()
+        assert draft["model"] is None
+        assert draft["intel"] is not None
+        assert draft["dismissed"] is True
 
 
 @pytest.mark.asyncio
