@@ -56,13 +56,16 @@ export function isOpenSceneWorkspace(workspace: WebUIContractWorkspaceListItem):
   return workspace.placement === 'sceneWorkspace' && workspace.enabled && !workspace.locked;
 }
 
-/** Code audit belongs to the permanent SOC module, independently of the alert suite. */
+/**
+ * Code audit joins the SOC module while the SOC workspace (alert operations suite) is
+ * open; without it, code audit is a scene module of its own.
+ */
 export function sceneNavigationOwner(
   workspaceId: string,
   workspaces?: readonly WebUIContractWorkspaceListItem[] | null,
 ): string {
-  if (workspaceId === CODE_AUDIT_WORKSPACE_ID
-    && workspaces?.some((workspace) => workspace.id === CODE_AUDIT_WORKSPACE_ID && isOpenSceneWorkspace(workspace))) {
+  const isOpen = (id: string) => workspaces?.some((workspace) => workspace.id === id && isOpenSceneWorkspace(workspace));
+  if (workspaceId === CODE_AUDIT_WORKSPACE_ID && isOpen(CODE_AUDIT_WORKSPACE_ID) && isOpen(SOC_WORKSPACE_ID)) {
     return SOC_WORKSPACE_ID;
   }
   return workspaceId;
