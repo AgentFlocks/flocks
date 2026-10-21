@@ -9,6 +9,9 @@ Verifies file writing behavior:
 """
 
 import os
+import ntpath
+import shlex
+import sys
 import pytest
 from pathlib import Path
 from types import SimpleNamespace
@@ -219,26 +222,84 @@ async def test_filename_only_redirects_to_default_outputs(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_source_root_absolute_basename_redirects_to_default_outputs(tmp_path, monkeypatch):
-    """Absolute source-root basename should be treated as filename-only intent."""
-    monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(tmp_path / "workspace"))
-    WorkspaceManager._instance = None
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("path_kind", ["absolute", "dot-relative", "nested", "parent-relative", "tilde"])
+async def test_explicit_paths_visible_to_read_and_bash(tmp_path, monkeypatch, path_kind, existing):
+    """Explicit destinations must agree across tools, including new root files."""
+    project_dir = tmp_path / "project with spaces"
+    project_dir.mkdir()
+    monkeypatch.setenv("HOME", str(project_dir))
+    target = project_dir / "pyproject.toml"
+    paths = {
+        "absolute": str(target),
+        "dot-relative": "./pyproject.toml",
+        "nested": "nested/../pyproject.toml",
+        "parent-relative": "../project with spaces/pyproject.toml",
+        "tilde": "~/pyproject.toml",
+    }
+    if existing:
+        target.write_text("old content", encoding="utf-8")
+    ctx = _make_ctx(extra={"workspace_dir": str(project_dir)})
+    if existing:
+        assert (await ToolRegistry.execute("read", ctx, filePath=paths[path_kind])).success
+    result = await ToolRegistry.execute(
+        "write", ctx, filePath=paths[path_kind], content="cross-tool content",
+    )
+    read_result = await ToolRegistry.execute("read", ctx, filePath=paths[path_kind])
+    bash_result = await ToolRegistry.execute("bash", ctx, command="cat ./pyproject.toml")
 
+    assert result.success, result.error
+    assert read_result.success, read_result.error
+    assert bash_result.success, bash_result.error
+    assert "cross-tool content" in read_result.output
+    assert "cross-tool content" in bash_result.output
+    assert target.read_text() == "cross-tool content"
+    assert result.metadata["filepath"] == str(target.resolve())
+    assert str(target.resolve()) in result.output
+    assert not (tmp_path / "workspace" / "outputs").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("file_path", ["report.txt", "  report.txt  "])
+async def test_filename_only_returns_usable_output_path(tmp_path, file_path):
     project_dir = tmp_path / "project"
-    project_dir.mkdir(parents=True, exist_ok=True)
-    source_root_target = project_dir / "report.txt"
-
-    ctx = _make_ctx()
-    with patch("flocks.tool.path_utils.Instance.get_directory", return_value=str(project_dir)):
-        result = await ToolRegistry.execute(
-            "write", ctx, filePath=str(source_root_target), content="report"
-        )
-
-    assert result.success, f"write failed: {result.error}"
+    project_dir.mkdir()
+    ctx = _make_ctx(extra={"workspace_dir": str(project_dir)})
+    result = await ToolRegistry.execute("write", ctx, filePath=file_path, content="output content")
+    assert result.success, result.error
+    target = result.output.split("\nPath: ", 1)[1]
+    assert target == result.metadata["filepath"]
     expected = tmp_path / "workspace" / "outputs" / dt.date.today().isoformat() / "report.txt"
-    assert expected.exists()
-    assert expected.read_text() == "report"
-    assert not source_root_target.exists()
+    assert Path(target) == expected.resolve()
+    read_result = await ToolRegistry.execute("read", ctx, filePath=target)
+    quoted = "'" + target.replace("'", "''") + "'" if sys.platform == "win32" else shlex.quote(target)
+    bash_result = await ToolRegistry.execute("bash", ctx, command=f"cat {quoted}")
+    assert read_result.success, read_result.error
+    assert bash_result.success, bash_result.error
+    assert "output content" in read_result.output
+    assert "output content" in bash_result.output
+
+
+@pytest.mark.parametrize("path", ["C:report.txt", "C:/report.txt", r"C:\report.txt"])
+def test_windows_drive_paths_are_not_bare_filenames(path):
+    from flocks.tool.file.write import _is_filename_only
+
+    # Exercise Windows drive syntax even when the test host is Unix.
+    with patch("flocks.tool.file.write.os.path.splitdrive", ntpath.splitdrive):
+        assert not _is_filename_only(path)
+
+
+@pytest.mark.asyncio
+async def test_existing_bare_filename_keeps_project_path(tmp_path):
+    target = tmp_path / "existing.txt"
+    target.write_text("old", encoding="utf-8")
+    ctx = _make_ctx(extra={"workspace_dir": str(tmp_path)})
+    assert (await ToolRegistry.execute("read", ctx, filePath="existing.txt")).success
+    result = await ToolRegistry.execute("write", ctx, filePath="existing.txt", content="updated")
+    assert result.success, result.error
+    assert target.read_text() == "updated"
+    assert result.metadata["filepath"] == str(target.resolve())
+    assert not (tmp_path / "workspace" / "outputs").exists()
 
 
 @pytest.mark.asyncio

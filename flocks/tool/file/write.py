@@ -110,24 +110,10 @@ def trim_diff(diff: str) -> str:
     
     return "\n".join(trimmed_lines)
 
-def _looks_like_filename_only_intent(raw_path: str, resolved_path: str, base_dir: str) -> bool:
-    """
-    Best-effort detect "user gave only a filename (no directory)" intent.
-
-    Cases considered filename-only:
-    - Relative path without any directory separator (e.g. ``hello.txt``)
-    - Absolute path that points to the source root + basename
-      (common when model auto-expands a bare filename to cwd/source dir)
-    """
-    normalized = (raw_path or "").replace("\\", "/")
-    if not raw_path:
-        return False
-    if not os.path.isabs(raw_path):
-        return "/" not in normalized
-    try:
-        return os.path.realpath(os.path.dirname(resolved_path)) == os.path.realpath(base_dir)
-    except Exception:
-        return False
+def _is_filename_only(raw_path: str) -> bool:
+    """Only a bare filename opts into default outputs; never infer intent from cwd."""
+    normalized = (raw_path or "").strip().replace("\\", "/")
+    return bool(normalized) and not os.path.splitdrive(normalized)[0] and "/" not in normalized
 
 
 async def _resolve_owner_username(ctx: ToolContext) -> Optional[str]:
@@ -199,21 +185,20 @@ async def _maybe_redirect_to_default_outputs(
     *,
     original_path: str,
     resolved_path: str,
-    base_dir: str,
 ) -> str:
     """
     For filename-only writes, force stable default output location.
 
-    This prevents nondeterministic writes to source root when user did not
-    specify a directory and model expanded filename against cwd.
+    Explicit paths (including absolute source-root paths and ``./name``)
+    retain the destination selected by shared path resolution.
     """
-    if not _looks_like_filename_only_intent(original_path, resolved_path, base_dir):
+    if not _is_filename_only(original_path):
         return resolved_path
     if os.path.exists(resolved_path):
         # Existing file writes should remain explicit and deterministic.
         return resolved_path
 
-    filename = os.path.basename(original_path) or os.path.basename(resolved_path)
+    filename = os.path.basename(original_path.strip()) or os.path.basename(resolved_path)
     if not filename:
         return resolved_path
 
@@ -288,12 +273,17 @@ def _existing_memory_write_error(filepath: str) -> Optional[str]:
                 "The path to the file to write. It may be absolute, use `~`, or be relative to the current project directory.\n"
                 "\n"
                 "IMPORTANT:\n"
-                "- For Project source files (source code, tests, and configs), use the explicit Project path.\n"
+                "- Explicit paths keep their destination, including absolute paths, `~/name`, and `./name`.\n"
+                "- For Project source files (source code, tests, and configs), use the explicit Project path"
+                " (e.g. `./pyproject.toml` for a project-root file).\n"
                 "- For Agent-generated outputs requested by the user (reports, tables, examples, analysis, and drafts),"
                 " use a filename-only path unless the user specified a destination. The tool routes filename-only"
-                " writes to the current Session's dated Workspace outputs directory.\n"
+                " writes for new files on the host to the current Session's dated Workspace outputs directory."
+                " Existing project files stay in place; sandbox writes stay inside the sandbox.\n"
+                "- The result includes the actual path; use it for subsequent read or bash calls.\n"
                 "\n"
-                "NEVER write Agent-generated outputs into the Project source directory."
+                "Do not write Agent-generated outputs into the Project source directory unless the user"
+                " explicitly selected that destination."
             ),
             required=True
         ),
@@ -335,7 +325,6 @@ async def write_tool(
                 ctx,
                 original_path=filePath,
                 resolved_path=resolution.resolved_path,
-                base_dir=resolution.base_dir,
             )
             if redirected_path != resolution.resolved_path:
                 resolution = await resolve_tool_path(
@@ -459,7 +448,7 @@ async def write_tool(
         )
     
     # Build output
-    output = "Wrote file successfully."
+    output = f"Wrote file successfully.\nPath: {filepath}"
     output_attachment = await _build_output_attachment(ctx, filepath)
 
     # Note: LSP diagnostics integration would go here
