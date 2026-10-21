@@ -98,6 +98,15 @@ function folderLabel(folder: FolderInfo): string {
   return folder.name?.trim() || pathBasename(folder.worktree);
 }
 
+/** Marks a folder or session that the other local accounts can read. */
+function SharedMark({ label }: { label: string }) {
+  return (
+    <span role="img" aria-label={label} title={label} className="inline-flex shrink-0">
+      <Share2 aria-hidden="true" className="h-3 w-3 text-sky-600 dark:text-sky-400" />
+    </span>
+  );
+}
+
 /** A title that scrolls into view on hover when it does not fit. */
 function ScrollingTitle({ text }: { text: string }) {
   const viewportRef = useRef<HTMLSpanElement>(null);
@@ -698,7 +707,8 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
     );
   }
 
-  const renderSessionRow = (session: Session, inFolder: boolean) => {
+  // A session in a shared folder is shared through it; the folder already carries the mark.
+  const renderSessionRow = (session: Session, inFolder: boolean, folderShared = false) => {
     const selected = selectedSessionId === session.id;
     const running = runningIds.has(session.id);
     if (renaming?.id === session.id) {
@@ -734,6 +744,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
           className={`flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus ${selected ? 'font-medium text-ui-text' : 'font-normal text-ui-text group-hover:text-ui-text'}`}>
           {running && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-red-500" />}
           <ScrollingTitle text={getSessionDisplayTitle(session)} />
+          {session.isShared && !folderShared && <SharedMark label={t('history.sharedMark')} />}
         </button>
         <button type="button" aria-label={t('history.sessionActions', { title: getSessionDisplayTitle(session) })}
           onClick={(event) => openMenu('session', session.id, event.currentTarget)}
@@ -832,11 +843,12 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
               return (
                 <div key={folder.id}>
                   <div className="group/folder flex items-center gap-0.5 rounded-lg px-1 transition-colors hover:bg-ui-hover">
-                    <button type="button" onClick={() => toggleFolder(folder.id)} aria-expanded={!isCollapsed}
+                    <button type="button" onClick={() => toggleFolder(folder.id)} aria-expanded={!isCollapsed} title={folderLabel(folder)}
                       className="flex h-8 min-w-0 flex-1 items-center gap-1.5 rounded-lg text-left text-[13px] font-normal text-ui-text hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus">
                       {isCollapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ui-secondary" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-ui-secondary" />}
                       <Folder className="h-3.5 w-3.5 shrink-0 text-ui-secondary" />
                       <span className={`min-w-0 truncate ${pinned ? 'font-medium' : ''}`}>{folderLabel(folder)}</span>
+                      {folder.isShared && <SharedMark label={t('history.sharedMark')} />}
                       {pinned && <Pin className="h-3 w-3 shrink-0 text-ui-secondary" />}
                     </button>
                     <button type="button" aria-label={t('history.folderActions', { folder: folderLabel(folder) })} title={t('history.folderActions', { folder: folderLabel(folder) })} onClick={(event) => openMenu('folder', folder.id, event.currentTarget)} className={folderActionButtonClass}>
@@ -848,7 +860,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
                   </div>
                   {!isCollapsed && (
                     <div className="space-y-0.5 py-0.5">
-                      {visibleRows(folder.id, folderSessions, compactCount).map((session) => renderSessionRow(session, true))}
+                      {visibleRows(folder.id, folderSessions, compactCount).map((session) => renderSessionRow(session, true, Boolean(folder.isShared)))}
                       {folderSessions.length === 0 && <p className="ml-7 px-2 py-1 text-xs text-ui-muted">{t('history.emptyFolder')}</p>}
                       {renderListFooter(folder.id, folderSessions, compactCount, Boolean(remoteMore), true)}
                     </div>

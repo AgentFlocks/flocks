@@ -179,6 +179,7 @@
     "moveFailed": "Move failed",
     "shared": "Shared",
     "unshared": "Stopped sharing",
+    "sharedMark": "Shared with local accounts",
     "shareFailed": "Action failed",
     "downloadFailed": "Download failed",
     "createSessionFailed": "Failed to create session",
