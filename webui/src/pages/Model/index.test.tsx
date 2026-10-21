@@ -29,6 +29,8 @@ const mocks = vi.hoisted(() => ({
   revealCredentials: vi.fn(),
   setCredentials: vi.fn(),
   testCredentials: vi.fn(),
+  discoverModels: vi.fn(),
+  importModels: vi.fn(),
   deleteDefault: vi.fn(),
   deleteDefinition: vi.fn(),
   sseOptions: null as null | { onReconnect?: () => void },
@@ -81,6 +83,12 @@ vi.mock('@/contexts/AuthContext', () => ({
 
 beforeEach(() => {
   mocks.authUser = { role: 'admin' };
+  mocks.discoverModels.mockResolvedValue({ data: {
+    source: 'api', status: 'success', code: 'models_discovered', message: 'Ready',
+    fetched_at: '2026-10-21T08:00:00Z', truncated: false,
+    models: [{ id: 'remote/chat-model', name: 'Remote Chat', already_added: false, selectable: true }],
+  } });
+  mocks.importModels.mockResolvedValue({ data: { added: ['remote/chat-model'], skipped: [], failed: [] } });
 });
 
 vi.mock('@/hooks/useSSE', () => ({
@@ -139,6 +147,8 @@ vi.mock('@/api/provider', () => ({
     revealCredentials: mocks.revealCredentials,
     setCredentials: mocks.setCredentials,
     testCredentials: mocks.testCredentials,
+    discoverModels: mocks.discoverModels,
+    importModels: mocks.importModels,
   },
   modelV2API: {
     listDefinitions: mocks.listDefinitions,
@@ -346,6 +356,33 @@ describe('ModelPage add provider dialog', () => {
       });
     });
   });
+
+  it('discovers with draft credentials and adds selected models only after creating the provider', async () => {
+    const user = userEvent.setup();
+    mocks.createProvider.mockResolvedValue({ data: { id: 'custom-my-api' } });
+    // The generic type may already own this ID; a new instance is independent.
+    mocks.discoverModels.mockResolvedValue({ data: {
+      source: 'api', status: 'success', code: 'models_discovered', message: 'Ready',
+      fetched_at: '2026-10-21T08:00:00Z', truncated: false,
+      models: [{ id: 'remote/chat-model', name: 'Remote Chat', already_added: true, selectable: true }],
+    } });
+    renderWithRouter(<ModelPage />);
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await user.click(await screen.findByRole('button', { name: 'Select Provider...' }));
+    await user.click(await screen.findByRole('button', { name: /OpenAI Compatible/i }));
+    await user.type(screen.getByPlaceholderText('e.g. SiliconFlow, LM Studio, My API'), 'My API');
+    await user.click(screen.getByRole('button', { name: 'discovery.title' }));
+    await user.click(await screen.findByRole('checkbox', { name: 'remote/chat-model' }));
+    expect(mocks.createProvider).not.toHaveBeenCalled();
+    expect(mocks.setCredentials).not.toHaveBeenCalled();
+    expect(mocks.importModels).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(mocks.importModels).toHaveBeenCalledWith('custom-my-api', [expect.objectContaining({ id: 'remote/chat-model' })]));
+    expect(mocks.createProvider).toHaveBeenCalledWith(expect.objectContaining({ skip_catalog_bootstrap: true }));
+    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
+    expect(mocks.deleteDefault).not.toHaveBeenCalled();
+    expect(await screen.findByText('discovery.importSummary')).toBeInTheDocument();
+  });
 });
 
 describe('ModelPage configure provider dialog', () => {
@@ -432,6 +469,105 @@ describe('ModelPage configure provider dialog', () => {
     expect(await screen.findByTestId('entity-sheet')).toBeInTheDocument();
     expect(mocks.revealCredentials).toHaveBeenCalledWith('openai');
   }
+
+  it('imports from the details panel and immediately refreshes the model list', async () => {
+    const user = userEvent.setup();
+    renderWithRouter(<ModelPage />);
+    await user.click(await screen.findByRole('button', { name: 'discovery.title' }));
+    await user.click(await screen.findByRole('checkbox', { name: 'remote/chat-model' }));
+    const definitionCalls = mocks.listDefinitions.mock.calls.length;
+    await user.click(screen.getByRole('button', { name: 'discovery.import' }));
+    await waitFor(() => expect(mocks.refetch).toHaveBeenCalled());
+    expect(mocks.listDefinitions.mock.calls.length).toBeGreaterThan(definitionCalls);
+    expect(mocks.setCredentials).not.toHaveBeenCalled();
+    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
+    expect(mocks.deleteDefault).not.toHaveBeenCalled();
+  });
+
+  it('keeps import results and added states visible across background loading, errors and SSE refreshes', async () => {
+    const user = userEvent.setup();
+    const loadedProviders = {
+      providers: [provider], connectedIds: ['openai'], loading: false, error: null, refetch: mocks.refetch,
+    };
+    mocks.useProviders.mockReturnValue(loadedProviders);
+    const { rerender } = renderWithRouter(<ModelPage />);
+    await user.click(await screen.findByRole('button', { name: 'discovery.title' }));
+    await user.click(await screen.findByRole('checkbox', { name: 'remote/chat-model' }));
+    await user.click(screen.getByRole('button', { name: 'discovery.import' }));
+    expect(await screen.findByText('discovery.importSummary')).toBeInTheDocument();
+
+    mocks.useProviders.mockReturnValue({ ...loadedProviders, loading: true });
+    rerender(<ModelPage />);
+    expect(screen.getByText('discovery.importSummary')).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'remote/chat-model' })).toBeDisabled();
+
+    mocks.useProviders.mockReturnValue({ ...loadedProviders, error: 'Temporary network failure' });
+    rerender(<ModelPage />);
+    expect(screen.getByRole('alert')).toHaveTextContent('providerList.refreshFailed');
+    expect(screen.getByText('discovery.importSummary')).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'remote/chat-model' })).toBeDisabled();
+
+    mocks.useProviders.mockReturnValue(loadedProviders);
+    rerender(<ModelPage />);
+    mocks.sseOptions?.onReconnect?.();
+    await waitFor(() => expect(mocks.refetch.mock.calls.length).toBeGreaterThan(1));
+    expect(screen.getByText('discovery.importSummary')).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'remote/chat-model' })).toBeDisabled();
+  });
+
+  it('preserves an unavailable default when an administrator views and fetches models', async () => {
+    const user = userEvent.setup();
+    mocks.getResolved.mockResolvedValue({ data: { provider_id: 'old-provider', model_id: 'keep-my-default' } });
+    renderWithRouter(<ModelPage />);
+    expect(await screen.findByText('keep-my-default')).toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: 'discovery.title' }));
+    await screen.findByRole('checkbox', { name: 'remote/chat-model' });
+    expect(mocks.deleteDefault).not.toHaveBeenCalled();
+    expect(screen.getByText('keep-my-default')).toBeInTheDocument();
+  });
+
+  it('uses unsaved configuration to discover, then saves and imports without deleting existing models', async () => {
+    const user = userEvent.setup();
+    await openConfigureDialog(user);
+    const sheet = within(screen.getByTestId('entity-sheet'));
+    const baseUrl = sheet.getByPlaceholderText('https://api.example.com/v1');
+    await user.clear(baseUrl);
+    await user.type(baseUrl, 'https://draft.example.com/v1');
+    await user.click(sheet.getByRole('button', { name: 'discovery.title' }));
+    await user.click(await sheet.findByRole('checkbox', { name: 'remote/chat-model' }));
+    expect(mocks.discoverModels).toHaveBeenCalledWith('openai', { api_key: 'sk-existing-secret-1234', base_url: 'https://draft.example.com/v1' });
+    expect(mocks.setCredentials).not.toHaveBeenCalled();
+    expect(mocks.importModels).not.toHaveBeenCalled();
+    await user.click(sheet.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(mocks.importModels).toHaveBeenCalledWith('openai', [expect.objectContaining({ id: 'remote/chat-model' })]));
+    expect(mocks.setCredentials).toHaveBeenCalledWith('openai', expect.objectContaining({ base_url: 'https://draft.example.com/v1', skip_catalog_bootstrap: true }));
+    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
+  });
+
+  it('drops a staged selection when the configuration URL changes', async () => {
+    const user = userEvent.setup();
+    await openConfigureDialog(user);
+    const sheet = within(screen.getByTestId('entity-sheet'));
+    await user.click(sheet.getByRole('button', { name: 'discovery.title' }));
+    await user.click(await sheet.findByRole('checkbox', { name: 'remote/chat-model' }));
+    await user.type(sheet.getByPlaceholderText('https://api.example.com/v1'), '/changed');
+    expect(sheet.queryByRole('checkbox', { name: 'remote/chat-model' })).not.toBeInTheDocument();
+    await user.click(sheet.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
+    expect(mocks.importModels).not.toHaveBeenCalled();
+    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
+  });
+
+  it('omits an empty discovery URL so the saved or default address is used', async () => {
+    const user = userEvent.setup();
+    await openConfigureDialog(user);
+    const sheet = within(screen.getByTestId('entity-sheet'));
+    await user.clear(sheet.getByPlaceholderText('https://api.example.com/v1'));
+    await user.click(sheet.getByRole('button', { name: 'discovery.title' }));
+    await sheet.findByRole('checkbox', { name: 'remote/chat-model' });
+    expect(mocks.discoverModels).toHaveBeenCalledWith('openai', { api_key: 'sk-existing-secret-1234', base_url: undefined });
+    expect(mocks.setCredentials).not.toHaveBeenCalled();
+  });
 
   it('does not test provider credentials when the page loads', async () => {
     renderWithRouter(<ModelPage />);
@@ -615,6 +751,7 @@ describe('ModelPage member access', () => {
     expect(screen.queryByTitle('Configure')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Add Provider' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'addModel' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'discovery.title' })).not.toBeInTheDocument();
     expect(screen.queryByTitle('status.disabled')).not.toBeInTheDocument();
     expect(screen.queryByTitle('Delete')).not.toBeInTheDocument();
     expect(screen.queryByTitle('dashboard.setDefaultModel')).not.toBeInTheDocument();

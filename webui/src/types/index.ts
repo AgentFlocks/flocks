@@ -460,6 +460,38 @@ export interface ProviderCredentialInput {
   username?: string;
   fields?: Record<string, string | undefined>;
   provider_name?: string;
+  skip_catalog_bootstrap?: boolean;
+}
+
+export interface DiscoveredModel {
+  id: string;
+  name: string;
+  already_added: boolean;
+  selectable: boolean;
+  unavailable_reason?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  supports_vision?: boolean;
+  supports_tools?: boolean;
+  supports_reasoning?: boolean;
+}
+
+export interface ModelDiscoveryResult {
+  source: 'api' | 'catalog' | 'none';
+  status: 'success' | 'fallback' | 'error';
+  code: string;
+  message: string;
+  fetched_at: string;
+  truncated: boolean;
+  models: DiscoveredModel[];
+}
+
+export type ModelImportInput = Pick<DiscoveredModel, 'id' | 'name' | 'context_window' | 'max_output_tokens' | 'supports_vision' | 'supports_tools' | 'supports_reasoning'>;
+
+export interface ModelImportResult {
+  added: string[];
+  skipped: string[];
+  failed: { id: string; error: string }[];
 }
 
 // ==================== Model Management V2 Types ====================
@@ -616,6 +648,7 @@ export interface CustomProviderCreate {
   base_url: string;
   api_key?: string;
   description?: string;
+  skip_catalog_bootstrap?: boolean;
 }
 
 export interface CustomProviderInfo {

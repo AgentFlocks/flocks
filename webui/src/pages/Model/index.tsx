@@ -25,6 +25,7 @@ import {
   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
 } from '@/api/provider';
 import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
+import ModelDiscovery, { ModelImportSummary, toModelImport } from './ModelDiscovery';
 import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
 import { extractErrorMessage } from '@/utils/error';
 import {
@@ -41,6 +42,7 @@ import type {
   ProviderCredentials, ModelDefinitionV2, UsageStats,
   CatalogProvider, CatalogModel, CatalogCredentialField, ModelSettingV2,
   CustomModelCreate, ProviderCredentialInput, FallbackModelRef,
+  DiscoveredModel, ModelImportResult,
 } from '@/types';
 
 // ==================== Provider Auth Helpers ====================
@@ -235,17 +237,16 @@ export default function ModelPage() {
         m => m.provider_id === dm.provider_id && m.id === dm.model_id
       );
 
-      if (isValid) {
-        setDefaultModel(dm);
-      } else {
+      // Viewing this page must never mutate routing configuration. Keep an
+      // unavailable default visible so an administrator can change it explicitly.
+      setDefaultModel(dm);
+      if (!isValid) {
         const modelLabel = `${dm.provider_id} / ${dm.model_id}`;
         if (isAdminRef.current) {
           toast.warning(t('dashboard.defaultModelInvalid', { model: modelLabel }));
-          defaultModelAPI.delete('llm').catch(() => {});
         } else {
           toast.warning(t('dashboard.defaultModelInvalidMember', { model: modelLabel }));
         }
-        setDefaultModel(null);
       }
     }).catch(() => {
       // Keep the current default model when model definitions cannot be loaded.
@@ -486,7 +487,7 @@ export default function ModelPage() {
 
   // ==================== Render ====================
 
-  if (loading) {
+  if (loading && providers.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
         <LoadingSpinner delayMs={180} />
@@ -494,13 +495,13 @@ export default function ModelPage() {
     );
   }
 
-  if (error) {
+  if (error && providers.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
           <p className="text-red-600 mb-4">{error}</p>
           <button onClick={refetch} className="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-900">
-            Retry
+            {t('providerList.retry')}
           </button>
         </div>
       </div>
@@ -508,7 +509,7 @@ export default function ModelPage() {
   }
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col" aria-busy={loading}>
       {/* Header */}
       <PageHeader
         title={t('pageTitle')}
@@ -538,6 +539,13 @@ export default function ModelPage() {
         }
       />
 
+      {error && (
+        <div role="alert" className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <span>{t('providerList.refreshFailed', { error })}</span>
+          <button type="button" onClick={refetch} disabled={loading} className="shrink-0 rounded border border-amber-300 px-2 py-1 text-xs hover:bg-amber-100 disabled:opacity-50">{t('providerList.retry')}</button>
+        </div>
+      )}
+
       {/* Dashboard Strip */}
       <DashboardStrip
         connectedCount={connectedCount}
@@ -551,9 +559,9 @@ export default function ModelPage() {
       />
 
       {/* Main Content: Provider List + Detail Panel */}
-      <div className="flex gap-3 flex-1 overflow-hidden min-h-0">
+      <div className="flex flex-col md:flex-row gap-3 flex-1 overflow-hidden min-h-0">
         {/* Provider List */}
-        <div className="w-64 flex-shrink-0 flex flex-col min-w-0">
+        <div className="w-full md:w-64 max-h-40 md:max-h-none flex-shrink-0 flex flex-col min-w-0">
           <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
             {configuredProviders.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center">
@@ -603,7 +611,7 @@ export default function ModelPage() {
         </div>
 
         {/* Detail Panel */}
-        <div className="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+        <div className="flex-1 min-h-0 min-w-0 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
           {selectedProvider ? (
             <ProviderDetail
               key={selectedProvider.id}
@@ -616,6 +624,10 @@ export default function ModelPage() {
               onToggleModel={isAdmin ? handleToggleModel : undefined}
               onDeleteModel={isAdmin ? handleDeleteModel : undefined}
               onOpenModelDetail={(model) => setSelectedModelForDetail({ provider: selectedProvider, model })}
+              onModelsImported={() => {
+                void handleSelectProvider(selectedProvider);
+                refetch();
+              }}
               onConnectionStatusChange={(status) => {
                 setConnectionStatus(prev => ({ ...prev, [selectedProvider.id]: status }));
                 saveConnectionCache(selectedProvider.id, status);
@@ -955,6 +967,7 @@ function ProviderDetail({
   provider, models, loadingModels,
   modelEnabledMap, connStatus, canEdit, onToggleModel, onDeleteModel,
   onOpenModelDetail, onConnectionStatusChange,
+  onModelsImported,
 }: {
   provider: EnrichedProvider;
   models: ModelDefinitionV2[];
@@ -967,6 +980,7 @@ function ProviderDetail({
   onDeleteModel?: (modelId: string) => void;
   onOpenModelDetail?: (model: ModelDefinitionV2) => void;
   onConnectionStatusChange?: (status: 'connected' | 'failed') => void;
+  onModelsImported?: () => void;
 }) {
   const toast = useToast();
   const { t } = useTranslation('model');
@@ -1071,6 +1085,12 @@ function ProviderDetail({
             </button>
           </div>
         </div>
+
+        {canEdit && (
+          <div className="mb-3">
+            <ModelDiscovery providerId={provider.id} mode="import" onImported={onModelsImported} />
+          </div>
+        )}
 
         {loadingModels ? (
           <div className="flex items-center justify-center py-8">
@@ -1276,6 +1296,9 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
 
   // Model selection (for catalog providers)
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set());
+  const [discoveryUsed, setDiscoveryUsed] = useState(false);
+  const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
+  const [discoveryImportResult, setDiscoveryImportResult] = useState<ModelImportResult | null>(null);
 
   // State
   const [saving, setSaving] = useState(false);
@@ -1348,6 +1371,9 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     setShowDropdown(false);
     setDropdownSearch('');
     setTestResult(null);
+    setDiscoveryUsed(false);
+    setDiscoveredModels([]);
+    setDiscoveryImportResult(null);
 
     const provider = catalog.find(p => p.id === providerId);
     if (provider) {
@@ -1413,7 +1439,21 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   };
 
   // Save — catalog provider (transitions to next wizard step instead of closing)
+  const importSelectedModels = async (providerId: string, models = discoveredModels): Promise<ModelImportResult | null> => {
+    if (!models.length) return null;
+    let result: ModelImportResult;
+    try {
+      result = (await providerAPI.importModels(providerId, models.map(toModelImport))).data;
+    } catch (importError) {
+      result = { added: [], skipped: [], failed: models.map(model => ({ id: model.id, error: extractErrorMessage(importError) })) };
+    }
+    setDiscoveryImportResult(result);
+    setAddedModelCount(count => count + result.added.length);
+    return result;
+  };
+
   const handleSaveCatalog = async () => {
+    if (saving || testing) return;
     if (!selectedCatalogId) { toast.warning('Please select a Provider'); return; }
     if (selectedCatalogId === 'openai-compatible' && !providerName.trim()) {
       toast.warning('Please enter Provider Name');
@@ -1428,7 +1468,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       return;
     }
     const azureModelId = isAzureProviderId(selectedCatalogId) ? azureDeploymentName.trim() : '';
-    if (isAzureProviderId(selectedCatalogId) && selectedModelIds.size === 0 && !azureModelId) {
+    if (isAzureProviderId(selectedCatalogId) && !discoveryUsed && selectedModelIds.size === 0 && !azureModelId) {
       toast.warning(t('form.azureDeploymentRequired'));
       return;
     }
@@ -1440,22 +1480,26 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
           base_url: baseUrl.trim(),
           api_key: apiKey.trim() || 'not-needed',
           description: description.trim() || selectedCatalog?.description || undefined,
+          ...(discoveryUsed ? { skip_catalog_bootstrap: true } : {}),
         });
         toast.success(t('providerAdded'), providerName.trim());
         setSavedProviderId(created.data.id);
         setSavedProviderName(providerName.trim());
-        setStep('add-model');
+        if (discoveryUsed) await importSelectedModels(created.data.id);
+        setStep(discoveryUsed ? 'success' : 'add-model');
         return;
       }
 
       await providerAPI.setCredentials(selectedCatalogId, {
         api_key: apiKey.trim() || 'not-needed',
         base_url: baseUrl.trim() || undefined,
+        ...(discoveryUsed ? { skip_catalog_bootstrap: true } : {}),
       });
-      if (selectedCatalog) {
+      if (selectedCatalog && !discoveryUsed) {
         const unselected = selectedCatalog.models.filter(m => !selectedModelIds.has(m.id)).map(m => m.id);
         await Promise.all(unselected.map(id => modelV2API.deleteDefinition(selectedCatalogId, id).catch(() => {})));
       }
+      if (discoveryUsed) await importSelectedModels(selectedCatalogId);
       if (azureModelId) {
         await modelV2API.createDefinition(selectedCatalogId, {
           model_id: azureModelId,
@@ -1547,7 +1591,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     switch (step) {
       case 'provider':
         return {
-          submitDisabled: !canSave,
+          submitDisabled: !canSave || saving || testing,
           submitLoading: saving || testing,
           submitLabel: 'Save',
           onSubmit: handleSave,
@@ -1859,11 +1903,21 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         </div>
                       )}
 
-                      {selectedCatalog.models.length > 0 && (
+                      <ModelDiscovery
+                        providerId={selectedCatalogId}
+                        mode="stage"
+                        newInstance={selectedCatalogId === 'openai-compatible'}
+                        credentials={{ api_key: apiKey.trim(), base_url: baseUrl.trim() || undefined }}
+                        disabled={saving || testing}
+                        onUsed={() => setDiscoveryUsed(true)}
+                        onSelectionChange={setDiscoveredModels}
+                      />
+
+                      {!discoveryUsed && selectedCatalog.models.length > 0 && (
                         <div>
                           <div className="flex items-center justify-between mb-2">
                             <label className="text-sm font-medium text-gray-700">
-                              {t('form.availableModels')}
+                              {t('discovery.legacyCatalog')}
                               <span className="text-gray-400 font-normal ml-1">
                                 ({selectedModelIds.size}/{selectedCatalog.models.length} {t('form.selected')})
                               </span>
@@ -1949,6 +2003,20 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
             <p className="mt-3 text-sm text-green-600 font-medium">
               {t('wizard.modelsAdded', { count: addedModelCount })}
             </p>
+          )}
+          {discoveryImportResult && (
+            <div className="mt-4 w-full space-y-3 text-left">
+              <ModelImportSummary result={discoveryImportResult} />
+              {discoveryImportResult.failed.length > 0 && savedProviderId && (
+                <button type="button" disabled={saving} onClick={async () => {
+                  if (saving) return;
+                  setSaving(true);
+                  const failedIds = new Set(discoveryImportResult.failed.map(item => item.id));
+                  try { await importSelectedModels(savedProviderId, discoveredModels.filter(model => failedIds.has(model.id))); }
+                  finally { setSaving(false); }
+                }} className="rounded-lg border border-amber-300 px-3 py-2 text-sm text-amber-800 disabled:opacity-50">{saving ? t('discovery.importing') : t('discovery.retryFailed')}</button>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -2418,6 +2486,10 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
   const [testChat, setTestChat] = useState<{ question: string; answer: string; model: string; latency: number } | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
 
+  const [discoveryUsed, setDiscoveryUsed] = useState(false);
+  const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
+  const [discoveryImportResult, setDiscoveryImportResult] = useState<ModelImportResult | null>(null);
+
   // Catalog model management
   const [catalogModels, setCatalogModels] = useState<CatalogModel[]>([]);
   const [catalogModelsLoaded, setCatalogModelsLoaded] = useState(false);
@@ -2481,6 +2553,7 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
   };
 
   const handleSubmit = async () => {
+    if (loading || testing) return;
     const nextApiKey = apiKey.trim();
     const apiKeyChanged = nextApiKey !== existingKey.trim();
     if (!nextApiKey && !hasExisting && !providerAllowsEmptyApiKey(provider.id)) {
@@ -2494,12 +2567,13 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
         provider_name: (provider.id === 'openai-compatible' || provider.id.startsWith('custom-'))
           ? (providerName.trim() || undefined)
           : undefined,
+        ...(discoveryUsed ? { skip_catalog_bootstrap: true } : {}),
       };
       if (nextApiKey && apiKeyChanged) payload.api_key = nextApiKey;
       await providerAPI.setCredentials(provider.id, payload);
 
       // Sync catalog model list: add newly selected, delete deselected
-      if (catalogModels.length > 0) {
+      if (catalogModels.length > 0 && !discoveryUsed) {
         const currentModelIds = new Set(models.map(m => m.id));
         const toDelete = catalogModels.filter(m => currentModelIds.has(m.id) && !selectedModelIds.has(m.id));
         const toAdd = catalogModels.filter(m => !currentModelIds.has(m.id) && selectedModelIds.has(m.id));
@@ -2514,6 +2588,20 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
           model_id: azureModelId,
           name: newAzureDeploymentDisplayName.trim() || azureModelId,
         });
+      }
+
+      if (discoveryUsed && discoveredModels.length > 0) {
+        let result: ModelImportResult;
+        try {
+          result = (await providerAPI.importModels(provider.id, discoveredModels.map(toModelImport))).data;
+        } catch (importError) {
+          result = { added: [], skipped: [], failed: discoveredModels.map(model => ({ id: model.id, error: extractErrorMessage(importError) })) };
+        }
+        setDiscoveryImportResult(result);
+        if (result.failed.length > 0) {
+          toast.warning(t('discovery.importPartial'));
+          return;
+        }
       }
 
       toast.success(t('credentialsSaved'));
@@ -2614,7 +2702,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
       icon={<Brain className="w-5 h-5" />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
-      submitDisabled={!canSave}
+      submitDisabled={!canSave || loading || testing}
       submitLoading={loading}
       submitLabel="Save"
       onClose={onClose}
@@ -2722,11 +2810,20 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
         </div>
 
         {/* Catalog model management */}
-        {catalogModels.length > 0 && (
+        <ModelDiscovery
+          providerId={provider.id}
+          mode="stage"
+          credentials={{ api_key: apiKey.trim() || undefined, base_url: baseUrl.trim() || undefined }}
+          disabled={loading || testing}
+          onUsed={() => setDiscoveryUsed(true)}
+          onSelectionChange={setDiscoveredModels}
+        />
+        {discoveryImportResult && <ModelImportSummary result={discoveryImportResult} />}
+        {!discoveryUsed && catalogModels.length > 0 && (
           <div>
             <div className="flex items-center justify-between mb-2">
               <label className="text-sm font-medium text-gray-700">
-                {t('form.availableModels')}
+                {t('discovery.legacyCatalogManagement')}
                 <span className="text-gray-400 font-normal ml-1">
                   ({selectedCatalogModelCount}/{catalogModels.length} {t('form.selected')})
                 </span>

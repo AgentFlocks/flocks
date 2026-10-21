@@ -15,6 +15,9 @@ import type {
   ModelSettingV2,
   CatalogProvider,
   APIServiceMetadata,
+  ModelDiscoveryResult,
+  ModelImportInput,
+  ModelImportResult,
 } from '@/types';
 
 const API_SERVICES_LIST_CACHE_TTL_MS = 5000;
@@ -85,6 +88,12 @@ function listApiServicesCached(options: { force?: boolean } = {}) {
 // ==================== Provider API (Legacy + Enhanced) ====================
 
 export const providerAPI = {
+  discoverModels: (id: string, credentials: { api_key?: string; base_url?: string } = {}) =>
+    client.post<ModelDiscoveryResult>(`/api/provider/${encodeURIComponent(id)}/discover-models`, credentials),
+
+  importModels: (id: string, models: ModelImportInput[]) =>
+    client.post<ModelImportResult>(`/api/provider/${encodeURIComponent(id)}/import-models`, { models }),
+
   /** List all providers (returns Flocks-compatible format) */
   list: () =>
     client.get<{ all: ProviderInfoV2[]; default: Record<string, string>; connected: string[] }>('/api/provider'),

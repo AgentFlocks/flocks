@@ -758,6 +758,15 @@ class Provider:
                 continue
 
             cls.apply_provider_config(provider, pconfig)
+            if getattr(provider, "_model_sync_manual", False):
+                # Legacy SDK defaults were registered during initialization.
+                # Remove stale entries owned by this provider and publish only
+                # its explicitly managed inventory to the global cache.
+                desired = {model.id: model for model in provider.get_models()}
+                for model_id, model in list(cls._models.items()):
+                    if model.provider_id == pid and model_id not in desired:
+                        del cls._models[model_id]
+                cls._models.update(desired)
 
     @staticmethod
     def apply_provider_config(provider: "BaseProvider", pconfig: Any) -> None:
@@ -766,6 +775,7 @@ class Provider:
         This method never looks up or replaces entries in the global registry.
         """
         pid = provider.id
+        provider._model_sync_manual = getattr(pconfig, "model_sync", None) == "manual"
         # Provider credentials/options are optional. Model definitions and
         # display names below still need to load when credentials are
         # unresolved or supplied outside the main config.
@@ -853,7 +863,7 @@ class Provider:
         if models_config is not None:
             from flocks.provider.model_catalog import get_retired_model_ids
 
-            retired_model_ids = get_retired_model_ids(pid)
+            retired_model_ids = frozenset() if provider._model_sync_manual else get_retired_model_ids(pid)
             desired_models: List[ModelInfo] = []
             if isinstance(models_config, dict):
                 for model_id, model_data in models_config.items():
@@ -1181,7 +1191,29 @@ class BaseProvider:
     # Per-event-loop SDK client cache; see LoopBoundClientSlot.
     _client = LoopBoundClientSlot()
 
+    def __init_subclass__(cls, **kwargs):
+        """Make an explicitly managed inventory authoritative for every SDK.
+
+        Older SDKs expose hard-coded defaults from get_models(). Keep those
+        defaults for legacy providers, while respecting an explicitly empty
+        user-managed inventory across direct SDK and registry callers.
+        """
+        super().__init_subclass__(**kwargs)
+        implementation = cls.__dict__.get("get_models")
+        if implementation is None:
+            return
+        from functools import wraps
+
+        @wraps(implementation)
+        def managed_models(self, *args, **kwargs):
+            if getattr(self, "_model_sync_manual", False):
+                return list(self._config_models)
+            return implementation(self, *args, **kwargs)
+
+        cls.get_models = managed_models
+
     def __init__(self, provider_id: str, name: str):
+        self._model_sync_manual = False
         self.id = provider_id
         self.name = name
         self._config: Optional[ProviderConfig] = None
@@ -1494,7 +1526,7 @@ class BaseProvider:
                 pass
 
         source_models = list(getattr(self, "_config_models", []))
-        if not source_models:
+        if not source_models and not self._model_sync_manual:
             source_models = list(self.get_models())
 
         result = []

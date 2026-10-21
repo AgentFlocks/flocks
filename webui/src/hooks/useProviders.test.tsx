@@ -142,4 +142,26 @@ describe('useProviders', () => {
     });
     expect(listMock).toHaveBeenCalledTimes(2);
   });
+
+  it('retains the last inventory during a failed background refresh but accepts a successful empty list', async () => {
+    listMock.mockResolvedValueOnce({ data: { all: [makeProvider('openai')], connected: ['openai'] } });
+    const { result } = renderHook(() => useProviders());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let rejectList: (error: Error) => void = () => undefined;
+    listMock.mockImplementationOnce(() => new Promise((_, reject) => { rejectList = reject; }));
+    act(() => { void result.current.refetch(); });
+    expect(result.current.loading).toBe(true);
+    expect(result.current.providers).toHaveLength(1);
+    await act(async () => { rejectList(new Error('Temporary connection failure')); });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBe('Temporary connection failure');
+    expect(result.current.providers).toMatchObject([{ id: 'openai' }]);
+    expect(result.current.connectedIds).toEqual(['openai']);
+
+    listMock.mockResolvedValueOnce({ data: { all: [], connected: [] } });
+    await act(async () => { await result.current.refetch(); });
+    expect(result.current.error).toBeNull();
+    expect(result.current.providers).toEqual([]);
+  });
 });

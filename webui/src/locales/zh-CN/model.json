@@ -8,7 +8,7 @@
     "noDefaultModel": "未设置",
     "setDefaultModel": "设置默认模型",
     "defaultModelUpdated": "默认模型已更新",
-    "defaultModelInvalid": "当前默认模型「{{model}}」已不在可用列表中，已自动清除，请重新选择",
+    "defaultModelInvalid": "当前默认模型「{{model}}」已不在可用列表中，配置已保留，请检查或重新选择",
     "defaultModelInvalidMember": "当前默认模型「{{model}}」已不在可用列表中，请联系管理员重新设置",
     "fallbackModels": "辅助模型",
     "noFallbackModels": "自动策略",
@@ -59,7 +59,9 @@
     "empty": "尚未添加模型供应商",
     "emptyHint": "点击右上角「添加模型供应商」开始配置",
     "emptyHintMember": "请联系管理员添加模型供应商",
-    "addProvider": "添加模型供应商"
+    "addProvider": "添加模型供应商",
+    "retry": "重试",
+    "refreshFailed": "刷新失败，当前仍显示上次成功加载的模型服务。{{error}}"
   },
   "detail": {
     "modelList": "模型列表",
@@ -183,5 +185,62 @@
     "skipForNow": "跳过",
     "addAnother": "再添加一个",
     "modelsAdded": "已添加 {{count}} 个模型"
+  },
+  "discovery": {
+    "title": "获取模型",
+    "refresh": "重新获取",
+    "loading": "正在获取…",
+    "close": "关闭获取结果",
+    "stagedHint": "凭据仅用于本次获取；选择的模型将在保存时新增。",
+    "catalogHint": "内置推荐目录，不是当前账号的实时模型列表；导入后请测试模型是否可用。",
+    "fetchedAt": "获取时间：{{time}}",
+    "truncated": "结果较多，当前仅展示部分模型；其余模型可手动添加。",
+    "metadataHint": "获取成功不代表每个模型均可调用。接口未提供的能力、价格和上下文信息尚未确认，可在导入后编辑并测试。",
+    "search": "搜索模型名称或 ID",
+    "pending": "待保存新增 {{count}} 个",
+    "selected": "已选择 {{count}} 个",
+    "selectVisible": "全选筛选结果",
+    "deselectVisible": "取消选择筛选结果",
+    "allAdded": "本次获取的模型均已添加。",
+    "alreadyAdded": "已添加，保留现有配置",
+    "contextWindow": "上下文：{{count}} tokens",
+    "noMatches": "没有匹配的模型",
+    "import": "新增所选 {{count}} 个模型",
+    "importing": "正在新增…",
+    "empty": "服务未返回模型，可重新获取或手动添加。",
+    "failed": "未能获取模型，请检查上方提示后重试，也可手动添加。",
+    "importSummary": "新增 {{added}} 个，已存在 {{skipped}} 个，失败 {{failed}} 个。",
+    "retryFailed": "重试失败项",
+    "importPartial": "凭据已保存，部分模型新增失败，请查看结果并重试。",
+    "legacyCatalog": "内置推荐目录（保存所选）",
+    "legacyCatalogManagement": "管理内置目录模型（取消勾选将删除）",
+    "source": {
+      "api": "实时服务列表",
+      "catalog": "内置推荐目录",
+      "none": "未获取到模型列表"
+    },
+    "unavailable": {
+      "azure_deployment_required": "请填写实际 Azure 部署名称，不能直接使用推荐模型名称。",
+      "not_chat_model": "非对话模型，暂不支持导入此清单。",
+      "unknown": "此模型暂不可导入。"
+    },
+    "codes": {
+      "models_discovered": "已获取模型列表，请选择要新增的模型。",
+      "catalog_fallback": "该服务不提供模型列表接口，展示内置推荐目录。",
+      "discovery_unsupported": "该服务暂不支持获取模型列表，可手动添加。",
+      "missing_base_url": "请先填写 Base URL。",
+      "missing_credentials": "请先填写所需凭据。",
+      "invalid_base_url": "Base URL 格式有误，请检查完整地址。",
+      "authentication_failed": "凭据校验失败，请检查 API Key。",
+      "permission_denied": "当前凭据无权获取模型列表，请检查账号权限。",
+      "rate_limited": "服务请求过于频繁，请稍后重试。",
+      "upstream_error": "模型服务返回错误，请检查服务状态后重试。",
+      "connection_timeout": "连接超时，请检查地址和网络后重试。",
+      "connection_error": "无法连接模型服务，请检查地址和网络。",
+      "invalid_response": "服务返回的模型列表格式无法识别。",
+      "response_too_large": "服务返回内容过大，请缩小返回范围或手动添加。",
+      "redirect_not_allowed": "服务返回了重定向，为保护凭据未自动跳转。请填写最终服务地址后重试。"
+    },
+    "reviewSelection": "查看获取结果"
   }
 }

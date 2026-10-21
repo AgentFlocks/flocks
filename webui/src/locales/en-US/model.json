@@ -8,7 +8,7 @@
     "noDefaultModel": "Not set",
     "setDefaultModel": "Set Default Model",
     "defaultModelUpdated": "Default model updated",
-    "defaultModelInvalid": "Default model \"{{model}}\" is no longer available and has been cleared. Please select a new one.",
+    "defaultModelInvalid": "Default model \"{{model}}\" is no longer in the available list. Its configuration is preserved; check it or choose another model.",
     "defaultModelInvalidMember": "Default model \"{{model}}\" is no longer available. Ask an administrator to choose a new one.",
     "fallbackModels": "Auxiliary Models",
     "noFallbackModels": "Automatic",
@@ -59,7 +59,9 @@
     "empty": "No providers configured",
     "emptyHint": "Click \"Add Provider\" to get started",
     "emptyHintMember": "Ask an administrator to add a provider",
-    "addProvider": "Add Provider"
+    "addProvider": "Add Provider",
+    "retry": "Retry",
+    "refreshFailed": "Refresh failed. Showing the last successfully loaded providers. {{error}}"
   },
   "detail": {
     "modelList": "Model List",
@@ -183,5 +185,62 @@
     "skipForNow": "Skip",
     "addAnother": "Add Another",
     "modelsAdded": "{{count}} model(s) added"
+  },
+  "discovery": {
+    "title": "Fetch models",
+    "refresh": "Fetch again",
+    "loading": "Fetching…",
+    "close": "Close discovery results",
+    "stagedHint": "Credentials are used only for this request. Selected models are added when you save.",
+    "catalogHint": "Built-in recommendations, not a live list for your account. Test imported models to confirm access.",
+    "fetchedAt": "Fetched: {{time}}",
+    "truncated": "Only part of the model list is shown. Other models can be added manually.",
+    "metadataHint": "A successful fetch does not confirm access to every model. Capabilities, pricing and context limits omitted by the service remain unconfirmed; edit and test after importing.",
+    "search": "Search model name or ID",
+    "pending": "{{count}} models pending save",
+    "selected": "{{count}} models selected",
+    "selectVisible": "Select filtered results",
+    "deselectVisible": "Deselect filtered results",
+    "allAdded": "All fetched models have already been added.",
+    "alreadyAdded": "Already added; existing settings preserved",
+    "contextWindow": "Context: {{count}} tokens",
+    "noMatches": "No matching models",
+    "import": "Add {{count}} selected models",
+    "importing": "Adding…",
+    "empty": "The service returned no models. Fetch again or add a model manually.",
+    "failed": "Could not fetch models. Review the message above, then retry or add a model manually.",
+    "importSummary": "Added {{added}}, already present {{skipped}}, failed {{failed}}.",
+    "retryFailed": "Retry failed models",
+    "importPartial": "Credentials saved. Some models could not be added; review the results and retry.",
+    "legacyCatalog": "Built-in recommendations (save selected)",
+    "legacyCatalogManagement": "Manage built-in models (unchecking deletes them)",
+    "source": {
+      "api": "Live service list",
+      "catalog": "Built-in recommendations",
+      "none": "No model list available"
+    },
+    "unavailable": {
+      "azure_deployment_required": "Enter your actual Azure deployment name; a recommended model name is not a deployment.",
+      "not_chat_model": "This is not a chat model and cannot be imported here.",
+      "unknown": "This model cannot be imported."
+    },
+    "codes": {
+      "models_discovered": "Select the models you want to add.",
+      "catalog_fallback": "This service does not expose a model list. Showing built-in recommendations.",
+      "discovery_unsupported": "Model discovery is not available for this service. Add models manually.",
+      "missing_base_url": "Enter the Base URL first.",
+      "missing_credentials": "Enter the required credentials first.",
+      "invalid_base_url": "Check that the Base URL is a valid, complete URL.",
+      "authentication_failed": "Authentication failed. Check your API key.",
+      "permission_denied": "Your credentials do not have permission to list models.",
+      "rate_limited": "Too many requests. Try again later.",
+      "upstream_error": "The model service returned an error. Check its status and retry.",
+      "connection_timeout": "Connection timed out. Check the address and network, then retry.",
+      "connection_error": "Could not connect. Check the service address and network.",
+      "invalid_response": "The model list response could not be recognized.",
+      "response_too_large": "The service response is too large. Reduce the returned list or add models manually.",
+      "redirect_not_allowed": "The service returned a redirect. To protect credentials, it was not followed. Enter the final service URL and retry."
+    },
+    "reviewSelection": "Review fetched models"
   }
 }
