@@ -139,6 +139,74 @@ async def test_catalog_compatible_providers_fetch_from_supplied_endpoint(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider_id", ["threatbook-cn-llm", "threatbook-io-llm"])
+@pytest.mark.parametrize("listing_status", [404, 405, 501])
+async def test_threatbook_reads_authenticated_model_list_without_using_a_real_model(
+    provider_id, listing_status, discovery_runtime, upstream
+):
+    def respond(request):
+        if request.method == "GET":
+            return httpx.Response(listing_status)
+        assert request.url.path == "/prefix/v1/chat/completions"
+        assert request.headers["authorization"] == "Bearer candidate-key"
+        body = json.loads(request.content)
+        assert body["model"].startswith("__flocks_model_list_probe_")
+        assert body["messages"] == [{"role": "user", "content": ""}]
+        assert body["max_tokens"] == 1 and body["stream"] is False
+        return httpx.Response(400, json={"error": {
+            "type": "MODEL_NOT_FOUND", "data": {"supported_models": ["live-new-model", "live-other-model"]},
+        }})
+
+    upstream.handler = respond
+    result = await discovery_runtime.module.discover_models(
+        provider_id, api_key="candidate-key", base_url="https://gateway.example.test/prefix/v1"
+    )
+    assert result["status"] == "success" and result["source"] == "api"
+    assert [model["id"] for model in result["models"]] == ["live-new-model", "live-other-model"]
+    assert [request.method for request in upstream.requests] == ["GET", "POST"]
+    assert all(request.url.host == "gateway.example.test" for request in upstream.requests)
+    assert Provider._providers == {} and discovery_runtime.config_file.read_text() == "{}"
+    discovery_runtime.writes.assert_not_called()
+    discovery_runtime.apply_config.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_id", ["threatbook-cn-llm", "threatbook-io-llm"])
+@pytest.mark.parametrize("status", [400, 401])
+async def test_threatbook_rejects_bad_credentials_from_its_authenticated_list(
+    provider_id, status, discovery_runtime, upstream
+):
+    upstream.handler = lambda request: httpx.Response(404) if request.method == "GET" else httpx.Response(
+        status, json={"error": {"type": "AUTH_ERROR"}}
+    )
+    result = await discovery_runtime.module.discover_models(provider_id, api_key="bad-key")
+    assert result["status"] == "error" and result["code"] == "authentication_failed"
+    assert result["source"] == "none" and result["models"] == []
+    discovery_runtime.writes.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [
+    {"error": {"type": "MODEL_NOT_FOUND"}},
+    {"error": {"type": "MODEL_NOT_FOUND", "data": {"supported_models": "not-a-list"}}},
+    {"error": {"type": "MODEL_NOT_FOUND", "data": {"supported_models": [{"id": "wrong-shape"}]}}},
+    {"error": {"type": "OTHER_ERROR", "data": {"supported_models": ["untrusted"]}}},
+])
+async def test_threatbook_does_not_accept_unexpected_validation_payload(payload, discovery_runtime, upstream):
+    upstream.handler = lambda request: httpx.Response(404) if request.method == "GET" else httpx.Response(400, json=payload)
+    result = await discovery_runtime.module.discover_models("threatbook-cn-llm", api_key="candidate-key")
+    assert result["status"] == "error" and result["code"] == "invalid_response"
+    assert result["models"] == []
+
+
+@pytest.mark.asyncio
+async def test_other_providers_do_not_use_the_threatbook_probe(discovery_runtime, upstream):
+    upstream.handler = lambda request: httpx.Response(404)
+    await discovery_runtime.module.discover_models("openai", api_key="candidate-key")
+    assert len(upstream.requests) == 1 and upstream.requests[0].method == "GET"
+
+
+@pytest.mark.asyncio
 async def test_anthropic_cursor_pagination_and_auth_headers(discovery_runtime, upstream):
     def respond(request):
         if "after_id" not in request.url.params:

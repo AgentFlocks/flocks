@@ -11,15 +11,13 @@ from flocks.bus import Bus, BusEvent
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.provider.model_catalog import get_raw_catalog
-from flocks.provider.model_discovery import discover_models
+from flocks.provider.model_discovery import THREATBOOK_MODEL_LIST_PROVIDERS, discover_models
 from flocks.provider.provider import Provider
 from flocks.server.auth import require_admin
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.server.routes.provider import _ensure_provider_initialized, _load_dynamic_providers
 
 router = APIRouter()
-
-_MODEL_LIST_KEY_CHECK_PROVIDERS = {"threatbook-cn-llm", "threatbook-io-llm"}
 
 
 class DiscoverModelsRequest(BaseModel):
@@ -245,7 +243,7 @@ async def check_provider_key(provider_id: str, body: DiscoverModelsRequest, _adm
         return {"status": "invalid" if result["code"] in {"authentication_failed", "missing_credentials"} else "unverified", "code": result["code"]}
     # ThreatBook uses a successful live model-list response as its validation
     # contract. Catalog fallback was excluded above and cannot verify a key.
-    if provider_id in _MODEL_LIST_KEY_CHECK_PROVIDERS:
+    if provider_id in THREATBOOK_MODEL_LIST_PROVIDERS:
         return {"status": "valid", "code": "model_list_verified"}
     # A public models endpoint does not prove that a key is valid. Require
     # rejection of an unrelated credential before reporting authentication.

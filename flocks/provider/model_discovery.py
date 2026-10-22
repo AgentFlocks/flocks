@@ -11,6 +11,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 from datetime import UTC, datetime
 from typing import Any
@@ -27,6 +28,7 @@ MAX_MODELS = 1000
 MAX_PAGES = 10
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 DISCOVERY_TIMEOUT_SECONDS = 20.0
+THREATBOOK_MODEL_LIST_PROVIDERS = frozenset({"threatbook-cn-llm", "threatbook-io-llm"})
 
 # SDK defaults are also used for provider types which predate catalog.json.
 _OPENAI_DEFAULTS = {
@@ -317,11 +319,16 @@ async def _validate_resolved_addresses(url: str) -> None:
             raise DiscoveryError("invalid_base_url", "The provider endpoint resolves to a prohibited network address.")
 
 
-async def _request_json(client: httpx.AsyncClient, url: str, headers: dict, params: dict | None = None) -> dict:
+async def _request_json(
+    client: httpx.AsyncClient, url: str, headers: dict, params: dict | None = None,
+    *, json_body: dict | None = None, accepted_statuses: tuple[int, ...] = (),
+) -> dict:
     await _validate_resolved_addresses(url)
-    async with client.stream("GET", url, headers=headers, params=params) as response:
+    async with client.stream(
+        "POST" if json_body is not None else "GET", url, headers=headers, params=params, json=json_body
+    ) as response:
         code = response.status_code
-        if code >= 300:
+        if code >= 300 and code not in accepted_statuses:
             error_code, message = {
                 401: ("authentication_failed", "The provider rejected the credentials."),
                 403: ("permission_denied", "The credentials do not have permission to list models."),
@@ -352,6 +359,32 @@ async def _request_json(client: httpx.AsyncClient, url: str, headers: dict, para
         if not isinstance(result, (dict, list)):
             raise DiscoveryError("invalid_response", "The provider returned an invalid model list.")
         return result
+
+
+async def _request_threatbook_models(client: httpx.AsyncClient, list_url: str, headers: dict) -> dict:
+    """Read ThreatBook's authenticated supported-model list without inference.
+
+    When GET /models is unavailable, an unknown model with empty content is
+    rejected before inference with MODEL_NOT_FOUND and supported_models. Bad
+    credentials are rejected by authentication instead. Never use a real model.
+    """
+    payload = await _request_json(
+        client, list_url.removesuffix("/models") + "/chat/completions", headers,
+        json_body={
+            "model": "__flocks_model_list_probe_" + secrets.token_hex(16) + "__",
+            "messages": [{"role": "user", "content": ""}],
+            "max_tokens": 1,
+            "stream": False,
+        },
+        accepted_statuses=(400,),
+    )
+    error = _dict(payload.get("error")) if isinstance(payload, dict) else {}
+    if error.get("type") == "AUTH_ERROR":
+        raise DiscoveryError("authentication_failed", "The provider rejected the credentials.", status_code=401)
+    models = _dict(error.get("data")).get("supported_models")
+    if error.get("type") != "MODEL_NOT_FOUND" or not isinstance(models, list) or any(not isinstance(mid, str) for mid in models):
+        raise DiscoveryError("invalid_response", "The provider did not return an authenticated supported-model list.")
+    return {"data": [{"id": mid} for mid in models]}
 
 
 def _positive_integer(value: Any) -> int | None:
@@ -507,7 +540,12 @@ async def discover_models(
                     timeout=httpx.Timeout(10.0, connect=5.0), follow_redirects=False
                 ) as client:
                     for page in range(MAX_PAGES):
-                        payload = await _request_json(client, url, headers, params)
+                        try:
+                            payload = await _request_json(client, url, headers, params)
+                        except DiscoveryError as error:
+                            if provider_id not in THREATBOOK_MODEL_LIST_PROVIDERS or error.status_code not in {404, 405, 501}:
+                                raise
+                            payload = await _request_threatbook_models(client, url, headers)
                         items = (
                             payload
                             if isinstance(payload, list)
