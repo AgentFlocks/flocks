@@ -65,9 +65,9 @@
   },
   "detail": {
     "modelList": "模型列表",
-    "noModels": "暂无模型定义",
+    "noModels": "暂无模型",
     "configureFirst": "请先配置凭证",
-    "addModelHint": "点击「添加模型」",
+    "addModelHint": "点击右上角「添加模型」开始添加",
     "batchTest": "批量测试",
     "testing": "测试中",
     "success": "成功",

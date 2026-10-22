@@ -65,9 +65,9 @@
   },
   "detail": {
     "modelList": "Model List",
-    "noModels": "No model definitions",
+    "noModels": "No models",
     "configureFirst": "Please configure credentials first",
-    "addModelHint": "Click \"Add Model\"",
+    "addModelHint": "Click \"Add Model\" in the upper right to get started",
     "batchTest": "Batch Test",
     "testing": "Testing",
     "success": "succeeded",

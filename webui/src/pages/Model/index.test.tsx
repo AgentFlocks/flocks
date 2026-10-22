@@ -522,6 +522,12 @@ describe('ModelPage configure provider dialog', () => {
   });
 
   it('lets saved models be selected and unselected together and persists off without deletion', async () => {
+    mocks.saveModelInventory.mockImplementation(async (_id: string, draft: { models: { enabled: boolean }[] }) => {
+      const enabled = draft.models[0].enabled;
+      mocks.getModelSettings.mockResolvedValue({ data: { enabled } });
+      mocks.getModelInventory.mockResolvedValue({ data: { models: [{ id: 'gpt-4o', name: 'GPT-4o', enabled }] } });
+      return { data: { added: [], skipped: [], failed: [] } };
+    });
     const user = userEvent.setup(); await openConfigureDialog(user);
     expect(await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' })).toBeChecked();
     await user.click(screen.getByRole('button', { name: 'compact.selectNone' }));
@@ -533,6 +539,36 @@ describe('ModelPage configure provider dialog', () => {
     await user.click(screen.getByRole('button', { name: 'compact.save' }));
     await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledWith('openai', { models: [expect.objectContaining({ id: 'gpt-4o', enabled: false })], deleted: [] }));
     expect(mocks.deleteDefinition).not.toHaveBeenCalled();
+    expect(await screen.findByText('detail.addModelHint')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'detail.modelList (0)' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'GPT-4o' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'detail.batchTest' })).toBeDisabled();
+
+    await user.click(screen.getByTitle('Configure'));
+    expect(await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' })).not.toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'compact.selectAll' }));
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    expect(await screen.findByRole('heading', { name: 'GPT-4o' })).toBeInTheDocument();
+    expect(screen.queryByText('detail.addModelHint')).not.toBeInTheDocument();
+  });
+
+  it('shows only enabled models and removes their test results when the last model is switched off', async () => {
+    const hiddenModel = { ...model, id: 'hidden-model', name: 'Hidden Model' };
+    mocks.listDefinitions.mockResolvedValue({ data: { models: [model, hiddenModel], total: 2 } });
+    mocks.getModelSettings.mockImplementation(async (_provider: string, id: string) => ({ data: { enabled: id !== 'hidden-model' } }));
+    const user = userEvent.setup(); renderWithRouter(<ModelPage />);
+    expect(await screen.findByRole('heading', { name: 'GPT-4o' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Hidden Model' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'detail.modelList (1)' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'detail.batchTest' }));
+    expect(await screen.findByText('10ms')).toBeInTheDocument();
+    expect(mocks.testCredentials).toHaveBeenCalledTimes(1);
+    expect(mocks.testCredentials).toHaveBeenCalledWith('openai', 'gpt-4o');
+    await user.click(screen.getByTitle('status.disabled'));
+    expect(await screen.findByText('detail.addModelHint')).toBeInTheDocument();
+    expect(screen.queryByText('10ms')).not.toBeInTheDocument();
+    expect(screen.queryByText(/detail\.success/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Hidden Model' })).not.toBeInTheDocument();
   });
 
   it('applies Auto and explicit model edits on provider save and deletes only through trash', async () => {

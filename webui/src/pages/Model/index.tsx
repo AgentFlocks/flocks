@@ -1013,6 +1013,10 @@ function ProviderDetail({
   const [batchTesting, setBatchTesting] = useState(false);
 
   const batchResultsRef = useRef<Record<string, ModelTestStatus>>({});
+  const enabledModels = useMemo(
+    () => models.filter(model => modelEnabledMap[`${provider.id}/${model.id}`] !== false),
+    [models, modelEnabledMap, provider.id],
+  );
 
   const handleTestSingleModel = async (modelId: string): Promise<ModelTestStatus> => {
     setModelTestStatus(prev => ({ ...prev, [modelId]: { status: 'testing' } }));
@@ -1036,10 +1040,6 @@ function ProviderDetail({
   };
 
   const handleBatchTest = async () => {
-    const enabledModels = models.filter(m => {
-      const key = `${provider.id}/${m.id}`;
-      return modelEnabledMap[key] !== false;
-    });
     if (enabledModels.length === 0) {
       toast.warning(t('form.noModelsToTest'));
       return;
@@ -1076,16 +1076,17 @@ function ProviderDetail({
     }
   };
 
-  const testedCount = Object.values(modelTestStatus).filter(s => s.status === 'success' || s.status === 'failed').length;
-  const successCount = Object.values(modelTestStatus).filter(s => s.status === 'success').length;
-  const failedCount = Object.values(modelTestStatus).filter(s => s.status === 'failed').length;
+  const visibleTestStatuses = enabledModels.map(model => modelTestStatus[model.id]);
+  const testedCount = visibleTestStatuses.filter(s => s?.status === 'success' || s?.status === 'failed').length;
+  const successCount = visibleTestStatuses.filter(s => s?.status === 'success').length;
+  const failedCount = visibleTestStatuses.filter(s => s?.status === 'failed').length;
 
   return (
     <div className="h-full flex flex-col">
       <div className="flex-1 overflow-y-auto px-4 py-3">
         <div className="flex items-center justify-between gap-3 mb-2">
           <h3 className="text-sm font-medium text-gray-800 shrink-0">
-            {t('detail.modelList')}{!loadingModels && <span className="text-gray-400 font-normal"> ({models.length})</span>}
+            {t('detail.modelList')}{!loadingModels && <span className="text-gray-400 font-normal"> ({enabledModels.length})</span>}
           </h3>
           <div className="flex items-center gap-1.5 shrink-0">
             {testedCount > 0 && (
@@ -1094,7 +1095,7 @@ function ProviderDetail({
                 {failedCount > 0 && <span className="text-red-600 ml-1">{failedCount} {t('detail.failed')}</span>}
                 {batchTesting && (
                   <span className="text-red-600 ml-1">
-                    {t('detail.testing')} {testedCount}/{models.filter(m => modelEnabledMap[`${provider.id}/${m.id}`] !== false).length}
+                    {t('detail.testing')} {testedCount}/{enabledModels.length}
                   </span>
                 )}
               </span>
@@ -1102,7 +1103,7 @@ function ProviderDetail({
             {!canEdit && <span className="text-[11px] text-gray-400">{t('detail.configAdminOnly')}</span>}
             <button
               onClick={handleBatchTest}
-              disabled={batchTesting || loadingModels || models.length === 0}
+              disabled={batchTesting || loadingModels || enabledModels.length === 0}
               className="flex items-center gap-1 px-2 py-1 text-xs border border-gray-300 text-gray-600 rounded hover:border-slate-400 hover:text-slate-800 hover:bg-slate-50 disabled:opacity-50"
             >
               {batchTesting ? <Loader2 className="w-3 h-3 animate-spin" /> : <TestTube className="w-3 h-3" />}
@@ -1115,7 +1116,7 @@ function ProviderDetail({
           <div className="flex items-center justify-center py-8">
             <LoadingSpinner />
           </div>
-        ) : models.length === 0 ? (
+        ) : enabledModels.length === 0 ? (
           <EmptyState
             icon={<Brain className="w-10 h-10" />}
             title={t('detail.noModels')}
@@ -1125,18 +1126,16 @@ function ProviderDetail({
           />
         ) : (
           <div className="space-y-1.5">
-            {models.map((model) => {
-              const key = `${provider.id}/${model.id}`;
-              const enabled = modelEnabledMap[key] !== false;
+            {enabledModels.map((model) => {
               return (
                 <ModelCard
                   key={model.id}
                   model={model}
-                  enabled={enabled}
+                  enabled
                   testStatus={modelTestStatus[model.id]}
                   onOpenDetail={onOpenModelDetail ? () => onOpenModelDetail(model) : undefined}
                   onTestModel={() => handleTestSingleModel(model.id)}
-                  onToggle={onToggleModel ? () => onToggleModel(provider.id, model.id, !enabled) : undefined}
+                  onToggle={onToggleModel ? () => onToggleModel(provider.id, model.id, false) : undefined}
                   onDelete={onDeleteModel ? () => onDeleteModel(model.id) : undefined}
                 />
               );
