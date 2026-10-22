@@ -25,14 +25,12 @@ import {
   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
 } from '@/api/provider';
 import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
+import CacheUsagePanel from './CacheUsagePanel';
 import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
 import { extractErrorMessage } from '@/utils/error';
 import {
   convertCurrencyAmount,
-  formatCacheHitRate,
-  formatTokenCount,
   formatTokenMillions,
-  getCacheUsageSummary,
   getConvertedTotalCost,
   getDefaultDashboardCurrency,
   toggleDashboardCurrency,
@@ -167,6 +165,9 @@ export default function ModelPage() {
 
   // Dashboard data
   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
+  const [usageLoading, setUsageLoading] = useState(true);
+  const [usageLoadError, setUsageLoadError] = useState(false);
+  const usageLoadSeqRef = useRef(0);
   const [defaultModel, setDefaultModel] = useState<{ provider_id: string; model_id: string } | null>(null);
   const [showDefaultModelDialog, setShowDefaultModelDialog] = useState(false);
   const [fallbackModels, setFallbackModels] = useState<FallbackModelRef[]>([]);
@@ -216,9 +217,27 @@ export default function ModelPage() {
     }
   }, []);
 
+  const loadUsage = useCallback(async () => {
+    const sequence = ++usageLoadSeqRef.current;
+    setUsageLoading(true);
+    setUsageLoadError(false);
+    try {
+      const response = await usageAPI.getSummary();
+      if (sequence === usageLoadSeqRef.current) setUsageStats(response.data);
+    } catch {
+      if (sequence === usageLoadSeqRef.current) setUsageLoadError(true);
+    } finally {
+      if (sequence === usageLoadSeqRef.current) setUsageLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadUsage();
+    return () => { usageLoadSeqRef.current += 1; };
+  }, [loadUsage]);
+
   // Fetch dashboard data on mount and validate default model
   useEffect(() => {
-    usageAPI.getSummary().then(r => setUsageStats(r.data)).catch(() => {});
     void loadFallbackModels();
 
     Promise.all([
@@ -508,7 +527,7 @@ export default function ModelPage() {
   }
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col overflow-y-auto">
       {/* Header */}
       <PageHeader
         title={t('pageTitle')}
@@ -549,9 +568,10 @@ export default function ModelPage() {
         availableFallbackCount={availableFallbackCount}
         onEditFallbacks={isAdmin ? () => setShowFallbackModelsDialog(true) : undefined}
       />
+      <CacheUsagePanel usageStats={usageStats} loading={usageLoading} error={usageLoadError} onRefresh={() => void loadUsage()} />
 
       {/* Main Content: Provider List + Detail Panel */}
-      <div className="flex gap-3 flex-1 overflow-hidden min-h-0">
+      <div className="flex gap-3 flex-1 overflow-hidden min-h-[18rem]">
         {/* Provider List */}
         <div className="w-64 flex-shrink-0 flex flex-col min-w-0">
           <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
@@ -760,7 +780,6 @@ function DashboardStrip({
 }) {
   const { t, i18n } = useTranslation('model');
   const totalTokens = usageStats?.summary?.total_tokens ?? 0;
-  const cacheUsage = useMemo(() => getCacheUsageSummary(usageStats), [usageStats]);
   const defaultCurrency = getDefaultDashboardCurrency(i18n.language);
   const [displayCurrency, setDisplayCurrency] = useState(defaultCurrency);
   const totalCost = useMemo(
@@ -773,7 +792,7 @@ function DashboardStrip({
   }, [i18n.language]);
 
   return (
-    <div className="grid grid-cols-2 gap-3 mb-4 lg:grid-cols-6">
+    <div className="grid shrink-0 grid-cols-2 gap-3 mb-4 lg:grid-cols-6">
       {/* Default Model Card */}
       <div className="rounded-lg border p-3 bg-purple-50 text-purple-700 border-purple-200">
         <div className="flex items-center justify-between mb-1 opacity-70">
@@ -816,28 +835,6 @@ function DashboardStrip({
         label={t('dashboard.totalTokens')}
         value={totalTokens > 0 ? formatTokenMillions(totalTokens) : t('dashboard.noUsage')}
         color="blue"
-        hint={cacheUsage.state === 'unreported'
-          ? t('dashboard.cacheUnreported')
-          : cacheUsage.state === 'legacy'
-            ? t('dashboard.cacheReadLegacy', { tokens: formatTokenCount(cacheUsage.cacheRead) })
-            : cacheUsage.state === 'reported'
-              ? cacheUsage.hitRate === null
-                ? t('dashboard.cacheRead', { tokens: formatTokenCount(cacheUsage.cacheRead) })
-                : t('dashboard.cacheHit', {
-                  tokens: formatTokenCount(cacheUsage.cacheRead),
-                  rate: formatCacheHitRate(cacheUsage.hitRate),
-                })
-              : undefined}
-        hintTitle={cacheUsage.state === 'unreported'
-          ? t('dashboard.cacheUnreportedHint')
-          : cacheUsage.state === 'legacy'
-            ? t('dashboard.cacheLegacyHint')
-            : cacheUsage.state === 'reported'
-              ? t('dashboard.cacheCoverageHint', {
-                reported: cacheUsage.reportedRequests,
-                total: cacheUsage.totalRequests,
-              })
-              : undefined}
       />
       <StatCard
         icon={<DollarSign className="w-5 h-5" />}

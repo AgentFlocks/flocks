@@ -47,6 +47,8 @@ import { useToast } from './Toast';
 import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
 import { getFileOperationDisplayName, redactToolInput, resolveToolPresentation } from './toolPresentation';
 import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
+import SessionCacheUsage from './SessionCacheUsage';
+import { areCacheUsageCallsEqual, getMessageCacheUsageCall, type CacheUsageCall } from '@/features/session-chat/cacheUsage';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
@@ -100,7 +102,13 @@ export {
 // Types
 // ============================================================================
 
-export type MergedMessage = Message & { _merged?: boolean };
+export type MergedMessage = Message & { _merged?: boolean; _cacheUsageCalls?: CacheUsageCall[] };
+
+function getChatCacheUsageCalls(message: MergedMessage): CacheUsageCall[] {
+  if (message._cacheUsageCalls) return message._cacheUsageCalls;
+  const call = getMessageCacheUsageCall(message);
+  return call ? [call] : [];
+}
 
 /**
  * Whether a permission request belongs in this chat: its own, or one from a
@@ -1189,21 +1197,24 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
     }
 
     const last = result[result.length - 1];
+    const cacheUsageCalls = getChatCacheUsageCalls(msg);
     if (
       last &&
       last.role === 'assistant' &&
       !getAgentSender(last.parts) &&
       last._merged &&
       last.finish !== 'summary' &&
+      last.parentID === msg.parentID &&
       !!last.compacted === !!msg.compacted
     ) {
       last.parts = [...last.parts, ...msg.parts];
+      last._cacheUsageCalls = [...(last._cacheUsageCalls || []), ...cacheUsageCalls];
       // The last constituent message owns the live state, including an unset
       // finish and the error that stopped the turn.
       last.finish = msg.finish;
       last.error = msg.error;
     } else {
-      result.push({ ...msg, parts: [...msg.parts], _merged: true });
+      result.push({ ...msg, parts: [...msg.parts], _merged: true, _cacheUsageCalls: cacheUsageCalls });
     }
   }
 
@@ -1468,6 +1479,7 @@ export function areChatTimelineItemsRenderEqual(
     if (prevMessage.agent !== nextMessage.agent) return false;
     if (prevMessage.timestamp !== nextMessage.timestamp) return false;
     if (prevMessage.compacted !== nextMessage.compacted) return false;
+    if (!areCacheUsageCallsEqual(getChatCacheUsageCalls(prevMessage), getChatCacheUsageCalls(nextMessage))) return false;
     if (!areChatMessagePartsRenderEqual(prevMessage.parts, nextMessage.parts)) return false;
   }
 
@@ -6310,6 +6322,8 @@ function ChatMessageBubbleInner({
       })()}
 
 
+      {!isUser && !sender && <SessionCacheUsage calls={getChatCacheUsageCalls(message)} isActive={isActive} />}
+
       {/* Actions — rendered inside bubble only while editing */}
       {showActions && parts.length > 0 && isEditing && (
         <div className={editingActionBarClass}>
@@ -7268,6 +7282,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.message.id !== next.message.id || prev.message.sessionID !== next.message.sessionID) return false;
   if (prev.message.timestamp !== next.message.timestamp) return false;
   if (prev.message.role !== next.message.role || prev.message.agent !== next.message.agent) return false;
+  if (!areCacheUsageCallsEqual(getChatCacheUsageCalls(prev.message), getChatCacheUsageCalls(next.message))) return false;
   const prevParts = prev.message.parts as any[] | undefined;
   const nextParts = next.message.parts as any[] | undefined;
   if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;

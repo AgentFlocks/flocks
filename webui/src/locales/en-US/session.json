@@ -184,6 +184,28 @@
     "incidentResponseSuggestion": "Help me handle a security incident: ransomware infection detected"
   },
   "chat": {
+    "cacheUsage": {
+      "summary": "Reply cache hit rate {{rate}}",
+      "coverage": "Reported {{reported}}/{{total}} records",
+      "updating": "Updating",
+      "unknownValue": "Unknown",
+      "formula": "Hit rate = cache-read tokens ÷ complete input tokens across reported records. Complete input includes uncached input, cache reads and cache writes, covering system prompts, conversation history and tool definitions.",
+      "totals": "Reported totals: {{read}} cache-read / {{input}} complete input tokens",
+      "partial": "Unreported records and historical records without a reporting flag are excluded from the hit rate. Unknown does not mean a cache miss.",
+      "call": "Record {{index}}",
+      "callRate": "Hit rate {{rate}}",
+      "unreported": "Provider did not report cache usage",
+      "legacy": "Cache reporting flag unavailable",
+      "uncachedInput": "Uncached input",
+      "recordedInput": "Recorded input",
+      "cacheRead": "Cache read",
+      "cacheWrite": "Cache write",
+      "promptTokens": "Complete input",
+      "output": "Output",
+      "reasoning": "Reasoning",
+      "messageID": "Message ID",
+      "scope": "Summarizes assistant-message records in this reply (tokens), weighted by input volume, not by averaging percentages. Child sessions and internal retries without separate records are excluded."
+    },
     "placeholder": "Ask Agent… (Enter to send, Shift+Enter for newline)",
     "placeholderCompacting": "Compacting context, please wait...",
     "placeholderStreaming": "AI is processing, please wait...",

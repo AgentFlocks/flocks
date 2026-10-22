@@ -107,6 +107,8 @@ export interface TokenUsage {
   cache?: {
     read: number;
     write: number;
+    /** False means unknown; null/absent identifies historical records. */
+    reported?: boolean | null;
   };
 }
 
