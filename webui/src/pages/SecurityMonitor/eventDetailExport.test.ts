@@ -66,6 +66,42 @@ const exportedAt = new Date("2026-10-21T02:00:00Z");
 const render = (value: EventDetailResponse) =>
   eventDetailMarkdown(value, "Asia/Shanghai", formatTime, exportedAt);
 
+it("exports the same concrete evidence gaps and keeps verbose audit boundaries only in JSON", () => {
+  const value = snapshot();
+  const gaps = [
+    "已有：告警和部分请求、响应。",
+    "还缺：上传正文。",
+    "还需：文件执行记录。",
+    "还需：跨主机登录记录。",
+  ];
+  value.overview!.gaps = gaps;
+  value.story = {
+    gaps: ["调查尚未形成最终结论。"],
+    boundaries: [
+      "未命中本地 SQL 可疑模式；attackState 与 attackResult 含义不同。",
+    ],
+  };
+  const report = render(value);
+  const section = report
+    .split("## 证据缺口与待跟进")[1]
+    .split("## 联动调查")[0];
+  for (const gap of gaps) expect(section).toContain(gap);
+  expect(report).not.toContain("调查尚未形成最终结论");
+  expect(report).not.toContain("未命中本地 SQL 可疑模式");
+  expect(
+    JSON.parse(eventDetailJson(value, "Asia/Shanghai", exportedAt)).detail.story
+      .boundaries,
+  ).toEqual(value.story.boundaries);
+});
+
+it("filters the old unknown-verdict placeholder while preserving concrete missing evidence", () => {
+  const value = snapshot();
+  value.overview!.gaps = ["调查尚未形成最终结论。", "缺少主机执行记录。"];
+  const report = render(value);
+  expect(report).not.toContain("调查尚未形成最终结论");
+  expect(report).toContain("缺少主机执行记录。");
+});
+
 it("exports the selected event with the concise timeline, evidence identity and completeness limits", () => {
   const value = snapshot();
   value.overview!.alert_timeline!.push({
@@ -118,6 +154,7 @@ it("uses retained historical evidence and does not attribute the current revisio
   value.event.handling_source = "xdr";
   value.overview!.recheck_state = "system_wait";
   value.overview!.recheck_reason = "告警查询服务暂不可用。";
+  value.overview!.gaps = ["当前补查尚无结果，不能替代此前风险事实。"];
   value.confirmed_story = {
     alert_timeline: [
       { id: "old", first_time: 10, end_time: 20, text: "此前确认的告警" },
@@ -128,6 +165,7 @@ it("uses retained historical evidence and does not attribute the current revisio
   expect(report).toContain("不代表新增活动已核查");
   expect(report).toContain("10 — 20 · 此前确认的告警");
   expect(report).toContain("此前确认的证据");
+  expect(report).not.toContain("当前补查尚无结果，不能替代此前风险事实。");
   expect(report).not.toContain("200 — 800");
   expect(report).not.toContain("主机查询可疑域名。");
   expect(report).not.toContain("取证版本：7");

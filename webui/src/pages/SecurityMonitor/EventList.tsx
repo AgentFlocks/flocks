@@ -466,17 +466,12 @@ function StoryDetails({
           <h3 className="text-sm font-semibold">证据缺口与待跟进</h3>
           <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-6">
             {[...new Set(gaps.map(readableEvidence).filter(Boolean))]
-              .slice(0, 3)
+              .slice(0, 4)
               .map((item, index) => (
                 <li key={index}>{item}</li>
               ))}
           </ul>
         </section>
-      )}
-      {strings(story.boundaries).length > 0 && (
-        <p className="text-xs leading-6 text-slate-500">
-          {strings(story.boundaries).join(" ")}
-        </p>
       )}
       {!retainedRisk &&
         !evidence.length &&

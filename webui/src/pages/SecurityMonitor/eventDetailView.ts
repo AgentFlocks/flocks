@@ -193,14 +193,22 @@ export function eventDetailView(detail: EventDetailResponse) {
     : currentEvidenceCards;
   const originalGaps = Array.isArray(overview.gaps)
     ? strings(overview.gaps)
-    : [...strings(story.gaps), ...strings(result.gaps)];
+    : Array.isArray(overview.missing_evidence)
+      ? strings(overview.missing_evidence)
+      : [...strings(story.gaps), ...strings(result.gaps)];
   const gaps = [
     ...new Set(
-      (retainedRisk ? strings(overview.missing_evidence) : originalGaps).filter(
-        (gap) =>
-          !confirmedRisk ||
-          !/调查尚未形成最终结论|尚未形成.*结论|调查未完成/.test(gap),
-      ),
+      (retainedRisk
+        ? [
+            ...(strings(overview.missing_evidence).length
+              ? strings(overview.findings)
+                  .slice(0, 1)
+                  .map((line) => `已有（此前核实）：${line}`)
+              : []),
+            ...strings(overview.missing_evidence),
+          ]
+        : [...originalGaps, ...strings(overview.missing_evidence)]
+      ).filter((gap) => !/调查尚未|尚未形成.*结论|调查未完成/.test(gap)),
     ),
   ];
   const recheckState = !eventEnded(detail.event)

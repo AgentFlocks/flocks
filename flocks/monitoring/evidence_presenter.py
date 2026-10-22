@@ -178,34 +178,46 @@ def _records(value, *, kind, fallback=(), context=None, identifiers=(), anchor=N
                                 allow_generic_alert_ids=allow_generic_alert_ids)
 
 
+def _entity(value):
+    """One address and a count; never invent pairings within aggregate lists."""
+    values = value if isinstance(value, list) else [value]
+    values = list(dict.fromkeys(_text(item, 45) for item in values if type(item) in (str, int) and str(item).strip()))
+    return (values[0] + (f' 等 {len(values)} 个 IP' if len(values) > 1 else '')) if values else ''
+
+
 def _summary(record, source, packets):
-    """Describe the alert's message; addresses and provenance stay in details."""
+    """Say who accessed what, keeping rule claims distinct from verified impact."""
+    src, dst = _entity(record.get('src_ip')), _entity(record.get('dst_ip'))
+    access = (f'{src} 访问 {dst}' if src and dst else f'源 IP 未提供的请求访问 {dst}' if dst
+              else f'{src} 发起访问（目的 IP 未提供）' if src else '')
     if any(_SQL.search(unquote(packet['text'])) for packet in packets if packet['field'].startswith('request')):
-        return '请求中包含 SQL 注入可疑语句。'
+        return (f'{access}，请求中包含 SQL 注入可疑语句。' if access
+                else '已取得的请求中包含 SQL 注入可疑语句。')
     name = re.sub(r'^(?:【[^】]*】|\[[^\]]*\])\s*', '', _text(record.get('name'), 100)).strip()
     lower = name.lower()
     if name:
+        action = ''
         if '随机域名' in name:
-            return '告警提示主机发起了大量随机域名的 DNS 查询。'
+            return f'告警显示：{src or "源 IP 未提供的主机"} 向 {dst or "地址未提供的 DNS 服务器"} 发起了大量随机域名的 DNS 查询。'
         if re.search(r'ba[ck].*(?:文件|访问)|\.bak', lower):
-            return '发现访问 .bak 备份文件的请求。' if 'bak' in lower else '发现访问备份或临时文件的请求。'
-        if 'druid' in lower and '未授权' in name:
-            return '发现疑似未授权访问 Druid 服务的请求。'
-        if '敏感文件访问' in name:
-            return '发现访问敏感文件的请求。'
-        if 'jetbrains' in lower and ('泄露' in name or 'idea' in lower):
-            return '发现疑似利用 JetBrains IDEA 信息泄露漏洞的请求。'
-        if 'ds_store' in lower:
-            return '发现访问 .DS_Store 目录信息文件的请求。'
-        if 'webshell' in lower and '扫描' in name:
-            return '发现扫描 Webshell 的请求。'
-        if '配置文件访问' in name:
-            return '发现访问服务器配置文件的请求。'
-        if 't3' in lower and ('weblogic' in lower or '协议' in name):
-            return '发现 WebLogic T3 协议连接。'
-        if '未授权' in name:
-            return f'告警提示疑似{name}。'
-        return f'告警提示：{name.rstrip("。 ")}。'
+            action = '请求访问 .bak 备份文件' if 'bak' in lower else '请求访问备份或临时文件'
+        elif 'druid' in lower and '未授权' in name:
+            action = '疑似未授权访问 Druid 服务'
+        elif '敏感文件访问' in name:
+            action = '请求访问敏感文件'
+        elif 'jetbrains' in lower and ('泄露' in name or 'idea' in lower):
+            action = '疑似利用 JetBrains IDEA 漏洞读取信息'
+        elif 'ds_store' in lower:
+            action = '请求读取 .DS_Store 目录信息文件'
+        elif 'webshell' in lower and '扫描' in name:
+            action = '疑似扫描 Webshell'
+        elif '配置文件访问' in name:
+            action = '请求读取服务器配置文件'
+        elif 't3' in lower and ('weblogic' in lower or '协议' in name):
+            action = '发起 WebLogic T3 协议连接'
+        if access:
+            return f'告警显示：{access}，{action}。' if action else f'{access}，触发「{name.rstrip("。 ")}」告警。'
+        return f'告警报告了「{name.rstrip("。 ")}」，未提供源 IP 和目的 IP。'
     return _unnamed_summary(record, packets)
 
 
@@ -222,15 +234,16 @@ def _unnamed_summary(record, packets):
     dns = bool(ports) and all(str(port) == '53' for port in ports)
     if record.get('domain') and dns:
         domains = record['domain'] if isinstance(record['domain'], list) else [record['domain']]
-        return (f'主机发起 DNS 查询，涉及 {len(domains)} 个域名。' if len(domains) > 1
-                else f'主机查询了域名「{_text(domains[0], 80)}」。')
+        src = _entity(record.get('src_ip')) or '源 IP 未提供的主机'
+        return (f'{src} 发起 DNS 查询，涉及 {len(domains)} 个域名。' if len(domains) > 1
+                else f'{src} 查询了域名「{_text(domains[0], 80)}」。')
     if record.get('url'):
-        return f'发现访问「{_text(record["url"], 90)}」的请求。'
+        src, dst = _entity(record.get('src_ip')), _entity(record.get('dst_ip'))
+        return (f'{src} 请求访问「{_text(record["url"], 90)}」' + (f'（目的 IP：{dst}）' if dst else '') + '。' if src
+                else f'来源记录了对「{_text(record["url"], 90)}」的访问请求（源 IP 未提供）。')
     if record.get('src_ip') and record.get('dst_ip'):
-        if isinstance(record['src_ip'], list) or isinstance(record['dst_ip'], list):
-            return '发现多台主机之间的网络访问记录。'
         tag = _text(record.get('intelligenceTag') or record.get('threatDefineName'), 60)
-        return f'主机 {_text(record["src_ip"], 45)} 访问 {_text(record["dst_ip"], 45)}' + (f'，目标被标记为「{tag}」' if tag else '') + '。'
+        return f'{_entity(record["src_ip"])} 访问 {_entity(record["dst_ip"])}' + (f'，目标被标记为「{tag}」' if tag else '') + '。'
     if record.get('x_forwarded_for'):
         return '记录了 X-Forwarded-For 请求头原值。'
     if record.get('domain'):

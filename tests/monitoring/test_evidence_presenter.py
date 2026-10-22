@@ -12,17 +12,20 @@ EVENT = {'id': 'incident-one', 'device': 'xdr-a', 'key': 'xdr-a:incident:inciden
 
 
 @pytest.mark.parametrize('name,expected', [
-    ('【HTTP转发定位】Bak后缀临时文件访问', '发现访问 .bak 备份文件的请求。'),
-    ('【HTTP转发定位】Bac后缀临时文件访问', '发现访问备份或临时文件的请求。'),
-    ('【HTTP转发定位】Druid未授权访问', '发现疑似未授权访问 Druid 服务的请求。'),
-    ('【HTTP转发定位】敏感文件访问', '发现访问敏感文件的请求。'),
-    ('【HTTP转发定位】DS_Store 信息泄露', '发现访问 .DS_Store 目录信息文件的请求。'),
+    ('【HTTP转发定位】Bak后缀临时文件访问', '请求访问 .bak 备份文件'),
+    ('【HTTP转发定位】Bac后缀临时文件访问', '请求访问备份或临时文件'),
+    ('【HTTP转发定位】Druid未授权访问', '疑似未授权访问 Druid 服务'),
+    ('【HTTP转发定位】敏感文件访问', '请求访问敏感文件'),
+    ('【HTTP转发定位】DS_Store 信息泄露', '请求读取 .DS_Store 目录信息文件'),
 ])
-def test_alert_summary_is_plain_language_without_aggregated_ips_or_success_claim(name, expected):
+def test_alert_summary_has_compact_subject_and_object_without_inventing_pairs_or_success(name, expected):
     row = {'alertId': 'alert-one', 'name': name, 'srcIp': [f'192.0.2.{n}' for n in range(20)],
            'dstIp': [f'198.51.100.{n}' for n in range(20)], 'dstPort': [80, 8080], 'attackResult': 1}
     card = evidence_cards(EVENT, [proof({'items': [row]})])[0]
-    assert card['summary'] == expected
+    assert expected in card['summary']
+    assert '192.0.2.0 等 20 个 IP 访问 198.51.100.0 等 20 个 IP' in card['summary']
+    assert '192.0.2.1、' not in card['summary']
+    assert not any(word in card['summary'] for word in ('成功', '每台', '分别'))
     assert card['alert_id'] == 'alert-one'
     assert len(field_values(card)['src_ip']) == 20
     assert field_values(card)['attack_result'] == 1
@@ -48,6 +51,22 @@ def test_dns_summary_explains_observation_without_inventing_c2_or_infection():
     assert 'random-14.biz' not in card['summary'] and 'random-14.biz' in json.dumps(card['fields'])
     assert card['time'] == 1791860390  # normalized alert time is source lastTime, not retrieval
     assert 'evidence-2' not in card['summary'] and 'incident-one' not in card['summary']
+
+
+def test_named_alert_summary_keeps_observed_source_separate_from_forwarded_header():
+    row = {'alertId': 'alert-one', 'name': 'FCKeditor漏洞利用', 'srcIp': '10.0.0.1',
+           'dstIp': '192.0.2.22', 'xForwardedFor': '198.51.100.8', 'attackResult': 1}
+    card = evidence_cards(EVENT, [proof({'items': [row]})])[0]
+    assert '10.0.0.1 访问 192.0.2.22' in card['summary']
+    assert 'FCKeditor漏洞利用' in card['summary'] and '触发' in card['summary']
+    assert '198.51.100.8' not in card['summary'] and '成功' not in card['summary']
+    row.pop('srcIp')
+    card = evidence_cards(EVENT, [proof({'items': [row]})])[0]
+    assert '源 IP 未提供' in card['summary'] and '198.51.100.8' not in card['summary']
+    row.update(srcIp='10.0.0.1', url='/upload')
+    row.pop('name')
+    card = evidence_cards(EVENT, [proof({'items': [row]})])[0]
+    assert '10.0.0.1 请求访问「/upload」' in card['summary'] and '目的 IP：192.0.2.22' in card['summary']
 
 
 def test_cross_device_record_explains_real_intelligence_and_candidate_boundary():
@@ -152,8 +171,7 @@ def test_one_alert_combines_parent_network_url_packets_file_and_process_facts():
     assert 'event_id' not in fields
     assert len(card['packets']) == 2 and len(card['records']) == 1
     assert card['raw'] == row
-    assert card['summary'] == '请求中包含 SQL 注入可疑语句。'
-    assert '10.0.0.1' not in card['summary'] and '192.0.2.22' not in card['summary']
+    assert card['summary'] == '10.0.0.1 访问 192.0.2.22，请求中包含 SQL 注入可疑语句。'
     assert '不能' not in card['summary'] and '提供' not in card['summary']
 
 

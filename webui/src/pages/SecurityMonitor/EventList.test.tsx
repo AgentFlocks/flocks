@@ -1827,6 +1827,42 @@ it("retains confirmed risk findings while separating a failed recheck and concre
   ).not.toBeInTheDocument();
 });
 
+it("shows available evidence and concrete missing proof without a standalone generic SQL warning", async () => {
+  const gaps = [
+    "已有：告警记录、访问 IP、请求头、响应正文。",
+    "还缺：FCKeditor 告警的上传正文。",
+    "还需：Webshell 文件的落地和执行记录。",
+    "还需：跨主机的登录或远程执行记录。",
+  ];
+  vi.mocked(monitoringEventsApi.detail).mockResolvedValue(
+    detail({
+      overview: {
+        summary: "已取得访问记录，尚未确认实际影响。",
+        gaps,
+        missing_evidence: gaps.slice(1),
+      },
+      story: {
+        gaps: ["调查尚未形成最终结论。"],
+        boundaries: [
+          "未命中本地 SQL 可疑模式；attackState 与 attackResult 含义不同。",
+        ],
+      },
+    }) as never,
+  );
+  renderPage();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+  );
+  const heading = await screen.findByRole("heading", {
+    name: "证据缺口与待跟进",
+  });
+  const section = heading.closest("section")!;
+  for (const gap of gaps)
+    expect(within(section).getByText(gap)).toBeInTheDocument();
+  expect(screen.queryByText(/未命中本地 SQL 可疑模式/)).not.toBeInTheDocument();
+  expect(screen.queryByText("调查尚未形成最终结论。")).not.toBeInTheDocument();
+});
+
 it.each(["member", "row"] as const)(
   "labels retained risk rechecks separately from a new unknown investigation (%s flag)",
   async (flagSource) => {

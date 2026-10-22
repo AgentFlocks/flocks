@@ -237,11 +237,9 @@ export function eventDetailMarkdown(
       "## 证据缺口与待跟进",
       "",
       ...Array.from(new Set(view.gaps.map(readableEvidence).filter(Boolean)))
-        .slice(0, 3)
+        .slice(0, 4)
         .map((gap) => `- ${markdown(gap)}`),
     );
-  if (Array.isArray(view.story.boundaries))
-    lines.push("", ...view.story.boundaries.map((item) => markdown(item)));
   lines.push("", "## 联动调查", "");
   if (!view.correlationGroups.length) lines.push("尚无联动查询记录。");
   for (const group of view.correlationGroups) {

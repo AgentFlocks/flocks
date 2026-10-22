@@ -31,7 +31,7 @@ def test_failed_investigation_shows_actual_access_and_missing_payload_response()
     result, assessment = render(event, case)
     assert '命令注入攻击' in result['summary']
     assert any('命令注入攻击' in line for line in result['findings'])
-    assert '192.0.2.73' not in str(result['findings'])
+    assert '192.0.2.73 等 2 个 IP 访问 192.0.2.23' in str(result['findings'])
     assert any('攻击请求' in line for line in result['missing_evidence'])
     assert any('服务端响应' in line for line in result['missing_evidence'])
     assert assessment['verdict'] == 'unknown' and not assessment['notify_eligible']
@@ -106,7 +106,7 @@ def test_candidate_request_keeps_its_correlation_boundary():
     result, _ = render(event, case)
     assert result['findings'][0].startswith('候选关联：')
     assert '命令注入攻击' in result['findings'][0]
-    assert any('实际攻击请求' in line for line in result['missing_evidence'])
+    assert any('攻击请求' in line for line in result['missing_evidence'])
     assert any('服务端响应' in line for line in result['missing_evidence'])
 
 
@@ -146,3 +146,48 @@ def test_confirmed_risk_reports_specific_supplementary_gaps_without_retracting_v
     result = operator_overview(event, case, {'verdict': 'risk'}, {}, [])
     assert result['summary'] == '已确认存在异常上传风险。'
     assert result['missing_evidence'] == ['主机侧缺少后续执行记录。']
+
+
+def test_webshell_gaps_distinguish_empty_upload_from_real_response_in_another_alert():
+    event, case = example()
+    event['name'] = '主机存在r57 Webshell访问，同时发现横向移动行为'
+    case['evidence'][0]['event_revision'] = fingerprint(event)
+    case['evidence'][0]['facts'] = {'items': [
+        {'alertId': 'upload', 'name': 'FCKeditor漏洞利用', 'srcIp': '192.0.2.73', 'dstIp': '192.0.2.23',
+         'requestHead': 'POST /upload HTTP/1.1', 'requestBody': '', 'responseBody': '', 'responseHead': ''},
+        {'alertId': 'traversal', 'name': 'WebLogic目录遍历', 'srcIp': '192.0.2.77', 'dstIp': '192.0.2.23',
+         'requestHead': 'GET /WEB-INF/web.xml HTTP/1.1', 'requestBody': '',
+         'responseHead': 'HTTP/1.1 200 OK', 'responseBody': '<web-app><display-name>example</display-name></web-app>'},
+    ]}
+    result, assessment = render(event, case)
+    gaps = ' '.join(result['gaps'])
+    assert result['gaps'][0].startswith('已有：') and '响应正文' in result['gaps'][0]
+    assert '请求正文' not in result['gaps'][0]
+    assert 'FCKeditor漏洞利用告警的请求正文' in gaps
+    assert 'WebLogic目录遍历告警的完整请求' not in gaps  # GET needs no upload body
+    assert 'Webshell 文件的落地和执行记录' in gaps and '跨主机的登录或远程执行记录' in gaps
+    assert '还缺：服务端响应' not in gaps and '调查尚未' not in gaps
+    assert not assessment['notify_eligible']  # Presentation cannot upgrade source labels or HTTP 200.
+
+
+@pytest.mark.parametrize('empty', ['', '（来源明确返回空正文）', '（正文为空，来源明确返回）'])
+def test_empty_packet_markers_are_not_counted_as_request_or_response_content(empty):
+    event, case = example()
+    case['evidence'][0]['facts']['data']['item'][0].update(requestBody=empty, responseBody=empty)
+    result, _ = render(event, case)
+    assert '请求正文' not in result['gaps'][0] and '响应正文' not in result['gaps'][0]
+    assert any('完整的攻击请求' in line for line in result['gaps'])
+    assert any('服务端响应' in line for line in result['gaps'])
+
+
+def test_sql_specific_limits_are_short_and_stay_in_the_evidence_gap_projection():
+    event, case = example()
+    event['name'] = 'SQL注入攻击'
+    case['evidence'][0]['event_revision'] = fingerprint(event)
+    row = case['evidence'][0]['facts']['data']['item'][0]
+    row.update(name='SQL注入', requestHead='GET /search?q=ordinary HTTP/1.1', responseHead='HTTP/1.1 200 OK')
+    result, assessment = render(event, case)
+    assert any('数据库执行记录' in line for line in result['gaps'])
+    assert any('状态码不能说明攻击是否成功' in line for line in result['gaps'])
+    assert all('attackState' not in line and '本地 SQL 可疑模式' not in line for line in result['gaps'])
+    assert assessment['verdict'] == 'unknown'
