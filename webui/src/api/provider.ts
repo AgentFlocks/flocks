@@ -99,43 +99,43 @@ export const providerAPI = {
     client.get<{ all: ProviderInfoV2[]; default: Record<string, string>; connected: string[] }>('/api/provider'),
 
   get: (id: string) =>
-    client.get<ProviderInfoV2>(`/api/provider/${id}`),
+    client.get<ProviderInfoV2>(`/api/provider/${encodeURIComponent(id)}`),
 
   getModels: (id: string) =>
-    client.get<any[]>(`/api/provider/${id}/models`),
+    client.get<any[]>(`/api/provider/${encodeURIComponent(id)}/models`),
 
   update: (id: string, data: {
     api_key?: string;
     base_url?: string;
     custom_settings?: Record<string, any>;
   }) =>
-    client.put(`/api/provider/${id}`, data),
+    client.put(`/api/provider/${encodeURIComponent(id)}`, data),
 
   test: (id: string) =>
-    client.post(`/api/provider/${id}/test`),
+    client.post(`/api/provider/${encodeURIComponent(id)}/test`),
 
   getStatistics: (id: string) =>
-    client.get(`/api/provider/${id}/statistics`),
+    client.get(`/api/provider/${encodeURIComponent(id)}/statistics`),
 
   // Credentials management (LLM providers — uses _llm_key convention)
   getCredentials: (id: string) =>
-    client.get<ProviderCredentials>(`/api/provider/${id}/credentials`),
+    client.get<ProviderCredentials>(`/api/provider/${encodeURIComponent(id)}/credentials`),
 
   revealCredentials: (id: string) =>
-    client.post<ProviderCredentials>(`/api/provider/${id}/credentials/reveal`),
+    client.post<ProviderCredentials>(`/api/provider/${encodeURIComponent(id)}/credentials/reveal`),
 
   setCredentials: (id: string, credentials: ProviderCredentialInput) =>
-    client.post<{ success: boolean; message: string }>(`/api/provider/${id}/credentials`, credentials),
+    client.post<{ success: boolean; message: string }>(`/api/provider/${encodeURIComponent(id)}/credentials`, credentials),
 
   // Credentials management (API services — uses _api_key convention)
   getServiceCredentials: (id: string) =>
-    client.get<ProviderCredentials>(`/api/provider/${id}/service-credentials`),
+    client.get<ProviderCredentials>(`/api/provider/${encodeURIComponent(id)}/service-credentials`),
 
   revealServiceCredentials: (id: string) =>
-    client.post<ProviderCredentials>(`/api/provider/${id}/service-credentials/reveal`),
+    client.post<ProviderCredentials>(`/api/provider/${encodeURIComponent(id)}/service-credentials/reveal`),
 
   setServiceCredentials: (id: string, credentials: ProviderCredentialInput) =>
-    client.post<{ success: boolean; message: string }>(`/api/provider/${id}/service-credentials`, credentials)
+    client.post<{ success: boolean; message: string }>(`/api/provider/${encodeURIComponent(id)}/service-credentials`, credentials)
       .then((response) => {
         invalidateApiServicesListCache();
         return response;
@@ -144,7 +144,7 @@ export const providerAPI = {
   configureServiceCredentials: (id: string, credentials: ProviderCredentialInput) =>
     client.post<{
       success: boolean; message: string; latency_ms?: number; error?: string;
-    }>(`/api/provider/${id}/service-credentials/configure`, credentials)
+    }>(`/api/provider/${encodeURIComponent(id)}/service-credentials/configure`, credentials)
       .then((response) => {
         if (response.data.success) {
           invalidateApiServicesListCache();
@@ -153,7 +153,7 @@ export const providerAPI = {
       }),
 
   deleteCredentials: (id: string) =>
-    client.delete<{ success: boolean }>(`/api/provider/${id}/credentials`),
+    client.delete<{ success: boolean }>(`/api/provider/${encodeURIComponent(id)}/credentials`),
 
   testCredentials: (id: string, modelId?: string) =>
     client.post<{
@@ -161,7 +161,7 @@ export const providerAPI = {
       model_count?: number; error?: string;
       model_id?: string; question?: string; answer?: string;
     }>(
-      `/api/provider/${id}/test-credentials`,
+      `/api/provider/${encodeURIComponent(id)}/test-credentials`,
       modelId ? { model_id: modelId } : {}
     ),
 
@@ -170,17 +170,17 @@ export const providerAPI = {
     listApiServicesCached(options),
 
   getServiceMetadata: (id: string) =>
-    client.get<APIServiceMetadata>(`/api/provider/${id}/metadata`),
+    client.get<APIServiceMetadata>(`/api/provider/${encodeURIComponent(id)}/metadata`),
 
   updateApiService: (id: string, data: { enabled?: boolean; verify_ssl?: boolean; group?: string | null }) =>
-    client.patch<APIServiceSummary>(`/api/provider/api-services/${id}`, data)
+    client.patch<APIServiceSummary>(`/api/provider/api-services/${encodeURIComponent(id)}`, data)
       .then((response) => {
         invalidateApiServicesListCache();
         return response;
       }),
 
   deleteApiService: (id: string) =>
-    client.delete<{ success: boolean }>(`/api/provider/api-services/${id}`)
+    client.delete<{ success: boolean }>(`/api/provider/api-services/${encodeURIComponent(id)}`)
       .then((response) => {
         invalidateApiServicesListCache();
         return response;
@@ -201,12 +201,12 @@ export const providerAPI = {
 
   getApiServiceStatus: (id: string) =>
     client.get<{ status: string; message?: string; latency_ms?: number; tool_tested?: string; error?: string; checked_at?: number }>(
-      `/api/provider/${id}/status`
+      `/api/provider/${encodeURIComponent(id)}/status`
     ),
 
   // API service metadata
   getMetadata: (id: string) =>
-    client.get<APIServiceMetadata>(`/api/provider/${id}/metadata`),
+    client.get<APIServiceMetadata>(`/api/provider/${encodeURIComponent(id)}/metadata`),
 };
 
 // ==================== Provider Catalog API ====================
@@ -234,15 +234,15 @@ export const modelV2API = {
 
   /** Get single model definition */
   getDefinition: (providerId: string, modelId: string) =>
-    client.get<ModelDefinitionV2>(`/api/model/v2/definitions/${providerId}/${modelId}`),
+    client.get<ModelDefinitionV2>(`/api/model/v2/definitions/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}`),
 
   /** Create or update a model definition (upsert) */
   createDefinition: (providerId: string, data: CustomModelCreate) =>
-    client.post<CustomModelInfo>(`/api/custom/models/${providerId}`, data),
+    client.post<CustomModelInfo>(`/api/custom/models/${encodeURIComponent(providerId)}`, data),
 
   /** Delete model definition */
   deleteDefinition: (providerId: string, modelId: string) =>
-    client.delete(`/api/model/v2/definitions/${providerId}/${modelId}`),
+    client.delete(`/api/model/v2/definitions/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}`),
 };
 
 // ==================== Default Model API ====================
@@ -254,7 +254,7 @@ export const defaultModelAPI = {
 
   /** Get default model for a type */
   get: (modelType: string) =>
-    client.get<DefaultModelConfig>(`/api/default-model/${modelType}`),
+    client.get<DefaultModelConfig>(`/api/default-model/${encodeURIComponent(modelType)}`),
 
   /**
    * Get the resolved default LLM model.
@@ -265,14 +265,14 @@ export const defaultModelAPI = {
 
   /** Set default model for a type */
   set: (modelType: string, providerId: string, modelId: string) =>
-    client.put<DefaultModelConfig>(`/api/default-model/${modelType}`, {
+    client.put<DefaultModelConfig>(`/api/default-model/${encodeURIComponent(modelType)}`, {
       provider_id: providerId,
       model_id: modelId,
     }),
 
   /** Delete default model for a type */
   delete: (modelType: string) =>
-    client.delete(`/api/default-model/${modelType}`),
+    client.delete(`/api/default-model/${encodeURIComponent(modelType)}`),
 
   /** Get the ordered runtime fallback chain used by WebUI Auto sessions. */
   getFallbacks: () =>
@@ -307,19 +307,19 @@ export const customAPI = {
 
   /** Delete custom provider */
   deleteProvider: (id: string) =>
-    client.delete(`/api/custom/providers/${id}`),
+    client.delete(`/api/custom/providers/${encodeURIComponent(id)}`),
 
   /** List custom models for provider */
   listModels: (providerId: string) =>
-    client.get<CustomModelInfo[]>(`/api/custom/models/${providerId}`),
+    client.get<CustomModelInfo[]>(`/api/custom/models/${encodeURIComponent(providerId)}`),
 
   /** Add custom model to provider */
   createModel: (providerId: string, data: CustomModelCreate) =>
-    client.post<CustomModelInfo>(`/api/custom/models/${providerId}`, data),
+    client.post<CustomModelInfo>(`/api/custom/models/${encodeURIComponent(providerId)}`, data),
 
   /** Delete custom model */
   deleteModel: (providerId: string, modelId: string) =>
-    client.delete(`/api/custom/models/${providerId}/${modelId}`),
+    client.delete(`/api/custom/models/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}`),
 };
 
 // ==================== Model Settings API ====================
@@ -327,11 +327,11 @@ export const customAPI = {
 export const modelSettingsAPI = {
   /** Get model settings */
   get: (providerId: string, modelId: string) =>
-    client.get<ModelSettingV2>(`/api/model/v2/settings/${providerId}/${modelId}`),
+    client.get<ModelSettingV2>(`/api/model/v2/settings/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}`),
 
   /** Update model settings (enable/disable, parameters) */
   update: (providerId: string, modelId: string, data: { enabled?: boolean; default_parameters?: Record<string, any> }) =>
-    client.put<ModelSettingV2>(`/api/model/v2/settings/${providerId}/${modelId}`, data),
+    client.put<ModelSettingV2>(`/api/model/v2/settings/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}`, data),
 };
 
 // ==================== Provider Category Helpers ====================

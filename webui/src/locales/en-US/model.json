@@ -197,7 +197,7 @@
     "truncated": "Only part of the model list is shown. Other models can be added manually.",
     "metadataHint": "A successful fetch does not confirm access to every model. Capabilities, pricing and context limits omitted by the service remain unconfirmed; edit and test after importing.",
     "search": "Search model name or ID",
-    "pending": "{{count}} models pending save",
+    "pending": "{{count}} models to add",
     "selected": "{{count}} models selected",
     "selectVisible": "Select filtered results",
     "deselectVisible": "Deselect filtered results",
@@ -241,6 +241,41 @@
       "response_too_large": "The service response is too large. Reduce the returned list or add models manually.",
       "redirect_not_allowed": "The service returned a redirect. To protect credentials, it was not followed. Enter the final service URL and retry."
     },
-    "reviewSelection": "Review fetched models"
+    "reviewSelection": "Review fetched models",
+    "invertVisible": "Invert filtered selection"
+  },
+  "configuration": {
+    "proxyUrl": "API proxy URL",
+    "models": "Models",
+    "modelCount": "{{enabled}} / {{total}} enabled",
+    "manageHint": "Model edits, deletions and switches apply immediately. Credentials and models to add apply when saved.",
+    "addModel": "Add manually",
+    "editModel": "Edit model {{model}}",
+    "deleteModel": "Delete model {{model}}",
+    "enableModel": "Enable model {{model}}",
+    "disableModel": "Disable model {{model}}",
+    "emptyModels": "No models added yet. Fetch a model list or add one manually.",
+    "defaultModel": "Default",
+    "refreshingModels": "Refreshing models…",
+    "settingsLoadFailed": "Model settings could not be loaded. Retry before saving; the existing configuration has been preserved.",
+    "retry": "Retry",
+    "provider": "Provider",
+    "providerName": "Provider name"
+  },
+  "connection": {
+    "title": "Check connection",
+    "description": "Send a model request to check the API key and proxy URL.",
+    "check": "Check",
+    "retry": "Retry",
+    "checking": "Checking…",
+    "saveAndCheck": "Save credentials and check",
+    "saveAndCheckHint": "This saves the current credentials and proxy URL before checking. Fetching models does not save credentials.",
+    "notChecked": "Not checked",
+    "success": "Connected",
+    "failure": "Connection failed",
+    "noModel": "Add a model first to check whether requests work.",
+    "testModel": "Test model",
+    "addBeforeCheck": "Fetch and select a model, or enter a deployment name, before saving and checking.",
+    "saveAndCheckNewHint": "This saves the credentials and selected models before checking. Fetching models does not save credentials."
   }
 }

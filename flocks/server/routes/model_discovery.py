@@ -59,6 +59,15 @@ class ProviderUpdatedProperties(BaseModel):
 ProviderUpdated = BusEvent.define("provider.updated", ProviderUpdatedProperties)
 
 
+async def publish_provider_updated(provider_id: str) -> None:
+    """Notify internal subscribers and authenticated browser SSE clients."""
+    from flocks.server.routes.event import publish_event
+
+    properties = {"provider_id": provider_id}
+    await Bus.publish(ProviderUpdated, properties)
+    await publish_event("provider.updated", properties)
+
+
 @router.post("/{provider_id}/discover-models")
 async def discover_provider_models(
     provider_id: str,
@@ -113,5 +122,5 @@ async def import_provider_models(
         provider = Provider._providers.get(provider_id)
         if provider is not None and hasattr(provider, "_custom_models"):
             provider._custom_models = list(provider._config_models)
-        await Bus.publish(ProviderUpdated, {"provider_id": provider_id})
+        await publish_provider_updated(provider_id)
     return {"added": added, "skipped": skipped, "failed": []}

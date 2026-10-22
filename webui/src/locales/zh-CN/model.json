@@ -197,7 +197,7 @@
     "truncated": "结果较多，当前仅展示部分模型；其余模型可手动添加。",
     "metadataHint": "获取成功不代表每个模型均可调用。接口未提供的能力、价格和上下文信息尚未确认，可在导入后编辑并测试。",
     "search": "搜索模型名称或 ID",
-    "pending": "待保存新增 {{count}} 个",
+    "pending": "待新增 {{count}} 个模型",
     "selected": "已选择 {{count}} 个",
     "selectVisible": "全选筛选结果",
     "deselectVisible": "取消选择筛选结果",
@@ -241,6 +241,41 @@
       "response_too_large": "服务返回内容过大，请缩小返回范围或手动添加。",
       "redirect_not_allowed": "服务返回了重定向，为保护凭据未自动跳转。请填写最终服务地址后重试。"
     },
-    "reviewSelection": "查看获取结果"
+    "reviewSelection": "查看获取结果",
+    "invertVisible": "反选筛选结果"
+  },
+  "configuration": {
+    "proxyUrl": "API 代理 URL",
+    "models": "模型列表",
+    "modelCount": "{{enabled}} / {{total}} 个已启用",
+    "manageHint": "编辑、删除和启停立即生效；凭据和待新增模型仅在保存时应用。",
+    "addModel": "手工新增",
+    "editModel": "编辑模型 {{model}}",
+    "deleteModel": "删除模型 {{model}}",
+    "enableModel": "启用模型 {{model}}",
+    "disableModel": "停用模型 {{model}}",
+    "emptyModels": "尚未添加模型，可获取模型列表或手工新增。",
+    "defaultModel": "默认",
+    "refreshingModels": "正在刷新模型…",
+    "settingsLoadFailed": "模型设置加载失败，重新加载前无法保存，现有配置保持不变。",
+    "retry": "重试",
+    "provider": "模型供应商",
+    "providerName": "供应商名称"
+  },
+  "connection": {
+    "title": "检查连接",
+    "description": "发送真实模型请求，检查 API 密钥和代理地址是否有效。",
+    "check": "检查",
+    "retry": "重试",
+    "checking": "正在检查…",
+    "saveAndCheck": "保存凭据并检查",
+    "saveAndCheckHint": "检查前将保存当前凭据和代理地址。获取模型不会保存凭据。",
+    "notChecked": "尚未检查",
+    "success": "连接正常",
+    "failure": "连接失败",
+    "noModel": "请先添加模型，再检查真实调用是否可用。",
+    "testModel": "测试模型",
+    "addBeforeCheck": "请先获取并选择模型，或填写实际部署名称，再保存并检查。",
+    "saveAndCheckNewHint": "将保存当前凭据及所选模型后检查。获取模型不会保存凭据。"
   }
 }

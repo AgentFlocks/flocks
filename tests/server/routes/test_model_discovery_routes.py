@@ -426,3 +426,32 @@ async def test_new_provider_credentials_preserve_legacy_or_explicit_selection_mo
     else:
         assert set(provider["models"]) == {model.id for model in get_provider_model_definitions("openai")}
         assert provider.get("model_sync") != "manual"
+
+
+@pytest.mark.asyncio
+async def test_import_notifies_real_sse_subscribers_with_provider_identity_only(
+    inventory, inventory_client, monkeypatch
+):
+    from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, reset_current_auth_user, set_current_auth_user
+    from flocks.server.routes.event import EventBroadcaster
+
+    broadcaster = EventBroadcaster()
+    monkeypatch.setattr(EventBroadcaster, "_instance", broadcaster)
+    admin = AuthUser(id="browser-admin", username="admin", role="admin")
+    member = AuthUser(id="browser-member", username="member", role="member")
+    admin_queue = await broadcaster.subscribe(admin)
+    member_queue = await broadcaster.subscribe(member)
+    token = set_current_auth_user(AuthUser(id=API_TOKEN_SERVICE_USER_ID, username="api-service", role="admin"))
+    try:
+        response = await inventory_client.post(
+            "/api/provider/custom-inventory/import-models",
+            json={"models": [{"id": "sse-new-model", "name": "SSE New Model"}]},
+        )
+    finally:
+        reset_current_auth_user(token)
+
+    assert response.status_code == 200, response.text
+    assert admin_queue.get_nowait() == {"type": "provider.updated", "properties": {"provider_id": "custom-inventory"}}
+    assert admin_queue.empty()
+    assert member_queue.empty()
+    inventory.publish.assert_awaited_once()

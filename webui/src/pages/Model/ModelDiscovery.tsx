@@ -31,6 +31,8 @@ interface ModelDiscoveryProps {
   mode: 'stage' | 'import';
   /** A new custom instance has its own model namespace, unlike its catalog type. */
   newInstance?: boolean;
+  /** When supplied, this inventory supersedes discovery's older already_added flags. */
+  existingModelIds?: string[];
   disabled?: boolean;
   onUsed?: () => void;
   onSelectionChange?: (models: DiscoveredModel[]) => void;
@@ -38,7 +40,7 @@ interface ModelDiscoveryProps {
 }
 
 /** Discovery is read-only. Staged selections are applied only by the owning form. */
-export default function ModelDiscovery({ providerId, credentials, mode, newInstance = false, disabled, onUsed, onSelectionChange, onImported }: ModelDiscoveryProps) {
+export default function ModelDiscovery({ providerId, credentials, mode, newInstance = false, existingModelIds, disabled, onUsed, onSelectionChange, onImported }: ModelDiscoveryProps) {
   const { t, i18n } = useTranslation('model');
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -47,6 +49,7 @@ export default function ModelDiscovery({ providerId, credentials, mode, newInsta
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmedImports, setConfirmedImports] = useState<{ inventoryKey: string | undefined; ids: Set<string> } | null>(null);
   const [importResult, setImportResult] = useState<ModelImportResult | null>(null);
   const requestVersion = useRef(0);
   const busy = useRef(false);
@@ -54,6 +57,11 @@ export default function ModelDiscovery({ providerId, credentials, mode, newInsta
   callbacks.current = { onUsed, onSelectionChange, onImported };
   const apiKey = credentials?.api_key;
   const baseUrl = credentials?.base_url;
+  // Compare membership rather than array identity: parent renders can allocate
+  // the same inventory again before their refresh after an import completes.
+  const existingModelKey = existingModelIds === undefined ? undefined : JSON.stringify([...new Set(existingModelIds)].sort());
+  const inventoryKeyRef = useRef(existingModelKey);
+  inventoryKeyRef.current = existingModelKey;
 
   // A response and its selection are valid only for the exact input used to fetch it.
   useEffect(() => {
@@ -66,15 +74,39 @@ export default function ModelDiscovery({ providerId, credentials, mode, newInsta
     setError(null);
     setQuery('');
     setSelected(new Set());
+    setConfirmedImports(null);
     setImportResult(null);
     callbacks.current.onSelectionChange?.([]);
     return () => { requestVersion.current += 1; };
   }, [providerId, apiKey, baseUrl, newInstance]);
 
-  const publishSelection = (next: Set<string>, models = result?.models ?? []) => {
-    setSelected(next);
-    callbacks.current.onSelectionChange?.(models.filter(model => next.has(model.id) && model.selectable && !model.already_added));
-  };
+  // An import acknowledgement remains visible immediately while the parent
+  // refreshes. The next changed inventory then becomes authoritative again.
+  useEffect(() => {
+    setConfirmedImports(previous => previous && previous.inventoryKey !== existingModelKey ? null : previous);
+  }, [existingModelKey]);
+
+  const models = useMemo(() => {
+    const existingIds = existingModelKey === undefined ? null : new Set<string>(JSON.parse(existingModelKey));
+    return (result?.models ?? []).map(model => ({
+      ...model,
+      already_added: (!newInstance && (existingIds ? existingIds.has(model.id) : model.already_added))
+        || !!(confirmedImports?.inventoryKey === existingModelKey && confirmedImports?.ids.has(model.id)),
+    }));
+  }, [result, newInstance, existingModelKey, confirmedImports]);
+  const selectedModels = useMemo(
+    () => models.filter(model => selected.has(model.id) && model.selectable && !model.already_added),
+    [models, selected],
+  );
+
+  useEffect(() => {
+    callbacks.current.onSelectionChange?.(selectedModels);
+    // Once a model enters the inventory, forget any pending selection so a
+    // later external deletion makes it an unchecked, addable candidate.
+    setSelected(previous => previous.size === selectedModels.length && selectedModels.every(model => previous.has(model.id))
+      ? previous
+      : new Set(selectedModels.map(model => model.id)));
+  }, [selectedModels]);
 
   const fetchModels = async () => {
     if (busy.current || disabled) return;
@@ -84,14 +116,15 @@ export default function ModelDiscovery({ providerId, credentials, mode, newInsta
     setError(null);
     setResult(null);
     setImportResult(null);
-    publishSelection(new Set());
+    setSelected(new Set());
+    setConfirmedImports(null);
     busy.current = true;
     const version = ++requestVersion.current;
     try {
       const response = await providerAPI.discoverModels(providerId, credentials);
       if (version !== requestVersion.current) return;
       // Deduplicate the view without changing provider-specific IDs.
-      const models = [...new Map(response.data.models.map(model => [model.id, newInstance ? { ...model, already_added: false } : model])).values()];
+      const models = [...new Map(response.data.models.map(model => [model.id, model])).values()];
       setResult({ ...response.data, models });
     } catch (fetchError) {
       if (version === requestVersion.current) setError(extractErrorMessage(fetchError));
@@ -105,12 +138,20 @@ export default function ModelDiscovery({ providerId, credentials, mode, newInsta
 
   const visibleModels = useMemo(() => {
     const search = query.trim().toLowerCase();
-    return (result?.models ?? []).filter(model => !search || model.id.toLowerCase().includes(search) || model.name.toLowerCase().includes(search));
-  }, [query, result]);
+    return models.filter(model => !search || model.id.toLowerCase().includes(search) || model.name.toLowerCase().includes(search));
+  }, [query, models]);
   const eligibleVisible = visibleModels.filter(model => model.selectable && !model.already_added);
-  const allVisibleSelected = eligibleVisible.length > 0 && eligibleVisible.every(model => selected.has(model.id));
-  const selectedModels = (result?.models ?? []).filter(model => selected.has(model.id) && model.selectable && !model.already_added);
-  const allAdded = !!result?.models.length && result.models.every(model => model.already_added);
+  const checkedCount = models.filter(model => model.already_added || model.selectable && selected.has(model.id)).length;
+  const allAdded = models.length > 0 && models.every(model => model.already_added);
+
+  const selectVisible = (operation: 'all' | 'invert' | 'none') => {
+    const next = new Set(selected);
+    eligibleVisible.forEach(model => {
+      if (operation === 'none' || operation === 'invert' && next.has(model.id)) next.delete(model.id);
+      else next.add(model.id);
+    });
+    setSelected(next);
+  };
 
   const importModels = async () => {
     if (busy.current || disabled || !selectedModels.length) return;
@@ -124,7 +165,11 @@ export default function ModelDiscovery({ providerId, credentials, mode, newInsta
       setImportResult(response.data);
       const added = new Set([...response.data.added, ...response.data.skipped]);
       setResult(previous => previous ? { ...previous, models: previous.models.map(model => added.has(model.id) ? { ...model, already_added: true } : model) } : previous);
-      publishSelection(new Set(selectedModels.filter(model => !added.has(model.id)).map(model => model.id)));
+      setConfirmedImports(previous => ({
+        inventoryKey: inventoryKeyRef.current,
+        ids: new Set([...(previous && previous.inventoryKey === inventoryKeyRef.current ? previous.ids : []), ...added]),
+      }));
+      setSelected(new Set(selectedModels.filter(model => !added.has(model.id)).map(model => model.id)));
       callbacks.current.onImported?.();
     } catch (importError) {
       if (version === requestVersion.current) setError(extractErrorMessage(importError));
@@ -146,7 +191,7 @@ export default function ModelDiscovery({ providerId, credentials, mode, newInsta
     // Folding a form section must not discard a model selection pending save.
     if (mode === 'import') {
       setResult(null);
-      publishSelection(new Set());
+      setSelected(new Set());
     }
   };
 
@@ -158,7 +203,12 @@ export default function ModelDiscovery({ providerId, credentials, mode, newInsta
           {loading ? t('discovery.loading') : open ? t('discovery.refresh') : mode === 'stage' && result ? t('discovery.reviewSelection') : t('discovery.title')}
         </button>
         {mode === 'stage' && <span className="text-xs text-gray-500">{t('discovery.stagedHint')}</span>}
-        {mode === 'stage' && !open && selectedModels.length > 0 && <span className="text-xs font-medium text-slate-700">{t('discovery.pending', { count: selectedModels.length })}</span>}
+        {mode === 'stage' && !open && checkedCount > 0 && (
+          <div className="flex flex-wrap gap-x-3 text-xs font-medium text-slate-700">
+            <span>{t('discovery.selected', { count: checkedCount })}</span>
+            <span>{t('discovery.pending', { count: selectedModels.length })}</span>
+          </div>
+        )}
         {open && <button type="button" onClick={close} disabled={importing || disabled} aria-label={t('discovery.close')} className="ml-auto p-1 text-gray-400 hover:text-gray-700 disabled:opacity-50"><X className="h-4 w-4" /></button>}
       </div>
       {open && (
@@ -181,21 +231,24 @@ export default function ModelDiscovery({ providerId, credentials, mode, newInsta
                     <input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder={t('discovery.search')} aria-label={t('discovery.search')} className="w-full rounded-lg border border-gray-300 bg-white py-2 pl-8 pr-3 text-sm" />
                   </label>
                   <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-600">
-                    <span>{t(mode === 'stage' ? 'discovery.pending' : 'discovery.selected', { count: selectedModels.length })}</span>
-                    <button type="button" disabled={!eligibleVisible.length || importing || disabled} onClick={() => {
-                      const next = new Set(selected);
-                      eligibleVisible.forEach(model => allVisibleSelected ? next.delete(model.id) : next.add(model.id));
-                      publishSelection(next);
-                    }} className="text-slate-700 hover:underline disabled:opacity-40">{t(allVisibleSelected ? 'discovery.deselectVisible' : 'discovery.selectVisible')}</button>
+                    <div className="flex flex-wrap gap-x-3">
+                      <span>{t('discovery.selected', { count: checkedCount })}</span>
+                      <span>{t('discovery.pending', { count: selectedModels.length })}</span>
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-1">
+                      <button type="button" disabled={!eligibleVisible.length || importing || disabled} onClick={() => selectVisible('all')} className="text-slate-700 hover:underline disabled:opacity-40">{t('discovery.selectVisible')}</button>
+                      <button type="button" disabled={!eligibleVisible.length || importing || disabled} onClick={() => selectVisible('invert')} className="text-slate-700 hover:underline disabled:opacity-40">{t('discovery.invertVisible')}</button>
+                      <button type="button" disabled={!eligibleVisible.some(model => selected.has(model.id)) || importing || disabled} onClick={() => selectVisible('none')} className="text-slate-700 hover:underline disabled:opacity-40">{t('discovery.deselectVisible')}</button>
+                    </div>
                   </div>
                   {allAdded && <p className="text-sm text-green-700">{t('discovery.allAdded')}</p>}
                   <div className="max-h-64 divide-y divide-gray-100 overflow-y-auto rounded-lg border border-gray-200 bg-white">
                     {visibleModels.map(model => (
                       <label key={model.id} className={`flex items-start gap-2.5 px-3 py-2 ${!model.selectable || model.already_added ? 'text-gray-400' : 'cursor-pointer hover:bg-gray-50'}`}>
-                        <input type="checkbox" aria-label={model.id} checked={selected.has(model.id)} disabled={disabled || importing || !model.selectable || model.already_added} onChange={() => {
+                        <input type="checkbox" aria-label={model.id} checked={model.already_added || model.selectable && selected.has(model.id)} disabled={disabled || importing || !model.selectable || model.already_added} onChange={() => {
                           const next = new Set(selected);
                           if (next.has(model.id)) next.delete(model.id); else next.add(model.id);
-                          publishSelection(next);
+                          setSelected(next);
                         }} className="mt-1 rounded border-gray-300" />
                         <div className="min-w-0 flex-1">
                           <p className="break-words text-sm font-medium">{model.name || model.id}</p>
