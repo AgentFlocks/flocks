@@ -18,7 +18,8 @@ import {
   type PromptRedactionSettings,
   type PromptRedactionSettingsUpdate,
 } from '@/api/sensitiveDetection';
-import { type UpdateProgress } from '@/api/update';
+import { type UpdateProgress, type UpgradeHandoffProgress } from '@/api/update';
+import UpgradeHandoffSteps, { useHandoffFailureMessage } from '@/components/common/UpgradeHandoffSteps';
 import { extractErrorMessage } from '@/utils/error';
 import { checkRestartReadiness } from '@/utils/restartPolling';
 
@@ -66,6 +67,8 @@ const DEFAULT_FORM: UpgradeApplyFormState = {
 const DISMISSED_REJECTED_REQUESTS_KEY = 'flockspro-dismissed-rejected-requests';
 const HEALTH_POLL_INTERVAL = 2000;
 const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
+// Upper bound while the upgrade handoff keeps answering; each of its steps times out within 5 minutes.
+const HANDOFF_MAX_WAIT = 30 * 60 * 1000;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function isValidInternationalPhone(value: string): boolean {
@@ -328,6 +331,9 @@ export default function FlocksproUpgradePage() {
   const [upgradeError, setUpgradeError] = useState<string | null>(null);
   const [proUpgrading, setProUpgrading] = useState(false);
   const [proRestarting, setProRestarting] = useState(false);
+  const [handoffProgress, setHandoffProgress] = useState<UpgradeHandoffProgress | null>(null);
+  const describeHandoffFailure = useHandoffFailureMessage();
+  const progressTokenRef = useRef<string | null>(null);
   const [proDowngrading, setProDowngrading] = useState(false);
   const [updateMode, setUpdateMode] = useState<'upgrade' | 'downgrade'>('upgrade');
   const [showDowngradeDialog, setShowDowngradeDialog] = useState(false);
@@ -887,10 +893,14 @@ export default function FlocksproUpgradePage() {
   };
 
   const pollUntilReady = () => {
-    const startedAt = Date.now();
+    // A handoff that answers is still working (a WebUI build alone can take minutes), so
+    // each answer restarts the wait for the service, up to HANDOFF_MAX_WAIT in total.
+    const restartStartedAt = Date.now();
+    let lastAnswerAt = restartStartedAt;
     let lastPollFailure = '';
     const poll = async () => {
-      if (Date.now() - startedAt > HEALTH_POLL_TIMEOUT) {
+      const now = Date.now();
+      if (now - lastAnswerAt > HEALTH_POLL_TIMEOUT || now - restartStartedAt > HANDOFF_MAX_WAIT) {
         setUpgradeError(lastPollFailure ? `${t('upgrade.restartTimeout')} ${lastPollFailure}` : t('upgrade.restartTimeout'));
         setProRestarting(false);
         setProUpgrading(false);
@@ -898,10 +908,22 @@ export default function FlocksproUpgradePage() {
         return;
       }
 
-      const readiness = await checkRestartReadiness();
+      const readiness = await checkRestartReadiness(progressTokenRef.current);
       if (readiness.ready) {
         window.location.reload();
         return;
+      }
+      const upgrade = readiness.upgrade;
+      if (upgrade) {
+        setHandoffProgress(upgrade);
+        if (upgrade.phase === 'failed') {
+          setUpgradeError(describeHandoffFailure(upgrade));
+          setProRestarting(false);
+          setProUpgrading(false);
+          setProDowngrading(false);
+          return;
+        }
+        lastAnswerAt = Date.now();
       }
       lastPollFailure = readiness.reason || lastPollFailure;
 
@@ -931,6 +953,8 @@ export default function FlocksproUpgradePage() {
         upsertUpgradeStep(progress);
         if (progress.stage === 'restarting') {
           sawRestarting = true;
+          progressTokenRef.current = progress.progress_token ?? null;
+          setHandoffProgress(null);
           setProUpgrading(false);
           setProRestarting(true);
           pollUntilReady();
@@ -968,6 +992,8 @@ export default function FlocksproUpgradePage() {
         upsertUpgradeStep(progress);
         if (progress.stage === 'restarting') {
           sawRestarting = true;
+          progressTokenRef.current = progress.progress_token ?? null;
+          setHandoffProgress(null);
           setProDowngrading(false);
           setProRestarting(true);
           pollUntilReady();
@@ -1678,7 +1704,7 @@ export default function FlocksproUpgradePage() {
 
       {showUpdateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
-          <div className="w-full max-w-md rounded-xl bg-white border border-gray-200 shadow-xl p-6 space-y-4">
+          <div className="w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-xl bg-white border border-gray-200 shadow-xl p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold text-gray-900">
                 {updateMode === 'downgrade' ? t('upgrade.downgradeTitle') : t('upgrade.startUpgrade')}
@@ -1706,7 +1732,8 @@ export default function FlocksproUpgradePage() {
             {upgradeSteps.length > 0 && (
               <div className="space-y-2">
                 {upgradeSteps.map((step) => {
-                  const isError = step.stage === 'error';
+                  const restartFailed = step.stage === 'restarting' && handoffProgress?.phase === 'failed';
+                  const isError = step.stage === 'error' || restartFailed;
                   const isRunning = step.stage === 'restarting' && proRestarting;
                   const downloadPercent = clampPercent(step.percent);
                   const hasDownloadProgress = step.stage === 'fetching' && typeof step.downloaded_bytes === 'number';
@@ -1726,6 +1753,9 @@ export default function FlocksproUpgradePage() {
                         <div className={isError ? 'text-xs text-red-600' : 'text-xs text-gray-500'}>
                           {step.message}
                         </div>
+                        {step.stage === 'restarting' && handoffProgress && (
+                          <UpgradeHandoffSteps progress={handoffProgress} />
+                        )}
                         {step.bundle_filename && (
                           <div className="mt-1 space-y-0.5 text-xs text-slate-500">
                             <div className="break-all">
@@ -1770,7 +1800,7 @@ export default function FlocksproUpgradePage() {
               </div>
             )}
             {upgradeError && (
-              <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 [overflow-wrap:anywhere]">
                 {upgradeError}
               </div>
             )}

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { checkRestartReadiness } from './restartPolling';
+import { checkRestartReadiness, UPGRADE_PROGRESS_TOKEN_HEADER } from './restartPolling';
 
 describe('checkRestartReadiness', () => {
   const originalLocation = window.location;
@@ -85,5 +85,77 @@ describe('checkRestartReadiness', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(requestSignals).toHaveLength(2);
     expect(requestSignals.every((signal) => signal.aborted)).toBe(true);
+  });
+
+  it('gives up on a response whose body stalls after the headers arrived', async () => {
+    vi.useFakeTimers();
+    const stalledBody = () => new Promise<never>(() => {});
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => ({
+      ok: String(input) === '/',
+      status: String(input) === '/' ? 200 : 503,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      json: stalledBody,
+      text: stalledBody,
+    }) as unknown as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    let settled = false;
+    const readinessPromise = checkRestartReadiness('tok-123').finally(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(settled).toBe(true);
+    const readiness = await readinessPromise;
+    expect(readiness.ready).toBe(false);
+    expect(readiness.reason).toContain('health check failed');
+    expect(readiness.reason).toContain('root page check failed');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads the upgrade handoff progress from a 503 health response without probing the root page', async () => {
+    const upgrade = {
+      phase: 'running',
+      step: 'build_webui',
+      steps: [
+        { id: 'stop', status: 'done' },
+        { id: 'build_webui', status: 'running' },
+        { id: 'start', status: 'pending' },
+      ],
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ status: 'upgrading', upgrade }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const readiness = await checkRestartReadiness('tok-123');
+
+    expect(readiness.ready).toBe(false);
+    expect(readiness.upgrade).toEqual(upgrade);
+    expect(readiness.reason).toContain('build_webui');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith('/api/health', expect.objectContaining({
+      headers: { [UPGRADE_PROGRESS_TOKEN_HEADER]: 'tok-123' },
+    }));
+  });
+
+  it('ignores 503 bodies that are not handoff progress', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/health') {
+        return new Response(JSON.stringify({ status: 'starting' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response('<html></html>', { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const readiness = await checkRestartReadiness();
+
+    expect(readiness).toEqual({ ready: false, reason: 'health check returned HTTP 503' });
+    expect(fetchMock.mock.calls[0][1]).not.toHaveProperty('headers');
   });
 });

@@ -176,6 +176,7 @@
     "moveFailed": "移动失败",
     "shared": "已共享",
     "unshared": "已取消共享",
+    "sharedMark": "已共享给本地账号",
     "shareFailed": "操作失败",
     "downloadFailed": "下载失败",
     "createSessionFailed": "创建会话失败",

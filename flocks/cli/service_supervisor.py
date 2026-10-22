@@ -52,7 +52,8 @@ class ManagedService:
 
     @property
     def pid(self) -> int | None:
-        return self.process.pid if self.process is not None else None
+        process = self.process
+        return process.pid if process is not None else None
 
 
 def _daemon_log(event: str, details: dict[str, object] | None = None) -> None:
@@ -255,6 +256,10 @@ class SupervisorDaemon:
                         daemon.request_stop()
                         self._send_json({"status": "stopping"})
                         return
+                    if parsed.path in {"/restart", "/restart/backend", "/restart/webui"} and daemon.is_stopping():
+                        # A stopping daemon must not spawn a backend it will never stop.
+                        self._send_json({"error": "daemon is stopping"}, status=409)
+                        return
                     if parsed.path == "/restart":
                         daemon.update_config(payload)
                         daemon.restart_all(reason="control restart")
@@ -295,24 +300,29 @@ class SupervisorDaemon:
     def request_stop(self) -> None:
         self._shutdown_requested.set()
 
+    def is_stopping(self) -> bool:
+        return self._shutdown_requested.is_set()
+
     def status_payload(self) -> dict[str, object]:
         try:
             from flocks import __version__
         except Exception:  # pragma: no cover - defensive
             __version__ = "unknown"
-        with self._lock:
-            return {
-                "daemon": {
-                    "pid": os.getpid(),
-                    "uptime": time.time() - self.started_at,
-                    "version": __version__,
-                    "state": "stopping" if self._shutdown_requested.is_set() else "running",
-                    "log_path": str(supervisor_log_path(self.paths)),
-                },
-                "backend": _service_payload(self.backend),
-                "webui": _service_payload(self.webui),
-                "config": service_config_payload(self.config),
-            }
+        # Read without self._lock: start/stop hold it through WebUI builds, health waits and
+        # graceful backend shutdown, and a blocked /status made clients treat a busy daemon
+        # as already stopped.
+        return {
+            "daemon": {
+                "pid": os.getpid(),
+                "uptime": time.time() - self.started_at,
+                "version": __version__,
+                "state": "stopping" if self.is_stopping() else "running",
+                "log_path": str(supervisor_log_path(self.paths)),
+            },
+            "backend": _service_payload(self.backend),
+            "webui": _service_payload(self.webui),
+            "config": service_config_payload(self.config),
+        }
 
     def handle_logs_request(self, handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> None:
         from flocks.cli.service_manager import FOLLOW_POLL_INTERVAL, _coerce_positive_int, tail_lines
@@ -449,6 +459,8 @@ class SupervisorDaemon:
         service.state = "stopped"
 
     def _start_backend_locked(self, *, immediate: bool) -> None:
+        if self.is_stopping():
+            return
         if self.backend.process is not None and self.backend.process.poll() is None:
             return
         if not immediate and time.monotonic() < self.backend.next_restart_at:

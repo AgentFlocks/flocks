@@ -96,6 +96,9 @@ export interface PaginatedResponse<T> {
 export interface TaskListParams {
   status?: TaskStatus;
   priority?: TaskPriority;
+  title?: string;
+  startedAfter?: string;
+  startedBefore?: string;
   deliveryStatus?: DeliveryStatus;
   sortBy?: string;
   sortOrder?: 'asc' | 'desc';
@@ -103,7 +106,7 @@ export interface TaskListParams {
   limit?: number;
 }
 
-export interface SchedulerListParams extends Omit<TaskListParams, 'deliveryStatus' | 'status'> {
+export interface SchedulerListParams extends Omit<TaskListParams, 'deliveryStatus' | 'status' | 'title' | 'startedAfter' | 'startedBefore'> {
   status?: TaskSchedulerStatus;
   scheduledOnly?: boolean;
 }

@@ -44,5 +44,28 @@
     "restarting": "Restarting service",
     "done": "Done",
     "error": "Error"
+  },
+  "handoff": {
+    "title": "Restart progress",
+    "steps": {
+      "stop": "Stop service",
+      "source_replace": "Replace program files",
+      "check_runtime": "Check Node.js and npm",
+      "sync_dependencies": "Install backend dependencies",
+      "install_pro": "Install Pro component",
+      "build_webui": "Build WebUI",
+      "finalize": "Verify installation",
+      "start": "Start service"
+    },
+    "statuses": {
+      "pending": "Not started",
+      "running": "In progress",
+      "done": "Done",
+      "skipped": "Skipped",
+      "failed": "Failed"
+    },
+    "failed": "The upgrade failed at \"{{step}}\": {{error}}",
+    "noDetail": "The detailed reason is only shown on the page that started the upgrade.",
+    "recoveryHint": "The service has not come back: check ~/.flocks/run/upgrade-result.json and today's errors.log under ~/.flocks/logs/ on the server, fix the cause, then run flocks start."
   }
 }

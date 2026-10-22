@@ -153,13 +153,7 @@ def _parse_model_definitions(
 
         pricing = None
         if pricing_raw:
-            pricing = PriceConfig(
-                input=pricing_raw.get("input", 0.0),
-                output=pricing_raw.get("output", 0.0),
-                cache_read=pricing_raw.get("cache_read"),
-                cache_write=pricing_raw.get("cache_write"),
-                currency=pricing_raw.get("currency", "USD"),
-            )
+            pricing = PriceConfig.model_validate(pricing_raw)
 
         model_type_str = m.get("model_type", "llm")
         try:

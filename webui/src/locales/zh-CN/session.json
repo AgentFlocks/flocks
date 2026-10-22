@@ -185,6 +185,28 @@
     "incidentResponseSuggestion": "帮我处理一个安全事件：发现勒索软件感染"
   },
   "chat": {
+    "cacheUsage": {
+      "summary": "本次回复缓存命中率 {{rate}}",
+      "coverage": "已报告 {{reported}}/{{total}} 条记录",
+      "updating": "统计中",
+      "unknownValue": "未知",
+      "formula": "命中率 = 已报告记录的缓存读取 Tokens ÷ 完整输入 Tokens。完整输入包含未缓存输入、缓存读取和缓存写入，包括系统提示、历史消息及工具定义。",
+      "totals": "已报告记录合计：缓存读取 {{read}} / 完整输入 {{input}} Tokens",
+      "partial": "未报告或缺少历史标记的记录不参与命中率计算；未知不代表未命中。",
+      "call": "记录 {{index}}",
+      "callRate": "命中率 {{rate}}",
+      "unreported": "提供商未报告缓存用量",
+      "legacy": "缺少缓存报告标记",
+      "uncachedInput": "未缓存输入",
+      "recordedInput": "记录输入",
+      "cacheRead": "缓存读取",
+      "cacheWrite": "缓存写入",
+      "promptTokens": "完整输入",
+      "output": "输出",
+      "reasoning": "推理",
+      "messageID": "消息 ID",
+      "scope": "汇总当前回复包含的助手消息记录（Tokens），按输入量加权，非各记录百分比平均值。不含子会话或未单独保留的内部重试。"
+    },
     "placeholder": "追问 Agent…（Enter 发送，Shift+Enter 换行）",
     "placeholderCompacting": "正在压缩上下文，请稍候...",
     "placeholderStreaming": "AI 正在处理中，请稍候...",
@@ -240,6 +262,10 @@
       "transient": "模型请求失败（{{reason}}），正在第 {{attempt}} 次重试",
       "countdown": "，约 {{seconds}} 秒后",
       "unknownReason": "临时错误"
+    },
+    "stopReason": {
+      "title": "任务已停止",
+      "toolExecuted": "这一步已经执行过工具，为避免重复执行，没有自动重试这次请求。"
     },
     "process": {
       "title": "查看 {{count}} 个步骤",
