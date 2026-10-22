@@ -2,7 +2,7 @@ import { useId } from 'react';
 import { AlertCircle, Database, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { UsageStats } from '@/types';
-import { formatCacheHitRate, getCacheUsageSummary } from './usageDisplay';
+import { formatCacheHitRate, formatTokenMillions, getCacheUsageSummary } from './usageDisplay';
 
 function count(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
@@ -27,6 +27,9 @@ export default function CacheUsagePanel({ usageStats, loading, error, onRefresh 
   const rate = read !== null && input !== null && input > 0 ? read / input : null;
   const formatCount = (value: number | null) => value === null
     ? t('cacheUsage.unknown') : value.toLocaleString(i18n.language);
+  const formatTokens = (value: number | null) => value !== null && value >= 1_000_000
+    ? formatTokenMillions(value) : formatCount(value);
+  const totalTokens = count(usageStats?.summary.total_tokens);
   const initialLoading = loading && !usageStats;
   const initialError = error && !usageStats;
 
@@ -58,7 +61,7 @@ export default function CacheUsagePanel({ usageStats, loading, error, onRefresh 
         <>
           <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-100 pb-3 dark:border-zinc-800">
             <span className="text-xs text-slate-500 dark:text-zinc-400">{t('dashboard.totalTokens')}</span>
-            <span data-testid="model-total-tokens-exact" className="text-base font-semibold tabular-nums text-slate-800 dark:text-zinc-100">{formatCount(count(usageStats?.summary.total_tokens))}</span>
+            <span data-testid="model-total-tokens-exact" title={formatCount(totalTokens)} className="text-base font-semibold tabular-nums text-slate-800 dark:text-zinc-100">{formatTokens(totalTokens)}</span>
           </div>
           <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-3">
             <div>
@@ -69,11 +72,11 @@ export default function CacheUsagePanel({ usageStats, loading, error, onRefresh 
             </div>
             <div>
               <dt className="text-xs text-slate-500 dark:text-zinc-400">{t('cacheUsage.cacheRead')}</dt>
-              <dd data-testid="model-cache-read" className="mt-1 break-words text-lg font-semibold tabular-nums text-slate-800 dark:text-zinc-100">{cache.state === 'none' ? '—' : formatCount(read)}</dd>
+              <dd data-testid="model-cache-read" title={cache.state === 'none' ? undefined : formatCount(read)} className="mt-1 break-words text-lg font-semibold tabular-nums text-slate-800 dark:text-zinc-100">{cache.state === 'none' ? '—' : formatTokens(read)}</dd>
             </div>
             <div>
               <dt className="text-xs text-slate-500 dark:text-zinc-400">{t('cacheUsage.completeInput')}</dt>
-              <dd data-testid="model-cache-input" className="mt-1 break-words text-lg font-semibold tabular-nums text-slate-800 dark:text-zinc-100">{cache.state === 'none' ? '—' : formatCount(input)}</dd>
+              <dd data-testid="model-cache-input" title={cache.state === 'none' ? undefined : formatCount(input)} className="mt-1 break-words text-lg font-semibold tabular-nums text-slate-800 dark:text-zinc-100">{cache.state === 'none' ? '—' : formatTokens(input)}</dd>
             </div>
             <div>
               <dt className="text-xs text-slate-500 dark:text-zinc-400">{t('cacheUsage.coverage')}</dt>
@@ -81,9 +84,9 @@ export default function CacheUsagePanel({ usageStats, loading, error, onRefresh 
               <dd data-testid="model-cache-unknown" className="mt-0.5 text-xs text-slate-500 dark:text-zinc-400">{t('cacheUsage.unknownRecords', { count: unknown })}</dd>
             </div>
           </dl>
-          <p className="mt-3 text-xs text-slate-500 dark:text-zinc-400">
+          <p title={cache.state === 'legacy' ? formatCount(cache.cacheRead) : undefined} className="mt-3 text-xs text-slate-500 dark:text-zinc-400">
             {cache.state === 'none' ? t('cacheUsage.empty')
-              : cache.state === 'legacy' ? t('cacheUsage.legacy', { tokens: formatCount(cache.cacheRead) })
+              : cache.state === 'legacy' ? t('cacheUsage.legacy', { tokens: formatTokens(cache.cacheRead) })
                 : cache.state === 'unreported' ? t('cacheUsage.unreported')
                   : rate === null ? t('cacheUsage.noDenominator')
                     : t('cacheUsage.reportedOnly')}
