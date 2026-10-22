@@ -641,10 +641,6 @@ export default function ModelPage() {
               onToggleModel={isAdmin ? handleToggleModel : undefined}
               onDeleteModel={isAdmin ? handleDeleteModel : undefined}
               onOpenModelDetail={(model) => setSelectedModelForDetail({ provider: selectedProvider, model })}
-              onModelsImported={() => {
-                void handleSelectProvider(selectedProvider);
-                refetch();
-              }}
               onConnectionStatusChange={(status) => {
                 setConnectionStatus(prev => ({ ...prev, [selectedProvider.id]: status }));
                 saveConnectionCache(selectedProvider.id, status);
@@ -680,7 +676,6 @@ export default function ModelPage() {
           onEditModel={(model) => setSelectedModelForDetail({ provider: selectedProvider, model })}
           onToggleModel={(modelId, enabled) => handleToggleModel(selectedProvider.id, modelId, enabled)}
           onDeleteModel={handleDeleteModel}
-          onModelsChanged={handleModelCreated}
           onClose={() => {
             setShowConfigDialog(false);
             setCredentials(null);
@@ -718,6 +713,8 @@ export default function ModelPage() {
       {showAddModel && selectedProvider && (
         <AddModelDialog
           provider={selectedProvider}
+          models={providerModels}
+          loadingModels={loadingModels}
           onClose={() => setShowAddModel(false)}
           onCreated={handleModelCreated}
         />
@@ -994,7 +991,6 @@ function ProviderDetail({
   provider, models, loadingModels,
   modelEnabledMap, connStatus, canEdit, onToggleModel, onDeleteModel,
   onOpenModelDetail, onConnectionStatusChange,
-  onModelsImported,
 }: {
   provider: EnrichedProvider;
   models: ModelDefinitionV2[];
@@ -1007,7 +1003,6 @@ function ProviderDetail({
   onDeleteModel?: (modelId: string) => void;
   onOpenModelDetail?: (model: ModelDefinitionV2) => void;
   onConnectionStatusChange?: (status: 'connected' | 'failed') => void;
-  onModelsImported?: () => void;
 }) {
   const toast = useToast();
   const { t } = useTranslation('model');
@@ -1112,12 +1107,6 @@ function ProviderDetail({
             </button>
           </div>
         </div>
-
-        {canEdit && (
-          <div className="mb-3">
-            <ModelDiscovery providerId={provider.id} mode="import" existingModelIds={models.map(model => model.id)} onImported={onModelsImported} />
-          </div>
-        )}
 
         {loadingModels ? (
           <div className="flex items-center justify-center py-8">
@@ -2226,8 +2215,12 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
 
 // ==================== Add Model Dialog ====================
 
-function AddModelDialog({ provider, onClose, onCreated }: {
-  provider: EnrichedProvider; onClose: () => void; onCreated: () => void;
+function AddModelDialog({ provider, models, loadingModels, onClose, onCreated }: {
+  provider: EnrichedProvider;
+  models: ModelDefinitionV2[];
+  loadingModels: boolean;
+  onClose: () => void;
+  onCreated: () => void;
 }) {
   const toast = useToast();
   const { t } = useTranslation('model');
@@ -2235,7 +2228,7 @@ function AddModelDialog({ provider, onClose, onCreated }: {
   const [loading, setLoading] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; latency?: number } | null>(null);
   const [testing, setTesting] = useState(false);
-  const modelSavedRef = useRef(false);
+  const [method, setMethod] = useState<'automatic' | 'manual'>('automatic');
 
   const handleSubmit = async () => {
     if (!form.isValid) {
@@ -2246,7 +2239,6 @@ function AddModelDialog({ provider, onClose, onCreated }: {
       setLoading(true);
       setTestResult(null);
       await modelV2API.createDefinition(provider.id, form.toPayload());
-      modelSavedRef.current = true;
       onCreated();
       toast.success(t('modelAdded'), `${form.name.trim()} (${form.modelId.trim()})`);
 
@@ -2299,16 +2291,19 @@ Provider: ${provider.name} (${provider.id})
     <EntitySheet
       open
       mode="create"
-      entityType="Custom Model"
+      entityType={t('form.model')}
+      width={720}
+      minWidth={360}
+      maxWidth={960}
       entityName={provider.name}
       icon={<Plus className="w-5 h-5" />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
-      submitDisabled={loading || testing || !form.isValid}
+      submitDisabled={loading || testing || (method === 'manual' && !form.isValid)}
       submitLoading={loading || testing}
-      submitLabel={testResult ? t('form.done') : t('form.addModelBtn')}
+      submitLabel={method === 'automatic' || testResult ? t('form.done') : t('form.addModelBtn')}
       onClose={handleClose}
-      onSubmit={testResult ? handleClose : handleSubmit}
+      onSubmit={method === 'automatic' || testResult ? handleClose : handleSubmit}
       initialTab="form"
     >
       <div className="space-y-4">
@@ -2321,13 +2316,26 @@ Provider: ${provider.name} (${provider.id})
             className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-sm text-gray-900 cursor-default"
           />
         </div>
-        <ModelFormFields
-          form={form}
-          testResult={testResult}
-          testing={testing}
-          modelIdPlaceholder={isAzureProviderId(provider.id) ? t('form.azureDeploymentPlaceholder') : undefined}
-          modelIdHint={isAzureProviderId(provider.id) ? t('form.azureModelIdHint') : undefined}
-        />
+        <div role="tablist" aria-label={t('discovery.addMethod')} className="flex gap-1 rounded-lg bg-gray-100 p-1">
+          {(['automatic', 'manual'] as const).map(value => (
+            <button key={value} type="button" role="tab" aria-selected={method === value} aria-controls={`add-model-${value}`} id={`add-model-tab-${value}`} disabled={loading || testing} onClick={() => setMethod(value)} className={`flex-1 rounded-md px-3 py-2 text-sm transition-colors disabled:opacity-50 ${method === value ? 'bg-white font-medium text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}>
+              {t(`discovery.${value}`)}
+            </button>
+          ))}
+        </div>
+        <div role="tabpanel" id="add-model-automatic" aria-labelledby="add-model-tab-automatic" hidden={method !== 'automatic'} className="space-y-3">
+          <p className="text-xs leading-5 text-gray-500">{t('discovery.savedCredentialsHint')}</p>
+          <ModelDiscovery providerId={provider.id} mode="import" existingModelIds={models.map(model => model.id)} disabled={loading || testing || loadingModels} onImported={onCreated} />
+        </div>
+        <div role="tabpanel" id="add-model-manual" aria-labelledby="add-model-tab-manual" hidden={method !== 'manual'} className="space-y-4">
+          <ModelFormFields
+            form={form}
+            testResult={testResult}
+            testing={testing}
+            modelIdPlaceholder={isAzureProviderId(provider.id) ? t('form.azureDeploymentPlaceholder') : undefined}
+            modelIdHint={isAzureProviderId(provider.id) ? t('form.azureModelIdHint') : undefined}
+          />
+        </div>
       </div>
     </EntitySheet>
   );
@@ -2405,7 +2413,7 @@ function allowsBuiltInVisionToggle(modelId: string): boolean {
 function ConfigureProviderDialog({
   provider, existingCredentials, models, loadingModels, modelEnabledMap, defaultModelId,
   onClose, onConfigured, onTestResult, onDelete, onAddModel, onEditModel,
-  onToggleModel, onDeleteModel, onModelsChanged,
+  onToggleModel, onDeleteModel,
 }: {
   provider: EnrichedProvider;
   existingCredentials: ProviderCredentials | null;
@@ -2421,7 +2429,6 @@ function ConfigureProviderDialog({
   onEditModel: (model: ModelDefinitionV2) => void;
   onToggleModel: (modelId: string, enabled: boolean) => Promise<void>;
   onDeleteModel: (modelId: string) => Promise<void>;
-  onModelsChanged: () => void;
 }) {
   const toast = useToast();
   const { t } = useTranslation('model');
@@ -2444,8 +2451,6 @@ function ConfigureProviderDialog({
   const [testModelId, setTestModelId] = useState(models[0]?.id ?? '');
   const [testChat, setTestChat] = useState<{ question: string; answer: string; model: string; latency: number } | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
-  const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
-  const [discoveryImportResult, setDiscoveryImportResult] = useState<ModelImportResult | null>(null);
   const nameEditable = provider.id === 'openai-compatible' || provider.id.startsWith('custom-');
   const baseUrlRequired = nameEditable || isAzureProviderId(provider.id);
   const hasPendingChanges = hasPendingProviderCredentialChanges(savedCredentials, {
@@ -2496,20 +2501,6 @@ function ConfigureProviderDialog({
     setLoading(true);
     try {
       if (!await persistCredentials()) return;
-      if (discoveredModels.length > 0) {
-        let result: ModelImportResult;
-        try {
-          result = (await providerAPI.importModels(provider.id, discoveredModels.map(toModelImport))).data;
-        } catch (importError) {
-          result = { added: [], skipped: [], failed: discoveredModels.map(model => ({ id: model.id, error: extractErrorMessage(importError) })) };
-        }
-        setDiscoveryImportResult(result);
-        if (result.added.length > 0 || result.skipped.length > 0) onModelsChanged();
-        if (result.failed.length > 0) {
-          toast.warning(t('discovery.importPartial'));
-          return;
-        }
-      }
       toast.success(t('credentialsSaved'));
       onConfigured();
     } catch (saveError) {
@@ -2679,15 +2670,6 @@ function ConfigureProviderDialog({
             <button type="button" onClick={onAddModel} disabled={busy || loadingModels} className="inline-flex items-center gap-1 rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-40"><Plus className="h-3.5 w-3.5" />{t('configuration.addModel')}</button>
           </div>
           <p className="text-xs leading-5 text-gray-500">{t('configuration.manageHint')}</p>
-          <ModelDiscovery
-            providerId={provider.id}
-            mode="stage"
-            credentials={{ api_key: apiKey.trim() || undefined, base_url: baseUrl.trim() || undefined }}
-            existingModelIds={models.map(model => model.id)}
-            disabled={busy || loadingModels}
-            onSelectionChange={setDiscoveredModels}
-          />
-          {discoveryImportResult && <ModelImportSummary result={discoveryImportResult} />}
           {isAzureProviderId(provider.id) && <p className="text-xs text-blue-800">{t('form.azureModelIdHint')}</p>}
           {models.length === 0 ? <p className="rounded-lg border border-dashed border-gray-200 p-5 text-center text-sm text-gray-500">{t('configuration.emptyModels')}</p> : (
             <ul className="divide-y divide-gray-100 rounded-lg border border-gray-200" aria-label={t('configuration.models')}>
