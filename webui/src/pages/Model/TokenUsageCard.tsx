@@ -48,6 +48,12 @@ export default function TokenUsageCard(props: {
     }, 160);
   };
   const onBlur = (event: React.FocusEvent) => {
+    if (!event.relatedTarget) {
+      // A refresh disables its button, which makes Chromium blur it without a
+      // destination. Keep keyboard focus in the open details while it loads.
+      if (panel.current?.contains(event.target) && event.target !== panel.current) panel.current.focus();
+      return;
+    }
     if (!contains(event.relatedTarget)) close();
   };
   const escape = (event: React.KeyboardEvent) => {
