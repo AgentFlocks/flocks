@@ -44,5 +44,28 @@
     "restarting": "重启服务",
     "done": "完成",
     "error": "出错"
+  },
+  "handoff": {
+    "title": "重启阶段进度",
+    "steps": {
+      "stop": "停止服务",
+      "source_replace": "替换程序文件",
+      "check_runtime": "检查 Node.js 与 npm",
+      "sync_dependencies": "安装后端依赖",
+      "install_pro": "安装 Pro 组件",
+      "build_webui": "构建前端",
+      "finalize": "校验安装结果",
+      "start": "启动服务"
+    },
+    "statuses": {
+      "pending": "未开始",
+      "running": "进行中",
+      "done": "已完成",
+      "skipped": "已跳过",
+      "failed": "失败"
+    },
+    "failed": "升级在「{{step}}」这一步失败：{{error}}",
+    "noDetail": "具体原因只显示在发起升级的页面上。",
+    "recoveryHint": "服务还没有恢复：请在服务器上查看 ~/.flocks/run/upgrade-result.json 和 ~/.flocks/logs/ 下当天的 errors.log，处理后执行 flocks start。"
   }
 }

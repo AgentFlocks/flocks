@@ -1,18 +1,21 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import UpdateModal from './UpdateModal';
 
-const { applyUpdate, checkUpdate } = vi.hoisted(() => ({
+const { applyUpdate, checkUpdate, checkRestartReadiness } = vi.hoisted(() => ({
   applyUpdate: vi.fn(),
   checkUpdate: vi.fn(),
+  checkRestartReadiness: vi.fn(),
 }));
 
 vi.mock('@/api/update', () => ({
   applyUpdate,
   checkUpdate,
 }));
+
+vi.mock('@/utils/restartPolling', () => ({ checkRestartReadiness }));
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -186,5 +189,129 @@ describe('UpdateModal upgrade results', () => {
     await waitFor(() => {
       expect(screen.queryByText('upgrading')).not.toBeInTheDocument();
     });
+  });
+});
+
+describe('UpdateModal restart stage', () => {
+  const updatable = { ...currentVersion, latest_version: '2026.10.20', has_update: true };
+  const step = (id: string, status: string) => ({ id, status });
+  const running = (current: string) => ({
+    phase: 'running',
+    step: current,
+    steps: ['stop', 'source_replace', 'build_webui', 'start'].map((id) => step(
+      id,
+      id === current ? 'running' : ['stop', 'source_replace', 'build_webui', 'start'].indexOf(id) < ['stop', 'source_replace', 'build_webui', 'start'].indexOf(current) ? 'done' : 'pending',
+    )),
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    checkUpdate.mockResolvedValue(updatable);
+    applyUpdate.mockImplementation(async (_version: string, onProgress: (progress: unknown) => void) => {
+      onProgress({ stage: 'applying', message: 'Staging v2026.10.20 for handoff...', success: null });
+      onProgress({ stage: 'restarting', message: 'Restarting service...', success: null, progress_token: 'tok-1' });
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('lists the restart steps and stops at a failed step with its reason', async () => {
+    checkRestartReadiness
+      .mockResolvedValueOnce({ ready: false, upgrade: running('build_webui') })
+      .mockResolvedValueOnce({
+        ready: false,
+        upgrade: {
+          phase: 'failed',
+          step: 'build_webui',
+          failed_step: 'build_webui',
+          error: 'npm run build exited with code 1',
+          steps: [step('stop', 'done'), step('source_replace', 'done'), step('build_webui', 'failed'), step('start', 'pending')],
+        },
+      });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    const list = await screen.findByRole('list', { name: 'handoff.title' });
+    expect(within(list).getAllByRole('listitem').map((item) => item.getAttribute('data-status')))
+      .toEqual(['done', 'done', 'running', 'pending']);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await screen.findByText('handoff.failed handoff.recoveryHint')).toBeInTheDocument();
+    expect(screen.getByText('upgradeFailed')).toBeInTheDocument();
+    expect(screen.queryByText('waitingRestart')).not.toBeInTheDocument();
+    expect(checkRestartReadiness).toHaveBeenCalledWith('tok-1');
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(checkRestartReadiness).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps waiting while the handoff answers, even when one step outlasts the restart timeout', async () => {
+    let polls = 0;
+    const failed = {
+      phase: 'failed',
+      step: 'build_webui',
+      failed_step: 'build_webui',
+      error: 'npm run build exited with code 1',
+      steps: [step('stop', 'done'), step('source_replace', 'done'), step('build_webui', 'failed'), step('start', 'pending')],
+    };
+    checkRestartReadiness.mockImplementation(async () => {
+      polls += 1;
+      // every poll costs a minute; the WebUI build runs for 12 of them
+      vi.setSystemTime(Date.now() + 60_000);
+      return { ready: false, upgrade: polls <= 12 ? running('build_webui') : failed };
+    });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    for (let poll = 0; poll < 12; poll += 1) {
+      await vi.advanceTimersByTimeAsync(2_100);
+    }
+    expect(polls).toBeGreaterThanOrEqual(12);
+    expect(screen.queryByText('restartTimeout')).not.toBeInTheDocument();
+    expect(screen.getByText('waitingRestart')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(await screen.findByText('handoff.failed handoff.recoveryHint')).toBeInTheDocument();
+    expect(screen.queryByText('restartTimeout')).not.toBeInTheDocument();
+  });
+
+  it('gives up after half an hour even while the handoff keeps answering', async () => {
+    checkRestartReadiness.mockImplementation(async () => {
+      vi.setSystemTime(Date.now() + 10 * 60_000);
+      return { ready: false, reason: 'upgrade handoff running: build_webui', upgrade: running('build_webui') };
+    });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    for (let poll = 0; poll < 4; poll += 1) {
+      await vi.advanceTimersByTimeAsync(2_100);
+    }
+
+    expect(await screen.findByText('restartTimeout')).toBeInTheDocument();
+    expect(checkRestartReadiness).toHaveBeenCalledTimes(3);
+  });
+
+  it('times out when nothing answers for the restart timeout', async () => {
+    checkRestartReadiness.mockImplementation(async () => {
+      vi.setSystemTime(Date.now() + 60_000);
+      return { ready: false, reason: 'health check failed' };
+    });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    for (let poll = 0; poll < 7; poll += 1) {
+      await vi.advanceTimersByTimeAsync(2_100);
+    }
+
+    expect(await screen.findByText('restartTimeout')).toBeInTheDocument();
+    expect(checkRestartReadiness).toHaveBeenCalledTimes(5);
   });
 });
