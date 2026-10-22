@@ -401,6 +401,8 @@
     "save": "Save",
     "saveModels": "Save models",
     "modelsSaved": "Model settings saved.",
+    "invalidModelName": "Model names must contain 1–512 characters without tabs, line breaks, or other control characters.",
+    "inventorySaveFailedAfterCredentials": "Connection information was saved, but the model list was not saved: {{error}}. Check and retry.",
     "saving": "Saving…",
     "checkKey": "Check connection",
     "checkKeyHint": "Check whether the API key is valid.",

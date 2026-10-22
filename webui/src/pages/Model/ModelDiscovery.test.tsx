@@ -17,6 +17,25 @@ beforeEach(() => {
 });
 const fetchButton = () => screen.getByRole('button', { name: /discovery.title|compact.refresh/ });
 
+it('never selects or saves non-chat candidates, including when selecting all', async () => {
+  api.discoverModels.mockResolvedValue({ data: { ...result().data, models: [
+    remote('gpt-4o'),
+    { ...remote('text-embedding-3-small'), selectable: false, unavailable_reason: 'not_chat_model' },
+    { ...remote('whisper-1'), selectable: false, unavailable_reason: 'not_chat_model' },
+  ] } });
+  const user = userEvent.setup(); const selection = vi.fn();
+  render(<ModelDiscovery providerId="openai" mode="import" onSelectionChange={selection} />);
+  await user.click(fetchButton());
+  await user.click(screen.getByRole('button', { name: 'compact.selectAll' }));
+  for (const id of ['text-embedding-3-small', 'whisper-1']) {
+    const toggle = screen.getByRole('switch', { name: `compact.enableModel ${id}` });
+    expect(toggle).toBeDisabled(); expect(toggle).not.toBeChecked();
+  }
+  expect(selection.mock.lastCall?.[0].map((model: { id: string }) => model.id)).toEqual(['gpt-4o']);
+  await user.click(screen.getByRole('button', { name: 'compact.saveModels' }));
+  expect(api.saveModelInventory).toHaveBeenCalledWith('openai', { models: [expect.objectContaining({ id: 'gpt-4o' })], deleted: [] });
+});
+
 it.each([[15, true], [16, false]] as const)('defaults a list of %i models to enabled=%s', async (count, enabled) => {
   const models = Array.from({ length: count }, (_, index) => `model-${index}`);
   api.discoverModels.mockResolvedValue(result(...models));
@@ -105,6 +124,25 @@ it('validates editor values and saves Auto as an explicit cleared override', asy
   expect(ready).toHaveBeenLastCalledWith(true);
   await user.click(screen.getByRole('button', { name: 'compact.saveModels' }));
   expect(api.saveModelInventory).toHaveBeenCalledWith('openai', { models: [expect.objectContaining({ id: 'saved', edited: true, enabled: false, context_window: null, max_output_tokens: null, supports_tools: true })], deleted: [] });
+});
+
+it('rejects pasted tabs in model names and allows correction before applying', async () => {
+  const user = userEvent.setup(); const ready = vi.fn();
+  render(<ModelDiscovery providerId="openai" mode="import" existingModelIds={['saved']} onReadyChange={ready} />);
+  await user.click(await screen.findByRole('button', { name: 'compact.editModel saved' }));
+  const editor = within(screen.getByRole('group', { name: 'compact.editModel' }));
+  const name = editor.getByRole('textbox', { name: 'form.displayName' });
+  await user.clear(name); await user.paste('PR69 bad\tname');
+  expect(name).toHaveValue('PR69 bad\tname');
+  expect(name).toHaveAttribute('aria-invalid', 'true');
+  expect(editor.getByRole('alert')).toHaveTextContent('compact.invalidModelName');
+  expect(editor.getByRole('button', { name: 'compact.apply' })).toBeDisabled();
+  expect(ready).toHaveBeenLastCalledWith(false);
+  expect(api.saveModelInventory).not.toHaveBeenCalled();
+  await user.clear(name); await user.type(name, 'PR69 corrected name');
+  await user.click(editor.getByRole('button', { name: 'compact.apply' }));
+  await user.click(screen.getByRole('button', { name: 'compact.saveModels' }));
+  expect(api.saveModelInventory).toHaveBeenCalledWith('openai', { models: [expect.objectContaining({ name: 'PR69 corrected name' })], deleted: [] });
 });
 
 it('only explicit trash actions delete saved models and apply on save', async () => {

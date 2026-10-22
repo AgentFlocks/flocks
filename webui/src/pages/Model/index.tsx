@@ -2339,11 +2339,16 @@ function ConfigureProviderDialog({ provider, existingCredentials, loadingModels,
     if (!apiKey.trim() && !existingCredentials?.has_credential && !providerAllowsEmptyApiKey(provider.id)) { setSaveError(t('discovery.codes.missing_credentials')); return; }
     if ((custom || isAzureProviderId(provider.id)) && !baseUrl.trim()) { setSaveError(t('form.baseUrlRequired')); return; }
     lock.current = true; setSaving(true); setSaveError(null);
+    let credentialsSaved = false;
     try {
       await providerAPI.setCredentials(provider.id, { ...credentials, provider_name: custom ? name.trim() || undefined : undefined, skip_catalog_bootstrap: true });
+      credentialsSaved = true;
       await providerAPI.saveModelInventory(provider.id, inventory);
       onModelsChanged(); toast.success(t('credentialsSaved')); onConfigured();
-    } catch (error) { setSaveError(extractErrorMessage(error)); }
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      setSaveError(credentialsSaved ? t('compact.inventorySaveFailedAfterCredentials', { error: message }) : message);
+    }
     finally { lock.current = false; setSaving(false); }
   };
   return <EntitySheet open mode="edit" entityType={t('configuration.provider')} entityName={provider.name} width={720} minWidth={360} maxWidth={960} icon={<Brain className="h-5 w-5" />} rexSystemContext="" rexWelcomeMessage="" hideRex hideTest initialTab="form" submitLabel={t('compact.save')} submitLoading={saving} submitDisabled={saving || !ready || loadingModels} onSubmit={save} onClose={onClose} footerLeft={<button type="button" disabled={saving} onClick={onDelete} className="flex items-center gap-1.5 text-xs text-red-600"><Trash2 className="h-3.5 w-3.5" />{t('form.removeProvider')}</button>}>

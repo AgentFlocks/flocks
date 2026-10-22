@@ -105,6 +105,24 @@ OPENAI_CATALOG_IDS = [
 
 
 @pytest.mark.asyncio
+async def test_id_only_lists_block_known_non_chat_families_without_blocking_audio_chat(discovery_runtime, upstream):
+    chat = ["gpt-4o", "gpt-4o-audio-preview", "private-embedding-chat"]
+    non_chat = [
+        "text-embedding-3-small", "openai/text-embedding-3-large", "text-embedding-ada-002",
+        "whisper-1", "openai/whisper-1:latest", "tts-1-hd", "gpt-4o-mini-tts",
+        "gpt-4o-transcribe", "dall-e-3", "gpt-image-1", "omni-moderation-latest",
+    ]
+    upstream.handler = lambda request: httpx.Response(200, json={"data": [{"id": mid} for mid in chat + non_chat]})
+    result = await discovery_runtime.module.discover_models("openai-compatible", base_url="https://gateway.test/v1")
+    assert result["status"] == "success"
+    models = {model["id"]: model for model in result["models"]}
+    assert set(models) == set(chat + non_chat)
+    assert all(models[mid]["selectable"] for mid in chat)
+    assert all(not models[mid]["selectable"] and models[mid]["unavailable_reason"] == "not_chat_model" for mid in non_chat)
+    discovery_runtime.writes.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("provider_id", OPENAI_CATALOG_IDS)
 async def test_catalog_compatible_providers_fetch_from_supplied_endpoint(
     provider_id,

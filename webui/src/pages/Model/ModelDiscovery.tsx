@@ -79,6 +79,9 @@ function ModelEditor({
   const [draft, setDraft] = useState(row);
   const [context, setContext] = useState(row.context_window?.toString() ?? '');
   const [output, setOutput] = useState(row.max_output_tokens?.toString() ?? '');
+  const validName = !!draft.name.trim()
+    && draft.name.trim().length <= 512
+    && Array.from(draft.name).every(char => char.charCodeAt(0) >= 32);
   const valid = [context, output].every(
     (value) => !value || (/^\d+$/.test(value) && Number(value) > 0 && Number(value) <= 100_000_000),
   );
@@ -96,14 +99,19 @@ function ModelEditor({
         <h4 className="text-sm font-semibold">{t('compact.editModel')}</h4>
         <span className="truncate text-xs text-gray-500">{row.id}</span>
       </div>
-      <label className="block space-y-1 text-sm">
-        <span>{t('form.displayName')}</span>
+      <div className="space-y-1 text-sm">
+        <label htmlFor={`${uid}-name`}>{t('form.displayName')}</label>
         <input
+          id={`${uid}-name`}
           value={draft.name}
+          maxLength={512}
+          aria-invalid={!validName}
+          aria-describedby={!validName ? `${uid}-name-error` : undefined}
           onChange={(e) => setDraft({ ...draft, name: e.target.value })}
           className="w-full rounded-md border border-gray-300 px-3 py-2"
         />
-      </label>
+        {!validName && <span id={`${uid}-name-error`} role="alert" className="block text-xs text-red-600">{t('compact.invalidModelName')}</span>}
+      </div>
       <div className="grid grid-cols-2 gap-3">
         {(
           [
@@ -167,7 +175,7 @@ function ModelEditor({
         </button>
         <button
           type="button"
-          disabled={!valid || !draft.name.trim()}
+          disabled={!valid || !validName}
           onClick={() =>
             onApply({
               ...draft,
@@ -292,10 +300,11 @@ export default function ModelDiscovery({
     setLoading(false);
     setError(null);
     setNotice(null);
-    setEditor(null);
+    setSummary(null);
+    setEditor((current) => current?.existing ? current : null);
     setRows((current) => current.filter((row) => row.existing));
-    setDeleted([]);
-    setDirty(false);
+    // Saved-model edits, switches, and explicit deletions belong to this
+    // provider, even when the credentials for the next discovery change.
   }, [providerId, apiKey, baseUrl, loaded]);
 
   useEffect(() => {

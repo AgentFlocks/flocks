@@ -11,7 +11,7 @@ from flocks.bus import Bus, BusEvent
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.provider.model_catalog import get_raw_catalog
-from flocks.provider.model_discovery import THREATBOOK_MODEL_LIST_PROVIDERS, discover_models
+from flocks.provider.model_discovery import THREATBOOK_MODEL_LIST_PROVIDERS, discover_models, is_known_non_chat_model
 from flocks.provider.provider import Provider
 from flocks.server.auth import require_admin
 from flocks.server.config_mutation import serialized_config_mutation
@@ -101,6 +101,9 @@ async def import_provider_models(
         raise HTTPException(404, "Save the provider before importing models")
     current = raw_provider.get("models")
     models = dict(current) if isinstance(current, dict) else {}
+    for candidate in body.models:
+        if candidate.id not in models and is_known_non_chat_model(candidate.id):
+            raise HTTPException(422, f"Model '{candidate.id}' is not a chat model and cannot be imported as an LLM")
     added: list[str] = []
     skipped: list[str] = []
     for candidate in body.models:
@@ -171,6 +174,10 @@ async def save_provider_model_inventory(provider_id: str, body: SaveInventoryReq
     ids = [model.id for model in body.models]
     if len(ids) != len(set(ids)) or set(ids) & set(body.deleted):
         raise HTTPException(422, "Duplicate or conflicting model IDs")
+    current = raw.get("models") or {}
+    for item in body.models:
+        if item.enabled and item.id not in current and is_known_non_chat_model(item.id):
+            raise HTTPException(422, f"Model '{item.id}' is not a chat model and cannot be imported as an LLM")
     models = raw.setdefault("models", {})
     settings = data.setdefault("model_settings", {})
     added, updated, deleted = [], [], []

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 
 from flocks.auth.context import AuthUser
 from flocks.config.config import Config, ConfigInfo, ProviderConfig
@@ -91,7 +92,10 @@ def inventory(tmp_path, monkeypatch):
 
 @pytest.fixture
 async def inventory_client(inventory):
+    from flocks.server.app import validation_exception_handler
+
     app = FastAPI()
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
     @app.middleware("http")
     async def authenticated_test_user(request, call_next):
@@ -311,6 +315,36 @@ async def test_invalid_import_items_do_not_mutate_config(model, inventory, inven
     assert response.status_code == 422, response.text
     inventory.write.assert_not_called()
     assert saved(inventory) == inventory.initial
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["import-models", "model-inventory"])
+@pytest.mark.parametrize("model_id", ["text-embedding-3-small", "whisper-1"])
+async def test_known_non_chat_models_cannot_be_imported_by_direct_requests(operation, model_id, inventory, inventory_client):
+    body = {"models": [{"id": "valid-chat", "name": "Chat"}, {"id": model_id, "name": model_id}]}
+    if operation == "model-inventory":
+        body["deleted"] = ["existing"]
+    response = await inventory_client.post(f"/api/provider/custom-inventory/{operation}", json=body)
+    assert response.status_code == 422, response.text
+    assert "not a chat model" in response.json()["detail"]
+    assert saved(inventory) == inventory.initial
+    inventory.write.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["import-models", "model-inventory"])
+async def test_control_character_name_uses_production_validation_handler_without_mutation(operation, inventory, inventory_client):
+    response = await inventory_client.post(f"/api/provider/custom-inventory/{operation}", json={
+        "models": [{"id": "valid-chat", "name": "PR69 bad\tname"}],
+    })
+    assert response.status_code == 422, response.text
+    error = response.json()
+    assert error["error"] == "ValidationError"
+    assert error["details"][0]["loc"] == ["body", "models", 0, "name"]
+    assert "control characters" in error["details"][0]["msg"]
+    assert isinstance(error["details"][0]["ctx"]["error"], str)
+    assert saved(inventory) == inventory.initial
+    inventory.write.assert_not_called()
 
 
 def test_manual_inventory_preserves_empty_and_partial_selection_after_catalog_sync(inventory):

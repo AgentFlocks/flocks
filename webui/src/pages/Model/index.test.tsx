@@ -46,6 +46,7 @@ vi.mock('react-i18next', () => ({
       if (key === 'status.models') return `${params?.count ?? 0} models`;
       if (key === 'configuration.modelCount') return `${params?.enabled}/${params?.total} enabled`;
       if (key === 'wizard.saveAndAddModels') return `Save and add ${params?.count} models`;
+      if (key === 'compact.inventorySaveFailedAfterCredentials') return `Connection information was saved, but the model list was not saved: ${params?.error}. Check and retry.`;
       if (key === 'modelSelection.info') {
         return 'modelSelection.info';
       }
@@ -626,6 +627,37 @@ describe('ModelPage configure provider dialog', () => {
     expect(mocks.saveModelInventory).toHaveBeenLastCalledWith('openai', { models: [], deleted: ['gpt-4o'] });
     await user.click(screen.getByRole('button', { name: 'compact.save' }));
     await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledTimes(2));
+  });
+
+  it.each(['key', 'url'])('retains explicit model deletions after changing the %s before saving', async (field) => {
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await user.click(await screen.findByRole('button', { name: 'compact.deleteModel gpt-4o' }));
+    expect(screen.queryByRole('switch', { name: 'compact.enableModel gpt-4o' })).not.toBeInTheDocument();
+    if (field === 'key') {
+      await user.clear(screen.getByLabelText('API Key')); await user.type(screen.getByLabelText('API Key'), 'new-key');
+    } else {
+      await user.type(screen.getByPlaceholderText('https://api.example.com/v1'), '/');
+    }
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledWith('openai', { models: [], deleted: ['gpt-4o'] }));
+    expect(mocks.setCredentials).toHaveBeenCalledWith('openai', expect.objectContaining(field === 'key'
+      ? { api_key: 'new-key' } : { base_url: 'https://old.example.com/v1/' }));
+  });
+
+  it('identifies the saved connection and failed inventory with the field error, then allows retry', async () => {
+    mocks.saveModelInventory.mockRejectedValueOnce({ response: { data: {
+      error: 'ValidationError', message: 'Request validation failed',
+      details: [{ loc: ['body', 'models', 0, 'name'], msg: 'Invalid model name' }],
+    } } });
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' });
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Connection information was saved, but the model list was not saved: models.0.name: Invalid model name');
+    expect(mocks.setCredentials).toHaveBeenCalledTimes(1);
+    expect(mocks.toast.success).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mocks.toast.success).toHaveBeenCalled());
   });
 
   it('offers an empty provider independent key checking and compact discovery', async () => {

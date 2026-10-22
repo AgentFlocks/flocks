@@ -391,6 +391,20 @@ def _positive_integer(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 100_000_000 else None
 
 
+def is_known_non_chat_model(model_id: str) -> bool:
+    """Recognize dedicated non-chat families in otherwise ID-only model lists.
+
+    Match model families, not arbitrary substrings: audio-capable chat models
+    and private deployment names must remain usable. Compatible gateways may
+    prefix an upstream model with a vendor namespace or append an Ollama tag.
+    """
+    name = model_id.rsplit("/", 1)[-1].split(":", 1)[0].lower()
+    return name.startswith((
+        "text-embedding-", "whisper-", "tts-", "dall-e-", "gpt-image-",
+        "text-moderation-", "omni-moderation-",
+    )) or bool(re.match(r"^gpt-4o(?:-mini)?-(?:transcribe|tts)(?:-|$)", name))
+
+
 def _normalize_model(item: Any, protocol: str, already_added: set[str]) -> dict | None:
     if not isinstance(item, dict):
         return None
@@ -439,7 +453,8 @@ def _normalize_model(item: Any, protocol: str, already_added: set[str]) -> dict 
     methods = item.get("supportedGenerationMethods") or item.get("supported_actions")
     endpoints = item.get("endpoints")
     non_chat = (
-        protocol == "google"
+        is_known_non_chat_model(model_id)
+        or protocol == "google"
         and isinstance(methods, list)
         and "generateContent" not in methods
         or protocol == "cohere"

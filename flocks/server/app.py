@@ -17,6 +17,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -1173,9 +1174,10 @@ app.add_middleware(_StaticWebUIMiddleware)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Handle validation errors"""
+    errors = jsonable_encoder(exc.errors(), custom_encoder={Exception: str})
     log.warning("validation.error", {
         "path": request.url.path,
-        "errors": exc.errors(),
+        "errors": errors,
     })
     
     return JSONResponse(
@@ -1183,7 +1185,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={
             "error": "ValidationError",
             "message": "Request validation failed",
-            "details": exc.errors(),
+            "details": errors,
         }
     )
 

@@ -401,6 +401,8 @@
     "save": "保存",
     "saveModels": "保存模型",
     "modelsSaved": "模型设置已保存。",
+    "invalidModelName": "模型名称须为 1–512 个字符，且不能包含制表符、换行等控制字符。",
+    "inventorySaveFailedAfterCredentials": "连接信息已保存，模型列表保存失败：{{error}}。请检查后重试。",
     "saving": "正在保存…",
     "checkKey": "检查连接",
     "checkKeyHint": "检查 API Key 是否有效。",
