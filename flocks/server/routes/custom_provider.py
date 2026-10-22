@@ -295,9 +295,17 @@ async def create_model(provider_id: str, body: CreateModelReq, _admin: object = 
     models = raw.get("models", {})
     existing_model = models.get(body.model_id)
     limits = await _resolve_model_limits(provider_id, body, raw)
-    cache_read_price = body.cache_read_price
-    if existing_model and "cache_read_price" not in body.model_fields_set:
-        cache_read_price = existing_model.get("cache_read_price")
+    price_fields = ("input_price", "output_price", "cache_read_price", "currency")
+    if existing_model is not None:
+        # Omission preserves both explicit overrides and the absence of an
+        # override, so editing a name does not replace catalog tiers with zero.
+        pricing_config = {key: existing_model[key] for key in price_fields if key in existing_model}
+        pricing_config.update({
+            key: getattr(body, key) for key in price_fields if key in body.model_fields_set
+        })
+    else:
+        # New custom models retain the existing zero-price defaults.
+        pricing_config = {key: getattr(body, key) for key in price_fields}
 
     now = datetime.now(UTC).isoformat()
     model_config = {
@@ -308,10 +316,7 @@ async def create_model(provider_id: str, body: CreateModelReq, _admin: object = 
         "supports_tools": body.supports_tools,
         "supports_streaming": body.supports_streaming,
         "supports_reasoning": body.supports_reasoning,
-        "input_price": body.input_price,
-        "output_price": body.output_price,
-        "cache_read_price": cache_read_price,
-        "currency": body.currency,
+        **pricing_config,
         "created_at": existing_model.get("created_at", now) if existing_model else now,
     }
 
@@ -321,9 +326,10 @@ async def create_model(provider_id: str, body: CreateModelReq, _admin: object = 
     # Add/update runtime
     _add_model_to_runtime(
         provider_id,
-        body.model_copy(update={"cache_read_price": cache_read_price}),
+        body,
         context_window=limits.context_window,
         max_output_tokens=limits.max_output_tokens,
+        model_config=model_config,
     )
 
     # Capture first-model eligibility from the config before the upsert.
@@ -342,9 +348,10 @@ async def create_model(provider_id: str, body: CreateModelReq, _admin: object = 
         unique_name=f"{provider_id}/{body.model_id}", name=body.name,
         context_window=limits.context_window,
         max_output_tokens=limits.max_output_tokens,
-        input_price=body.input_price, output_price=body.output_price,
-        cache_read_price=cache_read_price,
-        currency=body.currency, created_at=now,
+        input_price=pricing_config.get("input_price") or 0.0,
+        output_price=pricing_config.get("output_price") or 0.0,
+        cache_read_price=pricing_config.get("cache_read_price"),
+        currency=pricing_config.get("currency") or "USD", created_at=now,
     )
 
 
@@ -653,25 +660,28 @@ def _add_model_to_runtime(
     *,
     context_window: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
+    model_config: Optional[dict[str, Any]] = None,
 ):
     """Add (or upsert) a model in the runtime Provider registry.
 
     Works for both CustomProvider (_custom_models) and DynamicOpenAIProvider
     / OpenAICompatibleProvider (_config_models).
     """
+    price_fields = ("input_price", "output_price", "cache_read_price", "currency")
+    pricing_config = (
+        {key: getattr(body, key) for key in price_fields}
+        if model_config is None
+        else {key: model_config[key] for key in price_fields if key in model_config}
+    )
     _pricing = None
-    if (
-        body.input_price is not None
-        or body.output_price is not None
-        or body.cache_read_price is not None
-    ):
+    if any(pricing_config.get(key) is not None for key in price_fields[:3]):
         _pricing = {
-            "input": float(body.input_price or 0.0),
-            "output": float(body.output_price or 0.0),
-            "currency": body.currency,
+            "input": float(pricing_config.get("input_price") or 0.0),
+            "output": float(pricing_config.get("output_price") or 0.0),
+            "currency": pricing_config.get("currency") or "USD",
         }
-        if body.cache_read_price is not None:
-            _pricing["cache_read"] = float(body.cache_read_price)
+        if pricing_config.get("cache_read_price") is not None:
+            _pricing["cache_read"] = float(pricing_config["cache_read_price"])
     mi = ModelInfo(
         id=body.model_id,
         name=body.name,
@@ -697,8 +707,8 @@ def _add_model_to_runtime(
     mi._explicit_keys = {
         "name", "context_window", "max_output_tokens",
         "supports_streaming", "supports_tools", "supports_vision",
-        "supports_reasoning", "input_price", "output_price",
-        "cache_read_price", "currency",
+        "supports_reasoning",
+        *pricing_config.keys(),
     }
     Provider._models[body.model_id] = mi
     p = Provider.get(provider_id)
