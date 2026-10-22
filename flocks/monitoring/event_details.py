@@ -491,6 +491,8 @@ def timeline_projection(story, *, other_events=None):
     Cards already carry the event/version and device boundaries. Do not merge
     them again by name, time or alert ID, and never date them by query time.
     """
+    from .evidence_presenter import _summary
+
     story = story if isinstance(story, dict) else {}
 
     def pick(value, latest=False):
@@ -522,7 +524,11 @@ def timeline_projection(story, *, other_events=None):
         name = _readable_text(fields.get('name') or '', 100) if alert_id else '取证记录'
         kind_labels = {'network': '网络访问记录', 'domain': '域名关联记录', 'file': '文件取证记录',
                        'process': '进程取证记录', 'request': '请求与响应记录'}
-        text = name if alert_id and name else kind_labels.get(card.get('kind'), '来源取证记录')
+        packets = card.get('packets') if isinstance(card.get('packets'), list) else []
+        text = _summary(fields, source, packets)
+        if not text:
+            detail = _readable_text(card.get('summary') or kind_labels.get(card.get('kind'), '取证资料'), 200)
+            text = f'来源记录显示：{detail.rstrip("。 ")}。'
         records = card.get('records') if isinstance(card.get('records'), list) else []
         refs = list(dict.fromkeys(_text(record.get('evidence_id'), 100) for record in [card, *records]
                                  if isinstance(record, dict) and record.get('evidence_id')))
@@ -532,7 +538,7 @@ def timeline_projection(story, *, other_events=None):
                        **({'alert_id': alert_id} if alert_id else {}),
                        'first_time': first, 'end_time': end, 'time': first if first is not None else end,
                        'name': name,
-                       'text': text[:240], 'source': source, 'evidence_ids': refs,
+                       'text': _readable_text(text, 240), 'source': source, 'evidence_ids': refs,
                        'partial': bool(card.get('partial')), 'boundary': _text(card.get('boundary') or '', 600)})
     alerts.sort(key=lambda row: (_when(row['time']) if _when(row['time']) is not None else float('inf'), row['id']))
     if other_events is None:

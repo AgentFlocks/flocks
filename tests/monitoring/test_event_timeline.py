@@ -47,8 +47,9 @@ def test_deployed_dns_shape_projects_six_cards_once_after_list_and_proof_merging
     first = next(entry for entry in story['alert_timeline'] if entry['alert_id'] == 'alert-0')
     assert first['first_time'] == 1789999900 and first['end_time'] == 1792000100
     assert story['event_time_range'] == {'first_time': EVENT['startTime'], 'end_time': EVENT['endTime']}
-    assert all('192.0.2.' not in entry['text'] and '198.51.100.' not in entry['text']
-               and 'sample.invalid' not in entry['text'] for entry in story['alert_timeline'])
+    cards = {item['id']: item for item in story['evidence_cards']}
+    assert all(entry['text'] == cards[entry['card_id']]['summary'] for entry in story['alert_timeline'])
+    assert '192.0.2.130 访问 198.51.100.1' in first['text'] and 'fakehunter' in first['text']
     overview = readable_story(story)
     assert overview['alert_timeline'] == story['alert_timeline']
     assert overview['event_time_range'] == story['event_time_range']
@@ -81,7 +82,7 @@ def test_equal_names_times_or_display_sources_do_not_merge_distinct_cards_or_uni
     assert len(rows) == 4 and len({entry['id'] for entry in rows}) == 4
     unknown = [entry for entry in rows if entry['kind'] == 'observation']
     assert len(unknown) == 2 and all('alert_id' not in entry for entry in unknown)
-    assert all(entry['name'] == '取证记录' and entry['text'] == '文件取证记录' for entry in unknown)
+    assert all(entry['name'] == '取证记录' and '未提供源 IP 和目的 IP' in entry['text'] for entry in unknown)
     assert story == before
 
 
@@ -118,3 +119,19 @@ def test_old_stories_keep_the_legacy_timeline_and_card_boundaries_remain_visible
     row = timeline_projection({'evidence_cards': [card('alert-a', {'name': '检测'},
         partial=True, boundary='字段已截断，范围不完整。')]})['alert_timeline'][0]
     assert row['partial'] and row['boundary'] == '字段已截断，范围不完整。'
+
+
+def test_timeline_rebuilds_old_bare_names_with_compact_addresses_without_using_xff_as_source():
+    original = {'evidence_cards': [card('silverfox', {
+        'name': 'silverfox', 'src_ip': ['192.0.2.130', '192.0.2.131'],
+        'dst_ip': ['198.51.100.1', '198.51.100.2', '198.51.100.3'],
+        'x_forwarded_for': '203.0.113.9', 'start_time': 1790000000, 'end_time': 1792000000,
+        'attack_result': 1,
+    }, summary='silverfox'), card('missing-source', {'name': 'fakewebsite', 'dst_ip': '198.51.100.8',
+        'x_forwarded_for': '203.0.113.9'})]}
+    before = deepcopy(original)
+    rows = timeline_projection(original)['alert_timeline']
+    assert rows[0]['text'] == '192.0.2.130 等 2 个 IP 访问 198.51.100.1 等 3 个 IP，触发「silverfox」告警。'
+    assert '源 IP 未提供' in rows[1]['text'] and '198.51.100.8' in rows[1]['text']
+    assert all('203.0.113.9' not in row['text'] and '成功' not in row['text'] for row in rows)
+    assert original == before

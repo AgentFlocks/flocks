@@ -57,7 +57,7 @@ export function EventTimeline({
         <p className="mb-3 text-xs leading-6 text-slate-500">
           {retainedRisk
             ? "以下为此前确认风险的告警时间；补充核查另行记录。"
-            : "同一告警合并展示首次至最近发生的时间，具体 IP、域名见证据详情。"}
+            : "同一告警合并展示首次至最近发生的时间；简要列出源、目的 IP，完整信息见证据详情。"}
         </p>
       )}
       {!!timeline.length && (

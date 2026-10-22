@@ -34,7 +34,7 @@ const snapshot = (): EventDetailResponse => ({
         alert_id: "alert-a",
         first_time: 200,
         end_time: 800,
-        text: "phishing 告警",
+        text: "192.0.2.10 访问 198.51.100.1，触发「phishing」告警。",
       },
     ],
     timeline: [{ time: 200, text: "旧版重复长时间线" }],
@@ -116,7 +116,9 @@ it("exports the selected event with the concise timeline, evidence identity and 
   value.overview!.alert_timeline![0].partial = true;
   value.overview!.timeline_truncated = true;
   const report = render(value);
-  expect(report).toContain("200 — 800 · phishing 告警");
+  expect(report).toContain(
+    "200 — 800 · 192.0.2.10 访问 198.51.100.1，触发「phishing」告警。",
+  );
   expect(report).toContain("300 — 700 · phishing 告警");
   expect(report).not.toContain("旧版重复长时间线");
   expect(report).toContain("源 IP：192.0.2.10");

@@ -255,7 +255,7 @@ it("shows five compact alert ranges before expanding all distinct alert identiti
           alert_id: `alert-${index}`,
           first_time: "2026-07-12T08:33:47Z",
           end_time: "2026-07-14T08:22:05Z",
-          text: "phishing 告警",
+          text: "192.0.2.130 访问 198.51.100.1 等 3 个 IP，触发「phishing」告警。",
           partial: true,
           ...(index === 0 && { boundary: "此记录仅为候选关联，尚未核实。" }),
         })),
@@ -274,7 +274,11 @@ it("shows five compact alert ranges before expanding all distinct alert identiti
     name: "事件发生时间线",
   });
   expect(within(timeline).getAllByRole("listitem")).toHaveLength(5);
-  expect(within(timeline).getAllByText("phishing 告警")).toHaveLength(5);
+  expect(
+    within(timeline).getAllByText(
+      "192.0.2.130 访问 198.51.100.1 等 3 个 IP，触发「phishing」告警。",
+    ),
+  ).toHaveLength(5);
   expect(
     within(timeline).getAllByText("2026/7/12 16:33:47 — 2026/7/14 16:22:05"),
   ).toHaveLength(5);
