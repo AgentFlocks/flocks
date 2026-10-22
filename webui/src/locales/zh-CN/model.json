@@ -3,6 +3,18 @@
   "pageDescription": "管理 AI 模型提供商和模型配置",
   "addProvider": "添加模型供应商",
   "addModel": "添加模型",
+  "pricing": {
+    "tierBasis": "按每次请求的完整输入 Tokens（含缓存）选择一个价格区间，整次请求使用该档单价，不累进计价。",
+    "inputRange": "完整输入 Tokens",
+    "cacheWrite": "缓存写入",
+    "cacheFallback": "未单独定价，使用该档输入单价",
+    "version": "价格版本：{{version}}",
+    "priceOrder": "输入 / 输出 / 缓存命中 / 缓存写入（如有），每百万 Tokens；阶梯区间按完整输入计算",
+    "overrideTiers": "使用固定价格覆盖全部输入区间",
+    "overrideTiersHint": "勾选并保存后，下方固定单价将替代所有阶梯价格。未勾选时，修改其他设置会保留当前阶梯价格。",
+    "editHint": "修改价格会保存固定单价，并优先于目录价格。未修改价格时保留现有价格设置。缓存命中价留空时按输入单价计算。",
+    "invalidPrice": "输入和输出价格须为不小于 0 的数字；缓存命中价可留空。"
+  },
   "cacheUsage": {
     "title": "整体输入缓存命中率",
     "scope": "当前 Flocks 实例已记录的历史累计用量，涵盖所有提供商和模型。",

@@ -3,6 +3,18 @@
   "pageDescription": "Manage AI model providers and model configurations",
   "addProvider": "Add Provider",
   "addModel": "Add Model",
+  "pricing": {
+    "tierBasis": "Each request selects one tier using its complete input tokens, including cached tokens. That tier applies to the whole request; pricing is not progressive.",
+    "inputRange": "Complete input tokens",
+    "cacheWrite": "Cache write",
+    "cacheFallback": "No separate rate; uses this tier's input rate",
+    "version": "Price version: {{version}}",
+    "priceOrder": "Input / output / cache read / cache write (if available), per million tokens; tiers use complete input",
+    "overrideTiers": "Use fixed prices for all input ranges",
+    "overrideTiersHint": "When checked and saved, the fixed prices below replace every tier. When unchecked, changing other settings preserves the current tiers.",
+    "editHint": "Editing prices saves fixed rates that override catalog prices. Unedited prices retain their current settings. A blank cache-read price uses the input rate.",
+    "invalidPrice": "Input and output prices must be numbers at least 0; the cache-read price may be blank."
+  },
   "cacheUsage": {
     "title": "Overall input cache hit rate",
     "scope": "Historical usage recorded by this Flocks instance, across all providers and models.",

@@ -144,12 +144,34 @@ def resolve_usage_pricing(provider_id: str, model_id: str) -> Optional[PriceConf
     provider = Provider.get(provider_id)
     if provider:
         for candidate in getattr(provider, "_config_models", []):
-            if candidate.id == model_id:
+            if candidate.id == model_id and getattr(candidate, "pricing", None) is not None:
+                # Explicit prices, including zero, override catalog prices.
                 model_info = candidate
                 break
 
-    if model_info is None:
-        model_info = Provider.get_model(model_id)
+        if model_info is None:
+            try:
+                definitions = provider.get_model_definitions()
+            except Exception as exc:
+                log.debug("usage.pricing.definitions_failed", {
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "error_type": type(exc).__name__,
+                })
+            else:
+                for candidate in definitions:
+                    if candidate.id == model_id and candidate.provider_id == provider_id:
+                        # Config-only ModelInfo may omit pricing; definitions
+                        # enrich that same provider's model from the catalog.
+                        model_info = candidate
+                        break
+
+    if model_info is None or getattr(model_info, "pricing", None) is None:
+        candidate = Provider.get_model(model_id)
+        # The legacy registry is keyed only by model id. A shared model name
+        # must never borrow another provider's price.
+        if candidate is not None and candidate.provider_id == provider_id:
+            model_info = candidate
 
     pricing = getattr(model_info, "pricing", None) if model_info else None
     if pricing is None:
@@ -166,6 +188,8 @@ def resolve_usage_pricing(provider_id: str, model_id: str) -> Optional[PriceConf
             currency=getattr(pricing, "currency", "USD"),
             cache_read=getattr(pricing, "cache_read", None),
             cache_write=getattr(pricing, "cache_write", None),
+            tiers=getattr(pricing, "tiers", []),
+            price_version=getattr(pricing, "price_version", None),
         )
 
     if isinstance(pricing, dict):
@@ -176,6 +200,8 @@ def resolve_usage_pricing(provider_id: str, model_id: str) -> Optional[PriceConf
             currency=pricing.get("currency", "USD"),
             cache_read=pricing.get("cache_read"),
             cache_write=pricing.get("cache_write"),
+            tiers=pricing.get("tiers", []),
+            price_version=pricing.get("price_version"),
         )
 
     return None

@@ -26,7 +26,7 @@ import {
 } from '@/api/provider';
 import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
 import CacheUsagePanel from './CacheUsagePanel';
-import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
+import { formatPricePerMillion, formatPricingPerMillion, formatPricingTierRange, isPricingFree } from '@/utils/modelPricing';
 import { extractErrorMessage } from '@/utils/error';
 import {
   convertCurrencyAmount,
@@ -39,6 +39,7 @@ import type {
   ProviderCredentials, ModelDefinitionV2, UsageStats,
   CatalogProvider, CatalogModel, CatalogCredentialField, ModelSettingV2,
   CustomModelCreate, ProviderCredentialInput, FallbackModelRef,
+  PriceConfigV2,
 } from '@/types';
 
 // ==================== Provider Auth Helpers ====================
@@ -1108,6 +1109,49 @@ function ProviderDetail({
 
 // ==================== Model Card (V2) ====================
 
+function PricingTierTable({ pricing }: { pricing: PriceConfigV2 }) {
+  const { t } = useTranslation('model');
+  const tiers = pricing.tiers ?? [];
+  const hasCacheWrite = tiers.some(tier => tier.cache_write != null);
+  if (!tiers.length) return null;
+
+  return (
+    <div className="space-y-2 mb-3">
+      <p className="text-xs text-gray-500">{t('pricing.tierBasis')}</p>
+      <div className="overflow-x-auto rounded border border-gray-200">
+        <table className="w-full text-xs text-left">
+          <thead className="bg-gray-50 text-gray-500">
+            <tr>
+              <th className="px-2 py-2 font-medium">{t('pricing.inputRange')}</th>
+              <th className="px-2 py-2 font-medium">{t('form.input')}</th>
+              <th className="px-2 py-2 font-medium">{t('form.output')}</th>
+              <th className="px-2 py-2 font-medium">{t('form.cacheRead')}</th>
+              {hasCacheWrite && <th className="px-2 py-2 font-medium">{t('pricing.cacheWrite')}</th>}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 text-gray-700">
+            {tiers.map((tier, index) => (
+              <tr key={tier.max_input_tokens ?? 'unbounded'}>
+                <td className="px-2 py-2 whitespace-nowrap">{formatPricingTierRange(tiers, index)}</td>
+                <td className="px-2 py-2 whitespace-nowrap">{formatPricePerMillion(tier.input, pricing.currency, pricing.unit)}</td>
+                <td className="px-2 py-2 whitespace-nowrap">{formatPricePerMillion(tier.output, pricing.currency, pricing.unit)}</td>
+                <td className="px-2 py-2 whitespace-nowrap" title={tier.cache_read == null ? t('pricing.cacheFallback') : undefined}>
+                  {formatPricePerMillion(tier.cache_read ?? tier.input, pricing.currency, pricing.unit)}
+                </td>
+                {hasCacheWrite && (
+                  <td className="px-2 py-2 whitespace-nowrap" title={tier.cache_write == null ? t('pricing.cacheFallback') : undefined}>
+                    {formatPricePerMillion(tier.cache_write ?? tier.input, pricing.currency, pricing.unit)}
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onToggle, onDelete }: {
   model: ModelDefinitionV2;
   enabled: boolean;
@@ -1174,7 +1218,7 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
           </span>
           {contextK && <span className="text-[11px] text-gray-500 shrink-0">{contextK}</span>}
           {pricing && !isPricingFree(pricing) && (
-            <span className="text-[11px] text-gray-500 shrink-0">{formatPricingPerMillion(pricing)}</span>
+            <span className="text-[11px] text-gray-500 min-w-0 break-words" title={t('pricing.priceOrder')}>{formatPricingPerMillion(pricing)}</span>
           )}
           {pricing && isPricingFree(pricing) && (
             <span className="text-[11px] text-green-600 font-medium shrink-0">{t('status.free')}</span>
@@ -1883,8 +1927,8 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                                     <span className="text-sm font-medium text-gray-900">{model.name}</span>
                                     <CatalogModelBadges model={model} />
                                   </div>
-                                  <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
-                                    <span className="font-mono">{model.id}</span>
+                                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 mt-0.5">
+                                    <span className="font-mono break-all">{model.id}</span>
                                     {model.limits && (
                                       <span>
                                         {model.limits.context_window >= 1000000
@@ -1893,7 +1937,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                                       </span>
                                     )}
                                     {model.pricing && !isPricingFree(model.pricing) && (
-                                      <span>{formatPricingPerMillion(model.pricing)}</span>
+                                      <span className="min-w-0 break-words" title={t('pricing.priceOrder')}>{formatPricingPerMillion(model.pricing)}</span>
                                     )}
                                     {model.pricing && isPricingFree(model.pricing) && (
                                       <span className="text-green-600">{t('status.free')}</span>
@@ -2916,6 +2960,10 @@ function ModelDetailSheet({
     model.pricing?.cache_read != null ? String(model.pricing.cache_read) : '',
   );
   const [currency, setCurrency] = useState(model.pricing?.currency ?? 'USD');
+  const hasTieredPricing = Boolean(model.pricing?.tiers?.length);
+  const [overrideTieredPricing, setOverrideTieredPricing] = useState(false);
+  const [pricingEdited, setPricingEdited] = useState(false);
+  const saveFixedPricing = hasTieredPricing ? overrideTieredPricing : pricingEdited;
   const [enabled, setEnabled] = useState(true);
   const [defaultParameters, setDefaultParameters] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(false);
@@ -2928,6 +2976,7 @@ function ModelDetailSheet({
     setOutputPrice(value => convertEditablePrice(value, currency, nextCurrency));
     setCacheReadPrice(value => convertEditablePrice(value, currency, nextCurrency));
     setCurrency(nextCurrency);
+    setPricingEdited(true);
   };
 
   useEffect(() => {
@@ -2953,6 +3002,13 @@ function ModelDetailSheet({
 
   const handleSave = async () => {
     if (readOnly) return;
+    if (saveFixedPricing && (
+      [inputPrice, outputPrice].some(value => value.trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0)
+      || (cacheReadPrice.trim() !== '' && (!Number.isFinite(Number(cacheReadPrice)) || Number(cacheReadPrice) < 0))
+    )) {
+      toast.error(t('pricing.invalidPrice'));
+      return;
+    }
     setLoading(true);
     try {
       await Promise.all([
@@ -2965,12 +3021,12 @@ function ModelDetailSheet({
           supports_tools: supportsTools,
           supports_streaming: supportsStreaming,
           supports_reasoning: modelSupportsReasoning ? modelSupportsReasoning : supportsReasoning,
-          input_price: parseFloat(inputPrice) || 0,
-          output_price: parseFloat(outputPrice) || 0,
-          cache_read_price: cacheReadPrice.trim() === ''
-            ? null
-            : parseFloat(cacheReadPrice) || 0,
-          currency,
+          ...(saveFixedPricing ? {
+            input_price: Number(inputPrice),
+            output_price: Number(outputPrice),
+            cache_read_price: cacheReadPrice.trim() === '' ? null : Number(cacheReadPrice),
+            currency,
+          } : {}),
         }),
         modelSettingsAPI.update(provider.id, model.id, {
           enabled,
@@ -3097,22 +3153,39 @@ function ModelDetailSheet({
             {/* 价格 — 可编辑 */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.pricing')}</label>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {model.pricing?.price_version && (
+                <p className="text-xs text-gray-500 mb-2">{t('pricing.version', { version: model.pricing.price_version })}</p>
+              )}
+              {hasTieredPricing && model.pricing && <PricingTierTable pricing={model.pricing} />}
+              {hasTieredPricing && !readOnly && (
+                <label className="flex items-start gap-2 text-sm text-gray-700 mb-2">
+                  <input
+                    type="checkbox"
+                    checked={overrideTieredPricing}
+                    onChange={event => setOverrideTieredPricing(event.target.checked)}
+                    className="mt-0.5 rounded border-gray-300"
+                  />
+                  <span>{t('pricing.overrideTiers')}</span>
+                </label>
+              )}
+              {!readOnly && <p className="text-xs text-gray-500 mb-3">{t(hasTieredPricing ? 'pricing.overrideTiersHint' : 'pricing.editHint')}</p>}
+              {(!hasTieredPricing || overrideTieredPricing) && <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.input')}</label>
-                  <input type="number" step="0.01" value={inputPrice} onChange={e => setInputPrice(e.target.value)} className={fieldCls} />
+                  <input type="number" min="0" step="any" value={inputPrice} onChange={e => { setInputPrice(e.target.value); setPricingEdited(true); }} className={fieldCls} />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.output')}</label>
-                  <input type="number" step="0.01" value={outputPrice} onChange={e => setOutputPrice(e.target.value)} className={fieldCls} />
+                  <input type="number" min="0" step="any" value={outputPrice} onChange={e => { setOutputPrice(e.target.value); setPricingEdited(true); }} className={fieldCls} />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.cacheRead')}</label>
                   <input
                     type="number"
-                    step="0.01"
+                    min="0"
+                    step="any"
                     value={cacheReadPrice}
-                    onChange={e => setCacheReadPrice(e.target.value)}
+                    onChange={e => { setCacheReadPrice(e.target.value); setPricingEdited(true); }}
                     className={fieldCls}
                     placeholder="—"
                   />
@@ -3127,7 +3200,7 @@ function ModelDetailSheet({
                     <option value="CNY">CNY</option>
                   </select>
                 </div>
-              </div>
+              </div>}
             </div>
 
             {/* 启用此模型 — 可编辑 */}
@@ -3268,7 +3341,7 @@ function ModelSelectionInfo({ model }: { model: ModelDefinitionV2 }) {
             </div>
             <div className="flex gap-2">
               <dt className="shrink-0 text-gray-400">{t('form.pricing')}</dt>
-              <dd className="min-w-0 flex-1 text-right text-gray-700">
+              <dd className="min-w-0 flex-1 break-words text-right text-gray-700" title={t('pricing.priceOrder')}>
                 {formatModelPricing(model, t('modelSelection.free'), t('modelSelection.unavailable'))}
               </dd>
             </div>
