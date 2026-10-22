@@ -2297,7 +2297,6 @@ export default function SessionChat({
     fetchPendingQuestions,
     clearAll: clearPendingQuestions,
   } = usePendingQuestions();
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const focusedMessageRef = useRef('');
@@ -2390,7 +2389,11 @@ export default function SessionChat({
     if (scrollToBottomRafRef.current !== null) return;
     scrollToBottomRafRef.current = requestAnimationFrame(() => {
       scrollToBottomRafRef.current = null;
-      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+      // Scroll the message list only. scrollIntoView would also scroll every
+      // scrollable ancestor, so a page that embeds this chat (the code audit
+      // project page) would be pushed down past its own header.
+      const el = scrollContainerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
     });
   }, []);
 
@@ -4892,7 +4895,6 @@ export default function SessionChat({
             )}
           </div>
         )}
-        <div ref={messagesEndRef} className="h-0 flex-shrink-0" />
       </div>
 
       {/* Suggestions — shown before user sends any message */}

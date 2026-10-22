@@ -1117,6 +1117,57 @@ describe('SessionChat focused message deep links', () => {
   });
 });
 
+describe('SessionChat auto-scroll', () => {
+  const messagesState = (messages: Message[]) => ({
+    messages,
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+    addMessage: vi.fn(),
+    updateMessage: vi.fn(),
+    updateMessagePart: vi.fn(),
+    removeMessage: vi.fn(),
+    clearMessages: vi.fn(),
+    replaceMessageText: vi.fn(),
+    markMessageStopped: vi.fn(),
+    truncateAfterMessage: vi.fn(),
+  });
+
+  it('follows new messages inside its own list without scrolling the page that embeds it', async () => {
+    const first = makeMessage({
+      id: 'auto-scroll-1',
+      parts: [{ id: 'auto-scroll-part-1', type: 'text', text: 'first answer' } as any],
+    });
+    useSessionMessagesMock.mockReturnValue(messagesState([first]));
+    const { rerender } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    // jsdom has no layout: give the message list something to scroll to.
+    const list = screen.getByText('first answer').closest('.overflow-y-auto') as HTMLElement;
+    let scrollTop = 0;
+    Object.defineProperty(list, 'scrollHeight', { configurable: true, value: 640 });
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+
+    useSessionMessagesMock.mockReturnValue(messagesState([
+      first,
+      makeMessage({
+        id: 'auto-scroll-2',
+        parts: [{ id: 'auto-scroll-part-2', type: 'text', text: 'second answer' } as any],
+      }),
+    ]));
+    rerender(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    await waitFor(() => expect(scrollTop).toBe(640));
+    // scrollIntoView also scrolls every scrollable ancestor (the code audit page around the chat).
+    expect(window.HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
+  });
+});
+
 describe('ChatToolPart file operation titles', () => {
   it('shows only the filename in the header while preserving the full path in details', () => {
     const fullPath = '/Users/example/.flocks/workspace/outputs/2026-07-24/gold_price_retrieval_plan.md';
