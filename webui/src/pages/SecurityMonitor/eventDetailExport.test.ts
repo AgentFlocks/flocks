@@ -157,11 +157,11 @@ it.each(["source_status", "query_absent"])(
     const report = render(value);
     if (basis === "source_status") {
       expect(report).toContain("源端关闭依据：XDR 状态已关闭");
-      expect(report).toContain("XDR 状态已关闭，保留原研判记录。");
+      expect(report).toContain("XDR 已关闭此事件。");
     } else {
       expect(report).toContain("源端关闭依据：XDR 本轮未再返回");
       expect(report).toContain("已处置（历史记录，当前未核验）");
-      expect(report).toContain("XDR本轮查询未返回此事件");
+      expect(report).toContain("XDR 本轮查询未再返回此事件");
     }
     expect(report).not.toContain("处置来源：套件写回并回查确认");
   },
@@ -248,17 +248,16 @@ it("exports every correlation query and its sanitized facts even when it produce
     },
   ];
   const report = render(value);
-  expect(report).toContain("## 联动核查");
-  expect(report).toContain("明确无匹配");
-  expect(report).toContain("返回 0 条记录");
-  expect(report).toContain("10 — 20");
-  expect(report).toContain("资产 SIG · OneSIG · 资产核查");
-  expect(report).toContain("资产查询未提供发生时间范围");
-  expect(report).toContain("资产网段标记");
-  expect(report).toContain("查询失败");
-  expect(report).toContain("失败原因：接口回查超时");
-  expect(report).toContain("返回数未提供");
-  expect(report).toContain("仅取得部分资料，不能按完整核查处理。");
+  expect(report).toContain("## 联动调查");
+  expect(report).toContain("查询成功，未查到匹配记录");
+  expect(report).toContain("取得资产资料（1 条），未取得威胁日志");
+  expect(report).toContain("查询失败；接口回查超时；仅取得部分结果");
+  expect(report).not.toContain("host filter");
+  expect(report).not.toContain("资产网段标记");
+  const raw = JSON.parse(eventDetailJson(value, "Asia/Shanghai", exportedAt));
+  expect(raw.detail.overview.correlation_results[1].facts.items[0].name).toBe(
+    "资产网段标记",
+  );
 });
 
 it("keeps current rechecks and prior confirmation correlations separate in the readable export", () => {
@@ -300,6 +299,7 @@ it("keeps current rechecks and prior confirmation correlations separate in the r
   expect(current).toContain("当前查询失败");
   expect(current).not.toContain("此前候选记录");
   const prior = report.slice(report.indexOf("### 此前确证时的联动记录"));
-  expect(prior).toContain("此前候选记录");
-  expect(prior).toContain("不代表当前补充核查已完成");
+  expect(prior).toContain("此前来源");
+  expect(prior).toContain("取得候选记录（2 条）");
+  expect(prior).not.toContain("当前来源");
 });

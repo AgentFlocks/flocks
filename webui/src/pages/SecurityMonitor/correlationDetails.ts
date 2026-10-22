@@ -56,6 +56,54 @@ export interface CorrelationGroup {
   title: string;
   description: string;
   results: EventCorrelationResult[];
+  coveredEvidenceIds?: string[];
+}
+
+/** One readable outcome; a successful query is not a device health check. */
+export function correlationLine(row: EventCorrelationResult): string {
+  const source = row.source || row.device || "来源设备未提供";
+  const ref = row.evidence_id ? `${row.evidence_id} · ` : "";
+  const count =
+    typeof row.returned_count === "number" &&
+    Number.isInteger(row.returned_count) &&
+    row.returned_count >= 0
+      ? `（${row.returned_count} 条）`
+      : "";
+  let outcome: string;
+  switch (row.status) {
+    case "not_queried":
+      outcome = "未查询，连接状态未验证";
+      if (/未.*绑定/.test(row.summary || row.reason || ""))
+        outcome += "；尚未绑定联动设备";
+      else if (/预算/.test(row.summary || row.reason || ""))
+        outcome += "；等待后续轮次续查";
+      break;
+    case "unavailable":
+      outcome = "设备或查询能力不可用，未执行查询";
+      break;
+    case "skipped":
+      outcome = "已跳过，本事件未启用联动查询";
+      break;
+    case "failed":
+      outcome = `查询失败；${(row.error || row.reason || row.summary || "连接或接口异常，未取得结果").replace(/\s+/g, " ").slice(0, 180)}`;
+      break;
+    case "no_match":
+      outcome = "查询成功，未查到匹配记录；不代表没有风险";
+      break;
+    case "candidate":
+      outcome = `查询成功，取得候选记录${count}，尚待核对关联`;
+      break;
+    case "success":
+    case "insufficient":
+      outcome = /sig/i.test(row.product || "")
+        ? `查询成功，取得资产资料${count}，未取得威胁日志`
+        : `查询成功，取得资料${count}，尚无可确认的新增证据`;
+      break;
+    default:
+      outcome = "已查询，返回资料不足，结果仍需核对";
+  }
+  if (row.partial) outcome += "；仅取得部分结果";
+  return `${ref}${source}（${correlationProduct(row)}）：${outcome}。`;
 }
 
 function legacyResults(detail: EventDetailResponse): EventCorrelationResult[] {
@@ -159,5 +207,38 @@ export function eventCorrelationGroups(
         : [],
     });
   }
-  return groups;
+  return groups.map((group) => {
+    const evidenceStory =
+      group.scope === "confirmed" ? record(detail.confirmed_story) : overview;
+    const cards =
+      group.scope === "historical" ||
+      (group.scope === "current" && retainedRisk)
+        ? []
+        : Array.isArray(evidenceStory.evidence_cards)
+          ? evidenceStory.evidence_cards
+          : group.scope === "current" && Array.isArray(story.evidence_cards)
+            ? story.evidence_cards
+            : [];
+    const covered = new Set(
+      cards.flatMap((card) => {
+        const item = record(card);
+        const records = Array.isArray(item.records) ? item.records : [];
+        return [
+          text(item.evidence_id),
+          ...records.map((row) => text(record(row).evidence_id)),
+        ].filter(Boolean);
+      }),
+    );
+    const alreadyShown = (row: EventCorrelationResult) =>
+      row.status === "candidate" &&
+      !!row.evidence_id &&
+      covered.has(row.evidence_id);
+    return {
+      ...group,
+      coveredEvidenceIds: group.results.flatMap((row) =>
+        alreadyShown(row) ? [row.evidence_id!] : [],
+      ),
+      results: group.results.filter((row) => !alreadyShown(row)),
+    };
+  });
 }

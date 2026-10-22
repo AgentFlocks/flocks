@@ -90,8 +90,8 @@ export function eventSourceStatus(event: EventMember) {
       "来源未提供") + (historical ? "（历史记录，当前未核验）" : "");
   const explanation = ended
     ? verifiedClosure
-      ? "XDR 状态已关闭，保留原研判记录。"
-      : "XDR本轮查询未返回此事件，保留原研判和历史记录，不再自动观察或跟进。"
+      ? "XDR 已关闭此事件。"
+      : "XDR 本轮查询未再返回此事件，已结束本地监测。"
     : event.handling_source === "monitor_verified"
       ? "处置来源：套件写回并回查确认"
       : event.deal_status == null
@@ -253,9 +253,10 @@ export function eventDetailView(detail: EventDetailResponse) {
   });
   const currentCorrelationIds = correlationGroups
     .filter((group) => group.scope === "current")
-    .flatMap((group) =>
-      group.results.map((row) => row.evidence_id).filter(Boolean),
-    );
+    .flatMap((group) => [
+      ...group.results.map((row) => row.evidence_id).filter(Boolean),
+      ...(group.coveredEvidenceIds || []),
+    ]);
   const otherQueries = strings(story.other_queries).filter(
     (line) => !currentCorrelationIds.some((id) => line.startsWith(`${id} ·`)),
   );

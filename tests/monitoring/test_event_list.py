@@ -67,6 +67,20 @@ async def listing(**kwargs):
     return await event_list.list_events('owner', COMPONENT_ID, start_date=DAY, end_date=DAY, **kwargs)
 
 
+async def test_detail_keeps_failed_correlation_query_visible_without_using_it_as_evidence():
+    await install()
+    event = incident()
+    await observe(event)
+    failed = {'id': 'evidence-1', 'event': event['id'], 'event_revision': fingerprint(event),
+        'device': 'tdp', 'product': 'tdp', 'tool': 'tdp_log_search', 'kind': 'related',
+        'success': False, 'partial': True, 'facts': {}, 'error': '连接超时'}
+    await investigate(event, evidence=[failed], state='system_wait', result={'verdict': 'unknown'})
+    result = await event_list.detail('owner', COMPONENT_ID, event['key'])
+    assert result['overview']['correlation_results'][0]['status'] == 'failed'
+    assert result['overview']['correlation_results'][0]['error'] == '连接超时'
+    assert result['story']['evidence_cards'] == []
+
+
 async def test_same_device_same_type_groups_and_keeps_members():
     await install()
     for event in [incident('one'), incident('two', hour=3)]:

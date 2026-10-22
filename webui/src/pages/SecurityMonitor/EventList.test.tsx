@@ -1139,7 +1139,7 @@ it("shows locally ended events as ended without pending observation or a claim o
   fireEvent.click(item.getByRole("button", { name: "查看事件详情：group-a" }));
   const dialog = screen.getByRole("dialog");
   await within(dialog).findByText(
-    "XDR本轮查询未返回此事件，保留原研判和历史记录，不再自动观察或跟进。",
+    "XDR 本轮查询未再返回此事件，已结束本地监测。",
   );
   expect(
     within(dialog).queryByText(
@@ -1152,7 +1152,7 @@ it("shows locally ended events as ended without pending observation or a claim o
   ).not.toBeInTheDocument();
   expect(item.queryByText(/已结束|其他人员处置/)).not.toBeInTheDocument();
   expect(
-    within(dialog).queryByText(/已结束|其他人员处置/),
+    within(dialog).queryByText(/已结束处置|其他人员处置/),
   ).not.toBeInTheDocument();
   const audit = within(dialog).getByText("监测跟踪记录").closest("details")!;
   expect(audit).not.toHaveAttribute("open");

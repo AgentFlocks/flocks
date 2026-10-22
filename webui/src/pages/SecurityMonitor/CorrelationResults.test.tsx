@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { expect, it } from "vitest";
 import type {
   EventCorrelationResult,
@@ -40,12 +40,7 @@ const show = (
   value: EventDetailResponse,
   flags = { historical: false, retainedRisk: false },
 ) =>
-  render(
-    <CorrelationResults
-      groups={eventCorrelationGroups(value, flags)}
-      formatTime={(value) => (value == null ? "未提供" : String(value))}
-    />,
-  );
+  render(<CorrelationResults groups={eventCorrelationGroups(value, flags)} />);
 
 it("shows each query's explicit outcome and asset facts independently from alert cards without inventing a count", () => {
   const value = detail();
@@ -88,30 +83,15 @@ it("shows each query's explicit outcome and asset facts independently from alert
   show(value);
   const list = screen.getByRole("list", { name: "当前联动核查记录" });
   expect(within(list).getAllByRole("listitem")).toHaveLength(3);
-  expect(within(list).getByText("明确无匹配")).toBeInTheDocument();
-  expect(within(list).getByText("返回 0 条记录")).toBeInTheDocument();
-  expect(within(list).getByText("100 — 200")).toBeInTheDocument();
-  const sig = within(list).getByText("联动 SIG").closest("li")!;
-  expect(within(sig).getByText("OneSIG · 资产核查")).toBeInTheDocument();
-  expect(within(sig).getByText("返回 1 条资产记录")).toBeInTheDocument();
-  expect(
-    within(sig).getByText("资产查询未提供发生时间范围"),
-  ).toBeInTheDocument();
-  expect(sig.querySelector("details")).not.toHaveAttribute("open");
-  fireEvent.click(within(sig).getByText("查询参数与脱敏返回"));
-  expect(within(sig).getByText(/办公网段/)).toBeInTheDocument();
-  expect(sig.querySelector("script")).toBeNull();
-  const unknown = within(list).getByText("返回口径待核对设备").closest("li")!;
-  expect(within(unknown).getByText("返回数未提供")).toBeInTheDocument();
-  expect(
-    within(unknown).getByText("失败原因：接口权限暂不可用"),
-  ).toBeInTheDocument();
-  expect(
-    within(unknown).getByText("仅取得部分资料，不能按完整核查处理。"),
-  ).toBeInTheDocument();
-  expect(
-    within(unknown).getByText("候选记录尚未核实为同一资产。"),
-  ).toBeInTheDocument();
+  expect(list).toHaveTextContent("查询成功，未查到匹配记录");
+  expect(list).toHaveTextContent(
+    "联动 SIG（OneSIG · 资产核查）：查询成功，取得资产资料（1 条），未取得威胁日志",
+  );
+  expect(list).toHaveTextContent("查询失败；接口权限暂不可用；仅取得部分结果");
+  expect(list.querySelector("details")).toBeNull();
+  expect(list).not.toHaveTextContent("100 — 200");
+  expect(list).not.toHaveTextContent("办公网段");
+  expect(list.querySelector("script")).toBeNull();
 });
 
 it("treats an old successful empty or nonempty payload as an uncertain legacy record, and honors explicit failures", () => {
@@ -144,14 +124,11 @@ it("treats an old successful empty or nonempty payload as an uncertain legacy re
     },
   ];
   show(value);
-  expect(screen.getByText("旧记录 · 资料不足")).toBeInTheDocument();
-  expect(screen.queryByText("明确无匹配")).not.toBeInTheDocument();
-  expect(screen.queryByText("返回 0 条记录")).not.toBeInTheDocument();
-  expect(screen.getAllByText("返回数未提供")).toHaveLength(2);
-  expect(screen.getByText("查询失败")).toBeInTheDocument();
-  expect(screen.getByText("10 — 20")).toBeInTheDocument();
-  expect(screen.getByText("资产查询未提供发生时间范围")).toBeInTheDocument();
-  expect(screen.queryByText("1 — 2")).not.toBeInTheDocument();
+  expect(screen.getByText(/旧 SIG.*返回资料不足/)).toBeInTheDocument();
+  expect(screen.queryByText(/未查到匹配记录/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/0 条/)).not.toBeInTheDocument();
+  expect(screen.getByText(/失败 TDP.*查询失败；连接失败/)).toBeInTheDocument();
+  expect(screen.queryByText("10 — 20")).not.toBeInTheDocument();
 });
 
 it("uses the backend projection and separates current checks from retained confirmation records", () => {
@@ -184,11 +161,13 @@ it("uses the backend projection and separates current checks from retained confi
   const confirmed = screen.getByRole("region", {
     name: "此前确证时的联动记录",
   });
-  expect(within(current).getByText("本次 TDP")).toBeInTheDocument();
-  expect(within(current).getByText("未查询")).toBeInTheDocument();
-  expect(within(current).queryByText("此前 TDP")).not.toBeInTheDocument();
-  expect(within(confirmed).getByText("此前 TDP")).toBeInTheDocument();
-  expect(within(confirmed).queryByText("本次 TDP")).not.toBeInTheDocument();
+  expect(within(current).getByText(/本次 TDP/)).toBeInTheDocument();
+  expect(
+    within(current).getByText(/未查询，连接状态未验证/),
+  ).toBeInTheDocument();
+  expect(within(current).queryByText(/此前 TDP/)).not.toBeInTheDocument();
+  expect(within(confirmed).getByText(/此前 TDP/)).toBeInTheDocument();
+  expect(within(confirmed).queryByText(/本次 TDP/)).not.toBeInTheDocument();
   expect(screen.queryByText("不应重复推导的旧来源")).not.toBeInTheDocument();
 });
 
@@ -222,4 +201,50 @@ it("does not attribute unversioned saved queries to the current recheck or confi
   });
   expect(stale).toHaveLength(1);
   expect(stale[0].scope).toBe("historical");
+});
+
+it("omits queries already represented by key evidence while retaining failures and unqueried device state", () => {
+  const value = detail();
+  value.overview = {
+    evidence_cards: [
+      {
+        id: "card",
+        summary: "发现可疑请求。",
+        evidence_id: "evidence-2",
+        records: [{ evidence_id: "evidence-3" }],
+      },
+    ],
+    correlation_results: [
+      row(),
+      row({ id: "another", evidence_id: "evidence-3" }),
+      row({
+        id: "not-queried",
+        evidence_id: undefined,
+        source: "未查 SIG",
+        product: "sig",
+        status: "not_queried",
+      }),
+      row({
+        id: "failed",
+        evidence_id: "evidence-4",
+        source: "失败设备",
+        status: "failed",
+        error: "连接超时",
+      }),
+    ],
+  };
+  show(value);
+  expect(
+    screen.getByText("有价值的查询结果已列入关键证据。"),
+  ).toBeInTheDocument();
+  const list = screen.getByRole("list", { name: "当前联动核查记录" });
+  expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+  expect(list).toHaveTextContent("未查询，连接状态未验证");
+  expect(list).toHaveTextContent("查询失败；连接超时");
+  expect(list).not.toHaveTextContent("evidence-2");
+  const groups = eventCorrelationGroups(value, {
+    historical: false,
+    retainedRisk: true,
+  });
+  expect(groups[0].results).toHaveLength(4); // Current findings are not hidden behind historical risk cards.
 });

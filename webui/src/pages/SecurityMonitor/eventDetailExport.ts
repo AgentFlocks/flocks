@@ -16,12 +16,7 @@ import {
   investigationLabels,
 } from "./eventDetailView";
 import { timelinePartialNotice, timelineTime } from "./EventTimeline";
-import {
-  correlationCount,
-  correlationProduct,
-  correlationStatusLabels,
-  correlationWindow,
-} from "./correlationDetails";
+import { correlationLine } from "./correlationDetails";
 
 const markdown = (value: unknown): string =>
   String(value ?? "")
@@ -247,50 +242,19 @@ export function eventDetailMarkdown(
     );
   if (Array.isArray(view.story.boundaries))
     lines.push("", ...view.story.boundaries.map((item) => markdown(item)));
-  lines.push("", "## 联动核查", "");
-  if (!view.correlationGroups.length)
-    lines.push("尚未保存可展示的联动核查记录。");
+  lines.push("", "## 联动调查", "");
+  if (!view.correlationGroups.length) lines.push("尚无联动查询记录。");
   for (const group of view.correlationGroups) {
+    if (view.correlationGroups.length > 1)
+      lines.push(`### ${markdown(group.title)}`, "");
+    if (group.coveredEvidenceIds?.length)
+      lines.push("有价值的查询结果已列入关键证据。");
+    if (!group.results.length && !group.coveredEvidenceIds?.length)
+      lines.push("尚无联动查询记录。");
     lines.push(
-      `### ${markdown(group.title)}`,
-      "",
-      markdown(group.description),
+      ...group.results.map((row) => `- ${markdown(correlationLine(row))}`),
       "",
     );
-    if (!group.results.length)
-      lines.push(
-        group.scope === "confirmed"
-          ? "此前确证时未保存可展开的联动明细。"
-          : "尚未保存可展示的联动核查记录。",
-      );
-    for (const row of group.results) {
-      lines.push(
-        `#### ${markdown(row.source || row.device || "来源设备未提供")} · ${markdown(correlationProduct(row))}`,
-        "",
-        `状态：${markdown(correlationStatusLabels[row.status] || "资料不足")}`,
-        markdown(row.summary || row.reason || ""),
-        `查询主机 IP：${markdown(row.host || "未提供")}`,
-        `查询范围：${markdown(correlationWindow(row, formatTime))}`,
-        markdown(correlationCount(row)),
-      );
-      if (row.summary && row.reason && row.summary !== row.reason)
-        lines.push(markdown(row.reason));
-      if (row.error) lines.push(`失败原因：${markdown(row.error)}`);
-      if (
-        typeof row.total_count === "number" &&
-        Number.isInteger(row.total_count) &&
-        row.total_count >= 0
-      )
-        lines.push(`来源总数：${row.total_count}`);
-      if (row.partial) lines.push("仅取得部分资料，不能按完整核查处理。");
-      if (row.boundary) lines.push(markdown(row.boundary));
-      if (row.evidence_id) lines.push(`查询记录：${markdown(row.evidence_id)}`);
-      if (row.query != null)
-        lines.push("", "查询参数（已脱敏）：", "", code(row.query));
-      if (row.facts != null)
-        lines.push("", "已保存返回资料（已脱敏）：", "", code(row.facts));
-      lines.push("");
-    }
   }
   if (view.otherQueries.length)
     lines.push(

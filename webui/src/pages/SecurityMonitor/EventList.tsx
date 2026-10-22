@@ -448,10 +448,7 @@ function StoryDetails({
           </div>
         </section>
       )}
-      <CorrelationResults
-        groups={correlationGroups}
-        formatTime={(value) => formatTime(value, timezone)}
-      />
+      <CorrelationResults groups={correlationGroups} />
       {otherQueries.length > 0 && (
         <details className="rounded-lg bg-slate-50 p-3 dark:bg-slate-900">
           <summary className="cursor-pointer text-sm font-medium">

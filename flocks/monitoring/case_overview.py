@@ -3,10 +3,18 @@ import json
 import re
 
 from .assessment import fact_fields
-from .event_details import _readable_text, behavior_description, brief_values
+from .event_details import _readable_text, brief_values
+from .evidence_presenter import _summary
 
 _GENERIC_GAP = re.compile(r'调查尚未|尚未形成|置信度|高置信|版本不一致|结论缺少与|未明确证实|系统故障|查询未完成|仅取得部分事实|存在查询失败的来源|模型.*(?:超时|退避|冷却|不可用)|关联告警举证覆盖|事实列表已截断|evidence-\d+.*(?:查询|部分事实)')
 
+
+def _closure_text(assessment):
+    if assessment.get('source_closure_basis') == 'source_status':
+        return '该安全事件已被 XDR 关闭。'
+    if assessment.get('source_closure_basis') == 'not_returned':
+        return '该安全事件已标记为源端关闭（XDR 本轮查询未再返回）。'
+    return '该安全事件已标记为源端关闭。'
 
 
 def _concrete_gaps(items):
@@ -36,7 +44,7 @@ def _retained_overview(case, assessment):
         summary = '此前已核实存在风险，原有调查结论保留。'
     historical = assessment.get('risk_scope') == 'previous_activity'
     if assessment.get('source_closed'):
-        summary = '关闭前已确认风险：' + summary
+        summary = _closure_text(assessment) + '关闭前已确认风险：' + summary
     elif historical:
         summary = '此前活动已确认风险：' + summary
     finding_source = assessment.get('risk_fact_findings') or prior.get('operator_explanation')
@@ -62,14 +70,8 @@ def operator_overview(event, case, assessment, story, proofs):
     findings = []
     for card in sorted(cards, key=lambda card: (bool(card.get('boundary')), rank.get(card.get('kind'), 5))):
         fields = {field['key']: field.get('value') for field in card.get('fields', []) if isinstance(field, dict)}
-        text = (_readable_text(card.get('summary'), 190) if card.get('kind') == 'request'
-                else behavior_description(fields, story.get('basics')))
-        if text and card.get('kind') != 'request':
-            source = _readable_text(card.get('source') or '来源记录', 70)
-            if re.fullmatch(r'[a-f0-9-]{24,}', source):
-                source = '关联来源'
-            text = source + ('候选关联：' if card.get('boundary') else '记录：') + text
-        if text and card.get('kind') == 'request' and card.get('boundary'):
+        text = _summary(fields, '', card.get('packets', [])) or _readable_text(card.get('summary'), 190)
+        if text and '跨设备' in card.get('boundary', ''):
             text = '候选关联：' + text
         if text and text not in findings:
             findings.append(text)
@@ -77,6 +79,7 @@ def operator_overview(event, case, assessment, story, proofs):
             break
     host = brief_values(event.get('host') or story.get('basics', {}).get('host'), '主机')
     name = _readable_text(event.get('name') or story.get('basics', {}).get('name') or '安全事件', 80)
+    has_findings = bool(findings)
     if not findings:
         findings = [f'XDR记录{("主机" + host) if host else "本事件"}的「{name}」告警；尚未取得可核实的行为详情。']
     direct = [proof for proof in proofs if proof.get('device') == event.get('device') and proof.get('kind') != 'related']
@@ -118,8 +121,12 @@ def operator_overview(event, case, assessment, story, proofs):
             add('现有行为的完整核对及实际影响依据，当前尚未形成可靠判断。')
     if verdict == 'risk':
         missing = _concrete_gaps(result.get('gaps'))
-    if assessment.get('ended') and verdict == 'unknown':
-        summary = f'当前状态：{assessment.get("label") or "源端关闭"}；保留此前证据与研判记录。'
+    if (assessment.get('ended') or assessment.get('source_closed')) and verdict == 'unknown':
+        closed = (_closure_text(assessment) if assessment.get('source_closed') or '源端关闭' in str(assessment.get('label', ''))
+                  else '该安全事件' + (str(assessment.get('label')) if str(assessment.get('label', '')).startswith('已')
+                                        else '已' + str(assessment.get('label') or '结束监测')) + '。')
+        summary = closed + ('此前调查：' + findings[0] + '尚未确认实际影响。' if has_findings
+                            else '此前仅取得告警信息，尚未查清具体行为和实际影响。')
     elif verdict in {'risk', 'benign'}:
         summary = _readable_text(result.get('operator_summary') or result.get('reason'), 200)
         if re.search(r'cap-\d+|\b\d{10,13}\b|attackState|attackResult|gptResult', summary):
@@ -129,5 +136,5 @@ def operator_overview(event, case, assessment, story, proofs):
     else:
         summary = f'XDR检出{("主机" + host) if host else "本事件"}的「{name}」告警，当前仍需补证核对。'
     if assessment.get('source_closed') and verdict in {'risk', 'benign'}:
-        summary = ('关闭前已确认风险：' if verdict == 'risk' else '关闭前已核实无风险：') + summary
+        summary = _closure_text(assessment) + ('关闭前已确认风险：' if verdict == 'risk' else '关闭前已核实无风险：') + summary
     return {'summary': summary, 'findings': findings, 'missing_evidence': missing[:3]}

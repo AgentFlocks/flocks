@@ -795,7 +795,8 @@ def _detail(owner, scope, event_key):
     from .evidence_presenter import bound_evidence
     canonical = investigation['event'] if isinstance(investigation['event'], dict) else {}
     current_proofs = bound_evidence(event, investigation['evidence'], canonical=canonical)
-    story = build_story(event, current_proofs,
+    display_proofs = bound_evidence(event, investigation['evidence'], canonical=canonical, include_failed=True)
+    story = build_story(event, display_proofs,
                         investigation['result'] if isinstance(investigation['result'], dict) else {}, canonical=canonical)
     overview = readable_story({**story, 'verdict': summary['assessment']['verdict'],
         'conclusion': summary['assessment']['reason'], 'gaps': summary['assessment']['gaps']})

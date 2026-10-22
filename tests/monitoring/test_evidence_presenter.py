@@ -1,5 +1,6 @@
 """Operator summaries stay tied to facts and leave source payloads expandable."""
 import json
+import pytest
 
 from flocks.monitoring.evidence_presenter import evidence_cards, MAX_CARDS, MAX_RECORDS
 from flocks.monitoring.event_details import build_story, readable_story, safe_facts
@@ -8,6 +9,23 @@ from flocks.monitoring.investigation import fingerprint
 EVENT = {'id': 'incident-one', 'device': 'xdr-a', 'key': 'xdr-a:incident:incident-one',
          'name': '主机存在异常通信', 'host': '10.0.0.1', 'endTime': 1791860390,
          'startTime': 1791860154, 'dealStatus': 0}
+
+
+@pytest.mark.parametrize('name,expected', [
+    ('【HTTP转发定位】Bak后缀临时文件访问', '发现访问 .bak 备份文件的请求。'),
+    ('【HTTP转发定位】Bac后缀临时文件访问', '发现访问备份或临时文件的请求。'),
+    ('【HTTP转发定位】Druid未授权访问', '发现疑似未授权访问 Druid 服务的请求。'),
+    ('【HTTP转发定位】敏感文件访问', '发现访问敏感文件的请求。'),
+    ('【HTTP转发定位】DS_Store 信息泄露', '发现访问 .DS_Store 目录信息文件的请求。'),
+])
+def test_alert_summary_is_plain_language_without_aggregated_ips_or_success_claim(name, expected):
+    row = {'alertId': 'alert-one', 'name': name, 'srcIp': [f'192.0.2.{n}' for n in range(20)],
+           'dstIp': [f'198.51.100.{n}' for n in range(20)], 'dstPort': [80, 8080], 'attackResult': 1}
+    card = evidence_cards(EVENT, [proof({'items': [row]})])[0]
+    assert card['summary'] == expected
+    assert card['alert_id'] == 'alert-one'
+    assert len(field_values(card)['src_ip']) == 20
+    assert field_values(card)['attack_result'] == 1
 
 
 def proof(facts, **updates):
@@ -37,7 +55,7 @@ def test_cross_device_record_explains_real_intelligence_and_candidate_boundary()
         'srcIp': '10.0.0.1', 'dstIp': '192.0.2.22', 'dstPort': 3333,
         'domain': 'pool.example', 'intelligenceTag': '挖矿矿池', 'time': 1791860154}]}},
         source_name='华东TDP', device='tdp-1', tool='tdp_query', kind='related')])
-    assert '华东TDP' in cards[0]['summary'] and '挖矿矿池' in cards[0]['summary']
+    assert cards[0]['source'] == '华东TDP' and '挖矿矿池' in cards[0]['summary']
     assert '访问 192.0.2.22' in cards[0]['summary']
     assert '候选关联' in cards[0]['boundary']
     assert cards[0]['time'] == 1791860154
@@ -108,7 +126,8 @@ def test_file_and_process_in_one_record_are_one_card_without_invented_execution_
     assert len(cards) == 1 and cards[0]['kind'] == 'process'
     assert all(card['time'] is None for card in cards)  # creation != execution timestamp
     assert any(field['key'] == 'file_created_at' for field in cards[0]['fields'])
-    assert '/tmp/miner.exe' in cards[0]['summary'] and '进程或命令行' in cards[0]['summary']
+    assert 'miner.exe' in cards[0]['summary'] and '进程或命令行' in cards[0]['summary']
+    assert '/tmp/miner.exe' in json.dumps(cards[0]['fields'])
 
 
 def field_values(card):
@@ -133,7 +152,8 @@ def test_one_alert_combines_parent_network_url_packets_file_and_process_facts():
     assert 'event_id' not in fields
     assert len(card['packets']) == 2 and len(card['records']) == 1
     assert card['raw'] == row
-    assert all(text in card['summary'] for text in ('10.0.0.1', '192.0.2.22', '请求及响应报文', '文件信息', '进程或命令行', 'SQL 注入可疑语句'))
+    assert card['summary'] == '请求中包含 SQL 注入可疑语句。'
+    assert '10.0.0.1' not in card['summary'] and '192.0.2.22' not in card['summary']
     assert '不能' not in card['summary'] and '提供' not in card['summary']
 
 

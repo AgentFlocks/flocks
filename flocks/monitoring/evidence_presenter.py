@@ -179,70 +179,69 @@ def _records(value, *, kind, fallback=(), context=None, identifiers=(), anchor=N
 
 
 def _summary(record, source, packets):
-    src = _text(record.get('src_ip') or record.get('host'), 65)
-    dst, domain = _text(record.get('dst_ip'), 90), _text(record.get('domain'), 100)
-    port = record.get('dst_port')
-    ports = port if isinstance(port, list) else [port]
-    dns = bool(ports) and all(str(p) == '53' for p in ports)
-    name = _text(record.get('name') or record.get('virus_name'), 65)
-    if src and dst:
-        if dns:
-            observed = f'记录主机 {src} 向 {dst} 发起 DNS 查询'
-            if domain:
-                observed += f'，包含 {domain}'
-        else:
-            observed = f'记录主机 {src} 访问 {dst}'
-            if port not in (None, '', []):
-                observed += f'（目的端口 {_text(port, 45)}）'
-        if name:
-            observed += f'，来源记录为「{name}」'
-        tag = _text(record.get('intelligenceTag') or record.get('threatDefineName'), 70)
-        if tag:
-            observed += f'，来源情报标记为「{tag}」'
-    elif record.get('file_path') or record.get('file_name'):
-        identity = _text(record.get('file_path') or record.get('file_name'), 110)
-        virus = _text(record.get('virus_name'), 70)
-        observed = f'记录文件「{identity}」' + (f'，检出「{virus}」' if virus else '')
-    elif record.get('process_name') or record.get('command_line'):
-        process = _text(record.get('process_name') or '程序', 70)
-        observed = f'记录「{process}」的进程或命令行'
-    elif record.get('url'):
-        observed = f'记录对 {_text(record["url"], 110)} 的访问'
-    elif domain:
-        tag = _text(record.get('intelligenceTag') or record.get('threatDefineName'), 70)
-        observed = f'记录关联域名 {domain}' + (f'，来源情报标记为「{tag}」' if tag else '')
-    elif record.get('x_forwarded_for'):
-        observed = f'记录 X-Forwarded-For 请求头原值「{_text(record["x_forwarded_for"], 140)}」'
-    elif record.get('virus_name'):
-        observed = f'记录威胁「{_text(record["virus_name"], 80)}」'
-    elif record.get('threat_message'):
-        observed = '保留来源威胁信息'
-    elif record.get('request_line') or record.get('response_line'):
-        observed = '保留 HTTP 请求或响应行'
-    elif name or packets:
-        observed = f'记录「{name}」告警' if name else '保存告警举证'
-    else:
-        return ''
-    contents = []
-    request = any(p['field'].startswith('request') for p in packets)
-    response = any(p['field'].startswith('response') for p in packets)
-    if request or response:
-        contents.append('请求及响应报文' if request and response else '请求报文' if request else '响应报文')
-    if record.get('url') and not observed.startswith('记录对 '):
-        contents.append('访问地址')
-    if record.get('x_forwarded_for') and not observed.startswith('记录 X-Forwarded-For '):
-        contents.append('X-Forwarded-For 记录')
-    if record.get('src_ip') and record.get('dst_ip') and (record.get('file_path') or record.get('file_name')):
-        contents.append('文件信息')
-    if record.get('process_name') or record.get('command_line'):
-        if not observed.startswith('记录「') or not observed.endswith('进程或命令行'):
-            contents.append('进程或命令行')
-    text = f'{source}{observed}'
-    if contents:
-        text += '，已取得' + '、'.join(contents)
+    """Describe the alert's message; addresses and provenance stay in details."""
     if any(_SQL.search(unquote(packet['text'])) for packet in packets if packet['field'].startswith('request')):
-        text += '；请求中含 SQL 注入可疑语句'
-    return text + '。'
+        return '请求中包含 SQL 注入可疑语句。'
+    name = re.sub(r'^(?:【[^】]*】|\[[^\]]*\])\s*', '', _text(record.get('name'), 100)).strip()
+    lower = name.lower()
+    if name:
+        if '随机域名' in name:
+            return '告警提示主机发起了大量随机域名的 DNS 查询。'
+        if re.search(r'ba[ck].*(?:文件|访问)|\.bak', lower):
+            return '发现访问 .bak 备份文件的请求。' if 'bak' in lower else '发现访问备份或临时文件的请求。'
+        if 'druid' in lower and '未授权' in name:
+            return '发现疑似未授权访问 Druid 服务的请求。'
+        if '敏感文件访问' in name:
+            return '发现访问敏感文件的请求。'
+        if 'jetbrains' in lower and ('泄露' in name or 'idea' in lower):
+            return '发现疑似利用 JetBrains IDEA 信息泄露漏洞的请求。'
+        if 'ds_store' in lower:
+            return '发现访问 .DS_Store 目录信息文件的请求。'
+        if 'webshell' in lower and '扫描' in name:
+            return '发现扫描 Webshell 的请求。'
+        if '配置文件访问' in name:
+            return '发现访问服务器配置文件的请求。'
+        if 't3' in lower and ('weblogic' in lower or '协议' in name):
+            return '发现 WebLogic T3 协议连接。'
+        if '未授权' in name:
+            return f'告警提示疑似{name}。'
+        return f'告警提示：{name.rstrip("。 ")}。'
+    return _unnamed_summary(record, packets)
+
+
+def _unnamed_summary(record, packets):
+    """Fallback for observations that have no supplied alert name."""
+    if record.get('process_name') or record.get('command_line'):
+        return f'发现「{_text(record.get("process_name") or "程序", 60)}」的进程或命令行记录。'
+    if record.get('file_path') or record.get('file_name'):
+        filename = _text(record.get('file_name') or str(record['file_path']).replace(chr(92), '/').rsplit('/', 1)[-1], 70)
+        tag = _text(record.get('virus_name'), 60)
+        return f'发现文件「{filename}」' + (f'，来源标记为「{tag}」' if tag else '') + '。'
+    ports = record.get('dst_port')
+    ports = ports if isinstance(ports, list) else [ports]
+    dns = bool(ports) and all(str(port) == '53' for port in ports)
+    if record.get('domain') and dns:
+        domains = record['domain'] if isinstance(record['domain'], list) else [record['domain']]
+        return (f'主机发起 DNS 查询，涉及 {len(domains)} 个域名。' if len(domains) > 1
+                else f'主机查询了域名「{_text(domains[0], 80)}」。')
+    if record.get('url'):
+        return f'发现访问「{_text(record["url"], 90)}」的请求。'
+    if record.get('src_ip') and record.get('dst_ip'):
+        if isinstance(record['src_ip'], list) or isinstance(record['dst_ip'], list):
+            return '发现多台主机之间的网络访问记录。'
+        tag = _text(record.get('intelligenceTag') or record.get('threatDefineName'), 60)
+        return f'主机 {_text(record["src_ip"], 45)} 访问 {_text(record["dst_ip"], 45)}' + (f'，目标被标记为「{tag}」' if tag else '') + '。'
+    if record.get('x_forwarded_for'):
+        return '记录了 X-Forwarded-For 请求头原值。'
+    if record.get('domain'):
+        return f'记录了关联域名「{_text(record["domain"], 80)}」。'
+    if record.get('threat_message'):
+        return f'告警信息：{_text(record["threat_message"], 100)}'
+    if record.get('request_line') or record.get('response_line') or packets:
+        return '已取得该告警的请求或响应记录。'
+    if record.get('virus_name'):
+        return f'来源标记了威胁「{_text(record["virus_name"], 70)}」。'
+    return ''
 
 
 def _kind(record, packets):
