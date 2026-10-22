@@ -719,16 +719,18 @@ async def backfill_usage_records(
             continue
 
         existing_message_ids = await _get_recorded_message_ids(session.id)
-        messages = await Message.list_with_parts(session.id)
-        for msg in messages:
-            info = msg.info
+        # Usage lives entirely in message metadata. Loading parts here scans
+        # and deserializes historical text/tool output for every session,
+        # even when all usage rows have already been recorded.
+        messages = await Message.list(session.id)
+        for info in messages:
             if getattr(info, "role", None) != "assistant":
                 continue
 
             result.scanned_messages += 1
             backfill_status = await _backfill_message_if_needed(
                 session_id=session.id,
-                message=msg,
+                info=info,
                 existing_message_ids=existing_message_ids,
                 backfilled_at=backfilled_at,
                 start_dt=start_dt,
@@ -736,7 +738,7 @@ async def backfill_usage_records(
             )
             if backfill_status == "inserted":
                 result.inserted_records += 1
-                message_id = getattr(msg.info, "id", None)
+                message_id = getattr(info, "id", None)
                 if message_id:
                     existing_message_ids.add(message_id)
             elif backfill_status == "existing":
@@ -750,14 +752,13 @@ async def backfill_usage_records(
 async def _backfill_message_if_needed(
     *,
     session_id: str,
-    message,
+    info,
     existing_message_ids: set[str],
     backfilled_at: datetime,
     start_dt: Optional[datetime],
     end_dt: Optional[datetime],
 ) -> str:
     """Backfill one assistant message if it is not already recorded."""
-    info = message.info
     message_id = getattr(info, "id", None)
     provider_id = getattr(info, "providerID", None)
     model_id = getattr(info, "modelID", None)
