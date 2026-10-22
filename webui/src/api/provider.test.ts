@@ -152,6 +152,13 @@ describe('providerAPI.revealCredentials', () => {
     expect(mockPost).toHaveBeenCalledWith('/api/provider/openai/credentials/reveal');
   });
 
+  it('allows bounded authentication probes to finish and keeps credentials in the request body', async () => {
+    mockPost.mockResolvedValue({ data: { status: 'valid', code: 'key_valid' } });
+    const { providerAPI } = await import('./provider');
+    await providerAPI.checkKey('custom-供应商', { api_key: 'draft-key', base_url: 'https://api.example.com/v1' });
+    expect(mockPost).toHaveBeenCalledWith(`/api/provider/${encodeURIComponent('custom-供应商')}/check-key`, { api_key: 'draft-key', base_url: 'https://api.example.com/v1' }, { timeout: 60_000 });
+  });
+
   it('uses the explicit API service credential reveal endpoint', async () => {
     mockPost.mockResolvedValue({ data: { api_key: 'service-key', has_credential: true } });
 

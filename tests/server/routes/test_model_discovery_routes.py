@@ -455,3 +455,99 @@ async def test_import_notifies_real_sse_subscribers_with_provider_identity_only(
     assert admin_queue.empty()
     assert member_queue.empty()
     inventory.publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_inventory_all_off_keeps_models_metadata_and_routing(inventory, inventory_client):
+    response = await inventory_client.post('/api/provider/custom-inventory/model-inventory', json={
+        'models': [{'id': 'existing', 'name': 'Ignored remote name', 'enabled': False}], 'deleted': [],
+    })
+    assert response.status_code == 200
+    data = saved(inventory)
+    assert data['provider']['custom-inventory']['models'] == inventory.initial['provider']['custom-inventory']['models']
+    assert data['default_models'] == inventory.initial['default_models']
+    assert data['fallback_providers'] == inventory.initial['fallback_providers']
+    assert data['model_settings']['custom-inventory/existing']['enabled'] is False
+    assert data['model_settings']['custom-inventory/existing']['default_parameters'] == {'temperature': 0.25}
+    assert inventory.write.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_inventory_auto_edits_and_explicit_deletion_are_atomic(inventory, inventory_client):
+    response = await inventory_client.post('/api/provider/custom-inventory/model-inventory', json={
+        'models': [{'id': 'new', 'name': 'New', 'enabled': True, 'supports_streaming': True},
+                   {'id': 'off', 'name': 'Off', 'enabled': False}], 'deleted': ['existing'],
+    })
+    assert response.status_code == 200
+    data = saved(inventory)
+    assert set(data['provider']['custom-inventory']['models']) == {'new'}
+    assert data['default_models'] == {}
+    assert data['fallback_providers'] == []
+    assert 'custom-inventory/existing' not in data['model_settings']
+    assert data['provider']['custom-inventory']['models']['new'] == {'name': 'New', 'supports_streaming': True}
+    assert inventory.write.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_inventory_auto_removes_override_without_touching_other_metadata(inventory, inventory_client):
+    response = await inventory_client.post('/api/provider/custom-inventory/model-inventory', json={
+        'models': [{'id': 'existing', 'name': 'Edited', 'enabled': True, 'edited': True,
+                    'context_window': None, 'max_output_tokens': None, 'supports_tools': False}],
+    })
+    assert response.status_code == 200
+    model = saved(inventory)['provider']['custom-inventory']['models']['existing']
+    assert 'context_window' not in model and 'max_output_tokens' not in model
+    assert model['name'] == 'Edited' and model['supports_tools'] is False
+    assert model['input_price'] == 3.0 and model['cache_read_price'] == 0.3
+    assert model['supports_vision'] is True
+    response = await inventory_client.get('/api/provider/custom-inventory/model-inventory')
+    assert response.status_code == 200
+    assert response.json()['models'][0]['enabled'] is True
+    assert 'context_window' not in response.json()['models'][0]
+
+
+@pytest.mark.asyncio
+async def test_inventory_shows_effective_capabilities_without_materializing_runtime_limits(inventory, inventory_client):
+    Provider._providers['custom-inventory'] = SimpleNamespace(get_model_definitions=lambda: [SimpleNamespace(
+        id='existing', capabilities=SimpleNamespace(supports_reasoning=False, supports_streaming=True, context_window=128000)
+    )])
+    response = await inventory_client.get('/api/provider/custom-inventory/model-inventory')
+    assert response.status_code == 200
+    model = response.json()['models'][0]
+    assert model['supports_tools'] is False and model['supports_vision'] is True
+    assert model['supports_reasoning'] is False and model['supports_streaming'] is True
+    assert model['context_window'] == 96000 and 'max_output_tokens' not in model
+    inventory.write.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('operation', ['model-inventory', 'check-key'])
+async def test_inventory_and_key_checks_remain_admin_only(operation, inventory, inventory_client):
+    response = await inventory_client.post(f'/api/provider/custom-inventory/{operation}', json={}, headers={'x-test-role': 'member'})
+    assert response.status_code == 403
+    assert saved(inventory) == inventory.initial
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('control_code,status', [('authentication_failed', 'valid'), ('models_discovered', 'unverified')])
+async def test_key_check_requires_authentication_evidence_and_never_saves(control_code, status, inventory, inventory_client, monkeypatch):
+    discover = AsyncMock(side_effect=[{'source': 'api', 'status': 'success', 'code': 'models_discovered'},
+                                     {'source': 'api', 'status': 'success', 'code': control_code}])
+    monkeypatch.setattr(inventory.routes, 'discover_models', discover)
+    response = await inventory_client.post('/api/provider/custom-inventory/check-key', json={'api_key': 'candidate-key', 'base_url': 'https://candidate.test/v1'})
+    assert response.status_code == 200 and response.json()['status'] == status
+    assert 'models' not in response.json()
+    assert discover.await_args_list[0].kwargs['api_key'] == 'candidate-key'
+    assert discover.await_args_list[1].kwargs['api_key'] != 'candidate-key'
+    assert saved(inventory) == inventory.initial
+    inventory.write.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_key_check_rejects_invalid_credentials_without_control_or_save(inventory, inventory_client, monkeypatch):
+    discover = AsyncMock(return_value={'source': 'none', 'status': 'error', 'code': 'authentication_failed'})
+    monkeypatch.setattr(inventory.routes, 'discover_models', discover)
+    response = await inventory_client.post('/api/provider/custom-inventory/check-key', json={'api_key': 'bad-key'})
+    assert response.json() == {'status': 'invalid', 'code': 'authentication_failed'}
+    assert discover.await_count == 1
+    inventory.write.assert_not_called()

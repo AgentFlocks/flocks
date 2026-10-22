@@ -474,6 +474,7 @@ export interface DiscoveredModel {
   supports_vision?: boolean;
   supports_tools?: boolean;
   supports_reasoning?: boolean;
+  supports_streaming?: boolean;
 }
 
 export interface ModelDiscoveryResult {
@@ -486,12 +487,24 @@ export interface ModelDiscoveryResult {
   models: DiscoveredModel[];
 }
 
-export type ModelImportInput = Pick<DiscoveredModel, 'id' | 'name' | 'context_window' | 'max_output_tokens' | 'supports_vision' | 'supports_tools' | 'supports_reasoning'>;
+export type ModelImportInput = Pick<DiscoveredModel, 'id' | 'name' | 'context_window' | 'max_output_tokens' | 'supports_vision' | 'supports_tools' | 'supports_reasoning' | 'supports_streaming'>;
 
 export interface ModelImportResult {
   added: string[];
   skipped: string[];
   failed: { id: string; error: string }[];
+}
+
+export interface InventoryModelInput extends Omit<ModelImportInput, 'context_window' | 'max_output_tokens'> {
+  context_window?: number | null;
+  max_output_tokens?: number | null;
+  enabled: boolean;
+  edited?: boolean;
+}
+
+export interface ModelInventoryDraft {
+  models: InventoryModelInput[];
+  deleted: string[];
 }
 
 // ==================== Model Management V2 Types ====================

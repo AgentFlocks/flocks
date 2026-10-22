@@ -31,6 +31,9 @@ const mocks = vi.hoisted(() => ({
   testCredentials: vi.fn(),
   discoverModels: vi.fn(),
   importModels: vi.fn(),
+  getModelInventory: vi.fn(),
+  saveModelInventory: vi.fn(),
+  checkKey: vi.fn(),
   deleteDefault: vi.fn(),
   deleteDefinition: vi.fn(),
   sseOptions: null as null | { onReconnect?: () => void },
@@ -86,6 +89,9 @@ vi.mock('@/contexts/AuthContext', () => ({
 
 beforeEach(() => {
   mocks.authUser = { role: 'admin' };
+  mocks.getModelInventory.mockResolvedValue({ data: { models: [] } });
+  mocks.saveModelInventory.mockResolvedValue({ data: { added: [], skipped: [], failed: [] } });
+  mocks.checkKey.mockResolvedValue({ data: { status: 'valid', code: 'key_valid' } });
   mocks.discoverModels.mockResolvedValue({ data: {
     source: 'api', status: 'success', code: 'models_discovered', message: 'Ready',
     fetched_at: '2026-10-21T08:00:00Z', truncated: false,
@@ -157,6 +163,9 @@ vi.mock('@/api/provider', () => ({
     testCredentials: mocks.testCredentials,
     discoverModels: mocks.discoverModels,
     importModels: mocks.importModels,
+    getModelInventory: mocks.getModelInventory,
+    saveModelInventory: mocks.saveModelInventory,
+    checkKey: mocks.checkKey,
   },
   modelV2API: {
     listDefinitions: mocks.listDefinitions,
@@ -366,99 +375,48 @@ describe('ModelPage add provider dialog', () => {
     });
   });
 
-  it('discovers with draft credentials and adds selected models only after creating the provider', async () => {
-    const user = userEvent.setup();
-    mocks.createProvider.mockResolvedValue({ data: { id: 'custom-my-api' } });
-    // The generic type may already own this ID; a new instance is independent.
-    mocks.discoverModels.mockResolvedValue({ data: {
-      source: 'api', status: 'success', code: 'models_discovered', message: 'Ready',
-      fetched_at: '2026-10-21T08:00:00Z', truncated: false,
-      models: [{ id: 'remote/chat-model', name: 'Remote Chat', already_added: true, selectable: true }],
-    } });
+  async function openThreatBook(user: ReturnType<typeof userEvent.setup>) {
     renderWithRouter(<ModelPage />);
     await user.click(screen.getByRole('button', { name: 'Add Provider' }));
     await user.click(await screen.findByRole('button', { name: 'Select Provider...' }));
-    await user.click(await screen.findByRole('button', { name: /OpenAI Compatible/i }));
-    await user.type(screen.getByPlaceholderText('e.g. SiliconFlow, LM Studio, My API'), 'My API');
-    await user.click(screen.getByRole('button', { name: 'discovery.checkAndFetch' }));
-    await user.click(await screen.findByRole('checkbox', { name: 'remote/chat-model' }));
-    expect(mocks.createProvider).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole('button', { name: /ThreatBook-cn-llm/ }));
+    await user.type(screen.getByPlaceholderText('Paste ThreatBook CN LLM API Key'), 'draft-key');
+  }
+
+  it('checks the key independently without fetching or saving any model', async () => {
+    const user = userEvent.setup(); await openThreatBook(user);
+    await user.click(screen.getByRole('button', { name: 'compact.check' }));
+    expect(await screen.findByText('compact.keyCodes.key_valid')).toBeInTheDocument();
+    expect(mocks.checkKey).toHaveBeenCalledWith('threatbook-cn-llm', { api_key: 'draft-key', base_url: 'https://llm.threatbook.cn/v1' });
+    expect(mocks.discoverModels).not.toHaveBeenCalled();
     expect(mocks.setCredentials).not.toHaveBeenCalled();
+    expect(mocks.importModels).not.toHaveBeenCalled();
+  });
+
+  it('uses compact switches and saves an empty selection without importing models', async () => {
+    const user = userEvent.setup(); await openThreatBook(user);
+    await user.click(screen.getByRole('button', { name: 'discovery.title' }));
+    expect(await screen.findByRole('switch', { name: 'compact.enableModel remote/chat-model' })).toBeChecked();
+    expect(screen.queryByText('form.contextWindow')).not.toBeInTheDocument();
+    expect(screen.queryByText('discovery.filtersTitle')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'compact.selectNone' }));
+    await user.click(screen.getByRole('button', { name: 'Save Provider' }));
+    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
+    expect(mocks.importModels).not.toHaveBeenCalled();
+    expect(mocks.testCredentials).not.toHaveBeenCalled();
+  });
+
+  it('imports chosen models with Auto limits only after saving the provider', async () => {
+    const user = userEvent.setup(); await openThreatBook(user);
+    await user.click(screen.getByRole('button', { name: 'discovery.title' }));
+    await user.click(await screen.findByRole('button', { name: 'compact.editModel remote/chat-model' }));
+    const editor = within(screen.getByRole('group', { name: 'compact.editModel' }));
+    expect(editor.getAllByPlaceholderText('Auto')).toHaveLength(2);
+    await user.click(editor.getByRole('button', { name: 'compact.apply' }));
     expect(mocks.importModels).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: 'Save and add 1 models' }));
-    await waitFor(() => expect(mocks.importModels).toHaveBeenCalledWith('custom-my-api', [expect.objectContaining({ id: 'remote/chat-model' })]));
-    expect(mocks.createProvider).toHaveBeenCalledWith(expect.objectContaining({ skip_catalog_bootstrap: true }));
-    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
-    expect(mocks.deleteDefault).not.toHaveBeenCalled();
-    expect(await screen.findByText('discovery.importSummary')).toBeInTheDocument();
-  });
-
-  it('saves a new provider with an explicit empty inventory and does not run an empty connection check', async () => {
-    const user = userEvent.setup();
-    renderWithRouter(<ModelPage />);
-    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
-    await user.click(await screen.findByRole('button', { name: 'Select Provider...' }));
-    await user.click(await screen.findByRole('button', { name: /ThreatBook-cn-llm/ }));
-    await user.type(screen.getByPlaceholderText('Paste ThreatBook CN LLM API Key'), 'draft-key');
-    expect(screen.getByRole('button', { name: 'discovery.checkAndFetch' })).toBeEnabled();
-    await user.click(screen.getByRole('button', { name: 'discovery.checkAndFetch' }));
-    await screen.findByRole('checkbox', { name: 'remote/chat-model' });
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-    expect(mocks.importModels).not.toHaveBeenCalled();
-    expect(screen.queryByText('discovery.legacyCatalog')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Save Provider' }));
-    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalledWith('threatbook-cn-llm', expect.objectContaining({ skip_catalog_bootstrap: true })));
-    expect(mocks.testCredentials).not.toHaveBeenCalled();
-    expect(mocks.importModels).not.toHaveBeenCalled();
-    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
-  });
-
-  it('checks a new provider with no selected model using draft credentials without saving or testing a model', async () => {
-    const user = userEvent.setup();
-    renderWithRouter(<ModelPage />);
-    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
-    await user.click(await screen.findByRole('button', { name: 'Select Provider...' }));
-    await user.click(await screen.findByRole('button', { name: /ThreatBook-cn-llm/ }));
-    await user.type(screen.getByPlaceholderText('Paste ThreatBook CN LLM API Key'), 'draft-key');
-    const check = screen.getByRole('button', { name: 'discovery.checkAndFetch' });
-    expect(check).toBeEnabled();
-    await user.click(check);
-    expect(await screen.findByRole('checkbox', { name: 'remote/chat-model' })).not.toBeChecked();
-    expect(mocks.discoverModels).toHaveBeenCalledWith('threatbook-cn-llm', { api_key: 'draft-key', base_url: 'https://llm.threatbook.cn/v1' });
-    expect(screen.getByText('wizard.connectionStep')).toBeInTheDocument();
-    expect(screen.getByText('wizard.modelsStep')).toBeInTheDocument();
-    expect(screen.getByText('wizard.saveStep')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Save Provider' })).toBeEnabled();
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-    expect(mocks.importModels).not.toHaveBeenCalled();
-    expect(mocks.testCredentials).not.toHaveBeenCalled();
-    expect(mocks.createProvider).not.toHaveBeenCalled();
-  });
-
-  it('retries a failed read-only new-provider check with corrected draft credentials', async () => {
-    const user = userEvent.setup();
-    mocks.discoverModels.mockResolvedValueOnce({ data: {
-      source: 'none', status: 'error', code: 'authentication_failed', message: 'Invalid key',
-      fetched_at: '2026-10-22T08:00:00Z', truncated: false, models: [],
-    } });
-    renderWithRouter(<ModelPage />);
-    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
-    await user.click(await screen.findByRole('button', { name: 'Select Provider...' }));
-    await user.click(await screen.findByRole('button', { name: /ThreatBook-cn-llm/ }));
-    const apiKey = screen.getByPlaceholderText('Paste ThreatBook CN LLM API Key');
-    await user.type(apiKey, 'bad-key');
-    await user.click(screen.getByRole('button', { name: 'discovery.checkAndFetch' }));
-    expect(await screen.findByText('discovery.codes.authentication_failed')).toBeInTheDocument();
-    await user.clear(apiKey);
-    await user.type(apiKey, 'corrected-key');
-    expect(screen.queryByText('discovery.codes.authentication_failed')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'discovery.checkAndFetch' }));
-    await screen.findByRole('checkbox', { name: 'remote/chat-model' });
-    expect(mocks.discoverModels).toHaveBeenCalledTimes(2);
-    expect(mocks.discoverModels).toHaveBeenLastCalledWith('threatbook-cn-llm', { api_key: 'corrected-key', base_url: 'https://llm.threatbook.cn/v1' });
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-    expect(mocks.importModels).not.toHaveBeenCalled();
-    expect(mocks.testCredentials).not.toHaveBeenCalled();
+    await waitFor(() => expect(mocks.importModels).toHaveBeenCalledWith('threatbook-cn-llm', [expect.objectContaining({ id: 'remote/chat-model', context_window: undefined, max_output_tokens: undefined })]));
+    expect(mocks.setCredentials.mock.invocationCallOrder[0]).toBeLessThan(mocks.importModels.mock.invocationCallOrder[0]);
   });
 });
 
@@ -527,6 +485,7 @@ describe('ModelPage configure provider dialog', () => {
         has_credential: true,
       },
     });
+    mocks.getModelInventory.mockResolvedValue({ data: { models: [{ id: 'gpt-4o', name: 'GPT-4o', enabled: true }] } });
     mocks.setCredentials.mockResolvedValue({ data: { success: true } });
     mocks.testCredentials.mockResolvedValue({
       data: {
@@ -552,416 +511,74 @@ describe('ModelPage configure provider dialog', () => {
     return within(await screen.findByTestId('entity-sheet'));
   }
 
-  it('checks and fetches models for an empty provider without saving credentials or running a model call', async () => {
-    const user = userEvent.setup();
+  it('keeps key checking separate from fetching and never persists the draft during a check', async () => {
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' });
+    await user.clear(screen.getByLabelText('API Key')); await user.type(screen.getByLabelText('API Key'), 'draft-key');
+    await user.click(screen.getByRole('button', { name: 'compact.check' }));
+    expect(await screen.findByText('compact.keyCodes.key_valid')).toBeInTheDocument();
+    expect(mocks.checkKey).toHaveBeenCalledWith('openai', { api_key: 'draft-key', base_url: 'https://old.example.com/v1' });
+    expect(mocks.discoverModels).not.toHaveBeenCalled(); expect(mocks.setCredentials).not.toHaveBeenCalled();
+  });
+
+  it('lets saved models be selected and unselected together and persists off without deletion', async () => {
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    expect(await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' })).toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'compact.selectNone' }));
+    expect(screen.getByRole('switch', { name: 'compact.enableModel gpt-4o' })).not.toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'compact.selectAll' }));
+    expect(screen.getByRole('switch', { name: 'compact.enableModel gpt-4o' })).toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'compact.selectNone' }));
+    expect(mocks.saveModelInventory).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledWith('openai', { models: [expect.objectContaining({ id: 'gpt-4o', enabled: false })], deleted: [] }));
+    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
+  });
+
+  it('applies Auto and explicit model edits on provider save and deletes only through trash', async () => {
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await user.click(await screen.findByRole('button', { name: 'compact.editModel gpt-4o' }));
+    const editor = within(screen.getByRole('group', { name: 'compact.editModel' }));
+    expect(screen.getByRole('button', { name: 'compact.save' })).toBeDisabled();
+    expect(editor.getAllByPlaceholderText('Auto')).toHaveLength(2);
+    await user.type(editor.getByRole('spinbutton', { name: 'form.maxOutput' }), '8192');
+    await user.click(editor.getByRole('button', { name: 'compact.apply' }));
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledWith('openai', { models: [expect.objectContaining({ id: 'gpt-4o', context_window: null, max_output_tokens: 8192, edited: true })], deleted: [] }));
+  });
+
+  it('stages explicit deletion until save and keeps failures visible for retry', async () => {
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await user.click(await screen.findByRole('button', { name: 'compact.deleteModel gpt-4o' }));
+    expect(mocks.saveModelInventory).not.toHaveBeenCalled();
+    mocks.saveModelInventory.mockRejectedValueOnce(new Error('Inventory save failed'));
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Inventory save failed');
+    expect(mocks.saveModelInventory).toHaveBeenLastCalledWith('openai', { models: [], deleted: ['gpt-4o'] });
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledTimes(2));
+  });
+
+  it('offers an empty provider independent key checking and compact discovery', async () => {
+    mocks.getModelInventory.mockResolvedValue({ data: { models: [] } });
     mocks.listDefinitions.mockResolvedValue({ data: { models: [], total: 0 } });
-    await openConfigureDialog(user);
-    const sheet = within(screen.getByTestId('entity-sheet'));
-    const apiKey = sheet.getByLabelText('API Key');
-    await user.clear(apiKey);
-    await user.type(apiKey, 'sk-empty-provider-draft');
-    const check = sheet.getByRole('button', { name: 'discovery.checkAndFetch' });
-    expect(check).toBeEnabled();
-    expect(sheet.queryByRole('button', { name: 'connection.testModelCall' })).not.toBeInTheDocument();
-    await user.click(check);
-    expect(await sheet.findByRole('checkbox', { name: 'remote/chat-model' })).not.toBeChecked();
-    expect(mocks.discoverModels).toHaveBeenCalledWith('openai', { api_key: 'sk-empty-provider-draft', base_url: 'https://old.example.com/v1' });
-    expect(sheet.getByRole('button', { name: 'Save Provider' })).toBeEnabled();
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'compact.save' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: 'discovery.title' }));
+    expect(await screen.findByRole('switch', { name: 'compact.enableModel remote/chat-model' })).toBeChecked();
+    expect(mocks.setCredentials).not.toHaveBeenCalled(); expect(mocks.saveModelInventory).not.toHaveBeenCalled();
+  });
+
+  it('keeps the automatic add-model list compact and manual fields available', async () => {
+    const user = userEvent.setup(); renderWithRouter(<ModelPage />);
+    expect(screen.queryByRole('button', { name: 'discovery.title' })).not.toBeInTheDocument();
+    const sheet = await openAddModelDialog(user);
+    await user.click(await sheet.findByRole('button', { name: 'compact.refresh' }));
+    expect(await sheet.findByRole('switch', { name: 'compact.enableModel remote/chat-model' })).toBeChecked();
+    expect(sheet.queryByText('discovery.filtersTitle')).not.toBeInTheDocument();
+    await user.click(sheet.getByRole('tab', { name: 'discovery.manual' }));
+    expect(sheet.getByText('form.modelId')).toBeVisible();
     expect(mocks.setCredentials).not.toHaveBeenCalled();
-    expect(mocks.importModels).not.toHaveBeenCalled();
-    expect(mocks.testCredentials).not.toHaveBeenCalled();
-    expect(mocks.getResolved).toHaveBeenCalledTimes(1);
-  });
-
-  it('saves selected discovery metadata only when the provider form is submitted', async () => {
-    const user = userEvent.setup();
-    mocks.discoverModels.mockResolvedValue({ data: {
-      source: 'api', status: 'success', code: 'models_discovered', message: 'Ready',
-      fetched_at: '2026-10-22T08:00:00Z', truncated: false,
-      models: [{ id: 'remote/chat-model', name: 'Remote Chat', already_added: false, selectable: true,
-        context_window: 262144, max_output_tokens: 16384,
-        supports_vision: false, supports_tools: true, supports_reasoning: false }],
-    } });
-    await openConfigureDialog(user);
-    const sheet = within(screen.getByTestId('entity-sheet'));
-    await user.type(sheet.getByRole('textbox', { name: /configuration.proxyUrl/ }), '/draft');
-    await user.click(sheet.getByRole('button', { name: 'discovery.checkAndFetch' }));
-    await user.click(await sheet.findByRole('checkbox', { name: 'remote/chat-model' }));
-    await user.click(sheet.getByRole('button', { name: 'discovery.configureModel remote/chat-model' }));
-    const metadata = within(sheet.getByRole('region', { name: 'discovery.configurationTitle' }));
-    expect(sheet.getByRole('button', { name: 'Save and add 1 models' })).toBeDisabled();
-    expect(sheet.getByText('discovery.completeConfiguration')).toBeInTheDocument();
-    await user.clear(metadata.getByLabelText('discovery.fields.context_window'));
-    await user.type(metadata.getByLabelText('discovery.fields.context_window'), '131072');
-    await user.clear(metadata.getByLabelText('discovery.fields.max_output_tokens'));
-    await user.type(metadata.getByLabelText('discovery.fields.max_output_tokens'), '8192');
-    await user.selectOptions(metadata.getByLabelText('discovery.fields.supports_vision'), 'true');
-    await user.selectOptions(metadata.getByLabelText('discovery.fields.supports_tools'), 'false');
-    await user.click(metadata.getByRole('button', { name: 'discovery.applyConfiguration' }));
-    expect(sheet.getByRole('button', { name: 'Save and add 1 models' })).toBeEnabled();
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-    expect(mocks.importModels).not.toHaveBeenCalled();
-    await user.click(sheet.getByRole('button', { name: 'Save and add 1 models' }));
-    await waitFor(() => expect(mocks.importModels).toHaveBeenCalledWith('openai', [expect.objectContaining({
-      id: 'remote/chat-model', name: 'Remote Chat', context_window: 131072, max_output_tokens: 8192,
-      supports_vision: true, supports_tools: false, supports_reasoning: false,
-    })]));
-    expect(mocks.setCredentials).toHaveBeenCalledWith('openai', expect.objectContaining({
-      base_url: 'https://old.example.com/v1/draft', skip_catalog_bootstrap: true,
-    }));
-    expect(mocks.setCredentials.mock.invocationCallOrder[0]).toBeLessThan(mocks.importModels.mock.invocationCallOrder[0]);
-    expect(mocks.testCredentials).not.toHaveBeenCalled();
-    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
-    expect(mocks.deleteDefault).not.toHaveBeenCalled();
-  });
-
-  it('keeps partial import failures visible in the provider form and retries the failed selection', async () => {
-    const user = userEvent.setup();
-    mocks.importModels
-      .mockResolvedValueOnce({ data: { added: [], skipped: [], failed: [{ id: 'remote/chat-model', error: 'Temporary import failure' }] } })
-      .mockResolvedValueOnce({ data: { added: ['remote/chat-model'], skipped: [], failed: [] } });
-    await openConfigureDialog(user);
-    const sheet = within(screen.getByTestId('entity-sheet'));
-    await user.click(sheet.getByRole('button', { name: 'discovery.checkAndFetch' }));
-    await user.click(await sheet.findByRole('checkbox', { name: 'remote/chat-model' }));
-    await user.click(sheet.getByRole('button', { name: 'Save and add 1 models' }));
-    expect(await sheet.findByText(/Temporary import failure/)).toBeInTheDocument();
-    expect(screen.getByTestId('entity-sheet')).toBeInTheDocument();
-    expect(sheet.getByRole('checkbox', { name: 'remote/chat-model' })).toBeChecked();
-    await user.click(sheet.getByRole('button', { name: 'Save and add 1 models' }));
-    await waitFor(() => expect(mocks.importModels).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.queryByTestId('entity-sheet')).not.toBeInTheDocument());
-    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
-  });
-
-  it('shows credentials, connection checking and the live managed inventory in that order', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
-    const sheet = within(screen.getByTestId('entity-sheet'));
-    const key = sheet.getByLabelText('API Key');
-    const url = sheet.getByRole('textbox', { name: /configuration.proxyUrl/ });
-    const connection = sheet.getByRole('region', { name: 'connection.modelCallTitle' });
-    const inventory = sheet.getByRole('region', { name: 'configuration.models' });
-    expect(key.compareDocumentPosition(url) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(url.compareDocumentPosition(connection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(connection.compareDocumentPosition(inventory) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(sheet.getByText('1/1 enabled')).toBeInTheDocument();
-    expect(sheet.getByRole('switch')).toBeChecked();
-    expect(sheet.getByRole('button', { name: 'configuration.editModel' })).toBeEnabled();
-    expect(sheet.getByRole('button', { name: 'configuration.deleteModel' })).toBeEnabled();
-    expect(mocks.catalogList).not.toHaveBeenCalled();
-  });
-
-  it('toggles an existing model immediately without saving credential drafts', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
-    const sheet = within(screen.getByTestId('entity-sheet'));
-    await user.type(sheet.getByRole('textbox', { name: /configuration.proxyUrl/ }), '/draft');
-    await user.click(sheet.getByRole('switch'));
-    await waitFor(() => expect(mocks.updateModelSettings).toHaveBeenCalledWith('openai', 'gpt-4o', { enabled: false }));
-    expect(sheet.getByRole('switch')).not.toBeChecked();
-    expect(sheet.getByText('0/1 enabled')).toBeInTheDocument();
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
-  });
-
-  it('preserves unsaved credentials after an explicit model deletion refreshes parent data', async () => {
-    const user = userEvent.setup();
-    const confirmDelete = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    await openConfigureDialog(user);
-    const sheet = within(screen.getByTestId('entity-sheet'));
-    const apiKey = sheet.getByLabelText('API Key');
-    const url = sheet.getByRole('textbox', { name: /configuration.proxyUrl/ });
-    await user.clear(apiKey);
-    await user.type(apiKey, 'sk-unsaved-draft');
-    await user.clear(url);
-    await user.type(url, 'https://unsaved.example.com/v1');
-    mocks.listDefinitions.mockResolvedValue({ data: { models: [], total: 0 } });
-    await user.click(sheet.getByRole('button', { name: 'configuration.deleteModel' }));
-    await waitFor(() => expect(sheet.getByText('configuration.emptyModels')).toBeInTheDocument());
-    expect(mocks.deleteDefinition).toHaveBeenCalledWith('openai', 'gpt-4o');
-    expect(apiKey).toHaveValue('sk-unsaved-draft');
-    expect(url).toHaveValue('https://unsaved.example.com/v1');
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-    await user.click(sheet.getByRole('button', { name: 'Close sheet' }));
-    expect(screen.queryByTestId('entity-sheet')).not.toBeInTheDocument();
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-    confirmDelete.mockRestore();
-  });
-
-  it('opens manual model creation while leaving provider credential drafts unchanged', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
-    const sheet = within(screen.getByTestId('entity-sheet'));
-    await user.type(sheet.getByRole('textbox', { name: /configuration.proxyUrl/ }), '/draft');
-    await user.click(sheet.getByRole('button', { name: 'configuration.addModel' }));
-    expect(screen.getAllByTestId('entity-sheet')).toHaveLength(2);
-    const modelSheet = within(screen.getAllByTestId('entity-sheet')[1]);
-    await user.click(modelSheet.getByRole('tab', { name: 'discovery.manual' }));
-    expect(modelSheet.getByText('form.modelId')).toBeVisible();
-    const modelId = modelSheet.getByPlaceholderText('model-id');
-    await user.type(modelId, 'manual/private-model');
-    await user.click(modelSheet.getByRole('tab', { name: 'discovery.automatic' }));
-    expect(modelId).not.toBeVisible();
-    await user.click(modelSheet.getByRole('tab', { name: 'discovery.manual' }));
-    expect(modelId).toHaveValue('manual/private-model');
-    expect(mocks.discoverModels).not.toHaveBeenCalled();
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-    await user.click(modelSheet.getByRole('button', { name: 'Close sheet' }));
-    expect(sheet.getByRole('textbox', { name: /configuration.proxyUrl/ })).toHaveValue('https://old.example.com/v1/draft');
-  });
-
-  it('reports connection failure and retries the real model request without rewriting unchanged credentials', async () => {
-    const user = userEvent.setup();
-    mocks.testCredentials.mockResolvedValueOnce({ data: { success: false, error: 'Proxy refused connection' } });
-    await openConfigureDialog(user);
-    const sheet = within(screen.getByTestId('entity-sheet'));
-    await user.click(sheet.getByRole('button', { name: 'connection.testModelCall' }));
-    expect(await sheet.findByRole('alert')).toHaveTextContent('Proxy refused connection');
-    await user.click(sheet.getByRole('button', { name: 'connection.retry' }));
-    expect(await sheet.findByText('connection.success')).toBeInTheDocument();
-    expect(mocks.testCredentials).toHaveBeenCalledTimes(2);
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-  });
-
-  it('blocks model edits when settings fail to load and allows a successful retry', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
-    const providerSheet = within(screen.getByTestId('entity-sheet'));
-    mocks.getModelSettings.mockRejectedValueOnce(new Error('Settings unavailable'));
-    await user.click(providerSheet.getByRole('button', { name: 'configuration.editModel' }));
-    const editor = within(screen.getAllByTestId('entity-sheet')[1]);
-    expect(await editor.findByRole('alert')).toHaveTextContent('configuration.settingsLoadFailed');
-    expect(editor.getByRole('button', { name: 'Save' })).toBeDisabled();
-    await user.click(editor.getByRole('button', { name: 'Save' }));
-    expect(mocks.createDefinition).not.toHaveBeenCalled();
-    expect(mocks.updateModelSettings).not.toHaveBeenCalled();
-    await user.click(editor.getByRole('button', { name: 'configuration.retry' }));
-    await waitFor(() => expect(editor.getByRole('button', { name: 'Save' })).toBeEnabled());
-    await user.click(editor.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(mocks.createDefinition).toHaveBeenCalledWith('openai', expect.objectContaining({ model_id: 'gpt-4o' })));
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-  });
-
-  it('offers discovery only inside adding models and imports with saved credentials without closing the dialog', async () => {
-    const user = userEvent.setup();
-    renderWithRouter(<ModelPage />);
-    await screen.findByRole('button', { name: 'addModel' });
-    expect(screen.queryByRole('button', { name: 'discovery.checkAndFetch' })).not.toBeInTheDocument();
-    const modelSheet = await openAddModelDialog(user);
-    expect(modelSheet.getByRole('button', { name: 'form.close' })).toBeEnabled();
-    await user.click(modelSheet.getByRole('button', { name: 'discovery.checkAndFetch' }));
-    await user.click(await modelSheet.findByRole('checkbox', { name: 'remote/chat-model' }));
-    expect(mocks.discoverModels).toHaveBeenCalledWith('openai', undefined);
-    await user.click(modelSheet.getByRole('button', { name: 'discovery.configureModel remote/chat-model' }));
-    expect(modelSheet.getByRole('button', { name: 'form.close' })).toBeDisabled();
-    await user.click(modelSheet.getByRole('button', { name: 'discovery.cancelConfiguration' }));
-    expect(modelSheet.getByRole('button', { name: 'form.close' })).toBeEnabled();
-    const definitionCalls = mocks.listDefinitions.mock.calls.length;
-    await user.click(modelSheet.getByRole('button', { name: 'discovery.import' }));
-    await waitFor(() => expect(mocks.refetch).toHaveBeenCalled());
-    expect(mocks.listDefinitions.mock.calls.length).toBeGreaterThan(definitionCalls);
-    expect(modelSheet.getByText('discovery.importSummary')).toBeInTheDocument();
-    expect(modelSheet.getByRole('checkbox', { name: 'remote/chat-model' })).toBeChecked();
-    expect(modelSheet.getByRole('checkbox', { name: 'remote/chat-model' })).toBeDisabled();
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-    expect(mocks.createDefinition).not.toHaveBeenCalled();
-    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
-    expect(mocks.deleteDefault).not.toHaveBeenCalled();
-    await user.click(modelSheet.getByRole('button', { name: 'form.close' }));
-    expect(screen.queryByTestId('entity-sheet')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'discovery.checkAndFetch' })).not.toBeInTheDocument();
-    expect(mocks.createDefinition).not.toHaveBeenCalled();
-  });
-
-  it('keeps import results and added states visible across background loading, errors and SSE refreshes', async () => {
-    const user = userEvent.setup();
-    const loadedProviders = {
-      providers: [provider], connectedIds: ['openai'], loading: false, error: null, refetch: mocks.refetch,
-    };
-    mocks.useProviders.mockReturnValue(loadedProviders);
-    const { rerender } = renderWithRouter(<ModelPage />);
-    const modelSheet = await openAddModelDialog(user);
-    await user.click(modelSheet.getByRole('button', { name: 'discovery.checkAndFetch' }));
-    await user.click(await modelSheet.findByRole('checkbox', { name: 'remote/chat-model' }));
-    await user.click(modelSheet.getByRole('button', { name: 'discovery.import' }));
-    expect(await screen.findByText('discovery.importSummary')).toBeInTheDocument();
-
-    mocks.useProviders.mockReturnValue({ ...loadedProviders, loading: true });
-    rerender(<ModelPage />);
-    expect(screen.getByText('discovery.importSummary')).toBeInTheDocument();
-    expect(screen.getByRole('checkbox', { name: 'remote/chat-model' })).toBeDisabled();
-
-    mocks.useProviders.mockReturnValue({ ...loadedProviders, error: 'Temporary network failure' });
-    rerender(<ModelPage />);
-    expect(screen.getByRole('alert')).toHaveTextContent('providerList.refreshFailed');
-    expect(screen.getByText('discovery.importSummary')).toBeInTheDocument();
-    expect(screen.getByRole('checkbox', { name: 'remote/chat-model' })).toBeDisabled();
-
-    mocks.useProviders.mockReturnValue(loadedProviders);
-    rerender(<ModelPage />);
-    mocks.sseOptions?.onReconnect?.();
-    await waitFor(() => expect(mocks.refetch.mock.calls.length).toBeGreaterThan(1));
-    expect(screen.getByText('discovery.importSummary')).toBeInTheDocument();
-    expect(screen.getByRole('checkbox', { name: 'remote/chat-model' })).toBeDisabled();
-  });
-
-  it('preserves an unavailable default when an administrator views and fetches models', async () => {
-    const user = userEvent.setup();
-    mocks.getResolved.mockResolvedValue({ data: { provider_id: 'old-provider', model_id: 'keep-my-default' } });
-    renderWithRouter(<ModelPage />);
-    expect(await screen.findByText('keep-my-default')).toBeInTheDocument();
-    const modelSheet = await openAddModelDialog(user);
-    await user.click(modelSheet.getByRole('button', { name: 'discovery.checkAndFetch' }));
-    await modelSheet.findByRole('checkbox', { name: 'remote/chat-model' });
-    expect(mocks.deleteDefault).not.toHaveBeenCalled();
-    expect(screen.getByText('keep-my-default')).toBeInTheDocument();
-  });
-
-  it('saves provider credential drafts without requiring model selection or importing models', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
-    const sheet = within(screen.getByTestId('entity-sheet'));
-    const baseUrl = sheet.getByPlaceholderText('https://api.example.com/v1');
-    await user.clear(baseUrl);
-    await user.type(baseUrl, 'https://draft.example.com/v1');
-    expect(sheet.getByRole('button', { name: 'discovery.checkAndFetch' })).toBeEnabled();
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-    await user.click(sheet.getByRole('button', { name: 'Save Provider' }));
-    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
-    expect(mocks.setCredentials).toHaveBeenCalledWith('openai', expect.objectContaining({ base_url: 'https://draft.example.com/v1', skip_catalog_bootstrap: true }));
-    expect(mocks.discoverModels).not.toHaveBeenCalled();
-    expect(mocks.importModels).not.toHaveBeenCalled();
-    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
-  });
-
-  it('opens automatic discovery from adding models without using unsaved provider credentials', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
-    const sheet = within(screen.getByTestId('entity-sheet'));
-    await user.type(sheet.getByPlaceholderText('https://api.example.com/v1'), '/changed');
-    expect(sheet.getByRole('button', { name: 'discovery.checkAndFetch' })).toBeEnabled();
-    await user.click(sheet.getByRole('button', { name: 'configuration.addModel' }));
-    const modelSheet = within(screen.getAllByTestId('entity-sheet')[1]);
-    await user.click(modelSheet.getByRole('button', { name: 'discovery.checkAndFetch' }));
-    await modelSheet.findByRole('checkbox', { name: 'remote/chat-model' });
-    expect(mocks.discoverModels).toHaveBeenCalledWith('openai', undefined);
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-    expect(mocks.importModels).not.toHaveBeenCalled();
-    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
-    await user.click(modelSheet.getByRole('button', { name: 'Close sheet' }));
-    expect(sheet.getByRole('textbox', { name: /configuration.proxyUrl/ })).toHaveValue('https://old.example.com/v1/changed');
-    expect(mocks.setCredentials).not.toHaveBeenCalled();
-  });
-
-  it('does not test provider credentials when the page loads', async () => {
-    renderWithRouter(<ModelPage />);
-
-    await waitFor(() => {
-      expect(mocks.getCredentials).toHaveBeenCalledWith('openai');
-    });
-    expect(mocks.testCredentials).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ['threatbook-cn-llm', 'ThreatBook-cn-llm'],
-    ['threatbook-io-llm', 'ThreatBook-io-llm'],
-  ])('shows the shared free key link when editing %s', async (providerId, providerName) => {
-    const user = userEvent.setup();
-    const threatbookProvider = { ...provider, id: providerId, name: providerName };
-    const threatbookModel = { ...model, provider_id: providerId };
-    mocks.useProviders.mockReturnValue({
-      providers: [threatbookProvider],
-      connectedIds: [providerId],
-      loading: false,
-      error: null,
-      refetch: mocks.refetch,
-    });
-    mocks.listDefinitions.mockResolvedValue({ data: { models: [threatbookModel], total: 1 } });
-    mocks.catalogList.mockResolvedValue({
-      data: {
-        providers: [{ id: providerId, models: [] }],
-      },
-    });
-
-    renderWithRouter(<ModelPage />);
-    await user.click(await screen.findByTitle('Configure'));
-
-    expect(await screen.findByTestId('entity-sheet')).toBeInTheDocument();
-    expect(mocks.revealCredentials).toHaveBeenCalledWith(providerId);
-    expect(screen.getByRole('link', { name: 'form.claimFreeKey' })).toHaveAttribute(
-      'href',
-      'https://portal.agentflocks.com/',
-    );
-  });
-
-  it('does not show the ThreatBook free key link when editing another provider', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
-
-    expect(screen.queryByRole('link', { name: 'form.claimFreeKey' })).not.toBeInTheDocument();
-  });
-
-  it('displays and preserves the existing API key when saving a new base URL', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
-
-    const apiKeyInput = screen.getByDisplayValue('sk-existing-secret-1234');
-    expect(apiKeyInput).toHaveAttribute('type', 'password');
-    expect(apiKeyInput).not.toHaveValue('sk-***1234');
-    await user.click(screen.getByTitle('form.show'));
-    expect(apiKeyInput).toHaveAttribute('type', 'text');
-
-    const baseUrlInput = screen.getByPlaceholderText('https://api.example.com/v1');
-    await user.clear(baseUrlInput);
-    await user.type(baseUrlInput, 'https://new.example.com/v1');
-    await user.click(screen.getByRole('button', { name: 'Save Provider' }));
-
-    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
-    expect(mocks.testCredentials).not.toHaveBeenCalled();
-    const payload = mocks.setCredentials.mock.calls.at(-1)?.[1];
-    expect(payload).toEqual(expect.objectContaining({
-      base_url: 'https://new.example.com/v1',
-    }));
-    expect(payload).not.toHaveProperty('api_key');
-  });
-
-  it('persists the displayed API key and a base URL change before testing the connection', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
-    mocks.setCredentials.mockClear();
-    mocks.testCredentials.mockClear();
-
-    const baseUrlInput = screen.getByPlaceholderText('https://api.example.com/v1');
-    await user.clear(baseUrlInput);
-    await user.type(baseUrlInput, 'https://test.example.com/v1');
-    await user.click(screen.getByRole('button', { name: 'connection.saveAndTest' }));
-
-    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
-    const payload = mocks.setCredentials.mock.calls[0]?.[1];
-    expect(payload).toEqual(expect.objectContaining({
-      base_url: 'https://test.example.com/v1',
-      skip_catalog_bootstrap: true,
-    }));
-    expect(payload).not.toHaveProperty('api_key');
-    await waitFor(() => {
-      expect(mocks.testCredentials).toHaveBeenCalledWith('openai', 'gpt-4o');
-    });
-  });
-
-  it('submits a replacement API key when the displayed value changes', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
-
-    const apiKeyInput = screen.getByDisplayValue('sk-existing-secret-1234');
-    await user.clear(apiKeyInput);
-    await user.type(apiKeyInput, 'sk-replacement-secret');
-    await user.click(screen.getByRole('button', { name: 'Save Provider' }));
-
-    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
-    expect(mocks.setCredentials.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({
-      api_key: 'sk-replacement-secret',
-    }));
   });
 });
 

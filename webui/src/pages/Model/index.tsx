@@ -24,7 +24,7 @@ import {
   providerAPI, modelV2API, usageAPI,
   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
 } from '@/api/provider';
-import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
+import ProviderKeyCheck from './ProviderKeyCheck';
 import ModelDiscovery, { ModelImportSummary, toModelImport } from './ModelDiscovery';
 import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
 import { extractErrorMessage } from '@/utils/error';
@@ -42,7 +42,7 @@ import type {
   ProviderCredentials, ModelDefinitionV2, UsageStats,
   CatalogProvider, CatalogCredentialField, ModelSettingV2,
   CustomModelCreate, ProviderCredentialInput, FallbackModelRef,
-  DiscoveredModel, ModelImportResult,
+  DiscoveredModel, ModelImportResult, ModelInventoryDraft,
 } from '@/types';
 
 // ==================== Provider Auth Helpers ====================
@@ -157,6 +157,7 @@ export default function ModelPage() {
   // Dialog states
   const [showAddProvider, setShowAddProvider] = useState(false);
   const [showAddModel, setShowAddModel] = useState(false);
+  const [addModelMethod, setAddModelMethod] = useState<'automatic' | 'manual'>('automatic');
   const [selectedModelForDetail, setSelectedModelForDetail] = useState<{ provider: EnrichedProvider; model: ModelDefinitionV2 } | null>(null);
 
   // Model enabled/disabled states (maps "provider/model" -> enabled)
@@ -545,7 +546,7 @@ export default function ModelPage() {
             )}
             {isAdmin && selectedProvider && (
               <button
-                onClick={() => setShowAddModel(true)}
+                onClick={() => { setAddModelMethod('automatic'); setShowAddModel(true); }}
                 className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
               >
                 <Plus className="w-4 h-4" />
@@ -672,7 +673,7 @@ export default function ModelPage() {
           loadingModels={loadingModels}
           modelEnabledMap={modelEnabledMap}
           defaultModelId={defaultModel?.provider_id === selectedProvider.id ? defaultModel.model_id : undefined}
-          onAddModel={() => setShowAddModel(true)}
+          onAddModel={() => { setAddModelMethod('manual'); setShowAddModel(true); }}
           onEditModel={(model) => setSelectedModelForDetail({ provider: selectedProvider, model })}
           onToggleModel={(modelId, enabled) => handleToggleModel(selectedProvider.id, modelId, enabled)}
           onDeleteModel={handleDeleteModel}
@@ -713,6 +714,7 @@ export default function ModelPage() {
 
       {showAddModel && selectedProvider && (
         <AddModelDialog
+          initialMethod={addModelMethod}
           provider={selectedProvider}
           models={providerModels}
           loadingModels={loadingModels}
@@ -1640,13 +1642,14 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       onClose={handleWizardClose}
       onSubmit={sheetProps.onSubmit}
       footerLeft={sheetProps.footerLeft}
+      hideRex={step !== 'add-model'}
+      hideTest
       initialTab="form"
     >
       {/* ── Step 1: Provider Configuration ── */}
       {step === 'provider' && (
         <div className="space-y-0">
           <div className="space-y-5">
-            <h3 className="text-sm font-semibold text-gray-900">{t('wizard.connectionStep')}</h3>
             {loadingCatalog ? (
                 <div className="flex items-center justify-center py-12"><LoadingSpinner /></div>
               ) : (
@@ -1748,9 +1751,6 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
                             placeholder="e.g. SiliconFlow, LM Studio, My API"
                           />
-                          <p className="mt-1 text-xs text-gray-500">
-                            用于创建独立的 OpenAI-compatible Provider 实例，不会覆盖已有配置。
-                          </p>
                         </div>
                       )}
 
@@ -1794,9 +1794,6 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                             <ExternalLink className="h-4 w-4" />
                             {t('form.claimFreeKey')}
                           </a>
-                        )}
-                        {selectedCatalogId !== 'ollama' && providerAllowsEmptyApiKey(selectedCatalogId) && (
-                          <p className="text-xs text-gray-500 mt-1">{t('form.apiKeyOptionalHint')}</p>
                         )}
                       </div>
 
@@ -1848,7 +1845,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         </div>
                       )}
 
-                      <h3 className="text-sm font-semibold text-gray-900">{t('wizard.modelsStep')}</h3>
+                      <ProviderKeyCheck providerId={selectedCatalogId} credentials={{ api_key: apiKey.trim(), base_url: baseUrl.trim() || undefined }} disabled={saving} />
                       <ModelDiscovery
                         providerId={selectedCatalogId}
                         mode="stage"
@@ -1859,18 +1856,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         onSelectionChange={setDiscoveredModels}
                       />
 
-                      {!discoveryReady && <p role="status" className="text-xs text-amber-800">{t('discovery.completeConfiguration')}</p>}
-                      <div className="space-y-1 border-t border-gray-100 pt-4">
-                        <h3 className="text-sm font-semibold text-gray-900">{t('wizard.saveStep')}</h3>
-                        <p className="text-xs leading-5 text-gray-500">{t('wizard.saveHint')}</p>
-                      </div>
 
-                      <div className="flex items-start gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                        <Shield className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
-                        <p className="text-xs text-slate-700">
-                          {t('form.credentialNote')}
-                        </p>
-                      </div>
                     </>
                   )}
                 </>
@@ -2157,7 +2143,8 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
 
 // ==================== Add Model Dialog ====================
 
-function AddModelDialog({ provider, models, loadingModels, onClose, onCreated }: {
+function AddModelDialog({ provider, models, loadingModels, onClose, onCreated, initialMethod = 'automatic' }: {
+  initialMethod?: 'automatic' | 'manual';
   provider: EnrichedProvider;
   models: ModelDefinitionV2[];
   loadingModels: boolean;
@@ -2170,7 +2157,7 @@ function AddModelDialog({ provider, models, loadingModels, onClose, onCreated }:
   const [loading, setLoading] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; latency?: number } | null>(null);
   const [testing, setTesting] = useState(false);
-  const [method, setMethod] = useState<'automatic' | 'manual'>('automatic');
+  const [method, setMethod] = useState<'automatic' | 'manual'>(initialMethod);
   const [discoveryReady, setDiscoveryReady] = useState(true);
 
   const handleSubmit = async () => {
@@ -2247,6 +2234,8 @@ Provider: ${provider.name} (${provider.id})
       submitLabel={method === 'automatic' ? t('form.close') : testResult ? t('form.done') : t('form.addModelBtn')}
       onClose={handleClose}
       onSubmit={method === 'automatic' || testResult ? handleClose : handleSubmit}
+      hideRex={method === 'automatic'}
+      hideTest={method === 'automatic'}
       initialTab="form"
     >
       <div className="space-y-4">
@@ -2267,7 +2256,6 @@ Provider: ${provider.name} (${provider.id})
           ))}
         </div>
         <div role="tabpanel" id="add-model-automatic" aria-labelledby="add-model-tab-automatic" hidden={method !== 'automatic'} className="space-y-3">
-          <p className="text-xs leading-5 text-gray-500">{t('discovery.savedCredentialsHint')}</p>
           <ModelDiscovery providerId={provider.id} mode="import" existingModelIds={models.map(model => model.id)} disabled={loading || testing || loadingModels} onReadyChange={setDiscoveryReady} onImported={onCreated} />
         </div>
         <div role="tabpanel" id="add-model-manual" aria-labelledby="add-model-tab-manual" hidden={method !== 'manual'} className="space-y-4">
@@ -2353,12 +2341,7 @@ function allowsBuiltInVisionToggle(modelId: string): boolean {
 
 // ==================== Configure Dialog ====================
 
-function ConfigureProviderDialog({
-  provider, existingCredentials, models, loadingModels, modelEnabledMap, defaultModelId,
-  onClose, onConfigured, onTestResult, onDelete, onAddModel, onEditModel,
-  onToggleModel, onDeleteModel,
-  onModelsChanged,
-}: {
+function ConfigureProviderDialog({ provider, existingCredentials, loadingModels, onClose, onConfigured, onDelete, onAddModel, onModelsChanged, models }: {
   provider: EnrichedProvider;
   existingCredentials: ProviderCredentials | null;
   models: ModelDefinitionV2[];
@@ -2375,308 +2358,43 @@ function ConfigureProviderDialog({
   onDeleteModel: (modelId: string) => Promise<void>;
   onModelsChanged: () => void;
 }) {
-  const toast = useToast();
   const { t } = useTranslation('model');
-  // Model operations refresh the parent inventory and masked credential read.
-  // Keep the opening snapshot as the baseline until the user explicitly saves.
-  const [savedCredentials, setSavedCredentials] = useState(() => ({
-    apiKey: existingCredentials?.api_key ?? '',
-    baseUrl: existingCredentials?.base_url ?? '',
-    hasCredential: existingCredentials?.has_credential ?? false,
-  }));
-  const [baseUrl, setBaseUrl] = useState(savedCredentials.baseUrl);
-  const [apiKey, setApiKey] = useState(savedCredentials.apiKey);
-  const [providerName, setProviderName] = useState(provider.name);
-  const [showApiKey, setShowApiKey] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [busyModelId, setBusyModelId] = useState<string | null>(null);
-  const actionLock = useRef(false);
-  const isComposingRef = useRef(false);
-  const [testModelId, setTestModelId] = useState(models[0]?.id ?? '');
-  const [testChat, setTestChat] = useState<{ question: string; answer: string; model: string; latency: number } | null>(null);
-  const [testError, setTestError] = useState<string | null>(null);
-  const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
-  const [discoveryImportResult, setDiscoveryImportResult] = useState<ModelImportResult | null>(null);
-  const [discoveryReady, setDiscoveryReady] = useState(true);
-  const nameEditable = provider.id === 'openai-compatible' || provider.id.startsWith('custom-');
-  const baseUrlRequired = nameEditable || isAzureProviderId(provider.id);
-  const hasPendingChanges = hasPendingProviderCredentialChanges(savedCredentials, {
-    apiKey: apiKey.trim() || savedCredentials.apiKey,
-    baseUrl: baseUrl.trim() || savedCredentials.baseUrl,
-  });
-  const busy = loading || testing || busyModelId !== null;
-  const enabledModelCount = models.filter(model => modelEnabledMap[`${provider.id}/${model.id}`] !== false).length;
-
-  useEffect(() => {
-    setTestModelId(previous => models.some(model => model.id === previous) ? previous : models[0]?.id ?? '');
-  }, [models]);
-
-  useEffect(() => {
-    setTestChat(null);
-    setTestError(null);
-  }, [apiKey, baseUrl, testModelId]);
-
-  const persistCredentials = async () => {
-    const nextApiKey = apiKey.trim();
-    if (!nextApiKey && !savedCredentials.hasCredential && !providerAllowsEmptyApiKey(provider.id)) {
-      toast.warning(t('discovery.codes.missing_credentials'));
-      return false;
-    }
-    if (baseUrlRequired && !baseUrl.trim()) {
-      toast.warning(t('form.baseUrlRequired'));
-      return false;
-    }
-    const payload: ProviderCredentialInput = {
-      base_url: baseUrl.trim() || undefined,
-      provider_name: nameEditable ? providerName.trim() || undefined : undefined,
-      // Configuration owns the explicit inventory; never refill deleted models.
-      skip_catalog_bootstrap: true,
-    };
-    if (nextApiKey && nextApiKey !== savedCredentials.apiKey.trim()) payload.api_key = nextApiKey;
-    await providerAPI.setCredentials(provider.id, payload);
-    setSavedCredentials({
-      apiKey: nextApiKey || savedCredentials.apiKey,
-      baseUrl: baseUrl.trim() || savedCredentials.baseUrl,
-      hasCredential: true,
-    });
-    return true;
-  };
-
-  const handleSubmit = async () => {
-    if (actionLock.current || busy || loadingModels || !discoveryReady) return;
-    actionLock.current = true;
-    setLoading(true);
+  const toast = useToast();
+  const [apiKey, setApiKey] = useState(existingCredentials?.api_key ?? '');
+  const [baseUrl, setBaseUrl] = useState(existingCredentials?.base_url ?? '');
+  const [name, setName] = useState(provider.name);
+  const [showKey, setShowKey] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [ready, setReady] = useState(true);
+  const [inventory, setInventory] = useState<ModelInventoryDraft>({ models: [], deleted: [] });
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const lock = useRef(false);
+  const custom = provider.id === 'openai-compatible' || provider.id.startsWith('custom-');
+  const credentials = { api_key: apiKey.trim() || undefined, base_url: baseUrl.trim() || undefined };
+  const save = async () => {
+    if (lock.current || !ready || loadingModels) return;
+    if (!apiKey.trim() && !existingCredentials?.has_credential && !providerAllowsEmptyApiKey(provider.id)) { setSaveError(t('discovery.codes.missing_credentials')); return; }
+    if ((custom || isAzureProviderId(provider.id)) && !baseUrl.trim()) { setSaveError(t('form.baseUrlRequired')); return; }
+    lock.current = true; setSaving(true); setSaveError(null);
     try {
-      if (!await persistCredentials()) return;
-      if (discoveredModels.length > 0) {
-        let result: ModelImportResult;
-        try {
-          result = (await providerAPI.importModels(provider.id, discoveredModels.map(toModelImport))).data;
-        } catch (importError) {
-          result = { added: [], skipped: [], failed: discoveredModels.map(model => ({ id: model.id, error: extractErrorMessage(importError) })) };
-        }
-        setDiscoveryImportResult(result);
-        if (result.added.length > 0 || result.skipped.length > 0) onModelsChanged();
-        if (result.failed.length > 0) {
-          toast.warning(t('discovery.importPartial'));
-          return;
-        }
-      }
-      toast.success(t('credentialsSaved'));
-      onConfigured();
-    } catch (saveError) {
-      toast.error(t('configFailed'), extractErrorMessage(saveError));
-    } finally {
-      actionLock.current = false;
-      setLoading(false);
-    }
+      await providerAPI.setCredentials(provider.id, { ...credentials, provider_name: custom ? name.trim() || undefined : undefined, skip_catalog_bootstrap: true });
+      await providerAPI.saveModelInventory(provider.id, inventory);
+      onModelsChanged(); toast.success(t('credentialsSaved')); onConfigured();
+    } catch (error) { setSaveError(extractErrorMessage(error)); }
+    finally { lock.current = false; setSaving(false); }
   };
-
-  const handleTest = async () => {
-    if (actionLock.current || busy || loadingModels || !models.length) return;
-    actionLock.current = true;
-    setTesting(true);
-    setTestChat(null);
-    setTestError(null);
-    try {
-      // The button explicitly says "Save credentials and check" for a draft.
-      if (hasPendingChanges && !await persistCredentials()) return;
-      const response = await providerAPI.testCredentials(provider.id, testModelId || undefined);
-      if (response.data.success) {
-        setTestChat({
-          question: response.data.question || '',
-          answer: response.data.answer || '',
-          model: response.data.model_id || testModelId,
-          latency: response.data.latency_ms || 0,
-        });
-        onTestResult(true);
-      } else {
-        setTestError(response.data.error || response.data.message || t('testFailed'));
-        onTestResult(false);
-      }
-    } catch (testFailure) {
-      setTestError(extractErrorMessage(testFailure));
-      onTestResult(false);
-    } finally {
-      actionLock.current = false;
-      setTesting(false);
-    }
-  };
-
-  const runModelAction = async (modelId: string, action: () => Promise<void>) => {
-    if (actionLock.current || busy || loadingModels) return;
-    actionLock.current = true;
-    setBusyModelId(modelId);
-    try { await action(); }
-    finally {
-      actionLock.current = false;
-      setBusyModelId(null);
-    }
-  };
-
-  return (
-    <EntitySheet
-      open
-      mode="edit"
-      entityType={t('configuration.provider')}
-      entityName={provider.name}
-      width={720}
-      minWidth={360}
-      maxWidth={960}
-      icon={<Brain className="w-5 h-5" />}
-      rexSystemContext=""
-      rexWelcomeMessage=""
-      hideRex
-      hideTest
-      initialTab="form"
-      submitDisabled={busy || loadingModels || !discoveryReady}
-      submitLoading={loading}
-      submitLabel={t(discoveredModels.length > 0 ? 'wizard.saveAndAddModels' : 'wizard.saveProvider', { count: discoveredModels.length })}
-      onClose={onClose}
-      onSubmit={handleSubmit}
-      footerLeft={
-        <button type="button" onClick={onDelete} disabled={busy} className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50">
-          <Trash2 className="h-4 w-4" />{t('form.removeProvider')}
-        </button>
-      }
-    >
-      <div className="space-y-7">
-        <div className="space-y-4">
-          <h3 className="text-sm font-semibold text-gray-900">{t('wizard.connectionStep')}</h3>
-          {nameEditable && (
-            <div>
-              <label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="provider-display-name">{t('configuration.providerName')}</label>
-              <input id="provider-display-name" type="text" value={providerName} disabled={busy} onChange={event => setProviderName(event.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-50" placeholder="e.g. SiliconFlow, LM Studio, My API" />
-            </div>
-          )}
-          <div>
-            <label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="provider-api-key">
-              API Key
-              {!savedCredentials.hasCredential && !providerAllowsEmptyApiKey(provider.id) && <span className="text-slate-500"> *</span>}
-              {providerAllowsEmptyApiKey(provider.id) && <span className="ml-1 font-normal text-gray-400">{t('form.apiKeyOptional')}</span>}
-            </label>
-            <div className="relative">
-              <input
-                id="provider-api-key"
-                type={showApiKey ? 'text' : 'password'}
-                value={apiKey}
-                disabled={busy}
-                onChange={event => setApiKey(event.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2.5 pr-10 text-sm disabled:bg-gray-50"
-                placeholder={savedCredentials.hasCredential ? t('form.apiKeyKeepExisting') : providerAllowsEmptyApiKey(provider.id) ? t('form.apiKeyOptionalPlaceholder') : 'sk-...'}
-                onCompositionStart={() => { isComposingRef.current = true; }}
-                onCompositionEnd={() => { isComposingRef.current = false; }}
-                onKeyDown={event => event.key === 'Enter' && !isComposingRef.current && handleSubmit()}
-              />
-              <button type="button" onClick={() => setShowApiKey(value => !value)} className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-gray-400 hover:text-gray-700" title={t(showApiKey ? 'form.hide' : 'form.show')}>
-                {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
-            </div>
-            {isThreatBookLLMProviderId(provider.id) && (
-              <a href={THREATBOOK_FREE_KEY_URL} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 hover:bg-green-100">
-                <ExternalLink className="h-4 w-4" />{t('form.claimFreeKey')}
-              </a>
-            )}
-            {providerAllowsEmptyApiKey(provider.id) && <p className="mt-1 text-xs text-gray-500">{t('form.apiKeyOptionalHint')}</p>}
-          </div>
-          <div>
-            <label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="provider-proxy-url">
-              {t('configuration.proxyUrl')}{baseUrlRequired ? <span className="ml-1 text-slate-500">*</span> : <span className="ml-1 font-normal text-gray-400">{t('form.baseUrlOptional')}</span>}
-            </label>
-            <input id="provider-proxy-url" type="text" value={baseUrl} disabled={busy} onChange={event => setBaseUrl(event.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm disabled:bg-gray-50" placeholder="https://api.example.com/v1" />
-          </div>
-        </div>
-
-        <div className="space-y-3 border-t border-gray-100 pt-5">
-          <h3 className="text-sm font-semibold text-gray-900">{t('wizard.modelsStep')}</h3>
-          <ModelDiscovery
-            providerId={provider.id}
-            mode="stage"
-            credentials={{ api_key: apiKey.trim() || undefined, base_url: baseUrl.trim() || undefined }}
-            existingModelIds={models.map(model => model.id)}
-            disabled={busy || loadingModels}
-            onSelectionChange={setDiscoveredModels}
-            onReadyChange={setDiscoveryReady}
-          />
-          {!discoveryReady && <p role="status" className="text-xs text-amber-800">{t('discovery.completeConfiguration')}</p>}
-          {discoveryImportResult && <ModelImportSummary result={discoveryImportResult} />}
-          <p className="text-xs leading-5 text-gray-500">{t('wizard.saveHint')}</p>
-        </div>
-
-        <section aria-label={t('connection.modelCallTitle')} className="space-y-3 border-t border-gray-100 pt-5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold text-gray-900">{t('connection.modelCallTitle')}</h3>
-              <p className="mt-1 text-xs leading-5 text-gray-500">{t('connection.modelCallDescription')}</p>
-            </div>
-            {models.length > 0 && <button type="button" onClick={handleTest} disabled={busy || loadingModels} className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-40">
-              {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <TestTube className="h-4 w-4" />}
-              {t(testing ? 'connection.checking' : hasPendingChanges ? 'connection.saveAndTest' : testError ? 'connection.retry' : 'connection.testModelCall')}
-            </button>}
-          </div>
-          {hasPendingChanges && models.length > 0 && <p className="text-xs text-amber-800">{t('connection.saveAndTestHint')}</p>}
-          {models.length > 0 ? (
-            <label className="flex items-center gap-3 text-xs text-gray-500">
-              <span className="shrink-0">{t('connection.testModel')}</span>
-              <select value={testModelId} disabled={busy || loadingModels} onChange={event => setTestModelId(event.target.value)} className="min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-sm text-gray-700">
-                {models.map(model => <option key={model.id} value={model.id}>{model.name || model.id}</option>)}
-              </select>
-            </label>
-          ) : <p className="text-xs text-gray-500">{t('connection.noModel')}</p>}
-          {testError ? (
-            <div role="alert" className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-              <div className="min-w-0"><p className="font-medium">{t('connection.failure')}</p><p className="mt-1 break-words text-xs">{testError}</p></div>
-            </div>
-          ) : testChat ? (
-            <div role="status" className="space-y-1.5 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-800">
-              <p className="flex items-center gap-1.5 font-medium"><CheckCircle2 className="h-4 w-4" />{t('connection.success')}</p>
-              <p className="text-xs">{t('form.latencyMs', { model: testChat.model, latency: testChat.latency })}</p>
-              {testChat.question && <p className="break-words text-xs">Q: {testChat.question}</p>}
-              {testChat.answer && <p className="break-words text-xs">A: {testChat.answer}</p>}
-            </div>
-          ) : !testing && models.length > 0 && <p className="text-xs text-gray-400">{t('connection.notChecked')}</p>}
-        </section>
-
-        <section aria-label={t('configuration.models')} className="space-y-3 border-t border-gray-100 pt-5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 className="text-sm font-semibold text-gray-900">{t('configuration.models')}</h3>
-              <span className="text-xs text-gray-500">{t('configuration.modelCount', { enabled: enabledModelCount, total: models.length })}</span>
-              {loadingModels && <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-400" aria-label={t('configuration.refreshingModels')} />}
-            </div>
-            <button type="button" onClick={onAddModel} disabled={busy || loadingModels} className="inline-flex items-center gap-1 rounded-lg border border-gray-300 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-40"><Plus className="h-3.5 w-3.5" />{t('configuration.addModel')}</button>
-          </div>
-          <p className="text-xs leading-5 text-gray-500">{t('configuration.manageHint')}</p>
-          {isAzureProviderId(provider.id) && <p className="text-xs text-blue-800">{t('form.azureModelIdHint')}</p>}
-          {models.length === 0 ? <p className="rounded-lg border border-dashed border-gray-200 p-5 text-center text-sm text-gray-500">{t('configuration.emptyModels')}</p> : (
-            <ul className="divide-y divide-gray-100 rounded-lg border border-gray-200" aria-label={t('configuration.models')}>
-              {models.map(model => {
-                const enabled = modelEnabledMap[`${provider.id}/${model.id}`] !== false;
-                return (
-                  <li key={model.id} className="flex items-center gap-2.5 px-3 py-2.5">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className={`break-all text-sm font-medium ${enabled ? 'text-gray-900' : 'text-gray-400'}`}>{model.name || model.id}</span>
-                        {defaultModelId === model.id && <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] text-violet-700">{t('configuration.defaultModel')}</span>}
-                      </div>
-                      {model.name !== model.id && <p className="mt-0.5 break-all font-mono text-[11px] text-gray-400">{model.id}</p>}
-                    </div>
-                    {busyModelId === model.id && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-gray-400" />}
-                    <button type="button" onClick={() => onEditModel(model)} disabled={busy || loadingModels} aria-label={t('configuration.editModel', { model: model.name || model.id })} title={t('configuration.editModel', { model: model.name || model.id })} className="rounded p-1.5 text-gray-400 hover:bg-gray-50 hover:text-gray-700 disabled:opacity-40"><Pencil className="h-4 w-4" /></button>
-                    <button type="button" onClick={() => runModelAction(model.id, () => onDeleteModel(model.id))} disabled={busy || loadingModels} aria-label={t('configuration.deleteModel', { model: model.name || model.id })} title={t('configuration.deleteModel', { model: model.name || model.id })} className="rounded p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-40"><Trash2 className="h-4 w-4" /></button>
-                    <button type="button" role="switch" aria-checked={enabled} aria-label={t(enabled ? 'configuration.disableModel' : 'configuration.enableModel', { model: model.name || model.id })} disabled={busy || loadingModels} onClick={() => runModelAction(model.id, () => onToggleModel(model.id, !enabled))} className={`relative ml-1 h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-40 ${enabled ? 'bg-violet-600' : 'bg-gray-300'}`}><span className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0'}`} /></button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </section>
-        <p className="flex items-start gap-2 rounded-lg bg-slate-50 p-3 text-xs leading-5 text-slate-600"><Shield className="mt-0.5 h-4 w-4 shrink-0" />{t('form.credentialNote')}</p>
+  return <EntitySheet open mode="edit" entityType={t('configuration.provider')} entityName={provider.name} width={720} minWidth={360} maxWidth={960} icon={<Brain className="h-5 w-5" />} rexSystemContext="" rexWelcomeMessage="" hideRex hideTest initialTab="form" submitLabel={t('compact.save')} submitLoading={saving} submitDisabled={saving || !ready || loadingModels} onSubmit={save} onClose={onClose} footerLeft={<button type="button" disabled={saving} onClick={onDelete} className="flex items-center gap-1.5 text-xs text-red-600"><Trash2 className="h-3.5 w-3.5" />{t('form.removeProvider')}</button>}>
+    <div className="space-y-6">
+      <div className="space-y-4">
+        {custom && <label className="block space-y-1.5 text-sm font-medium text-gray-700">{t('configuration.providerName')}<input value={name} disabled={saving} onChange={e => setName(e.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 font-normal" /></label>}
+        <div><label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="provider-api-key">API Key</label><div className="relative"><input id="provider-api-key" type={showKey ? 'text' : 'password'} value={apiKey} disabled={saving} onChange={e => setApiKey(e.target.value)} placeholder={existingCredentials?.has_credential ? t('form.apiKeyKeepExisting') : 'sk-...'} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 pr-10 text-sm" /><button type="button" onClick={() => setShowKey(value => !value)} title={t(showKey ? 'form.hide' : 'form.show')} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400">{showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</button></div></div>
+        <label className="block space-y-1.5 text-sm font-medium text-gray-700">{t('configuration.proxyUrl')}<span className="ml-1 font-normal text-gray-400">{custom || isAzureProviderId(provider.id) ? '*' : t('form.baseUrlOptional')}</span><input value={baseUrl} disabled={saving} onChange={e => setBaseUrl(e.target.value)} placeholder="https://api.example.com/v1" className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm font-normal" /></label>
+        <ProviderKeyCheck providerId={provider.id} credentials={credentials} disabled={saving} />
       </div>
-    </EntitySheet>
-  );
+      <ModelDiscovery providerId={provider.id} mode="stage" existingModelIds={models.map(model => model.id)} credentials={credentials} disabled={saving} onInventoryChange={setInventory} onReadyChange={setReady} onAddModel={onAddModel} />
+      {saveError && <p role="alert" className="text-xs text-red-600">{saveError}</p>}
+    </div>
+  </EntitySheet>;
 }
 
 // ==================== Model Detail Sheet ====================

@@ -18,6 +18,8 @@ import type {
   ModelDiscoveryResult,
   ModelImportInput,
   ModelImportResult,
+  InventoryModelInput,
+  ModelInventoryDraft,
 } from '@/types';
 
 const API_SERVICES_LIST_CACHE_TTL_MS = 5000;
@@ -116,6 +118,11 @@ export const providerAPI = {
 
   getStatistics: (id: string) =>
     client.get(`/api/provider/${encodeURIComponent(id)}/statistics`),
+
+  getModelInventory: (id: string) => client.get<{ models: InventoryModelInput[] }>(`/api/provider/${encodeURIComponent(id)}/model-inventory`),
+  saveModelInventory: (id: string, draft: ModelInventoryDraft) => client.post<ModelImportResult>(`/api/provider/${encodeURIComponent(id)}/model-inventory`, draft),
+  // Authentication checks can make two bounded upstream requests.
+  checkKey: (id: string, credentials?: { api_key?: string; base_url?: string }) => client.post<{ status: 'valid' | 'invalid' | 'unverified'; code: string }>(`/api/provider/${encodeURIComponent(id)}/check-key`, credentials ?? {}, { timeout: 60_000 }),
 
   // Credentials management (LLM providers — uses _llm_key convention)
   getCredentials: (id: string) =>
