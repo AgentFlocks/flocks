@@ -102,10 +102,10 @@ describe('navPartitions', () => {
     expect(isOpenSceneWorkspace(scene({ placement: 'aiWorkbench' }))).toBe(false);
   });
 
-  it('assigns code audit to SOC only while the alert suite workspace is open', () => {
+  it('keeps code audit in its own workspace regardless of the alert suite state', () => {
     const audit = scene({ id: 'code_audit_ui', route: '/contracts/webui/workspaces/code_audit_ui' });
     const path = `${audit.route}/audit-home?view=audits`;
-    expect(resolveNavRoute(path, [scene({}), audit])).toEqual({ kind: 'workspace', workspace: sceneNavWorkspace('soc_ui') });
+    expect(resolveNavRoute(path, [scene({}), audit])).toEqual({ kind: 'workspace', workspace: sceneNavWorkspace('code_audit_ui') });
     for (const workspaces of [
       [audit],
       [scene({ enabled: false }), audit],
@@ -117,11 +117,11 @@ describe('navPartitions', () => {
     }
   });
 
-  it('preserves SOC navigation memory for code audit', () => {
+  it('migrates legacy SOC navigation memory to the independent code audit workspace', () => {
     const path = '/contracts/webui/workspaces/code_audit_ui/audit-home?view=audits';
     const paths = { [sceneNavWorkspace('soc_ui')]: path };
     saveWorkspacePaths(paths);
-    expect(readWorkspacePaths()).toEqual(paths);
+    expect(readWorkspacePaths()).toEqual({ [sceneNavWorkspace('code_audit_ui')]: path });
   });
 
   it('drops the old SOC scene-catalog memory after moving scene management to the header', () => {

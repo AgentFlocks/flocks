@@ -56,21 +56,6 @@ export function isOpenSceneWorkspace(workspace: WebUIContractWorkspaceListItem):
   return workspace.placement === 'sceneWorkspace' && workspace.enabled && !workspace.locked;
 }
 
-/**
- * Code audit joins the SOC module while the SOC workspace (alert operations suite) is
- * open; without it, code audit is a scene module of its own.
- */
-export function sceneNavigationOwner(
-  workspaceId: string,
-  workspaces?: readonly WebUIContractWorkspaceListItem[] | null,
-): string {
-  const isOpen = (id: string) => workspaces?.some((workspace) => workspace.id === id && isOpenSceneWorkspace(workspace));
-  if (workspaceId === CODE_AUDIT_WORKSPACE_ID && isOpen(CODE_AUDIT_WORKSPACE_ID) && isOpen(SOC_WORKSPACE_ID)) {
-    return SOC_WORKSPACE_ID;
-  }
-  return workspaceId;
-}
-
 export type NavRoute =
   | { kind: 'workspace'; workspace: NavWorkspaceId }
   | { kind: 'settings' }
@@ -98,7 +83,7 @@ export function resolveNavRoute(
     const workspace = workspaces?.find((item) => item.id === workspaceId);
     // Workbench-placed workspaces render their pages under the Agent menu.
     if (workspace?.placement === 'aiWorkbench') return { kind: 'workspace', workspace: AGENT_WORKSPACE };
-    return { kind: 'workspace', workspace: sceneNavWorkspace(sceneNavigationOwner(workspaceId, workspaces)) };
+    return { kind: 'workspace', workspace: sceneNavWorkspace(workspaceId) };
   }
   // Custom pages outside any workspace sit in the Agent menu.
   return { kind: 'workspace', workspace: AGENT_WORKSPACE };
@@ -118,16 +103,18 @@ export function readWorkspacePaths(): NavWorkspacePaths {
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
     const result: NavWorkspacePaths = {};
+    let legacyAuditPath: string | undefined;
     for (const [workspace, value] of Object.entries(parsed as Record<string, unknown>)) {
       if (!isInternalPath(value)) continue;
       const route = resolveNavRoute(value);
       if (route.kind !== 'workspace') continue;
       const sceneId = sceneWorkspaceIdOf(workspace);
       if (sceneId !== null) {
-        // SOC can remember a code-audit page. Layout validates suite availability when using it.
         const pageWorkspaceId = workspaceIdFromPath(value.split('?')[0]);
-        if (pageWorkspaceId === sceneId
-          || (sceneId === SOC_WORKSPACE_ID && pageWorkspaceId === CODE_AUDIT_WORKSPACE_ID)) result[workspace] = value;
+        if (pageWorkspaceId === sceneId) result[workspace] = value;
+        // Older versions grouped audit under SOC. Move that memory to audit
+        // without overwriting an existing, independent audit page preference.
+        else if (sceneId === SOC_WORKSPACE_ID && pageWorkspaceId === CODE_AUDIT_WORKSPACE_ID) legacyAuditPath = value;
       } else if (workspace === AGENT_WORKSPACE || workspace === AGENT_WORKSHOP) {
         // Placement of a workspace route is only known once navigation loads;
         // Layout checks stored paths against the current menu anyway.
@@ -136,6 +123,8 @@ export function readWorkspacePaths(): NavWorkspacePaths {
         }
       }
     }
+    const auditWorkspace = sceneNavWorkspace(CODE_AUDIT_WORKSPACE_ID);
+    if (legacyAuditPath && !result[auditWorkspace]) result[auditWorkspace] = legacyAuditPath;
     return result;
   } catch {
     return {};

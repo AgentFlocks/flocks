@@ -96,7 +96,6 @@ import {
   saveCurrentWorkspace,
   saveWorkspacePaths,
   sceneNavWorkspace,
-  sceneNavigationOwner,
   sceneWorkspaceIdOf,
   workspaceIdFromPath,
   type NavWorkspaceId,
@@ -611,8 +610,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     // Scene modules, SOC included, are shown only while their suite is installed, enabled
     // and unlocked; SOC keeps its place right after the workbench.
     const socWorkspaces = openSceneWorkspaces.filter((workspace) => workspace.id === SOC_WORKSPACE_ID);
-    const otherSceneWorkspaces = openSceneWorkspaces.filter((workspace) => workspace.id !== SOC_WORKSPACE_ID
-      && sceneNavigationOwner(workspace.id, openSceneWorkspaces) === workspace.id);
+    const otherSceneWorkspaces = openSceneWorkspaces.filter((workspace) => workspace.id !== SOC_WORKSPACE_ID);
     return [
       { id: AGENT_WORKSPACE, name: t('workbench'), icon: Home },
       ...[...socWorkspaces, ...otherSceneWorkspaces].map((workspace) => ({
@@ -630,8 +628,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   // Last path visited inside each workspace, so switching back lands there.
   const workspacePathsRef = useRef<NavWorkspacePaths>(readWorkspacePaths());
-  // The module a remembered path belongs to now: code audit pages move between SOC and
-  // their own module as the alert suite is installed, enabled or removed.
+  // Validate remembered paths against the workspace's current placement.
   const pathNavigation = useCallback((path: string | undefined): NavWorkspaceId | null => {
     if (!path) return null;
     const route = resolveNavRoute(path, webuiContractWorkspaces);
@@ -642,15 +639,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const routeNav = resolveNavRoute(`${location.pathname}${location.search}`, navStateReady ? webuiContractWorkspaces : null);
   const [rememberedWorkspace, setRememberedWorkspace] = useState<NavWorkspaceId>(readCurrentWorkspace);
   const routeWorkspace = routeNav.kind === 'workspace' ? routeNav.workspace : null;
-  const rememberedSceneId = sceneWorkspaceIdOf(rememberedWorkspace);
-  const rememberedOwner = rememberedSceneId
-    ? sceneNavWorkspace(sceneNavigationOwner(rememberedSceneId, openSceneWorkspaces)) : rememberedWorkspace;
   const inHeader = (workspaceId: NavWorkspaceId | null) => headerWorkspaces.some((workspace) => workspace.id === workspaceId);
-  const rememberedPathOwner = rememberedSceneId && navStateReady
-    ? pathNavigation(workspacePathsRef.current[rememberedWorkspace]) : null;
-  const rememberedNavigation = !inHeader(rememberedOwner) && inHeader(rememberedPathOwner)
-    ? rememberedPathOwner as NavWorkspaceId : rememberedOwner;
-  const currentWorkspace = routeWorkspace ?? (inHeader(rememberedNavigation) ? rememberedNavigation : AGENT_WORKSPACE);
+  const currentWorkspace = routeWorkspace ?? (inHeader(rememberedWorkspace) ? rememberedWorkspace : AGENT_WORKSPACE);
   useEffect(() => {
     if (!routeWorkspace || !navStateReady) return;
     // Only remember scene modules that are open.
@@ -664,17 +654,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     if (!routeWorkspace || !navStateReady) return;
     const path = `${location.pathname}${location.search}`;
     const next = { ...workspacePathsRef.current, [routeWorkspace]: path };
-    // An open audit page is the latest page of both modules that can own it (SOC or code
-    // audit on its own), so whichever owns it next returns here, not to an older page.
-    // A closed audit suite's page is about to be redirected and must not replace SOC's.
-    if (workspaceIdFromPath(location.pathname) === CODE_AUDIT_WORKSPACE_ID
-      && openSceneWorkspaces.some((workspace) => workspace.id === CODE_AUDIT_WORKSPACE_ID)) {
-      next[sceneNavWorkspace(SOC_WORKSPACE_ID)] = path;
-      next[sceneNavWorkspace(CODE_AUDIT_WORKSPACE_ID)] = path;
-    }
     workspacePathsRef.current = next;
     saveWorkspacePaths(next);
-  }, [location.pathname, location.search, navStateReady, openSceneWorkspaces, routeWorkspace]);
+  }, [location.pathname, location.search, navStateReady, routeWorkspace]);
 
   const newChat = useCallback(() => {
     setSidebarOpen(false);
@@ -781,21 +763,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         }];
       map.set(sceneNavWorkspace(workspace.id), groups.filter((group) => group.items.length > 0));
     }
-    if (sceneNavigationOwner(CODE_AUDIT_WORKSPACE_ID, openSceneWorkspaces) === SOC_WORKSPACE_ID) {
-      const socSections = map.get(sceneNavWorkspace(SOC_WORKSPACE_ID)) ?? [];
-      const auditItems = (map.get(sceneNavWorkspace(CODE_AUDIT_WORKSPACE_ID)) ?? []).flatMap((group) => group.items);
-      if (auditItems.length > 0) {
-        const operationsIndex = socSections.findIndex((section) => section.id === `scene:${SOC_WORKSPACE_ID}:operations`);
-        socSections.splice(operationsIndex < 0 ? socSections.length : operationsIndex + 1, 0, {
-          id: `scene:${SOC_WORKSPACE_ID}:code-audit`,
-          name: t('codeAudit'),
-          collapsible: true,
-          items: auditItems,
-        });
-      }
-      map.set(sceneNavWorkspace(SOC_WORKSPACE_ID), socSections);
-      map.delete(sceneNavWorkspace(CODE_AUDIT_WORKSPACE_ID));
-    }
     return map;
   }, [i18n.language, openSceneWorkspaces, workspacePageOrders, t]);
 
@@ -880,7 +847,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   // A scene whose workspace closed (uninstalled, disabled or license lapsed)
   // cannot stay on screen: fall back to its suite manager.
-  // Validate the page's own suite, not the shared navigation module that contains it.
   const routeSceneId = routeWorkspace && sceneWorkspaceIdOf(routeWorkspace)
     ? workspaceIdFromPath(location.pathname) : null;
   useEffect(() => {
@@ -898,11 +864,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     }
     if (workspaceId === currentWorkspace && routeNav.kind === 'workspace') return;
     const paths = workspacePathsRef.current;
-    // A scene module also takes a page remembered under the module that owned it before
-    // (code audit under SOC, or the other way round).
-    const candidates = sceneWorkspaceIdOf(workspaceId) ? [paths[workspaceId], ...Object.values(paths)] : [paths[workspaceId]];
-    const stored = candidates.find((path) => pathNavigation(path) === workspaceId);
-    if (stored) {
+    const stored = paths[workspaceId];
+    if (stored && pathNavigation(stored) === workspaceId) {
       navigate(stored);
       return;
     }
