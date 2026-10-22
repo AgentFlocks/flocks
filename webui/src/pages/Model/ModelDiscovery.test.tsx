@@ -17,6 +17,46 @@ beforeEach(() => {
 });
 const fetchButton = () => screen.getByRole('button', { name: /discovery.title|compact.refresh/ });
 
+it.each([[15, true], [16, false]] as const)('defaults a list of %i models to enabled=%s', async (count, enabled) => {
+  const models = Array.from({ length: count }, (_, index) => `model-${index}`);
+  api.discoverModels.mockResolvedValue(result(...models));
+  const selection = vi.fn(); const user = userEvent.setup();
+  render(<ModelDiscovery providerId="openai" mode="stage" onSelectionChange={selection} />);
+  await user.click(fetchButton());
+  const switches = await screen.findAllByRole('switch');
+  expect(switches).toHaveLength(count);
+  switches.forEach(toggle => expect(toggle).toHaveAttribute('aria-checked', String(enabled)));
+  expect(selection.mock.lastCall?.[0]).toHaveLength(enabled ? count : 0);
+  expect(api.saveModelInventory).not.toHaveBeenCalled();
+});
+
+it('defaults new models off in a large combined list while preserving saved and user selections on refresh', async () => {
+  api.getModelInventory.mockResolvedValue({ data: { models: [
+    { id: 'saved', name: 'Saved', enabled: true },
+    { id: 'disabled', name: 'Disabled', enabled: false },
+  ] } });
+  api.discoverModels.mockResolvedValue(result(...Array.from({ length: 14 }, (_, index) => `new-${index}`)));
+  const user = userEvent.setup();
+  render(<ModelDiscovery providerId="openai" mode="import" existingModelIds={['saved', 'disabled']} />);
+  await screen.findByRole('switch', { name: 'compact.enableModel saved' });
+  await user.click(fetchButton());
+  const newSwitches = screen.getAllByRole('switch', { name: /compact.enableModel new-/ });
+  expect(newSwitches).toHaveLength(14);
+  newSwitches.forEach(toggle => expect(toggle).not.toBeChecked());
+  expect(screen.getByRole('switch', { name: 'compact.enableModel saved' })).toBeChecked();
+  expect(screen.getByRole('switch', { name: 'compact.enableModel disabled' })).not.toBeChecked();
+  await user.click(screen.getByRole('switch', { name: 'compact.enableModel new-0' }));
+  await user.click(fetchButton());
+  expect(screen.getByRole('switch', { name: 'compact.enableModel new-0' })).toBeChecked();
+  expect(screen.getByRole('switch', { name: 'compact.enableModel new-1' })).not.toBeChecked();
+  await user.click(screen.getByRole('button', { name: 'compact.saveModels' }));
+  expect(api.saveModelInventory).toHaveBeenCalledWith('openai', { models: [
+    expect.objectContaining({ id: 'saved', enabled: true }),
+    expect.objectContaining({ id: 'disabled', enabled: false }),
+    expect.objectContaining({ id: 'new-0', enabled: true }),
+  ], deleted: [] });
+});
+
 it('shows compact editable switches with only select all and select none; new limits remain Auto', async () => {
   const user = userEvent.setup();
   render(<ModelDiscovery providerId="openai" mode="stage" />);

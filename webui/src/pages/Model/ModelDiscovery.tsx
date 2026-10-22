@@ -56,6 +56,7 @@ export function ModelImportSummary({ result }: { result: ModelImportResult }) {
 }
 
 type Row = InventoryModelInput & { existing: boolean; selectable: boolean };
+const AUTO_SELECT_MODEL_LIMIT = 15;
 const capabilities = [
   'supports_tools',
   'supports_vision',
@@ -387,12 +388,15 @@ export default function ModelDiscovery({
         return;
       }
       const byId = new Map(saved.map((row) => [row.id, row]));
-      response.data.models.forEach((model) => {
-        if (!byId.has(model.id) && !deleted.includes(model.id))
+      const candidates = response.data.models.filter((model) => !deleted.includes(model.id));
+      const autoSelectNewModels =
+        new Set([...byId.keys(), ...candidates.map((model) => model.id)]).size <= AUTO_SELECT_MODEL_LIMIT;
+      candidates.forEach((model) => {
+        if (!byId.has(model.id))
           byId.set(model.id, {
             id: model.id,
             name: model.name,
-            enabled: model.selectable,
+            enabled: autoSelectNewModels && model.selectable,
             selectable: model.selectable,
             existing: false,
             supports_tools: model.supports_tools,
