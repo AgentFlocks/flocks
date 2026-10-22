@@ -137,6 +137,47 @@ describe('SessionHistoryPanel', () => {
     expect(localStorage.getItem('flocks:history:pinned-folders:u1')).toContain('prj_b');
   });
 
+  it('marks shared folders and sessions, including a folder that was just shared', async () => {
+    // Regression (INC-BB67AF4D): the panel offered 本地共享 but never showed what was shared.
+    let productShared = false;
+    setSessions([
+      session('s1', 'prj_a', '会话一'),
+      { ...session('s3', 'prj_b', '共享目录里的会话'), isShared: true },
+      { ...session('s4', '', '单独共享的会话'), isShared: true },
+      session('s2', ''),
+    ]);
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/project') return Promise.resolve({ data: [
+        { id: 'prj_a', name: '产品设计', worktree: '/root/a', pathStatus: 'available', canWrite: true, isShared: productShared },
+        { id: 'prj_b', name: '共享目录', worktree: '/root/b', pathStatus: 'available', canWrite: true, isShared: true },
+      ] });
+      if (url === '/api/session/status') return Promise.resolve({ data: {} });
+      return Promise.resolve({ data: {} });
+    });
+    apiPost.mockImplementation(async (url: string) => {
+      if (url === '/api/project/prj_a/share-local') productShared = true;
+      return { data: {} };
+    });
+    const rowOf = (text: string) => screen.getByText(text).closest('button') as HTMLElement;
+    const mark = { name: 'history.sharedMark' };
+    renderPanel();
+
+    await waitFor(() => expect(within(rowOf('共享目录')).getByRole('img', mark)).toBeInTheDocument());
+    // The mark takes room from the name; the full name stays in the tooltip.
+    expect(rowOf('共享目录')).toHaveAttribute('title', '共享目录');
+    expect(within(rowOf('产品设计')).queryByRole('img', mark)).toBeNull();
+    // Shared through its folder: the folder carries the mark, the row does not repeat it.
+    expect(within(rowOf('共享目录里的会话')).queryByRole('img', mark)).toBeNull();
+    expect(within(rowOf('单独共享的会话')).getByRole('img', mark)).toBeInTheDocument();
+    expect(within(rowOf('s2')).queryByRole('img', mark)).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'history.folderActions:产品设计' }));
+    fireEvent.click(screen.getByRole('button', { name: /history.share$/ }));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/project/prj_a/share-local'));
+    await waitFor(() => expect(within(rowOf('产品设计')).getByRole('img', mark)).toBeInTheDocument());
+    expect(toastMock.success).toHaveBeenCalledWith('history.shared');
+  });
+
   it('archives a session after confirmation', async () => {
     const removeSession = vi.fn();
     setSessions([session('s1', 'prj_a', '会话一'), session('s2', '')], { removeSession });
