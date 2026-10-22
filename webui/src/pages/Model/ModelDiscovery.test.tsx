@@ -129,3 +129,15 @@ it('checks only the key without populating, saving or importing models and reset
   rerender(<ProviderKeyCheck providerId="openai" credentials={{ api_key: 'key-b' }} />);
   await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
 });
+
+it.each(['threatbook-cn-llm', 'threatbook-io-llm'])('shows the dedicated model-list key check for %s without importing models', async providerId => {
+  api.checkKey.mockResolvedValue({ data: { status: 'valid', code: 'model_list_verified' } });
+  const user = userEvent.setup();
+  render(<ProviderKeyCheck providerId={providerId} credentials={{ api_key: 'candidate-key' }} />);
+  expect(screen.getByText('compact.checkModelListHint')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'compact.check' }));
+  expect(await screen.findByRole('status')).toHaveTextContent('compact.keyCodes.model_list_verified');
+  expect(api.checkKey).toHaveBeenCalledWith(providerId, { api_key: 'candidate-key' });
+  expect(api.discoverModels).not.toHaveBeenCalled();
+  expect(api.saveModelInventory).not.toHaveBeenCalled();
+});

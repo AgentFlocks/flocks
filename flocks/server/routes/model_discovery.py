@@ -19,6 +19,8 @@ from flocks.server.routes.provider import _ensure_provider_initialized, _load_dy
 
 router = APIRouter()
 
+_MODEL_LIST_KEY_CHECK_PROVIDERS = {"threatbook-cn-llm", "threatbook-io-llm"}
+
 
 class DiscoverModelsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -241,6 +243,10 @@ async def check_provider_key(provider_id: str, body: DiscoverModelsRequest, _adm
     result = await discover_models(provider_id, api_key=body.api_key, base_url=body.base_url)
     if result["source"] != "api" or result["status"] != "success":
         return {"status": "invalid" if result["code"] in {"authentication_failed", "missing_credentials"} else "unverified", "code": result["code"]}
+    # ThreatBook uses a successful live model-list response as its validation
+    # contract. Catalog fallback was excluded above and cannot verify a key.
+    if provider_id in _MODEL_LIST_KEY_CHECK_PROVIDERS:
+        return {"status": "valid", "code": "model_list_verified"}
     # A public models endpoint does not prove that a key is valid. Require
     # rejection of an unrelated credential before reporting authentication.
     import secrets

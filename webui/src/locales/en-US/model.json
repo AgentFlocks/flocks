@@ -365,6 +365,7 @@
     "saving": "Saving…",
     "checkKey": "Check connection",
     "checkKeyHint": "Check whether the API key is valid.",
+    "checkModelListHint": "Verify the API key by fetching the live model list.",
     "check": "Check",
     "checkingKey": "Checking…",
     "keyUnverified": "This service cannot independently verify the key.",
@@ -389,6 +390,7 @@
       "response_too_large": "The service response is too large. Reduce the returned list or add models manually.",
       "redirect_not_allowed": "The service returned a redirect. To protect credentials, it was not followed. Enter the final service URL and retry.",
       "key_valid": "The key is valid.",
+      "model_list_verified": "Model list fetched successfully. Key verification passed.",
       "key_check_unsupported": "This service cannot independently verify the key."
     }
   }

@@ -544,6 +544,33 @@ async def test_key_check_requires_authentication_evidence_and_never_saves(contro
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('provider_id', ['threatbook-cn-llm', 'threatbook-io-llm'])
+@pytest.mark.parametrize('source,result_status,code,models,status,expected_code', [
+    ('api', 'success', 'models_discovered', [{'id': 'live-model'}], 'valid', 'model_list_verified'),
+    ('api', 'success', 'models_discovered', [], 'valid', 'model_list_verified'),
+    ('catalog', 'fallback', 'catalog_fallback', [{'id': 'reference-model'}], 'unverified', 'catalog_fallback'),
+    ('none', 'error', 'authentication_failed', [], 'invalid', 'authentication_failed'),
+    ('none', 'error', 'invalid_response', [], 'unverified', 'invalid_response'),
+    ('none', 'error', 'connection_timeout', [], 'unverified', 'connection_timeout'),
+])
+async def test_threatbook_key_check_uses_one_live_inventory_request_without_saving(
+    provider_id, source, result_status, code, models, status, expected_code, inventory, inventory_client, monkeypatch
+):
+    discover = AsyncMock(return_value={'source': source, 'status': result_status, 'code': code, 'models': models})
+    monkeypatch.setattr(inventory.routes, 'discover_models', discover)
+    response = await inventory_client.post(f'/api/provider/{provider_id}/check-key', json={
+        'api_key': 'candidate-key', 'base_url': 'https://configured.test/v1',
+    })
+    assert response.status_code == 200
+    assert response.json() == {'status': status, 'code': expected_code}
+    discover.assert_awaited_once_with(provider_id, api_key='candidate-key', base_url='https://configured.test/v1')
+    assert saved(inventory) == inventory.initial
+    inventory.write.assert_not_called()
+    inventory.apply_config.assert_not_awaited()
+    assert Provider._providers == {}
+
+
+@pytest.mark.asyncio
 async def test_key_check_rejects_invalid_credentials_without_control_or_save(inventory, inventory_client, monkeypatch):
     discover = AsyncMock(return_value={'source': 'none', 'status': 'error', 'code': 'authentication_failed'})
     monkeypatch.setattr(inventory.routes, 'discover_models', discover)

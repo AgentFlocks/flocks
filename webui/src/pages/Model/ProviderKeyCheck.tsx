@@ -15,6 +15,7 @@ export default function ProviderKeyCheck({
 }) {
   const { t } = useTranslation('model');
   const [checking, setChecking] = useState(false);
+  const modelListCheck = providerId === 'threatbook-cn-llm' || providerId === 'threatbook-io-llm';
   const [result, setResult] = useState<{ status: string; message: string } | null>(null);
   const version = useRef(0);
   useEffect(() => {
@@ -49,7 +50,9 @@ export default function ProviderKeyCheck({
       <div className="flex items-center justify-between gap-4">
         <div>
           <h3 className="text-sm font-semibold text-gray-900">{t('compact.checkKey')}</h3>
-          <p className="mt-1 text-xs text-gray-500">{t('compact.checkKeyHint')}</p>
+          <p className="mt-1 text-xs text-gray-500">
+            {t(modelListCheck ? 'compact.checkModelListHint' : 'compact.checkKeyHint')}
+          </p>
         </div>
         <button
           type="button"

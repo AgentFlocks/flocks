@@ -365,6 +365,7 @@
     "saving": "正在保存…",
     "checkKey": "检查连接",
     "checkKeyHint": "检查 API Key 是否有效。",
+    "checkModelListHint": "通过获取服务端模型列表验证 API Key。",
     "check": "检查",
     "checkingKey": "检查中…",
     "keyUnverified": "该服务暂无法独立验证 Key。",
@@ -389,6 +390,7 @@
       "response_too_large": "服务返回内容过大，请缩小返回范围或手动添加。",
       "redirect_not_allowed": "服务返回了重定向，为保护凭据未自动跳转。请填写最终服务地址后重试。",
       "key_valid": "Key 有效。",
+      "model_list_verified": "已成功获取模型列表，Key 验证通过。",
       "key_check_unsupported": "该服务暂无法独立验证 Key。"
     }
   }
