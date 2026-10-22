@@ -65,6 +65,21 @@ def _execution_update_values(execution: TaskExecution) -> tuple[Any, ...]:
     )
 
 
+def _timestamp_microseconds(value: Optional[str]) -> Optional[int]:
+    """Normalize stored ISO timestamps without losing sub-millisecond precision."""
+    if value is None:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        # Older rows without an offset follow the task store's UTC convention.
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        delta = timestamp - datetime(1970, 1, 1, tzinfo=timezone.utc)
+        return (delta.days * 86400 + delta.seconds) * 1000000 + delta.microseconds
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 class TaskStore:
     _initialized = False
     _conn: Optional[aiosqlite.Connection] = None
@@ -106,6 +121,9 @@ class TaskStore:
                 timeout=Storage._sqlite_timeout_s,
             )
             cls._conn.text_factory = cls._decode_legacy_text
+            await cls._conn.create_function(
+                "task_timestamp_us", 1, _timestamp_microseconds, deterministic=True,
+            )
             await Storage.configure_connection(cls._conn)
             await cls._conn.executescript(_TASKS_DDL)
             for stmt in _INDEX_STMTS:
@@ -545,6 +563,9 @@ class TaskStore:
         status: Optional[TaskStatus] = None,
         priority: Optional[TaskPriority] = None,
         delivery_status: Optional[DeliveryStatus] = None,
+        title: Optional[str] = None,
+        started_after: Optional[datetime] = None,
+        started_before: Optional[datetime] = None,
         sort_by: str = "queued_at",
         sort_order: str = "desc",
         offset: int = 0,
@@ -564,6 +585,22 @@ class TaskStore:
         if delivery_status:
             clauses.append("delivery_status = ?")
             params.append(delivery_status.value)
+        search_title = (title or "").strip()
+        if search_title:
+            # Treat SQL LIKE wildcards as literal task-name characters.
+            escaped_title = (
+                search_title.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            clauses.append("title LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped_title}%")
+        # ISO strings may have different offsets. Compare actual instants, with
+        # inclusive microsecond boundaries, and exclude tasks not yet started.
+        if started_after is not None:
+            clauses.append("task_timestamp_us(started_at) >= ?")
+            params.append(_timestamp_microseconds(started_after.isoformat()))
+        if started_before is not None:
+            clauses.append("task_timestamp_us(started_at) <= ?")
+            params.append(_timestamp_microseconds(started_before.isoformat()))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         allowed_sort = {
             "created_at",

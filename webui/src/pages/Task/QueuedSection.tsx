@@ -13,6 +13,7 @@ import { taskAPI, TaskExecution, TaskListParams } from '@/api/task';
 import { copyText } from '@/utils/clipboard';
 import { StatusBadge, PriorityBadge, SourceBadge, ModeBadge, ActionButton } from './components';
 import { formatTime, formatDuration, PAGE_SIZE } from './helpers';
+import ExecutionFilters, { type ExecutionSearchParams } from './ExecutionFilters';
 
 const DETAIL_POLL_INTERVAL_MS = 30000;
 const LazySessionChat = lazy(() => import('@/components/common/SessionChat'));
@@ -28,6 +29,7 @@ function SessionChatFallback() {
 export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: () => void }) {
   const { t } = useTranslation('task');
   const [filterKey, setFilterKey] = useState('all');
+  const [searchFilters, setSearchFilters] = useState<ExecutionSearchParams>({});
   const [page, setPage] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
@@ -42,7 +44,8 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
   ];
 
   const currentFilter = QUEUED_FILTERS.find(f => f.key === filterKey)?.filter ?? {};
-  const listParams = { ...currentFilter, offset: page * PAGE_SIZE, limit: PAGE_SIZE };
+  const listParams = { ...searchFilters, ...currentFilter, offset: page * PAGE_SIZE, limit: PAGE_SIZE };
+  const hasFilters = filterKey !== 'all' || Object.values(searchFilters).some(Boolean);
 
   const { tasks, total, loading, error, refetch } = useTaskExecutions(listParams, { pollInterval: 5000 });
   const effectiveTasks = useMemo(() => {
@@ -241,11 +244,19 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     setSelectedTasks(new Set());
   };
 
-  if (loading && effectiveTasks.length === 0) return <div className="flex justify-center py-12"><LoadingSpinner delayMs={180} /></div>;
-  if (error) return <div className="text-center py-12 text-red-500">{error}</div>;
+  const handleSearch = (filters: ExecutionSearchParams) => {
+    setSearchFilters(filters);
+    setPage(0);
+    setSelectedTasks(new Set());
+    closeDetail();
+  };
 
   return (
     <div className="space-y-3">
+      <ExecutionFilters
+        onSearch={handleSearch}
+        onReset={() => { setFilterKey('all'); handleSearch({}); }}
+      />
       <div className="flex items-center justify-between">
         <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
           {QUEUED_FILTERS.map(f => (
@@ -270,11 +281,15 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        {effectiveTasks.length === 0 ? (
+        {loading && effectiveTasks.length === 0 ? (
+          <div className="flex justify-center py-12"><LoadingSpinner delayMs={180} /></div>
+        ) : error ? (
+          <div role="alert" className="text-center py-12 text-red-500">{error}</div>
+        ) : effectiveTasks.length === 0 ? (
           <EmptyState
             icon={<ListTodo className="w-8 h-8" />}
-            title={t('queued.emptyTitle')}
-            description={t('queued.emptyDescription')}
+            title={t(hasFilters ? 'queued.filterEmptyTitle' : 'queued.emptyTitle')}
+            description={t(hasFilters ? 'queued.filterEmptyDescription' : 'queued.emptyDescription')}
           />
         ) : (
           <>
