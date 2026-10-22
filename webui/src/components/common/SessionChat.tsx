@@ -1198,8 +1198,10 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
       !!last.compacted === !!msg.compacted
     ) {
       last.parts = [...last.parts, ...msg.parts];
-      // The last constituent message owns the live state, including an unset finish.
+      // The last constituent message owns the live state, including an unset
+      // finish and the error that stopped the turn.
       last.finish = msg.finish;
+      last.error = msg.error;
     } else {
       result.push({ ...msg, parts: [...msg.parts], _merged: true });
     }
@@ -1515,6 +1517,13 @@ export function getMessageErrorText(message: Pick<Message, 'error'>): string {
   if (typeof error.code === 'string' && error.code.trim()) return error.code;
   if (typeof error.name === 'string' && error.name.trim()) return error.name;
   return 'Message failed';
+}
+
+/** Translation key explaining why a retryable error still stopped the turn, if recorded. */
+export function getMessageErrorNoteKey(message: Pick<Message, 'error'>): string | null {
+  const error = message.error as any;
+  if (error?.data?.retrySuppressed === 'tool_execution_started') return 'chat.stopReason.toolExecuted';
+  return null;
 }
 
 export function getUserAvatarContainerClassName(compact: boolean): string {
@@ -5792,6 +5801,24 @@ function ChatMessageBubbleInner({
   const shouldRenderAssistantErrorState = !isUser && !!messageErrorText && (
     parts.length === 0 || hasOnlyBlankTextParts
   );
+  const showErrorInEmptyState = visiblePartCount === 0 || shouldRenderAssistantErrorState;
+  // Why the turn stopped stays on the reply, below whatever it produced. When the
+  // reply had nothing else to say, the backend also stores the same text as a part.
+  const messageErrorNoteKey = messageErrorText ? getMessageErrorNoteKey(message) : null;
+  const errorEchoText = messageErrorText.trim();
+  const isErrorEchoPart = (part: MessagePart): boolean => (
+    !!errorEchoText && part.type === 'text' && String(part.text || '').trim() === errorEchoText
+  );
+  const messageErrorAlert = messageErrorText ? (
+    <div className="flex items-start gap-2 py-1 text-sm text-red-700 dark:text-red-300" role="alert">
+      <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500 dark:text-red-400" />
+      <div className="min-w-0">
+        <p className="font-medium">{t('chat.stopReason.title')}</p>
+        <p className="whitespace-pre-wrap break-words">{messageErrorText}</p>
+        {messageErrorNoteKey && <p className="mt-0.5 text-xs">{t(messageErrorNoteKey)}</p>}
+      </div>
+    </div>
+  ) : null;
   const outputAttachments = isUser ? [] : parts.flatMap((part) => {
     if (part.type !== 'tool' || part.tool !== 'write' || part.state?.status !== 'completed') return [];
     return (part.state.attachments || []).filter(
@@ -5819,19 +5846,14 @@ function ChatMessageBubbleInner({
     >
 
       {/* Empty / loading state */}
-      {(visiblePartCount === 0 || shouldRenderAssistantErrorState) && (
+      {showErrorInEmptyState && (
         isUser ? (
           <div className="flex items-center gap-2 opacity-60">
             <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
             {t('chat.sending')}
           </div>
         ) : (
-          messageErrorText ? (
-            <div className="flex items-start gap-2 py-1 text-sm text-red-700" role="alert">
-              <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500" />
-              <span className="whitespace-pre-wrap break-words">{messageErrorText}</span>
-            </div>
-          ) : (
+          messageErrorAlert ?? (
             <div className="flex items-center gap-1 py-1" aria-label={t('chat.thinking')}>
               <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
               <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
@@ -5857,7 +5879,8 @@ function ChatMessageBubbleInner({
           // image previews above the textual prompt — matches typical chat
           // UX for "look at this image and …" style messages.
           const fileParts = parts.filter((p) => p.type === 'file');
-          const displayParts = parts.filter((p) => p.type !== 'file');
+          // The error alert below already says it.
+          const displayParts = parts.filter((p) => p.type !== 'file' && !isErrorEchoPart(p));
           const isQuestionToolPart = (part: MessagePart): boolean => {
             if (part.type !== 'tool') return false;
             return isQuestionToolName(part.tool || '');
@@ -6265,6 +6288,11 @@ function ChatMessageBubbleInner({
               </>
             );
         })()
+      )}
+
+      {/* Why the turn stopped, after what it already produced */}
+      {messageErrorAlert && !showErrorInEmptyState && (
+        <div className="mt-2 first:mt-0" data-testid="chat-message-stop-reason">{messageErrorAlert}</div>
       )}
 
       {/* Streaming indicator */}
@@ -7236,6 +7264,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.onOpenContextFile !== next.onOpenContextFile) return false;
   if (prev.onOpenContext !== next.onOpenContext) return false;
   if (prev.message.finish !== next.message.finish) return false;
+  if (prev.message.error !== next.message.error) return false;
   if (prev.message.id !== next.message.id || prev.message.sessionID !== next.message.sessionID) return false;
   if (prev.message.timestamp !== next.message.timestamp) return false;
   if (prev.message.role !== next.message.role || prev.message.agent !== next.message.agent) return false;
