@@ -94,6 +94,13 @@ function evidenceMarkdown(
       "",
       code(packet.text || "（来源明确返回空正文）"),
     );
+  if (card.kind === "source_event") {
+    lines.push(
+      "",
+      "记录来源：已保存的 XDR 源事件字段；不是额外执行的举证查询。",
+    );
+    return lines.join("\n");
+  }
   const provenance = card.records?.length
     ? card.records
     : [
@@ -181,6 +188,8 @@ export function eventDetailMarkdown(
     );
   }
   lines.push("", "## 事件发生时间线", "");
+  if (view.timeline.some((item) => item.kind === "source_event"))
+    lines.push("以下为 XDR 源事件的发生时间；关联告警时间线尚未取得。", "");
   if (view.timelineTruncated)
     lines.push("部分来源时间受数量上限影响，当前时间线可能不完整。", "");
   if (view.timeline.some((item) => item.partial === true))

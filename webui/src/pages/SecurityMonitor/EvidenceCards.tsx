@@ -254,36 +254,47 @@ export function EvidenceCards({
                     <details className="rounded-lg bg-slate-50 p-3 dark:bg-slate-900">
                       <summary className="flex cursor-pointer items-center gap-1.5 text-xs font-medium">
                         <FileSearch size={13} />
-                        查询参数与脱敏原始记录
+                        {card.kind === "source_event"
+                          ? "已保存的源事件字段"
+                          : "查询参数与脱敏原始记录"}
                       </summary>
                       {hasValue(detail.alertId) && (
                         <p className="mt-3 break-all text-xs leading-6">
                           告警编号：{valueText(detail.alertId)}
                         </p>
                       )}
-                      <ol aria-label="查询溯源记录" className="mt-3 space-y-4">
-                        {detail.records.map((record, position) => (
-                          <li
-                            key={`${record.evidence_id || "record"}-${position}`}
-                          >
-                            <h4 className="text-xs font-medium">
-                              查询记录 {position + 1} ·{" "}
-                              {record.source || card.source}
-                            </h4>
-                            <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-all text-xs leading-6">
-                              {JSON.stringify(
-                                {
-                                  evidence_id: record.evidence_id,
-                                  query: record.query,
-                                  raw: record.raw,
-                                },
-                                null,
-                                2,
-                              )}
-                            </pre>
-                          </li>
-                        ))}
-                      </ol>
+                      {card.kind === "source_event" ? (
+                        <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-all text-xs leading-6">
+                          {JSON.stringify(card.raw, null, 2)}
+                        </pre>
+                      ) : (
+                        <ol
+                          aria-label="查询溯源记录"
+                          className="mt-3 space-y-4"
+                        >
+                          {detail.records.map((record, position) => (
+                            <li
+                              key={`${record.evidence_id || "record"}-${position}`}
+                            >
+                              <h4 className="text-xs font-medium">
+                                查询记录 {position + 1} ·{" "}
+                                {record.source || card.source}
+                              </h4>
+                              <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-all text-xs leading-6">
+                                {JSON.stringify(
+                                  {
+                                    evidence_id: record.evidence_id,
+                                    query: record.query,
+                                    raw: record.raw,
+                                  },
+                                  null,
+                                  2,
+                                )}
+                              </pre>
+                            </li>
+                          ))}
+                        </ol>
+                      )}
                     </details>
                   </div>
                 </details>

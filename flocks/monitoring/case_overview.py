@@ -183,7 +183,7 @@ def operator_overview(event, case, assessment, story, proofs):
                   else '该安全事件' + (str(assessment.get('label')) if str(assessment.get('label', '')).startswith('已')
                                         else '已' + str(assessment.get('label') or '结束监测')) + '。')
         summary = closed + ('此前调查：' + findings[0] + '尚未确认实际影响。' if has_findings
-                            else '此前仅取得告警信息，尚未查清具体行为和实际影响。')
+                            else '当前详情仅展示源事件告警，尚未加载可核对的行为举证。')
     elif verdict in {'risk', 'benign'}:
         summary = _readable_text(result.get('operator_summary') or result.get('reason'), 200)
         if re.search(r'cap-\d+|\b\d{10,13}\b|attackState|attackResult|gptResult', summary):

@@ -1,5 +1,6 @@
 """The UI and reports distinguish scheduled decisions from verified source facts."""
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from flocks.monitoring import event_list, followup
 from flocks.monitoring.assessment import assess_event, apply_followup
@@ -9,7 +10,7 @@ from tests.monitoring.test_followup import case, decision, consume
 
 
 async def ledger(case):
-    day = datetime.now(timezone.utc).date().isoformat()
+    day = datetime.now(ZoneInfo(case.policy.timezone)).date().isoformat()
     await write('INSERT INTO monitor_installations(owner,scope,project,policy) VALUES(?,?,?,?)',
                 (case.policy.owner, case.policy.scope, case.policy.project, encode(case.policy.model_dump())))
     await write('INSERT INTO monitor_attempts(id,execution_id,owner,project,scope,business_date,session_id,message_id,started_at,status) VALUES(?,?,?,?,?,?,?,?,?,?)',
@@ -20,7 +21,7 @@ async def ledger(case):
 
 async def member(case):
     # The list period follows first monitor detection, never source activity.
-    day = datetime.now(timezone.utc).date().isoformat()
+    day = datetime.now(ZoneInfo(case.policy.timezone)).date().isoformat()
     data = await event_list.list_events(case.policy.owner, case.policy.scope, start_date=day, end_date=day)
     return data['items'][0]['members'][0]
 

@@ -53,11 +53,13 @@ export function EventTimeline({
           {timelinePartialNotice}
         </p>
       )}
-      {grouped && (
+      {(grouped || timeline.some((item) => item.kind === "source_event")) && (
         <p className="mb-3 text-xs leading-6 text-slate-500">
-          {retainedRisk
-            ? "以下为此前确认风险的告警时间；补充核查另行记录。"
-            : "同一告警合并展示首次至最近发生的时间；简要列出源、目的 IP，完整信息见证据详情。"}
+          {timeline.some((item) => item.kind === "source_event")
+            ? "以下为 XDR 源事件的发生时间；关联告警时间线尚未取得。"
+            : retainedRisk
+              ? "以下为此前确认风险的告警时间；补充核查另行记录。"
+              : "同一告警合并展示首次至最近发生的时间；简要列出源、目的 IP，完整信息见证据详情。"}
         </p>
       )}
       {!!timeline.length && (

@@ -66,6 +66,45 @@ const exportedAt = new Date("2026-10-21T02:00:00Z");
 const render = (value: EventDetailResponse) =>
   eventDetailMarkdown(value, "Asia/Shanghai", formatTime, exportedAt);
 
+it("exports the source incident and its time range even before any alert proof is available", () => {
+  const value = snapshot();
+  value.overview!.evidence_cards = [];
+  value.overview!.alert_timeline = [];
+  value.source_event_evidence = {
+    id: "source-event",
+    kind: "source_event",
+    source: "XDR",
+    summary: "源事件：XDR 报告主机 192.0.2.10 的 Webshell 告警。",
+    fields: [
+      { key: "event_id", label: "事件编号", value: "incident-one" },
+      {
+        key: "proof_status",
+        label: "时间线与举证查询",
+        value: "当前版本尚无已保存的举证查询结果。",
+      },
+    ],
+  };
+  value.source_event_timeline = [
+    {
+      id: "source-range",
+      kind: "source_event",
+      first_time: 100,
+      end_time: 900,
+      text: "XDR 报告主机 192.0.2.10 的 Webshell 告警。",
+    },
+  ];
+  const report = render(value);
+  expect(report).toContain("100 — 900 · XDR 报告主机 192.0.2.10");
+  expect(report).toContain(
+    "以下为 XDR 源事件的发生时间；关联告警时间线尚未取得。",
+  );
+  expect(report).toContain("源事件：XDR 报告主机 192.0.2.10");
+  expect(report).toContain("事件编号：incident-one");
+  expect(report).toContain("不是额外执行的举证查询");
+  expect(report).not.toContain("未编号查询");
+  expect(report).not.toContain("尚未取得与当前事件版本对应的具体行为证据");
+});
+
 it("exports the same concrete evidence gaps and keeps verbose audit boundaries only in JSON", () => {
   const value = snapshot();
   const gaps = [

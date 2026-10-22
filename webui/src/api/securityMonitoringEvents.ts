@@ -175,7 +175,14 @@ export interface EventListResponse {
 }
 export interface EventEvidenceCard {
   id: string;
-  kind?: "network" | "domain" | "file" | "process" | "request" | "observation";
+  kind?:
+    | "network"
+    | "domain"
+    | "file"
+    | "process"
+    | "request"
+    | "observation"
+    | "source_event";
   summary: string;
   source: string;
   time?: string | number | null;
@@ -230,6 +237,8 @@ export interface EventCorrelationResult {
   facts?: unknown;
 }
 export interface EventDetailResponse {
+  source_event_evidence?: EventEvidenceCard | null;
+  source_event_timeline?: Record<string, unknown>[];
   story?: Record<string, unknown>;
   confirmed_story?: Record<string, unknown>;
   confirmed_evidence_scope?: "current_activity" | "previous_activity";

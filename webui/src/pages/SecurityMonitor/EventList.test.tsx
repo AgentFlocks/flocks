@@ -302,6 +302,59 @@ it("shows five compact alert ranges before expanding all distinct alert identiti
   expect(within(timeline).getAllByRole("listitem")).toHaveLength(5);
 });
 
+it("shows a live source event as evidence while clearly marking its alert timeline as not acquired", async () => {
+  const summary = "源事件：XDR 报告主机 192.0.2.10 的 Webshell 告警。";
+  vi.mocked(monitoringEventsApi.detail).mockResolvedValue(
+    detail({
+      event: member({ handling: "open" }),
+      overview: { evidence_cards: [], alert_timeline: [] },
+      story: { evidence_cards: [], alert_timeline: [] },
+      source_event_evidence: {
+        id: "source-event",
+        kind: "source_event",
+        source: "XDR",
+        summary,
+        fields: [
+          { key: "event_id", label: "事件编号", value: "event-1" },
+          {
+            key: "proof_status",
+            label: "时间线与举证查询",
+            value: "当前版本尚无已保存的举证查询结果。",
+          },
+        ],
+        raw: { event_id: "event-1" },
+      },
+      source_event_timeline: [
+        {
+          id: "source-range",
+          kind: "source_event",
+          first_time: 100,
+          end_time: 900,
+          text: "XDR 报告主机 192.0.2.10 的 Webshell 告警。",
+        },
+      ],
+    }) as never,
+  );
+  renderPage();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "查看事件详情：group-a" }),
+  );
+  const text = await screen.findByText(summary);
+  fireEvent.click(text.closest("summary")!);
+  expect(screen.getByText("时间线与举证查询")).toBeInTheDocument();
+  expect(
+    screen.getByText("当前版本尚无已保存的举证查询结果。"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("已保存的源事件字段")).toBeInTheDocument();
+  expect(
+    screen.getByText("以下为 XDR 源事件的发生时间；关联告警时间线尚未取得。"),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByText("尚未取得与当前事件版本对应的具体行为证据。"),
+  ).not.toBeInTheDocument();
+  expect(within(screen.getByRole("dialog")).queryByText("源端关闭")).not.toBeInTheDocument();
+});
+
 it("disables downloading during member changes and downloads only the loaded selected event without another query", async () => {
   let finishSecond!: (value: ReturnType<typeof detail>) => void;
   vi.mocked(monitoringEventsApi.detail)

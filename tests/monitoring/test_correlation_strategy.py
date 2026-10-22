@@ -89,14 +89,14 @@ async def test_unqueried_disabled_and_unavailable_remain_visible(detail_case, mo
     assert {row['status'] for row in case.event['story']['correlation_results']} == {expected_status}
 
 
-async def test_plan_checkpoint_survives_model_gate_without_device_calls(detail_case, monkeypatch):
+async def test_model_gate_keeps_source_proof_and_leaves_related_queries_pending(detail_case, monkeypatch):
     case = detail_case
     related_catalog(case, monkeypatch)
     case.policy.correlation_bindings = {'xdr': ['tdp']}
     monkeypatch.setattr(i, 'preflight_model', AsyncMock(side_effect=i.InvestigationError('模型暂不可用', 'dependency')))
     await i.investigate(case.policy, case.event, case.recorder)
     assert case.event['investigation']['state'] == 'system_wait'
-    assert not case.call.called
+    assert case.call.await_count == 1 and case.call.await_args.args[5] == 'proof'
     row = case.event['story']['correlation_results'][0]
     assert row['product'] == 'tdp' and row['status'] == 'not_queried'
 

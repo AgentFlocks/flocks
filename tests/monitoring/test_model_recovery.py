@@ -56,7 +56,7 @@ async def model_case(tmp_path, monkeypatch):
         catalog=catalog, clock=clock, event=event, enqueue=enqueue, recorder=Recorder())
 
 
-async def test_gateway_failure_stops_same_model_before_next_case_prime(model_case):
+async def test_gateway_failure_stops_ai_but_still_saves_each_source_incident(model_case):
     case = model_case
     first, second = case.event('first'), case.event('second')
     await case.enqueue(first)
@@ -65,7 +65,7 @@ async def test_gateway_failure_stops_same_model_before_next_case_prime(model_cas
     await i.investigate(case.policy, first, case.recorder, budget)
     await i.investigate(case.policy, second, case.recorder, budget)
     assert case.chat.await_count == budget.models == 1
-    assert case.query.await_count == budget.calls == 1
+    assert case.query.await_count == budget.calls == 2
     assert first['investigation']['state'] == 'system_wait'
     assert first['investigation']['attempted_this_round']
     assert first['investigation']['http_status'] == 504
@@ -78,6 +78,7 @@ async def test_gateway_failure_stops_same_model_before_next_case_prime(model_cas
     assert saved[0]['attempts'] == saved[0]['failure_count'] == 1
     assert len(json.loads(saved[0]['evidence'])) == 1
     assert saved[1]['attempts'] == saved[1]['failure_count'] == 0
+    assert len(json.loads(saved[1]['evidence'])) == 1
     assert not saved[0]['retry_exhausted'] and not saved[1]['retry_exhausted']
     assert not await rows('SELECT * FROM monitor_mail_notices')
     assert not await rows('SELECT * FROM monitor_dispositions')
@@ -92,18 +93,66 @@ async def test_cooldown_survives_new_round_and_success_releases_all_cases(model_
     second = case.event('second')
     await case.enqueue(second)
     await i.investigate(case.policy, second, case.recorder, i.Budget())
-    assert case.chat.await_count == case.query.await_count == 1
+    assert case.chat.await_count == 1 and case.query.await_count == 2
     case.clock[0] += timedelta(minutes=11)
     case.chat.side_effect = None
     case.chat.return_value = SimpleNamespace(finish_reason='stop', tool_calls=[], content=i.Choice(
         action='finish', verdict='unknown', reason='需要更多事实', evidence_ids=['evidence-1']).model_dump_json())
     await i.investigate(case.policy, first, case.recorder, i.Budget())
     assert first['investigation']['state'] == 'ready'
-    assert case.chat.await_count == 2 and case.query.await_count == 1
+    assert case.chat.await_count == 2 and case.query.await_count == 2
     assert not await rows('SELECT * FROM monitor_model_recovery')
     await i.investigate(case.policy, second, case.recorder, i.Budget())
     assert second['investigation']['state'] == 'ready'
     assert case.chat.await_count == 3 and case.query.await_count == 2
+
+
+async def test_new_activity_during_ai_backoff_gets_its_own_timeline_once_without_resetting_retry(model_case):
+    case = model_case
+    event = case.event('live')
+    async def source_reply(*args, **kwargs):
+        target = args[4]
+        return {'data': [{'uuId': target['id'], 'alertTimeLine': [{
+            'alertId': 'alert-live', 'name': '敏感文件访问', 'lastTime': target['endTime'],
+            'proof': {'srcIps': ['192.0.2.2'], 'dstIps': ['198.51.100.2'],
+                      'requestHead': 'GET /config HTTP/1.1', 'responseHead': 'HTTP/1.1 200 OK',
+                      'responseBody': 'synthetic response'},
+        }]}]}, {'action': 'get_proof', 'uuid': target['id']}
+    case.query.side_effect = source_reply
+    await case.enqueue(event)
+    await i.investigate(case.policy, event, case.recorder)
+    previous = (await rows('SELECT * FROM monitor_investigations'))[0]
+    newer = {**case.event('live'), 'endTime': 101}
+    await case.enqueue(newer)
+    await i.investigate(case.policy, newer, case.recorder)
+    current = (await rows('SELECT * FROM monitor_investigations'))[0]
+    assert case.chat.await_count == 1 and case.query.await_count == 2
+    assert current['next_retry_at'] == previous['next_retry_at']
+    assert current['state'] == previous['state'] and current['failure_count'] == previous['failure_count']
+    evidence = json.loads(current['evidence'])
+    assert len(evidence) == 1 and evidence[0]['event_revision'] == i.fingerprint(newer)
+    cards = newer['story']['evidence_cards']
+    assert len(cards) == 1 and len(cards[0]['packets']) == 3
+    assert '192.0.2.2 访问 198.51.100.2' in cards[0]['summary']
+    await i.investigate(case.policy, newer, case.recorder)
+    assert case.query.await_count == 2 and case.chat.await_count == 1
+    assert not newer['assessment']['notify_eligible']
+    assert not await rows('SELECT * FROM monitor_mail_notices')
+    assert not await rows('SELECT * FROM monitor_dispositions')
+
+
+async def test_source_refresh_during_ai_backoff_respects_shared_query_budget(model_case):
+    case = model_case
+    first = case.event('budget')
+    await case.enqueue(first)
+    await i.investigate(case.policy, first, case.recorder)
+    newer = {**case.event('budget'), 'endTime': 101}
+    await case.enqueue(newer)
+    budget = i.Budget()
+    budget.calls = case.policy.investigation_calls
+    await i.investigate(case.policy, newer, case.recorder, budget)
+    assert case.query.await_count == 1 and case.chat.await_count == 1
+    assert budget.calls == case.policy.investigation_calls
 
 
 async def test_transient_outage_does_not_exhaust_incident_after_three_rounds(model_case):

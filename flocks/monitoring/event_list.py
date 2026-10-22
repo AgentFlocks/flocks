@@ -796,8 +796,10 @@ def _detail(owner, scope, event_key):
     canonical = investigation['event'] if isinstance(investigation['event'], dict) else {}
     current_proofs = bound_evidence(event, investigation['evidence'], canonical=canonical)
     display_proofs = bound_evidence(event, investigation['evidence'], canonical=canonical, include_failed=True)
+    from .source_event import source_event_evidence
     story = build_story(event, display_proofs,
                         investigation['result'] if isinstance(investigation['result'], dict) else {}, canonical=canonical)
+    source_card, source_timeline = source_event_evidence(event, display_proofs, has_details=bool(story['evidence_cards']))
     overview = readable_story({**story, 'verdict': summary['assessment']['verdict'],
         'conclusion': summary['assessment']['reason'], 'gaps': summary['assessment']['gaps']})
     from .case_overview import operator_overview
@@ -806,6 +808,7 @@ def _detail(owner, scope, event_key):
     truncated = truncated or history_truncated
     warnings.extend(history_warnings)
     output = {'event': event, 'overview': overview, 'story': story, 'investigation': investigation, 'dispositions': dispositions, 'notice': notice,
+        'source_event_evidence': source_card, 'source_event_timeline': source_timeline,
         'confirmed_story': confirmed_story,
         'confirmed_evidence_scope': ('previous_activity' if summary['assessment'].get('risk_scope') == 'previous_activity' else 'current_activity') if confirmed_story is not None else None,
         'confirmed_at': summary['assessment'].get('confirmed_at') if summary['assessment'].get('confirmed_risk_retained') else None,

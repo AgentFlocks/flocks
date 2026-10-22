@@ -749,16 +749,21 @@ class Investigator:
             # The error is checkpointed. Other available sources can still help.
             pass
 
+    async def prime_source_event(self, catalog):
+        """Save the incident timeline even while its model is unavailable."""
+        core = 'basics' in self.event or bool(self.event.get('alertIds'))
+        incident = next((c for c in catalog if c.kind == 'xdr'), None)
+        if (core and incident and self.budget.calls < self.policy.investigation_calls
+                and len(self.evidence) < 24):
+            await self.collect(incident, 'proof')
+
     async def prime(self, catalog):
-        """Acquire core details before asking the model to interpret an event."""
+        """Supplement the source timeline before model interpretation."""
         # Legacy records without either field remain readable. Newly queried
         # incidents always have basics, including when all optional fields lack.
         core = 'basics' in self.event or bool(self.event.get('alertIds'))
         def available():
             return self.budget.calls < self.policy.investigation_calls and len(self.evidence) < 24
-        incident = next((c for c in catalog if c.kind == 'xdr'), None)
-        if core and incident and available():
-            await self.collect(incident, 'proof')
         identifiers = trusted_alert_ids(self.event, self.evidence)
         alerts = next((c for c in catalog if c.kind == 'xdr_alerts'), None)
         if core and alerts and identifiers and available():
@@ -804,6 +809,7 @@ class Investigator:
         if not depth:
             self.plan_correlations(allowed_catalog)
             await self.save(self.evidence, {'specialists': self.advice}, 'pending')
+            await self.prime_source_event(allowed_catalog)
         await preflight_model(agent_name, self.policy, self.event, self.budget)
         self.unavailable = list(dict.fromkeys(self.unavailable + self.policy.correlation_notes))[:30]
         agents = [a for a in await Agent.list() if a.delegatable and not a.hidden and 'security' in a.tags
@@ -1026,7 +1032,7 @@ async def investigate(policy, event, recorder, budget=None):
         if worker is not None:
             result['correlation_plan'] = worker.pending_correlations()
             result['correlation_scope'] = correlation_scope
-        result['story'] = build_story({**event, 'alertIds': trusted_alert_ids(event, evidence)}, evidence, result)
+        result['story'] = build_story(event, evidence, result, canonical=canonical)
         confirmed_risk = capture_case({'event': canonical, 'evidence': evidence, 'result': result,
             'state': state, 'revision': revision, 'updated_at': now().isoformat()}, confirmed_risk)
         await write('UPDATE monitor_investigations SET evidence=?,result=?,state=?,updated_at=?, '
@@ -1039,6 +1045,30 @@ async def investigate(policy, event, recorder, budget=None):
                    **{key: result[key] for key in ('failure_stage', 'model_failure', 'http_status', 'error_type',
                         'error_code', 'time_field', 'model_provider', 'model_id') if key in result})
     worker = None
+    # A newly observed activity can arrive while AI retry is delayed. Acquire
+    # its own incident proof once, preserving the model's state and retry time.
+    if (state in ('pending', 'deferred', 'system_wait') and not due
+            and result.get('failure_stage') == 'model'
+            and not any(p.get('kind') == 'proof' and p.get('event_revision') == fingerprint(canonical)
+                        for p in evidence)):
+        try:
+            normalize_window(event.get('investigationWindow'), source='源事件举证')
+        except QueryTimeError:
+            pass
+        else:
+            async def save_source(items, _result, _state):
+                result['story'] = build_story(event, items, result, canonical=canonical)
+                await write('UPDATE monitor_investigations SET evidence=?,result=?,updated_at=? '
+                            'WHERE owner=? AND project=? AND event_key=?',
+                            (encode(items), encode(result), now().isoformat(), policy.owner, policy.project, event['key']))
+            source_worker = Investigator(policy, event, recorder, evidence, save_source, budget or Budget())
+            try:
+                catalog, _ = await capabilities.discover(policy)
+                await source_worker.prime_source_event(capabilities.for_event(catalog, event, policy))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                diag.event('investigation.source_failure', failure=True, error_type=type(exc).__name__)
     if state in ('pending', 'deferred', 'system_wait') and due:
         attempted_this_round = True
         await write('UPDATE monitor_investigations SET attempts=attempts+1 WHERE owner=? AND project=? AND event_key=?',
@@ -1138,7 +1168,7 @@ async def investigate(policy, event, recorder, budget=None):
                      '此前已确认风险继续跟进；本轮补查不撤销原风险事实，通知及状态变更仍须按当前有效依据核验。') + (
                          recovery_next_step(state, next_retry_at, exhausted) if state != 'ready' else '后续按已记录的证据缺口补充核实。')
     event['investigation']['next_step'] = next_step
-    event['story'] = build_story({**event, 'alertIds': trusted_alert_ids(event, evidence)}, evidence, result)
+    event['story'] = build_story(event, evidence, result, canonical=canonical)
     summary = f"{event_label(event)}：{result.get('reason', '尚未形成调查结论')}。"
     if retained:
         summary = f"{event_label(event)}：此前已确认风险，{event['assessment']['reason']}本轮补查：{result.get('reason', '等待补充核实')}。"

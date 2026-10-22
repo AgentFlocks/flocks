@@ -165,11 +165,13 @@ export function eventDetailView(detail: EventDetailResponse) {
   const hasAlertTimeline =
     Array.isArray(timelineOverview.alert_timeline) ||
     Array.isArray(timelineStory.alert_timeline);
-  const timeline = uniqueTimeline(
+  let timeline = uniqueTimeline(
     hasAlertTimeline
       ? timelineOverview.alert_timeline || timelineStory.alert_timeline
       : timelineOverview.timeline || timelineStory.timeline,
   );
+  if (!retainedRisk && !timeline.length)
+    timeline = uniqueTimeline(detail.source_event_timeline);
   const otherTimeline = hasAlertTimeline
     ? uniqueTimeline(
         timelineOverview.other_timeline || timelineStory.other_timeline,
@@ -184,13 +186,15 @@ export function eventDetailView(detail: EventDetailResponse) {
   const currentEvidenceCards = records(
     overview.evidence_cards || story.evidence_cards,
   ) as unknown as EventEvidenceCard[];
+  const sourceCard = detail.source_event_evidence;
   const hasEvidenceCards =
     retainedRisk ||
+    !!sourceCard ||
     Array.isArray(overview.evidence_cards) ||
     Array.isArray(story.evidence_cards);
   const evidenceCards = retainedRisk
     ? historicalEvidenceCards
-    : currentEvidenceCards;
+    : [...(sourceCard ? [sourceCard] : []), ...currentEvidenceCards];
   const originalGaps = Array.isArray(overview.gaps)
     ? strings(overview.gaps)
     : Array.isArray(overview.missing_evidence)
