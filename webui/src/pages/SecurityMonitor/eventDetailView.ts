@@ -143,8 +143,6 @@ export function eventDetailView(detail: EventDetailResponse) {
     end_time: "事件最近发生",
     host: "关联主机",
     severity: "来源风险等级",
-    data_source: "数据来源",
-    source_device: "来源设备",
     src_ip: "源 IP",
     dst_ip: "目标 IP",
     src_port: "源端口",
