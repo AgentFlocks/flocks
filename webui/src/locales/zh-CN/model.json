@@ -3,6 +3,17 @@
   "pageDescription": "管理 AI 模型提供商和模型配置",
   "addProvider": "添加模型供应商",
   "addModel": "添加模型",
+  "providerPicker": {
+    "title": "选择模型供应商",
+    "hint": "搜索或选择你使用的模型服务，继续配置连接信息。",
+    "compatibleHint": "接入兼容 OpenAI 的网关、代理或自建模型服务。",
+    "loading": "正在加载供应商…",
+    "loadFailed": "供应商列表加载失败，请重试。",
+    "noneAvailable": "暂无可添加的供应商。",
+    "clearSearch": "清空搜索",
+    "change": "更换",
+    "back": "返回配置"
+  },
   "dashboard": {
     "defaultModel": "默认模型",
     "noDefaultModel": "未设置",

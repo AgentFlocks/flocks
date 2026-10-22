@@ -3,6 +3,17 @@
   "pageDescription": "Manage AI model providers and model configurations",
   "addProvider": "Add Provider",
   "addModel": "Add Model",
+  "providerPicker": {
+    "title": "Choose a model provider",
+    "hint": "Search for your model service, then configure its connection.",
+    "compatibleHint": "Connect an OpenAI-compatible gateway, proxy, or self-hosted model service.",
+    "loading": "Loading providers…",
+    "loadFailed": "Unable to load providers. Please try again.",
+    "noneAvailable": "No providers available to add.",
+    "clearSearch": "Clear search",
+    "change": "Change",
+    "back": "Back to configuration"
+  },
   "dashboard": {
     "defaultModel": "Default Model",
     "noDefaultModel": "Not set",

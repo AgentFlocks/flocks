@@ -302,7 +302,6 @@ describe('ModelPage add provider dialog', () => {
     renderWithRouter(<ModelPage />);
 
     await user.click(screen.getByRole('button', { name: 'Add Provider' }));
-    await user.click(await screen.findByRole('button', { name: 'Select Provider...' }));
 
     expect(await screen.findByRole('button', { name: /ThreatBook-cn-llm/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /ThreatBook-io-llm/i })).toBeInTheDocument();
@@ -315,6 +314,42 @@ describe('ModelPage add provider dialog', () => {
     await user.click(screen.getByRole('button', { name: /ThreatBook-io-llm/i }));
     keyLink = screen.getByRole('link', { name: 'form.claimFreeKey' });
     expect(keyLink).toHaveAttribute('href', 'https://portal.agentflocks.com/');
+  });
+
+  it('shows searchable providers immediately and preserves a draft when returning to the same provider', async () => {
+    const user = userEvent.setup(); renderWithRouter(<ModelPage />);
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    expect(await screen.findByRole('button', { name: 'OpenAI Compatible', exact: true })).toBeVisible();
+    const search = screen.getByRole('searchbox', { name: 'Search providers...' });
+    await user.type(search, 'International');
+    expect(screen.queryByRole('button', { name: 'ThreatBook-cn-llm', exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'ThreatBook-io-llm', exact: true })).toBeVisible();
+    await user.clear(search);
+    await user.click(screen.getByRole('button', { name: 'ThreatBook-cn-llm', exact: true }));
+    await user.type(screen.getByPlaceholderText('Paste ThreatBook CN LLM API Key'), 'draft-key');
+    await user.click(screen.getByRole('button', { name: 'discovery.title' }));
+    expect(await screen.findByRole('switch', { name: 'compact.enableModel remote/chat-model' })).toBeChecked();
+    await user.click(screen.getByRole('button', { name: /ThreatBook-cn-llm/ }));
+    expect(screen.getByRole('button', { name: 'Save and add 1 models' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'providerPicker.back' }));
+    expect(screen.getByPlaceholderText('Paste ThreatBook CN LLM API Key')).toHaveValue('draft-key');
+    expect(screen.getByRole('switch', { name: 'compact.enableModel remote/chat-model' })).toBeChecked();
+    await user.click(screen.getByRole('button', { name: /ThreatBook-cn-llm/ }));
+    await user.click(screen.getByRole('button', { name: 'ThreatBook-cn-llm', exact: true }));
+    expect(screen.getByPlaceholderText('Paste ThreatBook CN LLM API Key')).toHaveValue('draft-key');
+    expect(screen.getByRole('switch', { name: 'compact.enableModel remote/chat-model' })).toBeChecked();
+    expect(mocks.setCredentials).not.toHaveBeenCalled();
+  });
+
+  it('recovers from a failed catalog request without leaving an empty selector', async () => {
+    mocks.catalogList.mockRejectedValueOnce(new Error('Catalog unavailable'));
+    const user = userEvent.setup(); renderWithRouter(<ModelPage />);
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('providerPicker.loadFailed');
+    await user.click(screen.getByRole('button', { name: 'providerList.retry' }));
+    expect(await screen.findByRole('button', { name: 'OpenAI Compatible', exact: true })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'OpenAI Compatible', exact: true }));
+    expect(screen.getByPlaceholderText('e.g. SiliconFlow, LM Studio, My API')).toBeVisible();
   });
 
   it('reloads providers after the event stream reconnects', async () => {
@@ -339,7 +374,6 @@ describe('ModelPage add provider dialog', () => {
     await user.click(screen.getByRole('button', { name: 'Add Provider' }));
     expect(await screen.findByTestId('entity-sheet')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Select Provider...' }));
     await user.click(await screen.findByRole('button', { name: /OpenAI Compatible/i }));
 
     expect(screen.queryByText('(optional, leave empty for default)')).not.toBeInTheDocument();
@@ -378,7 +412,6 @@ describe('ModelPage add provider dialog', () => {
   async function openThreatBook(user: ReturnType<typeof userEvent.setup>) {
     renderWithRouter(<ModelPage />);
     await user.click(screen.getByRole('button', { name: 'Add Provider' }));
-    await user.click(await screen.findByRole('button', { name: 'Select Provider...' }));
     await user.click(await screen.findByRole('button', { name: /ThreatBook-cn-llm/ }));
     await user.type(screen.getByPlaceholderText('Paste ThreatBook CN LLM API Key'), 'draft-key');
   }
