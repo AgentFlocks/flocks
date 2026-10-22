@@ -16,6 +16,7 @@
     "invalidPrice": "Input and output prices must be numbers at least 0; the cache-read price may be blank."
   },
   "cacheUsage": {
+    "details": "Usage and cache details",
     "title": "Overall input cache hit rate",
     "scope": "Historical usage recorded by this Flocks instance, across all providers and models.",
     "hitRate": "Cache hit rate for reported input",

@@ -1,5 +1,5 @@
 import { useId } from 'react';
-import { AlertCircle, ChevronDown, Database, RefreshCw } from 'lucide-react';
+import { AlertCircle, Database, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { UsageStats } from '@/types';
 import { formatCacheHitRate, getCacheUsageSummary } from './usageDisplay';
@@ -31,7 +31,7 @@ export default function CacheUsagePanel({ usageStats, loading, error, onRefresh 
   const initialError = error && !usageStats;
 
   return (
-    <section aria-labelledby={titleId} aria-busy={loading} data-testid="model-cache-usage" className="mb-4 shrink-0 rounded-xl border border-slate-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
+    <section aria-labelledby={titleId} aria-busy={loading} data-testid="model-cache-usage" className="p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 id={titleId} className="flex items-center gap-2 text-sm font-semibold text-slate-800 dark:text-zinc-100">
@@ -56,7 +56,11 @@ export default function CacheUsagePanel({ usageStats, loading, error, onRefresh 
 
       {!initialLoading && !initialError && (
         <>
-          <dl className="mt-4 grid grid-cols-2 gap-x-5 gap-y-3 lg:grid-cols-4">
+          <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-100 pb-3 dark:border-zinc-800">
+            <span className="text-xs text-slate-500 dark:text-zinc-400">{t('dashboard.totalTokens')}</span>
+            <span data-testid="model-total-tokens-exact" className="text-base font-semibold tabular-nums text-slate-800 dark:text-zinc-100">{formatCount(count(usageStats?.summary.total_tokens))}</span>
+          </div>
+          <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-3">
             <div>
               <dt className="text-xs text-slate-500 dark:text-zinc-400">{t('cacheUsage.hitRate')}</dt>
               <dd data-testid="model-cache-rate" className="mt-1 break-words text-2xl font-semibold tabular-nums text-sky-700 dark:text-sky-300">
@@ -84,17 +88,12 @@ export default function CacheUsagePanel({ usageStats, loading, error, onRefresh 
                   : rate === null ? t('cacheUsage.noDenominator')
                     : t('cacheUsage.reportedOnly')}
           </p>
-          <details className="group/cache mt-3 border-t border-slate-100 pt-2 text-xs text-slate-500 dark:border-zinc-800 dark:text-zinc-400">
-            <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded focus-visible:outline focus-visible:outline-2 [&::-webkit-details-marker]:hidden">
-              {t('cacheUsage.explanation')}
-              <ChevronDown className="h-3.5 w-3.5 transition-transform group-open/cache:rotate-180" aria-hidden="true" />
-            </summary>
-            <div className="mt-2 max-h-32 space-y-2 overflow-y-auto pr-2 leading-relaxed">
-              <p>{t('cacheUsage.formula')}</p>
-              <p>{t('cacheUsage.exclusions')}</p>
-              <p>{t('cacheUsage.recordsScope')}</p>
-            </div>
-          </details>
+          <div className="mt-3 space-y-2 border-t border-slate-100 pt-3 text-xs leading-relaxed text-slate-500 dark:border-zinc-800 dark:text-zinc-400">
+            <h3 className="font-medium text-slate-700 dark:text-zinc-300">{t('cacheUsage.explanation')}</h3>
+            <p>{t('cacheUsage.formula')}</p>
+            <p>{t('cacheUsage.exclusions')}</p>
+            <p>{t('cacheUsage.recordsScope')}</p>
+          </div>
         </>
       )}
     </section>

@@ -25,12 +25,11 @@ import {
   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
 } from '@/api/provider';
 import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
-import CacheUsagePanel from './CacheUsagePanel';
+import TokenUsageCard from './TokenUsageCard';
 import { formatPricePerMillion, formatPricingPerMillion, formatPricingTierRange, isPricingFree } from '@/utils/modelPricing';
 import { extractErrorMessage } from '@/utils/error';
 import {
   convertCurrencyAmount,
-  formatTokenMillions,
   getConvertedTotalCost,
   getDefaultDashboardCurrency,
   toggleDashboardCurrency,
@@ -563,13 +562,15 @@ export default function ModelPage() {
         connectedCount={connectedCount}
         totalModels={totalModels}
         usageStats={usageStats}
+        usageLoading={usageLoading}
+        usageLoadError={usageLoadError}
+        onRefreshUsage={() => void loadUsage()}
         defaultModel={defaultModel}
         onEditDefault={isAdmin ? () => setShowDefaultModelDialog(true) : undefined}
         fallbackCount={fallbackModels.length}
         availableFallbackCount={availableFallbackCount}
         onEditFallbacks={isAdmin ? () => setShowFallbackModelsDialog(true) : undefined}
       />
-      <CacheUsagePanel usageStats={usageStats} loading={usageLoading} error={usageLoadError} onRefresh={() => void loadUsage()} />
 
       {/* Main Content: Provider List + Detail Panel */}
       <div className="flex gap-3 flex-1 overflow-hidden min-h-[18rem]">
@@ -763,6 +764,9 @@ function DashboardStrip({
   connectedCount,
   totalModels,
   usageStats,
+  usageLoading,
+  usageLoadError,
+  onRefreshUsage,
   defaultModel,
   onEditDefault,
   fallbackCount,
@@ -772,6 +776,9 @@ function DashboardStrip({
   connectedCount: number;
   totalModels: number;
   usageStats: UsageStats | null;
+  usageLoading: boolean;
+  usageLoadError: boolean;
+  onRefreshUsage: () => void;
   defaultModel: { provider_id: string; model_id: string } | null;
   /** Absent for members: default and auxiliary models are admin settings. */
   onEditDefault?: () => void;
@@ -780,7 +787,6 @@ function DashboardStrip({
   onEditFallbacks?: () => void;
 }) {
   const { t, i18n } = useTranslation('model');
-  const totalTokens = usageStats?.summary?.total_tokens ?? 0;
   const defaultCurrency = getDefaultDashboardCurrency(i18n.language);
   const [displayCurrency, setDisplayCurrency] = useState(defaultCurrency);
   const totalCost = useMemo(
@@ -831,12 +837,7 @@ function DashboardStrip({
       />
       <StatCard icon={<Link2 className="w-5 h-5" />} label={t('dashboard.connected')} value={String(connectedCount)} color="green" />
       <StatCard icon={<Cpu className="w-5 h-5" />} label={t('dashboard.availableModels')} value={String(totalModels)} color="blue" />
-      <StatCard
-        icon={<Brain className="w-5 h-5" />}
-        label={t('dashboard.totalTokens')}
-        value={totalTokens > 0 ? formatTokenMillions(totalTokens) : t('dashboard.noUsage')}
-        color="blue"
-      />
+      <TokenUsageCard usageStats={usageStats} loading={usageLoading} error={usageLoadError} onRefresh={onRefreshUsage} />
       <StatCard
         icon={<DollarSign className="w-5 h-5" />}
         label={t('dashboard.totalCost')}
