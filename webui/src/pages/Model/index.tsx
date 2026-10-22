@@ -1720,15 +1720,20 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                 </div>
 
                 <div className="col-span-2">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    {t('configuration.proxyUrl')}
-                    {isCatalogBaseUrlRequired(selectedCatalogId) ? (
-                      <span className="text-slate-500 ml-1">*</span>
-                    ) : (
-                      <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
-                    )}
-                  </label>
+                  <div className="mb-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                    <label htmlFor="catalog-provider-base-url" className="text-sm font-medium text-gray-700">
+                      {t('configuration.proxyUrl')}
+                      {isCatalogBaseUrlRequired(selectedCatalogId) ? (
+                        <span className="text-slate-500 ml-1">*</span>
+                      ) : (
+                        <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+                      )}
+                    </label>
+                    {selectedCatalogId === 'threatbook-io-llm' && <span id="catalog-provider-node-notice" className="text-xs text-gray-500">{t('form.threatbookIoNodeNotice')}</span>}
+                  </div>
                   <input
+                    id="catalog-provider-base-url"
+                    aria-describedby={selectedCatalogId === 'threatbook-io-llm' ? 'catalog-provider-node-notice' : undefined}
                     type="text"
                     value={baseUrl}
                     onChange={e => setBaseUrl(e.target.value)}
@@ -2305,7 +2310,13 @@ function ConfigureProviderDialog({ provider, existingCredentials, loadingModels,
       <div className="space-y-4">
         {custom && <label className="block space-y-1.5 text-sm font-medium text-gray-700">{t('configuration.providerName')}<input value={name} disabled={saving} onChange={e => setName(e.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 font-normal" /></label>}
         <div><label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="provider-api-key">API Key</label><div className="relative"><input id="provider-api-key" type={showKey ? 'text' : 'password'} value={apiKey} disabled={saving} onChange={e => setApiKey(e.target.value)} placeholder={existingCredentials?.has_credential ? t('form.apiKeyKeepExisting') : 'sk-...'} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 pr-10 text-sm" /><button type="button" onClick={() => setShowKey(value => !value)} title={t(showKey ? 'form.hide' : 'form.show')} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400">{showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</button></div></div>
-        <label className="block space-y-1.5 text-sm font-medium text-gray-700">{t('configuration.proxyUrl')}<span className="ml-1 font-normal text-gray-400">{custom || isAzureProviderId(provider.id) ? '*' : t('form.baseUrlOptional')}</span><input value={baseUrl} disabled={saving} onChange={e => setBaseUrl(e.target.value)} placeholder="https://api.example.com/v1" className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm font-normal" /></label>
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <label htmlFor="provider-base-url" className="text-sm font-medium text-gray-700">{t('configuration.proxyUrl')}<span className="ml-1 font-normal text-gray-400">{custom || isAzureProviderId(provider.id) ? '*' : t('form.baseUrlOptional')}</span></label>
+            {provider.id === 'threatbook-io-llm' && <span id="provider-node-notice" className="text-xs text-gray-500">{t('form.threatbookIoNodeNotice')}</span>}
+          </div>
+          <input id="provider-base-url" aria-describedby={provider.id === 'threatbook-io-llm' ? 'provider-node-notice' : undefined} value={baseUrl} disabled={saving} onChange={e => setBaseUrl(e.target.value)} placeholder="https://api.example.com/v1" className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm font-normal" />
+        </div>
         <ProviderKeyCheck providerId={provider.id} credentials={credentials} disabled={saving} />
       </div>
       <ModelDiscovery providerId={provider.id} mode="stage" existingModelIds={models.map(model => model.id)} credentials={credentials} disabled={saving} onInventoryChange={setInventory} onReadyChange={setReady} onAddModel={onAddModel} />

@@ -364,7 +364,7 @@
     "name": "ThreatBook-io-llm",
     "description": "ThreatBook International LLM Service (OpenAI-compatible)",
     "npm": "@ai-sdk/openai-compatible",
-    "default_base_url": "https://llm.threatbook.io/v1",
+    "default_base_url": "https://llm.threatbook.cn/v1",
     "credential_schemas": [
       {
         "auth_method": "api_key",

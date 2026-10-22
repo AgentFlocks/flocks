@@ -401,7 +401,7 @@ class TestCuratedCatalogModels:
         meta = get_provider_meta("threatbook-io-llm")
         assert meta is not None
         assert "THREATBOOK_IO_LLM_API_KEY" in meta.env_vars
-        assert get_provider_default_url("threatbook-io-llm") == "https://llm.threatbook.io/v1"
+        assert get_provider_default_url("threatbook-io-llm") == "https://llm.threatbook.cn/v1"
         models = get_provider_model_definitions("threatbook-io-llm")
         assert {m.id for m in models} == {
             "kimi-k2.7-code",

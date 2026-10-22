@@ -47,7 +47,7 @@ _OPENAI_DEFAULTS = {
     "tencent": "https://api.hunyuan.cloud.tencent.com/v1",
     "siliconflow": "https://api.siliconflow.cn/v1",
     "threatbook-cn-llm": "https://llm.threatbook.cn/v1",
-    "threatbook-io-llm": "https://llm.threatbook.io/v1",
+    "threatbook-io-llm": "https://llm.threatbook.cn/v1",
     "moonshot": "https://api.moonshot.cn/v1",
     "zhipu": "https://open.bigmodel.cn/api/paas/v4",
     "minimax": "https://api.minimax.chat/v1",

@@ -259,7 +259,7 @@ describe('ModelPage add provider dialog', () => {
               }],
             }],
             env_vars: [],
-            default_base_url: 'https://llm.threatbook.io/v1',
+            default_base_url: 'https://llm.threatbook.cn/v1',
             model_count: 1,
             models: [{
               id: 'deepseek-v4-flash-0731',

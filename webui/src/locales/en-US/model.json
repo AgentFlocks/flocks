@@ -129,6 +129,7 @@
     "baseUrl": "Base URL",
     "baseUrlOptional": "(optional, leave empty for default)",
     "baseUrlRequired": "Please enter Base URL",
+    "threatbookIoNodeNotice": "The international node (threatbook.io) is not yet available. The China node (threatbook.cn) is used for now.",
     "apiKey": "API Key",
     "ollamaNoKey": "(Ollama usually doesn't need this)",
     "apiKeyOptional": "(optional, leave empty for no-auth gateways)",
