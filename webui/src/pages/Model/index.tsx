@@ -676,6 +676,7 @@ export default function ModelPage() {
           onEditModel={(model) => setSelectedModelForDetail({ provider: selectedProvider, model })}
           onToggleModel={(modelId, enabled) => handleToggleModel(selectedProvider.id, modelId, enabled)}
           onDeleteModel={handleDeleteModel}
+          onModelsChanged={handleModelCreated}
           onClose={() => {
             setShowConfigDialog(false);
             setCredentials(null);
@@ -1311,17 +1312,12 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   const [azureDeploymentDisplayName, setAzureDeploymentDisplayName] = useState('');
 
   // Model selection (for catalog providers)
-  const [discoveryUsed, setDiscoveryUsed] = useState(false);
   const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
   const [discoveryImportResult, setDiscoveryImportResult] = useState<ModelImportResult | null>(null);
-  const [savedModelIds, setSavedModelIds] = useState<string[]>([]);
+  const [discoveryReady, setDiscoveryReady] = useState(true);
 
   // State
   const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
-
-  useEffect(() => { setTestResult(null); }, [apiKey, baseUrl]);
 
   // ── Wizard step management ──
   const [step, setStep] = useState<'provider' | 'success' | 'add-model'>('provider');
@@ -1388,11 +1384,9 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     setSelectedCatalogId(providerId);
     setShowDropdown(false);
     setDropdownSearch('');
-    setTestResult(null);
-    setDiscoveryUsed(false);
     setDiscoveredModels([]);
     setDiscoveryImportResult(null);
-    setSavedModelIds([]);
+    setDiscoveryReady(true);
 
     const provider = catalog.find(p => p.id === providerId);
     if (provider) {
@@ -1406,48 +1400,6 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     }
   };
 
-  // Test credentials
-  const handleTest = async () => {
-    if (testing || saving || !canTest) return;
-    if (!apiKey.trim() && !providerAllowsEmptyApiKey(selectedCatalogId)) {
-      toast.warning('Please enter API Key first');
-      return;
-    }
-    try {
-      setTesting(true);
-      setTestResult(null);
-      await providerAPI.setCredentials(selectedCatalogId, {
-        api_key: apiKey.trim(),
-        base_url: baseUrl.trim() || undefined,
-        provider_name: selectedCatalogId === 'openai-compatible' && providerName.trim() ? providerName.trim() : undefined,
-        skip_catalog_bootstrap: true,
-      });
-      setSavedProviderId(selectedCatalogId);
-      setSavedProviderName(displayName);
-      const azureModelId = isAzureProviderId(selectedCatalogId) ? azureDeploymentName.trim() : '';
-      const candidates = [...discoveredModels];
-      if (azureModelId && !savedModelIds.includes(azureModelId) && !candidates.some(model => model.id === azureModelId)) {
-        candidates.push({ id: azureModelId, name: azureDeploymentDisplayName.trim() || azureModelId, already_added: false, selectable: true });
-      }
-      const imported = await importSelectedModels(selectedCatalogId, candidates);
-      const savedIds = new Set([...(imported?.added || []), ...(imported?.skipped || [])]);
-      const modelId = candidates.find(model => savedIds.has(model.id))?.id || savedModelIds[0];
-      if (!modelId) {
-        setTestResult({ success: false, message: t('connection.noModel') });
-        return;
-      }
-      const res = await providerAPI.testCredentials(selectedCatalogId, modelId);
-      setTestResult({
-        success: res.data.success,
-        message: res.data.message || (res.data.success ? t('status.connected') : t('form.testFailed')),
-      });
-    } catch (err: any) {
-      setTestResult({ success: false, message: err.response?.data?.detail || err.message });
-    } finally {
-      setTesting(false);
-    }
-  };
-
   // Save — catalog provider (transitions to next wizard step instead of closing)
   const importSelectedModels = async (providerId: string, models = discoveredModels): Promise<ModelImportResult | null> => {
     if (!models.length) return null;
@@ -1458,13 +1410,12 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       result = { added: [], skipped: [], failed: models.map(model => ({ id: model.id, error: extractErrorMessage(importError) })) };
     }
     setDiscoveryImportResult(result);
-    setSavedModelIds(previous => [...new Set([...previous, ...result.added, ...result.skipped])]);
     setAddedModelCount(count => count + result.added.length);
     return result;
   };
 
   const handleSaveCatalog = async () => {
-    if (saving || testing) return;
+    if (saving || !discoveryReady) return;
     if (!selectedCatalogId) { toast.warning('Please select a Provider'); return; }
     if (selectedCatalogId === 'openai-compatible' && !providerName.trim()) {
       toast.warning('Please enter Provider Name');
@@ -1492,8 +1443,8 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
         toast.success(t('providerAdded'), providerName.trim());
         setSavedProviderId(created.data.id);
         setSavedProviderName(providerName.trim());
-        if (discoveryUsed) await importSelectedModels(created.data.id);
-        setStep(discoveryUsed ? 'success' : 'add-model');
+        await importSelectedModels(created.data.id);
+        setStep('success');
         return;
       }
 
@@ -1580,17 +1531,19 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     selectedCatalogId !== 'openai-compatible' ||
     (!!providerName.trim() && !!baseUrl.trim())
   );
-  const canTest = !!selectedCatalogId && selectedCatalogId !== 'openai-compatible'
-    && (discoveredModels.length > 0 || savedModelIds.length > 0 || (isAzureProviderId(selectedCatalogId) && !!azureDeploymentName.trim()));
+  const pendingModelCount = new Set([
+    ...discoveredModels.map(model => model.id),
+    ...(isAzureProviderId(selectedCatalogId) && azureDeploymentName.trim() ? [azureDeploymentName.trim()] : []),
+  ]).size;
 
   // Dynamic EntitySheet props based on wizard step
   const getSheetProps = () => {
     switch (step) {
       case 'provider':
         return {
-          submitDisabled: !canSave || saving || testing,
-          submitLoading: saving || testing,
-          submitLabel: 'Save',
+          submitDisabled: !canSave || saving || !discoveryReady,
+          submitLoading: saving,
+          submitLabel: t(pendingModelCount > 0 ? 'wizard.saveAndAddModels' : 'wizard.saveProvider', { count: pendingModelCount }),
           onSubmit: handleSave,
           footerLeft: undefined as React.ReactNode,
         };
@@ -1673,7 +1626,10 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     <EntitySheet
       open
       mode="create"
-      entityType={step === 'add-model' ? 'Custom Model' : t('form.model')}
+      entityType={step === 'add-model' ? t('form.model') : t('configuration.provider')}
+      width={720}
+      minWidth={360}
+      maxWidth={960}
       entityName={step !== 'provider' ? savedProviderName : undefined}
       icon={<Brain className="w-5 h-5" />}
       rexSystemContext={rexContext}
@@ -1690,6 +1646,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       {step === 'provider' && (
         <div className="space-y-0">
           <div className="space-y-5">
+            <h3 className="text-sm font-semibold text-gray-900">{t('wizard.connectionStep')}</h3>
             {loadingCatalog ? (
                 <div className="flex items-center justify-center py-12"><LoadingSpinner /></div>
               ) : (
@@ -1781,7 +1738,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                       {selectedCatalogId === 'openai-compatible' && (
                         <div>
                           <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Provider Name
+                            {t('configuration.providerName')}
                             <span className="text-slate-500 ml-1">*</span>
                           </label>
                           <input
@@ -1861,27 +1818,6 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         />
                       </div>
 
-                      <section className="space-y-2" aria-label={t('connection.title')}>
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div><h3 className="text-sm font-semibold text-gray-900">{t('connection.title')}</h3><p className="mt-1 text-xs text-gray-500">{t('connection.description')}</p></div>
-                          <button type="button" onClick={handleTest} disabled={!canTest || testing || saving} className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-sm text-white hover:bg-violet-700 disabled:opacity-40">
-                            {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <TestTube className="h-4 w-4" />}
-                            {t(testing ? 'connection.checking' : 'connection.saveAndCheck')}
-                          </button>
-                        </div>
-                        <p className={`text-xs ${canTest ? 'text-amber-800' : 'text-gray-500'}`}>{t(canTest ? 'connection.saveAndCheckNewHint' : 'connection.addBeforeCheck')}</p>
-                      </section>
-
-                      {discoveryImportResult && <ModelImportSummary result={discoveryImportResult} />}
-                      {testResult && (
-                        <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${
-                          testResult.success ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'
-                        }`}>
-                          {testResult.success ? <Check className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
-                          <span>{testResult.message}</span>
-                        </div>
-                      )}
-
                       {isAzureProviderId(selectedCatalogId) && (
                         <div className="space-y-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                           <div>
@@ -1912,16 +1848,22 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         </div>
                       )}
 
+                      <h3 className="text-sm font-semibold text-gray-900">{t('wizard.modelsStep')}</h3>
                       <ModelDiscovery
                         providerId={selectedCatalogId}
                         mode="stage"
                         newInstance={selectedCatalogId === 'openai-compatible'}
-                        existingModelIds={savedModelIds}
                         credentials={{ api_key: apiKey.trim(), base_url: baseUrl.trim() || undefined }}
-                        disabled={saving || testing}
-                        onUsed={() => setDiscoveryUsed(true)}
+                        disabled={saving}
+                        onReadyChange={setDiscoveryReady}
                         onSelectionChange={setDiscoveredModels}
                       />
+
+                      {!discoveryReady && <p role="status" className="text-xs text-amber-800">{t('discovery.completeConfiguration')}</p>}
+                      <div className="space-y-1 border-t border-gray-100 pt-4">
+                        <h3 className="text-sm font-semibold text-gray-900">{t('wizard.saveStep')}</h3>
+                        <p className="text-xs leading-5 text-gray-500">{t('wizard.saveHint')}</p>
+                      </div>
 
                       <div className="flex items-start gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg">
                         <Shield className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
@@ -2229,6 +2171,7 @@ function AddModelDialog({ provider, models, loadingModels, onClose, onCreated }:
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; latency?: number } | null>(null);
   const [testing, setTesting] = useState(false);
   const [method, setMethod] = useState<'automatic' | 'manual'>('automatic');
+  const [discoveryReady, setDiscoveryReady] = useState(true);
 
   const handleSubmit = async () => {
     if (!form.isValid) {
@@ -2299,9 +2242,9 @@ Provider: ${provider.name} (${provider.id})
       icon={<Plus className="w-5 h-5" />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
-      submitDisabled={loading || testing || (method === 'manual' && !form.isValid)}
+      submitDisabled={loading || testing || (method === 'automatic' ? !discoveryReady : !form.isValid)}
       submitLoading={loading || testing}
-      submitLabel={method === 'automatic' || testResult ? t('form.done') : t('form.addModelBtn')}
+      submitLabel={method === 'automatic' ? t('form.close') : testResult ? t('form.done') : t('form.addModelBtn')}
       onClose={handleClose}
       onSubmit={method === 'automatic' || testResult ? handleClose : handleSubmit}
       initialTab="form"
@@ -2325,7 +2268,7 @@ Provider: ${provider.name} (${provider.id})
         </div>
         <div role="tabpanel" id="add-model-automatic" aria-labelledby="add-model-tab-automatic" hidden={method !== 'automatic'} className="space-y-3">
           <p className="text-xs leading-5 text-gray-500">{t('discovery.savedCredentialsHint')}</p>
-          <ModelDiscovery providerId={provider.id} mode="import" existingModelIds={models.map(model => model.id)} disabled={loading || testing || loadingModels} onImported={onCreated} />
+          <ModelDiscovery providerId={provider.id} mode="import" existingModelIds={models.map(model => model.id)} disabled={loading || testing || loadingModels} onReadyChange={setDiscoveryReady} onImported={onCreated} />
         </div>
         <div role="tabpanel" id="add-model-manual" aria-labelledby="add-model-tab-manual" hidden={method !== 'manual'} className="space-y-4">
           <ModelFormFields
@@ -2414,6 +2357,7 @@ function ConfigureProviderDialog({
   provider, existingCredentials, models, loadingModels, modelEnabledMap, defaultModelId,
   onClose, onConfigured, onTestResult, onDelete, onAddModel, onEditModel,
   onToggleModel, onDeleteModel,
+  onModelsChanged,
 }: {
   provider: EnrichedProvider;
   existingCredentials: ProviderCredentials | null;
@@ -2429,6 +2373,7 @@ function ConfigureProviderDialog({
   onEditModel: (model: ModelDefinitionV2) => void;
   onToggleModel: (modelId: string, enabled: boolean) => Promise<void>;
   onDeleteModel: (modelId: string) => Promise<void>;
+  onModelsChanged: () => void;
 }) {
   const toast = useToast();
   const { t } = useTranslation('model');
@@ -2451,6 +2396,9 @@ function ConfigureProviderDialog({
   const [testModelId, setTestModelId] = useState(models[0]?.id ?? '');
   const [testChat, setTestChat] = useState<{ question: string; answer: string; model: string; latency: number } | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
+  const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
+  const [discoveryImportResult, setDiscoveryImportResult] = useState<ModelImportResult | null>(null);
+  const [discoveryReady, setDiscoveryReady] = useState(true);
   const nameEditable = provider.id === 'openai-compatible' || provider.id.startsWith('custom-');
   const baseUrlRequired = nameEditable || isAzureProviderId(provider.id);
   const hasPendingChanges = hasPendingProviderCredentialChanges(savedCredentials, {
@@ -2496,11 +2444,25 @@ function ConfigureProviderDialog({
   };
 
   const handleSubmit = async () => {
-    if (actionLock.current || busy || loadingModels) return;
+    if (actionLock.current || busy || loadingModels || !discoveryReady) return;
     actionLock.current = true;
     setLoading(true);
     try {
       if (!await persistCredentials()) return;
+      if (discoveredModels.length > 0) {
+        let result: ModelImportResult;
+        try {
+          result = (await providerAPI.importModels(provider.id, discoveredModels.map(toModelImport))).data;
+        } catch (importError) {
+          result = { added: [], skipped: [], failed: discoveredModels.map(model => ({ id: model.id, error: extractErrorMessage(importError) })) };
+        }
+        setDiscoveryImportResult(result);
+        if (result.added.length > 0 || result.skipped.length > 0) onModelsChanged();
+        if (result.failed.length > 0) {
+          toast.warning(t('discovery.importPartial'));
+          return;
+        }
+      }
       toast.success(t('credentialsSaved'));
       onConfigured();
     } catch (saveError) {
@@ -2568,9 +2530,9 @@ function ConfigureProviderDialog({
       hideRex
       hideTest
       initialTab="form"
-      submitDisabled={busy || loadingModels}
+      submitDisabled={busy || loadingModels || !discoveryReady}
       submitLoading={loading}
-      submitLabel="Save"
+      submitLabel={t(discoveredModels.length > 0 ? 'wizard.saveAndAddModels' : 'wizard.saveProvider', { count: discoveredModels.length })}
       onClose={onClose}
       onSubmit={handleSubmit}
       footerLeft={
@@ -2581,6 +2543,7 @@ function ConfigureProviderDialog({
     >
       <div className="space-y-7">
         <div className="space-y-4">
+          <h3 className="text-sm font-semibold text-gray-900">{t('wizard.connectionStep')}</h3>
           {nameEditable && (
             <div>
               <label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="provider-display-name">{t('configuration.providerName')}</label>
@@ -2625,18 +2588,34 @@ function ConfigureProviderDialog({
           </div>
         </div>
 
-        <section aria-label={t('connection.title')} className="space-y-3">
-          <div className="flex items-start justify-between gap-3">
+        <div className="space-y-3 border-t border-gray-100 pt-5">
+          <h3 className="text-sm font-semibold text-gray-900">{t('wizard.modelsStep')}</h3>
+          <ModelDiscovery
+            providerId={provider.id}
+            mode="stage"
+            credentials={{ api_key: apiKey.trim() || undefined, base_url: baseUrl.trim() || undefined }}
+            existingModelIds={models.map(model => model.id)}
+            disabled={busy || loadingModels}
+            onSelectionChange={setDiscoveredModels}
+            onReadyChange={setDiscoveryReady}
+          />
+          {!discoveryReady && <p role="status" className="text-xs text-amber-800">{t('discovery.completeConfiguration')}</p>}
+          {discoveryImportResult && <ModelImportSummary result={discoveryImportResult} />}
+          <p className="text-xs leading-5 text-gray-500">{t('wizard.saveHint')}</p>
+        </div>
+
+        <section aria-label={t('connection.modelCallTitle')} className="space-y-3 border-t border-gray-100 pt-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h3 className="text-sm font-semibold text-gray-900">{t('connection.title')}</h3>
-              <p className="mt-1 text-xs leading-5 text-gray-500">{t('connection.description')}</p>
+              <h3 className="text-sm font-semibold text-gray-900">{t('connection.modelCallTitle')}</h3>
+              <p className="mt-1 text-xs leading-5 text-gray-500">{t('connection.modelCallDescription')}</p>
             </div>
-            <button type="button" onClick={handleTest} disabled={busy || loadingModels || !models.length} className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-40">
+            {models.length > 0 && <button type="button" onClick={handleTest} disabled={busy || loadingModels} className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-40">
               {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <TestTube className="h-4 w-4" />}
-              {t(testing ? 'connection.checking' : hasPendingChanges ? 'connection.saveAndCheck' : testError ? 'connection.retry' : 'connection.check')}
-            </button>
+              {t(testing ? 'connection.checking' : hasPendingChanges ? 'connection.saveAndTest' : testError ? 'connection.retry' : 'connection.testModelCall')}
+            </button>}
           </div>
-          {hasPendingChanges && <p className="text-xs text-amber-800">{t('connection.saveAndCheckHint')}</p>}
+          {hasPendingChanges && models.length > 0 && <p className="text-xs text-amber-800">{t('connection.saveAndTestHint')}</p>}
           {models.length > 0 ? (
             <label className="flex items-center gap-3 text-xs text-gray-500">
               <span className="shrink-0">{t('connection.testModel')}</span>
@@ -2657,7 +2636,7 @@ function ConfigureProviderDialog({
               {testChat.question && <p className="break-words text-xs">Q: {testChat.question}</p>}
               {testChat.answer && <p className="break-words text-xs">A: {testChat.answer}</p>}
             </div>
-          ) : !testing && <p className="text-xs text-gray-400">{t('connection.notChecked')}</p>}
+          ) : !testing && models.length > 0 && <p className="text-xs text-gray-400">{t('connection.notChecked')}</p>}
         </section>
 
         <section aria-label={t('configuration.models')} className="space-y-3 border-t border-gray-100 pt-5">
