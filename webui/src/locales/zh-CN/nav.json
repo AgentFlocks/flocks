@@ -113,7 +113,6 @@
   "updateNow": "立即升级",
   "currentVersionLabel": "当前 v{{version}}",
   "currentProductVersionLabel": "当前 {{version}}",
-  "voiceInput": "语音输入",
   "agentWorkspace": "Agent 工作区",
   "switchWorkspace": "切换工作区",
   "sceneManagement": "场景管理",

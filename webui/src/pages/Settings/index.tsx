@@ -49,7 +49,6 @@ const ConfigPage = lazySettingsPage(() => import('@/pages/Config'));
 const SystemLogPage = lazySettingsPage(() => import('@/pages/SystemLog'));
 const ArchivedDataPage = lazySettingsPage(() => import('./ArchivedDataPanel'), ['session']);
 const NetworkProxyPage = lazySettingsPage(() => import('./NetworkProxyPanel'), ['networkProxy']);
-const VoiceSettingsPage = lazySettingsPage(() => import('@/pages/VoiceSettings'), ['voice']);
 
 
 function PreferenceRow({
@@ -491,7 +490,6 @@ function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
       {sectionId === 'archived-data' && <ArchivedDataPage />}
       {sectionId === 'system-logs' && <SystemLogPage />}
       {sectionId === 'network-proxy' && <NetworkProxyPage />}
-      {sectionId === 'voice-input' && <VoiceSettingsPage />}
       {ExtensionPage && <ExtensionPage />}
     </Suspense>
   );

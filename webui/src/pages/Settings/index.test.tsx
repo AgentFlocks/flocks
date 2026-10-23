@@ -51,10 +51,6 @@ vi.mock('@/pages/SystemLog', () => ({
   default: () => <div>system logs page</div>,
 }));
 
-vi.mock('@/pages/VoiceSettings', () => ({
-  default: () => <div>voice settings page</div>,
-}));
-
 vi.mock('./ArchivedDataPanel', () => ({
   default: () => <div>archived data page</div>,
 }));
@@ -388,7 +384,7 @@ it('restarts polling when the admin refreshes after a timeout', async () => {
     const tabs = screen.getByRole('navigation', { name: 'settingsTitle' });
     await waitFor(() => expect(within(tabs).getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
       // Security config and audit logs are extension sections; a stock build has none.
-      'settingsPreferences', 'archivedData', 'accountManagement', 'systemLog', 'networkProxy', 'voiceInput',
+      'settingsPreferences', 'archivedData', 'accountManagement', 'systemLog', 'networkProxy',
     ]));
     expect(within(tabs).getByRole('tab', { name: 'systemLog' })).toHaveAttribute('aria-selected', 'true');
     expect(within(tabs).queryByRole('tab', { name: /flocks/i })).not.toBeInTheDocument();
@@ -414,18 +410,6 @@ it('restarts polling when the admin refreshes after a timeout', async () => {
     renderSettings('/settings/archived-data');
 
     expect(await screen.findByText('archived data page')).toBeInTheDocument();
-  });
-
-  it('renders shared voice settings for an administrator without any extension or license', async () => {
-    renderSettings('/settings/voice-input');
-    expect(await screen.findByText('voice settings page')).toBeInTheDocument();
-  });
-
-  it('keeps shared voice configuration restricted to administrators', async () => {
-    useAuth.mockReturnValue({ user: { id: 'member', role: 'user' } });
-    renderSettings('/settings/voice-input');
-    expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
-    expect(screen.queryByText('voice settings page')).not.toBeInTheDocument();
   });
 
 });

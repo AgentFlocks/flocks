@@ -62,7 +62,7 @@ src/
 
 ## 界面规范
 
-界面样式以 flocksdev 的 dev 分支为准：页面直接写 Tailwind 默认色板类（`bg-white`、`text-gray-500`、`border-gray-200`…），深色模式由 `src/styles/index.css` 里的 `.dark` 兼容表和 `dark:` 变体处理，图标用 `lucide-react`。新页面照 dev 里同类页面的写法来。`src/styles/tokens.css` 的语义变量和 `index.css` 末尾的 `ui-*` 类只留给 dev 没有的界面（网络代理、语音输入等），取值已对齐 dev 配色。[UI_SPEC.md](./UI_SPEC.md)（v1.4）已停用，`ui_spec_check.py` 不再是 CI 检查。
+界面样式以 flocksdev 的 dev 分支为准：页面直接写 Tailwind 默认色板类（`bg-white`、`text-gray-500`、`border-gray-200`…），深色模式由 `src/styles/index.css` 里的 `.dark` 兼容表和 `dark:` 变体处理，图标用 `lucide-react`。新页面照 dev 里同类页面的写法来。`src/styles/tokens.css` 的语义变量和 `index.css` 末尾的 `ui-*` 类只留给 dev 没有的界面（网络代理、扩展注册的页面等），取值已对齐 dev 配色。[UI_SPEC.md](./UI_SPEC.md)（v1.4）已停用，`ui_spec_check.py` 不再是 CI 检查。
 
 ## 开发规范
 

@@ -116,7 +116,6 @@
   "updateNow": "Upgrade now",
   "currentVersionLabel": "Current v{{version}}",
   "currentProductVersionLabel": "Current {{version}}",
-  "voiceInput": "Voice input",
   "agentWorkspace": "Agent Workspace",
   "switchWorkspace": "Switch workspace",
   "sceneManagement": "Scene management",

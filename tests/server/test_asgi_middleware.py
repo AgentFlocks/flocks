@@ -577,7 +577,7 @@ async def test_critical_plugin_failure_blocks_websocket_auth(monkeypatch) -> Non
     from flocks.plugin import PluginLoader
     from flocks.server import auth
 
-    scope = _http_scope("/api/voice/stream")
+    scope = _http_scope("/api/pty/example/connect")
     scope.update(type="websocket", scheme="ws", headers=[(b"authorization", b"Bearer valid")])
     monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", True)
     monkeypatch.setattr(auth, "_auth_context_adapters", {})

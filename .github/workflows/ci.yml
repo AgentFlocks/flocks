@@ -56,7 +56,7 @@ jobs:
         run: python3 scripts/oss_boundary_check.py
 
       - name: Python test
-        run: uv run --no-sync pytest tests/scripts tests/hub tests/net tests/db tests/voice
+        run: uv run --no-sync pytest tests/scripts tests/hub tests/net tests/db
 
       # Architecture V1.2 guarantees: caller identity, model call ids, workflow
       # code gates, page secrets, pinned UI directory, managed-install CLI and
