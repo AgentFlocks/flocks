@@ -586,6 +586,7 @@ def test_build_dependency_sync_command_installs_project_on_windows(
     assert updater._build_dependency_sync_command("uv", uv_default_index="https://mirror.example/simple") == [
         "uv",
         "sync",
+        "--inexact",
         "--no-python-downloads",
         "--default-index",
         "https://mirror.example/simple",
@@ -597,7 +598,7 @@ def test_build_dependency_sync_command_keeps_project_install_on_non_windows(
 ) -> None:
     monkeypatch.setattr(updater.sys, "platform", "linux")
 
-    assert updater._build_dependency_sync_command("uv") == ["uv", "sync", "--no-python-downloads"]
+    assert updater._build_dependency_sync_command("uv") == ["uv", "sync", "--inexact", "--no-python-downloads"]
 
 
 def test_wheel_build_config_does_not_force_include_runtime_or_build_outputs() -> None:
@@ -1911,6 +1912,7 @@ async def test_dependency_sync_retries_cn_mirror_with_default_source(
         if cmd == [
             "/usr/bin/uv",
             "sync",
+            "--inexact",
             "--no-python-downloads",
             "--default-index",
             "https://mirrors.aliyun.com/pypi/simple",
@@ -1949,11 +1951,12 @@ async def test_dependency_sync_retries_cn_mirror_with_default_source(
         [
             "/usr/bin/uv",
             "sync",
+            "--inexact",
             "--no-python-downloads",
             "--default-index",
             "https://mirrors.aliyun.com/pypi/simple",
         ],
-        ["/usr/bin/uv", "sync", "--no-python-downloads"],
+        ["/usr/bin/uv", "sync", "--inexact", "--no-python-downloads"],
     ]
 
 
@@ -1991,11 +1994,12 @@ async def test_dependency_sync_retries_default_source_after_timeout_and_logs_out
         [
             "uv",
             "sync",
+            "--inexact",
             "--no-python-downloads",
             "--default-index",
             "https://mirrors.aliyun.com/pypi/simple",
         ],
-        ["uv", "sync", "--no-python-downloads"],
+        ["uv", "sync", "--inexact", "--no-python-downloads"],
     ]
     timeout_payload = next(payload for event, payload in warnings if event == "updater.dependencies.sync_timeout")
     assert timeout_payload["stdout"] == "mirror stdout"
@@ -2609,7 +2613,7 @@ async def test_dependency_sync_updates_windows_venv_in_place(
     )
 
     assert error is None
-    assert sync_calls == [([r"C:\tools\uv.exe", "sync", "--no-python-downloads"], install_root)]
+    assert sync_calls == [([r"C:\tools\uv.exe", "sync", "--inexact", "--no-python-downloads"], install_root)]
     assert (install_root / ".venv" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "old"
     assert not (install_root / ".venv.flocks_backup").exists()
 

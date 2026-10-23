@@ -483,6 +483,7 @@ async def test_install_or_repair_source_prebuilt_with_dependency_wheels_syncs_of
     assert captured[0] == [
         "/opt/flocks/tools/uv/uv",
         "sync",
+        "--inexact",
         "--frozen",
         "--offline",
         "--no-python-downloads",
