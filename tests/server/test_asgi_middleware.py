@@ -135,6 +135,7 @@ def test_production_http_middleware_is_pure_asgi_and_keeps_order(tmp_path) -> No
         "_RequestLoggingMiddleware",
         "_InstanceContextMiddleware",
         "_SecurityHeadersMiddleware",
+        "_ExtensionErrorResponseMiddleware",
     ]
 
 

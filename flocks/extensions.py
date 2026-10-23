@@ -4,6 +4,7 @@ Shared registration semantics for every Flocks extension point.
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -280,6 +281,65 @@ def register_public_path(pattern: Any) -> None:
     register_public_path_pattern(pattern)
 
 
+_serving = False
+
+
+def mark_serving(active: bool = True) -> None:
+    """Called by the server: true as its lifespan starts, before any extension loads; false once it ends."""
+    global _serving
+    _serving = bool(active)
+
+
+def serving() -> bool:
+    """Whether this process is serving now (not a CLI command that loaded the same extensions)."""
+    return _serving
+
+
+_error_responses: dict[type, Callable[[Any, BaseException], Any]] = {}
+
+
+def register_error_response(exc_type: type, handler: Callable[[Any, BaseException], Any]) -> None:
+    """Answer ``exc_type`` with ``handler(request, exc)``'s response instead of a bare 500.
+
+    Asked for an error a route did not handle, raised directly or behind
+    another one (``raise ... from``), so a store wrapping a driver error still
+    gets the extension's answer. The handler may be a coroutine; returning
+    None leaves the 500. One handler per type; registering again replaces it.
+    """
+    _error_responses[exc_type] = handler
+
+
+def unregister_error_response(exc_type: type) -> None:
+    _error_responses.pop(exc_type, None)
+
+
+#: Errors already put to the handlers: the inner middleware asks first and the
+#: catch-all may see the same error again; a handler is asked once per error.
+_asked: "weakref.WeakSet[BaseException]" = weakref.WeakSet()
+
+
+async def error_response(request: Any, exc: BaseException) -> Any:
+    """An extension's response for ``exc``, or None when none answers it (asked once per error)."""
+    import inspect
+
+    try:
+        if exc in _asked:
+            return None
+        _asked.add(exc)
+    except TypeError:  # an error that cannot be weakly referenced is simply asked again
+        pass
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen and len(seen) < 8:
+        seen.add(id(current))
+        for exc_type, handler in list(_error_responses.items()):
+            if isinstance(current, exc_type):
+                result = handler(request, current)
+                return await result if inspect.isawaitable(result) else result
+        current = current.__cause__ or current.__context__
+    return None
+
+
 _startup_hooks: list[tuple[str, Callable[[], Any], float]] = []
 _shutdown_hooks: list[tuple[str, Callable[[], Any], float]] = []
 
@@ -450,6 +510,7 @@ __all__ = [
     "register_auth_backend",
     "register_branding_provider",
     "register_content_source",
+    "register_error_response",
     "register_http_hook",
     "register_hub_root",
     "register_license_checker",
@@ -462,7 +523,11 @@ __all__ = [
     "register_public_path",
     "register_shutdown_hook",
     "register_startup_hook",
+    "mark_serving",
+    "serving",
     "run_shutdown_hooks",
     "run_startup_hooks",
+    "error_response",
+    "unregister_error_response",
     "unregister_hub_root",
 ]

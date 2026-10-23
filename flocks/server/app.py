@@ -105,6 +105,19 @@ def _schedule_startup_phase(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """The server's lifecycle; this process serves (``flocks.extensions.serving``) for exactly its span."""
+    from flocks.extensions import mark_serving
+
+    mark_serving(True)
+    try:
+        async with _serving_lifespan(app):
+            yield
+    finally:
+        mark_serving(False)
+
+
+@asynccontextmanager
+async def _serving_lifespan(app: FastAPI):
     """Handle application lifecycle"""
     from flocks.notifications.token_policy import service_boot_id
 
@@ -929,6 +942,52 @@ class _DeferredCORSMiddleware:
         await self._inner(scope, receive, send)
 
 
+class _ExtensionErrorResponseMiddleware:
+    """Answer an error an extension registered a response for, before the catch-all.
+
+    The catch-all (``general_exception_handler``) runs in the outermost error
+    middleware, which re-raises after answering so the server logs a crash; an
+    extension's deliberate refusal (``flocks.extensions.register_error_response``)
+    is a response, not a crash. Innermost, so the other middlewares see it as
+    an ordinary response. Once a response has started it can no longer be
+    replaced, and the error goes on as before.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def tracking_send(message: Message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracking_send)
+        except Exception as exc:
+            if started:
+                raise
+            from flocks.extensions import error_response
+
+            try:
+                answered = await error_response(Request(scope, receive=receive), exc)
+            except Exception as handler_exc:  # the catch-all still answers
+                log.warn("server.error_response_failed", {"path": scope.get("path"), "error": str(handler_exc)})
+                answered = None
+            if answered is None:
+                raise
+            await answered(scope, receive, send)
+
+
+app.add_middleware(_ExtensionErrorResponseMiddleware)
+
+
 class _SecurityHeadersMiddleware:
     """Attach baseline browser security headers without spawning request tasks."""
 
@@ -1292,6 +1351,15 @@ async def managed_workflow_read_only_handler(request: Request, exc: ManagedWorkf
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     """Handle all other exceptions"""
+    from flocks.extensions import error_response
+
+    try:
+        answered = await error_response(request, exc)
+    except Exception as handler_exc:  # an extension's handler must not make the answer worse than a 500
+        log.warn("server.error_response_failed", {"path": request.url.path, "error": str(handler_exc)})
+        answered = None
+    if answered is not None:
+        return answered
     import traceback
     tb = traceback.format_exc()
     log.error("server.error", {
