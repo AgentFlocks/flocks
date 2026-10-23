@@ -4,9 +4,7 @@ Cost calculator for LLM usage
 Calculates monetary cost from token usage and model pricing.
 """
 
-from typing import Optional
-
-from flocks.provider.types import PriceConfig, UsageCost
+from flocks.provider.types import PriceConfig, PriceTier, UsageCost
 
 
 class CostCalculator:
@@ -40,18 +38,28 @@ class CostCalculator:
             Computed costs.
         """
         unit = pricing.unit if pricing.unit > 0 else 1_000_000
+        rates: PriceConfig | PriceTier = pricing
+        if pricing.tiers:
+            # Select one complete price tier using the whole prompt, before
+            # subtracting cache tokens. Tiers are not progressive tax bands.
+            for tier in pricing.tiers:
+                if tier.max_input_tokens is None or input_tokens <= tier.max_input_tokens:
+                    rates = tier
+                    break
+            else:
+                raise ValueError("No price tier covers the request input tokens")
 
         # Input cost: prompt tokens that neither hit nor fill the cache
         billable_input = max(0, input_tokens - cached_tokens - cache_write_tokens)
-        input_cost = (billable_input / unit) * pricing.input
+        input_cost = (billable_input / unit) * rates.input
 
         # Output cost: providers bill reasoning as output
-        output_cost = ((output_tokens + reasoning_tokens) / unit) * pricing.output
+        output_cost = ((output_tokens + reasoning_tokens) / unit) * rates.output
 
         # Cache cost.  A model without a cache price is charged the input
         # price: an unknown cache discount is not a free cache.
-        read_price = pricing.cache_read if pricing.cache_read is not None else pricing.input
-        write_price = pricing.cache_write if pricing.cache_write is not None else pricing.input
+        read_price = rates.cache_read if rates.cache_read is not None else rates.input
+        write_price = rates.cache_write if rates.cache_write is not None else rates.input
         cache_cost = 0.0
         if cached_tokens > 0:
             cache_cost = (cached_tokens / unit) * read_price

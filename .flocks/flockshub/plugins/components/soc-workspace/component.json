@@ -1,10 +1,10 @@
 {
   "schemaVersion": "hub.component.v1",
   "id": "soc-workspace",
-  "name": "SOC Workspace",
-  "nameCn": "SOC 工作区",
-  "description": "SOC workspace with alert triage, persistent investigations, governed response and incident reviews.",
-  "descriptionCn": "SOC 工作区：告警研判、持续调查、受控处置及事件复盘。",
+  "name": "Alert Operations Suite",
+  "nameCn": "告警运营套件",
+  "description": "Alert operations suite: alert triage, persistent investigations, governed response and incident reviews.",
+  "descriptionCn": "告警运营套件：告警研判、持续调查、受控处置及事件复盘。",
   "components": [
     {
       "type": "webui",

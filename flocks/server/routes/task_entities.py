@@ -5,7 +5,7 @@ import time
 from typing import List, Optional, Type
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 from flocks.server.auth import require_admin
 from flocks.server.routes._timing import log_route_timing
 from flocks.utils.log import Log
@@ -416,6 +416,9 @@ async def list_executions(
     status_filter: Optional[str] = Query(None, alias="status"),
     priority: Optional[str] = Query(None),
     delivery_status: Optional[str] = Query(None, alias="deliveryStatus"),
+    title: Optional[str] = Query(None),
+    started_after: Optional[AwareDatetime] = Query(None, alias="startedAfter"),
+    started_before: Optional[AwareDatetime] = Query(None, alias="startedBefore"),
     sort_by: str = Query("queued_at", alias="sortBy"),
     sort_order: str = Query("desc", alias="sortOrder"),
     offset: int = Query(0, ge=0),
@@ -423,11 +426,24 @@ async def list_executions(
 ):
     from flocks.task.manager import TaskManager
 
+    if (
+        started_after is not None
+        and started_before is not None
+        and started_after > started_before
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="startedAfter must be before or equal to startedBefore",
+        )
+
     items, total = await TaskManager.list_executions(
         scheduler_id=scheduler_id,
         status=_parse_execution_status_filter(status_filter),
         priority=_parse_priority(priority),
         delivery_status=_parse_delivery_status(delivery_status),
+        title=title,
+        started_after=started_after,
+        started_before=started_before,
         sort_by=sort_by,
         sort_order=sort_order,
         offset=offset,

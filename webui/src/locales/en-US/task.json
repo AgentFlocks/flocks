@@ -74,6 +74,18 @@
     "custom": "Custom..."
   },
   "queued": {
+    "filterNamePlaceholder": "Search task names",
+    "filterExecutionTime": "Execution time range",
+    "filterStartTime": "Execution start time from",
+    "filterEndTime": "Execution start time through",
+    "filterAllPriorities": "All priorities",
+    "filterSearch": "Search",
+    "filterReset": "Reset",
+    "filterTimeHint": "Filters actual start times in your local timezone, including the final minute. Tasks that have not started are excluded from time filters.",
+    "filterInvalidTime": "Enter a valid execution time",
+    "filterInvalidRange": "Start time cannot be later than end time",
+    "filterEmptyTitle": "No matching tasks",
+    "filterEmptyDescription": "Adjust the filters or select Reset",
     "filterAll": "All",
     "filterCompleted": "Completed",
     "filterFailed": "Failed",

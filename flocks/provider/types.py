@@ -9,7 +9,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ==================== Enums ====================
@@ -226,6 +226,16 @@ class ModelLimits(BaseModel):
     max_output_tokens: int = 4096
 
 
+class PriceTier(BaseModel):
+    """Whole-request prices selected by the inclusive full-input upper bound."""
+
+    max_input_tokens: Optional[int] = Field(None, gt=0)
+    input: float = Field(..., ge=0, allow_inf_nan=False)
+    output: float = Field(..., ge=0, allow_inf_nan=False)
+    cache_read: Optional[float] = Field(None, ge=0, allow_inf_nan=False)
+    cache_write: Optional[float] = Field(None, ge=0, allow_inf_nan=False)
+
+
 class PriceConfig(BaseModel):
     """价格配置 (每百万 token)"""
     input: float = 0.0
@@ -234,6 +244,25 @@ class PriceConfig(BaseModel):
     currency: str = "USD"
     cache_read: Optional[float] = None
     cache_write: Optional[float] = None
+    tiers: List[PriceTier] = Field(default_factory=list)
+    price_version: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_tiers(self) -> "PriceConfig":
+        if not self.tiers:
+            return self
+        previous_max = 0
+        for index, tier in enumerate(self.tiers):
+            if tier.max_input_tokens is None:
+                if index != len(self.tiers) - 1:
+                    raise ValueError("Only the final price tier may have no input limit")
+            elif tier.max_input_tokens <= previous_max:
+                raise ValueError("Price tier input limits must be strictly increasing")
+            else:
+                previous_max = tier.max_input_tokens
+        if self.tiers[-1].max_input_tokens is not None:
+            raise ValueError("The final price tier must cover inputs without an upper limit")
+        return self
 
 
 class ModelCapabilitiesV2(BaseModel):

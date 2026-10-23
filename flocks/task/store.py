@@ -27,6 +27,13 @@ from .models import (
 log = Log.create(service="task.store")
 
 
+# ``started_at`` is ISO text; read it as an instant. One without an offset is UTC.
+_STARTED_AT_INSTANT = (
+    "(CASE WHEN started_at ~ '(Z|[+-][0-9]{2}(:?[0-9]{2})?)$' THEN started_at::timestamptz"
+    " ELSE started_at::timestamp AT TIME ZONE 'UTC' END)"
+)
+
+
 class TaskStore:
     _initialized = False
     # The handle, not the driver connection: on PostgreSQL there is no
@@ -561,6 +568,9 @@ class TaskStore:
         status: Optional[TaskStatus] = None,
         priority: Optional[TaskPriority] = None,
         delivery_status: Optional[DeliveryStatus] = None,
+        title: Optional[str] = None,
+        started_after: Optional[datetime] = None,
+        started_before: Optional[datetime] = None,
         sort_by: str = "queued_at",
         sort_order: str = "desc",
         offset: int = 0,
@@ -580,6 +590,25 @@ class TaskStore:
         if delivery_status:
             clauses.append("delivery_status = ?")
             params.append(delivery_status.value)
+        search_title = (title or "").strip()
+        if search_title:
+            # Treat SQL LIKE wildcards as literal task-name characters.
+            escaped_title = (
+                search_title.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            # ILIKE: SQLite's LIKE, which this filter was written for, ignores ASCII case.
+            clauses.append("title ILIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped_title}%")
+        # ISO strings may have different offsets. Compare actual instants, with
+        # inclusive microsecond boundaries, and exclude tasks not yet started
+        # (NULL compares as unknown). Rows written without an offset follow
+        # the task store's UTC convention, whatever the session time zone.
+        if started_after is not None:
+            clauses.append(f"{_STARTED_AT_INSTANT} >= ?::text::timestamptz")
+            params.append(started_after.isoformat())
+        if started_before is not None:
+            clauses.append(f"{_STARTED_AT_INSTANT} <= ?::text::timestamptz")
+            params.append(started_before.isoformat())
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         allowed_sort = {
             "created_at",

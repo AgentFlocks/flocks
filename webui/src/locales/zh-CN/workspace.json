@@ -290,5 +290,6 @@
     "selectDesc": "记忆文件由 Rex 等 Agent 自动写入，记录任务上下文与关键信息",
     "loadMemoryFailed": "加载记忆文件失败",
     "readFileFailed": "读取文件失败"
-  }
+  },
+  "title": "工作目录"
 }

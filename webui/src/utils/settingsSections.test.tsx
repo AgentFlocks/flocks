@@ -67,8 +67,9 @@ describe('useSettingsSectionGroups gates', () => {
     await act(async () => { answer(false); });
     await waitFor(() => expect(result.current.ready).toBe(true));
     expect(sectionIds(result.current.groups)).not.toContain('ext-gated');
-    // dev's order first (account, system logs); the sections dev does not have go last.
-    expect(sectionIds(result.current.groups)).toEqual(['preferences', 'archived-data', 'account', 'ext-ordered', 'system-logs', 'network-proxy', 'voice-input']);
+    // dev's order first (account, system logs); the sections dev does not have go last,
+    // and the data group follows the system group as in dev.
+    expect(sectionIds(result.current.groups)).toEqual(['preferences', 'account', 'ext-ordered', 'system-logs', 'network-proxy', 'voice-input', 'archived-data']);
   });
 
   it('places a registered section by its order among the built-in ones', async () => {
@@ -78,8 +79,10 @@ describe('useSettingsSectionGroups gates', () => {
     const ids = sectionIds(result.current.groups);
     expect(ids.indexOf('ext-ordered')).toBe(ids.indexOf('account') + 1);
     expect(ids.indexOf('ext-ordered')).toBeLessThan(ids.indexOf('system-logs'));
-    // Without an order a registered section comes after every built-in one.
-    expect(ids[ids.length - 1]).toBe('ext-gated');
+    // Without an order a registered section comes after every built-in one of its group.
+    const system = result.current.groups.find((group) => group.id === 'system')!.items.map((item) => item.id);
+    expect(system[system.length - 1]).toBe('ext-gated');
+    expect(ids[ids.length - 1]).toBe('archived-data');
   });
 
   it('runs the check once for several mounted instances and re-runs on refreshOn', async () => {

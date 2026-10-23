@@ -77,8 +77,10 @@
         "pricing": {
           "input": 1.0,
           "output": 4.0,
-          "cache_read": 0.1,
-          "currency": "CNY"
+          "cache_read": 0.02,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026102001"
         }
       },
       "deepseek-v4.1-flash-1017": {
@@ -107,7 +109,9 @@
           "input": 1.0,
           "output": 4.0,
           "cache_read": 0.1,
-          "currency": "CNY"
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101902"
         }
       },
       "deepseek-v4-flash-0731": {
@@ -133,8 +137,10 @@
         "pricing": {
           "input": 1.0,
           "output": 2.0,
-          "cache_read": 0.2,
-          "currency": "CNY"
+          "cache_read": 0.02,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026102001"
         }
       },
       "kimi-k2.7-code": {
@@ -163,8 +169,10 @@
         "pricing": {
           "input": 6.5,
           "output": 27.0,
-          "cache_read": 1.3,
-          "currency": "CNY"
+          "cache_read": null,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026072001"
         }
       },
       "minimax-m3": {
@@ -191,8 +199,24 @@
         "pricing": {
           "input": 4.2,
           "output": 16.8,
+          "cache_read": 0.84,
           "currency": "CNY",
-          "note": "≤512k input: ¥4.20/M tokens output: ¥16.80/M tokens; >512k input: ¥8.40/M tokens output: ¥33.60/M tokens"
+          "unit": 1000000,
+          "price_version": "2026102002",
+          "tiers": [
+            {
+              "max_input_tokens": 512000,
+              "input": 2.1,
+              "output": 8.4,
+              "cache_read": 0.42
+            },
+            {
+              "max_input_tokens": null,
+              "input": 4.2,
+              "output": 16.8,
+              "cache_read": 0.84
+            }
+          ]
         }
       },
       "minimax-m2.7": {
@@ -218,7 +242,10 @@
         "pricing": {
           "input": 2.1,
           "output": 8.4,
-          "currency": "CNY"
+          "cache_read": 0.42,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026102001"
         }
       },
       "minimax-m2.5": {
@@ -244,7 +271,10 @@
         "pricing": {
           "input": 2.1,
           "output": 8.4,
-          "currency": "CNY"
+          "cache_read": 0.42,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026102001"
         }
       },
       "GLM-5": {
@@ -270,7 +300,10 @@
         "pricing": {
           "input": 4.0,
           "output": 18.0,
-          "currency": "CNY"
+          "cache_read": 0.8,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
         }
       },
       "qwen3.6-plus": {
@@ -297,7 +330,10 @@
         "pricing": {
           "input": 2.0,
           "output": 12.0,
-          "currency": "CNY"
+          "cache_read": 0.2,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
         }
       },
       "kimi-k2.6": {
@@ -326,8 +362,10 @@
         "pricing": {
           "input": 6.5,
           "output": 27.0,
-          "cache_read": 1.3,
-          "currency": "CNY"
+          "cache_read": 1.1,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
         }
       },
       "deepseek-v4-flash": {
@@ -352,7 +390,76 @@
         "pricing": {
           "input": 1.0,
           "output": 2.0,
-          "currency": "CNY"
+          "cache_read": 0.02,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026102001"
+        }
+      },
+      "qwen3.8-max": {
+        "name": "Qwen3.8-Max",
+        "family": "qwen3.8",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_vision": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_output_tokens": 65536
+        },
+        "pricing": {
+          "input": 12.0,
+          "output": 36.0,
+          "cache_read": 1.5,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
+        }
+      },
+      "qwen3.8-flash": {
+        "name": "Qwen3.8-Flash",
+        "family": "qwen3.8",
+        "pricing": {
+          "input": 0.8,
+          "output": 2.7,
+          "cache_read": 0.1,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
+        }
+      },
+      "qwen3.8-27b": {
+        "name": "Qwen3.8-27b",
+        "family": "qwen3.8",
+        "pricing": {
+          "input": 3.0,
+          "output": 12.0,
+          "cache_read": 0.6,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
+        }
+      },
+      "glm-5.3-flash": {
+        "name": "GLM-5.3-Flash",
+        "family": "glm",
+        "pricing": {
+          "input": 0.8,
+          "output": 2.8,
+          "cache_read": 0.23,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
         }
       }
     },
@@ -408,8 +515,10 @@
         "pricing": {
           "input": 1.0,
           "output": 4.0,
-          "cache_read": 0.1,
-          "currency": "CNY"
+          "cache_read": 0.02,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026102001"
         }
       },
       "deepseek-v4.1-flash-1017": {
@@ -438,7 +547,9 @@
           "input": 1.0,
           "output": 4.0,
           "cache_read": 0.1,
-          "currency": "CNY"
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101902"
         }
       },
       "deepseek-v4-flash-0731": {
@@ -464,8 +575,10 @@
         "pricing": {
           "input": 1.0,
           "output": 2.0,
-          "cache_read": 0.2,
-          "currency": "CNY"
+          "cache_read": 0.02,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026102001"
         }
       },
       "kimi-k2.7-code": {
@@ -494,8 +607,10 @@
         "pricing": {
           "input": 6.5,
           "output": 27.0,
-          "cache_read": 1.3,
-          "currency": "CNY"
+          "cache_read": null,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026072001"
         }
       },
       "minimax-m3": {
@@ -521,8 +636,24 @@
         "pricing": {
           "input": 4.2,
           "output": 16.8,
+          "cache_read": 0.84,
           "currency": "CNY",
-          "note": "≤512k input: ¥4.20/M tokens output: ¥16.80/M tokens; >512k input: ¥8.40/M tokens output: ¥33.60/M tokens"
+          "unit": 1000000,
+          "price_version": "2026102002",
+          "tiers": [
+            {
+              "max_input_tokens": 512000,
+              "input": 2.1,
+              "output": 8.4,
+              "cache_read": 0.42
+            },
+            {
+              "max_input_tokens": null,
+              "input": 4.2,
+              "output": 16.8,
+              "cache_read": 0.84
+            }
+          ]
         }
       },
       "minimax-m2.7": {
@@ -548,7 +679,10 @@
         "pricing": {
           "input": 2.1,
           "output": 8.4,
-          "currency": "CNY"
+          "cache_read": 0.42,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026102001"
         }
       },
       "minimax-m2.5": {
@@ -574,7 +708,10 @@
         "pricing": {
           "input": 2.1,
           "output": 8.4,
-          "currency": "CNY"
+          "cache_read": 0.42,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026102001"
         }
       },
       "GLM-5": {
@@ -600,7 +737,10 @@
         "pricing": {
           "input": 4.0,
           "output": 18.0,
-          "currency": "CNY"
+          "cache_read": 0.8,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
         }
       },
       "qwen3.6-plus": {
@@ -627,7 +767,10 @@
         "pricing": {
           "input": 2.0,
           "output": 12.0,
-          "currency": "CNY"
+          "cache_read": 0.2,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
         }
       },
       "deepseek-v4-flash": {
@@ -652,7 +795,108 @@
         "pricing": {
           "input": 1.0,
           "output": 2.0,
-          "currency": "CNY"
+          "cache_read": 0.02,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026102001"
+        }
+      },
+      "qwen3.8-max": {
+        "name": "Qwen3.8-Max",
+        "family": "qwen3.8",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_vision": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_output_tokens": 65536
+        },
+        "pricing": {
+          "input": 12.0,
+          "output": 36.0,
+          "cache_read": 1.5,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
+        }
+      },
+      "qwen3.8-flash": {
+        "name": "Qwen3.8-Flash",
+        "family": "qwen3.8",
+        "pricing": {
+          "input": 0.8,
+          "output": 2.7,
+          "cache_read": 0.1,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
+        }
+      },
+      "qwen3.8-27b": {
+        "name": "Qwen3.8-27b",
+        "family": "qwen3.8",
+        "pricing": {
+          "input": 3.0,
+          "output": 12.0,
+          "cache_read": 0.6,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
+        }
+      },
+      "glm-5.3-flash": {
+        "name": "GLM-5.3-Flash",
+        "family": "glm",
+        "pricing": {
+          "input": 0.8,
+          "output": 2.8,
+          "cache_read": 0.23,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
+        }
+      },
+      "kimi-k2.6": {
+        "name": "kimi-k2.6",
+        "family": "kimi-k2.6",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_vision": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "placeholder": " ",
+            "cross_provider_policy": "placeholder"
+          },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 256000,
+          "max_input_tokens": 224000,
+          "max_output_tokens": 16000
+        },
+        "pricing": {
+          "input": 6.5,
+          "output": 27.0,
+          "cache_read": 1.1,
+          "currency": "CNY",
+          "unit": 1000000,
+          "price_version": "2026101901"
         }
       }
     },

@@ -63,7 +63,12 @@ WINDOWS_FRONTEND_BUILD_ASSERTION_MARKERS = (
 )
 WEBUI_BUILD_IGNORED_DIRS = frozenset({"dist", "node_modules", ".vite"})
 WATCHDOG_PID_FILENAME = "watchdog.pid"
+BACKEND_RUNTIME_DIRNAME = "backend-runtime"
+BACKEND_RUNTIME_DIR_ENV = "_FLOCKS_BACKEND_RUNTIME_DIR"
 SUPERVISOR_START_TIMEOUT_SECONDS = 180.0
+DAEMON_STOP_TIMEOUT_SECONDS = 30.0
+DAEMON_FORCE_STOP_TIMEOUT_SECONDS = 10.0
+PROCESS_DESCRIPTION_MAX_CHARS = 160
 
 
 class ServiceError(RuntimeError):
@@ -89,6 +94,7 @@ class RuntimeRecord:
     port: int | None = None
     command: tuple[str, ...] = ()
     started_at: float | None = None
+    process_identity: str | None = None
 
 
 def repo_root() -> Path:
@@ -142,6 +148,11 @@ def ensure_runtime_dirs(paths: RuntimePaths | None = None) -> RuntimePaths:
 def watchdog_pid_path(paths: RuntimePaths) -> Path:
     """Return the watchdog runtime record path."""
     return paths.run_dir / WATCHDOG_PID_FILENAME
+
+
+def backend_runtime_dir(paths: RuntimePaths) -> Path:
+    """Return where supervised backends record themselves, one file per process."""
+    return paths.run_dir / BACKEND_RUNTIME_DIRNAME
 
 
 def ensure_install_layout(root: Path | None = None) -> Path:
@@ -381,6 +392,7 @@ def _parse_runtime_record(raw: str) -> RuntimeRecord | None:
 
     started_at = payload.get("started_at")
     started_value = float(started_at) if isinstance(started_at, (int, float)) and not isinstance(started_at, bool) else None
+    identity = payload.get("process_identity")
 
     return RuntimeRecord(
         pid=pid,
@@ -389,6 +401,7 @@ def _parse_runtime_record(raw: str) -> RuntimeRecord | None:
         port=_coerce_positive_int(payload.get("port")),
         command=command,
         started_at=started_value,
+        process_identity=identity if isinstance(identity, str) and identity else None,
     )
 
 
@@ -573,6 +586,77 @@ def pid_is_running(pid: int | None) -> bool:
     return True
 
 
+class _FileTime(ctypes.Structure):
+    _fields_ = [("low", ctypes.c_uint32), ("high", ctypes.c_uint32)]
+
+
+def _windows_process_creation_filetime(pid: int) -> int | None:
+    """Return a Windows process creation FILETIME without needing its command line."""
+    if sys.platform != "win32" or pid <= 0:
+        return None
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    open_process.restype = ctypes.c_void_p
+    get_process_times = kernel32.GetProcessTimes
+    get_process_times.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(_FileTime)] * 4
+    get_process_times.restype = ctypes.c_int
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+
+    handle = open_process(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        times = [_FileTime() for _ in range(4)]
+        if not get_process_times(handle, *(ctypes.byref(item) for item in times)):
+            return None
+        return (times[0].high << 32) | times[0].low
+    finally:
+        close_handle(handle)
+
+
+def _proc_identity(pid: int) -> str | None:
+    """Return boot id plus start ticks from ``/proc``: exact for one process on one boot."""
+    try:
+        stat = (_PROC_ROOT / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+        # fields[0] is stat field 3 (state); field 22 is the start time in clock ticks since boot.
+        start_ticks = stat.rpartition(")")[2].split()[19]
+        boot_id = (_PROC_ROOT / "sys" / "kernel" / "random" / "boot_id").read_text(encoding="utf-8").strip()
+    except (OSError, IndexError):
+        return None
+    # Without the boot id, start ticks could repeat after a reboot: no token beats a weak one.
+    if not start_ticks.isdigit() or not boot_id:
+        return None
+    return f"proc:{boot_id}:{start_ticks}"
+
+
+def _process_identity(pid: int) -> str | None:
+    """Return an operating-system creation token that changes when a pid is reused."""
+    if pid <= 0:
+        return None
+    if sys.platform == "win32":
+        filetime = _windows_process_creation_filetime(pid)
+        return f"filetime:{filetime}" if filetime else None
+    if _proc_available():
+        identity = _proc_identity(pid)
+        if identity is not None:
+            return identity
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except FileNotFoundError:
+        return None
+    started = " ".join(completed.stdout.split())
+    return f"lstart:{started}" if completed.returncode == 0 and started else None
+
+
 def _windows_tasklist_process_name(pid: int) -> str | None:
     """Return the Windows image name for a pid via tasklist when possible."""
     if sys.platform != "win32" or pid <= 0:
@@ -627,7 +711,9 @@ def _windows_process_snapshot(pid: int) -> dict[str, str] | None:
         )
         if completed.returncode == 0:
             with contextlib.suppress(json.JSONDecodeError):
-                payload = json.loads((completed.stdout or "").strip() or "{}")
+                # Tolerate a UTF-8 BOM before the JSON: json.loads rejects it, and the
+                # tasklist fallback below carries no command line for identity checks.
+                payload = json.loads((completed.stdout or "").lstrip("\ufeff").strip() or "{}")
                 if isinstance(payload, dict):
                     return {
                         "name": str(payload.get("Name") or ""),
@@ -1134,6 +1220,152 @@ def cleanup_trusted_daemon_processes(*, console, root: Path | None = None, paths
     return trusted
 
 
+def write_backend_runtime_record(directory: Path, *, host: str, port: int) -> Path:
+    """Record the current process as a supervised backend; returns the record path."""
+    pid = os.getpid()
+    payload = {
+        "pid": pid,
+        "host": host,
+        "port": port,
+        "started_at": time.time(),
+        "process_identity": _process_identity(pid),
+    }
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{pid}.json"
+    temp_path = directory / f".{pid}.json.tmp"
+    temp_path.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+    os.replace(temp_path, path)
+    return path
+
+
+def remove_backend_runtime_record(path: Path, pid: int | None = None) -> None:
+    """Remove a backend record while it still describes *pid* (default: this process)."""
+    owner = os.getpid() if pid is None else pid
+    with contextlib.suppress(OSError):
+        record = read_runtime_record(path)
+        if record is None or record.pid == owner:
+            path.unlink(missing_ok=True)
+
+
+def _recorded_process_identity(record: RuntimeRecord) -> bool | None:
+    """Whether *record.pid* is still the process that wrote the record.
+
+    Compares the creation token the backend stored about itself with the current one, so a
+    reused pid never matches. None means either token is unavailable.
+    """
+    if record.process_identity is None:
+        return None
+    current = _process_identity(record.pid)
+    if current is None or current.partition(":")[0] != record.process_identity.partition(":")[0]:
+        # Unreadable now, or read from another source than the record (/proc vs ps): unknown.
+        return None
+    return current == record.process_identity
+
+
+def _cleanup_backend_record(path: Path, console) -> int | None:
+    """Stop one recorded backend; returns its pid when it was stopped."""
+    try:
+        record = read_runtime_record(path)
+    except OSError:
+        return None
+    if record is None:
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+        return None
+    if record.pid == os.getpid():
+        return None
+    if not pid_is_running(record.pid):
+        remove_backend_runtime_record(path, record.pid)
+        return None
+    identity = _recorded_process_identity(record)
+    if identity is False:
+        # The pid now belongs to a newer process: the recorded backend is long gone.
+        remove_backend_runtime_record(path, record.pid)
+        return None
+    if identity is None:
+        _console_print(
+            console,
+            f"[flocks] 记录中的后端（PID={record.pid}）仍在运行，但无法读取进程创建标识来确认身份，未自动结束；"
+            f"确认是残留的 Flocks 后端后请手动结束（{_manual_kill_hint([record.pid])}）。",
+        )
+        return None
+    _terminate_orphan_pid(record.pid, "后端", console)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and pid_is_running(record.pid):
+        time.sleep(0.25)
+    if pid_is_running(record.pid):
+        _console_print(
+            console,
+            f"[flocks] 无法结束残留后端（PID={record.pid}），可能需要管理员权限；请手动结束（{_manual_kill_hint([record.pid])}）。",
+        )
+        return None
+    remove_backend_runtime_record(path, record.pid)
+    return record.pid
+
+
+def cleanup_recorded_backend(paths: RuntimePaths, console) -> list[int]:
+    """Stop backends that earlier daemons left behind, using the backends' own records.
+
+    Each backend records its pid and OS creation token, so a leftover is found without
+    guessing from command lines (Windows may not expose them, and its venv launcher pid is
+    not the backend's). Records are only removed once their process is confirmed gone, and
+    one file per process means a new backend never overwrites an unresolved record.
+    """
+    directory = backend_runtime_dir(paths)
+    try:
+        record_paths = sorted(directory.glob("*.json"))
+    except OSError:
+        return []
+    stopped: list[int] = []
+    for path in record_paths:
+        pid = _cleanup_backend_record(path, console)
+        if pid is not None:
+            stopped.append(pid)
+    return stopped
+
+
+def _process_image_name(pid: int) -> str:
+    """Return a process executable name or path, never its arguments (they can carry secrets)."""
+    if sys.platform == "win32":
+        snapshot = _windows_process_snapshot(pid) or {}
+        return snapshot.get("executable_path", "") or snapshot.get("name", "")
+    completed = _run_ps(["ps", "-o", "comm=", "-p", str(pid)])
+    if _use_proc_instead(completed):
+        try:
+            return (_PROC_ROOT / str(pid) / "comm").read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return ""
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def _describe_pid(pid: int) -> str:
+    """Return a short best-effort description of a process for user-facing hints."""
+    if not pid_is_running(pid):
+        return f"PID {pid}，进程已不存在"
+    # Shown through Rich markup by the CLI error printer.
+    name = " ".join(_process_image_name(pid).split()).replace("[", "(").replace("]", ")")
+    if not name:
+        return f"PID {pid}"
+    if len(name) > PROCESS_DESCRIPTION_MAX_CHARS:
+        name = "..." + name[-(PROCESS_DESCRIPTION_MAX_CHARS - 3):]
+    return f"PID {pid}: {name}"
+
+
+def _manual_kill_hint(pids: Sequence[int]) -> str:
+    if sys.platform == "win32":
+        return "taskkill " + " ".join(f"/PID {pid}" for pid in pids) + " /T /F"
+    return "kill " + " ".join(str(pid) for pid in pids)
+
+
+def _occupied_port_hint(pids: Sequence[int]) -> str:
+    """Explain who holds a service port and how to free it when flocks cannot."""
+    owners = "；".join(_describe_pid(pid) for pid in pids)
+    return (
+        f"（{owners}）。flocks 只会自动结束能确认属于本机 Flocks 的进程；"
+        f"确认后请手动结束（{_manual_kill_hint(pids)}），或用 `flocks start --port <其他端口>` 换端口。"
+    )
+
+
 def _is_reachable_response(response: httpx.Response) -> bool:
     """Return True when an HTTP endpoint is reachable enough for startup checks."""
     return response.status_code < 500
@@ -1352,15 +1584,14 @@ def _start_backend_process(
     current = paths if paths is not None else ensure_runtime_dirs()
     _ensure_webui_dist(root, config, console)
 
+    # A backend left by an earlier daemon (crash, force stop) is found by its own record.
+    cleanup_recorded_backend(current, console)
     listeners = port_owner_pids(config.backend_port)
     if listeners:
         _cleanup_backend_start_port(config.backend_port, console, root=root)
         listeners = port_owner_pids(config.backend_port)
         if listeners:
-            raise ServiceError(
-                f"server 端口 {config.backend_port} 已被占用 (PID: {_join_pids(listeners)})，"
-                "请先执行 `flocks stop` 或手动清理残留进程。"
-            )
+            raise ServiceError(f"server 端口 {config.backend_port} 已被占用{_occupied_port_hint(listeners)}")
     if port_is_in_use(config.backend_port, listeners):
         raise ServiceError(
             f"server 端口 {config.backend_port} 已被占用，但当前环境无法识别占用 PID；"
@@ -1368,6 +1599,7 @@ def _start_backend_process(
         )
 
     command, env = _backend_command_and_env(root, config)
+    env[BACKEND_RUNTIME_DIR_ENV] = str(backend_runtime_dir(current))
     process = _spawn_process(command, cwd=root, log_path=current.backend_log, env=env)
     record = process_runtime_record(
         process,
@@ -1663,6 +1895,52 @@ def cleanup_legacy_runtime_processes(paths: RuntimePaths, console) -> None:
         stop_runtime_record_process(pid_file, name, console)
 
 
+def _daemon_process_alive(pid: int | None) -> bool:
+    return pid is not None and pid > 0 and pid != os.getpid() and pid_is_running(pid)
+
+
+def _looks_like_daemon_process(pid: int) -> bool:
+    """Guard pid reuse before force-stopping a daemon pid read from its own status."""
+    command_line = _process_command_line(pid).lower()
+    return "service-daemon" in command_line and "flocks" in command_line
+
+
+def _wait_for_daemon_exit(paths: RuntimePaths, daemon_pid: int | None, *, timeout: float) -> bool:
+    """Wait until the control API is down and the daemon process itself has exited."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if not supervisor_is_running(paths) and not _daemon_process_alive(daemon_pid):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.5)
+
+
+def _force_stop_daemon(paths: RuntimePaths, daemon_pid: int | None, console) -> None:
+    """Terminate the daemon process tree that ignored a stop request."""
+    control_running = supervisor_is_running(paths)
+    if _daemon_process_alive(daemon_pid) and (control_running or _looks_like_daemon_process(daemon_pid)):
+        _console_print(
+            console,
+            f"[flocks] Flocks daemon 未在 {DAEMON_STOP_TIMEOUT_SECONDS:.0f} 秒内退出，强制结束（PID={daemon_pid}）...",
+        )
+        _terminate_orphan_pid(daemon_pid, "daemon", console)
+        if _wait_for_daemon_exit(paths, daemon_pid, timeout=DAEMON_FORCE_STOP_TIMEOUT_SECONDS):
+            return
+    elif not control_running:
+        # The control API is gone and the pid exited or now belongs to something else.
+        return
+    raise ServiceError("Flocks daemon 未在预期时间内退出。")
+
+
+def _report_occupied_service_ports(config: ServiceConfig, console) -> None:
+    """Say who still holds a service port after stop; stop never kills unidentified owners."""
+    for port in sorted({config.backend_port, config.frontend_port}):
+        owners = port_owner_pids(port)
+        if owners:
+            _console_print(console, f"[flocks] 注意：端口 {port} 仍被占用{_occupied_port_hint(owners)}")
+
+
 def _stop_all_unlocked(console, *, paths: RuntimePaths) -> None:
     """Stop managed services; caller must hold the lifecycle lock."""
     cleanup_config = ServiceConfig()
@@ -1671,33 +1949,33 @@ def _stop_all_unlocked(console, *, paths: RuntimePaths) -> None:
     if not supervisor_is_running(paths):
         console.print("[flocks] Flocks daemon 未运行。")
         cleanup_legacy_runtime_processes(paths, console)
+        cleanup_recorded_backend(paths, console)
         cleanup_orphan_service_ports(cleanup_config, console, extra_configs=[legacy_config])
         stop_all_browser_daemons()
+        _report_occupied_service_ports(cleanup_config, console)
         return
     try:
-        stop_status = read_supervisor_status(paths=paths, timeout=1.0)
+        stop_status = read_supervisor_status(paths=paths, timeout=2.0)
         cleanup_config = stop_status.config
         legacy_config = _legacy_runtime_config(paths, cleanup_config)
     except Exception:
         pass
+    daemon_pid = stop_status.daemon.pid if stop_status is not None else None
     try:
         request_stop(paths=paths, timeout=2.0)
     except Exception as exc:
         raise ServiceError(f"无法请求 Flocks daemon 停止: {exc}") from exc
 
-    # The control API goes away slightly before the daemon process exits; wait
-    # for the pid too so the exiting daemon is not mistaken for a leftover.
-    daemon_pid = stop_status.daemon.pid if stop_status is not None else None
-    deadline = time.monotonic() + 20.0
-    while time.monotonic() < deadline:
-        if not supervisor_is_running(paths) and not pid_is_running(daemon_pid):
-            cleanup_legacy_runtime_processes(paths, console)
-            cleanup_orphan_service_ports(cleanup_config, console, extra_configs=[legacy_config])
-            stop_all_browser_daemons()
-            _print_stop_summary(console, stop_status)
-            return
-        time.sleep(0.5)
-    raise ServiceError("Flocks daemon 未在预期时间内退出。")
+    # The daemon answers /stop at once and stops the backend afterwards; only its exit
+    # means the backend is gone, so wait for the process, not for one missed /status.
+    if not _wait_for_daemon_exit(paths, daemon_pid, timeout=DAEMON_STOP_TIMEOUT_SECONDS):
+        _force_stop_daemon(paths, daemon_pid, console)
+    cleanup_legacy_runtime_processes(paths, console)
+    cleanup_recorded_backend(paths, console)
+    cleanup_orphan_service_ports(cleanup_config, console, extra_configs=[legacy_config])
+    stop_all_browser_daemons()
+    _print_stop_summary(console, stop_status)
+    _report_occupied_service_ports(cleanup_config, console)
 
 
 def stop_all(console) -> None:
@@ -1713,6 +1991,7 @@ def _start_all_without_stop(config: ServiceConfig, console) -> None:
     _print_static_port_migration_hint(config, console)
     console.print("[flocks] Flocks daemon 启动中...")
     cleanup_legacy_runtime_processes(paths, console)
+    cleanup_recorded_backend(paths, console)
     cleanup_orphan_service_ports(config, console)
     _ensure_webui_dist(ensure_install_layout(), config, console)
     process = _start_supervisor_process(config, paths, console)
@@ -1733,6 +2012,14 @@ def _start_all_unlocked(config: ServiceConfig, console, *, paths: RuntimePaths) 
             status = read_supervisor_status(paths=paths, timeout=1.0)
         except Exception:
             status = None
+        if status is not None and status.daemon.state.lower() == "stopping":
+            # Never hand a restart to a daemon that is shutting down: it would start a
+            # backend nobody stops. Let it finish, then start a fresh daemon.
+            _console_print(console, "[flocks] 上一个 Flocks daemon 正在退出，等待其退出后重新启动...")
+            if not _wait_for_daemon_exit(paths, status.daemon.pid, timeout=DAEMON_STOP_TIMEOUT_SECONDS):
+                _force_stop_daemon(paths, status.daemon.pid, console)
+            _start_all_without_stop(config, console)
+            return
         if status is not None and not _service_config_matches(config, status.config):
             console.print("[flocks] Flocks daemon 已在运行，但配置已变化，正在按新配置重启...")
             _stop_all_unlocked(console, paths=paths)
@@ -1745,7 +2032,10 @@ def _start_all_unlocked(config: ServiceConfig, console, *, paths: RuntimePaths) 
             return
         if status is not None and not _supervisor_backend_is_healthy(status):
             console.print("[flocks] Flocks daemon 已在运行，但 Flocks service 不可用，正在重启...")
-            status = request_restart(config, paths=paths)
+            try:
+                status = request_restart(config, paths=paths)
+            except Exception as error:
+                raise ServiceError(f"Flocks daemon 重启请求失败：{error}") from error
             _print_status_payload(status.raw, console, include_daemon_step=False)
             if not _startup_payload_is_ready(status.raw):
                 raise ServiceError(_startup_failure_message(status.raw))
@@ -2345,12 +2635,13 @@ def _run_windows_netstat(port: int) -> str:
     )
     if completed.returncode != 0:
         return ""
-    target = f":{port}"
     lines = []
     for line in (completed.stdout or "").splitlines():
-        if "LISTENING" not in line.upper():
+        parts = line.split()
+        if len(parts) < 4 or parts[3].upper() != "LISTENING":
             continue
-        if target not in line:
+        # Compare the local address port exactly: ":5173" must not match ":51730".
+        if parts[1].rpartition(":")[2] != str(port):
             continue
         lines.append(line)
     return "\n".join(lines)

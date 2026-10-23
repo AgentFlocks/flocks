@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import KnowledgeTab from './KnowledgeTab';
 import {
   FolderOpen, Upload, Download, Trash2, Edit3, Save,
@@ -106,16 +106,21 @@ function panelReducer(state: PanelState, action: PanelAction): PanelState {
 
 export default function WorkspacePage() {
   const location = useLocation();
-  const [activeTab, setActiveTab] = useState<Tab>(() => new URLSearchParams(location.search).get('tab') === 'knowledge' ? 'knowledge' : 'files');
+  const navigate = useNavigate();
+  const params = new URLSearchParams(location.search);
+  const tab = params.get('tab');
+  const activeTab: Tab = tab === 'knowledge' || tab === 'memory' ? tab : 'files';
+  const setActiveTab = (next: Tab) => {
+    const search = new URLSearchParams(location.search);
+    search.set('tab', next);
+    navigate({ pathname: location.pathname, search: search.toString() });
+  };
   const { t } = useTranslation('workspace');
-  useEffect(() => {
-    setActiveTab(new URLSearchParams(location.search).get('tab') === 'knowledge' ? 'knowledge' : 'files');
-  }, [location.key, location.search]);
 
   return (
     <div className="flex h-[calc(100vh-3rem)] min-h-[560px] flex-col">
       <PageHeader
-        title="Workspace"
+        title={activeTab === 'files' ? t('title') : t(`tabs.${activeTab}`)}
         description={t('description')}
         icon={<FolderOpen className="w-8 h-8" />}
       />

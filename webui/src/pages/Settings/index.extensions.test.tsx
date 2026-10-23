@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { Shield, ShieldCheck } from 'lucide-react';
 import SettingsPage from './index';
@@ -43,17 +43,17 @@ function renderAt(path: string) {
 }
 
 describe('SettingsPage extension sections', () => {
-  it('shows extension sections as tabs except one reached from the account menu', async () => {
-    renderAt('/settings/system-logs');
-    expect(await screen.findByText('system logs page')).toBeInTheDocument();
-    const tabs = within(screen.getByRole('navigation', { name: 'settingsTitle' })).getAllByRole('tab').map((tab) => tab.textContent);
-    expect(tabs).toContain('securityConfig');
-    expect(tabs).not.toContain('upgradeTab');
+  // The settings menu is the layout's settings sidebar (dev's design); the page
+  // itself renders the open section without a second set of tabs.
+  it('renders a registered section by its id', async () => {
+    renderAt('/settings/security');
+    expect(await screen.findByText('security page')).toBeInTheDocument();
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
   });
 
-  it('still opens the section that has no tab', async () => {
+  it('opens a section that also has its own account-menu entry', async () => {
     renderAt('/settings/upgrade');
     expect(await screen.findByText('upgrade page')).toBeInTheDocument();
-    expect(within(screen.getByRole('navigation', { name: 'settingsTitle' })).queryByRole('tab', { selected: true })).toBeNull();
+    expect(screen.getByTestId('settings-content')).toContainElement(screen.getByText('upgrade page'));
   });
 });

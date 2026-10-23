@@ -26,10 +26,9 @@ import { useLocation, useNavigate, useSearchParams, useParams } from 'react-rout
 import SessionComposerMenu, { SessionComposerMenuHeader, SessionModeOption } from './SessionComposerMenu';
 import { sessionPath } from '@/utils/sessionUrl';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
-import CopyButton from '@/components/common/CopyButton';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
-import SessionChat, { buildInstructionDisplayText, type ComposerPrefill, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import SessionChat, { buildInstructionDisplayText, type ComposerPrefill, type PromptDisplayOptions, type SendWelcomePrompt, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
 import SessionContextPanel from './SessionContextPanel';
 import { getInitialSidePanelWidth, getMaxSidePanelWidth, SIDE_PANEL_MIN_WIDTH } from '@/components/common/sidePanelSizing';
 import SuiteInstallProgressPanel, {
@@ -548,7 +547,7 @@ export default function SessionPage() {
   const [pendingOptimisticMessage, setPendingOptimisticMessage] = useState<Message | null>(null);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [contextPanelOpen, setContextPanelOpen] = useState(false);
-  const [contextPanelWidth, setContextPanelWidth] = useState(() => getInitialSidePanelWidth());
+  const [contextPanelWidth, setContextPanelWidth] = useState(() => Math.min(340, getInitialSidePanelWidth()));
   const [contextSnapshot, setContextSnapshot] = useState<SessionContextSnapshot | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
   const [contextLoadingMore, setContextLoadingMore] = useState(false);
@@ -1586,9 +1585,11 @@ export default function SessionPage() {
     setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
   }, []);
 
-  const handleAlertOperationsSetup = useCallback(async () => {
-    if (installingSocWorkspace) return;
+  const handleAlertOperationsSetup = useCallback(async (sendPrompt: SendWelcomePrompt) => {
+    if (installingSocWorkspace || selectedSession?.canWrite === false) return;
 
+    const navigationKey = navigationRef.current.key;
+    const identity = currentReaIdentity();
     setInstallingSocWorkspace(true);
     let startedComponentInstall = false;
     try {
@@ -1608,20 +1609,26 @@ export default function SessionPage() {
         await hubAPI.installStream('component', SOC_WORKSPACE_COMPONENT_ID, handleSuiteInstallProgress);
       }
 
+      if (!mountedRef.current || !paneActiveRef.current || navigationRef.current.key !== navigationKey || currentReaIdentity() !== identity) return;
+      const options = { displayText: buildInstructionDisplayText(t('welcome.alertOperations')) };
+      if (selectedSessionId) {
+        await sendPrompt(t('welcome.alertOperationsSuggestion'), options);
+        return;
+      }
       await handleCreateAndSend(
         t('welcome.alertOperationsSuggestion'),
         [],
         undefined,
         selectedPromptModel,
-        { displayText: buildInstructionDisplayText(t('welcome.alertOperations')) },
+        options,
       );
     } catch (err: any) {
       const message = err?.message ?? t('welcome.socComponentInstallFailedDescription');
       if (startedComponentInstall) {
         setSuiteInstallProgress(current => failSuiteInstallProgress(current, {
           id: SOC_WORKSPACE_COMPONENT_ID,
-          name: 'SOC Workspace Component',
-          nameCn: 'SOC 工作区场景套件',
+          name: 'Alert Operations Suite',
+          nameCn: '告警运营套件',
         }, message));
       }
       toast.error(
@@ -1631,7 +1638,7 @@ export default function SessionPage() {
     } finally {
       setInstallingSocWorkspace(false);
     }
-  }, [handleCreateAndSend, handleSuiteInstallProgress, installingSocWorkspace, selectedPromptModel, t, toast]);
+  }, [handleCreateAndSend, handleSuiteInstallProgress, installingSocWorkspace, selectedPromptModel, selectedSession?.canWrite, selectedSessionId, t, toast]);
 
   // The 「REA 逆向分析」 shortcut (and the plugin square's actions): route by the
   // live plugin state. The install or the use prompt only fills the message box
@@ -1641,13 +1648,14 @@ export default function SessionPage() {
   // same way. Every await is checked against the account and the page the click
   // came from.
   const handleReaEntry = useCallback(async (requested?: ReaEntryAction) => {
-    if (startingReaRef.current) return;
+    if (startingReaRef.current || selectedSession?.canWrite === false) return;
     startingReaRef.current = true;
     setStartingRea(true);
     const identity = currentReaIdentity();
     const navigationKey = navigationRef.current.key;
     const stale = () => (
       !mountedRef.current
+      || !paneActiveRef.current
       || currentReaIdentity() !== identity
       || navigationRef.current.key !== navigationKey
     );
@@ -1719,6 +1727,7 @@ export default function SessionPage() {
     handleSelectExecutionMode,
     refreshReaStatus,
     selectSession,
+    selectedSession?.canWrite,
     t,
     toast,
   ]);
@@ -1762,20 +1771,16 @@ export default function SessionPage() {
     : t('refreshingWorkbench');
 
   return (
-    <div className="flex h-full w-full overflow-hidden bg-[#fcfcfd] text-[#202328] dark:bg-[#303842] dark:text-[#d7dee8]">
+    <div className="flex h-full w-full overflow-hidden bg-ui-canvas text-ui-text">
       {/* ── Main area ── */}
-      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[#fcfcfd] dark:bg-[#303842]">
+      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-ui-canvas">
         {/* Header */}
         <header className="relative flex h-[52px] flex-shrink-0 items-center gap-2 px-4 text-[13px]">
           <div className="flex min-w-0 items-center">
-            <h2 className="truncate text-sm font-semibold text-[#555a61] dark:text-[#c3ccd6]">
+            <h2 className="truncate text-sm font-medium text-ui-secondary">
               {selectedSession?.title || t('newSession')}
             </h2>
           </div>
-
-          {selectedSessionId && selectedSession && !activeSessionError && (
-            <CopyButton text={new URL(sessionPath(selectedSessionId), window.location.origin).href} label={t('copyLink')} labelClassName="max-md:sr-only" />
-          )}
 
           {workbenchRefreshing && (
             <WorkbenchRefreshStatus label={workbenchRefreshLabel} />
@@ -1789,8 +1794,8 @@ export default function SessionPage() {
               onClick={() => setContextPanelOpen((open) => !open)}
               className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 max-md:shrink-0 max-md:whitespace-nowrap ${
                 contextPanelOpen
-                  ? 'bg-violet-50 text-violet-700 dark:bg-violet-500/15 dark:text-violet-200'
-                  : 'text-[#7b8087] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.06] dark:hover:text-white'
+                  ? 'bg-ui-selected text-ui-text'
+                  : 'text-ui-secondary hover:bg-ui-hover hover:text-ui-text'
               }`}
               aria-label={t('context.title')}
               title={t('context.title')}
@@ -1798,7 +1803,7 @@ export default function SessionPage() {
               <Sparkles className="h-3.5 w-3.5" />
               <span>{t('context.title')}</span>
               {(contextSnapshot?.counts.total || 0) > 0 && (
-                <span className="rounded-full bg-current/10 px-1.5 py-0.5 text-[10px]">
+                <span className="rounded-full bg-ui-hover px-1.5 py-0.5 text-xs">
                   {contextSnapshot!.counts.total}
                 </span>
               )}
@@ -1871,10 +1876,10 @@ export default function SessionPage() {
           onComposerPrefillApplied={handleReaComposerPrefillApplied}
           contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
           model={selectedPromptModel}
-          welcomeContent={(setInput) => (
+          welcomeContent={(setInput, sendPrompt) => (
             <WelcomeScreen
               onSuggestion={setInput}
-              onAlertOperationsSetup={() => void handleAlertOperationsSetup()}
+              onAlertOperationsSetup={() => void handleAlertOperationsSetup(sendPrompt)}
               alertOperationsBusy={installingSocWorkspace}
               reaShortcut={{
                 badge: Boolean(reaStatus?.badge),
@@ -2371,13 +2376,13 @@ export default function SessionPage() {
               role="separator"
               aria-orientation="vertical"
               onPointerDown={handleResizeContextPanel}
-              className="hidden w-1 flex-shrink-0 cursor-col-resize bg-zinc-200/70 transition-colors hover:bg-violet-300 xl:block dark:bg-zinc-700 dark:hover:bg-violet-500"
+              className="hidden w-1 flex-shrink-0 cursor-col-resize bg-ui-canvas transition-colors hover:bg-ui-control xl:block"
             />
             {/* A side column next to the chat, capped so messages and the composer keep their room
                 (40% below xl, 45% above); phones get a closable full-screen panel. */}
             <aside
               data-testid="session-context-aside"
-              className="fixed inset-0 z-50 h-full w-screen flex-shrink-0 overflow-hidden border-l border-zinc-200 bg-white sm:static sm:z-auto sm:w-[min(var(--session-context-width),40%)] xl:w-[min(var(--session-context-width),45%)] dark:border-zinc-700 dark:bg-zinc-900"
+              className="fixed inset-0 z-50 h-full w-screen flex-shrink-0 overflow-hidden border-l border-ui-border bg-ui-surface sm:static sm:z-auto sm:w-[min(var(--session-context-width),40%)] xl:w-[min(var(--session-context-width),45%)]"
               style={{ '--session-context-width': `${contextPanelWidth}px` } as React.CSSProperties}
             >
               <SessionContextPanel
@@ -2455,7 +2460,7 @@ interface WelcomeReaShortcut {
   onClick: () => void;
 }
 
-const SHORTCUT_CLASS = 'inline-flex h-11 shrink-0 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white';
+const SHORTCUT_CLASS = 'inline-flex h-11 shrink-0 items-center gap-2.5 rounded-[10px] border border-ui-border bg-ui-surface px-4 text-sm font-medium text-ui-secondary transition-colors hover:border-ui-control hover:bg-ui-hover hover:text-ui-text disabled:cursor-not-allowed disabled:opacity-70';
 
 function WelcomeScreen({
   onSuggestion,
@@ -2471,11 +2476,11 @@ function WelcomeScreen({
   const { t } = useTranslation('session');
   return (
     <div className="w-full max-w-[700px] px-9 text-center max-[600px]:px-4">
-      <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-slate-800 text-white shadow-[0_3px_10px_rgba(30,41,59,0.10)] dark:bg-[#46515e]">
+      <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-ui-selected text-ui-text">
         <Sparkles className="h-[30px] w-[30px]" strokeWidth={1.7} />
       </div>
-      <h3 className="text-[22px] font-semibold tracking-[-0.01em] text-[#1f2937] dark:text-[#f0f3f7]">{t('welcome.title')}</h3>
-      <p className="mt-3 text-sm leading-6 text-[#647084] dark:text-[#aeb9c5]">{t('welcome.description')}</p>
+      <h3 className="text-[28px] font-medium tracking-tight text-ui-text">{t('welcome.title')}</h3>
+      <p className="mt-3 text-sm leading-7 text-ui-muted">{t('welcome.description')}</p>
 
       {/* One row (REA V5): narrow screens scroll it sideways instead of wrapping; the top padding keeps the 「新」 badge visible. */}
       <div

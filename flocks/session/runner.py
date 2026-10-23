@@ -2219,6 +2219,10 @@ class SessionRunner:
                     # A tool may already have changed external state. Replaying
                     # the provider request can emit the same call again with a
                     # new call id, so no retry mode is safe past this boundary.
+                    if will_retry:
+                        # Kept on the stored error so the stop can say why a
+                        # retryable error still ended the turn.
+                        error_dict["data"]["retrySuppressed"] = "tool_execution_started"
                     will_retry = False
                 elif self._defer_step_errors and not self._attempt_state.replay_safe:
                     # Retrying after text/reasoning/tool activity can duplicate

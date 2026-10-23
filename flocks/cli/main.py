@@ -50,7 +50,9 @@ from flocks.cli.service_config import (
 )
 from flocks.cli.service_control import read_supervisor_status
 from flocks.cli.service_manager import (
+    BACKEND_RUNTIME_DIR_ENV,
     ServiceError,
+    remove_backend_runtime_record,
     resolve_flocks_cli_command,
     restart_all,
     restart_server,
@@ -59,6 +61,7 @@ from flocks.cli.service_manager import (
     show_status,
     start_all,
     stop_all,
+    write_backend_runtime_record,
 )
 from flocks.cli.service_supervisor import run_service_daemon
 from flocks.config.config import Config
@@ -545,19 +548,31 @@ def serve(
     console.print(f"[cyan]API docs:[/cyan] http://{host}:{port}/docs")
     console.print()
 
-    uvicorn.run(
-        "flocks.server.app:app",
-        host=host,
-        port=port,
-        reload=reload,
-        # Session loops, agent inboxes, the config cache and the knowledge engine
-        # client live in this process; an explicit 1 stops WEB_CONCURRENCY from
-        # forking workers that would each hold a diverging copy.
-        workers=1,
-        log_level="info",
-        log_config=_uvicorn_log_config(),
-        access_log=False,
-    )
+    # Set by the service daemon only; popped so tools spawned by this server never inherit it.
+    runtime_dir = os.environ.pop(BACKEND_RUNTIME_DIR_ENV, "")
+    record_path = None
+    if runtime_dir:
+        try:
+            record_path = write_backend_runtime_record(Path(runtime_dir), host=host, port=port)
+        except OSError:
+            record_path = None
+    try:
+        uvicorn.run(
+            "flocks.server.app:app",
+            host=host,
+            port=port,
+            reload=reload,
+            # Session loops, agent inboxes, the config cache and the knowledge engine
+            # client live in this process; an explicit 1 stops WEB_CONCURRENCY from
+            # forking workers that would each hold a diverging copy.
+            workers=1,
+            log_level="info",
+            log_config=_uvicorn_log_config(),
+            access_log=False,
+        )
+    finally:
+        if record_path is not None:
+            remove_backend_runtime_record(record_path)
 
 
 @app.command(name="service-daemon", hidden=True)

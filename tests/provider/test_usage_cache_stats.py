@@ -111,7 +111,6 @@ async def test_backfill_records_the_whole_prompt_and_the_cache_report(storage, m
     from flocks.session.message import (
         AssistantMessageInfo,
         MessagePath,
-        MessageWithParts,
         TokenCache,
         TokenUsage,
     )
@@ -141,11 +140,11 @@ async def test_backfill_records_the_whole_prompt_and_the_cache_report(storage, m
     async def fake_list_all():
         return [session]
 
-    async def fake_list_with_parts(session_id: str, include_archived: bool = False):
-        return [MessageWithParts(info=assistant, parts=[])]
+    async def fake_list_messages(session_id: str, include_archived: bool = False):
+        return [assistant]
 
     monkeypatch.setattr(usage_service.Session, "list_all", fake_list_all)
-    monkeypatch.setattr(usage_service.Message, "list_with_parts", fake_list_with_parts)
+    monkeypatch.setattr(usage_service.Message, "list", fake_list_messages)
     monkeypatch.setattr(
         usage_service, "resolve_usage_pricing",
         lambda *_: PriceConfig(input=2.0, output=12.0, cache_read=0.2, unit=1_000_000),

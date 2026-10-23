@@ -14,6 +14,7 @@ import type { SessionContextPanelProps } from './SessionContextPanel';
 import type { SSEChatEvent } from '@/features/session-chat/sseRouting';
 import { __resetExtensionSlotCacheForTesting } from '@/components/extensions/ExtensionSlot';
 import type { SessionStartHook } from '@/extensions/registry';
+import type { SessionChatProps } from '@/components/common/SessionChat';
 
 // Extensions see the session page only through its slots; tests register
 // slot components here and clear them again.
@@ -46,6 +47,7 @@ const initialActionProbe = vi.hoisted(() => ({ enabled: false, delivered: vi.fn(
 // SessionChat shows the welcome screen for any conversation without messages; the mock does so for
 // conversations with an id only when a test asks for it.
 const welcomeProbe = vi.hoisted(() => ({ forSessions: false }));
+const sendWelcomePrompt = vi.hoisted(() => vi.fn());
 
 const sessionStatusSSEOptionsRef = vi.hoisted(() => ({
   current: null as null | {
@@ -238,7 +240,7 @@ vi.mock('@/components/common/SessionChat', () => ({
     }) => React.ReactNode);
     onComposerAddMenuOpenChange?: (open: boolean) => void;
     centerToolbarSlot?: React.ReactNode;
-    welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
+    welcomeContent?: SessionChatProps['welcomeContent'];
     initialMessage?: string | null;
     initialDisplayText?: string | null;
     initialOptimisticMessage?: {
@@ -335,7 +337,9 @@ vi.mock('@/components/common/SessionChat', () => ({
         {toolbarSlot}
         {centerToolbarSlot}
         {(!sessionId || welcomeProbe.forSessions) && welcomeContent ? (
-          typeof welcomeContent === 'function' ? welcomeContent(setInput) : welcomeContent
+          typeof welcomeContent === 'function'
+            ? welcomeContent(setInput, (text, options) => sendWelcomePrompt(sessionId, text, options))
+            : welcomeContent
         ) : null}
         <div data-testid="mock-chat-input">{input}</div>
         <button
@@ -583,6 +587,8 @@ describe('SessionPage session actions menu', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     initialActionProbe.enabled = false;
+    welcomeProbe.forSessions = false;
+    sendWelcomePrompt.mockReset().mockResolvedValue(true);
     __resetChatModelResourcesForTesting();
     sessionStatusSSEOptionsRef.current = null;
     sessionChatSSERef.current = undefined;
@@ -2019,14 +2025,27 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
   });
 
-  it('installs the SOC workspace component before starting alert operations setup', async () => {
+  it('starts alert operations in the existing empty session without creating or moving a session', async () => {
+    welcomeProbe.forSessions = true;
+    renderSessionPage('/sessions/session-1');
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'welcome.alertOperations' }));
+    await waitFor(() => expect(sendWelcomePrompt).toHaveBeenCalledWith(
+      'session-1', 'welcome.alertOperationsSuggestion',
+      { displayText: '@@flocks-instruction:welcome.alertOperations' },
+    ));
+    expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
+    expect(sessionApi.moveToProject).not.toHaveBeenCalled();
+    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
+  });
+
+  it('installs the Alert Operations Suite before starting alert operations setup', async () => {
     const user = userEvent.setup();
     hubAPI.catalog.mockResolvedValueOnce({
       data: [{
         id: 'soc-workspace',
         type: 'component',
-        name: 'SOC Workspace Component',
-        nameCn: 'SOC 工作区场景套件',
+        name: 'Alert Operations Suite',
+        nameCn: '告警运营套件',
         state: 'available',
       }],
     });
@@ -2035,8 +2054,8 @@ describe('SessionPage session actions menu', () => {
         event: 'start',
         id: 'soc-workspace',
         type: 'component',
-        name: 'SOC Workspace Component',
-        nameCn: 'SOC 工作区场景套件',
+        name: 'Alert Operations Suite',
+        nameCn: '告警运营套件',
         total: 1,
         items: [{
           type: 'webui',
@@ -2049,8 +2068,8 @@ describe('SessionPage session actions menu', () => {
         event: 'item',
         id: 'soc-workspace',
         type: 'component',
-        name: 'SOC Workspace Component',
-        nameCn: 'SOC 工作区场景套件',
+        name: 'Alert Operations Suite',
+        nameCn: '告警运营套件',
         total: 1,
         item: {
           type: 'webui',
@@ -2063,8 +2082,8 @@ describe('SessionPage session actions menu', () => {
         event: 'complete',
         id: 'soc-workspace',
         type: 'component',
-        name: 'SOC Workspace Component',
-        nameCn: 'SOC 工作区场景套件',
+        name: 'Alert Operations Suite',
+        nameCn: '告警运营套件',
         total: 1,
       });
     });
@@ -2097,7 +2116,7 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
   });
 
-  it('shows a localized error when the SOC workspace component is missing', async () => {
+  it('shows a localized error when the Alert Operations Suite is missing', async () => {
     const user = userEvent.setup();
     hubAPI.catalog.mockResolvedValueOnce({ data: [] });
 
@@ -2116,14 +2135,14 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
   });
 
-  it('shows a localized error title when SOC workspace component installation fails', async () => {
+  it('shows a localized error title when Alert Operations Suite installation fails', async () => {
     const user = userEvent.setup();
     hubAPI.catalog.mockResolvedValueOnce({
       data: [{
         id: 'soc-workspace',
         type: 'component',
-        name: 'SOC Workspace Component',
-        nameCn: 'SOC 工作区场景套件',
+        name: 'Alert Operations Suite',
+        nameCn: '告警运营套件',
         state: 'available',
       }],
     });
@@ -2139,7 +2158,7 @@ describe('SessionPage session actions menu', () => {
       );
     });
     expect(await screen.findByText('场景套件安装进度')).toBeInTheDocument();
-    expect(screen.getByText('安装失败: SOC 工作区场景套件')).toBeInTheDocument();
+    expect(screen.getByText('安装失败: 告警运营套件')).toBeInTheDocument();
     expect(client.post).not.toHaveBeenCalled();
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
   });
@@ -3220,6 +3239,58 @@ describe('SessionPage session actions menu', () => {
       await user.click(await screen.findByTestId('rea-shortcut'));
       await waitFor(() => expect(composerText()).toBe('rea.usePrompt'));
       expectNothingSent();
+    });
+
+    it.each([
+      ['install', 'not_installed', true, 'rea.installPrompt'],
+      ['use', 'ready', true, 'rea.usePrompt'],
+      ['install from a session missing in the list', 'not_installed', false, 'rea.installPrompt'],
+      ['use when degraded', 'degraded', true, 'rea.usePrompt'],
+    ])('prefills the current session without creating, sending or moving a session for REA %s', async (_label, state, listed, prompt) => {
+      welcomeProbe.forSessions = true;
+      const folderSession = { ...session, projectID: 'prj_demo', effectiveProjectID: 'prj_demo' };
+      useSessions.mockReturnValue({
+        ...useSessions(), sessions: listed ? [folderSession] : [],
+      });
+      sessionApi.get.mockResolvedValue(folderSession);
+      mockRea({ state, installSessionId: 'session-old' });
+      renderSessionPage('/sessions/session-1');
+      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1'));
+      await userEvent.setup().click(await screen.findByTestId('rea-shortcut'));
+      await waitFor(() => expect(composerText()).toBe(prompt));
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-agent-name', 'rex');
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
+      expect(sendWelcomePrompt).not.toHaveBeenCalled();
+      expectNothingSent();
+      expect(client.patch).not.toHaveBeenCalled();
+      expect(sessionApi.moveToProject).not.toHaveBeenCalled();
+      expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
+    });
+
+    it.each(['installing', 'validating', 'install_failed'])('opens the existing install conversation when REA is %s elsewhere', async (state) => {
+      welcomeProbe.forSessions = true;
+      useSessions.mockReturnValue({
+        ...useSessions(), sessions: [session, { ...secondSession, id: 'session-old' }],
+      });
+      mockRea({ state, installSessionId: 'session-old' });
+      renderSessionPage('/sessions/session-1');
+      await userEvent.setup().click(await screen.findByTestId('rea-shortcut'));
+      await waitFor(() => expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-old'));
+      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-old'));
+      expect(composerText()).toBe(state === 'install_failed' ? 'rea.repairPrompt' : '');
+      expect(sendWelcomePrompt).not.toHaveBeenCalled();
+      expectNothingSent();
+    });
+
+    it('does not prefill or send a shortcut to a read-only session', async () => {
+      welcomeProbe.forSessions = true;
+      useSessions.mockReturnValue({ ...useSessions(), sessions: [{ ...session, canWrite: false }] });
+      mockRea();
+      renderSessionPage('/sessions/session-1');
+      await userEvent.setup().click(await screen.findByTestId('rea-shortcut'));
+      expect(composerText()).toBe('');
+      expect(sendWelcomePrompt).not.toHaveBeenCalled();
+      expect(client.post).not.toHaveBeenCalled();
     });
 
     it('fills the analysis prompt in when REA broke after passing (Rex repairs first)', async () => {

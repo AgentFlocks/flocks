@@ -50,6 +50,26 @@ export interface UpdateProgress {
   downloaded_bytes?: number | null;
   total_bytes?: number | null;
   percent?: number | null;
+  /** Restart stage only: lets this page read the error text of a failed restart step. */
+  progress_token?: string | null;
+}
+
+export type UpgradeHandoffStepStatus = 'pending' | 'running' | 'done' | 'skipped' | 'failed';
+
+export interface UpgradeHandoffStep {
+  id: string;
+  status: UpgradeHandoffStepStatus;
+  started_at?: number;
+  finished_at?: number;
+}
+
+/** Progress of the restart stage, served on the service port while the service is offline. */
+export interface UpgradeHandoffProgress {
+  phase: 'running' | 'failed' | 'done';
+  step: string | null;
+  steps: UpgradeHandoffStep[];
+  failed_step?: string;
+  error?: string;
 }
 
 // ======================================================================

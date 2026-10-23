@@ -367,13 +367,23 @@ describe('StreamingMarkdown', () => {
       <StreamingMarkdown content={'Saved to `.flocks/plans/plan.md`.'} isStreaming={false} />,
     );
 
-    expect(container.querySelector('code')).toHaveClass(
-      'rounded-md',
-      'bg-zinc-100/80',
-      'font-normal',
-      'text-zinc-700',
+    expect(container.firstElementChild).toHaveClass('chat-prose');
+    expect(container.firstElementChild).not.toHaveClass('prose-sm');
+    expect(container.querySelector('code')).toHaveClass('chat-inline-code');
+    expect(container.querySelector('code')).toHaveTextContent('.flocks/plans/plan.md');
+  });
+
+  it('keeps a wide table in a keyboard-accessible local scroll container', () => {
+    const { container } = render(
+      <StreamingMarkdown content={'| File | Status |\n| --- | --- |\n| report.md | **Complete** |'} isStreaming={false} />,
     );
-    expect(container.querySelector('code')).not.toHaveClass('font-semibold');
+
+    const table = container.querySelector('table');
+    expect(table?.parentElement).toHaveClass('chat-table-scroll');
+    expect(table?.parentElement).toHaveAttribute('tabindex', '0');
+    expect(table?.querySelectorAll('th')).toHaveLength(2);
+    expect(table?.querySelector('strong')).toHaveTextContent('Complete');
+    expect(table?.querySelector('td')).toHaveTextContent('report.md');
   });
 
   it('renders LaTeX delimiters used in assistant messages', () => {

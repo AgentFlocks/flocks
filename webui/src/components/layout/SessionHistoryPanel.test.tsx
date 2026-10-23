@@ -137,6 +137,47 @@ describe('SessionHistoryPanel', () => {
     expect(localStorage.getItem('flocks:history:pinned-folders:u1')).toContain('prj_b');
   });
 
+  it('marks shared folders and sessions, including a folder that was just shared', async () => {
+    // Regression (INC-BB67AF4D): the panel offered 本地共享 but never showed what was shared.
+    let productShared = false;
+    setSessions([
+      session('s1', 'prj_a', '会话一'),
+      { ...session('s3', 'prj_b', '共享目录里的会话'), isShared: true },
+      { ...session('s4', '', '单独共享的会话'), isShared: true },
+      session('s2', ''),
+    ]);
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/project') return Promise.resolve({ data: [
+        { id: 'prj_a', name: '产品设计', worktree: '/root/a', pathStatus: 'available', canWrite: true, isShared: productShared },
+        { id: 'prj_b', name: '共享目录', worktree: '/root/b', pathStatus: 'available', canWrite: true, isShared: true },
+      ] });
+      if (url === '/api/session/status') return Promise.resolve({ data: {} });
+      return Promise.resolve({ data: {} });
+    });
+    apiPost.mockImplementation(async (url: string) => {
+      if (url === '/api/project/prj_a/share-local') productShared = true;
+      return { data: {} };
+    });
+    const rowOf = (text: string) => screen.getByText(text).closest('button') as HTMLElement;
+    const mark = { name: 'history.sharedMark' };
+    renderPanel();
+
+    await waitFor(() => expect(within(rowOf('共享目录')).getByRole('img', mark)).toBeInTheDocument());
+    // The mark takes room from the name; the full name stays in the tooltip.
+    expect(rowOf('共享目录')).toHaveAttribute('title', '共享目录');
+    expect(within(rowOf('产品设计')).queryByRole('img', mark)).toBeNull();
+    // Shared through its folder: the folder carries the mark, the row does not repeat it.
+    expect(within(rowOf('共享目录里的会话')).queryByRole('img', mark)).toBeNull();
+    expect(within(rowOf('单独共享的会话')).getByRole('img', mark)).toBeInTheDocument();
+    expect(within(rowOf('s2')).queryByRole('img', mark)).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'history.folderActions:产品设计' }));
+    fireEvent.click(screen.getByRole('button', { name: /history.share$/ }));
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/project/prj_a/share-local'));
+    await waitFor(() => expect(within(rowOf('产品设计')).getByRole('img', mark)).toBeInTheDocument());
+    expect(toastMock.success).toHaveBeenCalledWith('history.shared');
+  });
+
   it('archives a session after confirmation', async () => {
     const removeSession = vi.fn();
     setSessions([session('s1', 'prj_a', '会话一'), session('s2', '')], { removeSession });
@@ -164,11 +205,14 @@ describe('SessionHistoryPanel', () => {
     expect(screen.queryByText('history.ungrouped')).not.toBeInTheDocument();
   });
 
-  it('keeps folder actions visible without hovering', async () => {
+  it('reveals folder actions only on their header hover or keyboard focus', async () => {
     renderPanel();
     await waitFor(() => expect(screen.getByText('产品设计')).toBeInTheDocument());
     for (const name of ['history.folderActions:产品设计', 'history.newSessionIn:产品设计']) {
-      expect(screen.getByRole('button', { name }).className).not.toMatch(/opacity-0/);
+      const button = screen.getByRole('button', { name });
+      expect(button).toHaveClass('opacity-0', 'pointer-events-none', 'group-hover/folder:opacity-100', 'focus-visible:opacity-100');
+      expect(button.parentElement).toHaveClass('group/folder');
+      expect(button.parentElement).not.toContainElement(screen.getByText('会话一'));
     }
   });
 
@@ -201,27 +245,37 @@ describe('SessionHistoryPanel', () => {
     expect(apiDelete).not.toHaveBeenCalled();
   });
 
-  it('shows a compact list, loads more and collapses back, keeping the open session reachable', async () => {
+  it.each(['tasks', 'prj_a'])('reveals 50 more sessions per click in %s, including after collapse', async (sectionId) => {
     const loadMore = vi.fn();
-    const ungrouped = Array.from({ length: 12 }, (_, i) => session(`u${i + 1}`, '', `未分类 ${i + 1}`));
-    setSessions(ungrouped, { hasMoreByProject: { tasks: true }, loadMore });
-    render(<MemoryRouter initialEntries={['/sessions/u12']}><SessionHistoryPanel collapsed={false} onExpandSidebar={vi.fn()} onNavigate={vi.fn()} /></MemoryRouter>);
-    // With a folder on screen the first page holds 6 sessions per list.
+    const sessions = Array.from({ length: 130 }, (_, i) => session(`u${i + 1}`, sectionId === 'tasks' ? '' : sectionId, `会话 ${i + 1}`));
+    setSessions(sessions, { hasMoreByProject: { [sectionId]: true }, loadMore });
+    render(<MemoryRouter initialEntries={['/sessions/u130']}><SessionHistoryPanel collapsed={false} onExpandSidebar={vi.fn()} onNavigate={vi.fn()} /></MemoryRouter>);
+    // Every list starts with 20 sessions, including when project folders exist.
     await waitFor(() => expect(screen.getByText('产品设计')).toBeInTheDocument());
-    expect(screen.getByText('未分类 6')).toBeInTheDocument();
-    expect(screen.queryByText('未分类 7')).not.toBeInTheDocument();
-    expect(screen.getByText('未分类 12')).toBeInTheDocument(); // the open session stays visible
+    expect(useSessionsMock).toHaveBeenLastCalledWith('', { projectIds: ['tasks', 'prj_a'], pageSize: 20, loadMorePageSize: 50 });
+    expect(screen.getByText('会话 20')).toBeInTheDocument();
+    expect(screen.queryByText('会话 21')).not.toBeInTheDocument();
+    expect(screen.getByText('会话 130')).toBeInTheDocument(); // the open session stays visible
     expect(screen.queryByRole('button', { name: 'history.collapse' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'history.loadMore' }));
-    expect(screen.getByText('未分类 11')).toBeInTheDocument();
-    expect(loadMore).not.toHaveBeenCalled(); // first reveal what is already loaded
+    expect(screen.getByText('会话 70')).toBeInTheDocument();
+    expect(screen.queryByText('会话 71')).not.toBeInTheDocument();
+    expect(loadMore).not.toHaveBeenCalled(); // reveal cached rows before requesting another page
     fireEvent.click(screen.getByRole('button', { name: 'history.loadMore' }));
-    expect(loadMore).toHaveBeenCalledWith('tasks');
+    expect(screen.getByText('会话 120')).toBeInTheDocument();
+    expect(screen.queryByText('会话 121')).not.toBeInTheDocument();
+    expect(loadMore).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'history.loadMore' }));
+    expect(loadMore).toHaveBeenCalledWith(sectionId);
 
     fireEvent.click(screen.getByRole('button', { name: 'history.collapse' }));
-    expect(screen.queryByText('未分类 7')).not.toBeInTheDocument();
-    expect(screen.getByText('未分类 12')).toBeInTheDocument();
+    expect(screen.queryByText('会话 21')).not.toBeInTheDocument();
+    expect(screen.getByText('会话 130')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'history.loadMore' }));
+    expect(screen.getByText('会话 70')).toBeInTheDocument();
+    expect(screen.queryByText('会话 71')).not.toBeInTheDocument();
+    expect(loadMore).toHaveBeenCalledOnce();
   });
 
   it('archives selected sessions in batch mode', async () => {
@@ -422,4 +476,3 @@ describe('SessionHistoryPanel', () => {
     expect(menu?.parentElement).toBe(document.body);
   });
 });
-

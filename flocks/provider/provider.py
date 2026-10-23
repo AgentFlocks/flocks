@@ -1363,14 +1363,8 @@ class BaseProvider:
             PriceConfig,
         )
         pricing = None
-        if model.pricing:
-            pricing = PriceConfig(
-                input=model.pricing.get("input", 0.0),
-                output=model.pricing.get("output", 0.0),
-                cache_read=model.pricing.get("cache_read"),
-                cache_write=model.pricing.get("cache_write"),
-                currency=model.pricing.get("currency", "USD"),
-            )
+        if model.pricing is not None:
+            pricing = PriceConfig.model_validate(model.pricing)
         max_output = model.capabilities.max_tokens or 4096
         return ModelDefinition(
             id=model.id,
@@ -1468,14 +1462,10 @@ class BaseProvider:
             overridden.limits.max_output_tokens = model.capabilities.max_tokens
 
         # Pricing — only override when pricing fields are present
-        if model.pricing:
-            overridden.pricing = PriceConfig(
-                input=model.pricing.get("input", 0.0),
-                output=model.pricing.get("output", 0.0),
-                cache_read=model.pricing.get("cache_read"),
-                cache_write=model.pricing.get("cache_write"),
-                currency=model.pricing.get("currency", "USD"),
-            )
+        if model.pricing is not None:
+            # Replace the complete price configuration. Explicit flat prices
+            # must not inherit catalog tiers or a different billing unit.
+            overridden.pricing = PriceConfig.model_validate(model.pricing)
 
         return overridden
 

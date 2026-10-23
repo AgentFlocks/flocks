@@ -218,6 +218,7 @@ export function applyMessagePartUpdate(
 type UseSessionsOptions = {
   projectIds?: string[];
   pageSize?: number;
+  loadMorePageSize?: number;
 };
 
 function sessionEffectiveProjectId(session: Session): string {
@@ -246,6 +247,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
     ? null
     : [...options.projectIds].sort().join('\u0000');
   const pageSize = options?.pageSize ?? SESSION_LIST_PAGE_SIZE;
+  const loadMorePageSize = options?.loadMorePageSize ?? pageSize;
   const queryKey = `${projectIdsKey ?? '*'}\u0001${pageSize}\u0001${search.trim()}`;
   useEffect(() => {
     sessionsRef.current = sessions;
@@ -317,7 +319,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
           && (projectId === undefined || sessionEffectiveProjectId(session) === projectId)
         )).length;
         const requestLimit = append
-          ? pageSize
+          ? loadMorePageSize
           : preserveLoadedDepth
             ? Math.max(pageSize, loadedCount)
             : pageSize;
@@ -394,7 +396,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         initializedRef.current = true;
       }
     }
-  }, [pageSize, projectIdsKey, queryKey, search]);
+  }, [pageSize, loadMorePageSize, projectIdsKey, queryKey, search]);
 
   const updateSessionTitle = useCallback((sessionId: string, title: string) => {
     const optimistic = optimisticSessionsRef.current.get(sessionId);

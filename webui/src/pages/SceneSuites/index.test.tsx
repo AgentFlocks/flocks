@@ -43,8 +43,8 @@ vi.mock('react-i18next', () => ({
 
 const SOC = {
   id: 'soc-workspace',
-  name: 'SOC Workspace Component',
-  nameCn: 'SOC 工作区场景套件',
+  name: 'Alert Operations Suite',
+  nameCn: '告警运营套件',
   description: 'soc',
   descriptionCn: 'SOC 套件',
   version: '1.0.0',
@@ -67,6 +67,14 @@ const CODE_AUDIT = {
   state: 'available' as const,
   workspaceId: 'code_audit_ui',
   workspaceEnabled: null,
+};
+
+const AI_REDTEAM = {
+  ...CODE_AUDIT,
+  id: 'ai-redteam-workspace',
+  name: 'AI Redteam Workspace Component',
+  nameCn: 'AI 红队场景套件',
+  workspaceId: 'ai_redteam_ui',
 };
 
 function renderPage(route = '/scenes/suites') {
@@ -111,7 +119,7 @@ describe('SceneSuitesPage', () => {
       scope: 'global', token: 'preview-token', requiresConfirmation: false, items: [],
     } });
     __resetSceneSuiteUpdatesForTesting();
-    hubAPI.sceneSuites.mockResolvedValue({ data: [SOC, CODE_AUDIT] });
+    hubAPI.sceneSuites.mockResolvedValue({ data: [SOC, AI_REDTEAM, CODE_AUDIT] });
     extensionRegistry.slots = [];
     __resetExtensionSlotCacheForTesting();
     hubAPI.install.mockResolvedValue({});
@@ -140,14 +148,18 @@ describe('SceneSuitesPage', () => {
     renderPage();
 
     const soc = await waitFor(() => card('soc-workspace'));
-    expect(within(soc).getByText('SOC 工作区场景套件')).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent)).toEqual([
+      '告警运营套件', '代码审计场景套件', 'AI 红队场景套件',
+    ]);
+    expect(within(soc).getByText('告警运营套件')).toBeInTheDocument();
     expect(within(soc).getByRole('button', { name: '停用' })).toBeInTheDocument();
     expect(within(soc).getByRole('button', { name: '卸载' })).toBeInTheDocument();
     expect(within(soc).queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
   });
 
   it('locks a suite the install lacks the edition for, with no action of its own', async () => {
-    hubAPI.sceneSuites.mockResolvedValue({ data: [SOC, { ...CODE_AUDIT, editionLocked: true }] });
+    // The red team suite is edition-locked too, but it is not launched yet: no hint, no action.
+    hubAPI.sceneSuites.mockResolvedValue({ data: [SOC, { ...AI_REDTEAM, editionLocked: true }, { ...CODE_AUDIT, editionLocked: true }] });
     renderPage();
 
     const audit = await waitFor(() => card('code-audit-workspace'));
@@ -156,6 +168,11 @@ describe('SceneSuitesPage', () => {
     expect(within(audit).queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
     // Where to get the edition is for an extension to offer; the open build offers nothing.
     expect(within(audit).queryByRole('link')).not.toBeInTheDocument();
+    const redteam = within(card('ai-redteam-workspace'));
+    expect(redteam.getByText('预计 2026年11月上线')).toBeInTheDocument();
+    expect(redteam.queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
+    expect(redteam.queryByRole('link')).not.toBeInTheDocument();
+    expect(redteam.queryByText('sceneSuites.editionHint')).not.toBeInTheDocument();
   });
 
   it('lets an extension offer the action on a locked suite', async () => {
@@ -171,18 +188,18 @@ describe('SceneSuitesPage', () => {
     __resetExtensionSlotCacheForTesting();
     hubAPI.sceneSuites.mockResolvedValue({ data: [
       { ...CODE_AUDIT, editionLocked: true },
-      { ...CODE_AUDIT, id: 'ai-redteam-workspace', nameCn: 'AI 红队场景套件', editionLocked: false, licensed: false, licenseState: 'unlicensed' },
+      { ...CODE_AUDIT, id: 'threat-hunting-workspace', nameCn: '威胁狩猎场景套件', editionLocked: false, licensed: false, licenseState: 'unlicensed' },
     ] });
     renderPage();
 
     const audit = await waitFor(() => card('code-audit-workspace'));
     expect(within(audit).getByRole('link', { name: 'get-edition' })).toBeInTheDocument();
-    const redteam = card('ai-redteam-workspace');
-    expect(within(redteam).getByRole('link', { name: 'get-license' })).toBeInTheDocument();
-    expect(within(redteam).queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
+    const licensedSuite = card('threat-hunting-workspace');
+    expect(within(licensedSuite).getByRole('link', { name: 'get-license' })).toBeInTheDocument();
+    expect(within(licensedSuite).queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
     expect(seen).toEqual(expect.arrayContaining([
       { suiteId: 'code-audit-workspace', reason: 'edition' },
-      { suiteId: 'ai-redteam-workspace', reason: 'license' },
+      { suiteId: 'threat-hunting-workspace', reason: 'license' },
     ]));
   });
 
@@ -192,6 +209,9 @@ describe('SceneSuitesPage', () => {
 
     const audit = await waitFor(() => card('code-audit-workspace'));
     const install = await within(audit).findByRole('button', { name: '安装' });
+    const redteam = within(card('ai-redteam-workspace'));
+    expect(redteam.getByText('预计 2026年11月上线')).toBeInTheDocument();
+    expect(redteam.queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
     await user.click(install);
 
     // Installing a suite streams per-component progress, so it goes through
@@ -453,7 +473,7 @@ describe('SceneSuitesPage', () => {
     await user.click(await screen.findByRole('button', { name: '卸载' }));
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
-      '操作失败: SOC 工作区场景套件', '场景正在运行，请稍后重试',
+      '操作失败: 告警运营套件', '场景正在运行，请稍后重试',
     ));
   });
 
@@ -530,7 +550,7 @@ describe('SceneSuitesPage', () => {
     renderPage();
     await user.click(await screen.findByRole('button', { name: '补全安装' }));
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
-      '操作失败: SOC 工作区场景套件', 'required workflow unavailable',
+      '操作失败: 告警运营套件', 'required workflow unavailable',
     ));
     expect(screen.getByText('待补全')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '补全安装' })).toBeEnabled();

@@ -78,6 +78,8 @@ import { useToast } from './Toast';
 import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
 import { getFileOperationDisplayName, redactToolInput, resolveToolPresentation } from './toolPresentation';
 import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
+import SessionCacheUsage from './SessionCacheUsage';
+import { areCacheUsageCallsEqual, getMessageCacheUsageCall, type CacheUsageCall } from '@/features/session-chat/cacheUsage';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
@@ -131,7 +133,13 @@ export {
 // Types
 // ============================================================================
 
-export type MergedMessage = Message & { _merged?: boolean };
+export type MergedMessage = Message & { _merged?: boolean; _cacheUsageCalls?: CacheUsageCall[] };
+
+function getChatCacheUsageCalls(message: MergedMessage): CacheUsageCall[] {
+  if (message._cacheUsageCalls) return message._cacheUsageCalls;
+  const call = getMessageCacheUsageCall(message);
+  return call ? [call] : [];
+}
 
 /**
  * Whether a permission request belongs in this chat: its own, or one from a
@@ -173,6 +181,12 @@ export interface ConversationBottomSlotActions {
   sessionId?: string | null;
   hasMessages: boolean;
 }
+
+/** Sends a shortcut through the current chat; false means no prompt was accepted. */
+export type SendWelcomePrompt = (
+  text: string,
+  options?: PromptDisplayOptions & { agent?: string; executionMode?: SessionExecutionMode },
+) => Promise<boolean>;
 
 export interface ComposerAddMenuActions {
   closeMenu: () => void;
@@ -284,8 +298,8 @@ export interface SessionChatProps {
   mentionAgents?: Agent[];
   /** Display configuration (compact, showActions, showTimestamp) */
   display?: SessionChatDisplay;
-  /** Custom welcome content when no messages. Can be a render prop receiving setInput. */
-  welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
+  /** Custom welcome content with composer input and current-session sending actions. */
+  welcomeContent?: React.ReactNode | ((setInput: (text: string) => void, sendPrompt: SendWelcomePrompt) => React.ReactNode);
   /** Extra content rendered below the conversation area and above the composer. */
   conversationBottomSlot?: React.ReactNode | ((actions: ConversationBottomSlotActions) => React.ReactNode);
   /** Content above the messages that scrolls with them, e.g. the run a follow-up chat is about. */
@@ -451,29 +465,6 @@ function getProcessPartInterval(part: MessagePart, activeNowMs?: number): Proces
   return { start: time.start, end };
 }
 
-function sumMergedProcessIntervals(intervals: ProcessTimeInterval[]): number {
-  if (intervals.length === 0) return 0;
-
-  const sorted = [...intervals].sort((a, b) => a.start - b.start);
-  let total = 0;
-  let currentStart = sorted[0].start;
-  let currentEnd = sorted[0].end;
-
-  for (let index = 1; index < sorted.length; index += 1) {
-    const interval = sorted[index];
-    if (interval.start <= currentEnd) {
-      currentEnd = Math.max(currentEnd, interval.end);
-      continue;
-    }
-
-    total += currentEnd - currentStart;
-    currentStart = interval.start;
-    currentEnd = interval.end;
-  }
-
-  return total + currentEnd - currentStart;
-}
-
 function isModelActivityPart(part: MessagePart): boolean {
   return part.type === 'step-start' && !!part.time && Number.isFinite(part.time.start);
 }
@@ -481,36 +472,16 @@ function isModelActivityPart(part: MessagePart): boolean {
 export function getProcessGroupDurationMs(
   parts: readonly MessagePart[],
   activeNowMs?: number,
-  activePartId?: string,
-  activeScope?: { messageId?: string; modelPartId?: string },
+  startedAtMs?: number,
 ): number | null {
-  const belongsToActiveMessage = (part: MessagePart) => (
-    !activeScope?.messageId || part.messageID === activeScope.messageId
-  );
-  const canExtend = (part: MessagePart) => {
-    const time = getProcessPartTime(part);
-    return activeNowMs !== undefined && belongsToActiveMessage(part)
-      && !!time && Number.isFinite(time.start) && !Number.isFinite(time.end)
-      && time.start <= activeNowMs;
-  };
-  // Only the latest model marker may be open. A lost close event on an older
-  // attempt must not extend it through a retry/backoff or a later model call.
-  const modelPart = [...parts].reverse().find(isModelActivityPart);
-  const activePart = activePartId
-    ? parts.find((part) => part.id === activePartId)
-    : [...parts].reverse().find((part) => canExtend(part)
-      && (part.type !== 'tool' || isActiveToolPart(part)));
-  const intervals = parts.map((part) => {
-    const active = canExtend(part) && (
-      part.type === 'tool' ? isActiveToolPart(part)
-        : isModelActivityPart(part) ? part.id === (activeScope?.modelPartId ?? modelPart?.id)
-          : !modelPart && part === activePart
-    );
-    return getProcessPartInterval(part, active ? activeNowMs : undefined);
-  }).filter((interval): interval is ProcessTimeInterval => interval !== null);
-
-  if (intervals.length === 0) return null;
-  return sumMergedProcessIntervals(intervals);
+  const intervals = parts.map((part) => getProcessPartInterval(part, activeNowMs))
+    .filter((interval): interval is ProcessTimeInterval => interval !== null);
+  // Measure the user's elapsed wait, including gaps and retry backoff.
+  const start = typeof startedAtMs === 'number' && Number.isFinite(startedAtMs) && startedAtMs > 0
+    ? startedAtMs
+    : Math.min(...intervals.map((interval) => interval.start));
+  const end = Math.max(activeNowMs ?? -Infinity, ...intervals.map((interval) => interval.end));
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
 }
 
 export function formatProcessDuration(durationMs: number): string {
@@ -520,17 +491,36 @@ export function formatProcessDuration(durationMs: number): string {
   return `${minutes}m${totalSeconds % 60}s`;
 }
 
-function useProcessElapsedClock(enabled: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
+function readObservedProcessEnd(storageKey: string): number | undefined {
+  try {
+    const value = Number(window.sessionStorage.getItem(storageKey));
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function useProcessElapsedClock(enabled: boolean, storageKey: string): number | undefined {
+  const [clock, setClock] = useState(() => ({
+    key: storageKey,
+    value: enabled ? Date.now() : readObservedProcessEnd(storageKey),
+  }));
 
   useEffect(() => {
     if (!enabled) return undefined;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    const tick = () => {
+      const value = Date.now();
+      setClock({ key: storageKey, value });
+      // Keep the last displayed end across Stop, timeline remounts and tab reloads.
+      // This is only a local lower bound; later recorded part ends still win.
+      try { window.sessionStorage.setItem(storageKey, String(value)); } catch { /* Storage may be disabled. */ }
+    };
+    tick();
+    const timer = window.setInterval(tick, 1_000);
     return () => window.clearInterval(timer);
-  }, [enabled]);
+  }, [enabled, storageKey]);
 
-  return now;
+  return clock.key === storageKey ? clock.value : readObservedProcessEnd(storageKey);
 }
 
 const StreamingReasoningText = memo(function StreamingReasoningText({
@@ -1245,19 +1235,24 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
     }
 
     const last = result[result.length - 1];
+    const cacheUsageCalls = getChatCacheUsageCalls(msg);
     if (
       last &&
       last.role === 'assistant' &&
       !getAgentSender(last.parts) &&
       last._merged &&
       last.finish !== 'summary' &&
+      last.parentID === msg.parentID &&
       !!last.compacted === !!msg.compacted
     ) {
       last.parts = [...last.parts, ...msg.parts];
-      // The last constituent message owns the live state, including an unset finish.
+      last._cacheUsageCalls = [...(last._cacheUsageCalls || []), ...cacheUsageCalls];
+      // The last constituent message owns the live state, including an unset
+      // finish and the error that stopped the turn.
       last.finish = msg.finish;
+      last.error = msg.error;
     } else {
-      result.push({ ...msg, parts: [...msg.parts], _merged: true });
+      result.push({ ...msg, parts: [...msg.parts], _merged: true, _cacheUsageCalls: cacheUsageCalls });
     }
   }
 
@@ -1274,20 +1269,20 @@ export function getMessageBubbleClassName({
   isEditing: boolean;
 }): string {
   if (!isUser) {
-    const typographyClass = compact ? 'text-sm' : 'text-[15px]';
+    const typographyClass = compact ? 'text-sm' : 'text-base';
 
-    return `w-full max-w-full min-w-0 bg-transparent py-1 ${typographyClass} text-[#34393e] break-words dark:text-zinc-100`;
+    return `w-full max-w-full min-w-0 bg-transparent py-1 ${typographyClass} text-ui-text break-words`;
   }
 
   if (compact) {
     const widthClass = isEditing ? 'w-full max-w-full' : 'max-w-full';
 
-    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm border border-black/[0.07] bg-zinc-50 text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
+    return `${widthClass} min-w-0 px-4 py-3 rounded-[18px] text-sm break-words border border-ui-border/60 bg-ui-subtle text-ui-text`;
   }
 
   const widthClass = isEditing ? 'w-full' : 'w-auto';
 
-  return `${widthClass} min-w-0 max-w-full px-5 py-3 rounded-[18px] text-sm break-words shadow-sm border border-black/[0.09] bg-zinc-50 text-[#30343a] dark:border-white/[0.10] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
+  return `${widthClass} min-w-0 max-w-full px-5 py-3 rounded-[18px] text-base break-words border border-ui-border/60 bg-ui-subtle text-ui-text`;
 }
 
 export function getInstructionDisplayBubbleClassName(compact: boolean): string {
@@ -1522,6 +1517,7 @@ export function areChatTimelineItemsRenderEqual(
     if (prevMessage.agent !== nextMessage.agent) return false;
     if (prevMessage.timestamp !== nextMessage.timestamp) return false;
     if (prevMessage.compacted !== nextMessage.compacted) return false;
+    if (!areCacheUsageCallsEqual(getChatCacheUsageCalls(prevMessage), getChatCacheUsageCalls(nextMessage))) return false;
     if (!areChatMessagePartsRenderEqual(prevMessage.parts, nextMessage.parts)) return false;
   }
 
@@ -1571,6 +1567,13 @@ export function getMessageErrorText(message: Pick<Message, 'error'>): string {
   if (typeof error.code === 'string' && error.code.trim()) return error.code;
   if (typeof error.name === 'string' && error.name.trim()) return error.name;
   return 'Message failed';
+}
+
+/** Translation key explaining why a retryable error still stopped the turn, if recorded. */
+export function getMessageErrorNoteKey(message: Pick<Message, 'error'>): string | null {
+  const error = message.error as any;
+  if (error?.data?.retrySuppressed === 'tool_execution_started') return 'chat.stopReason.toolExecuted';
+  return null;
 }
 
 export function getUserAvatarContainerClassName(compact: boolean): string {
@@ -2351,7 +2354,6 @@ export default function SessionChat({
     fetchPendingQuestions,
     clearAll: clearPendingQuestions,
   } = usePendingQuestions();
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const focusedMessageRef = useRef('');
@@ -2442,7 +2444,11 @@ export default function SessionChat({
     scrollToBottomRafRef.current = requestAnimationFrame(() => {
       scrollToBottomRafRef.current = null;
       if (!isAtBottomRef.current || historyScrollLockRef.current) return;
-      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+      // Scroll the message list only. scrollIntoView would also scroll every
+      // scrollable ancestor, so a page that embeds this chat (the code audit
+      // project page) would be pushed down past its own header.
+      const el = scrollContainerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
     });
   }, []);
 
@@ -3844,6 +3850,7 @@ export default function SessionChat({
     agentOverride?: string,
     options?: PromptDisplayOptions,
     uploadSubmission?: UploadSubmission,
+    promptExecutionMode = executionMode,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
@@ -3900,18 +3907,18 @@ export default function SessionChat({
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (model) payload.model = model;
       if (options?.displayText) payload.displayText = options.displayText;
-      payload.executionMode = executionMode;
+      payload.executionMode = promptExecutionMode;
 
       uploadSubmission?.start();
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
       uploadSubmission?.accept();
-      if (executionMode === 'goal' && text.trim()) {
+      if (promptExecutionMode === 'goal' && text.trim()) {
         goalHydrationVersionRef.current += 1;
         writeDismissedGoalKey(sessionId, '');
         setGoalBanner({ objective: text.trim(), status: 'active' });
         setDismissedGoalKey('');
       }
-      onExecutionModeAccepted?.(executionMode);
+      onExecutionModeAccepted?.(promptExecutionMode);
     } catch (err: unknown) {
       setIsStreaming(false);
       removeMessage(messageId);
@@ -3945,6 +3952,7 @@ export default function SessionChat({
     agentOverride?: string,
     options?: PromptDisplayOptions,
     uploadSubmission?: UploadSubmission,
+    promptExecutionMode = executionMode,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
@@ -3956,14 +3964,14 @@ export default function SessionChat({
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
         ...(model ? { model } : {}),
         ...(options?.displayText ? { displayText: options.displayText } : {}),
-        executionMode,
+        executionMode: promptExecutionMode,
       });
       // Acceptance transfers ownership before the queue refresh or a parent
       // callback can switch/unmount this composer.
       uploadSubmission?.accept();
       await fetchPromptQueue();
       setQueueExpanded(true);
-      onExecutionModeAccepted?.(executionMode);
+      onExecutionModeAccepted?.(promptExecutionMode);
     } catch (err: any) {
       const statusCode = err?.response?.status;
       const detail = err?.response?.data?.detail;
@@ -3974,6 +3982,23 @@ export default function SessionChat({
       throw err;
     }
   };
+
+  // A shortcut may await an installation/status lookup before sending. Read the
+  // latest chat state so a prompt started meanwhile is queued, not interrupted.
+  const welcomeSendingRef = useRef(false);
+  const welcomeSendRef = useRef<SendWelcomePrompt>(async () => false);
+  welcomeSendRef.current = async (text, options) => {
+    if (!attachmentsMountedRef.current || !sessionId || hideInput || transport || sending || welcomeSendingRef.current) return false;
+    welcomeSendingRef.current = true;
+    try {
+      const send = isStreaming ? enqueueText : sendText;
+      await send(text, [], options?.agent, options, undefined, options?.executionMode ?? executionMode);
+      return true;
+    } finally {
+      welcomeSendingRef.current = false;
+    }
+  };
+  const sendWelcomePrompt = useCallback<SendWelcomePrompt>((...args) => welcomeSendRef.current(...args), []);
 
   const handleComposerPrompt = async (text: string, options?: PromptDisplayOptions) => {
     const trimmed = text.trim();
@@ -4702,16 +4727,15 @@ export default function SessionChat({
       ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-transparent py-5'
       : 'relative flex flex-col flex-1 bg-gray-50 py-6 dark:bg-zinc-950 min-h-0 overflow-y-auto';
 
+  // A 760px reading column plus 48px avatar gutters aligns with the composer's
+  // 760px text area, 16px inner padding and 32px outer gutters.
   const msgListClass = compact
     ? fullWidth ? 'space-y-3 w-full px-4' : 'space-y-3'
     : fullWidth
       ? 'space-y-5 w-full px-12'
       : pageCanvas
-        // The avatars sit 40px outside the column. The 28px padding plus the
-        // side margin must leave them 48px: when the chat area (100%) is
-        // under ~800px the padding grows to 48px, so they are not cut off or
-        // scroll the chat sideways. Phones hide the avatars and keep 16px.
-        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-[clamp(28px,calc(48px_-_(100%_-_760px)_/_2),48px)] max-md:px-4'
+        // Phones hide the avatars and keep 16px.
+        ? 'space-y-7 w-full max-w-[856px] mx-auto px-12 max-md:px-4'
         : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
   const visibleGoalBanner = goalBanner && getGoalBannerKey(goalBanner) !== dismissedGoalKey
     ? goalBanner
@@ -4766,7 +4790,7 @@ export default function SessionChat({
     <button
       onClick={handleAbort}
       title={t('chat.stopTitle')}
-      className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+      className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-ui-action text-ui-on-action hover:bg-ui-action/90 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus focus-visible:ring-offset-2"
     >
       <Square aria-hidden="true" className="w-3 h-3 fill-current" />
     </button>
@@ -4814,7 +4838,7 @@ export default function SessionChat({
               style={conversationTopSlot ? undefined : { minHeight: '100%' }}
             >
               {typeof welcomeContent === 'function'
-                ? welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); })
+                ? welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); }, sendWelcomePrompt)
                 : welcomeContent}
             </div>
           ) : conversationTopSlot ? null : (
@@ -5016,7 +5040,6 @@ export default function SessionChat({
             )}
           </div>
         )}
-        <div ref={messagesEndRef} className="h-0 flex-shrink-0" />
       </div>
 
       {/* Suggestions — shown before user sends any message */}
@@ -5067,7 +5090,7 @@ export default function SessionChat({
             compact
               ? 'bg-white px-4 py-3 dark:bg-zinc-950'
               : pageCanvas
-                ? 'bg-transparent px-7 pb-6 pt-2 max-md:px-4 max-md:pb-4'
+                ? 'bg-transparent px-8 pb-5 pt-3 max-md:px-4 max-md:pb-4'
                 : 'bg-white py-4 dark:bg-zinc-950'
           }`}
         >
@@ -5077,7 +5100,7 @@ export default function SessionChat({
                 ? fullWidth
                   ? 'w-full px-5'
                   : pageCanvas
-                    ? 'mx-auto w-full max-w-[760px]'
+                    ? 'mx-auto w-full max-w-[792px]'
                     : 'w-[min(76%,64rem)] mx-auto px-6'
                 : ''
             }`}
@@ -5171,17 +5194,17 @@ export default function SessionChat({
                   if (event.target !== textareaRef.current) composerAddMenuButtonRef.current?.focus();
                 }
               }}
-              className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-[20px] shadow-[0_3px_12px_rgba(22,27,34,0.045)]' : 'rounded-2xl'} border transition-all ${
+              className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-[18px] shadow-ui-input' : 'rounded-2xl'} border transition-colors ${
                 isCompacting
                   ? 'border-amber-200 bg-amber-50/30 dark:border-amber-500/35 dark:bg-amber-950/25'
                   : isDragOver
                     ? 'border-sky-300 bg-sky-50/60 ring-4 ring-sky-100 dark:border-sky-500/50 dark:bg-sky-950/35 dark:ring-sky-500/10'
                     : isStreaming
-                      ? 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/70'
+                      ? 'border-ui-border bg-ui-surface'
                       : pageCanvas && !compact
-                        // Focus is one red border, no second ring (REA V30 / Flocks UI); it also wins over hover.
-                        ? 'border-black/[0.09] bg-zinc-50 hover:border-black/[0.14] focus-within:!border-[#DC2626] focus-within:bg-white dark:border-white/[0.10] dark:bg-[#303842] dark:hover:border-white/[0.16] dark:focus-within:!border-[#DC2626] dark:focus-within:bg-[#343d48]'
-                        : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
+                        // Focus changes the border only, keeping the composer geometry stable.
+                        ? 'border-ui-border bg-ui-surface hover:border-ui-control focus-within:border-ui-focus'
+                        : 'border-ui-border bg-ui-surface hover:border-ui-control focus-within:border-ui-focus focus-within:ring-2 focus-within:ring-ui-focus/15'
               }`}
             >
                 {/* Node reference chip */}
@@ -5409,8 +5432,8 @@ export default function SessionChat({
                             ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
                             : effectivePlaceholder
                     }
-                    className={`w-full resize-none bg-transparent text-sm outline-none placeholder:text-[#7b838e] dark:placeholder:text-[#9aa7b4] ${
-                      sending ? 'text-zinc-400 cursor-not-allowed dark:text-zinc-500' : 'text-zinc-900 dark:text-zinc-100'
+                    className={`w-full resize-none bg-transparent leading-[1.8] outline-none placeholder:text-ui-muted ${pageCanvas && !compact ? 'text-base' : 'text-sm'} ${
+                      sending ? 'text-ui-muted cursor-not-allowed' : 'text-ui-text'
                     }`}
                     style={{
                       minHeight: `${effectiveComposerTextareaMinHeight}px`,
@@ -5436,8 +5459,8 @@ export default function SessionChat({
                       aria-expanded={showComposerAddMenu}
                       className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
                         showComposerAddMenu
-                          ? 'bg-zinc-100 text-zinc-900 dark:bg-white/[0.09] dark:text-white'
-                          : 'text-zinc-500 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.07] dark:hover:text-white'
+                          ? 'bg-ui-selected text-ui-text'
+                          : 'text-ui-secondary hover:bg-ui-hover hover:text-ui-text'
                       }`}
                     >
                       <Plus aria-hidden="true" className="h-[17px] w-[17px]" strokeWidth={2} />
@@ -5531,7 +5554,7 @@ export default function SessionChat({
                         <button
                           onClick={handleSend}
                           title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-ui-action text-ui-on-action transition-colors hover:bg-ui-action/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus focus-visible:ring-offset-2"
                         >
                           {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2.5} />}
                         </button>
@@ -5541,11 +5564,11 @@ export default function SessionChat({
                         onClick={handleSend}
                         disabled={!canSend || composerBusy}
                         aria-label={t('chat.sendTitle')}
-                        title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.sendTitle')}
-                        className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
+                        title={hasUploadingFiles ? t('chat.upload.waiting') : undefined}
+                        className={`inline-flex h-8 w-8 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus focus-visible:ring-offset-2 ${
                           canSend && !composerBusy
-                            ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
-                            : 'cursor-not-allowed border border-zinc-300 bg-zinc-200 text-zinc-400 dark:border-[#5a6573] dark:bg-[#46515e] dark:text-[#b8c2cc]'
+                            ? 'bg-ui-action text-ui-on-action hover:bg-ui-action/90'
+                            : 'cursor-not-allowed border border-ui-border bg-ui-subtle text-ui-muted'
                         }`}
                       >
                         {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2.5} />}
@@ -5958,7 +5981,13 @@ function ChatMessageBubbleInner({
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
   const sender = getAgentSender(parts);
   const isUser = message.role === 'user' && !sender;
-  const processElapsedClock = useProcessElapsedClock(isActive && collapseIntermediateSteps);
+  const processElapsedClock = useProcessElapsedClock(
+    isActive && (collapseIntermediateSteps || showTimestamp),
+    `flocks:session:${message.sessionID}:message:${message.id}:observedEnd`,
+  );
+  const processStartedAt = Number.isFinite(message.timestamp) && message.timestamp > 0
+    ? message.timestamp
+    : Math.min(...parts.map((part) => getProcessPartInterval(part, processElapsedClock)?.start ?? Infinity));
   const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
   // Lightbox state for inline image previews. Browsers block top-level
   // navigation to ``data:`` URLs (the format we send for chat images), so a
@@ -6026,6 +6055,24 @@ function ChatMessageBubbleInner({
   const shouldRenderAssistantErrorState = !isUser && !!messageErrorText && (
     parts.length === 0 || hasOnlyBlankTextParts
   );
+  const showErrorInEmptyState = visiblePartCount === 0 || shouldRenderAssistantErrorState;
+  // Why the turn stopped stays on the reply, below whatever it produced. When the
+  // reply had nothing else to say, the backend also stores the same text as a part.
+  const messageErrorNoteKey = messageErrorText ? getMessageErrorNoteKey(message) : null;
+  const errorEchoText = messageErrorText.trim();
+  const isErrorEchoPart = (part: MessagePart): boolean => (
+    !!errorEchoText && part.type === 'text' && String(part.text || '').trim() === errorEchoText
+  );
+  const messageErrorAlert = messageErrorText ? (
+    <div className="flex items-start gap-2 py-1 text-sm text-red-700 dark:text-red-300" role="alert">
+      <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500 dark:text-red-400" />
+      <div className="min-w-0">
+        <p className="font-medium">{t('chat.stopReason.title')}</p>
+        <p className="whitespace-pre-wrap break-words">{messageErrorText}</p>
+        {messageErrorNoteKey && <p className="mt-0.5 text-xs">{t(messageErrorNoteKey)}</p>}
+      </div>
+    </div>
+  ) : null;
   const outputAttachments = isUser ? [] : parts.flatMap((part) => {
     if (part.type !== 'tool' || part.tool !== 'write' || part.state?.status !== 'completed') return [];
     return (part.state.attachments || []).filter(
@@ -6053,19 +6100,14 @@ function ChatMessageBubbleInner({
     >
 
       {/* Empty / loading state */}
-      {(visiblePartCount === 0 || shouldRenderAssistantErrorState) && (
+      {showErrorInEmptyState && (
         isUser ? (
           <div className="flex items-center gap-2 opacity-60">
             <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
             {t('chat.sending')}
           </div>
         ) : (
-          messageErrorText ? (
-            <div className="flex items-start gap-2 py-1 text-sm text-red-700" role="alert">
-              <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 text-red-500 flex-shrink-0" />
-              <span className="whitespace-pre-wrap break-words">{messageErrorText}</span>
-            </div>
-          ) : (
+          messageErrorAlert ?? (
             <div className="flex items-center gap-1 py-1" aria-label={t('chat.thinking')}>
               <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
               <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
@@ -6096,7 +6138,8 @@ function ChatMessageBubbleInner({
           // image previews above the textual prompt — matches typical chat
           // UX for "look at this image and …" style messages.
           const fileParts = parts.filter((p) => p.type === 'file');
-          const displayParts = parts.filter((p) => p.type !== 'file');
+          // The error alert below already says it.
+          const displayParts = parts.filter((p) => p.type !== 'file' && !isErrorEchoPart(p));
           const isQuestionToolPart = (part: MessagePart): boolean => {
             if (part.type !== 'tool') return false;
             return isQuestionToolName(part.tool || '');
@@ -6128,12 +6171,6 @@ function ChatMessageBubbleInner({
           const activeTailPart = isActive
             ? [...displayParts].reverse().find(isRenderableDisplayPart)
             : undefined;
-          const activeMessageId = displayParts[displayParts.length - 1]?.messageID;
-          const latestModelPart = [...displayParts].reverse().find(isModelActivityPart);
-          const activeOutputPart = [...displayParts].reverse().find((part) => (
-            ['text', 'reasoning', 'thinking'].includes(part.type)
-            && (!activeMessageId || part.messageID === activeMessageId)
-          ));
           const renderPart = (part: MessagePart, i: number, isVisible = true, processStep = false) => (
             // Spacing between consecutive parts is owned by this wrapper,
             // not by individual part components. Each part used to set its
@@ -6298,15 +6335,16 @@ function ChatMessageBubbleInner({
             group: Array<{ part: MessagePart; index: number }>,
             groupIndex: number,
             timingParts: MessagePart[],
+            isLastGroup: boolean,
           ) => {
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
             const processGroupKey = `${message.id}:process:${groupIndex}`;
             const durationParts = [...group.map(({ part }) => part), ...timingParts];
+            // Summaries show elapsed time since the reply began; only the last one ticks.
             const processDurationMs = getProcessGroupDurationMs(
               durationParts,
-              isActive ? processElapsedClock : undefined,
-              activeOutputPart?.id,
-              { messageId: activeMessageId, modelPartId: latestModelPart?.id },
+              isLastGroup ? processElapsedClock : undefined,
+              processStartedAt,
             );
             const hasStoredOpenState = !!processGroupOpenState
               && Object.prototype.hasOwnProperty.call(processGroupOpenState, processGroupKey);
@@ -6366,7 +6404,9 @@ function ChatMessageBubbleInner({
             const flushProcessGroup = () => {
               if (!processGroup) return;
               const group = processGroup;
-              nodes.push(() => renderProcessGroup(group.steps, group.index, group.timing));
+              nodes.push(() => renderProcessGroup(
+                group.steps, group.index, group.timing, group.index === processGroupIndex - 1,
+              ));
               lastGroup = group;
               processGroup = undefined;
             };
@@ -6386,7 +6426,7 @@ function ChatMessageBubbleInner({
                 return;
               }
               // Empty output is still timed, but never adds a visible step.
-              if ((isActive || latestModelPart) && ['text', 'reasoning', 'thinking'].includes(part.type)) {
+              if (['text', 'reasoning', 'thinking'].includes(part.type)) {
                 const group = processGroup || lastGroup;
                 if (group) group.timing.push(part);
                 else pendingTiming.push(part);
@@ -6509,6 +6549,11 @@ function ChatMessageBubbleInner({
         })()
       )}
 
+      {/* Why the turn stopped, after what it already produced */}
+      {messageErrorAlert && !showErrorInEmptyState && (
+        <div className="mt-2 first:mt-0" data-testid="chat-message-stop-reason">{messageErrorAlert}</div>
+      )}
+
       {/* Streaming indicator */}
       {isActive && !isUser && visiblePartCount > 0 && (() => {
         return (
@@ -6523,6 +6568,8 @@ function ChatMessageBubbleInner({
         );
       })()}
 
+
+      {!isUser && !sender && <SessionCacheUsage calls={getChatCacheUsageCalls(message)} isActive={isActive} />}
 
       {/* Actions — rendered inside bubble only while editing */}
       {showActions && parts.length > 0 && isEditing && (
@@ -6562,8 +6609,14 @@ function ChatMessageBubbleInner({
       )}
     </div>
   );
+  // Use the same elapsed time as the process summary, including the final output.
+  const displayTimestamp = message.timestamp + (
+    message.role === 'assistant'
+      ? (getProcessGroupDurationMs(parts, processElapsedClock, message.timestamp) ?? 0)
+      : 0
+  );
   const footerTimestamp = showTimestamp && message.timestamp
-    ? <span className="select-none text-[11px] text-[#8b929d] dark:text-[#9aa7b4]">{formatSmartTime(message.timestamp, i18n.language)}</span>
+    ? <span className="select-none text-[11px] text-[#8b929d] dark:text-[#9aa7b4]">{formatSmartTime(displayTimestamp, i18n.language)}</span>
     : null;
   const footer = !compact && showActions && visiblePartCount > 0 && !isEditing ? (
     <div className={`mt-1.5 flex items-center ${
@@ -6695,7 +6748,7 @@ function ChatMessageBubbleInner({
         </div>
         <div className="flex w-full min-w-0 flex-col items-start">
           <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-base font-semibold text-[#3f444a] dark:text-[#d7dee8]">
+            <span className="text-base font-medium text-ui-text">
               {agentName}
             </span>
           </div>
@@ -7487,7 +7540,11 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.onOpenContextFile !== next.onOpenContextFile) return false;
   if (prev.onOpenContext !== next.onOpenContext) return false;
   if (prev.message.finish !== next.message.finish) return false;
+  if (prev.message.error !== next.message.error) return false;
+  if (prev.message.id !== next.message.id || prev.message.sessionID !== next.message.sessionID) return false;
+  if (prev.message.timestamp !== next.message.timestamp) return false;
   if (prev.message.role !== next.message.role || prev.message.agent !== next.message.agent) return false;
+  if (!areCacheUsageCallsEqual(getChatCacheUsageCalls(prev.message), getChatCacheUsageCalls(next.message))) return false;
   const prevParts = prev.message.parts as any[] | undefined;
   const nextParts = next.message.parts as any[] | undefined;
   if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;

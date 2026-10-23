@@ -49,5 +49,28 @@
     "error": "Error"
   },
   "managedModeTitle": "Managed Release Package",
-  "managedModeDesc": "This installation's upgrades are managed by the deployment; the built-in updater will not modify the managed runtime. Use the deployment's upgrade flow or contact an administrator."
+  "managedModeDesc": "This installation's upgrades are managed by the deployment; the built-in updater will not modify the managed runtime. Use the deployment's upgrade flow or contact an administrator.",
+  "handoff": {
+    "title": "Restart progress",
+    "steps": {
+      "stop": "Stop service",
+      "source_replace": "Replace program files",
+      "check_runtime": "Check Node.js and npm",
+      "sync_dependencies": "Install backend dependencies",
+      "install_components": "Install extension components",
+      "build_webui": "Build WebUI",
+      "finalize": "Verify installation",
+      "start": "Start service"
+    },
+    "statuses": {
+      "pending": "Not started",
+      "running": "In progress",
+      "done": "Done",
+      "skipped": "Skipped",
+      "failed": "Failed"
+    },
+    "failed": "The upgrade failed at \"{{step}}\": {{error}}",
+    "noDetail": "The detailed reason is only shown on the page that started the upgrade.",
+    "recoveryHint": "The service has not come back: check ~/.flocks/run/upgrade-result.json and today's errors.log under ~/.flocks/logs/ on the server, fix the cause, then run flocks start."
+  }
 }

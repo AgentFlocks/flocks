@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ContextUsageSnapshot } from '@/api/session';
 import type { Message } from '@/types';
+import type { SendWelcomePrompt } from './SessionChat';
 
 import {
   areChatTimelineItemsRenderEqual,
@@ -18,6 +19,7 @@ import {
   getCompactionDividerClassName,
   getEditingActionBarClassName,
   getMessageBubbleClassName,
+  getMessageErrorNoteKey,
   getMessageErrorText,
   getMessageGroupClassName,
   getProcessGroupDurationMs,
@@ -78,6 +80,8 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.retryNotice.transient': '模型请求失败（{{reason}}），正在第 {{attempt}} 次重试',
   'chat.retryNotice.countdown': '，约 {{seconds}} 秒后',
   'chat.retryNotice.unknownReason': '临时错误',
+  'chat.stopReason.title': '任务已停止',
+  'chat.stopReason.toolExecuted': '这一步已经执行过工具，为避免重复执行，没有自动重试这次请求。',
   'chat.contextCompressed': '上下文已压缩',
   'chat.contextUsage.title': 'Context Usage',
   'chat.contextUsage.close': 'Close',
@@ -242,6 +246,7 @@ vi.mock('@/api/session', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.sessionStorage.clear();
   const localStorageData = new Map<string, string>();
   Object.defineProperty(window, 'localStorage', {
     configurable: true,
@@ -1118,6 +1123,57 @@ describe('SessionChat focused message deep links', () => {
   });
 });
 
+describe('SessionChat auto-scroll', () => {
+  const messagesState = (messages: Message[]) => ({
+    messages,
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+    addMessage: vi.fn(),
+    updateMessage: vi.fn(),
+    updateMessagePart: vi.fn(),
+    removeMessage: vi.fn(),
+    clearMessages: vi.fn(),
+    replaceMessageText: vi.fn(),
+    markMessageStopped: vi.fn(),
+    truncateAfterMessage: vi.fn(),
+  });
+
+  it('follows new messages inside its own list without scrolling the page that embeds it', async () => {
+    const first = makeMessage({
+      id: 'auto-scroll-1',
+      parts: [{ id: 'auto-scroll-part-1', type: 'text', text: 'first answer' } as any],
+    });
+    useSessionMessagesMock.mockReturnValue(messagesState([first]));
+    const { rerender } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    // jsdom has no layout: give the message list something to scroll to.
+    const list = screen.getByText('first answer').closest('.overflow-y-auto') as HTMLElement;
+    let scrollTop = 0;
+    Object.defineProperty(list, 'scrollHeight', { configurable: true, value: 640 });
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+
+    useSessionMessagesMock.mockReturnValue(messagesState([
+      first,
+      makeMessage({
+        id: 'auto-scroll-2',
+        parts: [{ id: 'auto-scroll-part-2', type: 'text', text: 'second answer' } as any],
+      }),
+    ]));
+    rerender(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    await waitFor(() => expect(scrollTop).toBe(640));
+    // scrollIntoView also scrolls every scrollable ancestor (the code audit page around the chat).
+    expect(window.HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
+  });
+});
+
 describe('ChatToolPart file operation titles', () => {
   it('shows only the filename in the header while preserving the full path in details', () => {
     const fullPath = '/Users/example/.flocks/workspace/outputs/2026-07-24/gold_price_retrieval_plan.md';
@@ -1506,7 +1562,7 @@ describe('getMessageBubbleClassName', () => {
     });
 
     expect(className).toContain('w-full');
-    expect(className).toContain('text-[15px]');
+    expect(className).toContain('text-base');
   });
 
   it('fills the fixed compact assistant message column', () => {
@@ -1553,8 +1609,8 @@ describe('getMessageBubbleClassName', () => {
       isEditing: false,
     });
 
-    expect(className).toContain('bg-zinc-50');
-    expect(className).toContain(compact ? 'border-black/[0.07]' : 'border-black/[0.09]');
+    expect(className).toContain('bg-ui-subtle');
+    expect(className).toContain('border-ui-border/60');
     expect(className).not.toContain('bg-sky-50');
     expect(className).not.toContain('border-sky-100');
   });
@@ -1931,7 +1987,7 @@ describe('SessionChat standalone thinking indicator', () => {
     }));
 
     await user.type(screen.getByPlaceholderText('请输入消息'), '接入设备');
-    await user.click(container.querySelector('button[class*="bg-sky-500"]')!);
+    await user.click(container.querySelector('svg.lucide-arrow-up')!.closest('button')!);
 
     await waitFor(() => {
       expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
@@ -1976,7 +2032,7 @@ describe('SessionChat standalone thinking indicator', () => {
     }));
 
     await user.type(screen.getByPlaceholderText('请输入消息'), '已连接涉笔');
-    await user.click(container.querySelector('button[class*="bg-sky-500"]')!);
+    await user.click(container.querySelector('svg.lucide-arrow-up')!.closest('button')!);
 
     await waitFor(() => {
       expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
@@ -2233,7 +2289,7 @@ describe('SessionChat delegated work stop controls', () => {
 
     fireEvent.change(screen.getByPlaceholderText('请输入消息'), { target: { value: 'Follow up' } });
     expect(screen.queryByTitle('chat.queue.enqueue')).not.toBeInTheDocument();
-    fireEvent.click(container.querySelector('button[class*="bg-sky-500"]')!);
+    fireEvent.click(container.querySelector('svg.lucide-arrow-up')!.closest('button')!);
     await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
       '/api/session/sess-1/prompt_async', expect.any(Object),
     ));
@@ -2314,7 +2370,7 @@ describe('SessionChat delegated work stop controls', () => {
       expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
       fireEvent.change(screen.getByPlaceholderText('请输入消息'), { target: { value: 'Try again' } });
       expect(screen.queryByTitle('chat.queue.enqueue')).not.toBeInTheDocument();
-      fireEvent.click(container.querySelector('button[class*="bg-sky-500"]')!);
+      fireEvent.click(container.querySelector('svg.lucide-arrow-up')!.closest('button')!);
       await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
         '/api/session/sess-1/prompt_async', expect.any(Object),
       ));
@@ -2606,6 +2662,106 @@ describe('SessionChat instruction display text', () => {
   });
 });
 
+describe('SessionChat welcome prompt sending', () => {
+  it('sends to the current session with optimistic history, the chosen model and the shortcut execution mode', async () => {
+    mockStatefulSessionMessages();
+    const accepted = vi.fn();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      agentName: 'explore',
+      model: { providerID: 'provider-1', modelID: 'model-1' },
+      executionMode: 'goal',
+      onExecutionModeAccepted: accepted,
+      welcomeContent: (_setInput, sendPrompt) => React.createElement('button', {
+        onClick: () => void sendPrompt('REA install guide', { agent: 'rex', executionMode: 'build' }),
+      }, 'Start REA'),
+    }));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Start REA' }));
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/prompt_async', {
+      parts: [{ type: 'text', text: 'REA install guide' }],
+      messageID: expect.any(String),
+      agent: 'rex',
+      model: { providerID: 'provider-1', modelID: 'model-1' },
+      executionMode: 'build',
+    }));
+    expect(screen.getByText('REA install guide')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start REA' })).not.toBeInTheDocument();
+    expect(accepted).toHaveBeenCalledWith('build');
+    expect(screen.queryByText('Goal')).not.toBeInTheDocument();
+    expect(clientPostMock).not.toHaveBeenCalledWith('/api/session', expect.anything());
+  });
+
+  it('queues a delayed shortcut when the current session has started streaming meanwhile', async () => {
+    let sendPrompt!: SendWelcomePrompt;
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1', executionMode: 'plan',
+      welcomeContent: (_setInput, send) => { sendPrompt = send; return null; },
+    }));
+    const delayedSend = sendPrompt;
+    await act(async () => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+      });
+    });
+    await act(async () => {
+      expect(await delayedSend('REA use', { agent: 'rex', executionMode: 'build' })).toBe(true);
+    });
+    expect(sessionApiEnqueuePromptMock).toHaveBeenCalledWith('sess-1', {
+      parts: [{ type: 'text', text: 'REA use' }], agent: 'rex', executionMode: 'build',
+    });
+    expect(clientPostMock).not.toHaveBeenCalled();
+  });
+
+  it('prevents duplicate shortcut sends while acceptance is pending', async () => {
+    const request = deferred<{ data: object }>();
+    clientPostMock.mockReturnValue(request.promise);
+    let sendPrompt!: SendWelcomePrompt;
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      welcomeContent: (_setInput, send) => { sendPrompt = send; return null; },
+    }));
+    let first!: Promise<boolean>;
+    await act(async () => {
+      first = sendPrompt('REA install');
+      expect(await sendPrompt('REA install')).toBe(false);
+    });
+    await act(async () => {
+      request.resolve({ data: {} });
+      expect(await first).toBe(true);
+    });
+    expect(clientPostMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes a failed optimistic message and permits retry in the same session', async () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    clientPostMock.mockRejectedValueOnce(new Error('offline'));
+    const messages = useSessionMessagesMock();
+    let sendPrompt!: SendWelcomePrompt;
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      welcomeContent: (_setInput, send) => { sendPrompt = send; return null; },
+    }));
+    await act(async () => { await expect(sendPrompt('REA install')).rejects.toThrow('offline'); });
+    expect(messages.removeMessage).toHaveBeenCalledWith(messages.addMessage.mock.calls[0][0].id);
+    await act(async () => { expect(await sendPrompt('REA install')).toBe(true); });
+    expect(clientPostMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/session/sess-1/prompt_async', '/api/session/sess-1/prompt_async',
+    ]);
+    alert.mockRestore();
+  });
+
+  it.each([true, false])('does not send from a read-only or unmounted chat (read-only: %s)', async (readOnly) => {
+    let sendPrompt!: SendWelcomePrompt;
+    const view = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1', hideInput: readOnly,
+      welcomeContent: (_setInput, send) => { sendPrompt = send; return null; },
+    }));
+    if (!readOnly) view.unmount();
+    expect(await sendPrompt('REA install')).toBe(false);
+    expect(clientPostMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('SessionChat composer controls', () => {
   function ModalChat({ onClose }: { onClose: () => void }) {
     const dialogRef = React.useRef<HTMLDivElement>(null);
@@ -2704,10 +2860,9 @@ describe('SessionChat composer controls', () => {
     const sendButton = screen.getByRole('button', { name: 'chat.sendTitle' });
     expect(sendButton).toBeDisabled();
 
-    // 禁用态走 tokens.css 的 disabled token，深色由 .dark 变量接管，不再写 dark: 字面色
-    expect(sendButton?.className).toContain('dark:bg-[#46515e]');
-    expect(sendButton?.className).toContain('dark:text-[#b8c2cc]');
-    expect(sendButton?.className).toContain('dark:border-[#5a6573]');
+    expect(sendButton?.className).toContain('bg-ui-subtle');
+    expect(sendButton?.className).toContain('text-ui-muted');
+    expect(sendButton?.className).toContain('border-ui-border');
   });
 
   it('groups attachment and injected actions in the Add menu', async () => {
@@ -3344,14 +3499,24 @@ describe('getThinkingFirstSentence', () => {
 });
 
 describe('process group duration', () => {
-  it('sums actual process intervals without counting gaps', () => {
+  it.each([0, undefined, NaN])('uses recorded step timing when message creation time is %s', (timestamp) => {
+    const start = new Date(2026, 9, 19, 19, 1).getTime();
+    const parts: Message['parts'] = [
+      { id: 'reason', type: 'reasoning', text: '检查', time: { start, end: start + 5_000 } },
+    ];
+    expect(getProcessGroupDurationMs(parts, undefined, timestamp)).toBe(5_000);
+    expect(getProcessGroupDurationMs(parts, start + 20_000, timestamp)).toBe(20_000);
+    expect(getProcessGroupDurationMs([], undefined, timestamp)).toBeNull();
+  });
+
+  it('includes waiting gaps between process intervals', () => {
     const parts = [
       { id: 'reason', type: 'reasoning', time: { start: 0, end: 5_000 } },
       { id: 'summary', type: 'text', text: '继续检查', time: { start: 8_000, end: 9_000 } },
       { id: 'tool', type: 'tool', state: { status: 'completed', time: { start: 20_000, end: 28_000 } } },
     ] as Message['parts'];
 
-    expect(getProcessGroupDurationMs(parts)).toBe(14_000);
+    expect(getProcessGroupDurationMs(parts)).toBe(28_000);
     expect(formatProcessDuration(500)).toBe('1s');
     expect(formatProcessDuration(7_600)).toBe('7s');
     expect(formatProcessDuration(260_900)).toBe('4m20s');
@@ -3359,7 +3524,7 @@ describe('process group duration', () => {
       .toBeNull();
   });
 
-  it('uses current time only for unfinished active intervals', () => {
+  it('uses current time for the active response and ignores future intervals', () => {
     const parts = [
       { id: 'done', type: 'tool', state: { status: 'completed', time: { start: 0, end: 5_000 } } },
       { id: 'stale-text', type: 'text', text: 'missed final update', time: { start: 8_000 } },
@@ -3367,19 +3532,18 @@ describe('process group duration', () => {
       { id: 'future-text', type: 'text', text: '等待下一步', time: { start: 40_000 } },
     ] as Message['parts'];
 
-    expect(getProcessGroupDurationMs(parts, 22_000)).toBe(7_000);
-    expect(getProcessGroupDurationMs(parts, 23_000)).toBe(8_000);
-    expect(getProcessGroupDurationMs(parts, 23_000, 'running')).toBe(8_000);
+    expect(getProcessGroupDurationMs(parts, 22_000)).toBe(22_000);
+    expect(getProcessGroupDurationMs(parts, 23_000)).toBe(23_000);
   });
 
-  it('merges overlapping intervals so parallel process steps are not double counted', () => {
+  it('counts parallel steps once while including the gap before the next step', () => {
     const parts = [
       { id: 'tool-a', type: 'tool', state: { status: 'completed', time: { start: 0, end: 10_000 } } },
       { id: 'tool-b', type: 'tool', state: { status: 'completed', time: { start: 5_000, end: 15_000 } } },
       { id: 'reason', type: 'reasoning', time: { start: 20_000, end: 22_000 } },
     ] as Message['parts'];
 
-    expect(getProcessGroupDurationMs(parts)).toBe(17_000);
+    expect(getProcessGroupDurationMs(parts)).toBe(22_000);
   });
 
   it('ignores invalid or incomplete historical intervals', () => {
@@ -3391,7 +3555,7 @@ describe('process group duration', () => {
       { id: 'valid', type: 'reasoning', time: { start: 30_000, end: 32_000 } },
     ] as unknown as Message['parts'];
 
-    expect(getProcessGroupDurationMs(parts)).toBe(2_000);
+    expect(getProcessGroupDurationMs(parts)).toBe(7_000);
   });
 
   it('keeps zero-duration completed intervals displayable', () => {
@@ -3410,6 +3574,7 @@ describe('process group duration', () => {
         message: makeMessage({
           id: 'assistant-active-duration',
           role: 'assistant',
+          timestamp: 1_000,
           parts: [{
             id: 'tool-active-duration',
             type: 'tool',
@@ -3661,6 +3826,46 @@ describe('getMessageErrorText', () => {
       error: { code: 'SessionError' } as any,
     }))).toBe('SessionError');
   });
+
+  it('explains a retry the backend held back because a tool had already run', () => {
+    expect(getMessageErrorNoteKey(makeMessage({
+      id: 'assistant-error',
+      error: { name: 'APIError', data: { message: 'timed out', retrySuppressed: 'tool_execution_started' } } as any,
+    }))).toBe('chat.stopReason.toolExecuted');
+    expect(getMessageErrorNoteKey(makeMessage({
+      id: 'assistant-error',
+      error: { name: 'APIError', data: { message: 'timed out' } } as any,
+    }))).toBeNull();
+    expect(getMessageErrorNoteKey(makeMessage({ id: 'assistant-ok' }))).toBeNull();
+  });
+});
+
+describe('mergeConsecutiveAssistantMessages error ownership', () => {
+  const step = (id: string, overrides: Partial<Message> = {}) => makeMessage({
+    id, role: 'assistant', finish: 'tool-calls',
+    parts: [{ id: `${id}-text`, type: 'text', text: id }] as Message['parts'],
+    ...overrides,
+  });
+  const timeout = { name: 'APIError', message: 'LLM stream timed out', data: { message: 'LLM stream timed out' } } as any;
+
+  it('keeps the error of the step that stopped the turn', () => {
+    const [merged] = mergeConsecutiveAssistantMessages([
+      step('first'),
+      step('last', { finish: 'error', error: timeout }),
+    ]);
+    expect(merged.id).toBe('first');
+    expect(merged.finish).toBe('error');
+    expect(merged.error).toBe(timeout);
+  });
+
+  it('drops an earlier error once a later step carried on', () => {
+    const [merged] = mergeConsecutiveAssistantMessages([
+      step('first', { finish: 'error', error: timeout }),
+      step('last', { finish: 'stop' }),
+    ]);
+    expect(merged.finish).toBe('stop');
+    expect(merged.error).toBeUndefined();
+  });
 });
 
 describe('shouldForwardSSEEventToParent', () => {
@@ -3861,6 +4066,63 @@ describe('SessionChat error rendering', () => {
     expect(screen.getByText('Model returned an empty response.')).toBeInTheDocument();
     expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
   });
+
+  const toolStep = (id: string, text: string) => [
+    { id: `${id}-text`, type: 'text', text },
+    { id: `${id}-tool`, type: 'tool', tool: 'bash', callID: `${id}-call`, state: {
+      status: 'completed', input: { command: `echo ${id}` }, output: id, time: { start: 0, end: 10 },
+    } },
+  ] as Message['parts'];
+  const mockMessages = (messages: Message[]) => useSessionMessagesMock.mockReturnValue({
+    messages,
+    loading: false,
+    refetch: vi.fn(),
+    addMessage: vi.fn(),
+    updateMessage: vi.fn(),
+    updateMessagePart: vi.fn(),
+    replaceMessageText: vi.fn(),
+    truncateAfterMessage: vi.fn(),
+  });
+
+  it('keeps why a multi-step turn stopped after a tool already ran', () => {
+    // Regression (INC-BCFF390A): the last step's error was dropped when the
+    // steps were merged, and a reply with text or tools never showed it.
+    const timeout = 'LLM stream timed out after 300s (mid-stream). The model may be overloaded or incompatible. Please try again or switch models.';
+    mockMessages([
+      makeMessage({ id: 'user-1', role: 'user', parts: [{ id: 'ask', type: 'text', text: '检查样式结构' }] as Message['parts'] }),
+      makeMessage({ id: 'step-1', role: 'assistant', finish: 'tool-calls', parts: toolStep('step-1', '我先看一下样式结构。') }),
+      makeMessage({
+        id: 'step-2', role: 'assistant', finish: 'error', parts: toolStep('step-2', '再检查一下视图文件。'),
+        error: { name: 'APIError', message: timeout, data: { message: timeout, retrySuppressed: 'tool_execution_started' } } as any,
+      }),
+    ]);
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('任务已停止');
+    expect(alert).toHaveTextContent(timeout);
+    expect(alert).toHaveTextContent('这一步已经执行过工具，为避免重复执行，没有自动重试这次请求。');
+    expect(screen.getByText('再检查一下视图文件。')).toBeInTheDocument();
+  });
+
+  it('shows an error the backend also stored as reply text only once', () => {
+    const unavailable = 'Model is unavailable. Please check the provider connection and model configuration.';
+    mockMessages([
+      makeMessage({ id: 'user-1', role: 'user', parts: [{ id: 'ask', type: 'text', text: '继续' }] as Message['parts'] }),
+      makeMessage({
+        id: 'step-1', role: 'assistant', finish: 'error',
+        parts: [...toolStep('step-1', '').slice(1), { id: 'echo', type: 'text', text: unavailable }] as Message['parts'],
+        error: { name: 'APIError', message: 'Connection error.', data: { message: 'Connection error.', displayMessage: unavailable } } as any,
+      }),
+    ]);
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getAllByText(unavailable)).toHaveLength(1);
+    expect(screen.getByRole('alert')).toHaveTextContent(unavailable);
+    expect(screen.getByRole('alert')).not.toHaveTextContent('没有自动重试');
+  });
 });
 
 describe('SessionChat intermediate process collapse', () => {
@@ -3872,6 +4134,7 @@ describe('SessionChat intermediate process collapse', () => {
           id: 'assistant-process',
           role: 'assistant',
           finish: 'stop',
+          timestamp: 1_000,
           parts: [
             {
               id: 'reason-1',
@@ -5464,11 +5727,79 @@ describe('ChatMessageBubble session typography', () => {
       compact: false,
     }));
 
-    expect(screen.getByText('Rex')).toHaveClass('text-base', 'font-semibold', 'text-[#3f444a]');
+    expect(screen.getByText('Rex')).toHaveClass('text-base', 'font-medium', 'text-ui-text');
   });
 });
 
 describe('ChatMessageBubble footer layout', () => {
+  it.each(['stop', 'error'])('keeps the last observed wait when retry ends with %s and the timeline remounts', (finish) => {
+    const at = (minute: number, second = 0) => new Date(2026, 9, 19, 19, minute, second).getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(at(5, 14));
+    try {
+      const message = makeMessage({ id: `retry-${finish}`, timestamp: at(1), parts: [
+        { id: 'reason', type: 'reasoning', text: '检查任务', time: { start: at(1), end: at(1, 10) } },
+        { id: 'model', type: 'step-start', time: { start: at(4), end: at(4, 10) } },
+      ] });
+      const props = { compact: false, showActions: true, showTimestamp: true, collapseIntermediateSteps: true };
+      const active = render(React.createElement(ChatMessageBubble, { ...props, message, isActive: true }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 4m14s');
+      active.unmount(); // SessionChat moves a finished reply from the tail to history.
+
+      const stopped = { ...message, finish };
+      const history = render(React.createElement(ChatMessageBubble, { ...props, message: stopped }));
+      act(() => vi.advanceTimersByTime(120_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 4m14s');
+      expect(screen.getByText('10月19日 19:05')).toBeInTheDocument();
+      history.unmount();
+      const reopened = render(React.createElement(ChatMessageBubble, { ...props, message: stopped }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 4m14s');
+      expect(screen.getByText('10月19日 19:05')).toBeInTheDocument();
+
+      // A different reply must not inherit the stopped reply's local timing.
+      reopened.rerender(React.createElement(ChatMessageBubble, { ...props, message: { ...stopped, id: 'other-reply' } }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 3m10s');
+      expect(screen.getByText('10月19日 19:04')).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps the elapsed duration and footer consistent through gaps, completion and reopening', () => {
+    const at = (minute: number, second = 0) => new Date(2026, 9, 19, 19, minute, second).getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(at(5, 14));
+    try {
+      const messages = [
+        makeMessage({ id: 'first-round', timestamp: at(1), finish: 'tool-calls', parts: [
+          { id: 'reason', type: 'reasoning', text: '检查任务', time: { start: at(1, 5), end: at(1, 10) } },
+        ] }),
+        makeMessage({ id: 'last-round', timestamp: at(4), parts: [
+          { id: 'model', type: 'step-start', time: { start: at(4), end: at(4, 10) } },
+        ] }),
+      ];
+      const props = { compact: false, showActions: true, showTimestamp: true, collapseIntermediateSteps: true };
+      const message = mergeConsecutiveAssistantMessages(messages)[0];
+      const view = render(React.createElement(ChatMessageBubble, { ...props, message, isActive: true }));
+      // The model call has ended but retry backoff is still user-visible waiting.
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 4m14s');
+      expect(screen.getByText('10月19日 19:05')).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(60_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5m14s');
+      expect(screen.getByText('10月19日 19:06')).toBeInTheDocument();
+
+      const completed = { ...message, finish: 'stop', parts: [...message.parts,
+        { id: 'output', type: 'text' as const, text: '完成', time: { start: at(6, 15), end: at(6, 20) } },
+      ] };
+      view.rerender(React.createElement(ChatMessageBubble, { ...props, message: completed }));
+      act(() => vi.advanceTimersByTime(120_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5m20s');
+      expect(screen.getByText('10月19日 19:06')).toBeInTheDocument();
+      view.unmount();
+      render(React.createElement(ChatMessageBubble, { ...props, message: completed }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5m20s');
+      expect(screen.getByText('10月19日 19:06')).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
   it('places assistant actions immediately before the timestamp', () => {
     render(React.createElement(ChatMessageBubble, {
       message: makeMessage({
@@ -7694,13 +8025,14 @@ describe('process duration across model/tool boundaries', () => {
   } } as Message['parts'][number];
   const marker = { id: 'model', type: 'step-start', time: { start: 20_000 } } as Message['parts'][number];
 
-  it.each(['pending', 'between-rounds', 'parallel'] as const)('keeps ticking during %s', (scenario) => {
+  it.each(['pending', 'between-rounds', 'parallel', 'retry'] as const)('keeps ticking during %s', (scenario) => {
     vi.useFakeTimers();
     vi.setSystemTime(22_000);
     try {
       const extra: Message['parts'] = scenario === 'pending'
         ? [marker, { id: 'pending', type: 'tool', tool: 'read', state: { status: 'pending', input: {} } }]
         : scenario === 'between-rounds' ? [marker]
+          : scenario === 'retry' ? [{ ...marker, time: { start: 20_000, end: 21_000 } }]
           : [
             { id: 'running', type: 'tool', tool: 'read', state: { status: 'running', input: {}, time: { start: 20_000 } } },
             { ...done, id: 'finished-first', state: { ...done.state!, time: { start: 20_000, end: 21_000 } } },
@@ -7709,9 +8041,9 @@ describe('process duration across model/tool boundaries', () => {
         message: makeMessage({ role: 'assistant', parts: [done, ...extra] }),
         isActive: true, collapseIntermediateSteps: true,
       }));
-      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 7s');
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 22s');
       act(() => vi.advanceTimersByTime(10_000));
-      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 17s');
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 32s');
       expect(screen.getByText(`查看 ${scenario === 'pending' ? 2 : scenario === 'parallel' ? 3 : 1} 个步骤`)).toBeInTheDocument();
     } finally { vi.useRealTimers(); }
   });
@@ -7723,30 +8055,30 @@ describe('process duration across model/tool boundaries', () => {
       const output = { id: 'output', type: 'text', text: '最终回答', time: { start: 22_000 } } as Message['parts'][number];
       const message = makeMessage({ role: 'assistant', parts: [done, marker, output] });
       const mounted = render(React.createElement(ChatMessageBubble, { message, isActive: true, collapseIntermediateSteps: true }));
-      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 10s');
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 25s');
       const completed = { ...message, finish: 'stop', parts: [done,
         { ...marker, time: { start: 20_000, end: 25_000 } },
         { ...output, time: { start: 22_000, end: 25_000 } },
       ] };
       mounted.rerender(React.createElement(ChatMessageBubble, { message: completed, isActive: false, collapseIntermediateSteps: true }));
       act(() => vi.advanceTimersByTime(10_000));
-      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 10s');
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 25s');
       mounted.unmount();
       render(React.createElement(ChatMessageBubble, { message: completed, isActive: false, collapseIntermediateSteps: true }));
-      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 10s');
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 25s');
       expect(screen.getByText('查看 1 个步骤')).toBeInTheDocument();
     } finally { vi.useRealTimers(); }
   });
 
-  it('does not extend orphan intervals from older messages/attempts', () => {
+  it('includes earlier rounds while active and ignores incomplete records after completion', () => {
     const parts = [
       { ...marker, id: 'old-model', messageID: 'old', time: { start: 0 } },
       { ...done, id: 'old-tool', messageID: 'old', state: { status: 'running', time: { start: 0 } } },
       { ...marker, messageID: 'new' },
       { ...done, messageID: 'new' },
     ] as Message['parts'];
-    expect(getProcessGroupDurationMs(parts, 22_000, 'old-tool', { messageId: 'new', modelPartId: 'model' })).toBe(7_000);
-    expect(getProcessGroupDurationMs(parts.slice(0, 2), 22_000, undefined, { messageId: 'new', modelPartId: 'model' })).toBeNull();
+    expect(getProcessGroupDurationMs(parts, 22_000)).toBe(22_000);
+    expect(getProcessGroupDurationMs(parts.slice(0, 2))).toBeNull();
   });
 
   it('keeps a merged next round active before any visible output arrives', () => {
@@ -7767,37 +8099,47 @@ describe('process duration across model/tool boundaries', () => {
     expect(shouldRenderMessage({ ...message, finish: 'stop' }, { isActive: false })).toBe(false);
   });
 
-  it('assigns model intervals once across a visible question boundary', () => {
-    render(React.createElement(ChatMessageBubble, {
-      message: makeMessage({ role: 'assistant', parts: [
-        { ...marker, id: 'model-before', time: { start: 0, end: 5_000 } }, done,
-        { id: 'question', type: 'tool', tool: 'question', callID: 'question-call', state: { status: 'running', input: {} } },
-        { ...marker, time: { start: 20_000, end: 23_000 } },
-        { ...done, id: 'second-tool', state: { ...done.state!, time: { start: 22_000, end: 24_000 } } },
-      ] }),
-      pendingQuestions: { 'question-call': { requestId: 'req', questions: [{ id: 'scope', type: 'choice', question: '选择范围', options: [{ label: '全部' }] }] } },
-      isActive: false, collapseIntermediateSteps: true,
-    }));
-    const durations = screen.getAllByTestId('chat-process-duration');
-    expect(durations).toHaveLength(2);
-    expect(durations[0]).toHaveTextContent('已处理 5s');
-    expect(durations[1]).toHaveTextContent('已处理 4s');
+  it('shows cumulative elapsed time across a visible question boundary and only ticks the last group', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(31_000);
+    try {
+      const props = {
+        message: makeMessage({ role: 'assistant', parts: [
+          { ...marker, id: 'model-before', time: { start: 1_000, end: 6_000 } },
+          { ...done, state: { ...done.state!, time: { start: 1_000, end: 6_000 } } },
+          { id: 'question', type: 'tool', tool: 'question', callID: 'question-call', state: { status: 'running', input: {} } },
+          { ...marker, time: { start: 21_000, end: 24_000 } },
+          { ...done, id: 'second-tool', state: { ...done.state!, time: { start: 23_000, end: 25_000 } } },
+        ] }),
+        pendingQuestions: { 'question-call': { requestId: 'req', questions: [{ id: 'scope', type: 'choice', question: '选择范围', options: [{ label: '全部' }] }] } },
+        isActive: false, collapseIntermediateSteps: true,
+      };
+      const view = render(React.createElement(ChatMessageBubble, props));
+      const durations = screen.getAllByTestId('chat-process-duration');
+      expect(durations).toHaveLength(2);
+      expect(durations[0]).toHaveTextContent('已处理 5s');
+      expect(durations[1]).toHaveTextContent('已处理 24s');
+      view.rerender(React.createElement(ChatMessageBubble, { ...props, isActive: true }));
+      act(() => vi.advanceTimersByTime(5_000));
+      expect(durations[0]).toHaveTextContent('已处理 5s');
+      expect(durations[1]).toHaveTextContent('已处理 35s');
+    } finally { vi.useRealTimers(); }
   });
 
-  it('does not change completed legacy message timing', () => {
+  it('includes final output and gaps in completed legacy messages', () => {
     render(React.createElement(ChatMessageBubble, {
       message: makeMessage({ role: 'assistant', finish: 'stop', parts: [done,
         { id: 'legacy-output', type: 'text', text: '完成', time: { start: 20_000, end: 30_000 } },
       ] }), isActive: false, collapseIntermediateSteps: true,
     }));
-    expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5s');
+    expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 30s');
   });
 
-  it('merges model/tool overlap and excludes a real gap', () => {
+  it('includes a real gap without double counting model/tool overlap', () => {
     expect(getProcessGroupDurationMs([
       { ...marker, time: { start: 0, end: 5_000 } }, done,
       { ...marker, id: 'next', time: { start: 20_000, end: 22_000 } },
-    ])).toBe(7_000);
+    ])).toBe(22_000);
   });
 });
 

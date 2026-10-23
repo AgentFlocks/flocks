@@ -1,7 +1,7 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Layout from './Layout';
 
 // A private-build style registry: a sidebar entry per section kind, an
@@ -29,8 +29,9 @@ const { registryMock, useAuth } = vi.hoisted(() => {
   return { registryMock, useAuth: vi.fn() };
 });
 
-const { checkUpdate } = vi.hoisted(() => ({
+const { checkUpdate, updateModalProps } = vi.hoisted(() => ({
   checkUpdate: vi.fn(),
+  updateModalProps: [] as Record<string, unknown>[],
 }));
 
 // Installed contract pages; a test may fill these before rendering.
@@ -54,6 +55,12 @@ vi.mock('@/hooks/useTokenPolicyNotice', () => ({
 vi.mock('@/hooks/useLayoutOpenTabs', () => ({ useLayoutOpenTabs: () => { const [v, s] = React.useState<any[]>([]); return [v, s]; } }));
 vi.mock('@/hooks/useWorkspacePageOrders', () => ({ useWorkspacePageOrders: () => ({ apply: (_id: string, items: any[]) => items }) }));
 vi.mock('./SessionHistoryPanel', () => ({ default: () => <div data-testid="history-panel" /> }));
+vi.mock('@/components/common/UpdateModal', () => ({
+  default: function UpdateModalMock(props: Record<string, unknown>) {
+    updateModalProps.push(props);
+    return <div role="dialog" aria-label="update-modal" />;
+  },
+}));
 vi.mock('@/components/common/ConfirmDialog', () => ({ useConfirm: () => vi.fn().mockResolvedValue(true) }));
 vi.mock('@/api/onboarding', () => ({ onboardingAPI: { getStatus: vi.fn().mockResolvedValue({ data: { completed: true } }) } }));
 vi.mock('@/api/update', () => ({
@@ -73,6 +80,10 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
+function ExtensionPathProbe() {
+  return <div data-testid="extension-path">{useLocation().pathname}</div>;
+}
+
 function renderLayout() {
   return render(
     <MemoryRouter initialEntries={['/']}>
@@ -89,7 +100,14 @@ async function flush() {
 
 function openAccountMenu(username = 'admin') {
   fireEvent.click(screen.getByRole('button', { name: `accountAndGlobal:${username}` }));
-  return screen.getByRole('menu', { name: 'accountMenu' });
+  return screen.getByRole('menu', { name: `accountAndGlobal:${username}` });
+}
+
+/** The Agent workshop's sidebar, where the agent hub's destinations live. */
+async function openWorkshop(container: HTMLElement) {
+  fireEvent.click(screen.getByRole('button', { name: 'agentWorkshop' }));
+  await flush();
+  return container.querySelector('aside nav') as HTMLElement;
 }
 
 function linkTargets(container: HTMLElement) {
@@ -100,6 +118,7 @@ function linkTargets(container: HTMLElement) {
 describe('Layout extension registry integration', () => {
   beforeEach(() => {
     localStorage.clear();
+    updateModalProps.length = 0;
     checkUpdate.mockResolvedValue({ has_update: false, latest_version: null, current_version: '0.2.0', error: null });
     useAuth.mockReturnValue({
       user: { id: 'u1', username: 'admin', role: 'admin', status: 'active', must_reset_password: false },
@@ -107,24 +126,61 @@ describe('Layout extension registry integration', () => {
     });
   });
 
-  it('puts sidebar entries in the Agent menu or the integrations group and honours hideDefault', async () => {
+  it('puts sidebar entries in the workbench menu or the workshop and honours hideDefault', async () => {
     const { container } = renderLayout();
     await flush();
 
-    // Workbench-section entries extend the Agent workspace's sidebar menu.
+    // Workbench-section entries extend the workbench's sidebar menu.
     const sidebar = container.querySelector('aside nav') as HTMLElement;
     expect(linkTargets(sidebar)).toContainEqual(['extWorkbench', '/ext/workbench']);
-    // The agent hub lives in the account menu now, so its entries join the integrations group.
-    const menu = openAccountMenu();
-    const targets = linkTargets(menu);
+    expect(within(sidebar).getByRole('button', { name: 'newChat' })).toBeInTheDocument();
+    // The agent hub is the workshop's tools and models group now, so its entries join that group.
+    const workshop = await openWorkshop(container);
+    const targets = linkTargets(workshop);
     expect(targets).toContainEqual(['extAgentHub', '/ext/agent-hub']);
     expect(targets).toContainEqual(['extAdminOnly', '/ext/admin']);
+    const toolsAndModels = within(workshop).getByRole('heading', { name: 'toolsAndModels' }).parentElement as HTMLElement;
+    expect(linkTargets(toolsAndModels).map(([, href]) => href)).toEqual(['/tools', '/models', '/hub', '/ext/admin', '/ext/agent-hub']);
     // Hidden defaults are gone, untouched ones remain.
     expect(targets.find(([, href]) => href === '/channels')).toBeUndefined();
     expect(targets.find(([, href]) => href === '/devices')).toBeUndefined();
     expect(targets.find(([, href]) => href === '/agents')).toBeDefined();
     expect(targets.find(([, href]) => href === '/models')).toBeDefined();
-    expect(within(sidebar).getByRole('button', { name: 'newChat' })).toBeInTheDocument();
+    // The account menu keeps only its own entries.
+    expect(linkTargets(openAccountMenu()).map(([, href]) => href)).not.toContain('/ext/agent-hub');
+  });
+
+  it('keeps the workshop on a page an extension lists in its menu', async () => {
+    const { container } = render(
+      <MemoryRouter initialEntries={['/ext/agent-hub']}>
+        <Routes>
+          <Route path="/*" element={<Layout contentRoutes={[{ path: '*', element: <div>extension page</div> }]} />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await flush();
+
+    // Not the workbench: the module tab and the sidebar are the workshop's.
+    expect(screen.getByRole('button', { name: 'agentWorkshop' })).toHaveAttribute('aria-current', 'page');
+    const sidebar = container.querySelector('aside nav') as HTMLElement;
+    expect(within(sidebar).getByRole('heading', { name: 'toolsAndModels' })).toBeInTheDocument();
+  });
+
+  it('returns to the workshop page an extension lists after a reload', async () => {
+    // Left on the extension page in the workshop, then the workbench, then reloaded.
+    localStorage.setItem('flocks_layout_workspace_paths', JSON.stringify({ 'agent-workshop': '/ext/agent-hub' }));
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/*" element={<Layout contentRoutes={[{ path: '*', element: <ExtensionPathProbe /> }]} />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await flush();
+
+    fireEvent.click(screen.getByRole('button', { name: 'agentWorkshop' }));
+    await flush();
+    expect(screen.getAllByTestId('extension-path').some((probe) => probe.textContent === '/ext/agent-hub')).toBe(true);
   });
 
   it('hides a whole group when hideDefault names a sidebar group id of earlier releases', async () => {
@@ -154,17 +210,18 @@ describe('Layout extension registry integration', () => {
 
       const sidebar = container.querySelector('aside nav') as HTMLElement;
       const sidebarHrefs = linkTargets(sidebar).map(([, href]) => href);
-      for (const href of ['/', '/tasks', '/workflows', '/bench/bench-page', '/custom/page', '/ext/workbench', '/ext/scene']) {
+      for (const href of ['/', '/tasks', '/workspace', '/bench/bench-page', '/custom/page', '/ext/workbench', '/ext/scene']) {
         expect(sidebarHrefs).not.toContain(href);
       }
       expect(within(sidebar).queryByRole('button', { name: 'newChat' })).toBeNull();
 
-      const menuHrefs = linkTargets(openAccountMenu()).map(([, href]) => href);
-      for (const href of ['/agents', '/skills', '/tools', '/workspace', '/devices', '/hub', '/models', '/channels', '/ext/agent-hub', '/ext/admin']) {
-        expect(menuHrefs).not.toContain(href);
+      // The workshop holds what both old groups held; every entry is hidden.
+      const workshopHrefs = linkTargets(await openWorkshop(container)).map(([, href]) => href);
+      for (const href of ['/agents', '/skills', '/workflows', '/workspace?tab=knowledge', '/workspace?tab=memory', '/tools', '/devices', '/hub', '/models', '/channels', '/ext/agent-hub', '/ext/admin']) {
+        expect(workshopHrefs).not.toContain(href);
       }
       // Account-menu entries never belonged to those groups.
-      expect(menuHrefs).toContain('/ext/menu');
+      expect(linkTargets(openAccountMenu()).map(([, href]) => href)).toContain('/ext/menu');
     } finally {
       registryMock.hideDefault = hideDefault;
       registryMock.navItems = navItems;
@@ -179,7 +236,8 @@ describe('Layout extension registry integration', () => {
 
     const entry = within(openAccountMenu()).getByRole('menuitem', { name: /extMenu/ });
     expect(entry).toHaveAttribute('href', '/ext/menu');
-    expect(entry.className).toContain('bg-gradient-to-r');
+    // Framed like dev's own upgrade entry.
+    expect(entry).toHaveClass('border', 'bg-ui-subtle');
     expect(within(entry).getByText('NEW')).toBeInTheDocument();
   });
 
@@ -188,10 +246,10 @@ describe('Layout extension registry integration', () => {
       user: { id: 'u2', username: 'member1', role: 'member', status: 'active', must_reset_password: false },
       logout: vi.fn(),
     });
-    renderLayout();
+    const { container } = renderLayout();
     await flush();
 
-    const hrefs = linkTargets(openAccountMenu('member1')).map(([, href]) => href);
+    const hrefs = linkTargets(await openWorkshop(container)).map(([, href]) => href);
     expect(hrefs).toContain('/ext/agent-hub');
     expect(hrefs).not.toContain('/ext/admin');
   });
@@ -200,6 +258,15 @@ describe('Layout extension registry integration', () => {
     renderLayout();
     await flush();
     await vi.waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'private-channel'));
+  });
+
+  it('gives the update dialog opened by hand the registry update channel', async () => {
+    renderLayout();
+    await flush();
+    fireEvent.click(within(openAccountMenu()).getByRole('menuitem', { name: 'checkUpdate' }));
+    expect(await screen.findByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+    // The dialog checks and applies on the channel the reminder checked, not the default one.
+    expect(updateModalProps.at(-1)).toEqual(expect.objectContaining({ channel: 'private-channel', forceInitialCheck: true }));
   });
 
   it('mounts the layout.version and layout.notifications slots', async () => {

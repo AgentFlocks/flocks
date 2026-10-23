@@ -25,6 +25,13 @@ export interface ExtensionRoute {
   i18nNamespaces?: string[];
   /** `app` (default) renders inside the main layout; `bare` renders without it. */
   layout?: 'app' | 'bare';
+  /**
+   * `settings` counts the route (and the paths under it) as system settings:
+   * the sidebar shows the settings menu there and no module remembers it as
+   * its last page, so a one-time page such as a sign-in callback is never
+   * opened again by switching modules.
+   */
+  area?: 'settings';
 }
 
 export interface ExtensionNavItem {

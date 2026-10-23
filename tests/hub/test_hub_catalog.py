@@ -87,7 +87,7 @@ def test_workflow_catalog_exposes_chinese_names():
 def test_soc_workspace_component_exposes_chinese_name():
     entries = {entry.id: entry for entry in list_catalog(plugin_type="component")}
 
-    assert entries["soc-workspace"].nameCn == "SOC 工作区场景套件"
+    assert entries["soc-workspace"].nameCn == "告警运营套件"
 
 
 async def test_chaitin_safeline_repair_release_replaces_broken_handler(

@@ -12,9 +12,10 @@ import copy
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from flocks.auth.context import AuthUser, get_current_auth_user
 from flocks.config.config import Config
 from flocks.provider.credential import get_api_key as get_llm_provider_api_key
 from flocks.config.config_writer import ConfigWriter
@@ -37,6 +38,13 @@ from flocks.server.routes.mcp import (
     set_mcp_credentials,
     test_mcp_connection,
 )
+from flocks.server.auth import get_optional_user, require_admin
+from flocks.server.routes.custom_provider import (
+    CreateModelReq,
+    FALLBACK_CONTEXT_WINDOW,
+    FALLBACK_MAX_OUTPUT_TOKENS,
+    _add_model_to_runtime,
+)
 from flocks.server.routes.provider import (
     APIServiceUpdateRequest,
     ProviderCredentialRequest,
@@ -45,6 +53,7 @@ from flocks.server.routes.provider import (
     _get_inline_provider_api_key,
     _load_api_service_metadata_data,
     _test_provider_credentials_impl,
+    _validated_base_url,
     get_service_credentials,
     set_provider_credentials,
     set_service_credentials,
@@ -58,6 +67,7 @@ from flocks.server.threatbook_regions import (
     infer_threatbook_mcp_region,
 )
 from flocks.tool.tool_loader import save_mcp_config
+from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
 
@@ -136,6 +146,20 @@ class OnboardingApplyResponse(BaseModel):
     default_model: Optional[Dict[str, str]] = None
 
 
+class OnboardingDraftRequest(BaseModel):
+    model: Optional[OnboardingValidateRequest] = None
+    intel: Optional[OnboardingValidateRequest] = None
+    dismissed: Optional[bool] = None
+
+
+class OnboardingDraftResponse(BaseModel):
+    model: Optional[OnboardingValidateRequest] = None
+    intel: Optional[OnboardingValidateRequest] = None
+    model_has_key: bool = False
+    intel_has_key: bool = False
+    dismissed: bool = False
+
+
 class ThreatBookIntelStatus(BaseModel):
     configured: bool
     region: Optional[Region] = None
@@ -155,6 +179,7 @@ class OnboardingStatusResponse(BaseModel):
         ...,
         description="True when a default LLM is set and its provider has usable credentials.",
     )
+    dismissed: bool = False
     has_default_model: bool = Field(
         ...,
         description="True when resolve_default_llm returns a provider/model pair.",
@@ -396,6 +421,20 @@ async def _temporary_config_and_secret_state():
 async def _rollback_on_apply_failure(mcp_name: Optional[str] = None):
     """Rollback onboarding writes if apply fails part-way through."""
     config_snapshot = _snapshot_config_state()
+    # Reloading restored disk config cannot remove providers/models first added
+    # by this transaction, or reset a provider whose original config was absent.
+    providers_snapshot = dict(Provider._providers)
+    models_snapshot = dict(Provider._models)
+    initialized_snapshot = Provider._initialized
+    provider_state_snapshot = {
+        provider_id: (
+            provider._config,
+            list(provider._config_models),
+            list(provider._custom_models) if hasattr(provider, "_custom_models") else None,
+            provider.name,
+        )
+        for provider_id, provider in providers_snapshot.items()
+    }
     previous_mcp_config = (
         copy.deepcopy(_load_raw_mcp_server_config(mcp_name)) if mcp_name else None
     )
@@ -425,6 +464,18 @@ async def _rollback_on_apply_failure(mcp_name: Optional[str] = None):
                 await _reload_runtime_state()
             else:
                 await _restore_config_and_secret_state(config_snapshot, secret_changes)
+            Provider._providers = providers_snapshot
+            Provider._models = models_snapshot
+            Provider._initialized = initialized_snapshot
+            for provider_id, provider in providers_snapshot.items():
+                original_config, original_models, original_custom_models, original_name = provider_state_snapshot[provider_id]
+                provider._config = original_config
+                provider._config_models = original_models
+                if original_custom_models is not None:
+                    provider._custom_models = original_custom_models
+                provider.name = original_name
+                if hasattr(provider, "_client"):
+                    provider._client = None
             raise
 
 
@@ -912,6 +963,160 @@ def _ensure_threatbook_mcp_config(region: Region) -> None:
     save_mcp_config(mcp_name, config)
 
 
+def _draft_storage_key(user: object = None) -> list[str]:
+    current_user = user if isinstance(user, AuthUser) else get_current_auth_user()
+    return ["onboarding", "draft", current_user.id if current_user else "default"]
+
+
+async def _read_draft(user: object = None) -> Dict[str, Any]:
+    stored = await Storage.read(_draft_storage_key(user))
+    return stored if isinstance(stored, dict) else {}
+
+
+def _redact_draft(request: OnboardingValidateRequest) -> OnboardingValidateRequest:
+    sanitized = request.model_copy(deep=True)
+    sanitized.threatbook_api_key = None
+    if sanitized.third_party_llm:
+        sanitized.third_party_llm.api_key = ""
+    return sanitized
+
+
+def _known_draft_provider(provider_id: str) -> Dict[str, Any]:
+    from flocks.provider.model_catalog import get_raw_catalog
+
+    # The SDK's legacy Azure ID and the catalog's Azure OpenAI ID use the same
+    # endpoint configuration. Do not turn arbitrary draft IDs into providers.
+    catalog = get_raw_catalog()
+    metadata = catalog.get(provider_id) or (
+        catalog.get("azure-openai") if provider_id == "azure" else None
+    )
+    if metadata is None and ConfigWriter.get_provider_raw(provider_id) is None:
+        raise HTTPException(status_code=400, detail=f"Unknown provider '{provider_id}'")
+    return metadata or {}
+
+
+def _persist_draft_model(third_party: ThirdPartyLLMConfig) -> None:
+    """Save local model metadata without probing services or selecting a default."""
+    # The address goes into the provider config whether or not a key comes with
+    # it: checked as saving credentials checks it, before anything is written.
+    _validated_base_url(third_party.base_url)
+    provider_id = third_party.provider_id
+    metadata = _known_draft_provider(provider_id)
+    raw = ConfigWriter.get_provider_raw(provider_id)
+    if raw is None:
+        raw = ConfigWriter.build_provider_config(
+            provider_id,
+            npm=metadata.get("npm"),
+            base_url=(third_party.base_url or "").strip() or metadata.get("default_base_url"),
+            models=copy.deepcopy(metadata.get("models") or {}),
+        )
+        if third_party.provider_name:
+            raw["name"] = third_party.provider_name
+        ConfigWriter.add_provider(provider_id, raw)
+    else:
+        if third_party.base_url is not None:
+            ConfigWriter.update_provider_field(provider_id, "options.baseURL", third_party.base_url.strip())
+        if third_party.provider_name:
+            ConfigWriter.update_provider_field(provider_id, "name", third_party.provider_name)
+
+    model_id = third_party.model_id.strip()
+    if not model_id or model_id in (raw.get("models") or {}):
+        return
+    # Reuse the model management upsert primitives. Its public create route also
+    # probes models.dev and promotes a first model, which drafts must never do.
+    body = CreateModelReq(
+        model_id=model_id,
+        name=model_id,
+        context_window=FALLBACK_CONTEXT_WINDOW,
+        max_output_tokens=FALLBACK_MAX_OUTPUT_TOKENS,
+    )
+    ConfigWriter.add_model(provider_id, model_id, body.model_dump(exclude={"model_id"}))
+    _add_model_to_runtime(provider_id, body)
+
+
+async def _draft_response(stored: Dict[str, Any]) -> OnboardingDraftResponse:
+    model = OnboardingValidateRequest.model_validate(stored["model"]) if stored.get("model") else None
+    intel = OnboardingValidateRequest.model_validate(stored["intel"]) if stored.get("intel") else None
+    model_has_key = False
+    if model:
+        if model.use_threatbook_model:
+            provider_id = ONBOARDING_REGION_PRESETS[model.region]["threatbook_llm_provider_id"]
+        else:
+            provider_id = model.third_party_llm.provider_id if model.third_party_llm else ""
+        model_has_key = bool(provider_id and _llm_provider_has_usable_credentials(provider_id))
+    intel_has_key = bool(intel and await _api_service_has_credentials(
+        ONBOARDING_REGION_PRESETS[intel.region]["threatbook_api_service_id"]
+    ))
+    return OnboardingDraftResponse(
+        model=_redact_draft(model) if model else None,
+        intel=_redact_draft(intel) if intel else None,
+        model_has_key=model_has_key,
+        intel_has_key=intel_has_key,
+        dismissed=bool(stored.get("dismissed", False)),
+    )
+
+
+@router.get("/draft", response_model=OnboardingDraftResponse)
+async def get_onboarding_draft(
+    _admin: object = Depends(require_admin),
+) -> OnboardingDraftResponse:
+    return await _draft_response(await _read_draft(_admin))
+
+
+@router.post("/draft", response_model=OnboardingDraftResponse)
+@serialized_config_mutation
+async def save_onboarding_draft(
+    request: OnboardingDraftRequest,
+    _admin: object = Depends(require_admin),
+) -> OnboardingDraftResponse:
+    stored = await _read_draft(_admin)
+    if request.model and request.model.third_party_llm and not request.model.use_threatbook_model:
+        _known_draft_provider(request.model.third_party_llm.provider_id)
+    async with _rollback_on_apply_failure():
+        for section in ("model", "intel"):
+            value = getattr(request, section)
+            if value is None:
+                continue
+            preset = ONBOARDING_REGION_PRESETS[value.region]
+            if section == "model":
+                if value.use_threatbook_model:
+                    if key := (value.threatbook_api_key or "").strip():
+                        await set_provider_credentials(
+                            preset["threatbook_llm_provider_id"], ProviderCredentialRequest(api_key=key),
+                        )
+                elif value.third_party_llm:
+                    third_party = value.third_party_llm
+                    _persist_draft_model(third_party)
+                    if key := third_party.api_key.strip():
+                        await set_provider_credentials(
+                            third_party.provider_id,
+                            ProviderCredentialRequest(
+                                api_key=key,
+                                base_url=third_party.base_url,
+                                provider_name=third_party.provider_name,
+                            ),
+                        )
+            elif key := (value.threatbook_api_key or "").strip():
+                await set_service_credentials(
+                    preset["threatbook_api_service_id"], ProviderCredentialRequest(api_key=key),
+                )
+
+            updates = _redact_draft(value).model_dump(exclude_unset=True, exclude_none=True)
+            previous = stored.get(section) or {}
+            previous_third_party = previous.get("third_party_llm") or {}
+            new_third_party = updates.get("third_party_llm")
+            if new_third_party and previous_third_party.get("provider_id") == new_third_party.get("provider_id"):
+                updates["third_party_llm"] = {**previous_third_party, **new_third_party}
+            stored[section] = _redact_draft(OnboardingValidateRequest.model_validate(
+                {**previous, **updates}
+            )).model_dump(mode="json")
+        if request.dismissed is not None:
+            stored["dismissed"] = request.dismissed
+        response = await _draft_response(stored)
+        await Storage.write(_draft_storage_key(_admin), stored)
+        return response
+
+
 @router.get(
     "/status",
     response_model=OnboardingStatusResponse,
@@ -921,12 +1126,16 @@ def _ensure_threatbook_mcp_config(region: Region) -> None:
         "and provider credentials (no separate onboarding store)."
     ),
 )
-async def get_onboarding_status() -> OnboardingStatusResponse:
+async def get_onboarding_status(
+    _user: Optional[AuthUser] = Depends(get_optional_user),
+) -> OnboardingStatusResponse:
+    dismissed = bool((await _read_draft(_user)).get("dismissed", False))
     threatbook_intel = await _build_threatbook_intel_status()
     resolved = await Config.resolve_default_llm()
     if not resolved:
         return OnboardingStatusResponse(
             completed=False,
+            dismissed=dismissed,
             has_default_model=False,
             default_model=None,
             threatbook_intel=threatbook_intel,
@@ -937,6 +1146,7 @@ async def get_onboarding_status() -> OnboardingStatusResponse:
     has_cred = _llm_provider_has_usable_credentials(provider_id)
     return OnboardingStatusResponse(
         completed=has_cred,
+        dismissed=dismissed,
         has_default_model=True,
         default_model=default_model,
         threatbook_intel=threatbook_intel,
@@ -952,6 +1162,7 @@ async def get_onboarding_status() -> OnboardingStatusResponse:
 @serialized_config_mutation
 async def validate_onboarding(
     request: OnboardingValidateRequest,
+    _admin: object = Depends(require_admin),
 ) -> OnboardingValidateResponse:
     return await _validate_onboarding_request(request)
 
@@ -965,8 +1176,21 @@ async def validate_onboarding(
 @serialized_config_mutation
 async def apply_onboarding(
     request: OnboardingValidateRequest,
+    _admin: object = Depends(require_admin),
 ) -> OnboardingApplyResponse:
-    return await _apply_onboarding(request)
+    response = await _apply_onboarding(request)
+    try:
+        stored = await _read_draft(_admin)
+        if request.use_threatbook_model or (request.third_party_llm and not request.threatbook_services_only):
+            stored.pop("model", None)
+        if not request.threatbook_model_only and (request.threatbook_api_key or "").strip():
+            stored.pop("intel", None)
+        await Storage.write(_draft_storage_key(_admin), stored)
+    except Exception as exc:
+        # Configuration has already committed successfully. A stale draft must
+        # not turn that success into a failed save or trigger repeated probes.
+        log.warning("onboarding.draft.cleanup_failed", {"error": str(exc)})
+    return response
 
 
 async def _apply_onboarding(request: OnboardingValidateRequest) -> OnboardingApplyResponse:
@@ -1039,6 +1263,7 @@ async def _apply_onboarding(request: OnboardingValidateRequest) -> OnboardingApp
                 configured.append("default_llm")
             elif request.third_party_llm:
                 third_party = request.third_party_llm
+                _persist_draft_model(third_party)
                 await set_provider_credentials(
                     third_party.provider_id,
                     ProviderCredentialRequest(
@@ -1051,12 +1276,12 @@ async def _apply_onboarding(request: OnboardingValidateRequest) -> OnboardingApp
                     ModelType.LLM,
                     SetDefaultModelRequest(
                         provider_id=third_party.provider_id,
-                        model_id=third_party.model_id,
+                        model_id=third_party.model_id.strip(),
                     ),
                 )
                 default_model = {
                     "provider_id": third_party.provider_id,
-                    "model_id": third_party.model_id,
+                    "model_id": third_party.model_id.strip(),
                 }
                 configured.extend(["third_party_llm", "default_llm"])
             elif not request.threatbook_services_only:

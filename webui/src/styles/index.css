@@ -5,8 +5,46 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --ui-canvas: 255 255 255;
+    --ui-sidebar: 255 255 255;
+    --ui-surface: 255 255 255;
+    --ui-subtle: 255 255 255;
+    --ui-hover: 241 245 249;
+    --ui-selected: 226 232 240;
+    --ui-text: 15 23 42;
+    --ui-secondary: 71 85 105;
+    --ui-muted: 100 116 139;
+    --ui-border: 226 232 240;
+    --ui-control: 100 116 139;
+    --ui-focus: 220 38 38;
+    --ui-action: 220 38 38;
+    --ui-on-action: 255 255 255;
+    --ui-shadow-input: 0 2px 10px rgb(15 23 42 / 0.04);
+    --ui-shadow-panel: 0 12px 32px rgb(15 23 42 / 0.16);
+  }
+
+  .dark {
+    --ui-canvas: 37 44 53;
+    --ui-sidebar: 33 40 48;
+    --ui-surface: 48 56 66;
+    --ui-subtle: 58 67 78;
+    --ui-hover: 64 73 85;
+    --ui-selected: 70 81 94;
+    --ui-text: 215 222 232;
+    --ui-secondary: 188 198 208;
+    --ui-muted: 161 172 184;
+    --ui-border: 74 85 99;
+    --ui-control: 125 135 148;
+    --ui-focus: 135 183 246;
+    --ui-action: 222 227 234;
+    --ui-on-action: 37 44 53;
+    --ui-shadow-input: 0 4px 20px rgb(0 0 0 / 0.1);
+    --ui-shadow-panel: 0 12px 36px rgb(0 0 0 / 0.24);
+  }
+
   body {
-    @apply bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100;
+    @apply bg-ui-canvas text-ui-text antialiased;
   }
 }
 
@@ -193,6 +231,43 @@
   .prose-invert details[open] summary {
     @apply border-white/20;
   }
+}
+
+/* Legacy light-mode text shares the UI reading tiers without recoloring
+   disabled controls, code/diff surfaces, or hover/focus/semantic colors. */
+:where(html:not(.dark)) :is(
+  .text-gray-300, .text-gray-400,
+  .text-zinc-300, .text-zinc-400,
+  .text-slate-300, .text-slate-400
+) {
+  --ui-legacy-text: var(--ui-muted);
+}
+
+:where(html:not(.dark)) :is(.text-gray-500, .text-zinc-500, .text-slate-500) {
+  --ui-legacy-text: var(--ui-secondary);
+}
+
+:where(html:not(.dark)) :is(
+  .text-gray-300, .text-gray-400, .text-gray-500,
+  .text-zinc-300, .text-zinc-400, .text-zinc-500,
+  .text-slate-300, .text-slate-400, .text-slate-500
+):not(:where(
+  :is(
+    :disabled, [aria-disabled="true"], pre, code, [data-theme="dark"],
+    .bg-gray-800, .bg-gray-900, .bg-zinc-950, .bg-slate-950, .bg-slate-900,
+    [class~="bg-slate-900/70"], [class~="bg-slate-900/80"], [class~="bg-slate-900/95"],
+    [class~="bg-[#252c35]"], [class~="bg-emerald-950/40"], [class~="bg-emerald-950/70"],
+    [class~="bg-red-950/45"], [class~="bg-red-950/70"]
+  ),
+  :is(
+    :disabled, [aria-disabled="true"], pre, code, [data-theme="dark"],
+    .bg-gray-800, .bg-gray-900, .bg-zinc-950, .bg-slate-950, .bg-slate-900,
+    [class~="bg-slate-900/70"], [class~="bg-slate-900/80"], [class~="bg-slate-900/95"],
+    [class~="bg-[#252c35]"], [class~="bg-emerald-950/40"], [class~="bg-emerald-950/70"],
+    [class~="bg-red-950/45"], [class~="bg-red-950/70"]
+  ) *
+)) {
+  color: rgb(var(--ui-legacy-text));
 }
 
 /* VS Code / GitHub Dark Dimmed inspired compatibility for existing Tailwind utilities. */
@@ -1441,6 +1516,41 @@
   background-clip: padding-box;
 }
 
+/* Keep the history gutter stable; show its thumb only while scrolling. */
+.session-history-scrollbar,
+.dark .session-history-scrollbar {
+  --history-scrollbar-thumb: transparent;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--history-scrollbar-thumb) transparent !important;
+}
+
+.session-history-scrollbar[data-scrolling='true'] {
+  --history-scrollbar-thumb: rgb(var(--ui-muted) / 0.55);
+}
+
+.session-history-scrollbar::-webkit-scrollbar,
+.dark .session-history-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+  background: transparent;
+}
+
+.session-history-scrollbar::-webkit-scrollbar-track,
+.dark .session-history-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.session-history-scrollbar::-webkit-scrollbar-thumb,
+.session-history-scrollbar::-webkit-scrollbar-thumb:hover,
+.dark .session-history-scrollbar::-webkit-scrollbar-thumb,
+.dark .session-history-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--history-scrollbar-thumb);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
 .dark table {
   color: var(--flocks-dark-text-muted);
 }
@@ -1527,6 +1637,102 @@
 .dark .prose a {
   color: #6cb6ff;
 }
+
+/* Chat typography is scoped separately from document and file previews. */
+.prose.chat-prose {
+  --tw-prose-body: rgb(var(--ui-text));
+  --tw-prose-headings: rgb(var(--ui-text));
+  --tw-prose-bold: rgb(var(--ui-text));
+  --tw-prose-bullets: rgb(var(--ui-muted));
+  --tw-prose-counters: rgb(var(--ui-muted));
+  color: rgb(var(--ui-text));
+  font-size: inherit;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+.prose.chat-prose :is(h1, h2, h3, h4) {
+  margin-top: 1.5em;
+  margin-bottom: 0.6em;
+  color: rgb(var(--ui-text));
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.prose.chat-prose h1 { font-size: 1.375em; }
+.prose.chat-prose h2 { font-size: 1.125em; border: 0; padding-bottom: 0; }
+.prose.chat-prose h3, .prose.chat-prose h4 { font-size: 1em; }
+.prose.chat-prose > :first-child { margin-top: 0; }
+.prose.chat-prose > :last-child { margin-bottom: 0; }
+.prose.chat-prose p { margin: 0.75em 0; }
+.prose.chat-prose :is(ul, ol) { margin: 0.75em 0; padding-left: 1.5em; }
+.prose.chat-prose li { margin: 0.35em 0; }
+.prose.chat-prose li > :is(ul, ol) { margin-top: 0.35em; }
+.prose.chat-prose strong { color: inherit; font-weight: 600; }
+
+.prose.chat-prose .chat-inline-code {
+  border-radius: 5px;
+  background: rgb(var(--ui-subtle));
+  padding: 0.15em 0.35em;
+  color: rgb(var(--ui-secondary));
+  font-size: 0.875em;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
+.prose.chat-prose .chat-inline-code::before,
+.prose.chat-prose .chat-inline-code::after {
+  content: none;
+}
+
+.prose.chat-prose pre {
+  margin: 1em 0;
+  border-radius: 10px;
+  padding: 1em;
+  font-size: 0.875em;
+  line-height: 1.65;
+}
+
+.prose.chat-prose blockquote {
+  margin: 1em 0;
+  border-left: 2px solid rgb(var(--ui-control));
+  padding-left: 1em;
+  color: rgb(var(--ui-secondary));
+  font-style: normal;
+  font-weight: 400;
+}
+
+.prose.chat-prose .chat-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 1em 0;
+  border: 1px solid rgb(var(--ui-border));
+  border-radius: 10px;
+}
+
+.prose.chat-prose .chat-table-scroll:focus-visible {
+  outline: 2px solid rgb(var(--ui-focus));
+  outline-offset: 2px;
+}
+
+.prose.chat-prose table {
+  margin: 0;
+  font-size: 0.875em;
+  line-height: 1.6;
+  overflow-wrap: normal;
+}
+
+.prose.chat-prose thead { background: rgb(var(--ui-subtle)); }
+.prose.chat-prose :is(th, td) {
+  border: 0;
+  border-bottom: 1px solid rgb(var(--ui-border));
+  padding: 0.75em 1em;
+  color: rgb(var(--ui-text));
+  vertical-align: top;
+}
+.prose.chat-prose th { font-weight: 500; white-space: nowrap; }
+.prose.chat-prose tr:last-child td { border-bottom: 0; }
+.prose.chat-prose tr:nth-child(even) td { background: rgb(var(--ui-subtle) / 0.5); }
 
 .dark .react-flow,
 .dark .react-flow__renderer,

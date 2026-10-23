@@ -187,6 +187,90 @@ async def test_install_or_repair_source_default_still_syncs_and_builds(
     assert frontend_calls == [install_root / "webui"]
 
 
+
+@pytest.mark.asyncio
+async def test_install_or_repair_source_reports_each_step_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install_root = _prepare_install_root(tmp_path)
+    _stub_install_side_effects(monkeypatch, tmp_path, install_root)
+    wheel = _write_component(tmp_path / "bundle")
+    steps: list[str] = []
+
+    async def _fake_frontend(_webui_dir, **_kwargs):
+        steps.append("<frontend build>")
+        return None
+
+    from flocks.cli import service_manager
+
+    monkeypatch.setattr(service_manager, "resolve_npm_executable", lambda: "/usr/bin/npm")
+    monkeypatch.setattr(service_manager, "node_version_satisfies_requirement", lambda: True)
+    monkeypatch.setattr(updater, "_build_frontend_workspace", _fake_frontend)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda *_args, **_kwargs: None)
+
+    await updater.install_or_repair_source(
+        install_root=install_root,
+        uv_path="/usr/bin/uv",
+        version="v2026.9.14",
+        extra_wheels=[wheel],
+        on_step=steps.append,
+    )
+
+    assert steps == [
+        "check_runtime", "sync_dependencies", "install_components", "build_webui", "<frontend build>", "finalize",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_install_or_repair_source_reports_npm_check_failure_as_its_own_step(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install_root = _prepare_install_root(tmp_path)
+    _stub_install_side_effects(monkeypatch, tmp_path, install_root)
+    steps: list[str] = []
+
+    from flocks.cli import service_manager
+
+    monkeypatch.setattr(service_manager, "resolve_npm_executable", lambda: None)
+
+    with pytest.raises(RuntimeError, match="npm was not found"):
+        await updater.install_or_repair_source(
+            install_root=install_root,
+            uv_path="/usr/bin/uv",
+            version="v2026.9.14",
+            on_step=steps.append,
+        )
+
+    assert steps == ["check_runtime"]
+
+
+@pytest.mark.asyncio
+async def test_install_or_repair_source_survives_a_failing_step_reporter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install_root = _prepare_install_root(tmp_path)
+    _stub_install_side_effects(monkeypatch, tmp_path, install_root)
+    wheel = _write_component(tmp_path / "bundle")
+    version_writes: list[str] = []
+    monkeypatch.setattr(updater, "_write_version_marker", lambda version: version_writes.append(version))
+
+    def broken_reporter(_step: str) -> None:
+        raise RuntimeError("progress file is read-only")
+
+    await updater.install_or_repair_source(
+        install_root=install_root,
+        uv_path="/opt/flocks/tools/uv/uv",
+        version="v2026.9.14",
+        extra_wheels=[wheel],
+        prebuilt=True,
+        on_step=broken_reporter,
+    )
+
+    assert version_writes == ["2026.9.14"]
+
 def test_build_restart_handoff_argv_adds_prebuilt_flags_only_when_requested(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -18,11 +18,11 @@ export type SettingsSectionId = string;
 
 export const BUILT_IN_SETTINGS_SECTION_IDS: readonly SettingsSectionId[] = [
   'preferences',
-  'archived-data',
   'account',
   'system-logs',
   'network-proxy',
   'voice-input',
+  'archived-data',
 ] as const;
 
 export function isSettingsSectionId(value: string | undefined): value is SettingsSectionId {
@@ -178,10 +178,11 @@ export function useSettingsSectionGroups(): { groups: SettingsGroup[]; ready: bo
     for (const items of Object.values(byGroup)) {
       items.sort((a, b) => (a.order ?? 100) - (b.order ?? 100));
     }
+    // dev's group order: preferences, system, then data.
     return [
       { id: 'preferences', name: t('settingsGroupPreferences'), items: byGroup.preferences },
-      { id: 'data', name: t('settingsGroupData'), items: byGroup.data },
       { id: 'system', name: t('settingsGroupSystem'), items: byGroup.system },
+      { id: 'data', name: t('settingsGroupData'), items: byGroup.data },
     ];
   }, [i18n, productName, t]);
 

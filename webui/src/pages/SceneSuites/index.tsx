@@ -26,10 +26,11 @@ import { sceneSuiteErrorMessage } from '@/utils/sceneSuites';
 
 const TEXT = {
   zh: {
-    title: '添加场景',
+    title: '场景管理',
     description: '安装后会自动启用场景，也可以在这里启用、停用和卸载已安装的场景。',
     refresh: '刷新',
     install: '安装',
+    redteamLaunch: '预计 2026年11月上线',
     update: '更新',
     uninstall: '卸载',
     enable: '启用',
@@ -78,10 +79,11 @@ const TEXT = {
     disabled_ok: '已停用',
   },
   en: {
-    title: 'Add scene',
+    title: 'Scene management',
     description: 'Scenes are enabled after installation. You can also enable, disable or uninstall installed scenes here.',
     refresh: 'Refresh',
     install: 'Install',
+    redteamLaunch: 'Expected launch: November 2026',
     update: 'Update',
     uninstall: 'Uninstall',
     enable: 'Enable',
@@ -132,6 +134,12 @@ const TEXT = {
 };
 
 type SuiteAction = 'install' | 'update' | 'uninstall' | 'enable' | 'disable';
+
+const SUITE_DISPLAY_ORDER: Record<string, number> = {
+  'soc-workspace': 0,
+  'code-audit-workspace': 1,
+  'ai-redteam-workspace': 2,
+};
 
 // Success toast per action. Spelled out because the keys are past tense and
 // the two toggles used to be derived from the action name, which yielded
@@ -187,6 +195,8 @@ export default function SceneSuitesPage() {
   const pagesUnavailable = searchParams.get('reason') === 'pages-unavailable';
   const targetCardRef = useRef<HTMLElement | null>(null);
   const { suites, loading, error, refetch } = useSceneSuiteUpdates();
+  const orderedSuites = useMemo(() => [...suites].sort((a, b) =>
+    (SUITE_DISPLAY_ORDER[a.id] ?? 3) - (SUITE_DISPLAY_ORDER[b.id] ?? 3)), [suites]);
   const [busyId, setBusyId] = useState<string | null>(null);
   const protectedUpdate = useProtectedHubUpdate();
   // Installing a suite pulls in its pages, tool and workflows one by one; show
@@ -343,7 +353,7 @@ export default function SceneSuitesPage() {
       )}
 
       <div className="space-y-3">
-        {suites.map((suite) => {
+        {orderedSuites.map((suite) => {
           // The server says whether this install has the edition the suite
           // needs (the same test its install refusal applies).
           const editionLocked = suite.editionLocked === true;
@@ -351,6 +361,7 @@ export default function SceneSuitesPage() {
           const licenseLocked = !editionLocked && editionNeedsLicence(suite.edition) && suite.licensed === false;
           const isPartial = suite.state === 'partial';
           const isInstalled = isPartial || suite.state === 'installed' || suite.state === 'updateAvailable' || suite.state === 'localOnly';
+          const awaitingLaunch = suite.id === 'ai-redteam-workspace' && (!isInstalled || isPartial);
           const hasWorkspace = suite.workspaceEnabled != null;
           // "有更新" can come from the page package alone while the suite
           // version is unchanged; say so next to the suite versions.
@@ -417,13 +428,13 @@ export default function SceneSuitesPage() {
                       </>
                     )}
                   </p>
-                  {editionLocked && (
+                  {editionLocked && !awaitingLaunch && (
                     <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{tScene('sceneSuites.editionHint')}</p>
                   )}
-                  {licenseLocked && (
+                  {licenseLocked && !awaitingLaunch && (
                     <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{text.licenseHint}</p>
                   )}
-                  {isPartial && (
+                  {isPartial && !awaitingLaunch && (
                     <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">
                       {hasWorkspace ? text.partialWorkspace : text.partialSuite}
                     </p>
@@ -436,7 +447,11 @@ export default function SceneSuitesPage() {
                 </div>
 
                 <div className="flex shrink-0 flex-col items-end gap-2">
-                  {editionLocked ? (
+                  {awaitingLaunch ? (
+                    <p className="py-1.5 text-sm font-medium text-zinc-500 dark:text-zinc-400">
+                      {text.redteamLaunch}
+                    </p>
+                  ) : editionLocked ? (
                     // Where to get the edition is the licensing extension's to say.
                     <ExtensionSlot name="sceneSuites.lockedAction" context={{ suiteId: suite.id, reason: 'edition' }} />
                   ) : (

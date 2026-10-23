@@ -199,6 +199,29 @@ export default function Page() {
 
 For Chinese pages, use Chinese copy inside the component, e.g. `{ready ? '页面已就绪' : '加载中...'}`.
 
+## Layout Inside the Host
+
+The page is rendered into the WebUI content area: below the fixed 56px top bar and to the right of the left navigation. The host adds no padding or scrollbar around a page under Home and clips anything taller than that area. The page is not in an iframe, so `100vh` and `position: fixed` refer to the whole browser window, not to the content area.
+
+- Give the root element `height: '100%'`; it then fills the content area exactly. Scroll inside panels (`minHeight: 0` plus `overflowY: 'auto'`). Never size the page with `100vh`, `h-screen` or `min-h-screen`: the page ends up 56px taller than the area, its bottom strip is cut off, and older Flocks versions may scroll the whole page up under the top bar.
+- Do not pin page parts (detail drawers, side panels, toolbars) with `position: fixed`. A fixed element at `top: 0` with a z-index below 50 sits under the top bar, which hides its first 56px. Give the root `position: 'relative'` and place the drawer with `position: 'absolute', top: 0, right: 0, bottom: 0`.
+- A dialog meant to cover the whole window may use `position: 'fixed', inset: 0, zIndex: 60`: above the top bar (50) and the navigation (40), below Flocks' own dialogs (70 and up).
+
+```tsx
+export default function Page() {
+  return (
+    <div style={{ position: 'relative', height: '100%', display: 'flex' }}>
+      <div style={{ width: 320, overflowY: 'auto' }}>{/* list */}</div>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        <div>{/* title and actions */}</div>
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>{/* details */}</div>
+      </div>
+      {/* a drawer: <div style={{ position: 'absolute', top: 0, right: 0, bottom: 0, width: 480 }}> */}
+    </div>
+  );
+}
+```
+
 ## Development Flow
 
 1. After scaffold creation, tell the user the nav label, route, and directory path.
@@ -510,6 +533,7 @@ Rex should ask only the minimum needed in this order:
 | Blank / error page | Check `GET /api/contracts/webui/pages/<id>` → `build.error` |
 | Build failed | Fix TSX syntax; only import `react` and `@flocks/webui-contract-sdk` |
 | Changes not visible | Confirm file saved under `src/`; try `POST .../build` |
+| Top of the page or a drawer hidden under the top bar; bottom of the page cut off | Root uses `100vh` / `h-screen`, or the part uses `position: fixed`; follow **Layout Inside the Host** |
 | 401 Unauthorized (WebUI) | User not logged in or session expired — re-login |
 | 401 Unauthorized (curl/script) | Add `Authorization: Bearer <server_api_token>`; run `flocks admin generate-api-token` if missing |
 | Page `api` calls fail | User must stay logged in; do not put API Token in page source |
@@ -524,6 +548,7 @@ Rex should ask only the minimum needed in this order:
 - Leave generated user page source, API handlers, assets, or drafts anywhere outside `~/.flocks/plugins/contracts/webui/<pageId>/`
 - Modify files under `dist/`
 - Import non-whitelisted npm packages into page code
+- Size the page with `100vh` / `h-screen` / `min-h-screen`, or pin page parts with `position: fixed` (see **Layout Inside the Host**)
 - Skip `pageId` format validation
 - Hardcode `server_api_token` or other secrets in page source (`src/*.tsx`)
 - Ask users to paste API tokens into chat

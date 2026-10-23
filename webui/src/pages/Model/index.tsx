@@ -25,14 +25,11 @@ import {
   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
 } from '@/api/provider';
 import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
-import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
+import TokenUsageCard from './TokenUsageCard';
+import { formatPricePerMillion, formatPricingPerMillion, formatPricingTierRange, isPricingFree } from '@/utils/modelPricing';
 import { extractErrorMessage } from '@/utils/error';
 import {
   convertCurrencyAmount,
-  formatCacheHitRate,
-  formatTokenCount,
-  formatTokenMillions,
-  getCacheUsageSummary,
   getConvertedTotalCost,
   getDefaultDashboardCurrency,
   toggleDashboardCurrency,
@@ -41,6 +38,7 @@ import type {
   ProviderCredentials, ModelDefinitionV2, UsageStats,
   CatalogProvider, CatalogModel, CatalogCredentialField, ModelSettingV2,
   CustomModelCreate, ProviderCredentialInput, FallbackModelRef,
+  PriceConfigV2,
 } from '@/types';
 
 // ==================== Provider Auth Helpers ====================
@@ -167,6 +165,9 @@ export default function ModelPage() {
 
   // Dashboard data
   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
+  const [usageLoading, setUsageLoading] = useState(true);
+  const [usageLoadError, setUsageLoadError] = useState(false);
+  const usageLoadSeqRef = useRef(0);
   const [defaultModel, setDefaultModel] = useState<{ provider_id: string; model_id: string } | null>(null);
   const [showDefaultModelDialog, setShowDefaultModelDialog] = useState(false);
   const [fallbackModels, setFallbackModels] = useState<FallbackModelRef[]>([]);
@@ -216,9 +217,27 @@ export default function ModelPage() {
     }
   }, []);
 
+  const loadUsage = useCallback(async () => {
+    const sequence = ++usageLoadSeqRef.current;
+    setUsageLoading(true);
+    setUsageLoadError(false);
+    try {
+      const response = await usageAPI.getSummary();
+      if (sequence === usageLoadSeqRef.current) setUsageStats(response.data);
+    } catch {
+      if (sequence === usageLoadSeqRef.current) setUsageLoadError(true);
+    } finally {
+      if (sequence === usageLoadSeqRef.current) setUsageLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadUsage();
+    return () => { usageLoadSeqRef.current += 1; };
+  }, [loadUsage]);
+
   // Fetch dashboard data on mount and validate default model
   useEffect(() => {
-    usageAPI.getSummary().then(r => setUsageStats(r.data)).catch(() => {});
     void loadFallbackModels();
 
     Promise.all([
@@ -447,6 +466,8 @@ export default function ModelPage() {
   }, [providers, pendingSelectId, loading]);
 
   const handleModelCreated = useCallback(() => {
+    // Creating the first model may also set the default on the server.
+    defaultModelAPI.getResolved().then(r => setDefaultModel(r.data)).catch(() => {});
     if (selectedProvider) {
       handleSelectProvider(selectedProvider);
     }
@@ -506,7 +527,7 @@ export default function ModelPage() {
   }
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col overflow-y-auto">
       {/* Header */}
       <PageHeader
         title={t('pageTitle')}
@@ -541,6 +562,9 @@ export default function ModelPage() {
         connectedCount={connectedCount}
         totalModels={totalModels}
         usageStats={usageStats}
+        usageLoading={usageLoading}
+        usageLoadError={usageLoadError}
+        onRefreshUsage={() => void loadUsage()}
         defaultModel={defaultModel}
         onEditDefault={isAdmin ? () => setShowDefaultModelDialog(true) : undefined}
         fallbackCount={fallbackModels.length}
@@ -549,7 +573,7 @@ export default function ModelPage() {
       />
 
       {/* Main Content: Provider List + Detail Panel (phones: list above the detail) */}
-      <div className="flex gap-3 flex-1 overflow-hidden min-h-0 max-md:flex-col max-md:overflow-visible">
+      <div className="flex gap-3 flex-1 overflow-hidden min-h-[18rem] max-md:flex-col max-md:overflow-visible">
         {/* Provider List */}
         <div className="w-64 flex-shrink-0 flex flex-col min-w-0 max-md:w-full">
           <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 max-md:max-h-64 max-md:pr-0">
@@ -740,6 +764,9 @@ function DashboardStrip({
   connectedCount,
   totalModels,
   usageStats,
+  usageLoading,
+  usageLoadError,
+  onRefreshUsage,
   defaultModel,
   onEditDefault,
   fallbackCount,
@@ -749,6 +776,9 @@ function DashboardStrip({
   connectedCount: number;
   totalModels: number;
   usageStats: UsageStats | null;
+  usageLoading: boolean;
+  usageLoadError: boolean;
+  onRefreshUsage: () => void;
   defaultModel: { provider_id: string; model_id: string } | null;
   /** Absent for members: default and auxiliary models are admin settings. */
   onEditDefault?: () => void;
@@ -757,8 +787,6 @@ function DashboardStrip({
   onEditFallbacks?: () => void;
 }) {
   const { t, i18n } = useTranslation('model');
-  const totalTokens = usageStats?.summary?.total_tokens ?? 0;
-  const cacheUsage = useMemo(() => getCacheUsageSummary(usageStats), [usageStats]);
   const defaultCurrency = getDefaultDashboardCurrency(i18n.language);
   const [displayCurrency, setDisplayCurrency] = useState(defaultCurrency);
   const totalCost = useMemo(
@@ -771,7 +799,7 @@ function DashboardStrip({
   }, [i18n.language]);
 
   return (
-    <div className="grid grid-cols-2 gap-3 mb-4 lg:grid-cols-6">
+    <div className="grid shrink-0 grid-cols-2 gap-3 mb-4 lg:grid-cols-6">
       {/* Default Model Card */}
       <div className="rounded-lg border p-3 bg-purple-50 text-purple-700 border-purple-200">
         <div className="flex items-center justify-between mb-1 opacity-70">
@@ -809,34 +837,7 @@ function DashboardStrip({
       />
       <StatCard icon={<Link2 className="w-5 h-5" />} label={t('dashboard.connected')} value={String(connectedCount)} color="green" />
       <StatCard icon={<Cpu className="w-5 h-5" />} label={t('dashboard.availableModels')} value={String(totalModels)} color="blue" />
-      <StatCard
-        icon={<Brain className="w-5 h-5" />}
-        label={t('dashboard.totalTokens')}
-        value={totalTokens > 0 ? formatTokenMillions(totalTokens) : t('dashboard.noUsage')}
-        color="blue"
-        hint={cacheUsage.state === 'unreported'
-          ? t('dashboard.cacheUnreported')
-          : cacheUsage.state === 'legacy'
-            ? t('dashboard.cacheReadLegacy', { tokens: formatTokenCount(cacheUsage.cacheRead) })
-            : cacheUsage.state === 'reported'
-              ? cacheUsage.hitRate === null
-                ? t('dashboard.cacheRead', { tokens: formatTokenCount(cacheUsage.cacheRead) })
-                : t('dashboard.cacheHit', {
-                  tokens: formatTokenCount(cacheUsage.cacheRead),
-                  rate: formatCacheHitRate(cacheUsage.hitRate),
-                })
-              : undefined}
-        hintTitle={cacheUsage.state === 'unreported'
-          ? t('dashboard.cacheUnreportedHint')
-          : cacheUsage.state === 'legacy'
-            ? t('dashboard.cacheLegacyHint')
-            : cacheUsage.state === 'reported'
-              ? t('dashboard.cacheCoverageHint', {
-                reported: cacheUsage.reportedRequests,
-                total: cacheUsage.totalRequests,
-              })
-              : undefined}
-      />
+      <TokenUsageCard usageStats={usageStats} loading={usageLoading} error={usageLoadError} onRefresh={onRefreshUsage} />
       <StatCard
         icon={<DollarSign className="w-5 h-5" />}
         label={t('dashboard.totalCost')}
@@ -1109,6 +1110,49 @@ function ProviderDetail({
 
 // ==================== Model Card (V2) ====================
 
+function PricingTierTable({ pricing }: { pricing: PriceConfigV2 }) {
+  const { t } = useTranslation('model');
+  const tiers = pricing.tiers ?? [];
+  const hasCacheWrite = tiers.some(tier => tier.cache_write != null);
+  if (!tiers.length) return null;
+
+  return (
+    <div className="space-y-2 mb-3">
+      <p className="text-xs text-gray-500">{t('pricing.tierBasis')}</p>
+      <div className="overflow-x-auto rounded border border-gray-200">
+        <table className="w-full text-xs text-left">
+          <thead className="bg-gray-50 text-gray-500">
+            <tr>
+              <th className="px-2 py-2 font-medium">{t('pricing.inputRange')}</th>
+              <th className="px-2 py-2 font-medium">{t('form.input')}</th>
+              <th className="px-2 py-2 font-medium">{t('form.output')}</th>
+              <th className="px-2 py-2 font-medium">{t('form.cacheRead')}</th>
+              {hasCacheWrite && <th className="px-2 py-2 font-medium">{t('pricing.cacheWrite')}</th>}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100 text-gray-700">
+            {tiers.map((tier, index) => (
+              <tr key={tier.max_input_tokens ?? 'unbounded'}>
+                <td className="px-2 py-2 whitespace-nowrap">{formatPricingTierRange(tiers, index)}</td>
+                <td className="px-2 py-2 whitespace-nowrap">{formatPricePerMillion(tier.input, pricing.currency, pricing.unit)}</td>
+                <td className="px-2 py-2 whitespace-nowrap">{formatPricePerMillion(tier.output, pricing.currency, pricing.unit)}</td>
+                <td className="px-2 py-2 whitespace-nowrap" title={tier.cache_read == null ? t('pricing.cacheFallback') : undefined}>
+                  {formatPricePerMillion(tier.cache_read ?? tier.input, pricing.currency, pricing.unit)}
+                </td>
+                {hasCacheWrite && (
+                  <td className="px-2 py-2 whitespace-nowrap" title={tier.cache_write == null ? t('pricing.cacheFallback') : undefined}>
+                    {formatPricePerMillion(tier.cache_write ?? tier.input, pricing.currency, pricing.unit)}
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onToggle, onDelete }: {
   model: ModelDefinitionV2;
   enabled: boolean;
@@ -1175,7 +1219,7 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
           </span>
           {contextK && <span className="text-[11px] text-gray-500 shrink-0">{contextK}</span>}
           {pricing && !isPricingFree(pricing) && (
-            <span className="text-[11px] text-gray-500 shrink-0">{formatPricingPerMillion(pricing)}</span>
+            <span className="text-[11px] text-gray-500 min-w-0 break-words" title={t('pricing.priceOrder')}>{formatPricingPerMillion(pricing)}</span>
           )}
           {pricing && isPricingFree(pricing) && (
             <span className="text-[11px] text-green-600 font-medium shrink-0">{t('status.free')}</span>
@@ -1884,8 +1928,8 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                                     <span className="text-sm font-medium text-gray-900">{model.name}</span>
                                     <CatalogModelBadges model={model} />
                                   </div>
-                                  <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
-                                    <span className="font-mono">{model.id}</span>
+                                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 mt-0.5">
+                                    <span className="font-mono break-all">{model.id}</span>
                                     {model.limits && (
                                       <span>
                                         {model.limits.context_window >= 1000000
@@ -1894,7 +1938,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                                       </span>
                                     )}
                                     {model.pricing && !isPricingFree(model.pricing) && (
-                                      <span>{formatPricingPerMillion(model.pricing)}</span>
+                                      <span className="min-w-0 break-words" title={t('pricing.priceOrder')}>{formatPricingPerMillion(model.pricing)}</span>
                                     )}
                                     {model.pricing && isPricingFree(model.pricing) && (
                                       <span className="text-green-600">{t('status.free')}</span>
@@ -2917,6 +2961,10 @@ function ModelDetailSheet({
     model.pricing?.cache_read != null ? String(model.pricing.cache_read) : '',
   );
   const [currency, setCurrency] = useState(model.pricing?.currency ?? 'USD');
+  const hasTieredPricing = Boolean(model.pricing?.tiers?.length);
+  const [overrideTieredPricing, setOverrideTieredPricing] = useState(false);
+  const [pricingEdited, setPricingEdited] = useState(false);
+  const saveFixedPricing = hasTieredPricing ? overrideTieredPricing : pricingEdited;
   const [enabled, setEnabled] = useState(true);
   const [defaultParameters, setDefaultParameters] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(false);
@@ -2929,6 +2977,7 @@ function ModelDetailSheet({
     setOutputPrice(value => convertEditablePrice(value, currency, nextCurrency));
     setCacheReadPrice(value => convertEditablePrice(value, currency, nextCurrency));
     setCurrency(nextCurrency);
+    setPricingEdited(true);
   };
 
   useEffect(() => {
@@ -2954,6 +3003,13 @@ function ModelDetailSheet({
 
   const handleSave = async () => {
     if (readOnly) return;
+    if (saveFixedPricing && (
+      [inputPrice, outputPrice].some(value => value.trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0)
+      || (cacheReadPrice.trim() !== '' && (!Number.isFinite(Number(cacheReadPrice)) || Number(cacheReadPrice) < 0))
+    )) {
+      toast.error(t('pricing.invalidPrice'));
+      return;
+    }
     setLoading(true);
     try {
       await Promise.all([
@@ -2966,12 +3022,12 @@ function ModelDetailSheet({
           supports_tools: supportsTools,
           supports_streaming: supportsStreaming,
           supports_reasoning: modelSupportsReasoning ? modelSupportsReasoning : supportsReasoning,
-          input_price: parseFloat(inputPrice) || 0,
-          output_price: parseFloat(outputPrice) || 0,
-          cache_read_price: cacheReadPrice.trim() === ''
-            ? null
-            : parseFloat(cacheReadPrice) || 0,
-          currency,
+          ...(saveFixedPricing ? {
+            input_price: Number(inputPrice),
+            output_price: Number(outputPrice),
+            cache_read_price: cacheReadPrice.trim() === '' ? null : Number(cacheReadPrice),
+            currency,
+          } : {}),
         }),
         modelSettingsAPI.update(provider.id, model.id, {
           enabled,
@@ -3098,22 +3154,39 @@ function ModelDetailSheet({
             {/* 价格 — 可编辑 */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.pricing')}</label>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {model.pricing?.price_version && (
+                <p className="text-xs text-gray-500 mb-2">{t('pricing.version', { version: model.pricing.price_version })}</p>
+              )}
+              {hasTieredPricing && model.pricing && <PricingTierTable pricing={model.pricing} />}
+              {hasTieredPricing && !readOnly && (
+                <label className="flex items-start gap-2 text-sm text-gray-700 mb-2">
+                  <input
+                    type="checkbox"
+                    checked={overrideTieredPricing}
+                    onChange={event => setOverrideTieredPricing(event.target.checked)}
+                    className="mt-0.5 rounded border-gray-300"
+                  />
+                  <span>{t('pricing.overrideTiers')}</span>
+                </label>
+              )}
+              {!readOnly && <p className="text-xs text-gray-500 mb-3">{t(hasTieredPricing ? 'pricing.overrideTiersHint' : 'pricing.editHint')}</p>}
+              {(!hasTieredPricing || overrideTieredPricing) && <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.input')}</label>
-                  <input type="number" step="0.01" value={inputPrice} onChange={e => setInputPrice(e.target.value)} className={fieldCls} />
+                  <input type="number" min="0" step="any" value={inputPrice} onChange={e => { setInputPrice(e.target.value); setPricingEdited(true); }} className={fieldCls} />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.output')}</label>
-                  <input type="number" step="0.01" value={outputPrice} onChange={e => setOutputPrice(e.target.value)} className={fieldCls} />
+                  <input type="number" min="0" step="any" value={outputPrice} onChange={e => { setOutputPrice(e.target.value); setPricingEdited(true); }} className={fieldCls} />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.cacheRead')}</label>
                   <input
                     type="number"
-                    step="0.01"
+                    min="0"
+                    step="any"
                     value={cacheReadPrice}
-                    onChange={e => setCacheReadPrice(e.target.value)}
+                    onChange={e => { setCacheReadPrice(e.target.value); setPricingEdited(true); }}
                     className={fieldCls}
                     placeholder="—"
                   />
@@ -3128,7 +3201,7 @@ function ModelDetailSheet({
                     <option value="CNY">CNY</option>
                   </select>
                 </div>
-              </div>
+              </div>}
             </div>
 
             {/* 启用此模型 — 可编辑 */}
@@ -3269,7 +3342,7 @@ function ModelSelectionInfo({ model }: { model: ModelDefinitionV2 }) {
             </div>
             <div className="flex gap-2">
               <dt className="shrink-0 text-gray-400">{t('form.pricing')}</dt>
-              <dd className="min-w-0 flex-1 text-right text-gray-700">
+              <dd className="min-w-0 flex-1 break-words text-right text-gray-700" title={t('pricing.priceOrder')}>
                 {formatModelPricing(model, t('modelSelection.free'), t('modelSelection.unavailable'))}
               </dd>
             </div>

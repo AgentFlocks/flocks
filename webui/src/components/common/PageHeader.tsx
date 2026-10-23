@@ -11,11 +11,11 @@ export default function PageHeader({ title, description, action, icon }: PageHea
       {/* Phones: the actions wrap under the title instead of squeezing it into a column. */}
       <div className="flex items-center justify-between max-md:flex-wrap max-md:gap-3">
         <div className="flex items-center gap-3 max-md:min-w-0">
-          {icon && <div className="text-red-600 max-md:shrink-0">{icon}</div>}
+          {icon && <div className="text-red-600 [&_svg]:stroke-[1.75] max-md:shrink-0">{icon}</div>}
           <div className="max-md:min-w-0">
-            <h1 className="text-2xl font-bold text-gray-900 max-md:text-xl">{title}</h1>
+            <h1 className="text-2xl font-semibold tracking-tight text-ui-text max-md:text-xl">{title}</h1>
             {description && (
-              <p className="mt-1 text-sm text-gray-500">{description}</p>
+              <p className="mt-1 text-sm leading-relaxed text-ui-secondary">{description}</p>
             )}
           </div>
         </div>
