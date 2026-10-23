@@ -47,7 +47,6 @@ function lazySettingsPage<T extends LazySettingsModule>(
 const ConfigPage = lazySettingsPage(() => import('@/pages/Config'));
 const SystemLogPage = lazySettingsPage(() => import('@/pages/SystemLog'));
 const ArchivedDataPage = lazySettingsPage(() => import('./ArchivedDataPanel'), ['session']);
-const VoiceSettingsPage = lazySettingsPage(() => import('@/pages/VoiceSettings'), ['voice']);
 
 
 function PreferenceRow({
@@ -456,7 +455,6 @@ function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
       {sectionId === 'account' && <ConfigPage />}
       {sectionId === 'archived-data' && <ArchivedDataPage />}
       {sectionId === 'system-logs' && <SystemLogPage />}
-      {sectionId === 'voice-input' && <VoiceSettingsPage />}
       {ExtensionPage && <ExtensionPage />}
     </Suspense>
   );

@@ -3,7 +3,7 @@
  *
  * 界面以 dev 分支的样式为准：dev 已有的页面直接写 Tailwind 色板类（bg-white、text-gray-500 …），
  * 深色由 index.css 的 .dark 兼容表接管。这里的变量只给 v2 新增、dev 没有的界面
- * （网络代理、语音输入等）以及 Hub 插件页面使用，取值对齐 dev 的配色：
+ * （网络代理等）、扩展注册的页面以及 Hub 插件页面使用，取值对齐 dev 的配色：
  * 浅色是 Tailwind gray + 品牌红，深色是 index.css 里的 --flocks-dark-* 那一套。
  */
 

@@ -1399,7 +1399,6 @@ from flocks.server.routes.device import router as device_router
 from flocks.server.routes.license import router as license_router
 from flocks.server.routes.webui import router as webui_pages_router
 from flocks.server.routes.contracts import router as contracts_router
-from flocks.server.routes.voice import router as voice_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(public_health_router, tags=["Health"])
@@ -1466,10 +1465,6 @@ app.include_router(notifications_router, prefix="/api/notifications", tags=["Not
 app.include_router(device_router, prefix="/api/devices", tags=["Device"])
 app.include_router(webui_pages_router, prefix="/api", tags=["WebUI"])
 app.include_router(contracts_router, prefix="/api", tags=["AccessContracts"])
-app.include_router(voice_router, prefix="/api/voice", tags=["Voice"])
-# Permission to ask is separate from the user's browser permission and the
-# authenticated, explicitly enabled voice endpoint.
-app.state.browser_microphone_allowed = True
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)

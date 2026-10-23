@@ -30,7 +30,6 @@ const LAZY_NAMESPACES = [
   'task',
   'tool',
   'update',
-  'voice',
   'workflow',
   'workspace',
 ] as const;
@@ -108,7 +107,6 @@ const builtinLazyLoaders: Record<SupportedLanguage, Record<LazyNamespace, Locale
     task: () => import('./locales/en-US/task.json'),
     tool: () => import('./locales/en-US/tool.json'),
     update: () => import('./locales/en-US/update.json'),
-    voice: () => import('./locales/en-US/voice.json'),
     workflow: () => import('./locales/en-US/workflow.json'),
     workspace: () => import('./locales/en-US/workspace.json'),
   },
@@ -128,7 +126,6 @@ const builtinLazyLoaders: Record<SupportedLanguage, Record<LazyNamespace, Locale
     task: () => import('./locales/zh-CN/task.json'),
     tool: () => import('./locales/zh-CN/tool.json'),
     update: () => import('./locales/zh-CN/update.json'),
-    voice: () => import('./locales/zh-CN/voice.json'),
     workflow: () => import('./locales/zh-CN/workflow.json'),
     workspace: () => import('./locales/zh-CN/workspace.json'),
   },

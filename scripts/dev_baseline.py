@@ -7,7 +7,7 @@ Run from either repository (no install, fetch, repair, restart or schema writes)
 Preparation, when needed, is explicit: `uv sync --group dev --frozen` in Core,
 `uv sync --extra test --frozen` in Pro, and `npm ci` in Core/webui. Set only
 FLOCKS_TEST_PG_DSN for disposable test PostgreSQL; production DSNs are not used.
-Core CI runs tests/scripts, tests/hub, tests/net, tests/db and tests/voice;
+Core CI runs tests/scripts, tests/hub and tests/db;
 WebUI CI runs lint, UI spec, `npm run test:run`, and build. Pro CI selects its
 Core repository/SHA through .github/flocks-core-pair.json or workflow_dispatch inputs.
 Dirty checkouts are valid local work, but cannot identify a remote CI pair.

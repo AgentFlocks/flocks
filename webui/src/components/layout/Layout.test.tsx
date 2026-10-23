@@ -554,7 +554,7 @@ describe('Layout chrome', () => {
     const sidebar = screen.getByRole('navigation', { name: 'moduleNavigation' });
     // A stock build has no edition sections; those an extension registers sort in by order.
     expect(within(sidebar).getAllByRole('link').map((link) => link.textContent)).toEqual([
-      'settingsPreferences', 'accountManagement', 'systemLog', 'voiceInput', 'archivedData',
+      'settingsPreferences', 'accountManagement', 'systemLog', 'archivedData',
     ]);
     expect(screen.queryByTestId('history-panel')).not.toBeInTheDocument();
     fireEvent.click(within(sidebar).getByRole('link', { name: 'archivedData' }));

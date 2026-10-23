@@ -2,7 +2,6 @@ import { useEffect, useMemo, useReducer } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Archive,
-  Mic,
   ScrollText,
   Settings as SettingsIcon,
   UserCog,
@@ -19,7 +18,6 @@ export const BUILT_IN_SETTINGS_SECTION_IDS: readonly SettingsSectionId[] = [
   'preferences',
   'account',
   'system-logs',
-  'voice-input',
   'archived-data',
 ] as const;
 
@@ -153,7 +151,6 @@ export function useSettingsSectionGroups(): { groups: SettingsGroup[]; ready: bo
       system: [
         { id: 'account', name: t('accountManagement'), icon: UserCog, order: 0 },
         { id: 'system-logs', name: t('systemLog'), icon: ScrollText, order: 15 },
-        { id: 'voice-input', name: t('voiceInput'), icon: Mic, adminOnly: true, order: 51 },
       ],
     };
     for (const section of registry.settingsSections) {

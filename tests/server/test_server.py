@@ -94,7 +94,8 @@ async def test_security_headers_present(anonymous_client):
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["referrer-policy"] == "no-referrer"
     assert response.headers["content-security-policy"] == "frame-ancestors 'self'"
-    assert response.headers["permissions-policy"] == "camera=(), microphone=(self), geolocation=()"
+    # No extension asked for the microphone, so a stock server denies it.
+    assert response.headers["permissions-policy"] == "camera=(), microphone=(), geolocation=()"
 
 
 @pytest.mark.asyncio
