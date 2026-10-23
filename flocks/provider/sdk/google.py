@@ -63,17 +63,7 @@ class GoogleProvider(BaseProvider):
                 api_key = self._config.api_key if self._config else self._api_key
                 if not api_key:
                     raise ValueError("Google API key not configured")
-                # Route both the sync and async httpx clients the SDK builds through
-                # the outbound proxy policy (flocks.json network.proxy).
-                from google.genai import types as genai_types
-
-                from flocks.net.http import ProxyRoutingTransport, SyncProxyRoutingTransport
-
-                http_options = genai_types.HttpOptions(
-                    client_args={"transport": SyncProxyRoutingTransport(), "trust_env": False},
-                    async_client_args={"transport": ProxyRoutingTransport(), "trust_env": False},
-                )
-                self._client = genai.Client(api_key=api_key, http_options=http_options)
+                self._client = genai.Client(api_key=api_key)
             except ImportError:
                 raise ImportError("google-genai package not installed. Install with: pip install google-genai")
         return self._client

@@ -17,7 +17,6 @@ from rich.console import Console
 
 from flocks.project.project import Project
 from flocks.storage.storage import Storage
-from flocks.net.http import async_client
 
 
 import_app = typer.Typer(
@@ -269,7 +268,7 @@ async def _import_session(
         
         try:
             import httpx
-            async with async_client() as client:
+            async with httpx.AsyncClient() as client:
                 # Try opncd.ai first
                 response = await client.get(f"https://opncd.ai/api/share/{slug}")
                 

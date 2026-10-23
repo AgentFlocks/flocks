@@ -386,15 +386,6 @@ it('restarts polling when the admin refreshes after a timeout', async () => {
     expect(screen.getByTestId('settings-content')).toContainElement(screen.getByText('system logs page'));
   });
 
-  it('redirects members away from admin-only settings', async () => {
-    useAuth.mockReturnValue({
-      user: { id: 'user-2', username: 'member', role: 'member', status: 'active', must_reset_password: false },
-    });
-    renderSettings('/settings/network-proxy');
-    expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
-    expect(screen.queryByText('network proxy page')).not.toBeInTheDocument();
-  });
-
   it('renders archived data management for local users', async () => {
     renderSettings('/settings/archived-data');
 

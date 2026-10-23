@@ -102,13 +102,8 @@ async def relay(
     }
     # Keep provider exceptions and HTTP headers out of responses and logs.
     async with asyncio.timeout(MAX_AUDIO_SECONDS + FINAL_TIMEOUT):
-        from flocks.net import proxy_url_for
-
         async with connect(
             ENDPOINT, additional_headers=headers,
-            # explicit route from the outbound proxy policy (None = direct);
-            # websockets would otherwise read HTTPS_PROXY / WSS_PROXY on its own
-            proxy=proxy_url_for(ENDPOINT),
             open_timeout=10, close_timeout=3, ping_interval=20, ping_timeout=10,
             max_size=MAX_RESPONSE_BYTES, max_queue=8, compression=None,
             logger=_TRANSPORT_LOGGER,

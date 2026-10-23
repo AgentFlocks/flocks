@@ -309,61 +309,6 @@ async def test_channel_bridge_process_uses_bundled_ca_node_option(
 
 
 @pytest.mark.asyncio
-async def test_start_bridge_passes_outbound_proxy_policy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    from flocks.net import proxy as proxy_mod
-    from flocks.net.proxy import ProxySettings
-
-    bridge_dir = tmp_path / "bridge"
-    bridge_dir.mkdir()
-    (bridge_dir / "bridge.js").write_text("console.log('bridge')", encoding="utf-8")
-    channel = WhatsAppChannel()
-    channel._bridge_dir = bridge_dir  # type: ignore[attr-defined]
-    channel._session_path = tmp_path / "session"  # type: ignore[attr-defined]
-    channel._media_cache_dir = tmp_path / "media"  # type: ignore[attr-defined]
-    captured_env: dict[str, str] = {}
-
-    async def fake_reuse(script: Path) -> bool:
-        return False
-
-    async def fake_wait(script: Path) -> None:
-        return None
-
-    class FakePopen:
-        def __init__(self, *args, **kwargs):
-            captured_env.update(kwargs.get("env") or {})
-
-    for name in proxy_mod.PROXY_ENV_NAMES:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.delenv("NODE_USE_ENV_PROXY", raising=False)
-    monkeypatch.setattr(channel, "_reuse_or_stop_existing_bridge", fake_reuse)
-    monkeypatch.setattr(channel, "_wait_for_bridge", fake_wait)
-    monkeypatch.setattr("flocks.channel.builtin.whatsapp.channel.find_executable", lambda name: "/usr/bin/node")
-    monkeypatch.setattr("flocks.channel.builtin.whatsapp.channel.subprocess.Popen", FakePopen)
-    proxy_mod.set_proxy_settings_override(ProxySettings.build(mode="manual", all="socks5h://127.0.0.1:7891", bypass=["*.example"]))
-    try:
-        await channel._start_bridge()  # type: ignore[attr-defined]
-    finally:
-        proxy_mod.set_proxy_settings_override(None)
-        if channel._bridge_log_fh:  # type: ignore[attr-defined]
-            channel._bridge_log_fh.close()  # type: ignore[attr-defined]
-
-    assert captured_env["FLOCKS_WHATSAPP_PROXY"] == "socks5h://127.0.0.1:7891"  # Baileys agent speaks socks
-    assert "ALL_PROXY" not in captured_env and "HTTPS_PROXY" not in captured_env  # Node's fetch does not
-    assert ".example" in captured_env["NO_PROXY"] and "127.0.0.1" in captured_env["NO_PROXY"]
-    assert captured_env["NODE_USE_ENV_PROXY"] == "1"
-
-    # whitelisted WhatsApp: the bridge is told to go direct while the variables stay for other hosts
-    proxy_mod.set_proxy_settings_override(ProxySettings.build(mode="manual", all="http://127.0.0.1:7890", bypass=["*.whatsapp.com"]))
-    try:
-        await channel._start_bridge()  # type: ignore[attr-defined]
-    finally:
-        proxy_mod.set_proxy_settings_override(None)
-        if channel._bridge_log_fh:  # type: ignore[attr-defined]
-            channel._bridge_log_fh.close()  # type: ignore[attr-defined]
-    assert captured_env["FLOCKS_WHATSAPP_PROXY"] == "" and captured_env["HTTPS_PROXY"] == "http://127.0.0.1:7890"
-
-
-@pytest.mark.asyncio
 async def test_pairing_rejects_running_session_after_dependency_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

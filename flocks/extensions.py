@@ -229,28 +229,6 @@ def register_route_provider(
     _register(router, name=name, prefix=prefix, tags=list(tags) if tags else None)
 
 
-def register_readiness_probe(name: str, probe: Callable[..., Any]) -> None:
-    """Register a dependency check the readiness endpoint reports on.
-
-    Registration alone says an extension is wired; it does not say the thing it
-    talks to is reachable.  A probe closes that gap, so an instance whose
-    database or local service is down is taken out of rotation instead of
-    answering "ready" and failing every request it is handed.
-
-    *probe* takes no arguments, may be async, and returns ``(ok, detail)``.
-    """
-
-    from flocks.plugin.readiness import register_readiness_probe as _register
-
-    _register(name, probe)
-
-
-def unregister_readiness_probe(name: str) -> None:
-    from flocks.plugin.readiness import unregister_readiness_probe as _unregister
-
-    _unregister(name)
-
-
 def register_branding_provider(provider: Any) -> None:
     """Register the source of the product name shown in the interface.
 
@@ -472,8 +450,6 @@ __all__ = [
     "register_auth_backend",
     "register_branding_provider",
     "register_content_source",
-    "register_readiness_probe",
-    "unregister_readiness_probe",
     "register_http_hook",
     "register_hub_root",
     "register_license_checker",

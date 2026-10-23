@@ -365,34 +365,6 @@ class TestDockerArgs:
         assert "--security-opt" in args
         assert "no-new-privileges" in args
 
-    def test_build_create_args_maps_host_gateway_for_loopback_proxies(self):
-        """container_env() rewrites 127.0.0.1 proxies to host.docker.internal; the name must resolve on Linux too."""
-        from flocks.net import proxy as proxy_mod
-        from flocks.net.proxy import ProxySettings
-        from flocks.sandbox.docker import build_sandbox_create_args
-        from flocks.sandbox.types import SandboxDockerConfig
-
-        # no proxy: nothing added (the host-gateway value is refused by old Docker / podman)
-        args = build_sandbox_create_args(name="c", cfg=SandboxDockerConfig(), scope_key="s")
-        assert "--add-host" not in args
-
-        proxy_mod.set_proxy_settings_override(ProxySettings.build(mode="manual", all="http://127.0.0.1:7890"))
-        try:
-            args = build_sandbox_create_args(name="c", cfg=SandboxDockerConfig(), scope_key="s")
-            assert args[args.index("--add-host") + 1] == "host.docker.internal:host-gateway"
-
-            # an operator-provided mapping wins and is not duplicated
-            cfg = SandboxDockerConfig(extra_hosts=["host.docker.internal:10.0.0.1"])
-            args = build_sandbox_create_args(name="c", cfg=cfg, scope_key="s")
-            hosts = [args[i + 1] for i, a in enumerate(args) if a == "--add-host"]
-            assert hosts == ["host.docker.internal:10.0.0.1"]
-
-            # a proxy that is not on this host needs no mapping
-            proxy_mod.set_proxy_settings_override(ProxySettings.build(mode="manual", all="http://proxy.corp:3128"))
-            assert "--add-host" not in build_sandbox_create_args(name="c", cfg=SandboxDockerConfig(), scope_key="s")
-        finally:
-            proxy_mod.set_proxy_settings_override(None)
-
     def test_build_create_args_with_limits(self):
         """资源限制参数."""
         from flocks.sandbox.docker import build_sandbox_create_args

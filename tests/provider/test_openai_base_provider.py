@@ -16,7 +16,6 @@ import pytest
 from openai import AsyncOpenAI
 
 import flocks.provider.sdk.openai_base as openai_base_module
-from flocks.net.http import ProxyRoutingTransport
 from flocks.provider.sdk.openai_base import (
     OpenAIBaseProvider,
     LLMResponseTooLargeError,
@@ -502,11 +501,8 @@ class TestOpenAIBaseProviderConfiguration:
         # See ``OpenAIBaseProvider._get_client``.
         assert mock_http_client.call_count == 1
         kwargs = mock_http_client.call_args.kwargs
-        # verify_ssl lands on the routing transport (one direct + one per proxy), and
-        # the client runs with trust_env=False: the outbound proxy policy decides.
-        assert kwargs["trust_env"] is False
-        assert isinstance(kwargs["transport"], ProxyRoutingTransport)
-        assert kwargs["transport"].verify is False
+        assert kwargs["verify"] is False
+        assert kwargs["trust_env"] is True
         timeout_arg = kwargs["timeout"]
         # Either an httpx.Timeout instance or compatible object: assert the
         # connect/read/write components rather than equality so future tweaks

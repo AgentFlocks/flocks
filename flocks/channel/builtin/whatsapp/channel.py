@@ -196,7 +196,7 @@ class WhatsAppChannel(ChannelPlugin):
 
         await self._ensure_bridge_deps()
         await self._start_bridge()
-        self._http = aiohttp.ClientSession()  # outbound: loopback (the bridge on 127.0.0.1)
+        self._http = aiohttp.ClientSession()
         self.mark_connected()
         log.info("whatsapp.connected", {
             "bridge_port": self._bridge_port,
@@ -410,16 +410,8 @@ class WhatsAppChannel(ChannelPlugin):
         self._bridge_log_path = self._session_path.parent / "bridge.log"
         self._bridge_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._bridge_log_fh = open(self._bridge_log_path, "a", encoding="utf-8")
-        from flocks.net import child_env, proxy_url_for
-
-        # HTTP_PROXY & co. per the outbound proxy policy; Node's native fetch (media
-        # download) only follows them with NODE_USE_ENV_PROXY=1 (Node >= 24) and only
-        # for http proxies, so SOCKS entries are left out of the variables ...
-        env = child_env(socks_capable=False)
+        env = os.environ.copy()
         append_node_options(env, NODE_USE_BUNDLED_CA_OPTION)
-        env.setdefault("NODE_USE_ENV_PROXY", "1")
-        # ... while Baileys' websocket / upload agent gets the real decision (socks included).
-        env["FLOCKS_WHATSAPP_PROXY"] = proxy_url_for("wss://web.whatsapp.com") or ""
         env["FLOCKS_WHATSAPP_MEDIA_DIR"] = str(self._media_cache_dir)
         env["FLOCKS_WHATSAPP_BRIDGE_TOKEN"] = self._bridge_token
         env["FLOCKS_WHATSAPP_CONFIG_HASH"] = self._bridge_config_hash()
@@ -450,7 +442,7 @@ class WhatsAppChannel(ChannelPlugin):
 
     async def _reuse_or_stop_existing_bridge(self, script: Path) -> bool:
         try:
-            async with aiohttp.ClientSession() as session:  # outbound: loopback
+            async with aiohttp.ClientSession() as session:
                 async with session.get(
                     self._url("/health"),
                     headers=self._bridge_headers(),
@@ -488,7 +480,7 @@ class WhatsAppChannel(ChannelPlugin):
                     f"WhatsApp bridge exited early with code {self._bridge_process.returncode}; log: {self._bridge_log_path}"
                 )
             try:
-                async with aiohttp.ClientSession() as session:  # outbound: loopback
+                async with aiohttp.ClientSession() as session:
                     async with session.get(
                         self._url("/health"),
                         headers=self._bridge_headers(),

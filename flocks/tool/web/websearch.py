@@ -141,9 +141,7 @@ async def websearch_tool(
             "Content-Type": "application/json"
         }
         
-        from flocks.net.aio import make_session
-
-        async with make_session(target_url=API_BASE_URL) as session:
+        async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{API_BASE_URL}/mcp",
                 json=request_data,

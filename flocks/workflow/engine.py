@@ -27,7 +27,6 @@ from .repl_runtime import (
     HostProcessPythonExecRuntime, PythonExecRuntime, Runtime,
     SandboxPythonExecRuntime, _legacy_registry_cancel_scope,
 )
-from flocks.net.http import sync_client
 
 
 _logger = logging.getLogger("flocks.workflow.engine")
@@ -1465,8 +1464,9 @@ class WorkflowEngine:
         status = "error"
         failure: Optional[BaseException] = None
         try:
+            import httpx
 
-            with sync_client(timeout=30.0) as client:
+            with httpx.Client(timeout=30.0) as client:
                 if method in {"GET", "DELETE", "HEAD"}:
                     resp = client.request(method, url, headers=headers)
                 elif isinstance(body, dict):

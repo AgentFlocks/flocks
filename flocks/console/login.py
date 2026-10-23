@@ -24,7 +24,6 @@ import httpx
 from flocks import __version__
 from flocks.console.outbox import deliver_reports
 from flocks.storage.storage import Storage
-from flocks.net.http import async_client
 
 
 def _shared_console_session_path() -> Path:
@@ -187,7 +186,7 @@ class ConsoleLoginService:
             "status": "pending",
         }
 
-        async with async_client(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(f"{console_base}/v1/flocks/console-logins", json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -223,7 +222,7 @@ class ConsoleLoginService:
 
         fingerprint = await cls.get_fingerprint()
         install_id = await cls._get_install_id()
-        async with async_client(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 f"{console_base}/v1/flocks/console-logins/{console_login_id}/exchange",
                 json={
@@ -283,7 +282,7 @@ class ConsoleLoginService:
         if not console_base:
             return {"ok": True, "mode": "mock", "session": session}
         token = str(session["console_session_token"])
-        async with async_client(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 f"{console_base}/v1/console-sessions/refresh",
                 headers={"Authorization": f"Bearer {token}"},
@@ -318,7 +317,7 @@ class ConsoleLoginService:
             token = str(session.get("console_session_token") or "").strip()
             if token:
                 try:
-                    async with async_client(timeout=10) as client:
+                    async with httpx.AsyncClient(timeout=10) as client:
                         await client.post(
                             f"{console_base}/v1/console-sessions/revoke",
                             headers={"Authorization": f"Bearer {token}"},
@@ -424,7 +423,7 @@ class ConsoleLoginService:
         token = str(session.get("console_session_token") or "").strip()
         if not token:
             raise ValueError("console_session_token 缺失，无法发送心跳")
-        async with async_client(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 target_url,
                 json=payload,
@@ -489,7 +488,7 @@ class ConsoleLoginService:
         }
         if not console_base:
             return {"ok": True, "mode": "mock", "node": payload}
-        async with async_client(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 f"{console_base}/v1/nodes/sync",
                 json=payload,

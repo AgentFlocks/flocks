@@ -332,21 +332,13 @@ async def webfetch_tool(
         else:
             headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 
-        from contextlib import AsyncExitStack
-
-        from flocks.net.aio import make_session
-
-        async with AsyncExitStack() as stack:
+        async with aiohttp.ClientSession() as session:
             # Follow redirects manually so every hop is SSRF-checked; aiohttp's
             # automatic redirect handling would otherwise let a public URL bounce
-            # to an internal address. Each hop gets its own session because the
-            # outbound proxy policy (flocks.json network.proxy) decides per target
-            # whether it goes direct (intranet whitelist) or through the proxy, and a
-            # SOCKS proxy is bound to the session's connector.
+            # to an internal address.
             current_url = url
             response_cm = None
             for _ in range(MAX_REDIRECTS + 1):
-                session = await stack.enter_async_context(make_session(target_url=current_url))
                 response_cm = session.get(
                     current_url,
                     headers=headers,
@@ -429,7 +421,6 @@ async def webfetch_tool(
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             })
 
-            # outbound: env — aiohttp is a hard dependency, this fallback only follows HTTP_PROXY
             with urllib.request.urlopen(req, timeout=timeout_sec) as response:
                 content = response.read().decode('utf-8', errors='replace')
                 content_type = response.headers.get("Content-Type", "")

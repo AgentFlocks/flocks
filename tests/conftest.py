@@ -289,31 +289,6 @@ def _isolate_runtime_root_from_shell(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-@pytest.fixture(autouse=True)
-def _isolate_outbound_proxy_from_shell(monkeypatch):
-    """Start every test with no proxy: no ``HTTP_PROXY`` family from the shell,
-    no macOS / Windows system proxy, no leftover process-wide override.
-
-    ``flocks.net.proxy`` makes HTTP clients follow the environment (``system``
-    mode) and, failing that, the OS proxy settings. A developer running the
-    suite behind Clash would otherwise see declarative HTTP tools, MCP clients
-    and the fetch helpers pick a ``ProxyConnector`` / proxied transport that the
-    tests never asked for. Tests that exercise the proxy set their own
-    variables or ``set_proxy_settings_override`` on top of this.
-    """
-    from flocks.net import proxy as proxy_mod
-
-    for name in proxy_mod.PROXY_ENV_NAMES + ("FLOCKS_PROXY_MODE", "FLOCKS_PROXY_URL", "FLOCKS_PROXY_BYPASS", proxy_mod.STARTUP_ENV_VAR):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(proxy_mod, "_os_proxy_settings", lambda: (None, None, []))
-    monkeypatch.setattr(proxy_mod, "_startup_env", None)
-    proxy_mod.set_proxy_settings_override(None)
-    proxy_mod._drop_cache()
-    yield
-    proxy_mod.set_proxy_settings_override(None)
-    proxy_mod._drop_cache()
-
-
 @pytest.fixture()
 def announced_suites():
     """List two licensed-edition scene suites the way an extension does.

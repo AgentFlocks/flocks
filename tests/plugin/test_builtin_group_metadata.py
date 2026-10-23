@@ -154,8 +154,7 @@ def _workflow_dirs():
 
 def test_builtin_workflow_groups():
     directories = _workflow_dirs()
-    # The two SOC workflows plus the g4b_echo test fixture shipped by arch_v2.
-    assert len(directories) == 3
+    assert len(directories) == 2
     for directory in directories:
         meta = directory / "meta.json"
         data = json.loads(meta.read_text(encoding="utf-8"))

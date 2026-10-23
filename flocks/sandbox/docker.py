@@ -158,16 +158,6 @@ async def read_container_config_hash(container_name: str) -> Optional[str]:
 # ==================== 构建容器创建参数 ====================
 
 
-def _proxy_needs_host_gateway() -> bool:
-    """True when the outbound proxy policy points the container at ``host.docker.internal``."""
-    try:
-        from flocks.net import container_env
-
-        return any("host.docker.internal" in value for name, value in container_env().items() if name.upper() != "NO_PROXY")
-    except Exception:  # pragma: no cover - policy unreadable
-        return False
-
-
 def build_sandbox_create_args(
     name: str,
     cfg: SandboxDockerConfig,
@@ -221,14 +211,6 @@ def build_sandbox_create_args(
     for entry in cfg.extra_hosts or []:
         if entry.strip():
             args.extend(["--add-host", entry])
-    if _proxy_needs_host_gateway() and not any(
-        str(entry).strip().startswith("host.docker.internal") for entry in cfg.extra_hosts or []
-    ):
-        # The outbound proxy policy rewrote a loopback proxy (127.0.0.1:7890) to
-        # host.docker.internal for the container (see flocks.net.container_env); on
-        # Linux that name only exists with this mapping. Added only when needed:
-        # the ``host-gateway`` value is refused by Docker < 20.10 / older podman.
-        args.extend(["--add-host", "host.docker.internal:host-gateway"])
 
     # 资源限制
     if isinstance(cfg.pids_limit, int) and cfg.pids_limit > 0:
@@ -471,14 +453,6 @@ def build_sandbox_env(
         "PATH": default_path,
         "HOME": container_workdir,
     }
-    # Outbound proxy policy reaches into the sandbox too (loopback proxies are
-    # rewritten to host.docker.internal); explicit sandbox / tool env still wins.
-    try:
-        from flocks.net import container_env
-
-        env.update(container_env())
-    except Exception:  # pragma: no cover - policy unreadable
-        pass
     for key, value in (sandbox_env or {}).items():
         env[key] = value
     for key, value in (params_env or {}).items():

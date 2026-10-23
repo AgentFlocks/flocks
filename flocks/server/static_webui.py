@@ -29,6 +29,8 @@ _PROTECTED_PREFIXES = (
     "/redoc",
     "/openapi.json",
     "/health",
+    # Kept out of the WebUI for an extension's readiness endpoint (a load
+    # balancer probe), which is registered after this list is read.
     "/ready",
 )
 

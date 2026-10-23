@@ -342,19 +342,6 @@ def _build_tcp_connector(verify_ssl: bool) -> "Any":
     return aiohttp.TCPConnector(**kwargs)
 
 
-def _build_session_kwargs(verify_ssl: bool, target_url: str) -> Dict[str, Any]:
-    """Connector for ``target_url`` under the outbound proxy policy, same socket hygiene as above."""
-    from flocks.net.aio import session_kwargs
-
-    connector_kwargs: Dict[str, Any] = {"force_close": True}
-    if sys.version_info < (3, 12, 7):
-        connector_kwargs["enable_cleanup_closed"] = True
-    kwargs = session_kwargs(target_url=target_url, ssl=verify_ssl, connector_kwargs=connector_kwargs)
-    if "connector" not in kwargs:
-        kwargs["connector"] = _build_tcp_connector(verify_ssl)
-    return kwargs
-
-
 def _build_http_handler(cfg: dict) -> ToolHandler:
     """Build an async HTTP request handler from declarative config."""
     method = cfg.get("method", "GET").upper()
@@ -410,7 +397,8 @@ def _build_http_handler(cfg: dict) -> ToolHandler:
 
         try:
             client_timeout = aiohttp.ClientTimeout(total=timeout)
-            async with aiohttp.ClientSession(timeout=client_timeout, **_build_session_kwargs(verify_ssl, url)) as session:
+            connector = _build_tcp_connector(verify_ssl)
+            async with aiohttp.ClientSession(timeout=client_timeout, connector=connector) as session:
                 req_kwargs: Dict[str, Any] = {"headers": headers}
                 if query_params:
                     req_kwargs["params"] = query_params

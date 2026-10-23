@@ -37,7 +37,6 @@ from typing import Any, List, Optional
 from flocks.skill.skill import Skill, SkillInfo, SkillInstallSpec
 from flocks.utils.log import Log
 from flocks.config.config import get_user_plugins_root
-from flocks.net.http import async_client
 
 
 log = Log.create(service="skill.installer")
@@ -557,7 +556,7 @@ class SkillInstaller:
             return None
 
         try:
-            async with async_client(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
                 resp = await client.get(f"https://skills.sh/{normalized}")
                 if resp.status_code != 200:
                     return None
@@ -652,7 +651,7 @@ class SkillInstaller:
 
         zip_url = f"https://wry-manatee-359.convex.site/api/v1/download?slug={name}"
         try:
-            async with async_client(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
                 resp = await client.get(zip_url)
                 if resp.status_code == 404:
                     return SkillInstallResult(
@@ -800,7 +799,7 @@ class SkillInstaller:
 
         errors: List[str] = []
         try:
-            async with async_client(
+            async with httpx.AsyncClient(
                 timeout=_NETWORK_TIMEOUT_SEC,
                 follow_redirects=True,
                 headers={"Accept": "application/vnd.github+json"},
@@ -1179,7 +1178,7 @@ class SkillInstaller:
             return SkillInstallResult(success=False, error=ssrf_error)
 
         try:
-            async with async_client(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
                 resp = await client.get(url)
                 if resp.status_code != 200:
                     return SkillInstallResult(

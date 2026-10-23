@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { __resetAgentsResourceForTesting } from '@/hooks/useAgents';
-import PageDialog from '../PageDialog';
 import AgentPage from './index';
 
 const { listMock, refreshMock, deleteMock, setDelegatableMock } = vi.hoisted(() => ({
@@ -75,22 +74,31 @@ vi.mock('@/components/common/EmptyState', () => ({
   default: ({ title, action }: { title: string; action?: ReactNode }) => <div>{title}{action}</div>,
 }));
 
-vi.mock('./AgentSheet', () => ({
-  default: ({ agent, onClose, onSaved }: {
-    agent?: unknown;
-    onClose: () => void;
-    onSaved: () => void;
-  }) => (
-    <PageDialog aria-label={agent ? '编辑 Agent' : '创建 Agent'} onClose={onClose}>
-      <button onClick={onClose}>关闭面板</button>
-      <button onClick={() => {
-        // AgentSheet invokes both callbacks after a successful save.
-        onSaved();
-        onClose();
-      }}>保存配置</button>
-    </PageDialog>
-  ),
-}));
+vi.mock('./AgentSheet', async () => {
+  const { useRef } = await import('react');
+  const { useDialogFocus } = await import('@/hooks/useDialogFocus');
+  return {
+    default: function AgentSheetStub({ agent, onClose, onSaved }: {
+      agent?: unknown;
+      onClose: () => void;
+      onSaved: () => void;
+    }) {
+      // A modal like the real sheet: focus moves in and Escape closes it.
+      const ref = useRef<HTMLDivElement>(null);
+      useDialogFocus(ref, true, onClose);
+      return (
+        <div ref={ref} role="dialog" aria-modal="true" tabIndex={-1} aria-label={agent ? '编辑 Agent' : '创建 Agent'}>
+          <button onClick={onClose}>关闭面板</button>
+          <button onClick={() => {
+            // AgentSheet invokes both callbacks after a successful save.
+            onSaved();
+            onClose();
+          }}>保存配置</button>
+        </div>
+      );
+    },
+  };
+});
 
 function makeAgent(overrides: Record<string, unknown>) {
   return {

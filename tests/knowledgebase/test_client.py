@@ -68,32 +68,6 @@ async def test_client_keeps_the_deployment_prefix_and_engine_key(base_url, expec
 
 
 @pytest.mark.asyncio
-async def test_engine_traffic_follows_the_outbound_proxy_policy(monkeypatch):
-    from flocks.net.http import ProxyRoutingTransport
-    from flocks.net.proxy import ProxySettings, set_proxy_settings_override
-
-    routed = []
-    engine = httpx.MockTransport(lambda request: httpx.Response(200, json=file_page()))
-
-    def transport_for(self, url):
-        # Record the policy's choice; answer offline instead of dialing the proxy.
-        routed.append((url.host, self.settings.proxy_url_for(str(url))))
-        return engine
-
-    monkeypatch.setattr(ProxyRoutingTransport, "_transport_for", transport_for)
-    set_proxy_settings_override(ProxySettings.build(
-        mode="manual", http="http://proxy.corp.test:3128", https="http://proxy.corp.test:3128",
-    ))
-    client = KnowledgebaseClient(Connection("https://ragflow.example", TOKEN))
-    try:
-        assert await client.files() == {"items": [], "total": 0, "page": 1}
-    finally:
-        set_proxy_settings_override(None)
-        await client.close()
-    assert routed and set(routed) == {("ragflow.example", "http://proxy.corp.test:3128")}
-
-
-@pytest.mark.asyncio
 async def test_dataset_create_and_retrieval_keep_the_ragflow_payloads():
     requests = []
 

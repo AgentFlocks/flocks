@@ -53,7 +53,7 @@ export async function createFlocksServer(options?: ServerOptions) {
         // Python serve 打印 "Starting server on: http://host:port"（可能带 rich 颜色码）
         const match = line.match(/Starting server on:\s*(?:\x1b\[[0-9;]*m)*\s*(https?:\/\/[^\s\x1b]+)/)
         if (match && !polling) {
-          // 这行在 uvicorn 绑定端口之前打印，等 /api/ready 通了再返回
+          // 这行在 uvicorn 绑定端口之前打印，等 /api/health 通了再返回
           polling = true
           waitReady(match[1]!, deadline, () => proc.exitCode !== null || !!options.signal?.aborted).then(
             (url) => {
@@ -97,10 +97,10 @@ export async function createFlocksServer(options?: ServerOptions) {
   }
 }
 
-/** 每 250ms 探一次 /api/ready，直到就绪、超过 deadline 或 stop()（进程退出/被中止）为止 */
+/** 每 250ms 探一次 /api/health，直到就绪、超过 deadline 或 stop()（进程退出/被中止）为止 */
 async function waitReady(url: string, deadline: number, stop: () => boolean): Promise<string> {
   while (Date.now() < deadline && !stop()) {
-    const ok = await fetch(`${url}/api/ready`)
+    const ok = await fetch(`${url}/api/health`)
       .then((r) => r.ok)
       .catch(() => false)
     if (ok) return url

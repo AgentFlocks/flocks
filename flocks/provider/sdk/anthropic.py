@@ -68,19 +68,14 @@ class AnthropicProvider(BaseProvider):
                 # Support custom base URL from config
                 base_url = self._config.base_url if self._config else None
                 
-                # Outbound proxy policy (flocks.json network.proxy / HTTP_PROXY family)
-                # via the shared routing transport; the SDK keeps its own timeouts.
-                from flocks.net.http import async_client
-
-                http_client = async_client()
                 if base_url:
                     log.info("anthropic.client.init", {
                         "base_url": base_url,
                         "has_api_key": bool(api_key),
                     })
-                    self._client = AsyncAnthropic(api_key=api_key, base_url=base_url, http_client=http_client)
+                    self._client = AsyncAnthropic(api_key=api_key, base_url=base_url)
                 else:
-                    self._client = AsyncAnthropic(api_key=api_key, http_client=http_client)
+                    self._client = AsyncAnthropic(api_key=api_key)
             except ImportError:
                 raise ImportError("anthropic package not installed. Install with: pip install anthropic")
         return self._client

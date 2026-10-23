@@ -298,15 +298,6 @@ def main_callback(
         )
         raise typer.Exit(1) from error
 
-    # Outbound proxy policy (flocks.json network.proxy) applies to CLI commands and
-    # everything they spawn (server, TUI, git / uv / npm) the same way as the server.
-    try:
-        from flocks.net import apply_process_environment
-
-        apply_process_environment()
-    except Exception as error:  # never block the CLI on a policy problem
-        Log.create(service="cli").warn("cli.network.proxy.apply_failed", {"error": str(error)})
-
     Log.Default.info(
         "flocks.start",
         {
@@ -649,9 +640,7 @@ def _attach_tui_to_managed_service(*, tui_dir: Path, project_dir: Path, server_u
     ]
     if session:
         tui_cmd.extend(["--session", session])
-    from flocks.net import child_env
-
-    subprocess.run(tui_cmd, cwd=tui_dir, env=child_env(socks_capable=False))
+    subprocess.run(tui_cmd, cwd=tui_dir)
 
 
 @app.command(hidden=True)
@@ -832,11 +821,8 @@ def tui(
         if session:
             tui_cmd.extend(["--session", session])
 
-        # Run TUI (blocking). Bun's fetch follows HTTP_PROXY / NO_PROXY but rejects
-        # socks:// URLs outright, so hand it the http-only view of the proxy policy.
-        from flocks.net import child_env
-
-        subprocess.run(tui_cmd, cwd=tui_dir, env=child_env(socks_capable=False))
+        # Run TUI (blocking)
+        subprocess.run(tui_cmd, cwd=tui_dir)
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user[/yellow]")

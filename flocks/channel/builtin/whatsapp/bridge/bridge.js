@@ -9,8 +9,6 @@ import {
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import express from 'express';
-import { HttpsProxyAgent } from 'https-proxy-agent';
-import { SocksProxyAgent } from 'socks-proxy-agent';
 import pino from 'pino';
 import path from 'path';
 import { createHash, randomBytes } from 'crypto';
@@ -57,19 +55,6 @@ const PAIR_ONLY = args.includes('--pair-only');
 const PAIR_JSON = args.includes('--pair-json');
 const PAIR_TIMEOUT_MS = Number.parseInt(process.env.FLOCKS_WHATSAPP_PAIR_TIMEOUT_MS || '120000', 10);
 const DEBUG = envFlag('FLOCKS_WHATSAPP_DEBUG');
-// Outbound proxy decided by the Python side (flocks.net) for wss://web.whatsapp.com:
-// '' means direct. http(s):// and socks4/5(h):// are both accepted.
-const PROXY_URL = String(process.env.FLOCKS_WHATSAPP_PROXY || '').trim();
-
-function buildProxyAgent(url) {
-  if (!url) return undefined;
-  const scheme = url.split('://')[0].toLowerCase();
-  if (scheme.startsWith('socks')) return new SocksProxyAgent(url);
-  if (scheme === 'http' || scheme === 'https') return new HttpsProxyAgent(url);
-  throw new Error(`unsupported proxy scheme in FLOCKS_WHATSAPP_PROXY: ${scheme}`);
-}
-
-const PROXY_AGENT = buildProxyAgent(PROXY_URL);
 
 mkdirSync(SESSION_DIR, { recursive: true });
 mkdirSync(MEDIA_DIR, { recursive: true });
@@ -292,9 +277,6 @@ async function startSocket() {
     version,
     auth: state,
     logger,
-    // websocket + media upload go through the agent; media *download* uses native fetch,
-    // which follows HTTP_PROXY only when NODE_USE_ENV_PROXY=1 (set by the Python side).
-    ...(PROXY_AGENT ? { agent: PROXY_AGENT, fetchAgent: PROXY_AGENT } : {}),
     printQRInTerminal: false,
     browser: ['Flocks', 'Chrome', '120.0'],
     syncFullHistory: false,

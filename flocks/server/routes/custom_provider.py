@@ -32,7 +32,6 @@ from flocks.server.auth import require_admin
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.server.routes.provider import _get_inline_provider_api_key
 from flocks.utils.log import Log
-from flocks.net.http import async_client
 
 
 class CustomProvider(OpenAICompatibleProvider):
@@ -532,11 +531,11 @@ async def _fetch_models_dev() -> Optional[dict[str, Any]]:
         return _models_dev_cache
 
     try:
+        import httpx
         import asyncio
 
-
         async def _get() -> Any:
-            async with async_client(timeout=MODELS_DEV_TIMEOUT_SEC) as client:
+            async with httpx.AsyncClient(timeout=MODELS_DEV_TIMEOUT_SEC) as client:
                 response = await client.get(MODELS_DEV_URL)
                 response.raise_for_status()
                 return response.json()

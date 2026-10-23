@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
+import httpx
 
 from flocks.channel.base import InboundMessage
 from flocks.channel.media_filename import sanitize_filename
@@ -28,7 +29,6 @@ from flocks.channel.builtin.dingtalk.client import (
 )
 from flocks.channel.builtin.dingtalk.config import resolve_account_credentials
 from flocks.utils.log import Log
-from flocks.net.http import async_client
 
 log = Log.create(service="channel.dingtalk.media")
 
@@ -129,7 +129,7 @@ async def _download_remote_bytes_limited(
     url: str, max_bytes: int,
 ) -> tuple[bytes, Optional[str]]:
     """Stream *url* into bytes, aborting when the body exceeds *max_bytes*."""
-    async with async_client(timeout=30.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         async with client.stream("GET", url) as resp:
             resp.raise_for_status()
             headers = {k.lower(): v for k, v in resp.headers.items()}

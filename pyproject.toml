@@ -92,8 +92,6 @@ dependencies = [
     # Kafka ingest (workflow input/output)
     "aiokafka>=0.14.0",
     "ddddocr>=1.6.1",
-    "aiohttp-socks>=0.10.1",
-    "pysocks>=1.7.1",
 ]
 
 [project.optional-dependencies]

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Optional
 
@@ -415,8 +415,8 @@ def check_startup_readiness(
         errors=tuple(errors),
     )
 
-    # The readiness endpoint passes quiet=True and logs state changes itself;
-    # a line per load-balancer probe is thousands a day that say nothing.
+    # A caller that polls (an extension's readiness endpoint) passes quiet=True
+    # and logs state changes itself; a line per probe says nothing new.
     if not quiet:
         if report.satisfied:
             if not requirements.empty:
@@ -429,152 +429,6 @@ def check_startup_readiness(
                 )
         else:
             log.error("plugin.readiness.unsatisfied", report.to_dict())
-    return report
-
-
-# ---------------------------------------------------------------------------
-# Dependency probes
-# ---------------------------------------------------------------------------
-#
-# The capability probes above answer "is an extension registered". A readiness
-# probe answers "is the thing it depends on actually reachable right now" --
-# a database, a local service. An extension registers its own, because the
-# core has no idea what a given deployment depends on, and a load balancer
-# needs the answer to include those dependencies rather than only the wiring.
-
-_PROBE_TIMEOUT_S = 2.0
-
-_readiness_probes: "Dict[str, Callable[[], Any]]" = {}
-
-
-def register_readiness_probe(name: str, probe: Callable[[], Any]) -> None:
-    """Register a dependency check reported by the readiness endpoint.
-
-    *probe* is called with no arguments and may be async.  It returns
-    ``(ok: bool, detail: str)``; anything else is read for truthiness.  A probe
-    that raises or exceeds the timeout counts as not ready, because "cannot
-    tell" and "not ready" have the same right answer for a load balancer.
-    """
-
-    if not name:
-        raise ValueError("readiness probe 必须提供 name")
-    if not callable(probe):
-        raise ValueError(f"readiness probe {name} 不可调用")
-    _readiness_probes[name] = probe
-    log.info("plugin.readiness.probe_registered", {"name": name})
-
-
-def unregister_readiness_probe(name: str) -> None:
-    _readiness_probes.pop(name, None)
-
-
-def registered_readiness_probes() -> List[str]:
-    return sorted(_readiness_probes)
-
-
-def reset_readiness_probes() -> None:
-    """Drop every registered probe.  For tests."""
-
-    _readiness_probes.clear()
-
-
-async def _run_probe(name: str, probe: Callable[[], Any]) -> tuple[str, bool, str]:
-    import asyncio
-    import inspect
-
-    try:
-        result = probe()
-        if inspect.isawaitable(result):
-            result = await asyncio.wait_for(result, timeout=_PROBE_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        return name, False, "timeout"
-    except Exception as exc:
-        return name, False, str(exc)
-
-    if isinstance(result, tuple) and len(result) == 2:
-        ok, detail = result
-        return name, bool(ok), str(detail)
-    return name, bool(result), ""
-
-
-async def run_readiness_probes() -> tuple[tuple[str, ...], Dict[str, str]]:
-    """Run every registered probe concurrently.
-
-    Returns the names that are not ready and a detail per probe.
-    """
-
-    if not _readiness_probes:
-        return (), {}
-
-    import asyncio
-
-    items = list(_readiness_probes.items())
-    results = await asyncio.gather(
-        *(_run_probe(name, probe) for name, probe in items),
-        return_exceptions=False,
-    )
-    failed: List[str] = []
-    details: Dict[str, str] = {}
-    for name, ok, detail in results:
-        details[name] = detail if detail else ("ok" if ok else "not ready")
-        if not ok:
-            failed.append(name)
-    return tuple(sorted(failed)), details
-
-
-# ---------------------------------------------------------------------------
-# Cached evaluation for the readiness endpoint
-# ---------------------------------------------------------------------------
-#
-# A load balancer probes every couple of seconds per node. Re-reading the
-# requirement declaration, re-running every capability probe and logging a line
-# each time turns a health check into a steady write load for no new
-# information -- the answer changes far more slowly than it is asked for.
-
-_READY_CACHE_TTL_S = 2.0
-_ready_cache: "Optional[tuple[float, ReadinessReport]]" = None
-_last_logged_state: Optional[bool] = None
-
-
-def reset_readiness_cache() -> None:
-    global _ready_cache, _last_logged_state
-    _ready_cache = None
-    _last_logged_state = None
-
-
-async def evaluate_readiness(
-    *,
-    failed_entrypoints: tuple[str, ...] = (),
-    force: bool = False,
-) -> ReadinessReport:
-    """The readiness answer a load balancer routes on, cached briefly."""
-
-    global _ready_cache, _last_logged_state
-
-    import time
-
-    now = time.monotonic()
-    if not force and _ready_cache is not None:
-        cached_at, cached = _ready_cache
-        if now - cached_at < _READY_CACHE_TTL_S:
-            return cached
-
-    report = check_startup_readiness(failed_entrypoints=failed_entrypoints, quiet=True)
-    failed_probes, probe_details = await run_readiness_probes()
-    if failed_probes:
-        report = replace(report, failed_probes=failed_probes)
-    report.probe_details.update(probe_details)
-
-    # Only a change is worth a line; the steady state is the load balancer
-    # doing its job.
-    if _last_logged_state != report.satisfied:
-        if report.satisfied:
-            log.info("plugin.readiness.satisfied", {"probes": sorted(probe_details)})
-        else:
-            log.error("plugin.readiness.unsatisfied", report.to_dict())
-        _last_logged_state = report.satisfied
-
-    _ready_cache = (now, report)
     return report
 
 
@@ -607,13 +461,6 @@ __all__ = [
     "StartupRequirementsUnmet",
     "check_startup_readiness",
     "enforce_startup_readiness",
-    "evaluate_readiness",
     "installed_plugin_entrypoints",
-    "register_readiness_probe",
-    "registered_readiness_probes",
     "reset_entrypoint_cache",
-    "reset_readiness_cache",
-    "reset_readiness_probes",
-    "run_readiness_probes",
-    "unregister_readiness_probe",
 ]

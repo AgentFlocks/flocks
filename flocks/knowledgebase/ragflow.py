@@ -41,21 +41,14 @@ class RagflowAdapter:
                 or max_content_bytes <= 0
             ):
                 raise ValueError
-            client_kwargs = {
-                "base_url": str(url).rstrip("/") + "/",
-                "headers": {"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
-                "timeout": timeout,
-                "follow_redirects": False,
-            }
-            if transport is None:
-                # A remote engine goes through the outbound proxy policy like any other
-                # call. Imported here: the pure resource tests inject a transport and
-                # load this module without the flocks package.
-                from flocks.net.http import async_client
-
-                self._client = async_client(**client_kwargs)
-            else:
-                self._client = httpx.AsyncClient(transport=transport, trust_env=False, **client_kwargs)
+            self._client = httpx.AsyncClient(
+                base_url=str(url).rstrip("/") + "/",
+                headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+                timeout=timeout,
+                transport=transport,
+                trust_env=False,
+                follow_redirects=False,
+            )
         except Exception:
             raise KBError(
                 500, "invalid_upstream_configuration", "The knowledge engine configuration is invalid."

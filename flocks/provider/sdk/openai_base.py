@@ -23,7 +23,6 @@ from flocks.provider.provider import (
 from flocks.provider.interleaved import is_kimi_k27_code_model, is_kimi_k3_model
 from flocks.provider.token_usage import normalize_usage
 from flocks.utils.log import Log
-from flocks.net.http import async_client
 
 log = Log.create(service="provider.openai_base")
 
@@ -137,15 +136,10 @@ def create_openai_http_client(
     timeout: httpx.Timeout = DEFAULT_HTTP_TIMEOUT,
     custom_settings: Any = None,
 ) -> httpx.AsyncClient:
-    """Build the shared OpenAI-compatible client with an ingress size cap.
-
-    ``trust_env`` keeps its historical meaning — "follow the outbound proxy policy"
-    (``flocks.json`` → ``network.proxy``, or the HTTP_PROXY family in ``system`` mode);
-    ``False`` forces a direct connection for this provider.
-    """
+    """Build the shared OpenAI-compatible client with an ingress size cap."""
     max_response_bytes = resolve_max_response_bytes(custom_settings)
-    return async_client(
-        use_proxy=trust_env,
+    return httpx.AsyncClient(
+        trust_env=trust_env,
         verify=verify,
         timeout=timeout,
         headers={"Accept-Encoding": "identity"},
@@ -958,6 +952,7 @@ class OpenAIBaseProvider(BaseProvider):
         """Get or create AsyncOpenAI client."""
         if self._client is None:
             from openai import AsyncOpenAI
+            import httpx
 
             api_key = self._config.api_key if self._config else self._api_key
             if not api_key:

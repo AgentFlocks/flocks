@@ -46,10 +46,8 @@ def unregister_auth_context_adapter(name: str) -> None:
 PUBLIC_PATHS = frozenset({
     "/",
     "/health",
-    "/ready",
     "/favicon.ico",
     "/api/health",
-    "/api/ready",
     "/api/config/ui-display",
     "/api/config/ui-favicon",
     "/api/auth/login",
@@ -315,7 +313,7 @@ async def apply_auth_for_request(request: HTTPConnection):
     # routes that otherwise bypass authentication. Keep probes reachable.
     if (
         PluginLoader.has_runtime_critical_entrypoint_failure()
-        and request.url.path not in {"/health", "/ready", "/api/health", "/api/ready"}
+        and request.url.path not in {"/health", "/api/health"}
     ):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

@@ -554,12 +554,12 @@ describe('Layout chrome', () => {
     const sidebar = screen.getByRole('navigation', { name: 'moduleNavigation' });
     // A stock build has no edition sections; those an extension registers sort in by order.
     expect(within(sidebar).getAllByRole('link').map((link) => link.textContent)).toEqual([
-      'settingsPreferences', 'accountManagement', 'systemLog', 'networkProxy', 'voiceInput', 'archivedData',
+      'settingsPreferences', 'accountManagement', 'systemLog', 'voiceInput', 'archivedData',
     ]);
     expect(screen.queryByTestId('history-panel')).not.toBeInTheDocument();
-    fireEvent.click(within(sidebar).getByRole('link', { name: 'networkProxy' }));
-    await waitFor(() => expect(activeProbe().textContent).toBe('/settings/network-proxy'));
-    expect(within(sidebar).getByRole('link', { name: 'networkProxy' })).toHaveAttribute('aria-current', 'page');
+    fireEvent.click(within(sidebar).getByRole('link', { name: 'archivedData' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/settings/archived-data'));
+    expect(within(sidebar).getByRole('link', { name: 'archivedData' })).toHaveAttribute('aria-current', 'page');
     expect(within(sidebar).queryByRole('link', { name: 'sceneSuiteManager' })).not.toBeInTheDocument();
     fireEvent.click(within(sidebar).getByRole('link', { name: 'settingsPreferences' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/settings/preferences'));

@@ -849,43 +849,6 @@ def normalize_fallback_provider_entries(value: Any) -> List[Dict[str, str]]:
     return normalized
 
 
-class NetworkProxyConfig(BaseModel):
-    """Outbound proxy policy (see flocks/net/proxy.py for the routing rules)."""
-    model_config = {"extra": "allow", "populate_by_name": True}
-
-    mode: Literal["off", "system", "manual"] = Field(
-        "system",
-        description=(
-            "off: never proxy; system: follow HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY; "
-            "manual: use the URLs below (also exported to the environment)."
-        ),
-    )
-    http: Optional[str] = Field(None, description="Proxy for http:// targets, e.g. http://127.0.0.1:7890")
-    https: Optional[str] = Field(None, description="Proxy for https:// targets; http://, socks5:// and socks5h:// accepted")
-    all: Optional[str] = Field(None, description="Fallback proxy when http / https are empty")
-    username: Optional[str] = Field(None, description="Proxy credentials (optional)")
-    password: Optional[str] = Field(None, description="Proxy password; stored as {secret:network_proxy_password}")
-    bypass: List[str] = Field(
-        default_factory=list,
-        description=(
-            "Direct-connection whitelist: hosts, .suffix / *.suffix domains, host:port, "
-            "IPs and CIDR blocks (e.g. *.corp.example, 10.0.0.0/8, gitlab.internal:8443)."
-        ),
-    )
-    bypass_private: bool = Field(
-        True,
-        alias="bypassPrivate",
-        description="Loopback, link-local, RFC1918 / ULA addresses and *.local / *.internal names always go direct.",
-    )
-
-
-class NetworkConfig(BaseModel):
-    """Network policy for outbound connections."""
-    model_config = {"extra": "allow"}
-
-    proxy: Optional[NetworkProxyConfig] = None
-
-
 class TokenPolicyNoticeConfig(BaseModel):
     """Enable or disable the built-in, one-month token policy notice."""
 
@@ -1008,10 +971,6 @@ class ConfigInfo(BaseModel):
         return normalized
 
     experimental: Optional[ExperimentalConfig] = None
-    network: Optional[NetworkConfig] = Field(
-        None,
-        description="Outbound network policy (proxy mode, proxy URLs, direct-connection whitelist).",
-    )
     concurrency: Optional[ConcurrencyConfig] = Field(
         None,
         description="Process-wide model request / subagent concurrency limits.",

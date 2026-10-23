@@ -413,37 +413,6 @@ class TestWeComReconnectWatchdog:
             await ch.start(config, AsyncMock(), abort_event)
 
         assert isinstance(FakeWSClient.last_kwargs["logger"], _WeComSdkLogger)
-        # no proxy configured in tests: the websocket is told to go direct explicitly
-        assert FakeWSClient.last_kwargs["ws_options"] == {"proxy": None}
-
-    async def test_start_routes_websocket_through_outbound_proxy(self):
-        from flocks.net import proxy as proxy_mod
-        from flocks.net.proxy import ProxySettings
-
-        class FakeWSClient:
-            last_kwargs = None
-
-            def __init__(self, *args, **kwargs):
-                self.handlers = {}
-                self.disconnect = AsyncMock()
-                FakeWSClient.last_kwargs = kwargs
-
-            def on(self, event, handler):
-                self.handlers[event] = handler
-
-            async def connect(self):
-                return None
-
-        ch = WeComChannel()
-        abort_event = asyncio.Event()
-        abort_event.set()
-        proxy_mod.set_proxy_settings_override(ProxySettings.build(mode="manual", all="socks5h://127.0.0.1:1080"))
-        try:
-            with patch("wecom_aibot_sdk.WSClient", FakeWSClient):
-                await ch.start({"botId": "bot-1", "secret": "secret-1"}, AsyncMock(), abort_event)
-        finally:
-            proxy_mod.set_proxy_settings_override(None)
-        assert FakeWSClient.last_kwargs["ws_options"] == {"proxy": "socks5h://127.0.0.1:1080"}
 
     async def test_watchdog_sets_timeout_event(self):
         ch = WeComChannel()

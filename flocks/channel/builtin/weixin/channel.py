@@ -225,10 +225,10 @@ class WeixinChannel(ChannelPlugin):
             total=None, connect=None, sock_connect=None, sock_read=None,
         )
         self._poll_session = aiohttp.ClientSession(
-            **ilink.session_kwargs_for(self._base_url),
+            trust_env=True, connector=ilink.make_ssl_connector(),
         )
         self._send_session = aiohttp.ClientSession(
-            timeout=no_timeout, **ilink.session_kwargs_for(self._base_url),
+            trust_env=True, connector=ilink.make_ssl_connector(), timeout=no_timeout,
         )
 
         self.mark_connected()

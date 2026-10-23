@@ -43,7 +43,6 @@ from flocks.tool.device.store import (
     update_device_metadata,
 )
 from flocks.tool.device.sync import sync_service_tool_state
-from flocks.net.http import async_client
 
 _AUTO_INSTANCE_IGNORED_KEY = "device.auto_instance_ignored_storage_keys"
 _AUTO_INSTANCE_LOCKS: dict[int, asyncio.Lock] = {}
@@ -344,7 +343,7 @@ async def _probe(base_url: str, *, verify_ssl: bool) -> DeviceTestResult:
         return int((time.monotonic() - start) * 1000)
 
     try:
-        async with async_client(verify=verify_ssl, timeout=10.0) as client:
+        async with httpx.AsyncClient(verify=verify_ssl, timeout=10.0) as client:
             resp = await client.get(base_url)
         ms = elapsed()
         return DeviceTestResult(

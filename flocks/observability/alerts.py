@@ -3,8 +3,8 @@
 An alert is raised once, when the condition starts, as an ERROR line
 (``alert.raised``, with the alert's name) in the process log, and as a line
 on the process's own stderr -- what systemd hands to journald -- so it is
-seen even when the log file or its shipping is what failed.  It is listed
-with the readiness details until it is cleared.
+seen even when the log file or its shipping is what failed.  ``active_alerts``
+lists it until it is cleared.
 None of them takes the node out of rotation: they are about the node's
 upkeep (its logs, their shipping), not about whether it can serve.
 """

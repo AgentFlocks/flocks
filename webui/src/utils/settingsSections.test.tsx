@@ -69,7 +69,7 @@ describe('useSettingsSectionGroups gates', () => {
     expect(sectionIds(result.current.groups)).not.toContain('ext-gated');
     // dev's order first (account, system logs); the sections dev does not have go last,
     // and the data group follows the system group as in dev.
-    expect(sectionIds(result.current.groups)).toEqual(['preferences', 'account', 'ext-ordered', 'system-logs', 'network-proxy', 'voice-input', 'archived-data']);
+    expect(sectionIds(result.current.groups)).toEqual(['preferences', 'account', 'ext-ordered', 'system-logs', 'voice-input', 'archived-data']);
   });
 
   it('places a registered section by its order among the built-in ones', async () => {

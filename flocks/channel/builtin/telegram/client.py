@@ -12,7 +12,6 @@ import asyncio
 from typing import Optional
 
 import httpx
-from flocks.net.http import async_client
 
 
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
@@ -26,7 +25,7 @@ async def get_http_client() -> httpx.AsyncClient:
     async with _HTTP_LOCK:
         if _HTTP_CLIENT is not None and not _HTTP_CLIENT.is_closed:
             return _HTTP_CLIENT
-        _HTTP_CLIENT = async_client(
+        _HTTP_CLIENT = httpx.AsyncClient(
             timeout=30,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )

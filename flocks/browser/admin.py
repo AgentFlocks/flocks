@@ -109,17 +109,6 @@ def _local_debugging_setup_lines(system: str | None = None) -> list[str]:
             "After the endpoint responds, rerun `flocks browser --setup`.",
         ]
     )
-    try:
-        from flocks.net import chromium_proxy_args
-
-        proxy_args = chromium_proxy_args()
-    except Exception:  # pragma: no cover - policy unreadable
-        proxy_args = []
-    if proxy_args:
-        lines.append(
-            "Flocks routes its own traffic through a proxy (flocks.json network.proxy); add the same to the browser: "
-            + " ".join(proxy_args)
-        )
     return lines
 
 

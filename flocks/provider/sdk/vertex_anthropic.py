@@ -22,7 +22,6 @@ from flocks.provider.provider import (
 from flocks.provider.sdk.anthropic import AnthropicProvider
 from flocks.provider.sdk.openai_base import build_reasoning_metadata
 from flocks.utils.log import Log
-from flocks.net.http import async_client
 
 log = Log.create(service="provider.vertex-anthropic")
 
@@ -281,10 +280,11 @@ class VertexAnthropicProvider(BaseProvider):
             payload["temperature"] = kwargs["temperature"]
         
         try:
+            import httpx
             
             url = f"{self._get_api_url(model_id)}:rawPredict"
             
-            async with async_client() as client:
+            async with httpx.AsyncClient() as client:
                 response = await client.post(
                     url,
                     headers={
@@ -395,6 +395,7 @@ class VertexAnthropicProvider(BaseProvider):
             payload["temperature"] = kwargs["temperature"]
         
         try:
+            import httpx
             
             url = f"{self._get_api_url(model_id)}:streamRawPredict"
             current_tool_id: Optional[str] = None
@@ -404,7 +405,7 @@ class VertexAnthropicProvider(BaseProvider):
             current_redacted_thinking_data: Optional[str] = None
             current_reasoning_open = False
             
-            async with async_client() as client:
+            async with httpx.AsyncClient() as client:
                 async with client.stream(
                     "POST",
                     url,

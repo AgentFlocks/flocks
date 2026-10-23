@@ -716,9 +716,8 @@ async def test_connect_socket_mode_preflights_app_token_before_handler(monkeypat
             self.response = SimpleNamespace(data={"error": "invalid_auth"})
 
     class FakeWebClient:
-        def __init__(self, token, **kwargs):
+        def __init__(self, token):
             self.token = token
-            self.session = kwargs.get("session")
 
         async def apps_connections_open(self, *, app_token):
             assert app_token == "xapp-bad"
@@ -755,10 +754,6 @@ async def test_start_rejects_user_token_auth_identity(monkeypatch):
     monkeypatch.setattr(slack_mod, "SLACK_AVAILABLE", True)
 
     class FakeClient:
-        def __init__(self, token, **kwargs):
-            self.token = token
-            self.session = kwargs.get("session")
-
         async def auth_test(self):
             return {
                 "user_id": "U_HUMAN",
@@ -766,11 +761,10 @@ async def test_start_rejects_user_token_auth_identity(monkeypatch):
             }
 
     class FakeApp:
-        def __init__(self, token=None, client=None):
-            self.token = token if token is not None else client.token
-            self.client = client
+        def __init__(self, token):
+            self.token = token
+            self.client = FakeClient()
 
-    monkeypatch.setattr(slack_mod, "AsyncWebClient", FakeClient)
     monkeypatch.setattr(slack_mod, "AsyncApp", FakeApp)
     plugin = SlackChannel()
 
@@ -868,13 +862,13 @@ async def test_slack_inbound_media_downloads_private_file_with_bot_token(monkeyp
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        def stream(self, method, url, headers=None):
+        def stream(self, method, url, headers):
             captured["method"] = method
             captured["url"] = url
             captured["headers"] = headers
             return FakeResponse()
 
-    monkeypatch.setattr(slack_media_mod, "async_client", lambda **_kw: FakeClient())
+    monkeypatch.setattr(slack_media_mod.httpx, "AsyncClient", FakeClient)
 
     msg = build_inbound_message(
         {

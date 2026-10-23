@@ -50,26 +50,6 @@ def make_ssl_connector() -> "Optional[aiohttp.TCPConnector]":
     return aiohttp.TCPConnector(ssl=ssl_ctx)
 
 
-def make_ssl_context() -> "Optional[ssl.SSLContext]":
-    """The certifi-backed SSL context by itself, for sessions that pick their own connector."""
-    try:
-        import certifi
-    except ImportError:
-        return None
-    return ssl.create_default_context(cafile=certifi.where())
-
-
-def session_kwargs_for(target_url: str) -> dict:
-    """``aiohttp.ClientSession`` kwargs for an iLink endpoint under the outbound proxy policy.
-
-    Keeps the certifi CA bundle and routes through the configured HTTP / SOCKS proxy
-    (or direct, if the host is whitelisted) instead of relying on ``trust_env``.
-    """
-    from flocks.net.aio import session_kwargs
-
-    return session_kwargs(target_url=target_url, ssl=make_ssl_context())
-
-
 def random_wechat_uin() -> str:
     value = struct.unpack(">I", secrets.token_bytes(4))[0]
     return base64.b64encode(str(value).encode("utf-8")).decode("ascii")

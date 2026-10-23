@@ -300,25 +300,21 @@ async def test_auth_asgi_bootstrap_login_and_me(pg_backend, monkeypatch):
         assert response.status_code == 400
 
 
-async def test_shared_pool_runtime_knowledge_and_channel(pg_backend):
+async def test_shared_pool_runtime_and_channel(pg_backend):
     from flocks.runtime_state.postgres import PostgresRuntimeStateStore
-    from flocks.knowledge.postgres import PostgresKnowledgeStore
     from flocks.channel.inbound.session_binding import _get_db, close_binding_db
     runtime = PostgresRuntimeStateStore(pg_backend)
-    knowledge = PostgresKnowledgeStore(pg_backend)
     pool = await pool_for(pg_backend)
-    assert await runtime._ensure_pool() is await knowledge._ensure_pool() is pool
+    assert await runtime._ensure_pool() is pool
     await runtime.initialize()
     await runtime.set("review-key", {"ok": True})
     await runtime.close()
-    assert await knowledge._ensure_pool() is pool
     await Storage.init()
     binding = await _get_db()
     results = await asyncio.gather(*[binding.fetch_one("SELECT COUNT(*) FROM channel_bindings") for _ in range(20)])
     assert results == [(0,)] * 20
     assert await runtime.get("review-key") == {"ok": True}
     await close_binding_db()
-    await knowledge.close()
     assert pool.get_idle_size() == pool.get_size()
 
 

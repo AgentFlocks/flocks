@@ -140,17 +140,6 @@ async def lifespan(app: FastAPI):
     # service runs.
     await _run_startup_phase(log, "extensions.prepare", lambda: _prepare_during_startup(app))
 
-    # Outbound proxy policy first: every client built later (providers, channels,
-    # hub, updater, MCP, child processes) reads the environment this writes.
-    def _apply_network_proxy() -> dict:
-        from flocks.net import apply_process_environment, describe_for_log
-
-        applied = apply_process_environment()
-        log.info("server.network.proxy", describe_for_log())
-        return applied
-
-    await _run_startup_phase(log, "network.proxy", _apply_network_proxy)
-
     try:
         from flocks.updater.updater import cleanup_replaced_files
 
@@ -220,24 +209,14 @@ async def lifespan(app: FastAPI):
 
     install_remote_abort_handler()
 
-    # /ready answers for the database too: a node whose database is gone or
-    # has turned into a standby keeps running but cannot save anything; one
-    # that just came back is let in once it stayed writable for a while. The
-    # monitor keeps that answer -- and the gate background work checks --
-    # current when no load balancer asks.
-    from flocks.db.health import DATABASE_PROBE, check_database, run_database_monitor
-    from flocks.plugin.readiness import register_readiness_probe
+    # A node whose database is gone or has turned into a standby keeps running
+    # but cannot save anything; one that just came back is let in once it
+    # stayed writable for a while. The monitor keeps that answer -- which the
+    # gate background work checks -- current.
+    from flocks.db.health import run_database_monitor
 
-    register_readiness_probe(DATABASE_PROBE, check_database)
     app.state.startup_background_tasks.append(
         asyncio.create_task(run_database_monitor(), name="db.health.monitor")
-    )
-    # Whether the log collector still ships this node's logs: alerts only,
-    # never readiness (flocks.observability.log_shipping).
-    from flocks.observability.log_shipping import run_log_shipping_monitor
-
-    app.state.startup_background_tasks.append(
-        asyncio.create_task(run_log_shipping_monitor(), name="observability.log_shipping")
     )
 
     # Content the deployment manages (flocks.content.managed): loaded before
@@ -809,8 +788,9 @@ async def _run_http_middleware_hooks(request: Request, context: dict[str, Any]) 
 
 _REQUEST_LOG_SKIP_EXACT = frozenset({
     "/health",
-    "/ready",
     "/api/health",
+    # An extension's load-balancer probe, asked every few seconds.
+    "/ready",
     "/api/ready",
     "/docs",
     "/redoc",

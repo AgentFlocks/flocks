@@ -289,7 +289,7 @@ def test_python_node_refuses_a_patch_it_cannot_apply(hook_pipeline) -> None:
 
 
 def test_http_request_sends_the_patched_target(hook_pipeline, monkeypatch) -> None:
-    from flocks.workflow import engine as engine_module
+    import httpx
 
     sent: list[tuple[str, str]] = []
 
@@ -311,7 +311,7 @@ def test_http_request_sends_the_patched_target(hook_pipeline, monkeypatch) -> No
             sent.append((method, url))
             return _Response()
 
-    monkeypatch.setattr(engine_module, "sync_client", lambda **kwargs: _Client())
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: _Client())
     recorder = _Recorder()
     hook_pipeline.register("patcher", _Patcher({"url": "http://10.0.0.5/api", "method": "post"}), order=1)
     hook_pipeline.register("test-recorder", recorder, order=2)

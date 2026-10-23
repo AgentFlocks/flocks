@@ -54,7 +54,6 @@ _WINDOWS_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 300
 # (``update_allowed_for_mode`` in ``flocks.updater.deploy`` is the source of truth).
 _NO_INPLACE_UPGRADE_MODES = ("docker", "managed", "offline")
 from flocks.updater.deploy import OFFLINE_UPGRADE_REFUSAL as OFFLINE_UPGRADE_REFUSED_MESSAGE  # noqa: E402
-from flocks.net.http import async_client
 
 _PROC_ROOT = Path("/proc")
 SYSTEMD_MAIN_PROCESS_REFUSED_MESSAGE = (
@@ -894,7 +893,7 @@ async def _fetch_github_release(
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    async with async_client(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(url, headers=headers, follow_redirects=True)
         resp.raise_for_status()
         data = resp.json()
@@ -929,7 +928,7 @@ async def _fetch_gitee_release(
     if token:
         params["access_token"] = token
 
-    async with async_client(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(api_url, params=params, follow_redirects=True)
         resp.raise_for_status()
         data = resp.json()
@@ -1031,7 +1030,7 @@ async def _fetch_gitlab_release(
     if token:
         headers["PRIVATE-TOKEN"] = token
 
-    async with async_client(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=15) as client:
         releases_url = f"{base}/api/v4/projects/{encoded}/releases"
         resp = await client.get(releases_url, headers=headers, follow_redirects=True)
 
@@ -1205,7 +1204,7 @@ async def _download_archive(
     elif token and "gitee.com" not in url:
         headers["Authorization"] = f"Bearer {token}"
 
-    async with async_client(timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
         async with client.stream("GET", url, headers=headers) as resp:
             if resp.status_code != 200:
                 await _raise_download_status_error(resp)
@@ -1242,7 +1241,7 @@ async def _download_channel_archive(
     dest = dest_dir / _download_filename_for_url(url, filename)
     origin = _url_origin(url)
     current = url
-    async with async_client(timeout=httpx.Timeout(30, read=300), follow_redirects=False) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=300), follow_redirects=False) as client:
         for _hop in range(10):
             request_headers = dict(headers or {}) if _url_origin(current) == origin else {}
             async with client.stream("GET", current, headers=request_headers) as resp:
@@ -2121,7 +2120,7 @@ async def get_installed_release(version: str) -> VersionInfo:
     tag = f"v{current}"
     encoded_tag = quote(tag, safe="")
     sources = [source for source in ucfg.sources if source in {"github", "gitee"}]
-    async with async_client(timeout=10) as client:
+    async with httpx.AsyncClient(timeout=10) as client:
         tasks = [
             asyncio.create_task(_fetch_installed_release_source(client, source, ucfg, encoded_tag))
             for source in sources

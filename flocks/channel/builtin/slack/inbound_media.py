@@ -11,13 +11,13 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
+import httpx
 
 from flocks.channel.base import InboundMessage
 from flocks.channel.media_filename import sanitize_filename
 from flocks.utils.log import Log
 
 from .config import resolve_bot_token
-from flocks.net.http import async_client
 
 log = Log.create(service="channel.slack.media")
 
@@ -124,16 +124,11 @@ async def _resolve_slack_file_url(
     if not file_id:
         return "", {}
     try:
-        import slack_sdk  # noqa: F401
+        from slack_sdk.web.async_client import AsyncWebClient
     except Exception as exc:
         raise RuntimeError("slack-sdk is required to resolve Slack file metadata") from exc
-    from .transport import build_web_client, close_web_client
 
-    client = build_web_client(bot_token)
-    try:
-        response = await client.files_info(file=file_id)
-    finally:
-        await close_web_client(client)
+    response = await AsyncWebClient(token=bot_token).files_info(file=file_id)
     file_obj = response.get("file") if hasattr(response, "get") else None
     if not isinstance(file_obj, dict):
         raise RuntimeError("Slack files.info returned no file object")
@@ -151,7 +146,7 @@ async def _download_file_limited(
 ) -> tuple[bytes, Optional[str], Optional[str]]:
     chunks: list[bytes] = []
     total = 0
-    async with async_client(timeout=60.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
         async with client.stream(
             "GET",
             media_url,

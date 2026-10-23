@@ -23,19 +23,6 @@ from flocks.mcp.types import McpResource, McpToolDef
 from flocks.mcp.utils import build_mcp_headers, build_mcp_url
 from flocks.utils.log import Log
 from flocks.config.config import get_user_plugins_root
-from flocks.net.http import async_client
-
-
-def _policy_http_client(headers=None, timeout=None, auth=None):
-    """``McpHttpClientFactory`` twin of ``mcp.shared._httpx_utils.create_mcp_http_client`` on the proxy policy."""
-    import httpx
-
-    kwargs = {"follow_redirects": True, "timeout": timeout if timeout is not None else httpx.Timeout(30.0, read=300.0)}
-    if headers is not None:
-        kwargs["headers"] = headers
-    if auth is not None:
-        kwargs["auth"] = auth
-    return async_client(**kwargs)
 
 log = Log.create(service="mcp.client")
 
@@ -431,7 +418,7 @@ class McpClient:
     ):
         """Create a modern Streamable HTTP transport context."""
         timeout = httpx.Timeout(self.timeout, read=60 * 5)
-        async with async_client(headers=headers, timeout=timeout) as http_client:
+        async with httpx.AsyncClient(headers=headers, timeout=timeout) as http_client:
             async with streamable_http_client(full_url, http_client=http_client) as streams:
                 yield streams
 
@@ -442,9 +429,7 @@ class McpClient:
         headers: Optional[Dict[str, str]],
     ):
         """Create an SSE transport context."""
-        # httpx_client_factory: the SDK's default client trusts the environment, i.e.
-        # NO_PROXY by name only; ours applies the CIDR / port whitelist too.
-        async with sse_client(full_url, headers=headers, timeout=self.timeout, httpx_client_factory=_policy_http_client) as streams:
+        async with sse_client(full_url, headers=headers, timeout=self.timeout) as streams:
             yield streams
 
     async def _run_connected_session(

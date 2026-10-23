@@ -25,7 +25,6 @@ from flocks.tool.registry import (
     ToolRegistry,
     ToolResult,
 )
-from flocks.net.http import async_client
 
 _CHANNEL_ALIASES: dict[str, list[str]] = {
     "wecom": ["wecom", "企微", "企业微信", "wechat_work", "wxwork"],
@@ -165,7 +164,7 @@ async def _http_session_send(
         if api_token:
             headers["Authorization"] = f"Bearer {api_token}"
 
-        async with async_client() as client:
+        async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"http://localhost:{port}/api/channel/session-send",
                 json=payload,

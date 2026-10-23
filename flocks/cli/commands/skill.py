@@ -24,7 +24,6 @@ from rich.text import Text
 
 from flocks.skill.skill import Skill, SkillInfo
 from flocks.skill.installer import SkillInstaller
-from flocks.net.http import async_client
 
 
 skill_app = typer.Typer(
@@ -289,7 +288,8 @@ async def _bounded(coro, timeout: float) -> list:
 async def _search_clawhub(query: str) -> list:
     """Query clawhub.com search API."""
     try:
-        async with async_client(timeout=10, follow_redirects=True) as client:
+        import httpx
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
             # Try clawhub search API endpoint
             resp = await client.get(
                 "https://clawhub.com/api/search",
@@ -317,7 +317,8 @@ async def _search_clawhub(query: str) -> list:
 async def _search_skills_sh(query: str) -> list:
     """Query skills.sh search API."""
     try:
-        async with async_client(timeout=10, follow_redirects=True) as client:
+        import httpx
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
             resp = await client.get(
                 "https://skills.sh/api/search",
                 params={"q": query, "limit": 10},
@@ -440,7 +441,8 @@ async def _search_github_collections(query: str) -> list:
     query_lower = query.lower()
 
     try:
-        async with async_client(
+        import httpx
+        async with httpx.AsyncClient(
             timeout=10,
             follow_redirects=True,
             headers={"Accept": "application/vnd.github+json"},

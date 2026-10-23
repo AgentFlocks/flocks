@@ -539,7 +539,8 @@ async def test_auth_guard_rejection_carries_security_headers_and_request_log(
     ("/api/channel/example/webhook", 503),
     ("/api/auth/bootstrap-admin", 503),
     ("/health", 200),
-    ("/ready", 200),
+    # An extension's readiness probe is not exempt: the node is not ready.
+    ("/ready", 503),
 ])
 async def test_critical_plugin_failure_blocks_http_effects_but_keeps_health(
     monkeypatch, path, expected_status,

@@ -4,9 +4,7 @@
   access and error logs, any third-party library -- are scrubbed like the
   ones written through Log, exception text included;
 * uvicorn's access formatter still gets the request line it unpacks;
-* dropping logs to stay within the disk budget raises an alert;
-* the log collector's counters tell a stalled or full shipper apart from a
-  healthy one; none of it touches readiness.
+* dropping logs to stay within the disk budget raises an alert.
 """
 
 from __future__ import annotations
@@ -16,7 +14,6 @@ import logging
 import pytest
 
 from flocks.observability import alerts
-from flocks.observability.log_shipping import counters_from_stats, judge
 from flocks.utils import log as log_module
 from flocks.utils.log import install_log_record_scrubber, scrub_log_record
 
@@ -113,68 +110,6 @@ def test_within_budget_nothing_is_raised(tmp_path, monkeypatch):
     (tmp_path / "2026-10-03" / "flocks.log").write_bytes(b"x" * 10)
     monkeypatch.setenv("FLOCKS_LOG_MAX_TOTAL_MB", "1")
     log_module.Log._cap_total_size(tmp_path)
-    assert alerts.active_alerts() == []
-
-
-def _stats(acked, failed, errors=0, pct=None, filled=None, maximum=None):
-    queue = {}
-    if pct is not None:
-        queue["filled"] = {"pct": pct}
-    if filled is not None:
-        queue.setdefault("filled", {})["events"] = filled
-        queue["max_events"] = maximum
-    return {"libbeat": {"output": {"events": {"acked": acked, "failed": failed}, "write": {"errors": errors}},
-                        "pipeline": {"queue": queue}}}
-
-
-def test_a_shipper_whose_sends_fail_without_acknowledgement_is_stalled():
-    before = counters_from_stats(_stats(acked=100, failed=0))
-    stalled = counters_from_stats(_stats(acked=100, failed=40, errors=3, pct=0.2))
-    assert judge(before, stalled)["log_shipping_stalled"]
-    # Failures while some still get through (one node of the store down): not stalled.
-    assert judge(before, counters_from_stats(_stats(acked=150, failed=40)))["log_shipping_stalled"] is None
-    assert judge(None, stalled)["log_shipping_stalled"] is None, "one reading says nothing about a trend"
-
-
-def test_a_shipper_queue_near_full_is_reported_whichever_way_it_counts():
-    assert judge(None, counters_from_stats(_stats(acked=1, failed=0, pct=0.95)))["log_shipping_queue_full"]
-    assert judge(None, counters_from_stats(_stats(acked=1, failed=0, filled=950, maximum=1000)))["log_shipping_queue_full"]
-    assert judge(None, counters_from_stats(_stats(acked=1, failed=0, pct=0.5)))["log_shipping_queue_full"] is None
-
-
-async def test_the_monitor_raises_and_clears_shipping_alerts(monkeypatch):
-    import asyncio
-
-    from flocks.observability import log_shipping
-
-    readings = iter([
-        _stats(acked=10, failed=0),
-        _stats(acked=10, failed=5, errors=2),  # the store went away
-        _stats(acked=60, failed=5, errors=2),  # back
-    ])
-    seen: list[list[str]] = []
-
-    async def read(_url):
-        try:
-            return next(readings)
-        except StopIteration:
-            raise asyncio.CancelledError
-
-    async def snapshot_sleep(_s):
-        seen.append([a["name"] for a in alerts.active_alerts()])
-
-    monkeypatch.setattr(log_shipping, "_read_stats", read)
-    monkeypatch.setattr(log_shipping.asyncio, "sleep", snapshot_sleep)
-    with pytest.raises(asyncio.CancelledError):
-        await log_shipping.run_log_shipping_monitor("http://127.0.0.1:5066/stats", interval=1)
-    assert seen == [[], ["log_shipping_stalled"], []]
-
-
-async def test_without_a_collector_nothing_is_watched(monkeypatch):
-    from flocks.observability import log_shipping
-
-    monkeypatch.delenv("FLOCKS_LOG_SHIPPER_STATS_URL", raising=False)
-    await log_shipping.run_log_shipping_monitor()  # returns at once
     assert alerts.active_alerts() == []
 
 

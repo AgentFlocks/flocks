@@ -9,6 +9,7 @@ import json
 import math
 import os
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -898,17 +899,18 @@ def upload_file(selector: str, path: str | list[str]) -> None:
 
 
 def http_get(url: str, headers: dict | None = None, timeout: float = 20.0) -> str:
-    """Fetch a URL directly without using the browser (follows the outbound proxy policy)."""
+    """Fetch a URL directly without using the browser."""
 
-    from flocks.net.http import sync_client
+    import gzip
 
     request_headers = {"User-Agent": "Mozilla/5.0", "Accept-Encoding": "gzip"}
     if headers:
         request_headers.update(headers)
-    with sync_client(timeout=timeout, follow_redirects=True) as client:
-        response = client.get(url, headers=request_headers)
-        response.raise_for_status()
-        return response.text
+    with urllib.request.urlopen(urllib.request.Request(url, headers=request_headers), timeout=timeout) as response:
+        data = response.read()
+        if response.headers.get("Content-Encoding") == "gzip":
+            data = gzip.decompress(data)
+        return data.decode()
 
 
 def _load_agent_helpers() -> None:

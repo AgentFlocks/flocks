@@ -25,7 +25,6 @@
   "accountManagement": "Account",
   "securityConfig": "Security Config",
   "systemLog": "System Logs",
-  "networkProxy": "Network proxy",
   "checkUpdate": "Check for updates",
   "flocksLlmUsageQuota": "Flocks LLM Usage",
   "auditLogs": "Audit Logs",
