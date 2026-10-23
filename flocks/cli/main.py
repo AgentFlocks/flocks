@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import typer
-from dotenv import load_dotenv
 from rich.console import Console
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
@@ -64,11 +63,12 @@ from flocks.cli.service_manager import (
     write_backend_runtime_record,
 )
 from flocks.cli.service_supervisor import run_service_daemon
+from flocks import startup_env
 from flocks.config.config import Config
 from flocks.utils.log import Log, LogLevel
 
-# Load .env file from current directory
-load_dotenv()
+# The .env flocks loaded on import (flocks/startup_env.py); a no-op by now.
+startup_env.load()
 
 app = typer.Typer(
     name="flocks",

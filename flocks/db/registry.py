@@ -8,6 +8,10 @@ database can start. These variables configure it:
     FLOCKS_DB_DSN       PostgreSQL connection string
     FLOCKS_DB_DSN_FILE  alternatively, a file containing the connection string
 
+With neither connection variable set, the file named by a persisted switch to
+PostgreSQL (``dsn_file`` in ``<config dir>/database.json``, see
+``flocks.db_backend``) is read instead.
+
 Legacy SQLite files are read only by the explicit offline migration command.
 Missing or invalid PostgreSQL configuration must never create a local database.
 """
@@ -21,10 +25,8 @@ from typing import Mapping, Optional
 from urllib.parse import urlsplit
 
 from flocks.db.dialect import Dialect, get_dialect
+from flocks.db_backend import BACKEND_ENV, DSN_ENV, DSN_FILE_ENV, BackendConfigurationError, persisted_choice
 
-BACKEND_ENV = "FLOCKS_DB_BACKEND"
-DSN_ENV = "FLOCKS_DB_DSN"
-DSN_FILE_ENV = "FLOCKS_DB_DSN_FILE"
 DEFAULT_BACKEND = "postgres"
 
 
@@ -73,17 +75,25 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> DatabaseSettin
     backend = _normalise(source.get(BACKEND_ENV, "") or DEFAULT_BACKEND)
     dsn = (source.get(DSN_ENV) or "").strip() or None
     dsn_file = (source.get(DSN_FILE_ENV) or "").strip()
+    dsn_file_source = DSN_FILE_ENV
     if backend != "postgres":
         raise DatabaseConfigurationError(
             "Only PostgreSQL is supported. Migrate legacy SQLite data before starting Flocks."
         )
     if dsn and dsn_file:
         raise DatabaseConfigurationError(f"Set only one of {DSN_ENV} and {DSN_FILE_ENV}")
+    if not dsn and not dsn_file:
+        try:
+            persisted = persisted_choice(source)
+        except BackendConfigurationError as exc:
+            raise DatabaseConfigurationError(str(exc)) from None
+        if persisted is not None and persisted.backend == "postgres" and persisted.dsn_file:
+            dsn_file, dsn_file_source = persisted.dsn_file, f"the dsn_file named in {persisted.source}"
     if dsn_file:
         try:
             dsn = Path(dsn_file).expanduser().read_text(encoding="utf-8").strip()
         except (OSError, UnicodeError):
-            raise DatabaseConfigurationError(f"Cannot read {DSN_FILE_ENV}") from None
+            raise DatabaseConfigurationError(f"Cannot read {dsn_file_source}") from None
     if not dsn:
         raise DatabaseConfigurationError(
             f"PostgreSQL requires {DSN_ENV} or {DSN_FILE_ENV} to be set"

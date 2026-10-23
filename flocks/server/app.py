@@ -37,21 +37,13 @@ from flocks.hooks.execution import (
 from flocks.server.auth import apply_auth_for_request, clear_auth_context
 from flocks.server.static_webui import maybe_serve_static_webui
 
-# Load .env file at startup
+# The .env flocks loaded on import (flocks/startup_env.py).
 try:
-    from dotenv import load_dotenv
-    # Try to find .env in project root
-    current_dir = Path(__file__).parent.parent.parent  # Go up to project root
-    env_file = current_dir / ".env"
-    if env_file.exists():
-        load_dotenv(env_file)
+    from flocks import startup_env
+
+    env_file = startup_env.load()
+    if env_file is not None:
         print(f"[OK] Loaded environment from {env_file}")
-    else:
-        # Try current working directory
-        load_dotenv()
-        print("[OK] Loaded environment from current directory")
-except ImportError:
-    print("[WARN] python-dotenv not installed, skipping .env loading")
 except Exception as e:
     print(f"[WARN] Failed to load .env: {e}")
 
