@@ -29,7 +29,6 @@
 #   FLOCKS_OFFLINE_SKIP_START=1       install only, do not start the service
 #   FLOCKS_OFFLINE_DRY_RUN=1          print the plan and exit without changing anything
 #   FLOCKS_OFFLINE_HEALTH_TIMEOUT=180 seconds to wait for /api/health
-#   FLOCKS_DB_DSN_FILE=/secure/postgres-dsn  required PostgreSQL settings (or FLOCKS_DB_DSN)
 #   FLOCKS_OFFLINE_ALLOW_DOWNGRADE=1  install over a newer version (not needed to recover from an online upgrade that never finished)
 
 set -Eeuo pipefail
@@ -549,14 +548,101 @@ elif env_file:
         print(env_file)
 PY
 }
+# This package runs on SQLite only. An install on another database (PostgreSQL: the enterprise
+# edition, or an earlier package) keeps its data there, and its settings would make the new
+# program refuse to start; it is refused here, before anything changes. Decided by the new
+# program's own rule (flocks/db_backend.py backend_choice, loaded from this package) on the
+# environment the service will get: its env file over the first .env the program loads
+# (flocks/startup_env.py). Data brought over from another install is judged by its own
+# config/database.json. Prints why it is refused, nothing for SQLite; always exits 0.
+database_declaration() {
+  "$BUNDLED_PY" - "$SRC_ROOT/flocks" "$INSTALL_ROOT" "$DATA_HOME" "$1" "${2:-}" <<'PY'
+import importlib.util, os, sys
+from pathlib import Path
+source_tree, install_root, data_home, root, env_file = sys.argv[1:6]
+try:
+    spec = importlib.util.spec_from_file_location("_installer_db_backend", Path(source_tree) / "flocks" / "db_backend.py")
+    db_backend = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = db_backend
+    spec.loader.exec_module(db_backend)
+except Exception as exc:  # a package without it is broken: say so rather than guess
+    print(f"的数据库设置无法检查（安装包里的 flocks/db_backend.py 读不了：{type(exc).__name__}）")
+    raise SystemExit(0)
+
+def read_env(path):
+    values = {}
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except (OSError, ValueError):
+        return values
+    for line in lines:  # the last assignment is the one the program gets
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):]
+        key, sep, value = line.partition("=")
+        if sep and key.strip() and not key.lstrip().startswith("#"):
+            values[key.strip()] = value.strip().strip("\"'").strip()
+    return values
+
+if env_file:
+    environ = read_env(env_file)  # what systemd hands the service: no ${...}, no trailing comments
+    environ.setdefault("HOME", data_home)
+    # the .env the new program loads: beside its source tree, else the nearest one above it
+    program = Path(install_root) / "flocks"
+    dotenv_file = next((candidate for candidate in (
+        Path(source_tree) / ".env", Path(source_tree) / "flocks" / ".env",
+        *(directory / ".env" for directory in (program.parent, *program.parent.parents)),
+    ) if candidate.is_file()), None)
+    if dotenv_file is not None:
+        # Read the way the program reads it (flocks/startup_env.py: python-dotenv's load_dotenv,
+        # override=False): ${VAR} from the service environment, trailing comments dropped, and
+        # what the service environment already sets wins. python-dotenv comes from this package.
+        for directory in sorted((Path(source_tree) / ".venv" / "lib").glob("python*/site-packages")):
+            sys.path.insert(0, str(directory))
+        try:
+            from dotenv.main import DotEnv
+        except ImportError:
+            print(f"的数据库设置无法检查（{dotenv_file} 要用 python-dotenv 读，安装包里没有）")
+            raise SystemExit(0)
+        process_environ = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(environ)
+        try:
+            loaded = DotEnv(dotenv_file, interpolate=True, override=False, encoding="utf-8").dict()
+        finally:
+            os.environ.clear()
+            os.environ.update(process_environ)
+        for key, value in loaded.items():
+            if key not in environ and value is not None:
+                environ[key] = value
+    os.environ["HOME"] = environ["HOME"]  # ~ for a missing FLOCKS_ROOT
+else:
+    environ = {"FLOCKS_CONFIG_DIR": str(Path(root) / "config")}
+try:
+    if env_file:
+        choice = db_backend.backend_choice(environ)
+    else:
+        choice = db_backend.persisted_choice(environ) or db_backend.BackendChoice(db_backend.SQLITE, "default")
+except Exception as exc:
+    print(f"的数据库设置读不出来（{type(exc).__name__}: {exc}）")
+    raise SystemExit(0)
+if choice.backend != db_backend.SQLITE:
+    print(f"用的数据库是 {choice.backend}（由 {choice.source} 决定）")
+PY
+}
 for root in "$DATA_ROOT" ${MIGRATE_FROM:+"$MIGRATE_FROM"}; do
   if [[ "$root" == "$DATA_ROOT" ]]; then
     declared_in="$(managed_declaration "$root" "$ENV_FILE")"
+    database_in="$(database_declaration "$root" "$ENV_FILE")"
   else
     declared_in="$(managed_declaration "$root")"
+    database_in="$(database_declaration "$root")"
   fi
   if [[ -n "$declared_in" ]]; then
     fail "${root} 属于一个由外部管理进程托管的安装（${declared_in} 声明了 managed），它的升级由那个管理进程负责，开源版离线包不能覆盖。本次未做任何改动"
+  fi
+  if [[ -n "$database_in" ]]; then
+    fail "${root} 所属的安装${database_in}；开源版离线包只支持 SQLite，覆盖安装后服务会起不来。请用企业版升级，或先把数据迁回 SQLite 再用本安装包。本次未做任何改动"
   fi
   if [[ -f "$root/$COMPONENT_MARKER" ]]; then
     fail "${root} 所属的安装装过本安装包不带的组件（${root}/${COMPONENT_MARKER}），覆盖安装会让它失效；请按该组件提供的方式升级，或先在页面上把它卸掉再用本安装包升级。本次未做任何改动"
@@ -565,20 +651,10 @@ done
 
 if [[ "$DRY_RUN" == "1" ]]; then
   log "dry-run: 将安装到 ${INSTALL_ROOT}，基目录 ${BASE:-（默认布局）}，服务用户 ${SERVICE_USER}，数据目录 ${DATA_ROOT}，配置 ${ENV_FILE}，日志 ${LOG_FILE}，端口 ${PORT}，systemd=${HAVE_SYSTEMD}，relocate=${RELOCATE}，迁移旧数据=${MIGRATE_FROM:-无}"
-  log "dry-run: 实际安装前会验证 PostgreSQL 配置与连接；检查失败不会停止旧服务"
   if [[ -n "$BASE" && ! -d "$BASE" ]]; then
     log "dry-run: 基目录 ${BASE} 还不存在，正式安装前要先建好（或挂载好）"
   fi
   exit 0
-fi
-
-# Freeze the checked credentials in a private staging directory. This is before
-# service-user creation, old-service stop, and every mutation of the live install.
-PG_PREFLIGHT_DIR="$(mktemp -d "$SRC_ROOT/installer/.postgres-preflight.XXXXXX")"
-chmod 700 "$PG_PREFLIGHT_DIR"
-if ! PYTHON_DOTENV_DISABLED=1 "$BUNDLED_PY" "$SRC_ROOT/installer/postgres_preflight.py" prepare \
-  --env-file "$ENV_FILE" --payload-root "$SRC_ROOT" --snapshot "$PG_PREFLIGHT_DIR"; then
-  fail "PostgreSQL 配置或连接预检失败；旧服务与数据未改动"
 fi
 
 # ---------------------------------------------------------------------------
@@ -732,7 +808,6 @@ render_env_template() {
   sed \
     -e "s|@INSTALL_ROOT@|$INSTALL_ROOT|g" \
     -e "s|@DATA_HOME@|$DATA_HOME|g" \
-    -e "s|@ENV_FILE@|$ENV_FILE|g" \
     -e "s|@PORT@|$PORT|g" \
     "$SRC_ROOT/installer/flocks.env.template"
 }
@@ -778,8 +853,6 @@ else
   render_env_template > "$ENV_FILE"
   log "已写入 ${ENV_FILE}"
 fi
-PYTHON_DOTENV_DISABLED=1 "$BUNDLED_PY" "$SRC_ROOT/installer/postgres_preflight.py" install \
-  --env-file "$ENV_FILE" --snapshot "$PG_PREFLIGHT_DIR" --service-user "$SERVICE_USER"
 # drop the offline pins an older package left in this file, otherwise the updater keeps refusing
 # online upgrades and uv / npm stay offline
 sed -i -E "/$OFFLINE_ONLY_KEYS_RE/d" "$ENV_FILE"
@@ -902,20 +975,6 @@ finish_staging() {
 }
 report_migration() {
   if [[ -n "$MIGRATE_FROM" ]]; then
-    if [[ -f "$DATA_ROOT/data/flocks.db" ]]; then
-      # this version reads PostgreSQL only; importing the copied SQLite database is an explicit step.
-      # The command runs like run_as_service_user (installed DB settings only, readable cwd), with
-      # every path shell-quoted so it can be pasted as printed.
-      local import_cmd
-      # shellcheck disable=SC2016  # $0 / $@ belong to the inner bash
-      printf -v import_cmd "runuser -u %q -- bash -c '%s' %q %q -m flocks.db.migrate --source %q --report-dir %q" \
-        "$SERVICE_USER" \
-        'unset FLOCKS_DB_BACKEND FLOCKS_DB_DSN FLOCKS_DB_DSN_FILE; set -a; . "$0" || exit 97; set +a; cd "${FLOCKS_REPO_ROOT:-/}" 2>/dev/null || cd /; exec "$@"' \
-        "$ENV_FILE" "$VENV_BIN/python" "$DATA_ROOT/data/flocks.db" "$DATA_ROOT/db-migration"
-      log "注意：旧数据里的 ${DATA_ROOT}/data/flocks.db（SQLite：账号、会话、任务等）没有导入 PostgreSQL，新实例里暂时看不到这些数据"
-      log "先盘点（只读，不写库）：${import_cmd}"
-      log "核对 ${DATA_ROOT}/db-migration 下的 report.json 后停掉服务，同一条命令末尾加 --apply 导入，再启动服务"
-    fi
     log "旧数据目录 ${MIGRATE_FROM} 原样保留；确认新实例里的账号、会话和配置都在之后可自行清理"
   fi
 }

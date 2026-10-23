@@ -916,8 +916,7 @@ def _agent_event_should_reload(event: object) -> bool:
     if dest:
         candidates.append(dest)
     for path in candidates:
-        # 监听的是 plugins 根目录（和工具监听器一样，这样启动后才创建的 agents/ 也能覆盖），
-        # 所以只认 agents/ 之下的文件，skills/tools 里的 .md 改动不能触发 agent 重载
+        # 只认 agents/ 之下的文件：skills/tools 里的 .md 改动不能触发 agent 重载
         if "agents" not in Path(path).parts:
             continue
         fname = os.path.basename(path)
@@ -1030,12 +1029,13 @@ class AgentFileWatcher:
         log.info("agent.watcher.cache_invalidated", {"reason": "agent plugin file changed on disk"})
 
     def _collect_watch_dirs(self) -> Set[str]:
-        """Return the plugin roots to watch.
+        """Return the agent directories to watch.
 
-        Watch ``<plugins>`` rather than ``<plugins>/agents`` (mirrors
-        ``ToolFileWatcher``): an ``agents/`` directory that only appears after
-        startup — the first custom agent saved from the WebUI — is then still
-        covered instead of silently unwatched until the next restart.
+        ``<plugins>/agents`` is created first, so the ``agents/`` directory the
+        first custom agent saved from the WebUI would otherwise create after
+        startup is still covered.  The plugin roots themselves are
+        ``ToolFileWatcher``'s: a second observer on the same path fails on
+        macOS (FSEvents refuses it) and one of the two stops reloading.
         """
         dirs: Set[str] = set()
         try:
@@ -1046,17 +1046,25 @@ class AgentFileWatcher:
 
             user_root = Path(get_user_plugins_root())
 
+        user_dir = user_root / "agents"
         try:
-            (user_root / "agents").mkdir(parents=True, exist_ok=True)
+            user_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
-        if os.path.isdir(user_root):
-            dirs.add(str(user_root))
+        if os.path.isdir(user_dir):
+            dirs.add(str(user_dir))
 
         try:
             project_root = Path.cwd() / ".flocks" / "plugins"
-            if str(project_root) != str(user_root) and os.path.isdir(project_root):
-                dirs.add(str(project_root))
+            project_dir = project_root / "agents"
+            if str(project_dir) != str(user_dir) and project_root.is_dir():
+                # The same for a project that keeps plugins: its first agent is still seen.
+                try:
+                    project_dir.mkdir(exist_ok=True)
+                except OSError:
+                    pass
+                if project_dir.is_dir():
+                    dirs.add(str(project_dir))
         except Exception:
             pass
 

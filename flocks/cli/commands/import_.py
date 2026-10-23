@@ -358,7 +358,6 @@ async def _import_session(
         if not keep_directory:
             previous_directory = _relocate_session_directory(session_info, target_directory)
 
-        # Store session
         session_key = f"session:{project_id}:{session_info['id']}"
         existing = await Storage.get(session_key)
         if existing is not None and not force and not new_id:
@@ -393,56 +392,26 @@ async def _import_session(
             message_count += 1
 
         session_id = session_info["id"]
-        from flocks.session.message_pages import (
-            SessionMessagesDeletedError, bump_revision, lock_session, replace_metadata,
-        )
+        from flocks.session.message import _refuse_removed_uploads
 
-        async def lock_message_projection(db):
-            try:
-                await lock_session(db, session_id)
-            except SessionMessagesDeletedError as exc:
-                raise ValueError("Session was deleted; use --new-id to import a new session") from exc
-            if not force:
-                row = await db.fetch_one("SELECT 1 FROM runtime_state WHERE key = ?", (session_key,))
-                if row is not None:
-                    raise ValueError("Session already exists; use --new-id to import a new session")
-            # The uploads the imported parts name: the same lock and tombstone
-            # check as every other write of parts (an upload being removed is
-            # either seen named here or refuses this import).
-            stored_rows = await db.fetch_all(
-                "SELECT value FROM runtime_state WHERE key = ANY(?::text[])",
-                ([f"message_parts:{session_id}:{message_id}" for message_id in serialized_parts],),
-            )
-            stored = [
-                part for row in stored_rows
-                for part in (json.loads(row[0]) if isinstance(row[0], str) else (row[0] or []))
-            ]
-            await guard_new_upload_references(
-                db, stored, [part for parts in serialized_parts.values() for part in parts],
-            )
-
-        async def update_message_projection(db):
-            await replace_metadata(db, session_id, serialized_messages)
-            await bump_revision(db, session_id)
-
-        from flocks.session.message import _named_uploads, guard_new_upload_references
-
-        if any(_named_uploads(parts) for parts in serialized_parts.values()):
-            from flocks.storage.file_mirror import FileMirror
-
-            await FileMirror._pool()  # the tombstone table, created outside the import's transaction
+        parts_entries = [
+            (f"message_parts:{session_id}:{message_id}", parts) for message_id, parts in serialized_parts.items()
+        ]
+        # The session, its messages and their parts go in together, or none of
+        # them; an upload a sweep removed refuses the import (the same check as
+        # every other write of parts).
         await Storage.mutate_many(
             set_entries=[
                 (session_key, session_info, "session"),
                 (f"message:{session_id}", serialized_messages, "message"),
-                *[
-                    (f"message_parts:{session_id}:{message_id}", parts, "message_part")
-                    for message_id, parts in serialized_parts.items()
-                ],
+                *[(key, parts, "message_part") for key, parts in parts_entries],
             ],
-            pre_transaction_hook=lock_message_projection,
-            transaction_hook=update_message_projection,
+            pre_transaction_hook=lambda db: _refuse_removed_uploads(db, parts_entries),
         )
+        # A replaced session (--force) must not be read back from a warm cache.
+        from flocks.session.message import Message
+
+        Message.invalidate_cache(session_id)
         
         console.print(f"[green]Imported session: {session_info['id']}[/green]")
         if new_id and session_info["id"] != original_id:

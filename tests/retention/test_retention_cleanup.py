@@ -1,11 +1,11 @@
 """What the retention pass deletes, and what it must leave alone."""
 
 import os
+import sqlite3
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import pytest
 
 from flocks.retention import RetentionPolicy, apply_policy, collect_targets, expired_turn_prefix
 from flocks.session.message import Message, MessageRole
@@ -193,9 +193,11 @@ async def test_delete_many_removes_messages_parts_and_search_rows_in_one_go(tmp_
     for message_id in old:
         assert await Storage.get(f"message_parts:{session.id}:{message_id}") is None
     if Storage.session_search_available():
-        async with Storage.transaction() as db:
-            rows = await db.fetch_all("SELECT message_id FROM session_transcript_index_state")
-        indexed = {row[0] for row in rows}
+        with sqlite3.connect(Storage._db_path) as db:
+            indexed = {
+                row[0]
+                for row in db.execute("SELECT message_id FROM session_transcript_index_state")
+            }
         assert indexed.isdisjoint(old)
         assert set(new) <= indexed
     Message.invalidate_cache(session.id)
@@ -282,19 +284,16 @@ async def test_session_used_again_after_planning_is_not_deleted(tmp_path, monkey
 async def test_delete_many_keeps_messages_only_in_storage(tmp_path):
     # Regression: a message that reached storage but not this process's cache
     # (e.g. another worker) must not be dropped when deleting an older one.
-    from flocks.session import message_pages
-
     session = await _new_session(tmp_path)
     old = await _turn(session.id, _days_ago_ms(5), _days_ago_ms(5), "old")
     await _turn(session.id, _days_ago_ms(1), _days_ago_ms(1), "cached-new")
-    # Commit a message the way another worker does, bypassing this process's cache.
-    stored = await Storage.get(f"message:{session.id}")
-    injected = dict(stored[-1], id="msg_only_in_storage")
-    async with Storage.transaction() as db:
-        await message_pages.lock_session(db, session.id)
-        await message_pages.upsert(db, session.id, injected)
-        await message_pages.sync_document(db, session.id)
-        await message_pages.bump_revision(db, session.id)
+    # Append a message straight to storage, bypassing the in-memory cache.
+    key = f"message:{session.id}"
+    stored = await Storage.get(key)
+    injected = dict(stored[-1])
+    injected["id"] = "msg_only_in_storage"
+    stored.append(injected)
+    await Storage.set(key, stored, "json")
 
     deleted = await Message.delete_many(session.id, old)
 
@@ -302,70 +301,6 @@ async def test_delete_many_keeps_messages_only_in_storage(tmp_path):
     remaining = await _stored_message_ids(session.id)
     assert "msg_only_in_storage" in remaining  # survived, not clobbered by a stale cache
     assert not any(mid in remaining for mid in old)
-    page, *_ = await Message.list_page_with_parts(session.id, limit=50)
-    assert "msg_only_in_storage" in [item.info.id for item in page]
-
-
-async def test_bulk_delete_leaves_pages_and_later_writes_without_the_deleted_messages(tmp_path):
-    # Regression: pages read the v2 message directory and every message write
-    # rebuilds the export document from it, so a bulk delete that only rewrote
-    # the document still showed the messages in pages and the next write
-    # brought them back. Their turn diffs go with them.
-    from flocks.session import message_pages
-
-    session = await _new_session(tmp_path)
-    old = await _turn(session.id, _days_ago_ms(5), _days_ago_ms(5), "old")
-    new = await _turn(session.id, _days_ago_ms(1), _days_ago_ms(1), "new")
-    await Storage.set(f"message_diff:{session.id}:{old[0]}", [{"file": "a"}], "session_diff")
-    await Storage.set(f"message_diff:{session.id}:{new[0]}", [{"file": "b"}], "session_diff")
-    async with Storage.transaction() as db:
-        revision = await message_pages.revision(db, session.id)
-
-    assert await Message.delete_many(session.id, old) == 2
-
-    page, *_ = await Message.list_page_with_parts(session.id, limit=50)
-    assert [item.info.id for item in page] == new
-    assert await Storage.get(f"message_diff:{session.id}:{old[0]}") is None
-    assert await Storage.get(f"message_diff:{session.id}:{new[0]}") == [{"file": "b"}]
-    async with Storage.transaction() as db:
-        # Other workers reload their caches when the revision moves.
-        assert await message_pages.revision(db, session.id) > revision
-
-    later = await _turn(session.id, NOW_MS, NOW_MS, "later")
-
-    assert await _stored_message_ids(session.id) == new + later
-    page, *_ = await Message.list_page_with_parts(session.id, limit=50)
-    assert [item.info.id for item in page] == new + later
-
-
-async def test_bulk_delete_trims_a_legacy_parts_blob(tmp_path):
-    session = await _new_session(tmp_path)
-    old = await _turn(session.id, _days_ago_ms(5), _days_ago_ms(5), "old")
-    new = await _turn(session.id, _days_ago_ms(1), _days_ago_ms(1), "new")
-    blob = {}
-    for message_id in old + new:
-        key = f"message_parts:{session.id}:{message_id}"
-        blob[message_id] = await Storage.get(key)
-        await Storage.delete(key)
-    await Storage.set(f"message_parts:{session.id}", blob, "message_parts")
-    Message.invalidate_cache(session.id)
-
-    assert await Message.delete_many(session.id, old) == 2
-
-    remaining = await Storage.get(f"message_parts:{session.id}")
-    assert sorted(remaining) == sorted(new)
-    page, *_ = await Message.list_page_with_parts(session.id, limit=50)
-    assert [item.info.id for item in page] == new
-    assert [part.text for item in page for part in item.parts] == ["q new", "a new"]
-
-
-async def test_message_cleanup_of_a_session_deleted_meanwhile_deletes_nothing(tmp_path):
-    session = await _new_session(tmp_path)
-    old = await _turn(session.id, _days_ago_ms(90), _days_ago_ms(90), "old")
-    assert await Session.delete(session.project_id, session.id)
-
-    assert await Message.delete_many(session.id, old) == 0
-    assert await Message.delete_selected(session.id, lambda stored, s: old) == 0
 
 
 async def test_delete_selected_skips_running_session(tmp_path, monkeypatch):
@@ -402,143 +337,6 @@ async def test_delete_selected_honors_revert_set_after_planning(tmp_path):
     # Only the first turn goes; the second turn is protected by the live revert.
     assert deleted == len(first) == 2
     assert await _stored_message_ids(session.id) == second
-
-
-async def test_session_running_in_another_worker_is_not_deleted(tmp_path):
-    from flocks.session.ownership import SessionExecutionLease
-
-    session = await _new_session(tmp_path)
-    await _set_session_time(session, created_ms=_days_ago_ms(60), updated_ms=_days_ago_ms(60))
-    # Another worker runs it: its loop holds the shared execution lease, while
-    # neither its SessionLoop nor its status is visible in this process.
-    lease = await SessionExecutionLease.acquire(session.id)
-    try:
-        report = await apply_policy(_policy(sessions=30), now=NOW)
-    finally:
-        await lease.release()
-
-    assert report.sessions == 0 and report.skipped_busy == 1
-    assert await Session.get_by_id_unfiltered(session.id) is not None
-
-
-async def test_messages_of_a_session_running_in_another_worker_are_kept(tmp_path):
-    from flocks.session.ownership import SessionExecutionLease
-
-    session = await _new_session(tmp_path)
-    await _turn(session.id, _days_ago_ms(90), _days_ago_ms(90), "old")
-    await _turn(session.id, _days_ago_ms(1), _days_ago_ms(1), "new")
-    await _set_session_time(session, created_ms=_days_ago_ms(90), updated_ms=_days_ago_ms(1))
-    lease = await SessionExecutionLease.acquire(session.id)
-    try:
-        report = await apply_policy(_policy(messages=30), now=NOW)
-    finally:
-        await lease.release()
-
-    assert report.messages == 0 and report.skipped_busy == 1
-    assert len(await _stored_message_ids(session.id)) == 4
-
-
-async def test_no_runner_can_take_a_session_while_retention_deletes_it(tmp_path, monkeypatch):
-    from flocks.session.ownership import SessionExecutionLease
-
-    session = await _new_session(tmp_path)
-    await _set_session_time(session, created_ms=_days_ago_ms(60), updated_ms=_days_ago_ms(60))
-    real_delete = Session.delete
-    attempts = []
-
-    async def delete_while_a_runner_tries_to_start(project_id, session_id, **kwargs):
-        attempts.append(await SessionExecutionLease.acquire(session_id))
-        return await real_delete(project_id, session_id, **kwargs)
-
-    monkeypatch.setattr(Session, "delete", delete_while_a_runner_tries_to_start)
-
-    report = await apply_policy(_policy(sessions=30), now=NOW)
-
-    assert attempts == [None]
-    assert report.sessions == 1
-
-
-async def test_a_synchronous_operation_on_a_session_keeps_retention_away(tmp_path):
-    # /shell and revert run outside a runner; they hold the same execution lease,
-    # so a cleanup in another process cannot delete the session meanwhile.
-    from flocks.session.ownership import SessionExecutionLease, current_lease
-    from flocks.session.session import SessionInactiveError
-
-    session = await _new_session(tmp_path)
-    await _set_session_time(session, created_ms=_days_ago_ms(60), updated_ms=_days_ago_ms(60))
-
-    async with Session.active_operation(session.id):
-        assert current_lease(session.id) is not None
-        report = await apply_policy(_policy(sessions=30), now=NOW)
-    assert report.sessions == 0 and report.skipped_busy == 1
-    assert await Session.get_by_id_unfiltered(session.id) is not None
-
-    runner = await SessionExecutionLease.acquire(session.id)  # running in another process
-    try:
-        with pytest.raises(SessionInactiveError, match="is running"):
-            async with Session.active_operation(session.id):
-                pass
-    finally:
-        await runner.release()
-
-
-async def test_unrevert_keeps_retention_away_while_it_restores_files(tmp_path, monkeypatch):
-    # Unrevert restores the snapshot and clears the revert state only at the end, so
-    # the session still looks 60 days old meanwhile: it holds the execution lease.
-    from flocks.session.lifecycle.revert import SessionRevert
-    from flocks.session.ownership import SessionExecutionLease, current_lease
-    from flocks.session.session import SessionInactiveError
-    from flocks.snapshot import Snapshot
-
-    session = await _new_session(tmp_path)
-    await Session.set_revert(session.project_id, session.id, "msg_reverted", snapshot="snap_before")
-    await _set_session_time(session, created_ms=_days_ago_ms(60), updated_ms=_days_ago_ms(60))
-    during = {}
-
-    async def restore(project_id, worktree, snapshot):
-        during["lease"] = current_lease(session.id) is not None
-        during["report"] = await apply_policy(_policy(sessions=30), now=NOW)
-        return True
-
-    monkeypatch.setattr(Snapshot, "restore", staticmethod(restore))
-
-    restored = await SessionRevert.unrevert(session.id)
-
-    assert during["lease"] is True
-    assert during["report"].sessions == 0 and during["report"].skipped_busy == 1
-    assert restored is not None and restored.revert is None
-
-    # Running in another process: refused, and the revert state stays.
-    await Session.set_revert(session.project_id, session.id, "msg_reverted", snapshot="snap_before")
-    runner = await SessionExecutionLease.acquire(session.id)
-    try:
-        with pytest.raises(SessionInactiveError, match="is running"):
-            await SessionRevert.unrevert(session.id)
-    finally:
-        await runner.release()
-    assert (await Session.get_by_id_unfiltered(session.id)).revert is not None
-
-
-async def test_a_policy_saved_elsewhere_stops_deletes_planned_under_the_old_one(tmp_path, monkeypatch):
-    import flocks.retention.cleanup as cleanup
-    from flocks.retention.policy import bump_policy_version, policy_version
-
-    session = await _new_session(tmp_path)
-    await _set_session_time(session, created_ms=_days_ago_ms(60), updated_ms=_days_ago_ms(60))
-    version = await policy_version()
-    real_collect = cleanup.collect_targets
-
-    async def collect_then_saved_elsewhere(policy, *, now=None):
-        targets = await real_collect(policy, now=now)
-        await bump_policy_version()
-        return targets
-
-    monkeypatch.setattr(cleanup, "collect_targets", collect_then_saved_elsewhere)
-
-    report = await apply_policy(_policy(sessions=30), now=NOW, policy_version=version)
-
-    assert report.sessions == 0
-    assert await Session.get_by_id_unfiltered(session.id) is not None
 
 
 async def test_record_delete_respects_mtime_touched_after_planning(tmp_path):
@@ -738,3 +536,35 @@ async def test_delete_selected_skips_non_idle_status_via_is_busy(tmp_path, monke
 
     assert result == -1  # busy: left alone
     assert len(await _stored_message_ids(session.id)) == 2  # nothing trimmed
+
+
+
+async def test_bulk_delete_trims_a_legacy_parts_blob(tmp_path):
+    session = await _new_session(tmp_path)
+    old = await _turn(session.id, _days_ago_ms(5), _days_ago_ms(5), "old")
+    new = await _turn(session.id, _days_ago_ms(1), _days_ago_ms(1), "new")
+    blob = {}
+    for message_id in old + new:
+        key = f"message_parts:{session.id}:{message_id}"
+        blob[message_id] = await Storage.get(key)
+        await Storage.delete(key)
+    await Storage.set(f"message_parts:{session.id}", blob, "message_parts")
+    Message.invalidate_cache(session.id)
+
+    assert await Message.delete_many(session.id, old) == 2
+
+    remaining = await Storage.get(f"message_parts:{session.id}")
+    assert sorted(remaining) == sorted(new)
+    page, *_ = await Message.list_page_with_parts(session.id, limit=50)
+    assert [item.info.id for item in page] == new
+    assert [part.text for item in page for part in item.parts] == ["q new", "a new"]
+
+
+
+async def test_message_cleanup_of_a_session_deleted_meanwhile_deletes_nothing(tmp_path):
+    session = await _new_session(tmp_path)
+    old = await _turn(session.id, _days_ago_ms(90), _days_ago_ms(90), "old")
+    assert await Session.delete(session.project_id, session.id)
+
+    assert await Message.delete_many(session.id, old) == 0
+    assert await Message.delete_selected(session.id, lambda stored, s: old) == 0

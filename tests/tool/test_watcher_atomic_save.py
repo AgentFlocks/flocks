@@ -149,7 +149,7 @@ def test_agent_watcher_ignores_md_outside_agents_dir() -> None:
     assert _agent_event_should_reload(evt) is False
 
 
-def test_agent_watcher_watches_plugin_root_to_catch_new_agent_dirs(monkeypatch, tmp_path) -> None:
+def test_agent_watcher_creates_and_watches_the_agents_dir_up_front(monkeypatch, tmp_path) -> None:
     from flocks.plugin import loader
     from flocks.agent.registry import AgentFileWatcher
 
@@ -160,7 +160,8 @@ def test_agent_watcher_watches_plugin_root_to_catch_new_agent_dirs(monkeypatch, 
     monkeypatch.setattr(loader, "DEFAULT_PLUGIN_ROOT", user_plugin_root)
     monkeypatch.chdir(project_root)
 
-    assert AgentFileWatcher()._collect_watch_dirs() == {str(user_plugin_root)}
+    # The plugin root itself is the tool watcher's (tests/agent/test_agent_watcher_dirs.py).
+    assert AgentFileWatcher()._collect_watch_dirs() == {str(user_plugin_root / "agents")}
     assert (user_plugin_root / "agents").is_dir()
 
 

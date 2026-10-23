@@ -55,7 +55,7 @@ async def isolated_task_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     TaskManager._instance = None
     TaskManager._startup_error = None
     TaskStore._initialized = False
-    TaskStore._handle = None
+    TaskStore._conn = None
 
     await Storage.init()
     await TaskStore.init()
@@ -71,7 +71,7 @@ async def isolated_task_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     TaskManager._instance = None
     TaskManager._startup_error = None
     TaskStore._initialized = False
-    TaskStore._handle = None
+    TaskStore._conn = None
 
 
 @pytest.mark.asyncio
@@ -98,7 +98,7 @@ async def test_immediate_scheduler_creates_single_queued_execution(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_list_executions_preserves_migrated_unicode_description(
+async def test_list_executions_tolerates_legacy_non_utf8_description(
     tmp_path: Path,
 ):
     legacy_description = "扫描 Windows 主机 192.168.254.1"
@@ -120,7 +120,7 @@ async def test_list_executions_preserves_migrated_unicode_description(
         SET description = CAST(? AS TEXT)
         WHERE id = ?
         """,
-        (legacy_description, execution_id),
+        (legacy_description.encode("gbk"), execution_id),
     )
     await db.commit()
 
@@ -580,10 +580,6 @@ async def test_task_stopped_from_its_session_is_cancelled_not_retried(
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=False,
     )
-    # Dispatch claims only what a dequeue already marked running.
-    execution.status = TaskStatus.RUNNING
-    execution.started_at = datetime.now(timezone.utc)
-    execution = await TaskStore.update_execution(execution)
     monkeypatch.setattr(
         TaskExecutor, "_create_task_session", AsyncMock(return_value="ses_stopped_task"),
     )
@@ -1598,12 +1594,28 @@ async def test_get_unviewed_results_includes_unread_and_notified_only(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_task_page_notice_does_not_touch_legacy_tables():
+async def test_task_page_notice_stops_after_third_display_and_keeps_legacy_tables():
     db = await TaskStore.raw_db()
     await db.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
     await db.execute("INSERT INTO tasks (id) VALUES (?)", ("legacy-retained",))
+    await db.commit()
+    TaskManager._write_migration_state({"failed": True, "notice_count": 0})
+
+    first = await TaskManager.get_task_page_notice()
+    second = await TaskManager.get_task_page_notice()
+    third = await TaskManager.get_task_page_notice()
+
+    assert first == {
+        "message": "系统更新了任务表的存储，旧表自动迁移失败，请手动重建任务 scheduler",
+        "displayCount": 1,
+    }
+    assert second is not None and second["displayCount"] == 2
+    assert third is not None and third["displayCount"] == 3
     assert await TaskManager.get_task_page_notice() is None
-    assert await db.fetch_one("SELECT id FROM tasks WHERE id = ?", ("legacy-retained",)) == ("legacy-retained",)
+    # Shown enough, nothing dropped: the old table and its rows stay.
+    assert TaskManager._legacy_tables_exist() is True
+    cursor = await db.execute("SELECT id FROM tasks")
+    assert [tuple(row) for row in await cursor.fetchall()] == [("legacy-retained",)]
 
 
 @pytest.mark.asyncio

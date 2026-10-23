@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import importlib.util
 import os
 import re
 import shutil
@@ -32,7 +31,7 @@ UNIT_TEMPLATE = INSTALLER_DIR / "flocks.service"
 MIGRATE_HELPER = INSTALLER_DIR / "migrate_data.py"
 INSTALLER_FILES = (
     "install.sh", "migrate_data.py", "flocks.service", "flocks.env.template", "flocks-cli-wrapper.sh",
-    "relocate.py", "postgres_preflight.py",
+    "relocate.py",
 )
 MANIFEST = PACKAGING_DIR / "versions.manifest.json"
 GLIBC_FLOOR = PACKAGING_DIR / "glibc_floor.py"
@@ -154,8 +153,6 @@ def _render_env(tmp_path: Path) -> dict[str, str]:
     script = (
         "set -Eeuo pipefail\n"
         f"SRC_ROOT='{src_root}'; INSTALL_ROOT=/opt/flocks; DATA_HOME=/var/lib/flocks; PORT=5273\n"
-        # The template points FLOCKS_DB_DSN_FILE next to the env file.
-        "ENV_FILE=/etc/flocks/flocks.env\n"
         f"{_bash_function_source(INSTALL_SCRIPT, 'render_env_template')}render_env_template\n"
     )
     completed = subprocess.run([BASH, "-c", script], capture_output=True, text=True)
@@ -856,11 +853,9 @@ exit 0
     assert not [line for line in logged if line.startswith(("rm", "run", "create", "start", "stop", "kill"))], logged
 
 
-@pytest.mark.parametrize("failing", ["server", "sidecar"])
-def test_smoke_cleanup_removes_what_it_created_even_when_it_never_started(tmp_path: Path, failing: str) -> None:
-    # the server container (or the postgres sidecar) is created but does not start: the run fails,
-    # and the cleanup still removes every container and the gateway this run brought up, leaving
-    # nothing behind
+def test_smoke_cleanup_removes_what_it_created_even_when_it_never_started(tmp_path: Path) -> None:
+    # the server container is created but does not start: the run fails, and the cleanup still
+    # removes that container and the gateway this run brought up, leaving nothing behind
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls, state = tmp_path / "docker-calls.log", tmp_path / "docker-state"
@@ -874,13 +869,12 @@ case "$1" in
     grep -qx "$name" {state} || exit 1
     case "$*" in *Labels*) echo 1 ;; esac
     exit 0 ;;
-  create|run)
+  create)
     shift
     while [ "$#" -gt 0 ]; do if [ "$1" = --name ]; then echo "$2" >> {state}; break; fi; shift; done
     exit 0 ;;
   start)
-    case "$2" in *-gw) exit 0 ;; *-pg) [ "$FAIL_START" = sidecar ] || exit 0 ;; *) [ "$FAIL_START" = server ] || exit 0 ;; esac
-    echo "start failed" >&2; exit 1 ;;
+    case "$2" in *-gw) exit 0 ;; *) echo "start failed" >&2; exit 1 ;; esac ;;
   rm)
     name="${{@: -1}}"
     grep -vx "$name" {state} > {state}.new || true
@@ -892,18 +886,15 @@ exit 0
     docker.chmod(0o755)
     run_file = tmp_path / "flocks-offline.run"
     run_file.write_text("not a real package\n", encoding="utf-8")
-    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER": str(docker),
-           "FAIL_START": failing}
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER": str(docker)}
     env.pop("SMOKE_KEEP", None)
     env.pop("SMOKE_NETWORK", None)
     result = subprocess.run([BASH, str(SMOKE_SCRIPT), str(run_file), "some/image"], capture_output=True, text=True,
                             env=env, timeout=60)
     assert result.returncode != 0
     logged = calls.read_text(encoding="utf-8").splitlines()
-    created = [line.split("--name ", 1)[1].split()[0] for line in logged if line.startswith(("create ", "run "))]
-    # gateway, postgres sidecar, then the server (not reached when the sidecar does not start)
-    assert len(created) == (3 if failing == "server" else 2), logged
-    assert created[0].endswith("-gw") and created[1].endswith("-pg"), logged
+    created = [line.split("--name ", 1)[1].split()[0] for line in logged if line.startswith("create ")]
+    assert len(created) == 2 and created[0].endswith("-gw"), logged  # gateway, then the server
     removed = [line.split()[-1] for line in logged if line.startswith("rm ")]
     assert set(removed) == set(created), logged
     assert state.read_text(encoding="utf-8").strip() == "", "left behind: " + state.read_text(encoding="utf-8")
@@ -931,11 +922,8 @@ def test_intranet_sim_stops_on_a_malformed_allowlist_before_touching_docker(tmp_
 def test_smoke_test_runs_behind_the_simulated_intranet_by_default() -> None:
     text = SMOKE_SCRIPT.read_text(encoding="utf-8")
     assert 'NETWORK_MODE="${SMOKE_NETWORK:-intranet}"' in text
-    # the postgres sidecar and the server share one network namespace: the gateway's, or with no
-    # network at all the sidecar's own (loopback only)
-    assert 'intranet) PG_NET_ARGS=(--network "container:$GATEWAY"); NET_ARGS=(--network "container:$GATEWAY") ;;' in text
-    assert 'none) PG_NET_ARGS=(--network none); NET_ARGS=(--network "container:$PG_NAME") ;;' in text
-    assert text.count('"${PG_NET_ARGS[@]}"') == 1
+    assert 'intranet) NET_ARGS=(--network "container:$GATEWAY") ;;' in text
+    assert 'none) NET_ARGS=(--network none) ;;' in text
     assert 'intranet-sim.sh" up --name "$GATEWAY"' in text
     assert 'intranet-sim.sh" check "$NAME"' in text
     assert 'intranet-sim.sh" down --name "$GATEWAY"' in text
@@ -950,6 +938,12 @@ def test_one_click_builder_supports_both_architectures() -> None:
     assert 'ARCHES="x86_64 aarch64"' in text  # --arch all
     assert "tonistiigi/binfmt" in text  # cross-arch hint
     assert "--repack" in text
+
+
+def _payload_source_tree(payload: Path) -> None:
+    """The package's source tree, with what the installer reads from it: the database backend rule."""
+    (payload / "flocks" / "flocks").mkdir(parents=True)
+    shutil.copy(REPO_ROOT / "flocks" / "db_backend.py", payload / "flocks" / "flocks" / "db_backend.py")
 
 
 def _fake_payload(tmp_path: Path, *, core_version: str = "v2026.9.14") -> Path:
@@ -968,7 +962,7 @@ def _fake_payload(tmp_path: Path, *, core_version: str = "v2026.9.14") -> Path:
     python_dir = payload / "tools" / "python" / "bin"
     python_dir.mkdir(parents=True)
     os.symlink(sys.executable, python_dir / "python3")
-    (payload / "flocks").mkdir()
+    _payload_source_tree(payload)
     (payload / "versions.json").write_text(
         json.dumps(
             {
@@ -1248,7 +1242,7 @@ def test_installer_dry_run_reads_payload_and_exits_cleanly(tmp_path: Path) -> No
     python_dir = payload / "tools" / "python" / "bin"
     python_dir.mkdir(parents=True)
     os.symlink(sys.executable, python_dir / "python3")
-    (payload / "flocks").mkdir()
+    _payload_source_tree(payload)
     (payload / "versions.json").write_text(
         json.dumps(
             {
@@ -1697,182 +1691,9 @@ def test_foreign_architecture_is_reported_before_the_bundled_python_is_needed(tm
     assert any(x.name.startswith("flocks-offline-failed-") for x in payload.iterdir())
 
 
-@pytest.fixture
-def pg_preflight_module():
-    if sys.platform == "win32":
-        pytest.skip("Linux installer helper requires Unix file ownership")
-    spec = importlib.util.spec_from_file_location("postgres_preflight", INSTALLER_DIR / "postgres_preflight.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_postgres_preflight_is_packaged_and_precedes_service_mutations():
-    source = INSTALL_SCRIPT.read_text()
-    call = source.index('"$SRC_ROOT/installer/postgres_preflight.py" prepare')
-    assert call < source.index('useradd --system')
-    assert call < source.index('systemctl stop flocks')
-    assert call < source.index('mv "$INSTALL_ROOT/$dir"')
-    assert '"$SCRIPT_DIR/installer/postgres_preflight.py"' in BUILD_SCRIPT.read_text()
-    assert 'FLOCKS_DB_DSN_FILE=@ENV_FILE@.postgres-dsn' in ENV_TEMPLATE.read_text()
-
-
-def _postgres_install_attempt(tmp_path, *, database_env=None, existing=""):
-    payload = _fake_payload(tmp_path)
-    import asyncpg
-    vendored = payload / "flocks" / ".venv" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
-    vendored.mkdir(parents=True)
-    (vendored / "site-packages").symlink_to(Path(asyncpg.__file__).resolve().parents[1], target_is_directory=True)
-    installed = tmp_path / "opt-flocks" / "flocks"
-    cli = installed / ".venv" / "bin" / "flocks"
-    cli.parent.mkdir(parents=True)
-    cli.write_text("#!/bin/sh\nexit 0\n")
-    cli.chmod(0o755)
-    (installed / "pyproject.toml").write_text("existing installation\n")
-    env_file = tmp_path / "flocks.env"
-    env_file.write_text("FLOCKS_PORT=5173\n" + existing)
-    original = env_file.read_bytes()
-    events = tmp_path / "events"
-    stubs = tmp_path / "stub-bin"
-    stubs.mkdir()
-    bodies = {
-        "id": "printf '0\\n'", "getent": "exit 0", "chown": "exit 0",
-        "useradd": "exit 92", "systemctl": "exit 93",
-        "runuser": "printf 'stop\\n' >> \"$INSTALLER_EVENTS\"; exit 0",
-        # Stop the successful branch immediately after its controlled stop;
-        # never mutate the old installation or run any real service command.
-        "mv": "printf 'move\\n' >> \"$INSTALLER_EVENTS\"; exit 94",
-    }
-    for name, body in bodies.items():
-        executable = stubs / name
-        executable.write_text("#!/bin/sh\n" + body + "\n")
-        executable.chmod(0o755)
-    env = {key: value for key, value in os.environ.items() if not key.startswith("FLOCKS_")}
-    # The FLOCKS_* filter above also drops FLOCKS_OFFLINE_HOME_CANDIDATES: put it back so the
-    # installer never picks up (and tries to migrate) a real ~/.flocks on this machine.
-    env.update(FLOCKS_OFFLINE_DATA_HOME=str(tmp_path / "service-home"), FLOCKS_OFFLINE_ENV_FILE=str(env_file),
-               FLOCKS_OFFLINE_HOME_CANDIDATES="",
-               FLOCKS_OFFLINE_SKIP_SYSTEMD="1", FLOCKS_OFFLINE_SKIP_FIREWALL="1",
-               HOME=str(tmp_path), USERPROFILE=str(tmp_path), PYTHON_DOTENV_DISABLED="1",
-               PATH=str(stubs) + os.pathsep + env.get("PATH", ""), INSTALLER_EVENTS=str(events))
-    env.update(database_env or {})
-    result = subprocess.run([BASH, str(payload / "installer" / "install.sh")],
-                            env=env, cwd=payload, capture_output=True, text=True, timeout=25)
-    assert env_file.read_bytes() == original
-    assert (installed / "pyproject.toml").read_text() == "existing installation\n"
-    return result, events.read_text().splitlines() if events.exists() else [], payload, env_file
-
-
-@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
-def test_postgres_missing_configuration_fails_before_stopping_old_service(tmp_path):
-    result, events, _, _ = _postgres_install_attempt(tmp_path)
-    assert result.returncode != 0
-    assert "必须配置 FLOCKS_DB_DSN" in result.stderr
-    assert "stop" not in events
-
-
-@pytest.mark.skipif(BASH is None or not os.getenv("FLOCKS_TEST_PG_DSN"), reason="requires bash and isolated PostgreSQL")
-def test_postgres_unreachable_connection_fails_before_stopping_old_service(tmp_path):
-    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-    from uuid import uuid4
-    parsed = urlsplit(os.environ["FLOCKS_TEST_PG_DSN"])
-    # A socket directory that does not exist is unreachable whether the test DSN
-    # names a TCP host and port (CI) or a local socket. Kept short: a socket path
-    # over the platform limit fails with a different error.
-    query = dict(parse_qsl(parsed.query))
-    query["host"] = f"/tmp/flocks-no-postgres-{uuid4().hex[:12]}"
-    userinfo = parsed.netloc.rpartition("@")[0]
-    netloc = userinfo + "@" if userinfo else ""
-    bad_dsn = urlunsplit(parsed._replace(netloc=netloc, query=urlencode(query)))
-    result, events, _, _ = _postgres_install_attempt(tmp_path, database_env={"FLOCKS_DB_DSN": bad_dsn})
-    assert result.returncode != 0 and "stop" not in events
-    assert "PostgreSQL" in result.stderr
-    assert "FileNotFoundError" in result.stderr
-    assert bad_dsn not in result.stdout + result.stderr
-
-
-@pytest.mark.skipif(BASH is None or not os.getenv("FLOCKS_TEST_PG_DSN"), reason="requires bash and isolated PostgreSQL")
-@pytest.mark.parametrize("source", ["environment", "existing", "file"])
-def test_postgres_valid_candidate_passes_before_controlled_stop(tmp_path, source):
-    dsn = os.environ["FLOCKS_DB_DSN"]
-    database_env = {"FLOCKS_DB_DSN": dsn} if source == "environment" else {}
-    existing = "FLOCKS_DB_DSN='" + dsn + "'\n" if source == "existing" else ""
-    if source == "file":
-        credential = tmp_path / "private dsn"
-        credential.write_text(dsn)
-        credential.chmod(0o600)
-        database_env = {"FLOCKS_DB_DSN_FILE": str(credential)}
-    result, events, payload, _ = _postgres_install_attempt(tmp_path, database_env=database_env, existing=existing)
-    assert "PostgreSQL 连接预检通过" in result.stdout, result.stdout + result.stderr
-    assert events[0] == "stop"
-    assert dsn not in result.stdout + result.stderr
-    snapshots = list((payload / "installer").glob(".postgres-preflight.*/dsn"))
-    assert len(snapshots) == 1 and snapshots[0].read_text().strip() == dsn
-    assert stat.S_IMODE(snapshots[0].stat().st_mode) == 0o600
-
-
-@pytest.mark.parametrize("case", ["both", "sqlite", "world-readable", "relative", "symlink", "empty"])
-def test_postgres_invalid_config_is_rejected_without_evaluating_it(tmp_path, monkeypatch, pg_preflight_module, case):
-    helper = pg_preflight_module
-    for key in helper.DB_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    env_file = tmp_path / "flocks.env"
-    env_file.write_text("")
-    credential = tmp_path / "dsn"
-    credential.write_text("postgresql://test@/db")
-    credential.chmod(0o600)
-    values = {
-        "both": {"FLOCKS_DB_DSN": "postgresql://test@/db", "FLOCKS_DB_DSN_FILE": str(credential)},
-        "sqlite": {"FLOCKS_DB_BACKEND": "sqlite", "FLOCKS_DB_DSN": "postgresql://test@/db"},
-        "world-readable": {"FLOCKS_DB_DSN_FILE": str(credential)},
-        "relative": {"FLOCKS_DB_DSN_FILE": "dsn"},
-        "empty": {},
-    }
-    if case == "world-readable":
-        credential.chmod(0o644)
-    if case == "symlink":
-        link = tmp_path / "link"
-        link.symlink_to(credential)
-        values[case] = {"FLOCKS_DB_DSN_FILE": str(link)}
-    for key, value in values[case].items():
-        monkeypatch.setenv(key, value)
-    with pytest.raises(helper.ConfigurationError):
-        helper.resolve(env_file)
-
-
-def test_postgres_env_values_are_data_and_credential_install_is_readable_by_service(tmp_path, monkeypatch, pg_preflight_module):
-    import pwd
-    from types import SimpleNamespace
-
-    helper = pg_preflight_module
-    for key in helper.DB_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    env_file = tmp_path / "service $literal.env"
-    sentinel = tmp_path / "command-ran"
-    dsn = f"postgresql://user:$(touch {sentinel})@localhost/db"
-    env_file.write_text("FLOCKS_DB_DSN='" + dsn + "'\nCUSTOM_VALUE=keep\n")
-    assert helper.resolve(env_file) == dsn and not sentinel.exists()
-    snapshot = tmp_path / "snapshot"
-    snapshot.mkdir()
-    (snapshot / "dsn").write_text(dsn)
-    args = SimpleNamespace(env_file=env_file, snapshot=snapshot, service_user=pwd.getpwuid(os.getuid()).pw_name)
-    helper.install(args)
-    assert dsn not in env_file.read_text()
-    assert "CUSTOM_VALUE=keep" in env_file.read_text()
-    credential = env_file.with_name(env_file.name + ".postgres-dsn")
-    assert stat.S_IMODE(credential.stat().st_mode) == 0o640
-    assert credential.read_text() == dsn
-    assert helper.resolve(env_file) == dsn  # Reinstall reads the escaped path identically.
-    assert list(tmp_path.glob("*.pg-bak-*"))  # The previous environment was preserved.
-    completed = subprocess.run([BASH, "-c", 'set -a; . "$1"; printf "%s" "$FLOCKS_DB_DSN_FILE"', "test", str(env_file)],
-                               capture_output=True, text=True, timeout=5)
-    assert completed.returncode == 0 and completed.stdout == str(credential)
-    assert not sentinel.exists()
-
-
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
 @pytest.mark.parametrize("selected", ["FLOCKS_DB_DSN", "FLOCKS_DB_DSN_FILE"])
-def test_postgres_service_command_uses_only_installed_settings(tmp_path, selected):
+def test_service_commands_use_only_the_installed_database_settings(tmp_path, selected):
     env_file = tmp_path / "installed.env"
     env_file.write_text("FLOCKS_DB_BACKEND=postgres\n" + selected + "='installed-value'\n")
     runuser = tmp_path / "runuser"
@@ -1889,61 +1710,8 @@ def test_postgres_service_command_uses_only_installed_settings(tmp_path, selecte
 
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
-def test_migration_report_gives_a_working_import_command_for_copied_sqlite_data(tmp_path):
-    # Spaces in every path: the printed command must still pass each one as a single argument.
-    data_root = tmp_path / "data home" / ".flocks"
-    (data_root / "data").mkdir(parents=True)
-    (data_root / "data" / "flocks.db").write_bytes(b"SQLite format 3\x00")
-    repo_root = tmp_path / "app root"
-    repo_root.mkdir()
-    env_file = tmp_path / "etc flocks" / "flocks.env"
-    env_file.parent.mkdir()
-    env_file.write_text(
-        f"FLOCKS_DB_BACKEND=postgres\nFLOCKS_DB_DSN='postgresql://installed'\nFLOCKS_REPO_ROOT='{repo_root}'\n"
-    )
-    venv_bin = tmp_path / "venv bin"
-    venv_bin.mkdir()
-    python = venv_bin / "python"
-    python.write_text(
-        "#!/bin/sh\n"
-        'echo "DSN=${FLOCKS_DB_DSN-unset} FILE=${FLOCKS_DB_DSN_FILE-unset} BACKEND=${FLOCKS_DB_BACKEND-unset}"\n'
-        'echo "CWD=$(pwd)"\n'
-        'printf "%s\\n" "$@"\n'
-    )
-    python.chmod(0o755)
-    script = (
-        'set -euo pipefail\nlog() { printf "%s\\n" "$*"; }\n'
-        f"MIGRATE_FROM=/home/old/.flocks\nDATA_ROOT='{data_root}'\nSERVICE_USER=flocks\n"
-        f"ENV_FILE='{env_file}'\nVENV_BIN='{venv_bin}'\n"
-        + _bash_function_source(INSTALL_SCRIPT, "report_migration") + "report_migration\n"
-    )
-    report = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=5)
-    assert report.returncode == 0, report.stderr
-    lines = report.stdout.splitlines()
-    assert "没有导入 PostgreSQL" in lines[0]
-    command = lines[1].split("：", 1)[1]
-    assert command.startswith("runuser -u flocks -- ")
-    # Pasted as printed (runuser has switched users by then), from an operator shell that carries
-    # other database settings: only the installed ones reach the explicit migration.
-    ambient = {**os.environ, "FLOCKS_DB_DSN_FILE": "/root/other.dsn", "FLOCKS_DB_DSN": "postgresql://ambient",
-               "FLOCKS_DB_BACKEND": "sqlite"}
-    inventory = subprocess.run([BASH, "-c", command.removeprefix("runuser -u flocks -- ")],
-                               capture_output=True, text=True, timeout=5, env=ambient, cwd=tmp_path)
-    assert inventory.returncode == 0, inventory.stderr
-    assert inventory.stdout.splitlines() == [
-        "DSN=postgresql://installed FILE=unset BACKEND=postgres", f"CWD={repo_root}", "-m", "flocks.db.migrate",
-        "--source", str(data_root / "data" / "flocks.db"), "--report-dir", str(data_root / "db-migration"),
-    ]
-    assert "--apply" in lines[2] and "原样保留" in lines[3]
-    # Without a SQLite database only the note about the old directory remains.
-    (data_root / "data" / "flocks.db").unlink()
-    plain = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=5)
-    assert plain.stdout.splitlines() == [lines[3]]
-
-
-@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
 @pytest.mark.parametrize("selected", ["FLOCKS_DB_DSN", "FLOCKS_DB_DSN_FILE"])
-def test_postgres_cli_wrapper_uses_only_installed_settings(tmp_path, selected):
+def test_cli_wrapper_uses_only_the_installed_database_settings(tmp_path, selected):
     env_file = tmp_path / "installed.env"
     env_file.write_text("FLOCKS_DB_BACKEND=postgres\n" + selected + "='installed-value'\n")
     wrapper = tmp_path / "flocks-wrapper"
@@ -1957,37 +1725,115 @@ def test_postgres_cli_wrapper_uses_only_installed_settings(tmp_path, selected):
     assert json.loads(result.stdout) == {"FLOCKS_DB_BACKEND": "postgres", selected: "installed-value"}
 
 
-@pytest.mark.asyncio
-@pytest.mark.skipif(not os.getenv("FLOCKS_TEST_PG_DSN") or sys.platform == "win32", reason="requires isolated PostgreSQL and Unix")
-async def test_postgres_installed_credential_initializes_application_storage(tmp_path, monkeypatch, pg_preflight_module):
-    import asyncio
-    import pwd
-    from types import SimpleNamespace
-    from urllib.parse import parse_qsl, urlsplit
-    from flocks.db import registry
-    from flocks.storage import Storage
-
-    dsn = os.environ["FLOCKS_DB_DSN"]
-    schema = dict(parse_qsl(urlsplit(dsn).query))["search_path"].split(",")[0]
+def _install_over_existing(tmp_path, *, existing_env="", database_json=None, config_dir=None, dotenv=None):
+    """Run the installer over an existing install; stubs stop it right after the controlled stop."""
+    payload = _fake_payload(tmp_path)
+    installed = tmp_path / "opt-flocks" / "flocks"
+    cli = installed / ".venv" / "bin" / "flocks"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("#!/bin/sh\nexit 0\n")
+    cli.chmod(0o755)
+    (installed / "pyproject.toml").write_text("existing installation\n")
     env_file = tmp_path / "flocks.env"
-    env_file.write_text("CUSTOM_VALUE=preserved\n")
-    snapshot = tmp_path / "snapshot"
-    snapshot.mkdir()
-    args = SimpleNamespace(env_file=env_file, snapshot=snapshot, payload_root=tmp_path,
-                           service_user=pwd.getpwuid(os.getuid()).pw_name)
-    await asyncio.to_thread(pg_preflight_module.prepare, args)
-    pg_preflight_module.install(args)
-    for key in pg_preflight_module.DB_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    for key, value in pg_preflight_module._environment(env_file).items():
-        monkeypatch.setenv(key, value)
-    registry.reset()
-    assert registry.load_settings().dsn == dsn
-    await Storage.init()
-    async with Storage.transaction() as db:
-        assert await db.fetch_one("SELECT current_schema()") == (schema,)
-    await Storage.set("installer/credential-probe", {"ok": True})
-    assert await Storage.read("installer/credential-probe") == {"ok": True}
+    env_file.write_text("FLOCKS_PORT=5173\n" + existing_env)
+    original = env_file.read_bytes()
+    if database_json is not None:
+        config = config_dir or tmp_path / "service-home" / ".flocks" / "config"
+        config.mkdir(parents=True)
+        (config / "database.json").write_text(
+            database_json if isinstance(database_json, str) else json.dumps(database_json)
+        )
+    if dotenv is not None:  # beside the install root: the nearest .env above the program
+        (tmp_path / "opt-flocks" / ".env").write_text(dotenv)
+        # the package's venv, where the installer finds python-dotenv to read it with
+        import dotenv as python_dotenv
+
+        vendored = payload / "flocks" / ".venv" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        vendored.mkdir(parents=True)
+        (vendored / "site-packages").symlink_to(Path(python_dotenv.__file__).resolve().parents[1], target_is_directory=True)
+    events = tmp_path / "events"
+    stubs = tmp_path / "stub-bin"
+    stubs.mkdir()
+    bodies = {
+        "id": "printf '0\\n'", "getent": "exit 0", "chown": "exit 0",
+        "useradd": "exit 92", "systemctl": "exit 93",
+        "runuser": "printf 'stop\\n' >> \"$INSTALLER_EVENTS\"; exit 0",
+        # Stop right after the controlled stop: never touch the old install or run a real service command.
+        "mv": "printf 'move\\n' >> \"$INSTALLER_EVENTS\"; exit 94",
+    }
+    for name, body in bodies.items():
+        executable = stubs / name
+        executable.write_text("#!/bin/sh\n" + body + "\n")
+        executable.chmod(0o755)
+    env = {key: value for key, value in os.environ.items() if not key.startswith("FLOCKS_")}
+    env.update(FLOCKS_OFFLINE_DATA_HOME=str(tmp_path / "service-home"), FLOCKS_OFFLINE_ENV_FILE=str(env_file),
+               FLOCKS_OFFLINE_HOME_CANDIDATES="",
+               FLOCKS_OFFLINE_SKIP_SYSTEMD="1", FLOCKS_OFFLINE_SKIP_FIREWALL="1",
+               HOME=str(tmp_path), USERPROFILE=str(tmp_path), PYTHON_DOTENV_DISABLED="1",
+               PATH=str(stubs) + os.pathsep + env.get("PATH", ""), INSTALLER_EVENTS=str(events))
+    result = subprocess.run([BASH, str(payload / "installer" / "install.sh")],
+                            env=env, cwd=payload, capture_output=True, text=True, timeout=25)
+    assert env_file.read_bytes() == original
+    assert (installed / "pyproject.toml").read_text() == "existing installation\n"
+    return result, events.read_text().splitlines() if events.exists() else []
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+@pytest.mark.parametrize("existing_env,database_json", [
+    ("FLOCKS_DB_BACKEND=postgres\n", None),
+    ("FLOCKS_DB_BACKEND=sqlite3\n", None),  # no backend of that name: the program would not start either
+    ("FLOCKS_DB_DSN_FILE=/etc/flocks/flocks.env.postgres-dsn\n", None),
+    ("", {"backend": "postgres", "dsn_file": "/etc/flocks/dsn"}),
+    ("FLOCKS_CONFIG_DIR={tmp}/srv-config\n", {"backend": "postgresql"}),
+    ("", "not json"),
+], ids=["backend", "unknown-name", "dsn-file", "database-json", "custom-config-dir", "unreadable-choice"])
+def test_an_install_on_postgresql_is_refused_before_the_service_stops(tmp_path, existing_env, database_json):
+    """The SQLite-only package kept its PostgreSQL settings and the new program refused to start."""
+    existing_env = existing_env.replace("{tmp}", str(tmp_path))
+    config_dir = (tmp_path / "srv-config") if "FLOCKS_CONFIG_DIR" in existing_env else None
+    result, events = _install_over_existing(
+        tmp_path, existing_env=existing_env, database_json=database_json, config_dir=config_dir,
+    )
+    assert result.returncode != 0
+    assert "只支持 SQLite" in result.stderr and "本次未做任何改动" in result.stderr
+    assert "stop" not in events, "the old service was never stopped (the moves park the payload)"
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_an_install_whose_dotenv_picks_postgresql_is_refused(tmp_path):
+    """The program also loads the nearest .env above it; the service env file wins over it."""
+    result, events = _install_over_existing(tmp_path, dotenv="FLOCKS_DB_BACKEND=postgres\n")
+    assert "只支持 SQLite" in result.stderr and "stop" not in events
+    overridden = tmp_path / "overridden"
+    overridden.mkdir()
+    result, events = _install_over_existing(
+        overridden, existing_env="FLOCKS_DB_BACKEND=sqlite\n", dotenv="FLOCKS_DB_BACKEND=postgres\n",
+    )
+    assert "只支持 SQLite" not in result.stderr and events[:1] == ["stop"], result.stderr
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_the_dotenv_is_read_the_way_python_dotenv_reads_it(tmp_path):
+    """${VAR} from the service environment and trailing comments, as load_dotenv sees them."""
+    home = tmp_path / "service-home"
+    config = home / "pgconfig"
+    config.mkdir(parents=True)
+    (config / "database.json").write_text(json.dumps({"backend": "postgres"}))
+    result, events = _install_over_existing(
+        tmp_path, existing_env=f"HOME={home}\n", dotenv="FLOCKS_CONFIG_DIR=${HOME}/pgconfig\n",
+    )
+    assert "只支持 SQLite" in result.stderr and "stop" not in events
+    commented = tmp_path / "commented"
+    commented.mkdir()
+    result, events = _install_over_existing(commented, dotenv="FLOCKS_DB_BACKEND=sqlite # local storage\n")
+    assert "只支持 SQLite" not in result.stderr and events[:1] == ["stop"], result.stderr
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_an_install_on_sqlite_goes_on_to_the_controlled_stop(tmp_path):
+    result, events = _install_over_existing(tmp_path, existing_env="FLOCKS_DB_BACKEND=sqlite\n")
+    assert "只支持 SQLite" not in result.stderr
+    assert events[:1] == ["stop"], result.stderr
 
 
 # ---------------------------------------------------------------------------

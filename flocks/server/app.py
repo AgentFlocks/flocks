@@ -201,16 +201,6 @@ async def lifespan(app: FastAPI):
 
     install_remote_abort_handler()
 
-    # A node whose database is gone or has turned into a standby keeps running
-    # but cannot save anything; one that just came back is let in once it
-    # stayed writable for a while. The monitor keeps that answer -- which the
-    # gate background work checks -- current.
-    from flocks.db.health import run_database_monitor
-
-    app.state.startup_background_tasks.append(
-        asyncio.create_task(run_database_monitor(), name="db.health.monitor")
-    )
-
     # Content the deployment manages (flocks.content.managed): loaded before
     # anything reads agents, skills or workflows -- a start that cannot list
     # it fails rather than serve local copies in its place -- then kept current.

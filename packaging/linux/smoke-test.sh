@@ -14,9 +14,6 @@
 #   server reaches only what the offline install manual opens for it (intranet-allowlist.txt) and
 #   nothing else resolves or connects; the test host needs internet for that. `none` = no network.
 #   Set SMOKE_KEEP=1 to keep the container (and its gateway) for inspection.
-#   PostgreSQL (required by the installer) runs in a throw-away sidecar (SMOKE_PG_IMAGE, default
-#   postgres:16) that shares the test container's network namespace: the installer reaches it on
-#   127.0.0.1 and the network rules above stay what they are.
 #   Set SMOKE_INIT=systemd to boot the image with systemd as PID 1 (the image must contain
 #   systemd, firewalld and chrony, e.g. one committed after `dnf install systemd firewalld chrony`):
 #   the installer then registers the real unit, opens firewalld and the test also simulates a
@@ -75,28 +72,21 @@ in_ctr() { docker exec "$NAME" bash -c "$*"; }
 in_ctr_q() { docker exec "$NAME" bash -c "$*" >/dev/null 2>&1; }
 NETWORK_MODE="${SMOKE_NETWORK:-intranet}"
 GATEWAY="$NAME-gw"
-PG_NAME="$NAME-pg"
-PG_IMAGE="${SMOKE_PG_IMAGE:-postgres:16}"
 case "$NETWORK_MODE" in
-  # the sidecar joins the gateway's namespace like the server; with no network the server joins the
-  # sidecar's, which has nothing but its loopback
-  intranet) PG_NET_ARGS=(--network "container:$GATEWAY"); NET_ARGS=(--network "container:$GATEWAY") ;;
-  none) PG_NET_ARGS=(--network none); NET_ARGS=(--network "container:$PG_NAME") ;;
+  intranet) NET_ARGS=(--network "container:$GATEWAY") ;;
+  none) NET_ARGS=(--network none) ;;
   *) echo "SMOKE_NETWORK must be intranet or none, not $NETWORK_MODE" >&2; exit 2 ;;
 esac
 # cleanup removes only what this run created: a container or gateway that already had the name
 # (say, kept by an earlier SMOKE_KEEP=1 run with the same PID) makes the start fail, not disappear
 CONTAINER_CREATED=0
 GATEWAY_CREATED=0
-PG_CREATED=0
 cleanup() {
   if [[ "${SMOKE_KEEP:-0}" == "1" ]]; then
     if [[ "$CONTAINER_CREATED" -eq 1 ]]; then say "container kept: $NAME"; fi
-    if [[ "$PG_CREATED" -eq 1 ]]; then say "postgres sidecar kept: $PG_NAME"; fi
     if [[ "$GATEWAY_CREATED" -eq 1 ]]; then say "gateway kept: $GATEWAY (intranet-sim.sh down --name $GATEWAY)"; fi
   else
     if [[ "$CONTAINER_CREATED" -eq 1 ]]; then docker rm -f -v "$NAME" >/dev/null 2>&1 || true; fi
-    if [[ "$PG_CREATED" -eq 1 ]]; then docker rm -f -v "$PG_NAME" >/dev/null 2>&1 || true; fi
     if [[ "$GATEWAY_CREATED" -eq 1 ]]; then bash "$SCRIPT_DIR/intranet-sim.sh" down --name "$GATEWAY" >/dev/null 2>&1 || true; fi
   fi
 }
@@ -110,27 +100,13 @@ if [[ "$NETWORK_MODE" == "intranet" ]]; then
   bash "$SCRIPT_DIR/intranet-sim.sh" up --name "$GATEWAY"
   GATEWAY_CREATED=1
 fi
-# a test-only password, generated for this run
-PG_PASSWORD="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
-# created, marked as this run's, then started: a sidecar that fails to start is still cleaned up
-docker create --name "$PG_NAME" "${PG_NET_ARGS[@]}" -e POSTGRES_USER=flocks -e POSTGRES_DB=flocks \
-  -e POSTGRES_PASSWORD="$PG_PASSWORD" "$PG_IMAGE" >/dev/null
-PG_CREATED=1
-docker start "$PG_NAME" >/dev/null
-pg_up=0
-for _ in $(seq 1 60); do
-  if docker exec "$PG_NAME" pg_isready -h 127.0.0.1 -U flocks -d flocks >/dev/null 2>&1; then pg_up=1; break; fi
-  sleep 1
-done
-[[ "$pg_up" -eq 1 ]] || { say "postgres sidecar did not come up"; exit 1; }
-INSTALL_ENV="$INSTALL_ENV FLOCKS_DB_DSN=postgresql://flocks:$PG_PASSWORD@127.0.0.1:5432/flocks"
 if [[ "$INIT_MODE" == "systemd" ]]; then
   docker create --name "$NAME" "${NET_ARGS[@]}" --privileged --cgroupns=host \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock ${BASE_VOLUME[@]+"${BASE_VOLUME[@]}"} \
     "$IMAGE" /usr/lib/systemd/systemd >/dev/null
   CONTAINER_CREATED=1
   docker start "$NAME" >/dev/null
-  INSTALL_ENV="${INSTALL_ENV#FLOCKS_OFFLINE_SKIP_SYSTEMD=1 }"
+  INSTALL_ENV=""
   for _ in $(seq 1 30); do
     if in_ctr_q "systemctl is-system-running --wait >/dev/null 2>&1 || systemctl list-units >/dev/null 2>&1"; then break; fi
     sleep 1

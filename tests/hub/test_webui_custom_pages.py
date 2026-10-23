@@ -56,7 +56,6 @@ def section(data: dict, section_id: str) -> dict:
     return next(item for item in data["sections"] if item["id"] == section_id)
 
 
-# The bundled soc_ui ships three official operations pages: overview, alerts, cases.
 async def installed_soc_ui() -> Path:
     record = await installer.install_plugin("webui", "soc_ui")
     return Path(record.installPath)
@@ -87,7 +86,7 @@ async def test_update_keeps_custom_page_and_its_section_entry(client):
     assert (page / "src/index.tsx").read_text().startswith("export default")
     assert (page / "api/routes.yaml").is_file()
     assert (page / "dist/page.js").read_text() == "built"
-    assert section(workspace(root), "operations")["pageIds"] == ["soc-overview", "soc-alerts", "soc-cases", "my-threats"]
+    assert section(workspace(root), "operations")["pageIds"] == ["soc-overview", "soc-alerts", "my-threats"]
 
 
 async def test_preview_lists_kept_pages_and_backup_still_has_them(client):
@@ -140,7 +139,7 @@ async def test_custom_section_keeps_its_place_and_official_layout_is_restored(cl
     assert section(merged, "hunting") == {
         "id": "hunting", "label": "狩猎", "pageIds": ["my-threats"], "defaultPageId": None,
     }
-    assert section(merged, "operations")["pageIds"] == ["soc-overview", "my-assets", "soc-alerts", "soc-cases"]
+    assert section(merged, "operations")["pageIds"] == ["soc-overview", "my-assets", "soc-alerts"]
     assert section(merged, "operations")["defaultPageId"] == "my-assets"
     assert merged["defaultPageId"] == "my-threats"
 
@@ -406,7 +405,7 @@ async def test_nested_pages_keep_their_entries_and_clashing_ones_stay_out(client
     assert (root / "custom_area/sub/src/index.tsx").is_file()
     assert not (root / "custom_area/dash").exists()
     assert not (root / "soc_dashboard/extra").exists()
-    assert section(workspace(root), "operations")["pageIds"] == ["soc-overview", "soc-alerts", "soc-cases", "area", "sub"]
+    assert section(workspace(root), "operations")["pageIds"] == ["soc-overview", "soc-alerts", "area", "sub"]
 
 
 async def test_bundle_copied_mid_build_is_rebuilt_and_a_finished_one_is_kept(client):
@@ -446,7 +445,7 @@ async def test_kept_page_below_a_replaced_one_is_copied_on_its_own(client):
     assert not (root / "area/clash/src").exists()
     assert (root / "area/clash/leaf/src/index.tsx").is_file()
     assert (root / "area/clash/leaf/deeper/src/index.tsx").is_file()
-    assert section(workspace(root), "operations")["pageIds"] == ["soc-overview", "soc-alerts", "soc-cases", "area", "leaf", "deeper"]
+    assert section(workspace(root), "operations")["pageIds"] == ["soc-overview", "soc-alerts", "area", "leaf", "deeper"]
 
 
 @pytest.mark.parametrize("linked", ["dist", "meta"])

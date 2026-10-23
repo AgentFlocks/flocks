@@ -411,9 +411,13 @@ async def test_run_records_typed_error_message_for_invalid_definition(client: As
 
 @pytest.mark.asyncio
 async def test_startup_marks_orphaned_running_executions_as_interrupted() -> None:
+    from flocks.workflow import ownership
+
     await WorkflowStore.init()
-    orphan_record = await WorkflowStore.start_execution({"id": "orphan-1", "workflowId": "w", "status": "running", "startedAt": 1_000, "inputParams": {}, "executionLog": []}, owner_node_id="stopped-node", lease_seconds=60)
-    await WorkflowStore.release_execution_lease("orphan-1", orphan_record)
+    # Written by a process that is gone.
+    await WorkflowStore.upsert_execution({"id": "orphan-1", "workflowId": "w", "status": "running", "startedAt": 1_000, "inputParams": {}, "executionLog": []})
+    await WorkflowStore.upsert_execution({"id": "live-1", "workflowId": "w", "status": "running", "startedAt": 1_500, "inputParams": {}, "executionLog": []})
+    ownership.start_renewal({"id": "live-1"})
     await WorkflowStore.upsert_execution({"id": "done-1", "workflowId": "w", "status": "success", "startedAt": 2_000, "inputParams": {}, "executionLog": []})
 
     marked = await workflow_module.mark_interrupted_executions()
@@ -422,8 +426,11 @@ async def test_startup_marks_orphaned_running_executions_as_interrupted() -> Non
     orphan = await WorkflowStore.get_execution("orphan-1")
     assert orphan["status"] == "error" and orphan["currentPhase"] == "error"
     assert "interrupted" in orphan["errorMessage"].lower() and orphan["finishedAt"]
+    # A run this process started is still going: recovery leaves it alone.
+    assert (await WorkflowStore.get_execution("live-1"))["status"] == "running"
     assert (await WorkflowStore.get_execution("done-1"))["status"] == "success"
     assert await workflow_module.mark_interrupted_executions() == 0
+    await ownership.stop_renewal("live-1")
 
 
 @pytest.mark.asyncio

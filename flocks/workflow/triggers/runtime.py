@@ -461,85 +461,90 @@ class TriggerRuntime:
             input_params=mapped_inputs,
         )
         exec_id = exec_data["id"]
-        step_recorder = ExecutionStepRecorder()
-        started_at = time.time()
-        tool_context = None
+        # Every way out of here ends the run: one whose end was not recorded (a
+        # cancel while its context is cleaned up, say) is let go, not left live.
         try:
-            context_kwargs: dict[str, Any] = {}
-            execution_context = current_execution_context()
-            if execution_context:
-                context_kwargs["execution_context"] = execution_context
-            tool_context = await build_workflow_tool_context(
-                workflow_id=workflow_id,
-                action_name=f"trigger:{trigger.type}",
-                **context_kwargs,
+            step_recorder = ExecutionStepRecorder()
+            started_at = time.time()
+            tool_context = None
+            try:
+                context_kwargs: dict[str, Any] = {}
+                execution_context = current_execution_context()
+                if execution_context:
+                    context_kwargs["execution_context"] = execution_context
+                tool_context = await build_workflow_tool_context(
+                    workflow_id=workflow_id,
+                    action_name=f"trigger:{trigger.type}",
+                    **context_kwargs,
+                )
+                register_primary_loop()
+                result = await asyncio.to_thread(
+                    run_workflow,
+                    workflow=workflow_json,
+                    inputs=mapped_inputs,
+                    run_id=exec_id,
+                    trace=False,
+                    execution_profile="high_frequency",
+                    cancel=lambda: execution_cancelled(exec_id),
+                    on_step_complete=step_recorder.on_step_complete,
+                    tool_context=tool_context,
+                )
+                status_value, error_message = resolve_execution_outcome(result)
+                step_count = step_recorder.step_count or result.steps
+                exec_data.update(step_recorder.summary)
+                exec_data.update(
+                    {
+                        "status": status_value,
+                        "outputResults": compact_outputs_for_storage(result.outputs),
+                        "finishedAt": _now_ms(),
+                        "duration": time.time() - started_at,
+                        "errorMessage": error_message,
+                        "executionLog": [],
+                        "stepCount": step_count,
+                        "currentNodeId": result.last_node_id,
+                        "currentPhase": status_value,
+                        "currentStepIndex": step_count,
+                        "triggerId": trigger.id,
+                        "triggerType": trigger.type,
+                        "deliveryId": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
+                        "attempt": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("attempt"),
+                        "triggerSource": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("source"),
+                    }
+                )
+            except asyncio.CancelledError:
+                await abandon_execution(exec_id)
+                raise
+            except Exception as exc:
+                step_count = step_recorder.step_count
+                exec_data.update(step_recorder.summary)
+                exec_data.update(
+                    {
+                        "status": "error",
+                        "finishedAt": _now_ms(),
+                        "duration": time.time() - started_at,
+                        "errorMessage": str(exc),
+                        "executionLog": [],
+                        "stepCount": step_count,
+                        "currentPhase": "error",
+                        "currentStepIndex": step_count,
+                        "triggerId": trigger.id,
+                        "triggerType": trigger.type,
+                        "deliveryId": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
+                        "attempt": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("attempt"),
+                        "triggerSource": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("source"),
+                    }
+                )
+            finally:
+                await cleanup_workflow_tool_context(tool_context)
+            await record_execution_result(
+                workflow_id,
+                exec_id,
+                exec_data,
+                steps=step_recorder.take_steps(),
             )
-            register_primary_loop()
-            result = await asyncio.to_thread(
-                run_workflow,
-                workflow=workflow_json,
-                inputs=mapped_inputs,
-                run_id=exec_id,
-                trace=False,
-                execution_profile="high_frequency",
-                cancel=lambda: execution_cancelled(exec_id),
-                on_step_complete=step_recorder.on_step_complete,
-                tool_context=tool_context,
-            )
-            status_value, error_message = resolve_execution_outcome(result)
-            step_count = step_recorder.step_count or result.steps
-            exec_data.update(step_recorder.summary)
-            exec_data.update(
-                {
-                    "status": status_value,
-                    "outputResults": compact_outputs_for_storage(result.outputs),
-                    "finishedAt": _now_ms(),
-                    "duration": time.time() - started_at,
-                    "errorMessage": error_message,
-                    "executionLog": [],
-                    "stepCount": step_count,
-                    "currentNodeId": result.last_node_id,
-                    "currentPhase": status_value,
-                    "currentStepIndex": step_count,
-                    "triggerId": trigger.id,
-                    "triggerType": trigger.type,
-                    "deliveryId": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
-                    "attempt": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("attempt"),
-                    "triggerSource": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("source"),
-                }
-            )
-        except asyncio.CancelledError:
-            await abandon_execution(exec_id)
-            raise
-        except Exception as exc:
-            step_count = step_recorder.step_count
-            exec_data.update(step_recorder.summary)
-            exec_data.update(
-                {
-                    "status": "error",
-                    "finishedAt": _now_ms(),
-                    "duration": time.time() - started_at,
-                    "errorMessage": str(exc),
-                    "executionLog": [],
-                    "stepCount": step_count,
-                    "currentPhase": "error",
-                    "currentStepIndex": step_count,
-                    "triggerId": trigger.id,
-                    "triggerType": trigger.type,
-                    "deliveryId": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
-                    "attempt": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("attempt"),
-                    "triggerSource": mapped_inputs.get("_flocks", {}).get("trigger", {}).get("source"),
-                }
-            )
+            return exec_data
         finally:
-            await cleanup_workflow_tool_context(tool_context)
-        await record_execution_result(
-            workflow_id,
-            exec_id,
-            exec_data,
-            steps=step_recorder.take_steps(),
-        )
-        return exec_data
+            await abandon_execution(exec_id)
 
     async def dispatch_event(
         self,

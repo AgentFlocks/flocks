@@ -9,11 +9,11 @@ import asyncio
 import json
 from typing import Any, List, Optional
 
-import asyncpg
 from fastapi import APIRouter, HTTPException, Request, status as http_status
 from pydantic import BaseModel, Field
 
 from flocks.audit import emit_audit_event
+from flocks.coordination import is_unique_violation
 from flocks.server.auth import get_request_ip, get_request_user_agent, require_admin, require_user
 from flocks.tool.device import (
     DEFAULT_GROUP_ID,
@@ -87,7 +87,9 @@ async def route_create_group(body: DeviceGroupCreate):
         raise HTTPException(status_code=400, detail="name is required")
     try:
         return await create_group(name, body.description, body.sort_order)
-    except asyncpg.UniqueViolationError:
+    except Exception as exc:
+        if not is_unique_violation(exc):
+            raise
         raise HTTPException(status_code=409, detail=f"机房名称 '{name}' 已存在")
 
 
@@ -104,7 +106,9 @@ async def route_update_group(group_id: str, body: DeviceGroupUpdate):
     """Rename the default room (or any room when multi-group is enabled)."""
     try:
         result = await update_group(group_id, body.name, body.description, body.sort_order)
-    except asyncpg.UniqueViolationError:
+    except Exception as exc:
+        if not is_unique_violation(exc):
+            raise
         attempted = (body.name or "").strip() or "(unchanged)"
         raise HTTPException(status_code=409, detail=f"机房名称 '{attempted}' 已存在")
     if result is None:

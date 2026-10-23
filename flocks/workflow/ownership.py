@@ -1,19 +1,40 @@
-"""Process ownership of workflow runs, backed by PostgreSQL leases."""
+"""Which process owns a workflow run.
+
+One process runs an installation's workflows, so a run is never taken over
+by another one.  This module keeps that process's own book of the runs it
+started (``create_execution_record``) and has not yet recorded as ended
+(``record_execution_result``), each with a cancel event that the code running
+it checks between nodes through ``execution_cancelled``.  A cancel request
+(``request_cancel``), an owner that stops waiting (``abandon_execution``) and
+shutdown set that event.
+
+A database backend whose processes share the workflow store replaces this
+module (``flocks.db_backend``) with leases that the owner renews while the run
+goes on.  Note the difference in ``execution_cancelled``: there, a run this
+process holds no lease for counts as cancelled; here a run this process never
+started is not cancelled by it.
+"""
 
 from __future__ import annotations
 
-import asyncio
-import os
 import threading
 import time
-import uuid
-from dataclasses import dataclass, field
+from collections import OrderedDict
 from typing import Any
 
-from flocks.task.node import current_node_id, heartbeat_seconds, lease_seconds
 from flocks.utils.log import Log
 
 log = Log.create(service="workflow.ownership")
+
+#: Abandoned runs whose worker thread may still be going are kept so the
+#: thread keeps seeing the cancellation at its next node: for a day (a node
+#: runs far shorter), and at most this many, the oldest going first.
+_ABANDONED_KEEP_SECONDS = 24 * 3600
+_ABANDONED_KEPT = 65536
+
+_lock = threading.Lock()
+_live: dict[str, threading.Event] = {}
+_abandoned: OrderedDict[str, float] = OrderedDict()  # id -> when it was let go (monotonic)
 
 
 class WorkflowOwnershipError(RuntimeError):
@@ -24,116 +45,85 @@ class WorkflowAlreadyRunning(WorkflowOwnershipError):
     """Another process owns the requested no-overlap scope."""
 
 
-_process_identity: tuple[int, str] | None = None
-
-
-def process_owner_id() -> str:
-    global _process_identity
-    pid = os.getpid()
-    if _process_identity is None or _process_identity[0] != pid:
-        _process_identity = (pid, f"{current_node_id()}:{pid}:{uuid.uuid4().hex}")
-    return _process_identity[1]
-
-
-@dataclass
-class WorkflowLease:
-    execution_id: str
-    token: dict[str, Any]
-    duration: int
-    lost: threading.Event = field(default_factory=threading.Event)
-    cancelled: threading.Event = field(default_factory=threading.Event)
-    task: asyncio.Task | None = None
-    deadline: float = 0.0
-
-    async def renew(self) -> None:
-        from flocks.workflow.store import WorkflowStore
-
-        interval = min(heartbeat_seconds(), max(0.1, self.duration / 3))
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                remaining = self.deadline - time.monotonic()
-                if remaining <= 0:
-                    self.lost.set()
-                    return
-                renewal_started = time.monotonic()
-                renewed = await asyncio.wait_for(
-                    WorkflowStore.renew_execution_lease(self.execution_id, self.token, self.duration),
-                    timeout=remaining,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning("workflow.lease.renew_failed", {"exec_id": self.execution_id, "error": str(exc)})
-                if time.monotonic() >= self.deadline:
-                    self.lost.set()
-                    return
-                continue
-            if not renewed:
-                self.lost.set()
-                return
-            if renewed.get("cancel_requested"):
-                self.cancelled.set()
-            # Start the local deadline before the request. Network/commit time
-            # must never let this process run beyond the database lease.
-            self.deadline = renewal_started + self.duration
-
-
-_leases: dict[str, WorkflowLease] = {}
-
-
 def start_renewal(exec_data: dict[str, Any], *, duration: int | None = None, claimed_at: float | None = None) -> None:
+    """Note a run this process started: it is live here until it is recorded as ended."""
     execution_id = str(exec_data["id"])
-    token = {key: exec_data[key] for key in ("leaseKey", "ownerNodeId", "ownerGeneration")}
-    lease = WorkflowLease(execution_id, token, duration or lease_seconds())
-    lease.deadline = (claimed_at if claimed_at is not None else time.monotonic()) + lease.duration
-    lease.task = asyncio.create_task(lease.renew(), name=f"workflow-lease-{execution_id}")
-    _leases[execution_id] = lease
+    with _lock:
+        _abandoned.pop(execution_id, None)
+        _live[execution_id] = threading.Event()
+
+
+def running_here(execution_id: str) -> bool:
+    """Whether this process started the run and has not seen it end or let it go."""
+    with _lock:
+        return execution_id in _live
 
 
 def execution_cancelled(execution_id: str) -> bool:
-    """Thread-safe cancellation check used between workflow nodes/tool calls."""
-    lease = _leases.get(execution_id)
-    return lease is None or lease.lost.is_set() or lease.cancelled.is_set() or time.monotonic() >= lease.deadline
+    """Whether the run was asked to stop (thread-safe, checked between nodes)."""
+    with _lock:
+        event = _live.get(execution_id)
+        return (event is not None and event.is_set()) or execution_id in _abandoned
+
+
+def request_cancel(execution_id: str) -> bool:
+    """Ask a live run of this process to stop at its next node."""
+    with _lock:
+        event = _live.get(execution_id)
+    if event is None:
+        return False
+    event.set()
+    return True
 
 
 def owned_summary(exec_data: dict[str, Any]) -> dict[str, Any]:
-    result = dict(exec_data)
-    lease = _leases.get(str(exec_data["id"]))
-    if lease is not None:
-        if lease.lost.is_set() or time.monotonic() >= lease.deadline:
-            raise WorkflowOwnershipError(f"Workflow execution lease expired: {lease.execution_id}")
-        result.update(lease.token)
-    return result
+    return dict(exec_data)
 
 
 async def stop_renewal(execution_id: str) -> None:
-    lease = _leases.pop(execution_id, None)
-    if lease is not None and lease.task is not None:
-        lease.task.cancel()
-        try:
-            await lease.task
-        except asyncio.CancelledError:
-            pass
+    """The run's end is recorded: it is no longer live here."""
+    with _lock:
+        _live.pop(execution_id, None)
+
+
+def _let_go(execution_id: str) -> bool:
+    with _lock:
+        event = _live.pop(execution_id, None)
+        if event is None:
+            return False
+        event.set()
+        now = time.monotonic()
+        _abandoned[execution_id] = now
+        _abandoned.move_to_end(execution_id)
+        while _abandoned and (
+            len(_abandoned) > _ABANDONED_KEPT
+            or now - next(iter(_abandoned.values())) > _ABANDONED_KEEP_SECONDS
+        ):
+            _abandoned.popitem(last=False)
+        return True
 
 
 async def abandon_execution(execution_id: str) -> None:
-    """Stop renewing after cancellation; recovery fences and finalizes the run."""
-    lease = _leases.get(execution_id)
-    if lease is not None:
-        from flocks.workflow.store import WorkflowStore
+    """The owner stopped waiting for the run: stop it and record it as cancelled.
 
-        lease.lost.set()
-        try:
-            await WorkflowStore.release_execution_lease(execution_id, lease.token)
-        except Exception as exc:
-            # Expiry still fences the run if the database is unavailable.
-            log.warning("workflow.lease.release_failed", {"exec_id": execution_id, "error": str(exc)})
-        finally:
-            await stop_renewal(execution_id)
+    Nothing else would end the record: the run's thread may still finish its
+    current node, but it stops there and nobody writes its result.  A run whose
+    end is already recorded is left as it is.
+    """
+    if not _let_go(execution_id):
+        return
+    from flocks.workflow.store import WorkflowStore
+
+    try:
+        await WorkflowStore.end_abandoned_execution(execution_id)
+    except Exception as exc:
+        # Startup recovery finalizes the record if this write is lost.
+        log.warning("workflow.abandon.record_failed", {"exec_id": execution_id, "error": str(exc)})
 
 
 async def close_execution_leases() -> None:
-    """Shutdown cancels renewal; other nodes may recover after the lease expires."""
-    for execution_id in list(_leases):
-        await stop_renewal(execution_id)
+    """Shutdown: ask every live run to stop; startup recovery ends their records."""
+    with _lock:
+        execution_ids = list(_live)
+    for execution_id in execution_ids:
+        _let_go(execution_id)

@@ -113,7 +113,7 @@ def test_within_budget_nothing_is_raised(tmp_path, monkeypatch):
     assert alerts.active_alerts() == []
 
 
-@pytest.mark.parametrize("module", ["flocks.workflow.service_runtime", "flocks.db.migrate"])
+@pytest.mark.parametrize("module", ["flocks.workflow.service_runtime"])
 def test_processes_started_on_their_own_scrub_before_they_log(module, monkeypatch):
     """They never run Log.init: their main() installs the scrubber itself."""
     import importlib

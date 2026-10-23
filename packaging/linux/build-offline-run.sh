@@ -256,7 +256,7 @@ fi
 VENV_PY="$INSTALL_ROOT/flocks/.venv/bin/python"
 [[ -x "$VENV_PY" ]] || fail "venv python missing after uv sync"
 # run from / so the current directory cannot shadow the editable install
-FLOCKS_MODULE_FILE="$(cd / && "$VENV_PY" -c 'import flocks, uvicorn, fastapi, litellm, asyncpg, asyncpg.protocol.protocol; print(flocks.__file__)')"
+FLOCKS_MODULE_FILE="$(cd / && "$VENV_PY" -c 'import flocks, uvicorn, fastapi, litellm; print(flocks.__file__)')"
 case "$FLOCKS_MODULE_FILE" in
   "$INSTALL_ROOT/flocks/flocks/"*) info "venv ok: $FLOCKS_MODULE_FILE" ;;
   *) fail "venv imports flocks from $FLOCKS_MODULE_FILE, expected $INSTALL_ROOT/flocks/flocks/" ;;
@@ -319,7 +319,6 @@ fi
 mkdir -p "$INSTALL_ROOT/installer"
 cp "$SCRIPT_DIR/installer/install.sh" "$SCRIPT_DIR/installer/migrate_data.py" "$SCRIPT_DIR/installer/flocks.service" \
    "$SCRIPT_DIR/installer/flocks.env.template" "$SCRIPT_DIR/installer/flocks-cli-wrapper.sh" \
-   "$SCRIPT_DIR/installer/postgres_preflight.py" \
    "$SCRIPT_DIR/installer/relocate.py" \
    "$INSTALL_ROOT/installer/"
 chmod 755 "$INSTALL_ROOT/installer/install.sh" "$INSTALL_ROOT/installer/flocks-cli-wrapper.sh"

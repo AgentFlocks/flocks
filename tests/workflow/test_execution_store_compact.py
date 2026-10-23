@@ -1,7 +1,7 @@
 """Regression tests for ``compact_outputs_for_storage`` and
 ``compact_history_for_storage`` in ``flocks.workflow.execution_store``.
 
-These helpers protect the ``workflow_execution`` PostgreSQL row from being
+These helpers protect the ``workflow_execution`` SQLite row from being
 inflated to tens of MB per syslog message: each execution of
 ``stream_alert_dedup`` (and similar streaming workflows) can produce
 ``enriched_alerts``/``unique_alerts`` lists with thousands of items that
@@ -176,7 +176,7 @@ def test_compact_outputs_does_not_mutate_input() -> None:
 def test_compact_outputs_drastically_reduces_serialised_size() -> None:
     """End-to-end size guarantee: the typical 10K-alert payload should
     shrink by more than 1000x once compacted, which is what makes the
-    PostgreSQL row size bounded under syslog throughput.
+    SQLite row size bounded under syslog throughput.
     """
     import json
 
@@ -443,7 +443,6 @@ async def test_record_execution_result_backfills_execution_log_steps() -> None:
 
     async def complete_execution(*args, **kwargs):  # noqa: ANN002, ANN003
         calls.append("complete")
-        return True
 
     async def increment_stats(*args, **kwargs):  # noqa: ANN002, ANN003
         calls.append("stats")
@@ -476,7 +475,7 @@ async def test_record_execution_result_backfills_execution_log_steps() -> None:
     ):
         await record_execution_result("wf", "exec-1", exec_data)
 
-    assert calls == ["complete", "trim"]
+    assert calls == ["complete", "stats", "trim"]
     complete_execution_mock.assert_awaited_once()
     summary, steps = complete_execution_mock.await_args.args
     assert complete_execution_mock.await_args.kwargs == {}
@@ -486,7 +485,7 @@ async def test_record_execution_result_backfills_execution_log_steps() -> None:
     assert steps[1][1]["inputs"] == {"_filtered_alerts_count": 150}
     assert summary["executionLog"] == []
     assert summary["stepCount"] == 2
-    increment_stats_mock.assert_not_awaited()
+    increment_stats_mock.assert_awaited_once_with("wf", success=True, duration=1.0)
     trim_executions_mock.assert_awaited_once_with("wf", keep=30)
     audit_data = record_audit.await_args.kwargs["run_result"]
     assert audit_data["executionLog"] == [step for _, step in steps]
@@ -494,7 +493,7 @@ async def test_record_execution_result_backfills_execution_log_steps() -> None:
 
 @pytest.mark.asyncio
 async def test_record_execution_result_accepts_explicit_step_batch() -> None:
-    complete_execution = AsyncMock(return_value=True)
+    complete_execution = AsyncMock(return_value=None)
     increment_stats = AsyncMock(return_value=None)
     trim_executions = AsyncMock(return_value=[])
     record_audit = AsyncMock(return_value=None)
@@ -529,7 +528,7 @@ async def test_record_execution_result_accepts_explicit_step_batch() -> None:
     assert complete_execution.await_args.kwargs == {}
     assert summary["executionLog"] == []
     assert persisted_steps == explicit_steps
-    increment_stats.assert_not_awaited()
+    increment_stats.assert_awaited_once_with("wf-trigger", success=True, duration=0.01)
     trim_executions.assert_awaited_once_with("wf-trigger", keep=30)
     audit_data = record_audit.await_args.kwargs["run_result"]
     assert [step["node_id"] for step in audit_data["executionLog"]] == [
@@ -539,8 +538,8 @@ async def test_record_execution_result_accepts_explicit_step_batch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_record_execution_result_does_not_repeat_atomic_stats_after_completion() -> None:
-    complete_execution = AsyncMock(return_value=True)
+async def test_record_execution_result_stats_failure_does_not_block_retention() -> None:
+    complete_execution = AsyncMock(return_value=None)
     increment_stats = AsyncMock(side_effect=RuntimeError("stats locked"))
     trim_executions = AsyncMock(return_value=[])
 
@@ -564,13 +563,13 @@ async def test_record_execution_result_does_not_repeat_atomic_stats_after_comple
         )
 
     complete_execution.assert_awaited_once()
-    increment_stats.assert_not_awaited()
+    increment_stats.assert_awaited_once()
     trim_executions.assert_awaited_once_with("wf-stats-failure", keep=30)
 
 
 @pytest.mark.asyncio
 async def test_record_execution_result_retention_failure_keeps_committed_execution() -> None:
-    complete_execution = AsyncMock(return_value=True)
+    complete_execution = AsyncMock(return_value=None)
     increment_stats = AsyncMock(return_value=None)
     trim_executions = AsyncMock(side_effect=RuntimeError("retention locked"))
 
@@ -594,7 +593,11 @@ async def test_record_execution_result_retention_failure_keeps_committed_executi
         )
 
     complete_execution.assert_awaited_once()
-    increment_stats.assert_not_awaited()
+    increment_stats.assert_awaited_once_with(
+        "wf-retention-failure",
+        success=False,
+        duration=0.5,
+    )
     trim_executions.assert_awaited_once_with("wf-retention-failure", keep=30)
 
 
@@ -647,7 +650,7 @@ def test_compact_outputs_covers_input_params_batch_key() -> None:
     """HTTP /run batch calls may pass a large ``alerts`` list as inputParams.
     ``compact_outputs_for_storage`` must compact it when the key is in
     ``DEFAULT_LARGE_LIST_KEYS`` – this is what ``create_execution_record``
-    now does before writing to PostgreSQL.
+    now does before writing to SQLite.
     """
     batch_inputs = {
         "alerts": _make_alerts(5_000),
@@ -691,7 +694,7 @@ async def test_record_execution_result_deletes_jsonl_for_trimmed_executions(tmp_
     for record_path in [*trimmed_paths, retained_path]:
         record_path.write_text('{"type":"workflow.summary"}\n', encoding="utf-8")
 
-    complete_execution = AsyncMock(return_value=True)
+    complete_execution = AsyncMock(return_value=None)
     increment_stats = AsyncMock(return_value=None)
     trim_executions = AsyncMock(return_value=["exec-00", "exec-01"])
     record_audit = AsyncMock(return_value=None)

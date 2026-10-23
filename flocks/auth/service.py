@@ -13,10 +13,10 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import aiosqlite
 from pydantic import BaseModel, Field
 
 from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, AuthUser
-from flocks.db import registry
 from flocks.extensions import ensure_callable_methods
 from flocks.storage.storage import Storage
 from flocks.utils.id import Identifier
@@ -77,42 +77,6 @@ def _encode_scope_values(values: Iterable[str]) -> str:
     return json.dumps(list(_clean_scope_values(values)), ensure_ascii=False)
 
 
-def _auth_schema(dialect) -> list[str]:
-    """The user and session tables, typed by the active backend."""
-    text = dialect.text_type()
-    flag = dialect.integer_type()
-    return [
-        f"""
-        CREATE TABLE IF NOT EXISTS users (
-            id                       {text} PRIMARY KEY,
-            username                 {text} NOT NULL UNIQUE,
-            password_hash            {text} NOT NULL,
-            role                     {text} NOT NULL DEFAULT 'member',
-            status                   {text} NOT NULL DEFAULT 'active',
-            must_reset_password      {flag} NOT NULL DEFAULT 0,
-            tenant_ids               {text} NOT NULL DEFAULT '[]',
-            asset_groups             {text} NOT NULL DEFAULT '[]',
-            temp_password_expires_at {text},
-            created_at               {text} NOT NULL,
-            updated_at               {text} NOT NULL,
-            last_login_at            {text}
-        )
-        """,
-        f"""
-        CREATE TABLE IF NOT EXISTS user_sessions (
-            session_id {text} PRIMARY KEY,
-            user_id    {text} NOT NULL,
-            expires_at {text} NOT NULL,
-            created_at {text} NOT NULL,
-            updated_at {text} NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )
-        """,
-        "CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_user_sessions_expires ON user_sessions(expires_at)",
-    ]
-
-
 class LocalUser(BaseModel):
     id: str
     username: str
@@ -142,51 +106,68 @@ class LocalAuthBackend:
 
     _initialized: bool = False
     _initialized_db_path: Optional[str] = None
-    _initialized_backend = None
     _session_ttl_days: int = SESSION_TTL_DAYS
     _temp_password_ttl_hours: int = TEMP_PASSWORD_TTL_HOURS
     # Once the system has any user, it can't transition back to the
     # "no users" state (there is no full-wipe flow). Cache the True result
-    # so the hot path in apply_auth_for_request avoids querying PostgreSQL.
+    # so the hot path in apply_auth_for_request avoids hitting SQLite.
     _has_users_cached: bool = False
 
     @classmethod
     async def init(cls) -> None:
         await Storage.init()
         db_path = Storage.get_db_path()
-        settings = registry.current()
-        if (cls._initialized and cls._initialized_db_path == str(db_path)
-                and cls._initialized_backend == settings):
+        if cls._initialized and cls._initialized_db_path == str(db_path) and db_path.exists():
             return
         # Switching to a new DB path (common in tests) must clear cached state.
         cls._has_users_cached = False
-        async with Storage.transaction(db_path) as db:
-            if db.dialect.name == "postgres":
-                await db.execute("SELECT pg_advisory_xact_lock(hashtext(?))", ("flocks.auth.schema",))
-            await db.executescript(";\n".join(_auth_schema(db.dialect)))
+        async with Storage.connect(db_path) as db:
+            await db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'member',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    must_reset_password INTEGER NOT NULL DEFAULT 0,
+                    tenant_ids TEXT NOT NULL DEFAULT '[]',
+                    asset_groups TEXT NOT NULL DEFAULT '[]',
+                    temp_password_expires_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_login_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS user_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
+                CREATE INDEX IF NOT EXISTS idx_user_sessions_expires ON user_sessions(expires_at);
+
+                """
+            )
             await cls._ensure_user_scope_columns(db)
             await db.commit()
 
         cls._initialized = True
         cls._initialized_db_path = str(db_path)
-        cls._initialized_backend = settings
         log.info("auth.initialized")
 
     @classmethod
-    async def _ensure_user_scope_columns(cls, db) -> None:
-        # PRAGMA on SQLite, information_schema elsewhere; the dialect knows.
-        d = db.dialect
-        rows = await db.fetch_all(
-            d.columns_query().format(table="users"), d.columns_query_params("users")
-        )
-        name_at = d.column_name_index()
-        columns = {str(row[name_at]) for row in rows}
-        text = d.text_type()
+    async def _ensure_user_scope_columns(cls, db: aiosqlite.Connection) -> None:
+        async with db.execute("PRAGMA table_info(users)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
         if "tenant_ids" not in columns:
-            await db.execute(f"ALTER TABLE users ADD COLUMN tenant_ids {text} NOT NULL DEFAULT '[]'")
+            await db.execute("ALTER TABLE users ADD COLUMN tenant_ids TEXT NOT NULL DEFAULT '[]'")
         if "asset_groups" not in columns:
-            await db.execute(f"ALTER TABLE users ADD COLUMN asset_groups {text} NOT NULL DEFAULT '[]'")
-
+            await db.execute("ALTER TABLE users ADD COLUMN asset_groups TEXT NOT NULL DEFAULT '[]'")
 
     @classmethod
     def _hash_password(cls, password: str) -> str:
@@ -213,7 +194,7 @@ class LocalAuthBackend:
             return True
         await cls.init()
         db_path = Storage.get_db_path()
-        async with Storage.transaction(db_path) as db:
+        async with Storage.connect(db_path) as db:
             async with db.execute("SELECT COUNT(1) FROM users") as cursor:
                 row = await cursor.fetchone()
                 result = bool(row and row[0] > 0)
@@ -266,6 +247,7 @@ class LocalAuthBackend:
 
         user_id = Identifier.ascending("user")
         now = _iso_now()
+        # Hashing is deliberately slow: off the event loop.
         password_hash = await asyncio.to_thread(cls._hash_password, password)
         params = (
             user_id,
@@ -297,17 +279,14 @@ class LocalAuthBackend:
                 VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
                 """
         db_path = Storage.get_db_path()
-        async with Storage.transaction(db_path) as db:
+        async with Storage.connect(db_path) as db:
             try:
-                if only_if_no_users and db.dialect.name == "postgres":
-                    # Serialize the empty-table check across processes. A
-                    # single INSERT .. WHERE NOT EXISTS still races under
-                    # PostgreSQL READ COMMITTED when usernames differ.
-                    await db.execute("SELECT pg_advisory_xact_lock(hashtext(?))", ("flocks.auth.bootstrap",))
                 cursor = await db.execute(sql, params)
                 await db.commit()
             except Exception as exc:
-                if getattr(exc, "sqlstate", None) == "23505":
+                from flocks.coordination import is_unique_violation
+
+                if is_unique_violation(exc):
                     raise ValueError("用户名已存在") from exc
                 raise
             if only_if_no_users and cursor.rowcount == 0:
@@ -320,7 +299,7 @@ class LocalAuthBackend:
     async def get_user_by_id(cls, user_id: str) -> Optional[LocalUser]:
         await cls.init()
         db_path = Storage.get_db_path()
-        async with Storage.transaction(db_path) as db:
+        async with Storage.connect(db_path) as db:
             async with db.execute(
                 """
                 SELECT id, username, role, status, must_reset_password, tenant_ids, asset_groups,
@@ -349,7 +328,7 @@ class LocalAuthBackend:
     async def get_user_by_username(cls, username: str) -> Optional[Tuple[LocalUser, str, Optional[str]]]:
         await cls.init()
         db_path = Storage.get_db_path()
-        async with Storage.transaction(db_path) as db:
+        async with Storage.connect(db_path) as db:
             async with db.execute(
                 """
                 SELECT id, username, role, status, must_reset_password, tenant_ids, asset_groups,
@@ -381,7 +360,7 @@ class LocalAuthBackend:
         await cls.init()
         db_path = Storage.get_db_path()
         users: List[LocalUser] = []
-        async with Storage.transaction(db_path) as db:
+        async with Storage.connect(db_path) as db:
             async with db.execute(
                 """
                 SELECT id, username, role, status, must_reset_password, tenant_ids, asset_groups,
@@ -415,7 +394,7 @@ class LocalAuthBackend:
         now = _iso_now()
         expires_at = (_utc_now() + timedelta(days=cls._session_ttl_days)).isoformat()
         db_path = Storage.get_db_path()
-        async with Storage.transaction(db_path) as db:
+        async with Storage.connect(db_path) as db:
             await db.execute(
                 """
                 INSERT INTO user_sessions(session_id, user_id, expires_at, created_at, updated_at)
@@ -430,7 +409,7 @@ class LocalAuthBackend:
     async def get_user_by_session_id(cls, session_id: str) -> Optional[LocalUser]:
         await cls.init()
         db_path = Storage.get_db_path()
-        async with Storage.transaction(db_path) as db:
+        async with Storage.connect(db_path) as db:
             async with db.execute(
                 """
                 SELECT u.id, u.username, u.role, u.status, u.must_reset_password,
@@ -469,7 +448,7 @@ class LocalAuthBackend:
     async def revoke_session(cls, session_id: str) -> None:
         await cls.init()
         db_path = Storage.get_db_path()
-        async with Storage.transaction(db_path) as db:
+        async with Storage.connect(db_path) as db:
             await db.execute("DELETE FROM user_sessions WHERE session_id = ?", (session_id,))
             await db.commit()
 
@@ -505,7 +484,7 @@ class LocalAuthBackend:
         session_id = await cls._create_session(user.id)
         now = _iso_now()
         db_path = Storage.get_db_path()
-        async with Storage.transaction(db_path) as db:
+        async with Storage.connect(db_path) as db:
             await db.execute("UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?", (now, now, user.id))
             await db.commit()
 
@@ -551,7 +530,7 @@ class LocalAuthBackend:
         now = _iso_now()
         pwd_hash = cls._hash_password(new_password)
         db_path = Storage.get_db_path()
-        async with Storage.transaction(db_path) as db:
+        async with Storage.connect(db_path) as db:
             cursor = await db.execute(
                 """
                 UPDATE users
@@ -584,7 +563,7 @@ class LocalAuthBackend:
         await cls.init()
         now = _iso_now()
         db_path = Storage.get_db_path()
-        async with Storage.transaction(db_path) as db:
+        async with Storage.connect(db_path) as db:
             cursor = await db.execute(
                 """
                 UPDATE users

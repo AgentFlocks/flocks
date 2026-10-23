@@ -1,4 +1,4 @@
-"""Exercise real process exit: CliRunner cannot detect leaked database threads."""
+"""Exercise real process exit: CliRunner cannot detect leaked SQLite threads."""
 
 import json
 import os
@@ -30,10 +30,6 @@ import pytest
     ],
 )
 def test_task_command_exits(tmp_path, args, exit_code, json_output):
-    # The CLI needs a database; the conftest points FLOCKS_DB_DSN at this test's schema.
-    dsn = os.environ.get("FLOCKS_DB_DSN")
-    if not dsn:
-        pytest.skip("FLOCKS_TEST_PG_DSN is not set")
     root = Path(__file__).resolve().parents[2]
     env = {
         key: value for key, value in os.environ.items()
@@ -43,7 +39,6 @@ def test_task_command_exits(tmp_path, args, exit_code, json_output):
         HOME=str(tmp_path),
         USERPROFILE=str(tmp_path),
         FLOCKS_ROOT=str(tmp_path / ".flocks"),
-        FLOCKS_DB_DSN=dsn,
         PYTHONPATH=str(root),
         PYTHON_DOTENV_DISABLED="1",
         PYTHONIOENCODING="utf-8",

@@ -6,7 +6,7 @@ from typing import Optional
 
 from flocks.utils.log import Log
 
-from .models import ExecutionTriggerType, SchedulerMode, TaskTrigger
+from .models import ExecutionTriggerType, SchedulerMode, SchedulerStatus, TaskTrigger
 from .store import TaskStore
 
 log = Log.create(service="task.scheduler")
@@ -68,19 +68,32 @@ class TaskScheduler:
             next_run = self._parse_next_run(scheduler.trigger)
             if not next_run or next_run > now:
                 continue
+            active = await TaskStore.get_active_execution_for_scheduler(scheduler.id)
+            if active is not None:
+                continue
+
             trigger_type = (
                 ExecutionTriggerType.RUN_ONCE
                 if scheduler.mode == SchedulerMode.ONCE
                 else ExecutionTriggerType.SCHEDULED
             )
-            execution = TaskManager.build_execution(scheduler, trigger_type=trigger_type)
-            following_run = (
-                self._compute_next(scheduler.trigger, after=now)
-                if scheduler.mode == SchedulerMode.CRON else None
+            trigger = scheduler.trigger.model_copy(deep=True)
+            status = scheduler.status
+            if scheduler.mode == SchedulerMode.CRON and trigger.cron:
+                trigger.next_run = self._compute_next(trigger, after=now)
+            if scheduler.mode == SchedulerMode.ONCE:
+                status = SchedulerStatus.DISABLED
+                trigger.next_run = None
+            # Started only if nobody changed the scheduler since it was read
+            # here: writing this copy back used to undo an edit or a disable.
+            fired = await TaskStore.fire_scheduler(
+                scheduler,
+                TaskManager.build_execution_from_scheduler(scheduler, trigger_type=trigger_type),
+                trigger=trigger,
+                status=status,
             )
-            await TaskStore.enqueue_schedule_occurrence(
-                scheduler, execution, next_run=following_run,
-            )
+            if not fired:
+                log.info("scheduler.changed_before_run", {"scheduler_id": scheduler.id})
 
     @staticmethod
     def _parse_next_run(trigger: TaskTrigger) -> Optional[datetime]:

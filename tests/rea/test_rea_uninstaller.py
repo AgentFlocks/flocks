@@ -580,32 +580,6 @@ async def test_conversations_another_process_runs_count_and_are_not_taken_for_st
 
 
 @pytest.mark.asyncio
-async def test_sessions_running_elsewhere_are_read_from_their_leases(tmp_path):
-    from flocks.session.ownership import SessionExecutionLease
-    from flocks.session.session import Session
-    from flocks.storage.storage import Storage
-
-    here = await Session.create(project_id="proj", directory=str(tmp_path))
-    there = await Session.create(project_id="proj", directory=str(tmp_path))
-    mine = await SessionExecutionLease.acquire(here.id)
-    async with Storage.transaction() as db:
-        await db.execute(
-            "INSERT INTO session_execution_leases(session_id, owner_id, generation, expires_at) "
-            "VALUES (?, 'other-host:42:abc:def', 1, clock_timestamp() + interval '60 seconds')",
-            (there.id,),
-        )
-        await db.execute(
-            "INSERT INTO session_execution_leases(session_id, owner_id, generation, expires_at) "
-            "VALUES ('rea:operation:other-host', 'other-host:42:abc:ghi', 1, clock_timestamp() + interval '60 seconds')",
-        )
-    try:
-        # Its own runs are seen through SessionStatus; leases name only other processes' conversations.
-        assert await uninstaller._sessions_running_elsewhere() == [there.id]
-    finally:
-        await mine.release()
-
-
-@pytest.mark.asyncio
 async def test_a_busy_conversation_that_cannot_be_read_keeps_the_uninstall_from_starting(installed, monkeypatch):
     from flocks.session.message import Message
 

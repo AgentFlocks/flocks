@@ -3,8 +3,8 @@
   "id": "soc-workspace",
   "name": "Alert Operations Suite",
   "nameCn": "告警运营套件",
-  "description": "Alert operations suite: alert triage, persistent investigations, governed response and incident reviews.",
-  "descriptionCn": "告警运营套件：告警研判、持续调查、受控处置及事件复盘。",
+  "description": "Package for Flocks alert operations: WebUI pages, query tool, and denoise/triage workflows.",
+  "descriptionCn": "Flocks 告警运营套件，包含 WebUI 页面、查询工具、降噪工作流和研判工作流。",
   "components": [
     {
       "type": "webui",
@@ -21,18 +21,6 @@
     {
       "type": "workflow",
       "id": "stream_alert_triage"
-    },
-    {
-      "type": "tool",
-      "id": "soc_case_manage"
-    },
-    {
-      "type": "agent",
-      "id": "soc-investigator"
-    },
-    {
-      "type": "workflow",
-      "id": "soc_case_investigation"
     }
   ]
 }

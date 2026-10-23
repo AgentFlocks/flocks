@@ -295,20 +295,6 @@ def test_zero_days_keeps_every_log(tmp_path):
     assert sorted(path.name for path in log_dir.iterdir()) == before
 
 
-async def test_a_policy_save_waits_for_a_delete_in_flight():
-    import asyncio
-
-    from flocks.retention.policy import bump_policy_version, policy_unchanged, policy_version
-
-    version = await policy_version()
-    async with policy_unchanged(version) as unchanged:
-        assert unchanged
-        save = asyncio.create_task(bump_policy_version())
-        await asyncio.sleep(0.3)
-        assert not save.done()  # the save cannot overtake a delete holding the version
-    assert await asyncio.wait_for(save, 10) == version + 1
-    async with policy_unchanged(version) as unchanged:
-        assert not unchanged  # deletes planned under the old policy stop from now on
 
 
 async def test_day_rollover_leaves_log_cleanup_to_the_scheduler(monkeypatch):

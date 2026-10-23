@@ -10,8 +10,8 @@ it in the session it ran in (its persisted checkpoint) or retries it.
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -19,7 +19,6 @@ import pytest
 from flocks.task.executor import TaskExecutor
 from flocks.task.manager import TaskManager
 from flocks.task.models import ExecutionMode, TaskExecution, TaskScheduler, TaskStatus
-from flocks.task.node import reset_node_id_cache
 from flocks.task.outcome import (
     BLOCKED_UNVERIFIED_EFFECTS,
     NEEDS_VERIFICATION,
@@ -81,15 +80,28 @@ def test_a_call_guarded_by_its_key_holds_the_run_for_a_check(monkeypatch):
 
 
 @pytest.fixture()
-async def store():
-    if not os.environ.get("FLOCKS_TEST_PG_DSN"):
-        pytest.skip("requires isolated PostgreSQL test DSN")
+async def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from flocks.config.config import Config
+    from flocks.storage.storage import Storage
+
+    data_dir = tmp_path / "flocks_data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("FLOCKS_DATA_DIR", str(data_dir))
+    Config._global_config = None
+    Config._cached_config = None
     await TaskStore.close()
-    reset_node_id_cache()
+    Storage._db_path = None
+    Storage._initialized = False
+    TaskStore._initialized = False
+    await Storage.init()
     await TaskStore.init()
     yield
     await TaskStore.close()
-    reset_node_id_cache()
+    Storage._db_path = None
+    Storage._initialized = False
+    TaskStore._initialized = False
+    Config._global_config = None
+    Config._cached_config = None
 
 
 async def _agent_run_with(tool_calls: list[tuple[str, str, str]]) -> TaskExecution:
@@ -202,7 +214,7 @@ async def test_an_interrupted_workflow_run_that_got_going_is_held_not_requeued(s
         from flocks.task import executor as module
 
         with module._workflow_cancel_lock:
-            module._workflow_started[run.id] = (run.owner_generation, True)  # handed to the worker thread
+            module._workflow_started[run.id] = True  # handed to the worker thread
         entered.set()
         await asyncio.Event().wait()
 
@@ -246,42 +258,31 @@ async def test_a_person_continues_a_held_run_through_the_api(store, monkeypatch)
         assert (await client.post("/api/task-executions/exec_missing/continue")).status_code == 404
 
 
-async def test_an_earlier_attempts_start_on_this_node_is_not_read_as_no_start():
-    """Recovered under a new generation: this node's record of the earlier attempt says nothing about 'not started'."""
+async def test_a_workflow_run_this_process_never_dispatched_is_judged_by_its_start():
+    """Recovered after a restart: nothing recorded here, so a run that started may have run the workflow."""
+    from flocks.task.outcome import run_outcome
+
+    execution = TaskExecution(
+        schedulerID="sch_g14", title="g14 wf", status=TaskStatus.RUNNING, executionMode=ExecutionMode.WORKFLOW,
+        workflowID="isolated", startedAt=datetime.now(timezone.utc),
+    )
+    assert TaskExecutor.workflow_started(execution) is None
+    outcome = await run_outcome(execution)
+    assert outcome.kind == NEEDS_VERIFICATION and outcome.effects == ("workflow:isolated",)
+
+
+async def test_a_dispatched_workflow_run_that_had_not_started_is_safe_to_retry():
     from flocks.task import executor as module
     from flocks.task.outcome import run_outcome
 
     execution = TaskExecution(
         schedulerID="sch_g14", title="g14 wf", status=TaskStatus.RUNNING, executionMode=ExecutionMode.WORKFLOW,
-        workflowID="isolated", startedAt=datetime.now(timezone.utc), ownerGeneration=2,
+        workflowID="isolated", startedAt=datetime.now(timezone.utc),
     )
     with module._workflow_cancel_lock:
-        module._workflow_started[execution.id] = (1, True)  # the attempt before the recovery started it here
+        module._workflow_started[execution.id] = False  # dispatched here, never got to the workflow
     try:
-        assert TaskExecutor.workflow_started(execution) is None
-        outcome = await run_outcome(execution)
-        assert outcome.kind == NEEDS_VERIFICATION and outcome.effects == ("workflow:isolated",)
-    finally:
-        TaskExecutor.forget_workflow_started(execution.id)
-
-
-async def test_an_earlier_attempt_that_had_not_started_here_says_nothing_of_the_one_now():
-    """An attempt left 'not started' on this node; the run was taken over and started elsewhere."""
-    from flocks.task import executor as module
-    from flocks.task.outcome import run_outcome
-
-    execution = TaskExecution(
-        schedulerID="sch_g14", title="g14 wf", status=TaskStatus.RUNNING, executionMode=ExecutionMode.WORKFLOW,
-        workflowID="isolated", startedAt=datetime.now(timezone.utc), ownerGeneration=2,
-    )
-    with module._workflow_cancel_lock:
-        module._workflow_started[execution.id] = (1, False)  # generation 1 never got to the workflow here
-    try:
-        assert TaskExecutor.workflow_started(execution) is None, "not this attempt's record"
-        outcome = await run_outcome(execution)
-        assert outcome.kind == NEEDS_VERIFICATION, "generation 2 may have started it: not safe to run again"
-        with module._workflow_cancel_lock:
-            module._workflow_started[execution.id] = (2, False)
-        assert TaskExecutor.workflow_started(execution) is False, "this attempt's own: it had not started"
+        assert TaskExecutor.workflow_started(execution) is False
+        assert (await run_outcome(execution)).kind == SAFE_TO_RETRY
     finally:
         TaskExecutor.forget_workflow_started(execution.id)

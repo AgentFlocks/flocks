@@ -170,10 +170,10 @@ class Session:
     _current_var: contextvars.ContextVar[Optional[SessionInfo]] = contextvars.ContextVar(
         "session_current", default=None,
     )
-    # Bounded storage-key hints; session contents always come from PostgreSQL.
+    # Secondary index: session_id → storage key for O(1) lookup
     _id_index: Dict[str, str] = {}
     _id_index_limit = 4096
-    # Kept for callers that reset old cache state; reads never use this value.
+    # Hot-path cache for repeatedly listing sessions in the UI.
     _all_sessions_cache: Optional[List[SessionInfo]] = None
     # Serializes tree topology changes only. Ordinary writes use a keyed lock,
     # so unrelated sessions no longer block each other.
@@ -214,6 +214,7 @@ class Session:
 
     @classmethod
     def _remember_key(cls, session_id: str, storage_key: str) -> None:
+        """Remember where a session is stored; the oldest entries go past the limit."""
         cls._id_index.pop(session_id, None)
         if len(cls._id_index) >= cls._id_index_limit:
             oldest = next(iter(cls._id_index), None)
@@ -223,13 +224,17 @@ class Session:
 
     @classmethod
     def _sync_list_cache(cls, session: SessionInfo) -> None:
-        """Invalidate derived local statistics after a session mutation."""
+        """Keep the in-memory list cache aligned with session mutations."""
         from flocks.project.project import Project
 
         Project.invalidate_session_stats()
-        # Shared PostgreSQL rows can change in another process. Cache keys,
-        # never session contents; freshness also governs access filtering.
-        cls._all_sessions_cache = None
+        if cls._all_sessions_cache is None:
+            return
+
+        remaining = [cached for cached in cls._all_sessions_cache if cached.id != session.id]
+        if session.status != "deleted":
+            remaining.append(session)
+        cls._all_sessions_cache = cls._sort_sessions(remaining)
 
     @classmethod
     def _remove_from_list_cache(cls, session_id: str) -> None:
@@ -284,23 +289,7 @@ class Session:
     @classmethod
     @asynccontextmanager
     async def active_operation(cls, session_id: str) -> AsyncIterator[SessionInfo]:
-        """Prevent lifecycle transitions while a synchronous operation is running.
-
-        Like a runner, it holds the session's execution lease (or the one this
-        context already holds), so no runner and no data retention in any
-        process takes the session meanwhile; ``SessionInactiveError`` while
-        another holds it.
-        """
-        from flocks.session.ownership import SessionExecutionLease, current_lease
-
-        if current_lease(session_id) is None:
-            lease = await SessionExecutionLease.acquire(session_id)
-            if lease is None:
-                raise SessionInactiveError(f"Session {session_id} is running; try again once that finished")
-            async with lease:
-                async with cls.active_operation(session_id) as session:
-                    yield session
-            return
+        """Prevent lifecycle transitions while a synchronous operation is running."""
 
         async with cls.lifecycle_lock(session_id):
             session = await cls.get_by_id_unfiltered(session_id)
@@ -405,17 +394,17 @@ class Session:
         session = await cls.get_by_id_unfiltered(session_id)
         if session is None:
             raise SessionNotFoundError(f"Session {session_id} not found")
-        async def clear_boundary(tx, current):
-            metadata = dict(current.metadata or {})
-            if "projectMove" not in metadata:
-                return None
-            metadata.pop("projectMove")
-            return current.model_copy(update={"metadata": metadata})
+        metadata = dict(getattr(session, "metadata", {}) or {})
+        if "projectMove" not in metadata:
+            return False
 
-        updated = await cls._mutate_document_locked(
-            session.project_id, session.id, clear_boundary, check_access=False,
-        )
-        return updated is not None
+        metadata.pop("projectMove")
+        updated_session = session.model_copy(update={"metadata": metadata})
+        storage_key = f"session:{session.project_id}:{session.id}"
+        await Storage.set(storage_key, updated_session, "session")
+        cls._remember_key(session.id, storage_key)
+        cls._sync_list_cache(updated_session)
+        return True
 
     @staticmethod
     def has_pinned_model(session: Optional[SessionInfo]) -> bool:
@@ -573,7 +562,7 @@ class Session:
             }
         kwargs["metadata"] = metadata
         
-        async def persist(parent: Optional[SessionInfo] = None, *, transaction=None) -> SessionInfo:
+        async def persist(parent: Optional[SessionInfo] = None) -> SessionInfo:
             if parent_id is not None:
                 if parent is None:
                     raise ValueError(f"Parent session {parent_id} not found")
@@ -600,17 +589,11 @@ class Session:
             )
 
             # The parent status check and child row creation share the archive
-            # guard and one PG transaction. Another process cannot change the
-            # locked parent's owner/status between validation and child insert.
+            # lock, so an archive cannot commit between them in this process.
             storage_key = f"session:{project_id}:{created.id}"
-            if transaction is None:
-                await Storage.set(storage_key, created, "session")
-            else:
-                await transaction.execute(
-                    "INSERT INTO runtime_state (key, value, value_type, updated_at) "
-                    "VALUES (?, ?::jsonb, 'session', now())",
-                    (storage_key, created.model_dump_json(by_alias=True)),
-                )
+            await Storage.set(storage_key, created, "session")
+            cls._remember_key(created.id, storage_key)
+            cls._sync_list_cache(created)
             return created
 
         from flocks.project.project import Project, ProjectDeletionError
@@ -627,24 +610,19 @@ class Session:
             else:
                 async with cls._tree_lock:
                     async with cls.lifecycle_lock(parent_id):
+                        parent = await Storage.get(
+                            f"session:{project_id}:{parent_id}",
+                            SessionInfo,
+                        )
+                        if parent is None or parent.status == "deleted":
+                            raise ValueError(f"Parent session {parent_id} not found")
                         if cls.is_lifecycle_transitioning(parent_id):
                             raise ValueError(
                                 f"Parent session {parent_id} is changing lifecycle state"
                             )
-                        async with Storage.transaction() as transaction:
-                            row = await transaction.fetch_one(
-                                "SELECT value FROM runtime_state WHERE key = ? FOR UPDATE",
-                                (f"session:{project_id}:{parent_id}",),
-                            )
-                            parent = SessionInfo.model_validate_json(row[0]) if row else None
-                            if parent is None or parent.status == "deleted":
-                                raise ValueError(f"Parent session {parent_id} not found")
-                            if parent.status != "active":
-                                raise ValueError(f"Parent session {parent_id} is not active")
-                            session = await persist(parent, transaction=transaction)
-
-        cls._remember_key(session.id, f"session:{project_id}:{session.id}")
-        cls._sync_list_cache(session)
+                        if parent.status != "active":
+                            raise ValueError(f"Parent session {parent_id} is not active")
+                        session = await persist(parent)
 
         try:
             from flocks.agent.registry import Agent
@@ -730,8 +708,8 @@ class Session:
         Get a session by ID only (searches across all projects)
         
         TypeScript compatible - doesn't require project_id.
-        Reuses a cached storage key while reading current database contents.
-        Cache misses use PostgreSQL's indexed session ID projection.
+        Uses an in-memory index for O(1) lookup when available,
+        falling back to a full key scan on cache miss.
         
         Args:
             session_id: Session ID
@@ -740,6 +718,13 @@ class Session:
             Session info or None
         """
         try:
+            if cls._all_sessions_cache is not None:
+                cached = next((s for s in cls._all_sessions_cache if s.id == session_id), None)
+                if cached:
+                    if not cls._is_accessible_to_current_user(cached):
+                        return None
+                    return cached
+
             # Fast path: check in-memory index
             cached_key = cls._id_index.get(session_id)
             if cached_key:
@@ -747,25 +732,26 @@ class Session:
                 if session and session.status != "deleted":
                     if not cls._is_accessible_to_current_user(session):
                         return None
-                    cls._remember_key(session_id, cached_key)
                     return session
                 # Index is stale — remove and fall through
                 cls._id_index.pop(session_id, None)
             
-            # A session created on a peer is absent from this process's key
-            # index. PostgreSQL's partial id-expression index resolves it.
-            async with Storage.transaction() as tx:
-                row = await tx.fetch_one_mapping(
-                    "SELECT key, value FROM runtime_state "
-                    "WHERE key LIKE 'session:%' AND value ->> 'id' = ? LIMIT 1",
-                    (session_id,),
-                )
-            if row is not None:
-                raw = row["value"]
-                session = SessionInfo.model_validate_json(raw) if isinstance(raw, str) else SessionInfo.model_validate(raw)
-                if session.status != "deleted" and cls._is_accessible_to_current_user(session):
-                    cls._remember_key(session_id, row["key"])
-                    return session
+            # Slow path: scan all session keys
+            keys = await Storage.list_keys(prefix="session:")
+            
+            for key in keys:
+                if key.endswith(f":{session_id}"):
+                    try:
+                        session = await Storage.get(key, SessionInfo)
+                        if session and session.status != "deleted":
+                            if not cls._is_accessible_to_current_user(session):
+                                return None
+                            cls._remember_key(session_id, key)
+                            return session
+                    except Exception as _e:
+                        log.debug("session.get_by_id.parse_failed", {"key": key, "error": str(_e)})
+                        continue
+            
             return None
         except Exception as e:
             log.warn("session.get_by_id.error", {"error": str(e), "id": session_id})
@@ -783,6 +769,9 @@ class Session:
             List of sessions
         """
         try:
+            if cls._all_sessions_cache is not None:
+                return [s for s in cls._all_sessions_cache if s.project_id == project_id and cls._is_accessible_to_current_user(s)]
+
             entries = await Storage.list_entries(prefix=f"session:{project_id}:", model=SessionInfo)
             sessions = []
 
@@ -811,6 +800,9 @@ class Session:
             List of all sessions
         """
         try:
+            if cls._all_sessions_cache is not None:
+                return [s for s in cls._all_sessions_cache if cls._is_accessible_to_current_user(s)]
+
             entries = await Storage.list_entries(prefix="session:", model=SessionInfo)
             sessions = []
 
@@ -822,7 +814,8 @@ class Session:
                 except Exception as e:
                     log.warn("session.parse.error", {"key": key, "error": str(e)})
 
-            return [s for s in cls._sort_sessions(sessions) if cls._is_accessible_to_current_user(s)]
+            cls._all_sessions_cache = cls._sort_sessions(sessions)
+            return [s for s in cls._all_sessions_cache if cls._is_accessible_to_current_user(s)]
         except Exception as e:
             log.error("session.list_all.error", {"error": str(e)})
             return []
@@ -890,25 +883,37 @@ class Session:
         
         return updated_session
 
-    @staticmethod
-    def _enforce_dedicated_agent_policy(
+    @classmethod
+    async def _update_locked(
+        cls,
+        project_id: str,
         session_id: str,
-        session: SessionInfo,
-        update_data: Dict[str, Any],
-        updates: Dict[str, Any],
-    ) -> None:
-        """Keep a dedicated-agent claim intact across a generic update.
+        *,
+        allow_inactive: bool = False,
+        **updates,
+    ) -> Optional[SessionInfo]:
+        """Update a session while its lifecycle lock is already held."""
+        if cls.is_lifecycle_transitioning(session_id):
+            return None
+        session = await cls.get(project_id, session_id)
+        if not session or (session.status != "active" and not allow_inactive):
+            return None
+        if not cls._is_writable_to_current_user(session):
+            return None
 
-        Raises when ``updates`` would drop the claim or move the session to
-        another agent. Switching an unclaimed session to another agent drops a
-        stale claim from ``update_data`` unless ``updates`` supplies one that
-        names the new agent.
-        """
+        alias_map = {
+            "project_id": "projectID",
+            "parent_id": "parentID",
+            "owner_user_id": "ownerUserID",
+            "owner_username": "ownerUsername",
+        }
+
+        update_data = session.model_dump(by_alias=True)
         current_policy = (update_data.get("metadata") or {}).get(
             DEDICATED_AGENT_POLICY_METADATA_KEY
         )
-        # An ordinary ``None`` leaves the metadata untouched (see
-        # ``_update_locked``); only a supplied value or ``_UNSET`` replaces it.
+        # An ordinary ``None`` leaves the metadata untouched (see the loop
+        # below); only a supplied value or ``_UNSET`` replaces it.
         if (
             isinstance(current_policy, dict)
             and current_policy.get("version") == 1
@@ -949,85 +954,46 @@ class Session:
                 current_metadata = dict(update_data.get("metadata") or {})
                 current_metadata.pop(DEDICATED_AGENT_POLICY_METADATA_KEY, None)
                 update_data["metadata"] = current_metadata
+        for key, value in updates.items():
+            if value is _UNSET:
+                alias_key = alias_map.get(key, key)
+                if alias_key in update_data:
+                    update_data[alias_key] = None
+                elif key in update_data:
+                    update_data[key] = None
+                continue
 
-    @classmethod
-    async def _update_locked(
-        cls,
-        project_id: str,
-        session_id: str,
-        *,
-        allow_inactive: bool = False,
-        pre_lock: Optional[Callable[[Any], Awaitable[None]]] = None,
-        transaction_check: Optional[Callable[[Any, SessionInfo], Awaitable[None]]] = None,
-        **updates,
-    ) -> Optional[SessionInfo]:
-        """Update a session while its lifecycle lock is already held.
-
-        ``pre_lock`` runs first in the PostgreSQL transaction, before the
-        session row is locked; ``transaction_check`` sees the locked row and
-        aborts the update by raising. A callable ``metadata`` receives a copy
-        of the locked row's metadata and returns the new metadata.
-        """
-        if cls.is_lifecycle_transitioning(session_id):
-            return None
-
-        async def apply_updates(tx, session):
-            if transaction_check is not None:
-                await transaction_check(tx, session)
-            alias_map = {
-                "project_id": "projectID",
-                "parent_id": "parentID",
-                "owner_user_id": "ownerUserID",
-                "owner_username": "ownerUsername",
-            }
-
-            effective = updates
-            if callable(updates.get("metadata")):
-                effective = {
-                    **updates,
-                    "metadata": updates["metadata"](deepcopy(session.metadata or {})),
-                }
-            update_data = session.model_dump(by_alias=True)
-            cls._enforce_dedicated_agent_policy(session_id, session, update_data, effective)
-            # Use ``_UNSET`` to explicitly clear a field; ordinary ``None``
-            # remains a no-op for backward compatibility.
-            for key, value in effective.items():
-                if value is _UNSET:
+            if value is not None:
+                if key == "summary" and isinstance(value, dict):
+                    if update_data.get("summary"):
+                        update_data["summary"].update(value)
+                    else:
+                        update_data["summary"] = value
+                elif key == "revert" and isinstance(value, dict):
+                    update_data["revert"] = value
+                else:
                     alias_key = alias_map.get(key, key)
                     if alias_key in update_data:
-                        update_data[alias_key] = None
+                        update_data[alias_key] = value
                     elif key in update_data:
-                        update_data[key] = None
-                    continue
+                        update_data[key] = value
 
-                if value is not None:
-                    if key == "summary" and isinstance(value, dict):
-                        if update_data.get("summary"):
-                            update_data["summary"].update(value)
-                        else:
-                            update_data["summary"] = value
-                    elif key == "revert" and isinstance(value, dict):
-                        update_data["revert"] = value
-                    else:
-                        alias_key = alias_map.get(key, key)
-                        if alias_key in update_data:
-                            update_data[alias_key] = value
-                        elif key in update_data:
-                            update_data[key] = value
+        if "time" not in update_data:
+            update_data["time"] = {}
+        update_data["time"]["updated"] = int(datetime.now().timestamp() * 1000)
 
-            changed = SessionInfo(**update_data)
-            if get_current_auth_user() is not None and (
-                changed.id != session.id
-                or changed.project_id != session.project_id
-                or changed.parent_id != session.parent_id
-            ):
-                raise PermissionError("Session topology cannot be changed through generic update")
-            return changed
-
-        return await cls._mutate_document_locked(
-            project_id, session_id, apply_updates, allow_inactive=allow_inactive,
-            pre_lock=pre_lock,
-        )
+        updated_session = SessionInfo(**update_data)
+        if get_current_auth_user() is not None and (
+            updated_session.id != session.id
+            or updated_session.project_id != session.project_id
+            or updated_session.parent_id != session.parent_id
+        ):
+            raise PermissionError("Session topology cannot be changed through generic update")
+        storage_key = f"session:{project_id}:{session_id}"
+        await Storage.set(storage_key, updated_session, "session")
+        cls._remember_key(session_id, storage_key)
+        cls._sync_list_cache(updated_session)
+        return updated_session
 
     @classmethod
     async def mutate_metadata(
@@ -1035,122 +1001,24 @@ class Session:
         project_id: str,
         session_id: str,
         mutator: Callable[[Dict[str, Any]], Dict[str, Any]],
-        *,
-        transaction_hook: Optional[Callable[[Any, "SessionInfo", Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None,
     ) -> Optional[SessionInfo]:
-        """Patch the latest metadata; an optional hook shares its PG transaction.
-
-        The hook must use the provided transaction, not borrow another pooled
-        connection. Its writes commit or roll back with the session document.
-        A dedicated-agent claim in the metadata cannot be dropped or changed.
-        """
-
-        async def patch_metadata(tx, session):
-            # Deep copy: a mutator editing the nested claim in place must not
-            # also edit the copy the policy check compares against.
-            metadata = mutator(deepcopy(session.metadata or {}))
-            if transaction_hook is not None:
-                metadata = await transaction_hook(tx, session, metadata)
-            update_data = session.model_dump(by_alias=True)
-            cls._enforce_dedicated_agent_policy(
-                session_id, session, update_data, {"metadata": metadata},
-            )
-            update_data["metadata"] = metadata
-            return SessionInfo(**update_data)
-
+        """Atomically update metadata while preserving dedicated-agent policy."""
         async with cls.lifecycle_lock(session_id):
             if cls.is_lifecycle_transitioning(session_id):
                 return None
-            updated_session = await cls._mutate_document_locked(
-                project_id, session_id, patch_metadata,
-            )
-            if updated_session is None:
+            session = await cls.get(project_id, session_id)
+            if not session or session.status != "active":
                 return None
-
-        log.info("session.metadata.updated", {
-            "id": session_id,
-            "project_id": project_id,
-        })
+            metadata = mutator(deepcopy(session.metadata or {}))
+            updated_session = await cls._update_locked(
+                project_id, session_id, metadata=metadata,
+            )
+        if updated_session is not None:
+            log.info("session.metadata.updated", {
+                "id": session_id,
+                "project_id": project_id,
+            })
         return updated_session
-
-    @classmethod
-    async def _mutate_document_locked(
-        cls, project_id: str, session_id: str,
-        operation: Callable[[Any, SessionInfo], Awaitable[Optional[SessionInfo]]],
-        *, allow_inactive: bool = False, check_access: bool = True,
-        pre_lock: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> Optional[SessionInfo]:
-        """Patch the latest document while the caller holds its local write lock.
-
-        The PostgreSQL row lock also serializes other processes. The operation
-        must use the supplied transaction for any coordinated durable writes.
-        """
-        updated = await cls._mutate_documents_locked(
-            [(project_id, session_id)], operation,
-            allow_inactive=allow_inactive, check_access=check_access,
-            pre_lock=pre_lock,
-        )
-        return updated[0] if updated else None
-
-    @classmethod
-    async def _mutate_documents_locked(
-        cls, documents: List[tuple[str, str]],
-        operation: Callable[[Any, SessionInfo], Awaitable[Optional[SessionInfo]]],
-        *, allow_inactive: bool = False, check_access: bool = True,
-        touch_timestamp: bool = True,
-        pre_lock: Optional[Callable[[Any], Awaitable[None]]] = None,
-    ) -> Optional[List[SessionInfo]]:
-        """Lock a tree in key order once, then apply patches to its latest rows.
-
-        ``pre_lock`` takes locks that precede the session rows in the shared
-        order (message page state before runtime documents).
-        """
-        keys = [f"session:{project_id}:{session_id}" for project_id, session_id in documents]
-        if not keys:
-            return []
-        async with Storage.transaction() as tx:
-            if pre_lock is not None:
-                await pre_lock(tx)
-            rows = await tx.fetch_all(
-                "SELECT key, value FROM runtime_state WHERE key = ANY(?::text[]) ORDER BY key FOR UPDATE",
-                (keys,),
-            )
-            latest = {row[0]: SessionInfo.model_validate_json(row[1]) for row in rows}
-            if len(latest) != len(keys):
-                return None
-            if any(
-                session.status == "deleted"
-                or (session.status != "active" and not allow_inactive)
-                or (check_access and not cls._is_writable_to_current_user(session))
-                for session in latest.values()
-            ):
-                return None
-            updated = []
-            writes = []
-            for key in keys:
-                session = latest[key]
-                changed = await operation(tx, session)
-                if changed is None:
-                    await tx.rollback()
-                    return None
-                if touch_timestamp:
-                    changed.time.updated = int(datetime.now().timestamp() * 1000)
-                updated.append(changed)
-                if touch_timestamp or changed != session:
-                    writes.append((
-                        f"session:{changed.project_id}:{changed.id}",
-                        changed.model_dump_json(by_alias=True), key,
-                    ))
-            if writes:
-                await tx.execute_many(
-                    "UPDATE runtime_state SET key = ?, value = ?::jsonb, updated_at = now() WHERE key = ?",
-                    writes,
-                )
-        for session in updated:
-            cls._remember_key(session.id, f"session:{session.project_id}:{session.id}")
-        if updated:
-            cls._sync_list_cache(updated[0])
-        return updated
 
     @classmethod
     async def move_to_project(
@@ -1212,10 +1080,8 @@ class Session:
                     messages = await Message.list(session.id, include_archived=True)
                     move_boundaries[session.id] = messages[-1].id if messages else None
 
-                async def move_current(tx, session):
-                    if session.revert is not None:
-                        return None
-                    return session.model_copy(update={
+                moved_sessions = [
+                    session.model_copy(update={
                         "project_id": target_project_id,
                         "directory": target_directory,
                         "metadata": {
@@ -1233,13 +1099,21 @@ class Session:
                         },
                         "time": session.time.model_copy(update={"updated": updated_at}),
                     })
-
-                moved_sessions = await cls._mutate_documents_locked(
-                    [(source_project_id, session.id) for session in sessions], move_current,
-                    touch_timestamp=False,
+                    for session in sessions
+                ]
+                await Storage.mutate_many(
+                    set_entries=[
+                        (f"session:{target_project_id}:{session.id}", session, "session")
+                        for session in moved_sessions
+                    ],
+                    delete_keys=[
+                        f"session:{source_project_id}:{session.id}"
+                        for session in sessions
+                    ],
                 )
-                if moved_sessions is None:
-                    return None
+                for session in moved_sessions:
+                    cls._remember_key(session.id, f"session:{target_project_id}:{session.id}")
+                    cls._sync_list_cache(session)
 
                 log.info("session.project_moved", {
                     "id": session_id,
@@ -1258,7 +1132,6 @@ class Session:
         session_id: str,
         *,
         precheck: Optional[Callable[[List["SessionInfo"]], bool]] = None,
-        verify: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> bool:
         """Permanently delete a session tree and all application-owned data.
 
@@ -1267,15 +1140,13 @@ class Session:
         lock is held and *before* the lifecycle generation is bumped or any abort
         side effect runs, so returning ``False`` leaves the tree completely
         untouched (nothing stopped, no queue cleared, no in-flight write rejected).
-        ``verify(db)`` runs first inside the deleting transaction; raising there
-        (e.g. the caller's execution leases were lost) rolls the delete back.
         """
 
         from flocks.project.project import Project
 
         async with Project.lifecycle_guard(project_id):
             return await cls._delete_locked(
-                project_id, session_id, precheck=precheck, verify=verify,
+                project_id, session_id, precheck=precheck,
             )
 
     @classmethod
@@ -1285,7 +1156,6 @@ class Session:
         session_id: str,
         *,
         precheck: Optional[Callable[[List["SessionInfo"]], bool]] = None,
-        verify: Optional[Callable[[Any], Awaitable[None]]] = None,
     ) -> bool:
         """
         Permanently delete a session tree and all application-owned data.
@@ -1340,42 +1210,23 @@ class Session:
 
             upload_candidates = await session_upload_candidates(session_ids)
 
-            async def _lock_message_states(db) -> None:
-                if verify is not None:
-                    await verify(db)
-                ordered_ids = sorted(set(session_ids))
-                # Match Message writes: page state precedes runtime documents.
-                # Ensure absent rows too, so a first writer's uncommitted state
-                # insertion cannot slip past an empty SELECT snapshot.
-                await db.execute(
-                    "INSERT INTO session_message_page_state(session_id, ready) "
-                    "SELECT value, FALSE FROM unnest(?::text[]) AS requested(value) ORDER BY value "
-                    "ON CONFLICT(session_id) DO NOTHING",
-                    (ordered_ids,),
+            async def _recheck_delete_permission(db) -> None:
+                # The rows as this transaction sees them, before it deletes
+                # them: an owner changed since the tree was read keeps the
+                # delete from going ahead.
+                keys = [f"session:{item.project_id}:{item.id}" for item in sessions]
+                placeholders = ", ".join("?" for _ in keys)
+                cursor = await db.execute(
+                    f"SELECT value FROM storage WHERE key IN ({placeholders})", keys,
                 )
-                await db.fetch_all(
-                    "SELECT session_id FROM session_message_page_state "
-                    "WHERE session_id = ANY(?::text[]) ORDER BY session_id FOR UPDATE",
-                    (ordered_ids,),
-                )
-                if actor is not None:
-                    # Check the actual locked rows in the deletion transaction;
-                    # a prior tree snapshot is insufficient after reassignment.
-                    keys = [f"session:{item.project_id}:{item.id}" for item in sessions]
-                    rows = await db.fetch_all(
-                        "SELECT key, value FROM runtime_state "
-                        "WHERE key = ANY(?::text[]) ORDER BY key FOR UPDATE",
-                        (keys,),
-                    )
-                    if len(rows) != len(keys) or any(
-                        not SessionPolicy.can_delete(SessionInfo.model_validate_json(row[1]), actor)
-                        for row in rows
-                    ):
-                        raise PermissionError("Session delete permission changed")
+                rows = await cursor.fetchall()
+                if len(rows) != len(keys) or any(
+                    not SessionPolicy.can_delete(SessionInfo.model_validate_json(row[0]), actor)
+                    for row in rows
+                ):
+                    raise PermissionError("Session delete permission changed")
 
             async def _delete_search_index(db) -> None:
-                from flocks.session.message_pages import remove_sessions
-                await remove_sessions(db, session_ids)
                 for owner, relatives in upload_candidates.items():
                     await register_upload_candidates(db, owner, relatives)
                 if not Storage.session_search_available():
@@ -1405,7 +1256,7 @@ class Session:
                         f"system_prompts:{session.id}:",
                     )
                 ],
-                pre_transaction_hook=_lock_message_states,
+                pre_transaction_hook=_recheck_delete_permission if actor is not None else None,
                 transaction_hook=_delete_search_index,
             )
             PermissionNext.clear_session_runtime(session_ids)
@@ -1620,23 +1471,32 @@ class Session:
             sessions = refreshed
 
             archived_ts = int(datetime.now().timestamp() * 1000)
-            async def archive_current(tx, session):
+            updated_sessions: List[SessionInfo] = []
+            for session in sessions:
                 if session.status == "archived":
-                    return session
-                return session.model_copy(update={
+                    updated_sessions.append(session)
+                    continue
+                updated_sessions.append(session.model_copy(update={
                     "status": "archived",
                     "time": session.time.model_copy(update={
                         "archived": session.time.archived or archived_ts,
                     }),
-                })
+                }))
 
-            updated_sessions = await cls._mutate_documents_locked(
-                [(session.project_id, session.id) for session in sessions], archive_current,
-                allow_inactive=True, touch_timestamp=False,
-            )
-            if updated_sessions is None:
-                return False
-            sessions = updated_sessions
+            original_status = {session.id: session.status for session in sessions}
+            changed = [
+                session
+                for session in updated_sessions
+                if original_status[session.id] != session.status
+            ]
+            if changed:
+                await Storage.set_many([
+                    (f"session:{session.project_id}:{session.id}", session, "session")
+                    for session in changed
+                ])
+                for session in changed:
+                    cls._remember_key(session.id, f"session:{session.project_id}:{session.id}")
+                    cls._sync_list_cache(session)
             archive_committed = True
 
             try:
@@ -1702,23 +1562,24 @@ class Session:
         if not sessions:
             return False
         try:
-            async def unarchive_current(tx, session):
-                if session.status != "archived":
-                    return session
-                return session.model_copy(update={
+            changed = [
+                session.model_copy(update={
                     "status": "active",
                     "time": session.time.model_copy(update={
                         "archived": None,
                     }),
                 })
-
-            updated_sessions = await cls._mutate_documents_locked(
-                [(session.project_id, session.id) for session in sessions], unarchive_current,
-                allow_inactive=True, touch_timestamp=False,
-            )
-            if updated_sessions is None:
-                return False
-            sessions = updated_sessions
+                for session in sessions
+                if session.status == "archived"
+            ]
+            if changed:
+                await Storage.set_many([
+                    (f"session:{session.project_id}:{session.id}", session, "session")
+                    for session in changed
+                ])
+                for session in changed:
+                    cls._remember_key(session.id, f"session:{session.project_id}:{session.id}")
+                    cls._sync_list_cache(session)
 
             from flocks.session.interaction_queue import InteractionQueue
 

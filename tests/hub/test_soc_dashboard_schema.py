@@ -2,7 +2,7 @@ import importlib.util
 import asyncio
 import gc
 import json
-from flocks.db import sync_query
+import sqlite3
 import subprocess
 import sys
 import time
@@ -17,10 +17,10 @@ import pytest
 
 def _activity_workflow_db(tmp_path):
     path = tmp_path / "workflow.db"
-    with sync_query.connect() as conn:
+    with sqlite3.connect(path) as conn:
         conn.execute("""CREATE TABLE workflow_executions (
             id TEXT PRIMARY KEY, workflow_id TEXT, status TEXT,
-            started_at BIGINT, updated_at BIGINT,
+            started_at INTEGER, updated_at INTEGER,
             input_params TEXT, output_results TEXT, payload TEXT)""")
         conn.execute("CREATE INDEX idx_started ON workflow_executions(workflow_id, started_at DESC)")
         conn.execute("CREATE INDEX idx_status ON workflow_executions(workflow_id, status)")
@@ -28,7 +28,7 @@ def _activity_workflow_db(tmp_path):
 
 
 def _activity_execution(path, key, *, status="running", started=1000, inputs=None, output=None, payload=None):
-    with sync_query.connect() as conn:
+    with sqlite3.connect(path) as conn:
         conn.execute("INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
             key, "stream_alert_denoise", status, started, started + 100,
             json.dumps(inputs or {}), json.dumps(output or {}), json.dumps(payload or {}),
@@ -79,7 +79,7 @@ def test_activity_distinguishes_empty_unknown_and_real_batches(tmp_path):
     assert events["workflow-execution:unknown"]["alert"]["threatName"] == "降噪批次 · 数量未提供"
     assert events["workflow-execution:nonempty"]["result"]["rawCount"] == 5
     assert events["workflow-execution:queued"]["status"] == "queued"
-    with sync_query.connect() as conn:
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
         assert conn.execute("SELECT count(*) FROM workflow_executions").fetchone()[0] == 4
 
 
@@ -106,8 +106,8 @@ def test_activity_large_payload_and_database_lock_degrade_without_writes(tmp_pat
                         inputs={"large": "x" * 1_000_000})
     events = handlers._get_workflow_recent_events("stream_alert_denoise")
     assert len(json.dumps(events)) < 4096
-    with sync_query.connect() as conn:
-        conn.execute("LOCK TABLE workflow_executions IN ACCESS EXCLUSIVE MODE")
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("BEGIN EXCLUSIVE")
         snapshot = {"complete": True}
         started = time.monotonic()
         assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
@@ -136,24 +136,27 @@ def test_activity_does_not_substitute_execution_id_for_missing_alert_id(tmp_path
     assert event["alert"]["id"] == ""
 
 
-def test_activity_postgres_bounds_payloads_before_loading_them(tmp_path, monkeypatch):
+def test_activity_old_sqlite_omits_payloads_instead_of_using_unsafe_length(tmp_path, monkeypatch):
     handlers = _load_dashboard_handlers()
     handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
-    _activity_execution(handlers.WORKFLOW_DB, "guarded", inputs={"alerts": [{"threat_name": "small preview"}]})
+    _activity_execution(handlers.WORKFLOW_DB, "old-sqlite", inputs={
+        "alerts": [{"threat_name": "must not read this"}],
+    })
+    original_connect = sqlite3.connect
     queries = []
-    execute = sync_query.Connection.execute
 
-    def capture(conn, sql, params=()):
-        queries.append(sql)
-        return execute(conn, sql, params)
+    class OldSQLiteConnection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            queries.append(sql)
+            if sql == "SELECT octet_length('')":
+                raise sqlite3.OperationalError("no such function: octet_length")
+            return super().execute(sql, *args)
 
-    monkeypatch.setattr(sync_query.Connection, "execute", capture)
+    monkeypatch.setattr(handlers.sqlite3, "connect", lambda *a, **kw: original_connect(*a, **kw, factory=OldSQLiteConnection))
     events = handlers._get_workflow_recent_events("stream_alert_denoise")
-    assert events[0]["alert"]["threatName"] == "small preview"
-    preview_queries = [sql for sql in queries if "CASE WHEN octet_length" in sql]
-    assert len(preview_queries) == 1
-    assert "WHERE id IN" in preview_queries[0]
-    assert all("262144" in sql for sql in preview_queries)
+    assert events[0]["status"] == "running"
+    assert "must not read this" not in json.dumps(events)
+    assert not any("CASE WHEN" in query or "length(payload)" in query for query in queries)
 
 
 def test_activity_reader_does_not_wait_or_open_another_db_when_busy(tmp_path, monkeypatch):
@@ -163,8 +166,8 @@ def test_activity_reader_does_not_wait_or_open_another_db_when_busy(tmp_path, mo
     with handlers._workflow_activity_read_lock:
         with monkeypatch.context() as patch:
             def unexpected_connect(*args, **kwargs):
-                raise AssertionError("contending reader must not open PostgreSQL")
-            patch.setattr(handlers, "_connect", unexpected_connect)
+                raise AssertionError("contending reader must not open SQLite")
+            patch.setattr(handlers.sqlite3, "connect", unexpected_connect)
             snapshot = {"complete": True, "available": True}
             assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
             assert snapshot == {"complete": False, "available": False}
@@ -204,14 +207,14 @@ def test_activity_preview_limit_counts_utf8_bytes_not_characters(tmp_path):
     _activity_execution(handlers.WORKFLOW_DB, "unicode")
     inputs = json.dumps({"padding": "中" * 100_000, "alerts": [{"threat_name": "oversized-preview"}]}, ensure_ascii=False)
     assert len(inputs) < 262144 < len(inputs.encode("utf-8"))
-    with sync_query.connect() as conn:
-        conn.execute("UPDATE workflow_executions SET input_params = ? WHERE id = ?", (inputs, "unicode"))
+    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+        conn.execute("UPDATE workflow_executions SET input_params = ?", (inputs,))
     events = handlers._get_workflow_recent_events("stream_alert_denoise")
     assert events[0]["status"] == "running"
     assert "oversized-preview" not in json.dumps(events)
 
 
-def test_activity_deadline_is_checked_even_without_progress_callback(tmp_path, monkeypatch):
+def test_activity_deadline_is_checked_even_without_sqlite_progress_callback(tmp_path, monkeypatch):
     handlers = _load_dashboard_handlers()
     handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
     _activity_execution(handlers.WORKFLOW_DB, "active")
@@ -226,14 +229,14 @@ def test_activity_deadline_is_checked_even_without_progress_callback(tmp_path, m
 
 
 @pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="native RSS via resource is Unix-only")
-def test_activity_large_text_is_not_materialized_in_client_memory(tmp_path):
+def test_activity_large_text_is_not_materialized_in_native_sqlite_memory(tmp_path):
     handlers = _load_dashboard_handlers()
     db = _activity_workflow_db(tmp_path)
     _activity_execution(db, "old-large-running", payload={"padding": "x" * (32 * 1024 * 1024)})
     for index in range(12):
         _activity_execution(db, f"new-done-{index}", status="success", started=2000 + index)
     # A fresh process excludes fixture allocations; tracemalloc alone cannot
-    # see the driver's native buffers. Do not start the application or touch user DBs.
+    # see SQLite's native buffers. Do not start the application or touch user DBs.
     script = '''
 import importlib.util, json, resource, sys
 from pathlib import Path
@@ -241,8 +244,7 @@ spec = importlib.util.spec_from_file_location("soc_native_rss_test", sys.argv[1]
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
-from flocks.db import sync_query
-module._database.set(sync_query)
+module.WORKFLOW_DB = Path(sys.argv[2])
 before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 events = module._get_workflow_recent_events("stream_alert_denoise")
 after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -282,19 +284,6 @@ def test_activity_repeated_projection_does_not_retain_payloads(tmp_path):
         tracemalloc.stop()
 
 
-def _create_alert_records(conn):
-    conn.execute("""CREATE TABLE alert_records (
-        row_id TEXT PRIMARY KEY, rowid BIGINT UNIQUE NOT NULL,
-        record_id TEXT, record_json JSONB NOT NULL, asset_date TEXT NOT NULL,
-        event_time BIGINT NOT NULL, source_file TEXT, line_number BIGINT,
-        source_type TEXT, threat_name TEXT, is_duplicate BIGINT NOT NULL DEFAULT 0)""")
-
-
-def _insert_alert_record(conn, key, record, asset_date, event_time, *, duplicate=0):
-    conn.execute("""INSERT INTO alert_records(row_id,rowid,record_id,record_json,asset_date,event_time,is_duplicate)
-        VALUES (?,?,?,?::jsonb,?,?,?)""", (str(key), key, str(key), json.dumps(record), asset_date, event_time, duplicate))
-
-
 def _load_dashboard_handlers():
     handler_path = (
         Path(__file__).resolve().parents[2]
@@ -316,7 +305,6 @@ def _load_dashboard_handlers():
         spec.loader.exec_module(module)
     finally:
         sys.dont_write_bytecode = previous
-    module._database.set(sync_query)
     return module
 
 
@@ -341,7 +329,6 @@ def _load_overview_handlers():
         spec.loader.exec_module(module)
     finally:
         sys.dont_write_bytecode = previous
-    module._request_state.set({"database": sync_query, "records": {}, "decoded": {}, "config": None})
     return module
 
 
@@ -368,57 +355,153 @@ def _load_alert_operations():
     return module
 
 
-def test_soc_dashboard_upgrades_imported_facts_and_preserves_source_records(tmp_path: Path):
+def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
+    db_path = tmp_path / "soc.db"
     first_record = {
-        "_source_type": "tdp", "threat_name": "SQL injection", "_threat_type": "web_attack",
-        "triage_status": "ok", "_triage_persisted_at": "2026-07-14T13:00:00",
-        "attack_verdict": "benign", "attack_success": False,
-        "triage_attack_verdict": "attack", "triage_attack_success": "unknown",
+        "_source_type": "tdp",
+        "threat_name": "SQL injection",
+        "_threat_type": "web_attack",
+        "triage_status": "ok",
+        "_triage_persisted_at": "2026-07-14T13:00:00",
+        "attack_verdict": "benign",
+        "attack_success": False,
+        "triage_attack_verdict": "attack",
+        "triage_attack_success": "unknown",
     }
-    with sync_query.connect() as conn:
-        _create_alert_records(conn)
-        _insert_alert_record(conn, 1, first_record, "2026-07-14", 1784014800)
-        conn.execute("CREATE TABLE soc_dashboard_meta(meta_key TEXT PRIMARY KEY, meta_value TEXT NOT NULL)")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE alert_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_json TEXT NOT NULL,
+                asset_date TEXT NOT NULL,
+                event_time INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO alert_records(record_json, asset_date, event_time) VALUES (?, ?, ?)",
+            (json.dumps(first_record), "2026-07-14", 1784014800),
+        )
+        conn.execute(
+            "CREATE TABLE soc_dashboard_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT NOT NULL)"
+        )
         conn.execute("INSERT INTO soc_dashboard_meta VALUES ('schema_version', '1')")
-        conn.execute("CREATE TABLE soc_dashboard_alert_facts(alert_row_id BIGINT PRIMARY KEY, row_key TEXT)")
+        conn.execute(
+            "CREATE TABLE soc_dashboard_alert_facts "
+            "(alert_row_id INTEGER PRIMARY KEY, row_key TEXT)"
+        )
         conn.execute("INSERT INTO soc_dashboard_alert_facts VALUES (999, 'stale')")
+        conn.commit()
 
     handlers = _load_dashboard_handlers()
-    assert handlers._ensure_postgres_schema()
-    second_record = {
-        "_source_type": "hids", "threat_name": "Malware download", "threat_type": "malware",
-        "triage_status": "ok", "_triage_persisted_at": "2026-07-14T13:01:00",
-    }
-    with sync_query.connect() as conn:
-        _insert_alert_record(conn, 2, second_record, "2026-07-14", 1784014860)
+    handlers.DEFAULT_SQLITE_DB = db_path
     handlers._schema_ready.clear()
-    assert handlers._ensure_postgres_schema()
-    updated = {
-        **first_record, "_triage_persisted_at": "2026-07-14T13:02:00",
-        "triage_attack_verdict": "attack_failed", "triage_attack_success": False,
+
+    assert handlers._ensure_sqlite_schema() is True
+
+    second_record = {
+        "_source_type": "hids",
+        "threat_name": "Malware download",
+        "threat_type": "malware",
+        "triage_status": "ok",
+        "_triage_persisted_at": "2026-07-14T13:01:00",
+    }
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO alert_records(record_json, asset_date, event_time) VALUES (?, ?, ?)",
+            (json.dumps(second_record), "2026-07-14", 1784014860),
+        )
+        conn.commit()
+
+    handlers._schema_ready.clear()
+    assert handlers._ensure_sqlite_schema() is True
+
+    updated_first_record = {
+        **first_record,
+        "_triage_persisted_at": "2026-07-14T13:02:00",
+        "triage_attack_verdict": "attack_failed",
+        "triage_attack_success": False,
         "triage_report": "# Updated report",
     }
-    with sync_query.connect() as conn:
-        conn.execute("UPDATE alert_records SET record_json = ?::jsonb WHERE row_id = ?", (json.dumps(updated), "1"))
-        facts = [tuple(row) for row in conn.execute(
-            "SELECT alert_row_id,row_key,source_type,threat_name,threat_type,has_triage "
-            "FROM soc_dashboard_alert_facts ORDER BY alert_row_id").fetchall()]
-        source_rows = [tuple(row) for row in conn.execute("SELECT rowid,row_id,is_duplicate FROM alert_records ORDER BY rowid").fetchall()]
-        definition = conn.execute("SELECT pg_get_functiondef('soc_dashboard_project_alert()'::regprocedure)").fetchone()[0]
-        version = conn.execute("SELECT meta_value FROM soc_dashboard_meta WHERE meta_key='schema_version'").fetchone()[0]
-        updated_fact = tuple(conn.execute(
-            "SELECT triage_persisted_at,triage_attack_verdict,triage_attack_success "
-            "FROM soc_dashboard_alert_facts WHERE row_key='1'").fetchone())
-        columns = conn.columns("soc_dashboard_alert_facts")
-    assert set(handlers._FACT_COLUMNS) <= columns
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO alert_records (
+                row_id, record_id, asset_date, source_file, line_number,
+                event_time, source_type, threat_name, is_duplicate, record_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(row_id) DO UPDATE SET
+                record_id=excluded.record_id,
+                asset_date=excluded.asset_date,
+                source_file=excluded.source_file,
+                line_number=excluded.line_number,
+                event_time=excluded.event_time,
+                source_type=excluded.source_type,
+                threat_name=excluded.threat_name,
+                is_duplicate=excluded.is_duplicate,
+                record_json=excluded.record_json
+            """,
+            (
+                "1",
+                "1",
+                "2026-07-14",
+                "triage-replay.jsonl",
+                1,
+                1784014800,
+                "tdp",
+                "SQL injection",
+                0,
+                json.dumps(updated_first_record),
+            ),
+        )
+        conn.commit()
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(alert_records)")}
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(alert_records)")}
+        facts = conn.execute(
+            "SELECT alert_row_id, row_key, source_type, threat_name, threat_type, has_triage "
+            "FROM soc_dashboard_alert_facts ORDER BY alert_row_id"
+        ).fetchall()
+        source_rows = conn.execute(
+            "SELECT id, row_id, is_duplicate FROM alert_records ORDER BY id"
+        ).fetchall()
+        trigger_sql = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='trigger' AND name='soc_dashboard_fact_insert'"
+        ).fetchone()[0]
+        schema_version = conn.execute(
+            "SELECT meta_value FROM soc_dashboard_meta WHERE meta_key='schema_version'"
+        ).fetchone()[0]
+        updated_fact = conn.execute(
+            "SELECT triage_persisted_at, triage_attack_verdict, triage_attack_success "
+            "FROM soc_dashboard_alert_facts "
+            "WHERE row_key = '1'"
+        ).fetchone()
+
+    assert {
+        "row_id",
+        "record_id",
+        "source_file",
+        "line_number",
+        "source_type",
+        "threat_name",
+        "is_duplicate",
+    } <= columns
+    assert {
+        "idx_alert_records_asset_date",
+        "idx_alert_records_event_time",
+        "idx_alert_records_source_type",
+        "idx_alert_records_threat_name",
+        "idx_alert_records_row_id",
+    } <= indexes
     assert source_rows == [(1, "1", 0), (2, "2", 0)]
     assert facts == [
         (1, "1", "tdp", "SQL injection", "web_attack", 1),
         (2, "2", "hids", "Malware download", "malware", 1),
     ]
-    assert "NEW.row_id" in definition
+    assert "COALESCE(NULLIF(NEW.row_id, ''), CAST(NEW.rowid AS TEXT))" in trigger_sql
     assert updated_fact == ("2026-07-14T13:02:00", "attack", "failed")
-    assert version == handlers.SCHEMA_VERSION
+    assert schema_version == "4"
 
 
 def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
@@ -478,17 +561,32 @@ def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
                 "risk_level": "High",
             }
         )
-    with sync_query.connect() as conn:
-        _create_alert_records(conn)
-        for index, record in enumerate(records, 1):
-            _insert_alert_record(conn, index, record, asset_date, 1784014799 + index)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE alert_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_json TEXT NOT NULL,
+                asset_date TEXT NOT NULL,
+                event_time INTEGER NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO alert_records(record_json, asset_date, event_time) VALUES (?, ?, ?)",
+            [
+                (json.dumps(record), asset_date, 1784014800 + index)
+                for index, record in enumerate(records)
+            ],
+        )
+        conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.DEFAULT_POSTGRES_DB = db_path
+    handlers.DEFAULT_SQLITE_DB = db_path
     handlers._schema_ready.clear()
 
-    assert handlers._ensure_postgres_schema() is True
-    sources = handlers._find_postgres_sources(
+    assert handlers._ensure_sqlite_schema() is True
+    sources = handlers._find_sqlite_sources(
         asset_date,
         asset_date,
         1784014800,
@@ -496,10 +594,10 @@ def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
     )
     triage = handlers._read_triage(sources)
     closed_loop = handlers._build_closed_loop(triage)
-    with sync_query.connect() as conn:
-        timeline = handlers._postgres_timeline(
+    with sqlite3.connect(db_path) as conn:
+        timeline = handlers._sqlite_timeline(
             conn,
-            handlers._postgres_settings(),
+            handlers._sqlite_settings(),
             "asset_date = ? AND event_time BETWEEN ? AND ?",
             [asset_date, 1784014800, 1784014800 + len(records)],
             [asset_date],
@@ -524,8 +622,8 @@ def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
     assert triage["benign"] == 2
     assert triage["unknown"] == 3
     assert triage["triageFailed"] == 2
-    assert tuple(first_fact) == ("threat-name-0", "threat-type-0", "low", "High")
-    assert tuple(normalized_non_attack) == ("non_attack", "unknown")
+    assert first_fact == ("threat-name-0", "threat-type-0", "low", "High")
+    assert normalized_non_attack == ("non_attack", "unknown")
     assert dict(triage["threatTypeCounter"]) == {
         f"threat-type-{index}": 1 for index in range(len(records))
     }
@@ -542,8 +640,17 @@ def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
     assert sum(timeline["attack"]) == triage["attackTotal"]
 
     overview_handlers = _load_overview_handlers()
-    overview_sources = overview_handlers._find_postgres_sources(asset_date, asset_date)
-    overview_triage = overview_handlers._read_triage(overview_sources)
+    overview_handlers.DEFAULT_SQLITE_DB = db_path
+    overview_triage = overview_handlers._read_triage(
+        [
+            overview_handlers._RecordSource(
+                path=db_path,
+                role="triage",
+                date=asset_date,
+                data_source="sqlite",
+            )
+        ]
+    )
 
     assert overview_triage["attackSuccess"] == 1
     assert overview_triage["attack"] == 1
@@ -613,15 +720,30 @@ def test_soc_overview_keeps_threat_names_and_types_separate(tmp_path: Path):
             "threat_name": "Suspicious crawler",
         },
     ]
-    with sync_query.connect() as conn:
-        _create_alert_records(conn)
-        for index, record in enumerate(records, 1):
-            _insert_alert_record(conn, index, record, asset_date, 1784014799 + index)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE alert_records "
+            "(record_json TEXT NOT NULL, asset_date TEXT NOT NULL, event_time INTEGER NOT NULL)"
+        )
+        conn.executemany(
+            "INSERT INTO alert_records VALUES (?, ?, ?)",
+            [
+                (json.dumps(record), asset_date, 1784014800 + index)
+                for index, record in enumerate(records)
+            ],
+        )
+        conn.commit()
 
     handlers = _load_overview_handlers()
-    sources = handlers._find_postgres_sources(asset_date, asset_date)
-    denoise = handlers._read_denoise(sources)
-    field_stats = handlers._build_field_stats(sources)
+    handlers.DEFAULT_SQLITE_DB = db_path
+    source = handlers._RecordSource(
+        path=db_path,
+        role="denoise",
+        date=asset_date,
+        data_source="sqlite",
+    )
+    denoise = handlers._read_denoise([source])
+    field_stats = handlers._build_field_stats([source])
 
     assert dict(denoise["threatCounter"]) == {
         "sql injection attempt": 1,
@@ -630,6 +752,210 @@ def test_soc_overview_keeps_threat_names_and_types_separate(tmp_path: Path):
     assert {
         item["label"]: item["value"] for item in field_stats["threatTypes"]
     } == {"web_attack": 1, "unknown": 1}
+
+
+def _overview_alert_store(db_path: Path, asset_date: str, records: list[dict], start: int) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE alert_records "
+            "(record_json TEXT NOT NULL, asset_date TEXT NOT NULL, event_time INTEGER NOT NULL)"
+        )
+        conn.executemany(
+            "INSERT INTO alert_records VALUES (?, ?, ?)",
+            [(json.dumps(record), asset_date, start + index) for index, record in enumerate(records)],
+        )
+        conn.commit()
+
+
+def _overview_stats(db_path: Path, monkeypatch: pytest.MonkeyPatch, date: str) -> dict:
+    handlers = _load_overview_handlers()
+    monkeypatch.setenv("FLOCKS_SOC_ALERTS_SQLITE_DB", str(db_path))
+    monkeypatch.setattr(handlers, "WORKFLOW_DB", db_path.parent / "no-workflow.db")
+    return handlers.get_stats(SimpleNamespace(), SimpleNamespace(query_params={"date": date}))
+
+
+def test_soc_overview_reports_the_model_verdicts_instead_of_estimating_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    # Raw fields that the removed estimate read as "attack succeeded" on every row.
+    records = []
+    for index in range(10):
+        verdict, result = ("attack", "failed") if index == 0 else ("non_attack", "unknown")
+        cached = index < 3
+        records.append({
+            "id": f"alert-{index}", "threat_name": "SQL injection", "_source_type": "tdp",
+            "threat_result": "success", "rsp_status_code": 200, "rsp_body_len": 120,
+            "is_duplicate": False, "dedup_key": f"key-{index}",
+            "triage_attack_verdict": verdict, "triage_attack_success": result,
+            "triage_source": "cache" if cached else "triaged", "triage_status": "cached" if cached else "ok",
+        })
+    db_path = tmp_path / "soc.db"
+    _overview_alert_store(db_path, "2026-09-03", records, int(datetime(2026, 9, 3, 10, 0).timestamp()))
+
+    result = _overview_stats(db_path, monkeypatch, "2026-09-03")
+
+    assert {item["key"]: item["value"] for item in result["verdicts"]} == {
+        "attack_success": 0, "attack": 0, "attack_failed": 1, "non_attack": 9, "unknown": 0,
+    }
+    assert (
+        result["triage"]["totalRecords"], result["triage"]["newTriaged"], result["triage"]["cacheHit"],
+    ) == (10, 7, 3)
+    assert result["timeline"] == {
+        "labels": ["2026-09-03"], "window": "按日统计",
+        "denoiseRaw": [10], "denoiseUnique": [10], "triageTotal": [10], "triageAttack": [1],
+    }
+
+
+def test_soc_overview_counts_each_triage_row_once_and_reads_legacy_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    records = [
+        {"triage_status": "ok", "triage_attack_verdict": "non_attack", "triage_attack_success": "unknown"},
+        {"triage_status": "failed", "triage_attack_verdict": "unknown", "triage_attack_success": "unknown"},
+        # Older rows kept the outcome in the verdict, with a boolean or no result.
+        {"triage_status": "ok", "triage_attack_verdict": "attack_failed", "triage_attack_success": False},
+        {"triage_status": "ok", "triage_attack_verdict": "attack_failed"},
+        {"triage_status": "ok", "triage_attack_verdict": "attack_success"},
+        {"triage_status": "ok", "triage_attack_verdict": "attack", "triage_attack_success": True},
+        # A migrated alert that was never triaged.
+        {"threat_name": "not triaged"},
+    ]
+    db_path = tmp_path / "soc.db"
+    _overview_alert_store(
+        db_path, "2026-09-04",
+        [{"id": str(index), **record} for index, record in enumerate(records)],
+        int(datetime(2026, 9, 4, 9, 0).timestamp()),
+    )
+
+    result = _overview_stats(db_path, monkeypatch, "2026-09-04")
+
+    assert {item["key"]: item["value"] for item in result["verdicts"]} == {
+        "attack_success": 2, "attack": 0, "attack_failed": 2, "non_attack": 1, "unknown": 1,
+    }
+    assert (
+        result["triage"]["totalRecords"], result["triage"]["triageFailed"], result["denoise"]["totalRaw"],
+    ) == (6, 1, 7)
+    # The failed row is pending once, not once as failed and again as unknown.
+    assert result["closedLoop"] == {
+        "autoClosed": 3, "resolved": 5, "manualDecision": 1, "pending": 1, "resolutionRate": round(5 / 6, 4),
+    }
+
+
+def test_soc_dashboard_holds_the_write_lock_while_its_triggers_are_down(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """An alert written while the projection triggers are being replaced would never reach the facts."""
+    db_path = tmp_path / "soc.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE alert_records (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "record_json TEXT NOT NULL, asset_date TEXT NOT NULL, event_time INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO alert_records(record_json, asset_date, event_time) VALUES (?, ?, ?)",
+            (json.dumps({"threat_name": "first"}), "2026-07-14", 1784014800),
+        )
+        conn.commit()
+    handlers = _load_dashboard_handlers()
+    handlers.DEFAULT_SQLITE_DB = db_path
+    handlers._schema_ready.clear()
+    assert handlers._ensure_sqlite_schema() is True
+    handlers._schema_ready.clear()  # a restart: same schema version, the triggers are replaced again
+
+    seen = {}
+    real_drop = handlers._drop_dashboard_triggers
+
+    def drop_then_another_writer(conn):
+        real_drop(conn)
+        other = sqlite3.connect(db_path, timeout=0)
+        try:
+            other.execute(
+                "INSERT INTO alert_records(record_json, asset_date, event_time) VALUES (?, ?, ?)",
+                (json.dumps({"threat_name": "second"}), "2026-07-14", 1784014900),
+            )
+            other.commit()
+            seen["written_meanwhile"] = True
+        except sqlite3.OperationalError:
+            seen["written_meanwhile"] = False  # it waits for the schema check (busy timeout in real writers)
+        finally:
+            other.close()
+
+    monkeypatch.setattr(handlers, "_drop_dashboard_triggers", drop_then_another_writer)
+    assert handlers._ensure_sqlite_schema() is True
+
+    with sqlite3.connect(db_path) as conn:
+        alerts = conn.execute("SELECT COUNT(*) FROM alert_records").fetchone()[0]
+        facts = conn.execute("SELECT COUNT(*) FROM soc_dashboard_alert_facts").fetchone()[0]
+    assert seen == {"written_meanwhile": False}
+    assert facts == alerts == 1
+
+
+def test_soc_dashboard_upgrades_an_older_facts_table_in_place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A schema version bump recomputes the facts where they are; no table or index is dropped."""
+    db_path = tmp_path / "soc.db"
+    record = {
+        "_source_type": "tdp", "threat_name": "SQL injection", "threat_type": "web_attack",
+        "triage_status": "ok", "_triage_persisted_at": "2026-07-14T13:00:00",
+        "triage_attack_verdict": "attack", "triage_attack_success": "success",
+    }
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE alert_records (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "record_json TEXT NOT NULL, asset_date TEXT NOT NULL, event_time INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO alert_records(record_json, asset_date, event_time) VALUES (?, ?, ?)",
+            (json.dumps(record), "2026-07-14", 1784014800),
+        )
+        conn.execute("CREATE TABLE soc_dashboard_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT NOT NULL)")
+        conn.execute("INSERT INTO soc_dashboard_meta VALUES ('schema_version', '3')")
+        # Schema version 3: verdict / attack_success instead of the triage_attack_* pair.
+        conn.execute(
+            "CREATE TABLE soc_dashboard_alert_facts (alert_row_id INTEGER PRIMARY KEY, "
+            "row_key TEXT NOT NULL UNIQUE, asset_date TEXT NOT NULL, event_time INTEGER, "
+            "source_type TEXT, threat_name TEXT, threat_type TEXT, is_duplicate INTEGER NOT NULL DEFAULT 0, "
+            "phase TEXT, direction TEXT, result TEXT, protocol TEXT, severity TEXT, response_code TEXT, "
+            "port TEXT, has_triage INTEGER NOT NULL DEFAULT 0, triage_persisted_at TEXT, triage_status TEXT, "
+            "triage_source TEXT, verdict TEXT, risk_level TEXT, triage_ms INTEGER NOT NULL DEFAULT 0, "
+            "attack_success INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute(
+            "INSERT INTO soc_dashboard_alert_facts (alert_row_id, row_key, asset_date, verdict) "
+            "VALUES (1, '1', '2026-07-14', 'attack'), (999, 'gone', '2026-07-13', 'benign')"
+        )
+        conn.commit()
+
+    dropped = []
+    real_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+
+        def authorizer(action, name, *_):
+            if action in (sqlite3.SQLITE_DROP_TABLE, sqlite3.SQLITE_DROP_INDEX):
+                dropped.append(name)
+            return sqlite3.SQLITE_OK
+
+        connection.set_authorizer(authorizer)
+        return connection
+
+    handlers = _load_dashboard_handlers()
+    handlers.DEFAULT_SQLITE_DB = db_path
+    handlers._schema_ready.clear()
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite3, "connect", connect)
+        assert handlers._ensure_sqlite_schema() is True
+
+    with sqlite3.connect(db_path) as conn:
+        facts = conn.execute(
+            "SELECT alert_row_id, row_key, threat_type, has_triage, triage_attack_verdict, "
+            "triage_attack_success FROM soc_dashboard_alert_facts ORDER BY alert_row_id"
+        ).fetchall()
+        version = conn.execute(
+            "SELECT meta_value FROM soc_dashboard_meta WHERE meta_key='schema_version'"
+        ).fetchone()[0]
+
+    assert dropped == []
+    assert facts == [(1, "1", "web_attack", 1, "attack", "success")]
+    assert version == "4"
 
 
 def test_soc_dashboard_activity_does_not_mix_name_type_or_risk_fields():
@@ -716,14 +1042,68 @@ def test_soc_alert_verdict_uses_model_triage_instead_of_raw_attack_result():
     assert operations._verdict_bucket({"threat_result": "success"}) == "unknown"
 
 
+# Records as the triage workflow wrote them over time: the current pair of fields,
+# and older ones that kept the outcome in the verdict or as a boolean.
+ATTACK_OUTCOMES = [
+    ({"triage_attack_verdict": "attack_success"}, "success"),
+    ({"triage_attack_verdict": "attack_failed"}, "failed"),
+    ({"triage_attack_verdict": "attack_failed", "triage_attack_success": False}, "failed"),
+    ({"triage_attack_verdict": "attack_success", "triage_attack_success": False}, "success"),
+    ({"triage_attack_verdict": "attack", "triage_attack_success": True}, "success"),
+    ({"triage_attack_verdict": "attack", "triage_attack_success": False}, "unknown"),
+    ({"triage_attack_verdict": "attack", "triage_attack_success": "failed"}, "failed"),
+    ({"triage_attack_verdict": "attack_success", "triage_attack_success": "unknown"}, "unknown"),
+    ({"triage_attack_verdict": "non_attack", "triage_attack_success": "success"}, "unknown"),
+]
+
+
+def _load_workspace_query_tool():
+    path = (
+        Path(__file__).resolve().parents[2]
+        / ".flocks/flockshub/plugins/tools/python/soc_workspace_query/soc_workspace_query.py"
+    )
+    spec = importlib.util.spec_from_file_location("soc_workspace_query_outcome_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module
+
+
+@pytest.mark.parametrize("record,expected", ATTACK_OUTCOMES)
+def test_every_soc_entry_reads_an_attack_outcome_the_same_way(record, expected):
+    """Alerts page, posture dashboard (Python and SQL), overview and the query tool (Python and SQL)."""
+    dashboard = _load_dashboard_handlers()
+    query_tool = _load_workspace_query_tool()
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute("CREATE TABLE alert_records (record_json TEXT NOT NULL)")
+        conn.execute("INSERT INTO alert_records VALUES (?)", (json.dumps(record),))
+        dashboard_sql = conn.execute(
+            f"SELECT {dashboard._fact_expressions('source')[-1]} FROM alert_records AS source"
+        ).fetchone()[0]
+        query_sql = conn.execute(f"SELECT {query_tool.ATTACK_RESULT_SQL} FROM alert_records").fetchone()[0]
+
+    readings = {
+        "alerts": _load_alert_operations()._triage_attack_success(record),
+        "dashboard": dashboard._triage_attack_success_value(record),
+        "dashboard_sql": dashboard_sql,
+        "overview": _load_overview_handlers()._triage_attack_success_value(record),
+        "query_tool": query_tool._attack_result(record),
+        "query_tool_sql": query_sql,
+    }
+    assert readings == dict.fromkeys(readings, expected)
+
+
 def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path: Path):
     workflow_db = tmp_path / "workflow.db"
-    with sync_query.connect() as conn:
+    with sqlite3.connect(workflow_db) as conn:
         conn.execute(
             """
             CREATE TABLE workflow_stats (
                 workflow_id TEXT PRIMARY KEY,
-                call_count BIGINT
+                call_count INTEGER
             )
             """
         )
@@ -731,11 +1111,11 @@ def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path:
             "INSERT INTO workflow_stats VALUES (?, ?)",
             ("stream_alert_denoise", 42),
         )
-
+        conn.commit()
 
     handlers = _load_dashboard_handlers()
     handlers.WORKFLOW_DB = workflow_db
-    handlers.DEFAULT_POSTGRES_DB = tmp_path / "missing-soc.db"
+    handlers.DEFAULT_SQLITE_DB = tmp_path / "missing-soc.db"
     handlers._activity_pruned_at = float("inf")
 
     payload = handlers._get_activity({"bootstrap": "latest"})
@@ -744,12 +1124,12 @@ def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path:
     assert payload["workflowEvents"] == []
     assert payload["events"] == []
 
-    with sync_query.connect() as conn:
+    with sqlite3.connect(workflow_db) as conn:
         conn.execute(
             "UPDATE workflow_stats SET call_count = 43 WHERE workflow_id = ?",
             ("stream_alert_denoise",),
         )
-
+        conn.commit()
 
     assert handlers._get_activity({"bootstrap": "latest"})["workflowStats"] == {
         "callCount": 43,
@@ -760,7 +1140,7 @@ def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path:
 def test_soc_dashboard_activity_exposes_triage_workflow_link_context(tmp_path: Path):
     workflow_db = tmp_path / "workflow.db"
     now_ms = int(datetime.now().timestamp() * 1000)
-    with sync_query.connect() as conn:
+    with sqlite3.connect(workflow_db) as conn:
         conn.execute(
             """
             CREATE TABLE workflow_executions (
@@ -769,7 +1149,7 @@ def test_soc_dashboard_activity_exposes_triage_workflow_link_context(tmp_path: P
                 status TEXT NOT NULL,
                 input_params TEXT NOT NULL DEFAULT '{}',
                 output_results TEXT NOT NULL DEFAULT '{}',
-                started_at BIGINT NOT NULL,
+                started_at INTEGER NOT NULL,
                 payload TEXT NOT NULL DEFAULT '{}'
             )
             """
@@ -797,11 +1177,11 @@ def test_soc_dashboard_activity_exposes_triage_workflow_link_context(tmp_path: P
                 json.dumps({"sessionId": "session-triage-1", "messageId": "msg-triage-1"}),
             ),
         )
-
+        conn.commit()
 
     handlers = _load_dashboard_handlers()
     handlers.WORKFLOW_DB = workflow_db
-    handlers.DEFAULT_POSTGRES_DB = tmp_path / "missing-soc.db"
+    handlers.DEFAULT_SQLITE_DB = tmp_path / "missing-soc.db"
     handlers._activity_pruned_at = float("inf")
 
     payload = handlers._get_activity({"bootstrap": "latest"})
@@ -824,7 +1204,7 @@ def test_soc_dashboard_activity_tolerates_empty_soc_db_with_workflow_events(tmp_
     soc_db.touch()
     workflow_db = tmp_path / "workflow.db"
     now_ms = int(datetime.now().timestamp() * 1000)
-    with sync_query.connect() as conn:
+    with sqlite3.connect(workflow_db) as conn:
         conn.execute(
             """
             CREATE TABLE workflow_executions (
@@ -833,7 +1213,7 @@ def test_soc_dashboard_activity_tolerates_empty_soc_db_with_workflow_events(tmp_
                 status TEXT NOT NULL,
                 input_params TEXT NOT NULL DEFAULT '{}',
                 output_results TEXT NOT NULL DEFAULT '{}',
-                started_at BIGINT NOT NULL,
+                started_at INTEGER NOT NULL,
                 payload TEXT NOT NULL DEFAULT '{}'
             )
             """
@@ -850,10 +1230,10 @@ def test_soc_dashboard_activity_tolerates_empty_soc_db_with_workflow_events(tmp_
                 json.dumps({"sessionId": "session-1", "messageId": "message-1"}),
             ),
         )
-
+        conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.DEFAULT_POSTGRES_DB = soc_db
+    handlers.DEFAULT_SQLITE_DB = soc_db
     handlers.WORKFLOW_DB = workflow_db
     handlers._activity_pruned_at = float("inf")
 
@@ -879,7 +1259,7 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
     yesterday_at_1105 = today_at_1105 - timedelta(days=1)
     today_ms = int(today_at_1100.timestamp() * 1000)
     yesterday_ms = int(yesterday_at_1100.timestamp() * 1000)
-    with sync_query.connect() as conn:
+    with sqlite3.connect(tasks_db) as conn:
         conn.execute(
             """
             CREATE TABLE task_schedulers (
@@ -960,18 +1340,18 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
                     ),
             ],
         )
-
+        conn.commit()
 
     workflow_db = tmp_path / "workflow.db"
-    with sync_query.connect() as conn:
+    with sqlite3.connect(workflow_db) as conn:
         conn.execute(
             """
             CREATE TABLE workflow_stats (
                 workflow_id TEXT PRIMARY KEY,
-                call_count BIGINT NOT NULL,
-                success_count BIGINT NOT NULL,
-                error_count BIGINT NOT NULL,
-                updated_at BIGINT NOT NULL
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
             )
             """
         )
@@ -984,14 +1364,14 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
                 current_phase TEXT,
                 current_node_id TEXT,
                 current_node_type TEXT,
-                current_step_index BIGINT,
-                step_count BIGINT NOT NULL DEFAULT 0,
+                current_step_index INTEGER,
+                step_count INTEGER NOT NULL DEFAULT 0,
                 input_params TEXT NOT NULL DEFAULT '{}',
                 output_results TEXT NOT NULL DEFAULT '{}',
                 error_message TEXT,
-                started_at BIGINT NOT NULL,
-                finished_at BIGINT,
-                updated_at BIGINT,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                updated_at INTEGER,
                 payload TEXT NOT NULL DEFAULT '{}'
             )
             """
@@ -1001,9 +1381,9 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
             CREATE TABLE workflow_configs (
                 workflow_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
-                version BIGINT,
+                version INTEGER,
                 config TEXT NOT NULL,
-                updated_at BIGINT,
+                updated_at INTEGER,
                 PRIMARY KEY (workflow_id, kind)
             )
             """
@@ -1132,7 +1512,7 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
                 ),
             ],
         )
-
+        conn.commit()
 
     handlers = _load_dashboard_handlers()
     handlers.TASK_DB = tasks_db
@@ -1202,15 +1582,15 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
 
 def test_soc_dashboard_task_center_hides_mock_pinned_workflows_by_default(tmp_path: Path):
     workflow_db = tmp_path / "workflow.db"
-    with sync_query.connect() as conn:
+    with sqlite3.connect(workflow_db) as conn:
         conn.execute(
             """
             CREATE TABLE workflow_stats (
                 workflow_id TEXT PRIMARY KEY,
-                call_count BIGINT NOT NULL,
-                success_count BIGINT NOT NULL,
-                error_count BIGINT NOT NULL,
-                updated_at BIGINT
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER
             )
             """
         )
@@ -1220,11 +1600,11 @@ def test_soc_dashboard_task_center_hides_mock_pinned_workflows_by_default(tmp_pa
                 id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
                 status TEXT NOT NULL,
-                started_at BIGINT NOT NULL
+                started_at INTEGER NOT NULL
             )
             """
         )
-
+        conn.commit()
 
     handlers = _load_dashboard_handlers()
     handlers.TASK_DB = tmp_path / "missing-tasks.db"
@@ -1248,8 +1628,8 @@ def test_soc_dashboard_token_usage_uses_grouped_cached_reads(tmp_path: Path, mon
 
     now = datetime.now().astimezone().replace(hour=10, minute=0, second=0, microsecond=0)
     yesterday = now - timedelta(days=1)
-    with sync_query.connect() as conn:
-        conn.execute("CREATE TABLE usage_records (created_at TEXT NOT NULL, total_tokens BIGINT NOT NULL)")
+    with sqlite3.connect(usage_db) as conn:
+        conn.execute("CREATE TABLE usage_records (created_at TEXT NOT NULL, total_tokens INTEGER NOT NULL)")
         conn.executemany(
             "INSERT INTO usage_records VALUES (?, ?)",
             [
@@ -1258,7 +1638,7 @@ def test_soc_dashboard_token_usage_uses_grouped_cached_reads(tmp_path: Path, mon
                 (handlers._usage_iso(yesterday), 7),
             ],
         )
-
+        conn.commit()
 
     first = handlers._read_token_usage()
 
@@ -1271,7 +1651,7 @@ def test_soc_dashboard_token_usage_uses_grouped_cached_reads(tmp_path: Path, mon
     def fail_connect(*args, **kwargs):
         raise AssertionError("token usage should be served from cache")
 
-    monkeypatch.setattr(handlers, "_connect", fail_connect)
+    monkeypatch.setattr(handlers.sqlite3, "connect", fail_connect)
     assert handlers._read_token_usage() == first
 
 
@@ -1284,14 +1664,14 @@ def test_soc_dashboard_task_center_supports_legacy_workflow_execution_schema(tmp
         microsecond=0,
     )
     today_ms = int(today_at_1100.timestamp() * 1000)
-    with sync_query.connect() as conn:
+    with sqlite3.connect(workflow_db) as conn:
         conn.execute(
             """
             CREATE TABLE workflow_stats (
                 workflow_id TEXT PRIMARY KEY,
-                call_count BIGINT NOT NULL,
-                success_count BIGINT NOT NULL,
-                error_count BIGINT NOT NULL
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL
             )
             """
         )
@@ -1301,7 +1681,7 @@ def test_soc_dashboard_task_center_supports_legacy_workflow_execution_schema(tmp
                 id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
                 status TEXT NOT NULL,
-                started_at BIGINT NOT NULL
+                started_at INTEGER NOT NULL
             )
             """
         )
@@ -1313,7 +1693,7 @@ def test_soc_dashboard_task_center_supports_legacy_workflow_execution_schema(tmp
             "INSERT INTO workflow_executions VALUES (?, ?, ?, ?)",
             ("wf-running", "stream_alert_denoise", "running", today_ms),
         )
-
+        conn.commit()
 
     handlers = _load_dashboard_handlers()
     handlers.TASK_DB = tmp_path / "missing-tasks.db"
@@ -1336,15 +1716,15 @@ def test_soc_dashboard_task_center_supports_legacy_workflow_execution_schema(tmp
 def test_soc_dashboard_task_center_ignores_disabled_trigger_workflow_runs(tmp_path: Path):
     workflow_db = tmp_path / "workflow.db"
     now_ms = int(datetime.now().astimezone().timestamp() * 1000)
-    with sync_query.connect() as conn:
+    with sqlite3.connect(workflow_db) as conn:
         conn.execute(
             """
             CREATE TABLE workflow_stats (
                 workflow_id TEXT PRIMARY KEY,
-                call_count BIGINT NOT NULL,
-                success_count BIGINT NOT NULL,
-                error_count BIGINT NOT NULL,
-                updated_at BIGINT NOT NULL
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
             )
             """
         )
@@ -1354,10 +1734,10 @@ def test_soc_dashboard_task_center_ignores_disabled_trigger_workflow_runs(tmp_pa
                 id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
                 status TEXT NOT NULL,
-                current_step_index BIGINT,
-                step_count BIGINT,
-                started_at BIGINT NOT NULL,
-                updated_at BIGINT
+                current_step_index INTEGER,
+                step_count INTEGER,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER
             )
             """
         )
@@ -1366,9 +1746,9 @@ def test_soc_dashboard_task_center_ignores_disabled_trigger_workflow_runs(tmp_pa
             CREATE TABLE workflow_configs (
                 workflow_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
-                version BIGINT,
+                version INTEGER,
                 config TEXT NOT NULL,
-                updated_at BIGINT,
+                updated_at INTEGER,
                 PRIMARY KEY (workflow_id, kind)
             )
             """
@@ -1399,7 +1779,7 @@ def test_soc_dashboard_task_center_ignores_disabled_trigger_workflow_runs(tmp_pa
                 now_ms,
             ),
         )
-
+        conn.commit()
 
     handlers = _load_dashboard_handlers()
     handlers.TASK_DB = tmp_path / "missing-tasks.db"
@@ -1421,15 +1801,15 @@ def test_soc_dashboard_task_center_uses_trigger_runtime_window_for_active_workfl
     workflow_db = tmp_path / "workflow.db"
     now_ms = int(datetime.now().astimezone().timestamp() * 1000)
     old_ms = now_ms - 3 * 60 * 60 * 1000
-    with sync_query.connect() as conn:
+    with sqlite3.connect(workflow_db) as conn:
         conn.execute(
             """
             CREATE TABLE workflow_stats (
                 workflow_id TEXT PRIMARY KEY,
-                call_count BIGINT NOT NULL,
-                success_count BIGINT NOT NULL,
-                error_count BIGINT NOT NULL,
-                updated_at BIGINT NOT NULL
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
             )
             """
         )
@@ -1439,10 +1819,10 @@ def test_soc_dashboard_task_center_uses_trigger_runtime_window_for_active_workfl
                 id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
                 status TEXT NOT NULL,
-                current_step_index BIGINT,
-                step_count BIGINT,
-                started_at BIGINT NOT NULL,
-                updated_at BIGINT
+                current_step_index INTEGER,
+                step_count INTEGER,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER
             )
             """
         )
@@ -1451,9 +1831,9 @@ def test_soc_dashboard_task_center_uses_trigger_runtime_window_for_active_workfl
             CREATE TABLE workflow_configs (
                 workflow_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
-                version BIGINT,
+                version INTEGER,
                 config TEXT NOT NULL,
-                updated_at BIGINT,
+                updated_at INTEGER,
                 PRIMARY KEY (workflow_id, kind)
             )
             """
@@ -1507,7 +1887,7 @@ def test_soc_dashboard_task_center_uses_trigger_runtime_window_for_active_workfl
                 ),
             ],
         )
-
+        conn.commit()
 
     handlers = _load_dashboard_handlers()
     handlers.TASK_DB = tmp_path / "missing-tasks.db"
@@ -1533,15 +1913,15 @@ def test_soc_dashboard_task_center_marks_stale_running_without_trigger_config(tm
     workflow_db = tmp_path / "workflow.db"
     now_ms = int(datetime.now().astimezone().timestamp() * 1000)
     old_ms = now_ms - 3 * 60 * 60 * 1000
-    with sync_query.connect() as conn:
+    with sqlite3.connect(workflow_db) as conn:
         conn.execute(
             """
             CREATE TABLE workflow_stats (
                 workflow_id TEXT PRIMARY KEY,
-                call_count BIGINT NOT NULL,
-                success_count BIGINT NOT NULL,
-                error_count BIGINT NOT NULL,
-                updated_at BIGINT NOT NULL
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
             )
             """
         )
@@ -1551,10 +1931,10 @@ def test_soc_dashboard_task_center_marks_stale_running_without_trigger_config(tm
                 id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
                 status TEXT NOT NULL,
-                current_step_index BIGINT,
-                step_count BIGINT,
-                started_at BIGINT NOT NULL,
-                updated_at BIGINT
+                current_step_index INTEGER,
+                step_count INTEGER,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER
             )
             """
         )
@@ -1566,7 +1946,7 @@ def test_soc_dashboard_task_center_marks_stale_running_without_trigger_config(tm
             "INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?, ?)",
             ("wf-stale-manual", "custom_workflow", "running", 1, 2, old_ms, old_ms),
         )
-
+        conn.commit()
 
     handlers = _load_dashboard_handlers()
     handlers.TASK_DB = tmp_path / "missing-tasks.db"
@@ -1589,7 +1969,7 @@ def test_soc_dashboard_task_center_orders_dynamic_rows(tmp_path: Path):
     recent_ms = int(recent.timestamp() * 1000)
 
     tasks_db = tmp_path / "tasks.db"
-    with sync_query.connect() as conn:
+    with sqlite3.connect(tasks_db) as conn:
         conn.execute(
             """
             CREATE TABLE task_schedulers (
@@ -1676,18 +2056,18 @@ def test_soc_dashboard_task_center_orders_dynamic_rows(tmp_path: Path):
             "INSERT INTO task_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             task_exec_rows,
         )
-
+        conn.commit()
 
     workflow_db = tmp_path / "workflow.db"
-    with sync_query.connect() as conn:
+    with sqlite3.connect(workflow_db) as conn:
         conn.execute(
             """
             CREATE TABLE workflow_stats (
                 workflow_id TEXT PRIMARY KEY,
-                call_count BIGINT NOT NULL,
-                success_count BIGINT NOT NULL,
-                error_count BIGINT NOT NULL,
-                updated_at BIGINT NOT NULL
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
             )
             """
         )
@@ -1697,9 +2077,9 @@ def test_soc_dashboard_task_center_orders_dynamic_rows(tmp_path: Path):
                 id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
                 status TEXT NOT NULL,
-                started_at BIGINT NOT NULL,
-                finished_at BIGINT,
-                updated_at BIGINT
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                updated_at INTEGER
             )
             """
         )
@@ -1708,9 +2088,9 @@ def test_soc_dashboard_task_center_orders_dynamic_rows(tmp_path: Path):
             CREATE TABLE workflow_configs (
                 workflow_id TEXT NOT NULL,
                 kind TEXT NOT NULL,
-                version BIGINT,
+                version INTEGER,
                 config TEXT NOT NULL,
-                updated_at BIGINT,
+                updated_at INTEGER,
                 PRIMARY KEY (workflow_id, kind)
             )
             """
@@ -1741,7 +2121,7 @@ def test_soc_dashboard_task_center_orders_dynamic_rows(tmp_path: Path):
                 older_ms,
             ),
         )
-
+        conn.commit()
 
     handlers = _load_dashboard_handlers()
     handlers.TASK_DB = tasks_db
@@ -1828,13 +2208,33 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
     end_time = start_time + 3600
     asset_date = datetime.fromtimestamp(start_time).strftime("%Y-%m-%d")
     soc_db = tmp_path / "soc.db"
-    with sync_query.connect() as conn:
-        _create_alert_records(conn)
-        for index, (offset, duplicate) in enumerate(((60, 0), (120, 1)), 1):
-            _insert_alert_record(conn, index, {"_source_type": "soc"}, asset_date, start_time + offset, duplicate=duplicate)
+    with sqlite3.connect(soc_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE alert_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_json TEXT NOT NULL,
+                asset_date TEXT NOT NULL,
+                event_time INTEGER NOT NULL,
+                is_duplicate INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        for offset, is_duplicate in ((60, 0), (120, 1)):
+            conn.execute(
+                "INSERT INTO alert_records(record_json, asset_date, event_time, is_duplicate) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    json.dumps({"_source_type": "soc"}),
+                    asset_date,
+                    start_time + offset,
+                    is_duplicate,
+                ),
+            )
+        conn.commit()
 
     workflow_db = tmp_path / "workflow.db"
-    with sync_query.connect() as conn:
+    with sqlite3.connect(workflow_db) as conn:
         conn.execute(
             """
             CREATE TABLE workflow_executions (
@@ -1843,7 +2243,7 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
                 status TEXT NOT NULL,
                 input_params TEXT NOT NULL,
                 output_results TEXT NOT NULL,
-                started_at BIGINT NOT NULL
+                started_at INTEGER NOT NULL
             )
             """
         )
@@ -1851,10 +2251,10 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
             """
             CREATE TABLE workflow_stats (
                 workflow_id TEXT PRIMARY KEY,
-                call_count BIGINT NOT NULL,
-                success_count BIGINT NOT NULL,
-                error_count BIGINT NOT NULL,
-                updated_at BIGINT NOT NULL
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
             )
             """
         )
@@ -1862,10 +2262,10 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
             """
             CREATE TABLE soc_dashboard_workflow_stats_samples (
                 workflow_id TEXT NOT NULL,
-                sampled_at BIGINT NOT NULL,
-                call_count BIGINT NOT NULL,
-                success_count BIGINT NOT NULL DEFAULT 0,
-                error_count BIGINT NOT NULL DEFAULT 0,
+                sampled_at INTEGER NOT NULL,
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                error_count INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (workflow_id, sampled_at)
             )
             """
@@ -1970,10 +2370,10 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
             "UPDATE workflow_executions SET input_params = ?, output_results = ? WHERE id = ?",
             (json.dumps(duplicate_input), json.dumps(duplicate_output), "second"),
         )
-
+        conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.DEFAULT_POSTGRES_DB = soc_db
+    handlers.DEFAULT_SQLITE_DB = soc_db
     handlers.WORKFLOW_DB = workflow_db
     handlers._schema_ready.clear()
 

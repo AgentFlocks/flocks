@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from flocks.workspace.manager import WorkspaceManager
 
@@ -292,30 +292,21 @@ async def upsert_session_execution_profile(
     *,
     patch: Mapping[str, Any],
     source: str,
-    transaction_hook: Callable[[Any, "SessionInfo"], Awaitable[Mapping[str, Any]]] | None = None,
 ) -> dict[str, Any] | None:
     from flocks.session.session import Session
 
     session = await Session.get_by_id(str(session_id or "").strip())
     if session is None:
         return None
-    async def merge_current(tx, current, metadata):
-        actual_patch = dict(patch)
-        if transaction_hook is not None:
-            actual_patch.update(await transaction_hook(tx, current))
-        merged_profile = merge_profile(current, patch=actual_patch, source=source)
-        return with_profile_metadata(metadata, merged_profile)
 
-    updated = await Session.mutate_metadata(
-        session.project_id,
-        session.id,
-        lambda metadata: metadata,
-        transaction_hook=merge_current,
-    )
+    def merge_current(metadata: dict[str, Any]) -> dict[str, Any]:
+        # Merged into the metadata as it is under the lifecycle lock: the copy
+        # read above may predate another update (contextFolders, a knowledge
+        # base) that writing it back whole would undo.
+        current = session.model_copy(update={"metadata": metadata})
+        return with_profile_metadata(metadata, merge_profile(current, patch=patch, source=source))
+
+    updated = await Session.mutate_metadata(session.project_id, session.id, merge_current)
     if updated is None:
-        if transaction_hook is not None:
-            # A caller coordinating another write must not interpret a lost
-            # lifecycle race as permission to commit that write separately.
-            raise RuntimeError("session_unavailable_for_profile_update")
         return None
     return profile_from_session(updated)

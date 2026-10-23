@@ -293,31 +293,6 @@ async def test_revert_without_snapshot_config_keeps_snapshot_null(client: AsyncC
     assert resp.json()["revert"].get("snapshot") in (None, "")
 
 
-@pytest.mark.asyncio
-async def test_unrevert_is_refused_while_the_session_runs_elsewhere(client: AsyncClient, session_id: str, monkeypatch):
-    """Unrevert restores files outside a runner: like revert it needs the session's execution lease."""
-    from flocks.session.ownership import SessionExecutionLease
-    from flocks.snapshot import snapshot as snapshot_module
-
-    monkeypatch.setattr(snapshot_module.Snapshot, "track", AsyncMock(return_value=None), raising=True)
-    first = await _noreply(client, session_id, "one", mock_reply="1")
-    await _noreply(client, session_id, "two", mock_reply="2")
-    resp = await client.post(f"/api/session/{session_id}/revert", json={"messageID": first})
-    assert resp.status_code == status.HTTP_200_OK, resp.text
-
-    runner = await SessionExecutionLease.acquire(session_id)  # running in another process
-    try:
-        resp = await client.post(f"/api/session/{session_id}/unrevert")
-        assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
-    finally:
-        await runner.release()
-    assert (await client.get(f"/api/session/{session_id}")).json()["revert"]["messageID"] == first
-
-    resp = await client.post(f"/api/session/{session_id}/unrevert")
-    assert resp.status_code == status.HTTP_200_OK, resp.text
-    assert resp.json()["revert"] is None
-
-
 # ---------------------------------------------------------------------------
 # diff / metrics / recent / statistics access  (SES-0171 / 0172 / 0173 / 0196~0209 / 0213 / 0215 / 0216)
 # ---------------------------------------------------------------------------

@@ -84,44 +84,30 @@ def week_slot(now: datetime, start: datetime) -> tuple[str | None, datetime]:
     return slot, monday if now < monday else monday + timedelta(days=7)
 
 
-async def _read_modify_write(tx, key: str, change: Callable[[dict], T], *, lock_row: bool) -> T:
-    """One read-modify-write of the KV record *key* inside an open transaction.
-
-    The record lives in the document store's own table, which the two backends
-    name differently (SQLite ``storage``, PostgreSQL ``runtime_state``); the
-    ``?`` placeholders are rewritten by the handle. On PostgreSQL a
-    transaction-scoped advisory lock on the key serializes concurrent workers
-    the way ``BEGIN IMMEDIATE`` serializes the whole SQLite database -- a row
-    lock would not do, because ``FOR UPDATE`` cannot lock a row that does not
-    exist yet, and the first write of a campaign is exactly that case.
-    """
-    if lock_row:
-        await tx.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (key,))
-    row = await tx.fetch_one("SELECT value FROM runtime_state WHERE key = ?", (key,))
-    raw = row[0] if row else None
-    record = (json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)) if raw else {}
-    before = json.dumps(record)
-    result = change(record)
-    after = json.dumps(record)
-    if after != before:
-        await tx.execute(
-            "INSERT INTO runtime_state (key, value, value_type, updated_at) VALUES (?, ?::jsonb, 'json', now()) "
-            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
-            (key, after),
-        )
-    return result
-
-
 async def _update_record(key: str, change: Callable[[dict], T]) -> T:
-    """Serialize campaign initialization and delivery transitions across workers.
-
-    Runs on the active backend through the portable handle: SQLite takes the
-    database write lock up front (``BEGIN IMMEDIATE``), PostgreSQL takes an
-    advisory lock on the key for the duration of the transaction.
-    """
+    """Serialize campaign initialization and delivery transitions across workers."""
     await Storage.init(Storage.get_db_path())
-    async with Storage.transaction() as db:
-        return await _read_modify_write(db, key, change, lock_row=True)
+    async with Storage.connect() as db:
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            async with db.execute("SELECT value FROM storage WHERE key = ?", (key,)) as cursor:
+                row = await cursor.fetchone()
+            record = json.loads(row[0]) if row else {}
+            before = json.dumps(record)
+            result = change(record)
+            after = json.dumps(record)
+            if after != before:
+                now = utc_now().isoformat()
+                await db.execute(
+                    "INSERT INTO storage (key, value, type, created_at, updated_at) VALUES (?, ?, 'json', ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                    (key, after, now, now),
+                )
+            await db.commit()
+            return result
+        except BaseException:
+            await db.rollback()
+            raise
 
 
 class TokenPolicyService:

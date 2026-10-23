@@ -303,27 +303,24 @@ class TestArchiveUnarchive:
 
     @pytest.mark.asyncio
     async def test_archive_cannot_be_overwritten_by_an_inflight_update(self, monkeypatch):
-        from flocks.db.backends.postgres import PostgresTransaction
         session = await _create(project_id="proj_arch_update_race")
         storage_key = f"session:{session.project_id}:{session.id}"
         update_reached_write = asyncio.Event()
         release_update = asyncio.Event()
-        original_write = PostgresTransaction.execute_many
+        original_set = Storage.set
 
-        async def delayed_write(tx, sql, rows):
-            if sql.startswith("UPDATE runtime_state SET key") and any(
-                row[2] == storage_key and '"title":"Racing update"' in row[1] for row in rows
-            ):
+        async def delayed_set(key, value, *args, **kwargs):
+            if key == storage_key and getattr(value, "title", None) == "Racing update":
                 update_reached_write.set()
                 await release_update.wait()
-            return await original_write(tx, sql, rows)
+            return await original_set(key, value, *args, **kwargs)
 
-        monkeypatch.setattr(PostgresTransaction, "execute_many", delayed_write)
+        monkeypatch.setattr(Storage, "set", delayed_set)
 
         update_task = asyncio.create_task(
             Session.update(session.project_id, session.id, title="Racing update")
         )
-        await asyncio.wait_for(update_reached_write.wait(), 3)
+        await update_reached_write.wait()
         archive_task = asyncio.create_task(Session.archive(session.project_id, session.id))
         await asyncio.sleep(0)
         assert archive_task.done() is False
@@ -338,26 +335,23 @@ class TestArchiveUnarchive:
 
     @pytest.mark.asyncio
     async def test_unrelated_session_updates_do_not_share_a_global_lock(self, monkeypatch):
-        from flocks.db.backends.postgres import PostgresTransaction
         first = await _create(project_id="proj_keyed_locks", title="First")
         second = await _create(project_id="proj_keyed_locks", title="Second")
         first_write_started = asyncio.Event()
         release_first_write = asyncio.Event()
-        original_write = PostgresTransaction.execute_many
+        original_set = Storage.set
 
-        async def delayed_write(tx, sql, rows):
-            if sql.startswith("UPDATE runtime_state SET key") and any(
-                row[2].endswith(f":{first.id}") and '"title":"Slow"' in row[1] for row in rows
-            ):
+        async def delayed_set(key, value, *args, **kwargs):
+            if key.endswith(f":{first.id}") and getattr(value, "title", None) == "Slow":
                 first_write_started.set()
                 await release_first_write.wait()
-            return await original_write(tx, sql, rows)
+            return await original_set(key, value, *args, **kwargs)
 
-        monkeypatch.setattr(PostgresTransaction, "execute_many", delayed_write)
+        monkeypatch.setattr(Storage, "set", delayed_set)
         first_update = asyncio.create_task(
             Session.update(first.project_id, first.id, title="Slow")
         )
-        await asyncio.wait_for(first_write_started.wait(), 3)
+        await first_write_started.wait()
 
         try:
             second_update = await asyncio.wait_for(

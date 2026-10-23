@@ -829,44 +829,29 @@ async def get_session_status(request: Request) -> Dict[str, Any]:
     from flocks.session.agent_inbox import AgentInbox
 
     current_user = require_user(request)
-    statuses = SessionStatus.list()
-    from flocks.storage.storage import Storage
-    async with Storage.transaction() as db:
-        rows = await db.fetch_all(
-            """WITH candidates AS (
-                SELECT unnest(?::text[]) AS session_id
-                UNION SELECT session_id FROM session_execution_leases WHERE expires_at > clock_timestamp()
-            )
-            SELECT document.value, lease.session_id IS NOT NULL
-            FROM candidates
-            JOIN runtime_state document ON document.key LIKE 'session:%'
-                AND document.value ->> 'id' = candidates.session_id
-            LEFT JOIN session_execution_leases lease ON lease.session_id = candidates.session_id
-                AND lease.expires_at > clock_timestamp()
-            WHERE COALESCE(document.value ->> 'status', 'active') <> 'deleted'""",
-            (list(statuses),),
-        )
+    statuses = dict(SessionStatus.list())
+    # A session another process runs reads as busy here too.  Only a database
+    # backend that shares sessions between processes names any.
+    from flocks.coordination import sessions_running_elsewhere
+
+    for session_id in await sessions_running_elsewhere():
+        session_status = statuses.get(session_id)
+        if session_status is None or session_status.type == "idle":
+            statuses[session_id] = SessionStatusBusy()
     readable: Dict[str, bool] = {}
 
     async def can_read(session_id: str) -> bool:
-        # The map spans every instance, so it must not show sessions (or
-        # their ancestry) that the caller could not open one by one.
+        # The map must not show sessions (or their ancestry) that the caller
+        # could not open one by one.
         if session_id not in readable:
             session = await _get_session_by_id_unfiltered(session_id)
             readable[session_id] = session is not None and SessionPolicy.can_read(session, current_user)
         return readable[session_id]
 
     result: Dict[str, Any] = {}
-    for raw, peer_busy in rows:
-        session = (SessionModel.model_validate_json(raw) if isinstance(raw, str)
-                   else SessionModel.model_validate(raw))
-        session_id = session.id
-        readable[session_id] = SessionPolicy.can_read(session, current_user)
-        if not readable[session_id]:
+    for session_id, session_status in statuses.items():
+        if not await can_read(session_id):
             continue
-        session_status = statuses.get(session_id)
-        if session_status is None or (peer_busy and session_status.type == "idle"):
-            session_status = SessionStatusBusy()
         result[session_id] = {
             **session_status.model_dump(),
             "ancestorSessionIDs": [

@@ -3,8 +3,7 @@
 ``collect_targets`` only reads; it backs the preview in the settings page.
 ``apply_policy`` checks every item again right before deleting it, because a
 session may have become active (or a log file may have been written) since
-the plan was made. Sessions that are running, in this worker or any other,
-are never touched.
+the plan was made. Sessions that are running are never touched.
 """
 
 from __future__ import annotations
@@ -13,13 +12,12 @@ import asyncio
 import os
 import shutil
 import time
-from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
-from flocks.retention.policy import RetentionPolicy, policy_unchanged
+from flocks.retention.policy import RetentionPolicy
 from flocks.utils.log import Log, get_log_dir, list_expired_log_paths
 
 log = Log.create(service="retention")
@@ -327,87 +325,25 @@ async def collect_targets(
     return targets
 
 
-async def _with_execution(
-    session_ids: Iterable[str],
-    operation: Callable[[Callable[[Any], Awaitable[None]]], Awaitable[Any]],
-) -> Any:
-    """Run ``operation(verify)`` holding every session's execution lease; None if one is taken.
-
-    Runners in every worker hold the same lease while they run (so does a
-    manual compaction), so a session another worker is running is left alone,
-    and none can start mid-delete. ``verify(db)`` re-checks every lease inside
-    the deleting transaction and locks it until the commit: a lease that
-    expired or was taken over meanwhile rolls the delete back. The operation
-    gets a task of its own: losing a lease cancels that task, not the round.
-    """
-    from flocks.session.ownership import SessionExecutionLease, SessionOwnershipLost
-
-    async def held() -> Any:
-        acquired = []
-        async with AsyncExitStack() as leases:
-            for session_id in sorted(set(session_ids)):
-                lease = await SessionExecutionLease.acquire(session_id)
-                if lease is None:
-                    return None
-                await leases.enter_async_context(lease)
-                acquired.append(lease)
-
-            async def verify(db: Any) -> None:
-                for lease in acquired:
-                    await lease.verify(db)
-
-            return await operation(verify)
-
-    task = asyncio.create_task(held(), name="data-retention-delete")
-    try:
-        await asyncio.wait({task})
-    except asyncio.CancelledError:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        raise
-    if task.cancelled():
-        raise SessionOwnershipLost("Session execution ownership lost during data retention")
-    return task.result()
-
-
 async def apply_policy(
     policy: RetentionPolicy,
     *,
     now: Optional[float] = None,
     should_continue: Optional[Callable[[], bool]] = None,
-    policy_version: Optional[int] = None,
 ) -> RetentionReport:
     """Delete everything ``policy`` says has expired and report what went.
 
     ``should_continue`` lets the scheduler stop an in-flight round once the
     policy changes (e.g. an admin switched a kind to "keep forever"); it is
     checked before each destructive delete so no further data goes under the
-    old, now-superseded policy. ``policy_version`` is the shared version read
-    before ``policy``: each delete holds it and stops once a save in any worker
-    moved it (see ``policy_unchanged``).
+    old, now-superseded policy.
     """
     from flocks.session.message import Message, UploadSweep
     from flocks.session.recorder import Recorder
     from flocks.session.session import Session
 
-    stale = False
-
     def _superseded() -> bool:
-        return stale or (should_continue is not None and not should_continue())
-
-    @asynccontextmanager
-    async def _policy_holds() -> AsyncIterator[bool]:
-        """Whether one more delete may go ahead; holds the shared policy version meanwhile."""
-        nonlocal stale
-        if _superseded():
-            yield False
-            return
-        if policy_version is None:
-            yield True
-            return
-        async with policy_unchanged(policy_version) as unchanged:
-            stale = not unchanged
-            yield unchanged
+        return should_continue is not None and not should_continue()
 
     now = time.time() if now is None else now
     now_ms = int(now * 1000)
@@ -416,15 +352,14 @@ async def apply_policy(
     report.skipped_busy = targets.skipped_busy
 
     for path in targets.log_paths:
-        async with _policy_holds() as go:
-            if not go:
-                break
-            size = await asyncio.to_thread(_path_size, path)
-            if await asyncio.to_thread(_remove_path, path):
-                report.log_paths += 1
-                report.freed_bytes += size
-            else:
-                report.errors += 1
+        if _superseded():
+            break
+        size = await asyncio.to_thread(_path_size, path)
+        if await asyncio.to_thread(_remove_path, path):
+            report.log_paths += 1
+            report.freed_bytes += size
+        else:
+            report.errors += 1
 
     deleted_ids: set[str] = set()
     if targets.sessions:
@@ -446,36 +381,31 @@ async def apply_policy(
             return True
 
         for target in targets.sessions:
-            async with _policy_holds() as go:
-                if not go:
-                    break
-                tree = await Session.collect_tree(target.project_id, target.root_id)
-                if not tree:
-                    continue
-                if not _tree_retainable_for_delete(tree):
-                    report.skipped_busy += 1  # used again or busy since the plan was made
-                    continue
-                try:
-                    # None: a runner holds one of the tree's leases.
-                    deleted = await _with_execution(
-                        [session.id for session in tree],
-                        lambda verify: Session.delete(
-                            target.project_id, target.root_id,
-                            precheck=_tree_retainable_for_delete, verify=verify,
-                        ),
-                    )
-                except Exception as exc:
-                    log.warning("retention.session_delete_failed", {
-                        "session_id": target.root_id,
-                        "error": str(exc),
-                    })
-                    report.errors += 1
-                    continue
-                if deleted:
-                    report.sessions += len(tree)
-                    deleted_ids.update(session.id for session in tree)
-                else:
-                    report.skipped_busy += 1
+            if _superseded():
+                break
+            tree = await Session.collect_tree(target.project_id, target.root_id)
+            if not tree:
+                continue
+            if not _tree_retainable_for_delete(tree):
+                report.skipped_busy += 1  # used again or busy since the plan was made
+                continue
+            try:
+                deleted = await Session.delete(
+                    target.project_id, target.root_id,
+                    precheck=_tree_retainable_for_delete,
+                )
+            except Exception as exc:
+                log.warning("retention.session_delete_failed", {
+                    "session_id": target.root_id,
+                    "error": str(exc),
+                })
+                report.errors += 1
+                continue
+            if deleted:
+                report.sessions += len(tree)
+                deleted_ids.update(session.id for session in tree)
+            else:
+                report.skipped_busy += 1
 
     if targets.messages:
         cutoff_ms = now_ms - policy.message_days * DAY_MS
@@ -491,28 +421,23 @@ async def apply_policy(
         # anywhere still names them takes a pass over every session's parts.
         try:
             for session_id in targets.messages:
-                async with _policy_holds() as go:
-                    if not go:
-                        break
-                    try:
-                        # Its delete checks this one lease itself (require_current_ownership).
-                        deleted = await _with_execution(
-                            [session_id],
-                            lambda _verify: Message.delete_selected(
-                                session_id, _expired_selector, is_busy=_session_is_busy, sweep_uploads=False,
-                            ),
-                        )
-                    except Exception as exc:
-                        log.warning("retention.message_delete_failed", {
-                            "session_id": session_id,
-                            "error": str(exc),
-                        })
-                        report.errors += 1
-                        continue
-                    if deleted is None or deleted < 0:
-                        report.skipped_busy += 1  # running here or in another worker
-                    else:
-                        report.messages += deleted
+                if _superseded():
+                    break
+                try:
+                    deleted = await Message.delete_selected(
+                        session_id, _expired_selector, is_busy=_session_is_busy, sweep_uploads=False,
+                    )
+                except Exception as exc:
+                    log.warning("retention.message_delete_failed", {
+                        "session_id": session_id,
+                        "error": str(exc),
+                    })
+                    report.errors += 1
+                    continue
+                if deleted < 0:
+                    report.skipped_busy += 1  # session was running
+                else:
+                    report.messages += deleted
         finally:
             try:
                 await UploadSweep().run()
@@ -523,24 +448,23 @@ async def apply_policy(
 
     cutoff_s = now - policy.log_days * 86_400 if policy.log_days else None
     for record in targets.records:
-        async with _policy_holds() as go:
-            if not go:
-                break
-            if record.reason == _SESSION_DELETED:
-                if record.path.stem not in deleted_ids:
-                    continue  # its session was not deleted after all
-                outcome, freed = await Recorder.delete_file(record.path)
-            else:
-                if cutoff_s is None:
-                    continue
-                # delete_file re-checks the mtime under the record's append lock, so a
-                # file written to since planning is left alone.
-                outcome, freed = await Recorder.delete_file(record.path, older_than=cutoff_s)
-            if outcome == "deleted":
-                report.record_files += 1
-                report.freed_bytes += freed
-            elif outcome == "failed":
-                report.errors += 1
+        if _superseded():
+            break
+        if record.reason == _SESSION_DELETED:
+            if record.path.stem not in deleted_ids:
+                continue  # its session was not deleted after all
+            outcome, freed = await Recorder.delete_file(record.path)
+        else:
+            if cutoff_s is None:
+                continue
+            # delete_file re-checks the mtime under the record's append lock, so a
+            # file written to since planning is left alone.
+            outcome, freed = await Recorder.delete_file(record.path, older_than=cutoff_s)
+        if outcome == "deleted":
+            report.record_files += 1
+            report.freed_bytes += freed
+        elif outcome == "failed":
+            report.errors += 1
 
     report.finished_at = int(time.time() * 1000)
     log.info("retention.applied", report.to_dict())

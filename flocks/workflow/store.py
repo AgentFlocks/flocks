@@ -1,17 +1,19 @@
-"""PostgreSQL persistence for workflow runtime data."""
+"""SQLite persistence for workflow runtime data."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import sqlite3
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from flocks.db.connect import open_transaction
-from flocks.db.json_nul import escape_nul_for_json, restore_nul_from_json
-from flocks.db.store import Transaction
+import aiosqlite
+
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -37,27 +39,60 @@ _WORKFLOW_TABLE_PREFIXES = (
     "workflow_syslog_config/",
 )
 _WORKFLOW_PREFIXES = _WORKFLOW_KV_PREFIXES + _WORKFLOW_TABLE_PREFIXES
+_EXECUTION_UPSERT_SQL = """
+    INSERT OR REPLACE INTO workflow_executions
+    (id, workflow_id, status, current_phase, current_node_id, current_node_type,
+     current_step_index, step_count, input_params, output_results, error_message,
+     trigger_id, trigger_type, started_at, finished_at, duration, updated_at, payload)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+#: A running summary never replaces the record of a run that already ended:
+#: progress that a worker thread reports after its run was recorded as
+#: cancelled (ownership.abandon_execution) must not bring it back to running.
+_EXECUTION_RUNNING_UPSERT_SQL = """
+    INSERT INTO workflow_executions
+    (id, workflow_id, status, current_phase, current_node_id, current_node_type,
+     current_step_index, step_count, input_params, output_results, error_message,
+     trigger_id, trigger_type, started_at, finished_at, duration, updated_at, payload)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+        workflow_id = excluded.workflow_id, status = excluded.status,
+        current_phase = excluded.current_phase, current_node_id = excluded.current_node_id,
+        current_node_type = excluded.current_node_type,
+        current_step_index = excluded.current_step_index, step_count = excluded.step_count,
+        input_params = excluded.input_params, output_results = excluded.output_results,
+        error_message = excluded.error_message, trigger_id = excluded.trigger_id,
+        trigger_type = excluded.trigger_type, started_at = excluded.started_at,
+        finished_at = excluded.finished_at, duration = excluded.duration,
+        updated_at = excluded.updated_at, payload = excluded.payload
+    WHERE workflow_executions.status = 'running'
+"""
+_ABANDONED_EXECUTION_MESSAGE = "Run stopped before it finished"
 
 
 class WorkflowStore:
-    """Workflow-domain tables in the shared PostgreSQL database."""
+    """Workflow-domain store backed by ``workflow.db`` tables."""
 
     _initialized = False
-    # The handle, not the driver connection: on PostgreSQL there is no
-    # file to connect to and the connection comes from a shared pool.
-    _handle: Optional[Transaction] = None
+    _conn: Optional[aiosqlite.Connection] = None
+    _completion_conn: Optional[aiosqlite.Connection] = None
     _init_pid: Optional[int] = None
     _db_path: Optional[Path] = None
-    _init_lock = asyncio.Lock()
-    _init_lock_key = None
+    _completion_lock: Optional[asyncio.Lock] = None
+    _lifecycle_lock: Optional[asyncio.Lock] = None
+    _lifecycle_loop: Optional[asyncio.AbstractEventLoop] = None
+    #: Webhook deliveries recorded within their replay window: key ->
+    #: (delivery id, claim token, when the window ends on the monotonic clock).
+    _webhook_deliveries: Dict[str, Tuple[str, str, float]] = {}
+    _webhook_lock = threading.Lock()
 
     @classmethod
     def _lock(cls) -> asyncio.Lock:
-        """Lifecycle lock shared by init and close, one per process and loop."""
-        key = (os.getpid(), asyncio.get_running_loop())
-        if cls._init_lock_key != key:
-            cls._init_lock, cls._init_lock_key = asyncio.Lock(), key
-        return cls._init_lock
+        loop = asyncio.get_running_loop()
+        if cls._lifecycle_lock is None or cls._lifecycle_loop is not loop:
+            cls._lifecycle_lock = asyncio.Lock()
+            cls._lifecycle_loop = loop
+        return cls._lifecycle_lock
 
     @classmethod
     def get_db_path(cls) -> Path:
@@ -66,85 +101,151 @@ class WorkflowStore:
     @classmethod
     async def init(cls) -> None:
         async with cls._lock():
-            await cls._initialize()
+            await cls._init_unlocked()
 
     @classmethod
-    async def _initialize(cls) -> None:
+    async def _init_unlocked(cls) -> None:
         current_pid = os.getpid()
-        if cls._initialized and cls._init_pid == current_pid:
+        db_path = cls.get_db_path()
+        if cls._initialized and cls._init_pid == current_pid and cls._db_path == db_path:
             return
-        await Storage._ensure_init()
-        handle = await open_transaction()
-        cls._handle = handle
-        try:
-            async with handle.transaction() as tx:
-                await tx.execute("SELECT pg_advisory_xact_lock(hashtext(?))", ("flocks.workflow.schema",))
-                await tx.executescript(";\n".join(_workflow_ddl(tx.dialect) + _INDEX_STMTS))
-            cls._initialized = True
-            cls._init_pid = current_pid
-        except BaseException:
-            await handle.close()
-            cls._handle = None
+        pid_changed = cls._initialized and cls._init_pid is not None and cls._init_pid != current_pid
+        db_path_changed = cls._initialized and cls._db_path is not None and cls._db_path != db_path
+        if pid_changed or db_path_changed:
+            log.warn(
+                "workflow.store.fork_detected",
+                {
+                    "parent_pid": cls._init_pid,
+                    "child_pid": current_pid,
+                    "old_db_path": str(cls._db_path) if cls._db_path else None,
+                    "new_db_path": str(db_path),
+                },
+            )
+            if not pid_changed:
+                if cls._conn:
+                    await cls._conn.close()
+                if cls._completion_conn:
+                    await cls._completion_conn.close()
+            cls._conn = None
+            cls._completion_conn = None
             cls._initialized = False
             cls._init_pid = None
+            cls._completion_lock = None
+            cls._forget_process_state()
+
+        await Storage._ensure_init()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        async def _open_and_migrate() -> None:
+            cls._conn = await aiosqlite.connect(
+                db_path,
+                timeout=Storage._sqlite_timeout_s,
+            )
+            cls._conn.row_factory = aiosqlite.Row
+            await Storage.configure_connection(cls._conn)
+            await cls._conn.executescript(_WORKFLOW_DDL)
+            for stmt in _INDEX_STMTS:
+                await cls._conn.execute(stmt)
+            await cls._conn.commit()
+            cls._completion_conn = await aiosqlite.connect(
+                db_path,
+                timeout=Storage._sqlite_timeout_s,
+            )
+            cls._completion_conn.row_factory = aiosqlite.Row
+            await Storage.configure_connection(cls._completion_conn)
+            cls._initialized = True
+            cls._init_pid = current_pid
+            cls._db_path = db_path
+            cls._completion_lock = asyncio.Lock()
+            await cls._migrate_legacy_kv()
+
+        try:
+            await _open_and_migrate()
+            log.info("workflow.store.initialized")
+        except BaseException as exc:
+            if cls._conn:
+                await cls._conn.close()
+            if cls._completion_conn:
+                await cls._completion_conn.close()
+            cls._conn = None
+            cls._completion_conn = None
+            cls._initialized = False
+            cls._init_pid = None
+            cls._db_path = None
+            if isinstance(exc, Exception) and Storage._is_db_corruption_error(exc):
+                await Storage.recover_corrupt_db(
+                    db_path,
+                    action="workflow.store.init",
+                    exc=exc,
+                    reinitialize=_open_and_migrate,
+                )
+                log.info("workflow.store.initialized")
+                return
             raise
 
     @classmethod
     async def close(cls) -> None:
-        from flocks.workflow.ownership import close_execution_leases
-        await close_execution_leases()
         async with cls._lock():
-            if cls._handle:
-                await cls._handle.close()
-            cls._handle = None
+            if cls._conn:
+                await cls._conn.close()
+            if cls._completion_conn:
+                await cls._completion_conn.close()
+            cls._conn = None
+            cls._completion_conn = None
             cls._initialized = False
             cls._init_pid = None
             cls._db_path = None
+            cls._completion_lock = None
+            cls._forget_process_state()
 
     @classmethod
-    async def _db(cls):
-        """Borrow PostgreSQL connections through the shared transaction handle."""
+    def _forget_process_state(cls) -> None:
+        """What this process kept about the deliveries of the database it leaves."""
+        with cls._webhook_lock:
+            cls._webhook_deliveries.clear()
+
+    @classmethod
+    async def _db(cls) -> aiosqlite.Connection:
         if cls._initialized and cls._init_pid is not None and cls._init_pid != os.getpid():
             await cls.init()
-        if not cls._handle or not cls._initialized:
+        if not cls._conn or not cls._initialized:
             await cls.init()
-        return cls._handle
+        return cls._conn  # type: ignore[return-value]
 
     @classmethod
-    async def raw_db(cls) -> Transaction:
+    async def raw_db(cls) -> aiosqlite.Connection:
         return await cls._db()
 
     @classmethod
-    async def raw_completion_db(cls) -> Transaction:
-        """The handle ``complete_execution`` writes through (for transaction-level tests).
+    async def _completion_db(cls) -> aiosqlite.Connection:
+        if cls._initialized and cls._init_pid is not None and cls._init_pid != os.getpid():
+            await cls.init()
+        if not cls._completion_conn or not cls._initialized:
+            await cls.init()
+        return cls._completion_conn  # type: ignore[return-value]
 
-        The portable handle already pins one connection per transaction block,
-        so completion writes share it instead of a second driver connection.
-        """
-        return await cls._db()
+    @classmethod
+    def _completion_guard(cls) -> asyncio.Lock:
+        """Serializes the transactions on the completion connection."""
+        if cls._completion_lock is None:
+            cls._completion_lock = asyncio.Lock()
+        return cls._completion_lock
 
-    @staticmethod
-    def _recency_order(dialect) -> str:
-        """Deterministic order for equal start timestamps."""
-        return "started_at DESC, updated_at DESC, id DESC"
+    @classmethod
+    async def raw_completion_db(cls) -> aiosqlite.Connection:
+        """Return the completion connection for transaction-level tests."""
+        return await cls._completion_db()
 
     @staticmethod
     def _json_dumps(value: Any) -> str:
-        text = json.dumps(value, ensure_ascii=False, default=str)
-        if "\\u0000" not in text and "_pg_nul_" not in text:
-            return text
-        # Recovery reads the payload as jsonb, which cannot hold U+0000 (a
-        # NUL-terminated syslog frame in the inputs, for one); store it
-        # escaped and marked, and _json_loads gives the original back. A value
-        # using the marker's reserved names is wrapped so it reads back as is.
-        return json.dumps(escape_nul_for_json(json.loads(text)), ensure_ascii=False)
+        return json.dumps(value, ensure_ascii=False, default=str)
 
     @staticmethod
     def _json_loads(value: Optional[str], default: Any = None) -> Any:
         if value is None:
             return default
         try:
-            return restore_nul_from_json(json.loads(value))
+            return json.loads(value)
         except Exception:
             return default
 
@@ -174,30 +275,108 @@ class WorkflowStore:
         except (TypeError, ValueError):
             return None
 
-    _EXECUTION_COLUMNS = (
-        'id', 'workflow_id', 'status', 'current_phase', 'current_node_id', 'current_node_type',
-        'current_step_index', 'step_count', 'input_params', 'output_results', 'error_message',
-        'trigger_id', 'trigger_type', 'started_at', 'finished_at', 'duration', 'updated_at', 'payload',
-    )
-    _STEP_COLUMNS = ('exec_id', 'step_index', 'node_id', 'node_type', 'inputs', 'outputs', 'error', 'payload')
+    @staticmethod
+    def _quote_identifier(identifier: str) -> str:
+        return '"' + identifier.replace('"', '""') + '"'
 
     @classmethod
-    def _execution_upsert_sql(cls, dialect) -> str:
-        return dialect.upsert(
-            "workflow_executions",
-            cls._EXECUTION_COLUMNS,
-            key_columns=('id',),
-            update_columns=cls._EXECUTION_COLUMNS[1:],
-        )
+    def _legacy_table_exists(cls, conn: sqlite3.Connection) -> bool:
+        row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name = 'storage'").fetchone()
+        return row is not None
 
     @classmethod
-    def _step_upsert_sql(cls, dialect) -> str:
-        return dialect.upsert(
-            "workflow_execution_steps",
-            cls._STEP_COLUMNS,
-            key_columns=('exec_id', 'step_index'),
-            update_columns=cls._STEP_COLUMNS[2:],
+    def _legacy_rows_from_db(cls, db_path: Path) -> list[sqlite3.Row]:
+        if not db_path.exists():
+            return []
+        conn = Storage.connect_sync(db_path)
+        try:
+            if not cls._legacy_table_exists(conn):
+                return []
+            clauses = " OR ".join("key LIKE ?" for _ in _WORKFLOW_PREFIXES)
+            params = tuple(f"{prefix}%" for prefix in _WORKFLOW_PREFIXES)
+            return conn.execute(
+                f"""
+                SELECT key, value, type, created_at, updated_at
+                FROM storage
+                WHERE {clauses}
+                ORDER BY key
+                """,
+                params,
+            ).fetchall()
+        finally:
+            conn.close()
+
+    @classmethod
+    async def _migrate_legacy_kv(cls) -> None:
+        if await cls.kv_get(_MIGRATION_MARKER_KEY) is not None:
+            return
+        rows_by_key: dict[str, sqlite3.Row] = {}
+        for db_path in (Storage.get_db_path(), cls.get_db_path()):
+            for row in await asyncio.to_thread(cls._legacy_rows_from_db, db_path):
+                rows_by_key[str(row["key"])] = row
+
+        counts = {
+            "executions": 0,
+            "steps": 0,
+            "stats": 0,
+            "configs": 0,
+            "kv": 0,
+            "skipped": 0,
+        }
+        for key, row in rows_by_key.items():
+            value = cls._json_loads(str(row["value"]), None)
+            if value is None:
+                counts["skipped"] += 1
+                continue
+            if key.startswith("workflow_execution_step/") and isinstance(value, dict):
+                parts = key.split("/")
+                if len(parts) >= 3:
+                    try:
+                        await cls.record_step(parts[1], int(parts[2]), value)
+                        counts["steps"] += 1
+                    except Exception:
+                        counts["skipped"] += 1
+                continue
+            if key.startswith("workflow_execution/") and isinstance(value, dict):
+                await cls.upsert_execution(value)
+                counts["executions"] += 1
+                continue
+            if key.startswith("workflow/") and key.endswith("/stats") and isinstance(value, dict):
+                workflow_id = key[len("workflow/") : -len("/stats")]
+                await cls.put_stats(workflow_id, value)
+                counts["stats"] += 1
+                continue
+            if key.startswith("workflow_integration_config/") and isinstance(value, dict):
+                workflow_id = key[len("workflow_integration_config/") :]
+                await cls.put_config(workflow_id, value)
+                counts["configs"] += 1
+                continue
+            if key.startswith(_WORKFLOW_KV_PREFIXES):
+                await cls.kv_put(key, value)
+                counts["kv"] += 1
+                continue
+            if key.startswith(
+                (
+                    "workflow_kafka_config/",
+                    "workflow_poller_config/",
+                    "workflow_syslog_config/",
+                )
+            ) and isinstance(value, dict):
+                workflow_id = key.rsplit("/", 1)[-1]
+                await cls.put_config(workflow_id, value, kind=key.split("/", 1)[0])
+                counts["configs"] += 1
+
+        await cls.kv_put(
+            _MIGRATION_MARKER_KEY,
+            {
+                "version": 1,
+                "migrated_at": cls._now_iso(),
+                "source_db": str(Storage.get_db_path()),
+                "workflow_db": str(cls.get_db_path()),
+                **counts,
+            },
         )
+        log.info("workflow.store.legacy_kv_migrated", counts)
 
     @classmethod
     def _execution_row(
@@ -235,188 +414,89 @@ class WorkflowStore:
         )
 
     @classmethod
-    async def upsert_execution(cls, exec_data: Dict[str, Any]) -> bool:
+    async def upsert_execution(cls, exec_data: Dict[str, Any]) -> None:
         db = await cls._db()
         _, _, row = cls._execution_row(exec_data)
-        async with db.transaction() as tx:
-            if not await cls._check_execution_owner(tx, exec_data):
-                return False
-            await tx.execute(cls._execution_upsert_sql(tx.dialect), row)
-        return True
-
-    @classmethod
-    async def start_execution(
-        cls, exec_data: Dict[str, Any], *, owner_node_id: str,
-        lease_seconds: int, scope_key: Optional[str] = None,
-        delivery: Optional[Tuple[str, str]] = None,
-    ) -> Dict[str, Any]:
-        """Atomically acquire a run and, optionally, its no-overlap scope.
-
-        *delivery* is the webhook delivery the run is for, as ``(key, claim
-        token)``: the run is bound to it in the same transaction, so a
-        delivery is either handled by exactly this run or still open for a
-        retry -- never claimed by a run that did not start.  When the claim was
-        taken over meanwhile, nothing is started.
-        """
-        from flocks.workflow.ownership import WorkflowAlreadyRunning, WorkflowOwnershipError
-
-        db = await cls._db()
-        execution_id = str(exec_data["id"])
-        async with db.transaction() as tx:
-            if scope_key is not None:
-                await tx.execute(
-                    "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", (scope_key,)
-                )
-                live = await tx.fetch_one(
-                    "SELECT execution_id FROM workflow_execution_leases "
-                    "WHERE scope_key = ? AND lease_expires_at > clock_timestamp() LIMIT 1",
-                    (scope_key,),
-                )
-                if live is not None:
-                    raise WorkflowAlreadyRunning(f"Workflow is already running: {exec_data['workflowId']}")
-            claimed = await tx.fetch_one_mapping(
-                """INSERT INTO workflow_execution_leases
-                   (lease_key, execution_id, scope_key, owner_node_id, generation, lease_expires_at)
-                   VALUES (?, ?, ?, ?, 1, clock_timestamp() + (? * interval '1 second'))
-                   ON CONFLICT (lease_key) DO UPDATE SET
-                     owner_node_id = EXCLUDED.owner_node_id,
-                     generation = workflow_execution_leases.generation + 1,
-                     cancel_requested = FALSE,
-                     lease_expires_at = EXCLUDED.lease_expires_at
-                   WHERE workflow_execution_leases.lease_expires_at <= clock_timestamp()
-                   RETURNING generation""",
-                (execution_id, execution_id, scope_key, owner_node_id, max(1, lease_seconds)),
-            )
-            if claimed is None:
-                raise WorkflowOwnershipError(f"Execution is already owned: {execution_id}")
-            current = await tx.fetch_one_mapping(
-                "SELECT status FROM workflow_executions WHERE id = ? FOR UPDATE", (execution_id,)
-            )
-            if current is not None and current["status"] != "running":
-                raise WorkflowOwnershipError(f"Execution is already terminal: {execution_id}")
-            owned = dict(exec_data)
-            owned.update(leaseKey=execution_id, ownerNodeId=owner_node_id, ownerGeneration=claimed["generation"])
-            _, _, row = cls._execution_row(owned)
-            await tx.execute(cls._execution_upsert_sql(tx.dialect), row)
-            if delivery is not None:
-                bound = await tx.fetch_one(
-                    "UPDATE workflow_webhook_deliveries SET exec_id = ? "
-                    "WHERE key = ? AND claim_token = ? AND exec_id IS NULL RETURNING key",
-                    (execution_id, delivery[0], delivery[1]),
-                )
-                if bound is None:
-                    raise WorkflowOwnershipError("the webhook delivery was taken over by another request")
-        return owned
-
-    @classmethod
-    async def claim_schedule_slot(
-        cls, workflow_id: str, trigger_id: str, slot_ms: int, owner: str, *, keep_days: int = 7,
-    ) -> bool:
-        """Claim one scheduled time of a workflow's schedule for this instance.
-
-        Every instance runs the schedule's loop; the one whose claim is
-        recorded first runs that time, the others skip it -- also when the
-        winner's run already finished (a no-overlap lease alone would let a
-        later instance start the same time again).  Claims older than
-        *keep_days* are dropped as new ones are made.
-        """
-        db = await cls._db()
-        async with db.transaction() as tx:
-            await tx.execute(
-                "DELETE FROM workflow_schedule_claims WHERE workflow_id = ? AND trigger_id = ? AND slot_ms < ?",
-                (workflow_id, trigger_id, int(slot_ms) - keep_days * 86_400_000),
-            )
-            row = await tx.fetch_one(
-                "INSERT INTO workflow_schedule_claims (workflow_id, trigger_id, slot_ms, claimed_by, claimed_at) "
-                "VALUES (?, ?, ?, ?, clock_timestamp()) ON CONFLICT DO NOTHING RETURNING slot_ms",
-                (workflow_id, trigger_id, int(slot_ms), owner),
-            )
-        return row is not None
-
-    @classmethod
-    async def _check_execution_owner(cls, tx, exec_data: Dict[str, Any]) -> bool:
-        """Lock the claim before the execution row, matching takeover/recovery."""
-        from flocks.workflow.ownership import WorkflowOwnershipError
-
-        lease = await tx.fetch_one_mapping(
-            "SELECT owner_node_id, generation, lease_expires_at > clock_timestamp() AS live "
-            "FROM workflow_execution_leases WHERE execution_id = ? FOR UPDATE", (str(exec_data["id"]),)
-        )
-        if lease is None:
-            # Legacy records are writable by the explicit importer only; once
-            # claimed, every ordinary progress/final write requires its token.
-            if exec_data.get("ownerGeneration") is not None:
-                raise WorkflowOwnershipError("Workflow execution lease is missing")
-            return True
-        if (lease["owner_node_id"] != exec_data.get("ownerNodeId")
-            or lease["generation"] != exec_data.get("ownerGeneration")):
-            raise WorkflowOwnershipError(f"Workflow ownership changed: {exec_data['id']}")
-        current = await tx.fetch_one_mapping(
-            "SELECT status FROM workflow_executions WHERE id = ? FOR UPDATE", (str(exec_data["id"]),)
-        )
-        if current is not None and current["status"] != "running":
-            return False
-        if not lease["live"]:
-            raise WorkflowOwnershipError(f"Workflow lease expired: {exec_data['id']}")
-        return True
-
-    @classmethod
-    async def renew_execution_lease(cls, exec_id: str, token: Dict[str, Any], lease_seconds: int) -> Optional[Dict[str, Any]]:
-        db = await cls._db()
-        return await db.fetch_one_mapping(
-            """UPDATE workflow_execution_leases
-               SET lease_expires_at = clock_timestamp() + (? * interval '1 second')
-               WHERE execution_id = ? AND owner_node_id = ? AND generation = ?
-                 AND lease_expires_at > clock_timestamp()
-               RETURNING cancel_requested""",
-            (max(1, lease_seconds), exec_id, token["ownerNodeId"], token["ownerGeneration"]),
-        )
-
-    @classmethod
-    async def request_execution_cancel(cls, exec_id: str) -> bool:
-        db = await cls._db()
-        result = await db.execute(
-            "UPDATE workflow_execution_leases SET cancel_requested = TRUE "
-            "WHERE execution_id = ? AND lease_expires_at > clock_timestamp() "
-            "AND EXISTS (SELECT 1 FROM workflow_executions e WHERE e.id = ? AND e.status = 'running')",
-            (exec_id, exec_id),
-        )
-        return result.rowcount > 0
-
-    @classmethod
-    async def release_execution_lease(cls, exec_id: str, token: Dict[str, Any]) -> bool:
-        db = await cls._db()
-        result = await db.execute(
-            "UPDATE workflow_execution_leases SET lease_expires_at = clock_timestamp() "
-            "WHERE execution_id = ? AND owner_node_id = ? AND generation = ?",
-            (exec_id, token["ownerNodeId"], token["ownerGeneration"]),
-        )
-        return result.rowcount > 0
+        running = row[2] == "running"
+        await db.execute(_EXECUTION_RUNNING_UPSERT_SQL if running else _EXECUTION_UPSERT_SQL, row)
+        await db.commit()
 
     @classmethod
     async def recover_expired_executions(cls, message: str, *, limit: int = 500) -> int:
-        """Recover a bounded batch; live leases and concurrent completion win."""
+        """Finalize executions left running by a process that is gone.
+
+        An execution runs only in the process that started it, so one still
+        recorded as running that is not live here (ownership.running_here) can
+        never finish.  Returns how many were finalized (at most *limit* per call).
+        """
+        from flocks.workflow.ownership import running_here
+
         db = await cls._db()
-        async with db.transaction() as tx:
-            result = await tx.execute(
-                """WITH expired AS MATERIALIZED (
-                     SELECT l.execution_id, l.generation
-                     FROM workflow_execution_leases l
-                     JOIN workflow_executions e ON e.id = l.execution_id
-                     WHERE l.lease_expires_at <= clock_timestamp() AND e.status = 'running'
-                     ORDER BY l.lease_expires_at LIMIT ? FOR UPDATE OF l SKIP LOCKED
-                   )
-                   UPDATE workflow_executions e SET status = 'error', current_phase = 'error',
-                     error_message = ?, finished_at = ?, updated_at = ?,
-                     payload = (e.payload::jsonb || jsonb_build_object(
-                       'status', 'error', 'currentPhase', 'error', 'errorMessage', ?::text,
-                       'finishedAt', ?::bigint, 'updatedAt', ?::bigint))::text
-                   FROM expired x WHERE e.id = x.execution_id AND e.status = 'running'
-                     AND (e.payload::jsonb ->> 'ownerGeneration')::bigint = x.generation
-                   RETURNING e.id""",
-                (max(1, min(limit, 5000)), message, cls._now_ms(), cls._now_ms(), message, cls._now_ms(), cls._now_ms()),
+        async with db.execute(
+            "SELECT payload FROM workflow_executions WHERE status = 'running' ORDER BY started_at ASC",
+        ) as cur:
+            rows = await cur.fetchall()
+        recovered = 0
+        for row in rows:
+            if recovered >= max(1, limit):
+                break
+            exec_data = cls._json_loads(row["payload"], None)
+            if not isinstance(exec_data, dict) or running_here(str(exec_data.get("id") or "")):
+                continue
+            now = cls._now_ms()
+            exec_data.update(
+                status="error", currentPhase="error", errorMessage=message, finishedAt=now, updatedAt=now,
             )
-        return result.rowcount
+            await cls.upsert_execution(exec_data)
+            recovered += 1
+        return recovered
+
+    @classmethod
+    async def request_execution_cancel(cls, exec_id: str) -> bool:
+        """Ask the run to stop at its next node; False when it is not live in this process."""
+        from flocks.workflow.ownership import request_cancel
+
+        return request_cancel(exec_id)
+
+    @classmethod
+    async def end_abandoned_execution(cls, exec_id: str) -> bool:
+        """Record a run that nobody will finish as cancelled, unless it already ended."""
+        db = await cls._completion_db()
+        async with cls._completion_guard():
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "SELECT payload FROM workflow_executions WHERE id = ? AND status = 'running'",
+                    (exec_id,),
+                ) as cur:
+                    row = await cur.fetchone()
+                exec_data = cls._json_loads(row["payload"], None) if row else None
+                if not isinstance(exec_data, dict):
+                    await db.commit()
+                    return False
+                now = cls._now_ms()
+                started_at = cls._as_int(exec_data.get("startedAt"))
+                exec_data.update(
+                    status="cancelled",
+                    currentPhase="cancelled",
+                    errorMessage=exec_data.get("errorMessage") or _ABANDONED_EXECUTION_MESSAGE,
+                    finishedAt=now,
+                    updatedAt=now,
+                )
+                if started_at is not None and not isinstance(exec_data.get("duration"), (int, float)):
+                    exec_data["duration"] = max(0.0, (now - started_at) / 1000.0)
+                await db.execute(_EXECUTION_UPSERT_SQL, cls._execution_row(exec_data)[2])
+                await db.commit()
+                return True
+            except BaseException:
+                try:
+                    await db.rollback()
+                except BaseException as rollback_exc:
+                    log.error(
+                        "workflow.store.abandon_rollback_failed",
+                        {"exec_id": exec_id, "error": str(rollback_exc)},
+                    )
+                raise
 
     @classmethod
     async def get_execution(cls, exec_id: str) -> Optional[Dict[str, Any]]:
@@ -454,7 +534,7 @@ class WorkflowStore:
             f"""
             SELECT payload FROM workflow_executions
             WHERE {" AND ".join(clauses)}
-            ORDER BY {cls._recency_order(db.dialect)}
+            ORDER BY started_at DESC, rowid DESC
             LIMIT ?
             """,
             tuple(params),
@@ -468,66 +548,49 @@ class WorkflowStore:
         return items
 
     @classmethod
-    async def list_running_executions(cls) -> List[Dict[str, Any]]:
-        """Every execution still recorded as running, across all workflows.
-
-        Read at startup: an in-flight run lives only in the process that
-        started it, so anything still ``running`` here belongs to a process
-        that is gone and can never finish.
-        """
-        db = await cls._db()
-        async with db.execute(
-            """
-            SELECT payload FROM workflow_executions
-            WHERE status = 'running'
-            ORDER BY started_at ASC
-            """
-        ) as cur:
-            rows = await cur.fetchall()
-        items: List[Dict[str, Any]] = []
-        for row in rows:
-            value = cls._json_loads(row["payload"], None)
-            if isinstance(value, dict):
-                items.append(value)
-        return items
-
-    @classmethod
     async def delete_execution(cls, exec_id: str) -> bool:
         db = await cls._db()
-        async with db.transaction() as tx:
-            await tx.execute("DELETE FROM workflow_execution_steps WHERE exec_id = ?", (exec_id,))
-            cur = await tx.execute("DELETE FROM workflow_executions WHERE id = ?", (exec_id,))
+        await db.execute("DELETE FROM workflow_execution_steps WHERE exec_id = ?", (exec_id,))
+        cur = await db.execute("DELETE FROM workflow_executions WHERE id = ?", (exec_id,))
+        await db.commit()
         return cur.rowcount > 0
 
     @classmethod
     async def delete_executions_for_workflow(cls, workflow_id: str) -> int:
         db = await cls._db()
-        async with db.transaction() as tx:
-            await tx.execute(
-                "DELETE FROM workflow_execution_steps WHERE exec_id IN "
-                "(SELECT id FROM workflow_executions WHERE workflow_id = ?)", (workflow_id,),
-            )
-            cur = await tx.execute("DELETE FROM workflow_executions WHERE workflow_id = ?", (workflow_id,))
+        async with db.execute(
+            "SELECT id FROM workflow_executions WHERE workflow_id = ?",
+            (workflow_id,),
+        ) as cur:
+            exec_ids = [str(row["id"]) for row in await cur.fetchall()]
+        for exec_id in exec_ids:
+            await db.execute("DELETE FROM workflow_execution_steps WHERE exec_id = ?", (exec_id,))
+        cur = await db.execute("DELETE FROM workflow_executions WHERE workflow_id = ?", (workflow_id,))
+        await db.commit()
         return cur.rowcount
 
     @classmethod
     async def trim_executions(cls, workflow_id: str, *, keep: int) -> List[str]:
+        """Delete finished executions past the newest *keep* finished ones.
+
+        A run still going is neither removed nor counted: a long run would
+        otherwise lose its record once enough shorter ones finished after it.
+        """
         db = await cls._db()
-        async with db.transaction() as tx:
-            unlimited = "ALL"
-            async with tx.execute(
-                f"SELECT id FROM workflow_executions WHERE workflow_id = ? AND status != 'running' "
-                f"ORDER BY {cls._recency_order(tx.dialect)} LIMIT {unlimited} OFFSET ?",
-                (workflow_id, max(int(keep), 0)),
-            ) as cur:
-                exec_ids = [str(row["id"]) for row in await cur.fetchall()]
-            # Bound parameter count without one database round trip per row.
-            for start in range(0, len(exec_ids), 500):
-                batch = exec_ids[start:start + 500]
-                marks = ",".join("?" for _ in batch)
-                await tx.execute(f"DELETE FROM workflow_execution_steps WHERE exec_id IN ({marks})", batch)
-                await tx.execute(f"DELETE FROM workflow_executions WHERE id IN ({marks})", batch)
-                await tx.execute(f"DELETE FROM workflow_execution_leases WHERE execution_id IN ({marks})", batch)
+        async with db.execute(
+            """
+            SELECT id FROM workflow_executions
+            WHERE workflow_id = ? AND status <> 'running'
+            ORDER BY started_at DESC, rowid DESC
+            LIMIT -1 OFFSET ?
+            """,
+            (workflow_id, max(int(keep), 0)),
+        ) as cur:
+            exec_ids = [str(row["id"]) for row in await cur.fetchall()]
+        for exec_id in exec_ids:
+            await db.execute("DELETE FROM workflow_execution_steps WHERE exec_id = ?", (exec_id,))
+            await db.execute("DELETE FROM workflow_executions WHERE id = ?", (exec_id,))
+        await db.commit()
         return exec_ids
 
     @classmethod
@@ -556,55 +619,67 @@ class WorkflowStore:
         exec_id: str,
         step_index: int,
         step_payload: Dict[str, Any],
-        *, token: Optional[Dict[str, Any]] = None,
     ) -> None:
-        await cls.record_steps(exec_id, [(step_index, step_payload)], token=token)
+        await cls.record_steps(exec_id, [(step_index, step_payload)])
 
     @classmethod
     async def record_steps(
         cls,
         exec_id: str,
         steps: Iterable[Tuple[int, Dict[str, Any]]],
-        *, token: Optional[Dict[str, Any]] = None,
     ) -> None:
         rows = cls._step_rows(exec_id, steps)
         if not rows:
             return
         db = await cls._db()
-        async with db.transaction() as tx:
-            if not await cls._check_execution_owner(tx, {**(token or {}), "id": exec_id}):
-                return
-            await tx.execute_many(cls._step_upsert_sql(tx.dialect), rows)
+        await db.executemany(
+            """
+            INSERT OR REPLACE INTO workflow_execution_steps
+            (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        await db.commit()
 
     @classmethod
     async def complete_execution(
         cls,
         exec_data: Dict[str, Any],
         steps: Iterable[Tuple[int, Dict[str, Any]]],
-    ) -> bool:
-        """Atomically persist one final execution summary and its step batch.
-        The execution claim is fenced in the same transaction as the writes.
-        """
-        db = await cls._db()
+    ) -> None:
+        """Atomically persist one final execution summary and its step batch."""
+        db = await cls._completion_db()
         exec_id, workflow_id, execution_row = cls._execution_row(exec_data)
         step_rows = cls._step_rows(exec_id, steps)
-        async with db.transaction() as tx:
-            if not await cls._check_execution_owner(tx, exec_data):
-                return False
-            if step_rows:
-                await tx.execute_many(cls._step_upsert_sql(tx.dialect), step_rows)
-            await tx.execute(cls._execution_upsert_sql(tx.dialect), execution_row)
-            await cls._increment_stats_on(
-                tx, workflow_id, success=exec_data.get("status") == "success",
-                duration=float(exec_data.get("duration") or 0.0),
-            )
-            if exec_data.get("ownerGeneration") is not None:
-                await tx.execute(
-                    "UPDATE workflow_execution_leases SET lease_expires_at = clock_timestamp() "
-                    "WHERE execution_id = ? AND owner_node_id = ? AND generation = ?",
-                    (exec_id, exec_data["ownerNodeId"], exec_data["ownerGeneration"]),
-                )
-        return True
+
+        async with cls._completion_guard():
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                if step_rows:
+                    await db.executemany(
+                        """
+                        INSERT OR REPLACE INTO workflow_execution_steps
+                        (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        step_rows,
+                    )
+                await db.execute(_EXECUTION_UPSERT_SQL, execution_row)
+                await db.commit()
+            except BaseException:
+                try:
+                    await db.rollback()
+                except BaseException as rollback_exc:
+                    log.error(
+                        "workflow.store.completion_rollback_failed",
+                        {
+                            "workflow_id": workflow_id,
+                            "exec_id": exec_id,
+                            "error": str(rollback_exc),
+                        },
+                    )
+                raise
 
     @classmethod
     async def list_steps(
@@ -645,8 +720,8 @@ class WorkflowStore:
     @classmethod
     async def clear_steps(cls, exec_id: str) -> int:
         db = await cls._db()
-        async with db.transaction() as tx:
-            cur = await tx.execute("DELETE FROM workflow_execution_steps WHERE exec_id = ?", (exec_id,))
+        cur = await db.execute("DELETE FROM workflow_execution_steps WHERE exec_id = ?", (exec_id,))
+        await db.commit()
         return cur.rowcount
 
     @classmethod
@@ -672,47 +747,42 @@ class WorkflowStore:
     @classmethod
     async def put_stats(cls, workflow_id: str, stats: Dict[str, Any]) -> None:
         db = await cls._db()
-        async with db.transaction() as tx:
-            await tx.execute(
-                tx.dialect.upsert(
-                    "workflow_stats",
-                    ('workflow_id', 'call_count', 'success_count', 'error_count', 'total_runtime', 'avg_runtime', 'thumbs_up', 'thumbs_down', 'updated_at'),
-                    key_columns=('workflow_id',),
-                    update_columns=('call_count', 'success_count', 'error_count', 'total_runtime', 'avg_runtime', 'thumbs_up', 'thumbs_down', 'updated_at'),
-                ),
-                (
-                    workflow_id,
-                    int(stats.get("callCount") or stats.get("call_count") or 0),
-                    int(stats.get("successCount") or stats.get("success_count") or 0),
-                    int(stats.get("errorCount") or stats.get("error_count") or 0),
-                    float(stats.get("totalRuntime") or stats.get("total_runtime") or 0.0),
-                    float(stats.get("avgRuntime") or stats.get("avg_runtime") or 0.0),
-                    int(stats.get("thumbsUp") or stats.get("thumbs_up") or 0),
-                    int(stats.get("thumbsDown") or stats.get("thumbs_down") or 0),
-                    cls._now_ms(),
-                ),
-            )
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO workflow_stats
+            (workflow_id, call_count, success_count, error_count, total_runtime,
+             avg_runtime, thumbs_up, thumbs_down, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                workflow_id,
+                int(stats.get("callCount") or stats.get("call_count") or 0),
+                int(stats.get("successCount") or stats.get("success_count") or 0),
+                int(stats.get("errorCount") or stats.get("error_count") or 0),
+                float(stats.get("totalRuntime") or stats.get("total_runtime") or 0.0),
+                float(stats.get("avgRuntime") or stats.get("avg_runtime") or 0.0),
+                int(stats.get("thumbsUp") or stats.get("thumbs_up") or 0),
+                int(stats.get("thumbsDown") or stats.get("thumbs_down") or 0),
+                cls._now_ms(),
+            ),
+        )
+        await db.commit()
 
     @classmethod
     async def delete_stats(cls, workflow_id: str) -> bool:
         db = await cls._db()
-        async with db.transaction() as tx:
-            cur = await tx.execute("DELETE FROM workflow_stats WHERE workflow_id = ?", (workflow_id,))
+        cur = await db.execute("DELETE FROM workflow_stats WHERE workflow_id = ?", (workflow_id,))
+        await db.commit()
         return cur.rowcount > 0
 
     @classmethod
     async def increment_stats(cls, workflow_id: str, *, success: bool, duration: float) -> None:
         db = await cls._db()
-        async with db.transaction() as tx:
-            await cls._increment_stats_on(tx, workflow_id, success=success, duration=duration)
-
-    @classmethod
-    async def _increment_stats_on(cls, tx, workflow_id: str, *, success: bool, duration: float) -> None:
         runtime = float(duration)
         success_delta = 1 if success else 0
         error_delta = 0 if success else 1
         updated_at = cls._now_ms()
-        await tx.execute(
+        await db.execute(
             """
             INSERT INTO workflow_stats (
                 workflow_id,
@@ -745,6 +815,7 @@ class WorkflowStore:
                 updated_at,
             ),
         )
+        await db.commit()
 
     @classmethod
     async def put_config(
@@ -757,16 +828,15 @@ class WorkflowStore:
         db = await cls._db()
         config_kind = kind or str(config.get("kind") or "workflow.integration-config")
         version = cls._as_int(config.get("version"))
-        async with db.transaction() as tx:
-            await tx.execute(
-                tx.dialect.upsert(
-                    "workflow_configs",
-                    ('workflow_id', 'kind', 'version', 'config', 'updated_at'),
-                    key_columns=('workflow_id', 'kind'),
-                    update_columns=('version', 'config', 'updated_at'),
-                ),
-                (workflow_id, config_kind, version, cls._json_dumps(config), cls._now_ms()),
-            )
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO workflow_configs
+            (workflow_id, kind, version, config, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (workflow_id, config_kind, version, cls._json_dumps(config), cls._now_ms()),
+        )
+        await db.commit()
 
     @classmethod
     async def get_config(
@@ -804,19 +874,18 @@ class WorkflowStore:
     @classmethod
     async def delete_config(cls, workflow_id: str, *, kind: Optional[str] = None) -> int:
         db = await cls._db()
-        async with db.transaction() as tx:
-            if kind:
-                cur = await tx.execute(
-                    "DELETE FROM workflow_configs WHERE workflow_id = ? AND kind = ?",
-                    (workflow_id, kind),
-                )
-            else:
-                cur = await tx.execute("DELETE FROM workflow_configs WHERE workflow_id = ?", (workflow_id,))
+        if kind:
+            cur = await db.execute(
+                "DELETE FROM workflow_configs WHERE workflow_id = ? AND kind = ?",
+                (workflow_id, kind),
+            )
+        else:
+            cur = await db.execute("DELETE FROM workflow_configs WHERE workflow_id = ?", (workflow_id,))
+        await db.commit()
         return cur.rowcount
 
-    #: A delivery claimed this long ago that never started a run was dropped
-    #: (its process died between the claim and the run); a retry may take it.
-    WEBHOOK_TAKEOVER_S = 60.0
+    #: A recorded delivery's window ends here at the latest, whatever it asked for.
+    _WEBHOOK_WINDOW_MAX_S = 7 * 24 * 3600.0
 
     @classmethod
     async def claim_webhook_delivery(
@@ -825,72 +894,49 @@ class WorkflowStore:
         """Record a webhook delivery unless the same one is still within its window.
 
         Returns ``None`` when this call recorded it -- go ahead and run -- or
-        the first delivery's id when *key* is a replay.  Atomic across every
-        instance on the database: two copies arriving at two nodes at once
-        resolve to exactly one recorded delivery.  *claim_token* identifies
-        this claim (and only this one) to :meth:`release_webhook_delivery`
-        and to the run it starts (:meth:`start_execution`'s ``delivery``).
-
-        A claim whose run never started -- no execution was bound to it within
-        ``WEBHOOK_TAKEOVER_S`` -- is not a delivery that was handled: a
-        retry takes it over instead of being answered as a duplicate.
+        the first delivery's id when *key* is a replay.  The deliveries are
+        recorded in this process, the one that runs what they start; one that
+        restarts runs a delivery sent again.  *claim_token* identifies this
+        claim to :meth:`release_webhook_delivery`.
         """
-        db = await cls._db()
-        async with db.transaction() as tx:
-            # Rows past their window are only kept long enough to be harmless.
-            await tx.execute(
-                "DELETE FROM workflow_webhook_deliveries WHERE expires_at < clock_timestamp() - interval '1 hour'"
-            )
-            claimed = await tx.execute(
-                "INSERT INTO workflow_webhook_deliveries (key, delivery_id, expires_at, claim_token, claimed_at, exec_id) "
-                "VALUES (?, ?, clock_timestamp() + (? * interval '1 second'), ?, clock_timestamp(), NULL) "
-                "ON CONFLICT (key) DO UPDATE SET delivery_id = EXCLUDED.delivery_id, expires_at = EXCLUDED.expires_at, "
-                "claim_token = EXCLUDED.claim_token, "  # secret-guard: allow 误报：SQL 片段 EXCLUDED.claim_token
-                "claimed_at = EXCLUDED.claimed_at, exec_id = NULL "
-                "WHERE workflow_webhook_deliveries.expires_at <= clock_timestamp() "
-                "OR (workflow_webhook_deliveries.exec_id IS NULL "
-                "AND workflow_webhook_deliveries.claimed_at <= clock_timestamp() - (? * interval '1 second')) "
-                "RETURNING delivery_id",
-                (key, delivery_id, float(window_s), claim_token, float(cls.WEBHOOK_TAKEOVER_S)),
-            )
-            if await claimed.fetchone() is not None:
-                return None
-            existing = await tx.execute("SELECT delivery_id FROM workflow_webhook_deliveries WHERE key = ?", (key,))
-            row = await existing.fetchone()
-        return str(row["delivery_id"]) if row is not None else ""
+        now = time.monotonic()
+        window = min(max(float(window_s), 0.0), cls._WEBHOOK_WINDOW_MAX_S)
+        with cls._webhook_lock:
+            for stale in [k for k, (_, _, ends) in cls._webhook_deliveries.items() if ends <= now]:
+                del cls._webhook_deliveries[stale]
+            recorded = cls._webhook_deliveries.get(key)
+            if recorded is not None:
+                return recorded[0]
+            cls._webhook_deliveries[key] = (delivery_id, claim_token, now + window)
+        return None
 
     @classmethod
     async def release_webhook_delivery(cls, key: str, claim_token: str) -> None:
         """Forget the delivery one claim recorded, so the same one may be sent again.
 
-        Only that claim: a later claim of the same key (after this one's window
-        ran out) carries another token and stays.
+        Only that claim: a later claim of the same key carries another token and stays.
         """
         if not claim_token:
             return
-        db = await cls._db()
-        async with db.transaction() as tx:
-            await tx.execute(
-                "DELETE FROM workflow_webhook_deliveries WHERE key = ? AND claim_token = ?",
-                (key, claim_token),
-            )
+        with cls._webhook_lock:
+            recorded = cls._webhook_deliveries.get(key)
+            if recorded is not None and recorded[1] == claim_token:
+                del cls._webhook_deliveries[key]
 
     @classmethod
     async def kv_put(cls, key: str, value: Any, value_type: str = _JSON_TYPE) -> None:
         db = await cls._db()
         now = cls._now_iso()
-        # On conflict, created_at is simply left out of the update, which is
-        # what the COALESCE subquery here used to achieve.
-        async with db.transaction() as tx:
-            await tx.execute(
-                tx.dialect.upsert(
-                    "workflow_kv",
-                    ("key", "value", "type", "created_at", "updated_at"),
-                    key_columns=("key",),
-                    update_columns=("value", "type", "updated_at"),
-                ),
-                (key, cls._json_dumps(value), value_type, now, now),
-            )
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO workflow_kv (key, value, type, created_at, updated_at)
+            VALUES (?, ?, ?,
+                COALESCE((SELECT created_at FROM workflow_kv WHERE key = ?), ?),
+                ?)
+            """,
+            (key, cls._json_dumps(value), value_type, key, now, now),
+        )
+        await db.commit()
 
     @classmethod
     async def kv_get(cls, key: str) -> Optional[Any]:
@@ -904,8 +950,8 @@ class WorkflowStore:
     @classmethod
     async def kv_remove(cls, key: str) -> bool:
         db = await cls._db()
-        async with db.transaction() as tx:
-            cur = await tx.execute("DELETE FROM workflow_kv WHERE key = ?", (key,))
+        cur = await db.execute("DELETE FROM workflow_kv WHERE key = ?", (key,))
+        await db.commit()
         return cur.rowcount > 0
 
     @classmethod
@@ -938,70 +984,81 @@ class WorkflowStore:
     @classmethod
     async def kv_clear(cls, prefix: str) -> int:
         db = await cls._db()
-        async with db.transaction() as tx:
-            cur = await tx.execute(
-                "DELETE FROM workflow_kv WHERE key LIKE ? ESCAPE '\\'",
-                (Storage._like_prefix_pattern(prefix),),
-            )
+        cur = await db.execute(
+            "DELETE FROM workflow_kv WHERE key LIKE ? ESCAPE '\\'",
+            (Storage._like_prefix_pattern(prefix),),
+        )
+        await db.commit()
         return cur.rowcount
 
 
-def _workflow_ddl(dialect) -> list[str]:
-    """The workflow tables, using the shared PostgreSQL column types."""
-    text, num, real = dialect.text_type(), dialect.integer_type(), dialect.double_type()
-    return [
-        """CREATE TABLE IF NOT EXISTS workflow_execution_leases (
-            lease_key TEXT PRIMARY KEY, execution_id TEXT NOT NULL UNIQUE,
-            scope_key TEXT, owner_node_id TEXT NOT NULL,
-            generation BIGINT NOT NULL DEFAULT 1, cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
-            lease_expires_at TIMESTAMPTZ NOT NULL)""",
-        "ALTER TABLE workflow_execution_leases ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE",
-        f"""CREATE TABLE IF NOT EXISTS workflow_executions (
-            id {text} PRIMARY KEY, workflow_id {text} NOT NULL, status {text} NOT NULL,
-            current_phase {text}, current_node_id {text}, current_node_type {text},
-            current_step_index {num}, step_count {num} NOT NULL DEFAULT 0,
-            input_params {text} NOT NULL DEFAULT '{{}}', output_results {text} NOT NULL DEFAULT '{{}}',
-            error_message {text}, trigger_id {text}, trigger_type {text},
-            started_at {num} NOT NULL, finished_at {num}, duration {real},
-            updated_at {num}, payload {text} NOT NULL)""",
-        f"""CREATE TABLE IF NOT EXISTS workflow_execution_steps (
-            exec_id {text} NOT NULL, step_index {num} NOT NULL, node_id {text}, node_type {text},
-            inputs {text} NOT NULL DEFAULT '{{}}', outputs {text} NOT NULL DEFAULT '{{}}',
-            error {text}, payload {text} NOT NULL, PRIMARY KEY (exec_id, step_index))""",
-        f"""CREATE TABLE IF NOT EXISTS workflow_stats (
-            workflow_id {text} PRIMARY KEY, call_count {num} NOT NULL DEFAULT 0,
-            success_count {num} NOT NULL DEFAULT 0, error_count {num} NOT NULL DEFAULT 0,
-            total_runtime {real} NOT NULL DEFAULT 0, avg_runtime {real} NOT NULL DEFAULT 0,
-            thumbs_up {num} NOT NULL DEFAULT 0, thumbs_down {num} NOT NULL DEFAULT 0,
-            updated_at {num})""",
-        f"""CREATE TABLE IF NOT EXISTS workflow_configs (
-            workflow_id {text} NOT NULL, kind {text} NOT NULL, version {num},
-            config {text} NOT NULL, updated_at {num}, PRIMARY KEY (workflow_id, kind))""",
-        f"""CREATE TABLE IF NOT EXISTS workflow_kv (
-            key {text} PRIMARY KEY, value {text} NOT NULL, type {text} NOT NULL,
-            created_at {text} NOT NULL, updated_at {text} NOT NULL)""",
-        # Webhook deliveries seen recently, shared by every instance on the
-        # database so a replay is recognised wherever it lands.
-        f"""CREATE TABLE IF NOT EXISTS workflow_webhook_deliveries (
-            key {text} PRIMARY KEY, delivery_id {text} NOT NULL,
-            expires_at TIMESTAMPTZ NOT NULL, claim_token {text} NOT NULL DEFAULT '')""",
-        "ALTER TABLE workflow_webhook_deliveries ADD COLUMN IF NOT EXISTS claim_token TEXT NOT NULL DEFAULT ''",
-        # The run a delivery started, bound in the run's own start transaction.
-        "ALTER TABLE workflow_webhook_deliveries ADD COLUMN IF NOT EXISTS exec_id TEXT",
-        "ALTER TABLE workflow_webhook_deliveries ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()",
-        # One row per scheduled time a schedule ran, so only one instance runs it.
-        f"""CREATE TABLE IF NOT EXISTS workflow_schedule_claims (
-            workflow_id {text} NOT NULL, trigger_id {text} NOT NULL, slot_ms BIGINT NOT NULL,
-            claimed_by {text} NOT NULL, claimed_at TIMESTAMPTZ NOT NULL,
-            PRIMARY KEY (workflow_id, trigger_id, slot_ms))""",
-    ]
+_WORKFLOW_DDL = """
+CREATE TABLE IF NOT EXISTS workflow_executions (
+    id                 TEXT PRIMARY KEY,
+    workflow_id        TEXT NOT NULL,
+    status             TEXT NOT NULL,
+    current_phase      TEXT,
+    current_node_id    TEXT,
+    current_node_type  TEXT,
+    current_step_index INTEGER,
+    step_count         INTEGER NOT NULL DEFAULT 0,
+    input_params       TEXT NOT NULL DEFAULT '{}',
+    output_results     TEXT NOT NULL DEFAULT '{}',
+    error_message      TEXT,
+    trigger_id         TEXT,
+    trigger_type       TEXT,
+    started_at         INTEGER NOT NULL,
+    finished_at        INTEGER,
+    duration           REAL,
+    updated_at         INTEGER,
+    payload            TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workflow_execution_steps (
+    exec_id    TEXT NOT NULL,
+    step_index INTEGER NOT NULL,
+    node_id    TEXT,
+    node_type  TEXT,
+    inputs     TEXT NOT NULL DEFAULT '{}',
+    outputs    TEXT NOT NULL DEFAULT '{}',
+    error      TEXT,
+    payload    TEXT NOT NULL,
+    PRIMARY KEY (exec_id, step_index)
+);
+
+CREATE TABLE IF NOT EXISTS workflow_stats (
+    workflow_id   TEXT PRIMARY KEY,
+    call_count    INTEGER NOT NULL DEFAULT 0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    error_count   INTEGER NOT NULL DEFAULT 0,
+    total_runtime REAL NOT NULL DEFAULT 0,
+    avg_runtime   REAL NOT NULL DEFAULT 0,
+    thumbs_up     INTEGER NOT NULL DEFAULT 0,
+    thumbs_down   INTEGER NOT NULL DEFAULT 0,
+    updated_at    INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS workflow_configs (
+    workflow_id TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    version     INTEGER,
+    config      TEXT NOT NULL,
+    updated_at  INTEGER,
+    PRIMARY KEY (workflow_id, kind)
+);
+
+CREATE TABLE IF NOT EXISTS workflow_kv (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    type       TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
 
 _INDEX_STMTS = [
-    "CREATE INDEX IF NOT EXISTS idx_workflow_leases_scope_expiry ON workflow_execution_leases(scope_key, lease_expires_at)",
-    "CREATE INDEX IF NOT EXISTS idx_workflow_leases_expiry ON workflow_execution_leases(lease_expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow_started ON workflow_executions(workflow_id, started_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow_status ON workflow_executions(workflow_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_executions_trigger ON workflow_executions(workflow_id, trigger_type, trigger_id)",
     "CREATE INDEX IF NOT EXISTS idx_workflow_execution_steps_exec_step ON workflow_execution_steps(exec_id, step_index)",
-    "CREATE INDEX IF NOT EXISTS idx_workflow_webhook_deliveries_expiry ON workflow_webhook_deliveries(expires_at)",
 ]

@@ -10,7 +10,6 @@ with what to do next, and ``report`` shows an analysis result as a card.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import secrets
 from typing import Any, Optional
@@ -461,17 +460,9 @@ _task_ref_salt: Optional[str] = None
 async def _load_task_ref_salt() -> str:
     global _task_ref_salt
     if _task_ref_salt is None:
-        from flocks.storage.storage import Storage
+        from flocks.coordination import shared_setdefault
 
-        async with Storage.transaction() as db:
-            await db.execute(
-                "INSERT INTO runtime_state(key, value, value_type) VALUES (?, ?::jsonb, 'json') "
-                "ON CONFLICT (key) DO NOTHING",
-                (_TASK_REF_SALT_KEY, json.dumps(secrets.token_hex(16))),
-            )
-            row = await db.fetch_one("SELECT value FROM runtime_state WHERE key = ?", (_TASK_REF_SALT_KEY,))
-        value = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-        _task_ref_salt = str(value)
+        _task_ref_salt = str(await shared_setdefault(_TASK_REF_SALT_KEY, secrets.token_hex(16)))
     return _task_ref_salt
 
 

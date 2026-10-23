@@ -3,9 +3,9 @@
   "id": "soc_ui",
   "type": "webui",
   "name": "SOC Workspace WebUI",
-  "description": "SOC workspace for posture, overview, alert investigation, incident response and retrospective review.",
-  "descriptionCn": "SOC 工作区，包含态势、SOC 总览、告警调查、事件响应与复盘。",
-  "version": "1.2.4",
+  "description": "SOC workspace pages for posture, overview, and alert investigation.",
+  "descriptionCn": "SOC 工作区页面，包含态势、SOC 总览和告警调查。",
+  "version": "1.1.10.1",
   "author": "Flocks Team",
   "license": "MIT",
   "homepage": "",
@@ -41,25 +41,19 @@
   },
   "dependencies": {
     "skills": [],
-    "tools": [
-      "soc_case_manage"
-    ],
+    "tools": [],
     "python": [],
     "external": []
   },
   "permissions": {
-    "tools": [
-      "soc_case_manage"
-    ],
+    "tools": [],
     "network": false,
     "shell": false,
     "filesystem": "read"
   },
   "risk": {
-    "level": "high",
-    "reasons": [
-      "Allows human approval and execution requests for incident response plans through existing device policy gates."
-    ]
+    "level": "low",
+    "reasons": []
   },
   "entrypoints": [
     "workspace.json"

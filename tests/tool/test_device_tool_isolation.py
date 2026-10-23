@@ -5,7 +5,7 @@ Regression suite for the bug where two device instances sharing the same
 tool on/off state coupled — toggling a tool "for Device A" also affected
 Device B.
 
-Fix: store per-device tool overrides in the ``device_tool_settings`` PostgreSQL
+Fix: store per-device tool overrides in the ``device_tool_settings`` SQLite
 table (ON DELETE CASCADE cleans up automatically on device removal).  The
 override is checked at ToolRegistry.execute() time, AFTER the shared global
 tool_settings have been applied.  A per-device ``enabled=False`` row disables
@@ -32,7 +32,7 @@ from flocks.tool.registry import Tool, ToolCategory, ToolContext, ToolInfo, Tool
 
 @pytest.fixture
 async def db_env(tmp_path: Path, monkeypatch):
-    """Use the retained PostgreSQL schema provided by the global fixture.
+    """Isolated SQLite DB for each test.
 
     Importing ``flocks.tool.device.models`` ensures all DDLs (including
     device_tool_settings) are registered before Storage.init() runs.
@@ -93,18 +93,16 @@ async def _insert_stub_device(device_id: str, storage_key: str) -> None:
     from flocks.storage.storage import Storage
 
     now = 1_700_000_000_000
-    async with Storage.transaction() as db:
+    async with Storage.connect(Storage.get_db_path()) as db:
         await db.execute("""
-            INSERT INTO device_groups (id, name, sort_order, created_at, updated_at)
+            INSERT OR IGNORE INTO device_groups (id, name, sort_order, created_at, updated_at)
             VALUES ('default-room', '默认机房', 0, ?, ?)
-            ON CONFLICT (id) DO NOTHING
         """, (now, now))
         await db.execute("""
-            INSERT INTO device_integrations
+            INSERT OR IGNORE INTO device_integrations
                 (id, group_id, name, storage_key, service_id, enabled,
                  verify_ssl, fields, status, created_at, updated_at)
             VALUES (?, 'default-room', ?, ?, ?, 1, 0, '{}', 'unknown', ?, ?)
-            ON CONFLICT (id) DO NOTHING
         """, (device_id, f"dev-{device_id[:4]}", storage_key, storage_key, now, now))
         await db.commit()
 
@@ -121,21 +119,12 @@ class TestStoreDeviceToolSettings:
         assert result is None
 
     async def test_set_and_get_roundtrip(self, db_env):
-        from flocks.storage.storage import Storage
         from flocks.tool.device.store import get_device_tool_enabled, set_device_tool_enabled
         dev_id = str(uuid.uuid4())
         await _insert_stub_device(dev_id, "sangfor_af_v8_0_106")
         await set_device_tool_enabled(dev_id, "sangfor_af_login", False)
         result = await get_device_tool_enabled(dev_id, "sangfor_af_login")
         assert result is False
-        await set_device_tool_enabled(dev_id, "sangfor_af_login", True)
-        assert await get_device_tool_enabled(dev_id, "sangfor_af_login") is True
-        async with Storage.transaction() as db:
-            row = await (await db.execute(
-                "SELECT count(*) FROM device_tool_settings WHERE device_id = ? AND tool_name = ?",
-                (dev_id, "sangfor_af_login"),
-            )).fetchone()
-        assert row[0] == 1
 
     async def test_set_does_not_affect_other_device(self, db_env):
         from flocks.tool.device.store import get_device_tool_enabled, set_device_tool_enabled

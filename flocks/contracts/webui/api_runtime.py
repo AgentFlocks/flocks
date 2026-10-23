@@ -667,7 +667,7 @@ class WebUIPageApiRuntime:
         return JSONResponse(content=result)
 
     def _create_context(self, page_id: str, user: Any, secrets: frozenset[str] = frozenset()) -> Any:
-        from flocks.db import sync_query
+        from flocks.coordination import page_api_database
 
         logger = Log.create(service=f"webui-page-api:{page_id}")
         return SimpleNamespace(
@@ -676,7 +676,8 @@ class WebUIPageApiRuntime:
             secrets=_SecretAccessor(page_id, secrets),  # secret-guard: allow 误报：字段名含 secret
             logger=logger,
             cache=None,
-            database=SimpleNamespace(connect=sync_query.connect, identity=sync_query.identity),
+            # A direct database handle, from a backend that offers pages one; None otherwise.
+            database=page_api_database(),
         )
 
     async def _mark_failed(self, page_id: str, error: str) -> None:

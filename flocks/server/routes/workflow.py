@@ -759,7 +759,7 @@ _INTERRUPTED_EXECUTION_MESSAGE = "Execution interrupted: server restarted before
 
 
 async def mark_interrupted_executions() -> int:
-    """Finalize only executions whose PostgreSQL owner lease has expired."""
+    """Finalize executions left running by a process that is gone."""
     return await WorkflowStore.recover_expired_executions(_INTERRUPTED_EXECUTION_MESSAGE)
 
 
@@ -2041,7 +2041,7 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
         def _cleanup_active(_t: asyncio.Task, _eid: str = exec_id) -> None:
             _active_workflow_executions.pop(_eid, None)
             # A task cancelled before its first step never enters the runner's
-            # finally block. Release its lease instead of renewing forever.
+            # finally block: end its record instead of leaving it running.
             asyncio.create_task(abandon_execution(_eid), name=f"workflow-release-{_eid}")
 
         task.add_done_callback(_cleanup_active)

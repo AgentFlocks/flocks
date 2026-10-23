@@ -13,10 +13,8 @@ whole turns older than ``messageDays`` go.
 
 from __future__ import annotations
 
-import json
 import os
-from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -25,8 +23,6 @@ from flocks.utils.log import set_log_cleanup_managed, set_log_retention_days_ove
 MAX_RETENTION_DAYS = 3650
 DEFAULT_LOG_DAYS = 30
 CONFIG_SECTION = "dataRetention"
-# Moved by every policy save; see policy_unchanged.
-POLICY_VERSION_KEY = "data_retention:policy_version"
 
 
 class RetentionPolicy(BaseModel):
@@ -83,8 +79,8 @@ async def load_policy() -> RetentionPolicy:
 async def load_saved_policy() -> RetentionPolicy:
     """The policy as saved right now: every configuration layer, never a cached copy.
 
-    A cache another request refilled before a save would pair an old policy
-    with the version the save moved (see policy_unchanged).
+    The CLI and the server are separate processes; a copy cached before an
+    admin's change would keep deleting under the old policy.
     """
     from flocks.config.config import Config
     from flocks.config.runtime import runtime_config
@@ -104,9 +100,8 @@ async def preload_log_retention() -> None:
     Called before ``Log.init`` by every Flocks process (CLI and server). From
     then on the logger deletes nothing on its own, neither on startup nor at
     day rollover, where it only knows the period it read once: expired logs go
-    only in the scheduler's rounds, under the policy as last saved anywhere and
-    the shared policy version (see policy_unchanged). The saved period is still
-    applied for what asks the logger.
+    only in the scheduler's rounds, under the policy as last saved. The saved
+    period is still applied for what asks the logger.
     """
     set_log_cleanup_managed(True)
     try:
@@ -115,57 +110,11 @@ async def preload_log_retention() -> None:
         pass
 
 
-def _version_of(row: Any) -> int:
-    if row is None or row[0] is None:
-        return 0
-    return int(json.loads(row[0]) if isinstance(row[0], str) else row[0])
-
-
-async def policy_version() -> int:
-    """The shared version every policy save moves; a cleanup reads it before the policy."""
-    from flocks.storage.storage import Storage
-
-    async with Storage.transaction() as db:
-        row = await db.fetch_one("SELECT value FROM runtime_state WHERE key = ?", (POLICY_VERSION_KEY,))
-    return _version_of(row)
-
-
 async def bump_policy_version() -> int:
-    """Move the shared version after a new policy was written to flocks.json.
+    """Called after a new policy was written to flocks.json.
 
-    Waits for any deletion holding the version (``policy_unchanged``) to finish,
-    so once this returns no worker deletes under an older policy.
+    The scheduler reads the saved policy before every round, so in one process
+    there is no version to move. A database backend whose processes share
+    retention replaces this module with one that keeps a shared version.
     """
-    from flocks.storage.storage import Storage
-
-    async with Storage.transaction() as db:
-        row = await db.fetch_one(
-            """INSERT INTO runtime_state(key, value, value_type) VALUES (?, '1'::jsonb, 'json')
-            ON CONFLICT (key) DO UPDATE SET value = to_jsonb((runtime_state.value #>> '{}')::bigint + 1),
-                updated_at = clock_timestamp()
-            RETURNING value""",
-            (POLICY_VERSION_KEY,),
-        )
-    return _version_of(row)
-
-
-@asynccontextmanager
-async def policy_unchanged(version: int) -> AsyncIterator[bool]:
-    """Hold the shared policy version across one deletion; yield whether it is still ``version``.
-
-    A save moves the version only after this lets go, and a deletion guarded
-    after that sees the new version, so every worker orders policy changes and
-    deletions the same way: none deletes under a policy an admin has replaced.
-    """
-    from flocks.storage.storage import Storage
-
-    async with Storage.transaction() as db:
-        await db.execute(
-            "INSERT INTO runtime_state(key, value, value_type) VALUES (?, '0'::jsonb, 'json') "
-            "ON CONFLICT (key) DO NOTHING",
-            (POLICY_VERSION_KEY,),
-        )
-        row = await db.fetch_one(
-            "SELECT value FROM runtime_state WHERE key = ? FOR SHARE", (POLICY_VERSION_KEY,),
-        )
-        yield _version_of(row) == version
+    return 0

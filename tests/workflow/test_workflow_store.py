@@ -5,8 +5,6 @@ import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from asyncpg.transaction import Transaction as PgTransaction
-
 import pytest
 
 from flocks.config.config import Config
@@ -21,9 +19,11 @@ def _reset_state() -> None:
     Storage._initialized = False
     Storage._init_pid = None
     WorkflowStore._initialized = False
-    WorkflowStore._handle = None
+    WorkflowStore._conn = None
+    WorkflowStore._completion_conn = None
     WorkflowStore._init_pid = None
     WorkflowStore._db_path = None
+    WorkflowStore._completion_lock = None
 
 
 @pytest.fixture(autouse=True)
@@ -38,55 +38,48 @@ async def isolated_workflow_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
-async def test_concurrent_initialization_keeps_one_transaction_handle(monkeypatch) -> None:
-    import flocks.workflow.store as store_module
+async def test_concurrent_initialization_keeps_one_connection_pair(monkeypatch) -> None:
+    import aiosqlite
 
     await Storage.init()
-    real_open = store_module.open_transaction
+    real_connect = aiosqlite.connect
     opened = []
 
-    async def tracked_open(*args, **kwargs):
-        handle = await real_open(*args, **kwargs)
-        opened.append(handle)
-        return handle
+    def tracked_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        if Path(args[0]) == WorkflowStore.get_db_path():
+            opened.append(connection)
+        return connection
 
-    monkeypatch.setattr(store_module, "open_transaction", tracked_open)
-    await asyncio.gather(*(WorkflowStore.init() for _ in range(10)))
-    assert len(opened) == 1
-    assert WorkflowStore._handle is opened[0]
+    monkeypatch.setattr(aiosqlite, "connect", tracked_connect)
+    try:
+        await asyncio.gather(*(WorkflowStore.init() for _ in range(10)))
+        assert len(opened) == 2
+        assert WorkflowStore._conn is opened[0]
+        assert WorkflowStore._completion_conn is opened[1]
+    finally:
+        await WorkflowStore.close()
+        for connection in opened:
+            await connection.close()
 
 
 @pytest.mark.asyncio
-async def test_cancelled_initialization_closes_the_handle(monkeypatch) -> None:
-    import flocks.workflow.store as store_module
-
+async def test_cancelled_initialization_closes_connection(monkeypatch) -> None:
     await Storage.init()
     entered = asyncio.Event()
-    closed = []
 
-    class BlockedHandle:
-        def transaction(self):
-            return self
+    async def blocked_migration():
+        entered.set()
+        await asyncio.Event().wait()
 
-        async def __aenter__(self):
-            entered.set()
-            await asyncio.Event().wait()
-
-        async def __aexit__(self, *_exc):
-            return False
-
-        async def close(self):
-            closed.append(self)
-
-    handle = BlockedHandle()
-    monkeypatch.setattr(store_module, "open_transaction", AsyncMock(return_value=handle))
+    monkeypatch.setattr(WorkflowStore, "_migrate_legacy_kv", blocked_migration)
     task = asyncio.create_task(WorkflowStore.init())
     await asyncio.wait_for(entered.wait(), timeout=10)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert closed == [handle]
-    assert WorkflowStore._handle is None
+    assert WorkflowStore._conn is None
+    assert WorkflowStore._completion_conn is None
     assert not WorkflowStore._initialized
 
 
@@ -177,17 +170,16 @@ async def test_complete_execution_writes_steps_and_summary_with_one_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await WorkflowStore.init()
-    await WorkflowStore.raw_completion_db()
-    # Count actual PostgreSQL transaction commits, across pooled connections.
+    db = await WorkflowStore.raw_completion_db()
     commit_count = 0
-    original_commit = PgTransaction.commit
+    original_commit = db.commit
 
-    async def counted_commit(transaction) -> None:
+    async def counted_commit() -> None:
         nonlocal commit_count
         commit_count += 1
-        await original_commit(transaction)
+        await original_commit()
 
-    monkeypatch.setattr(PgTransaction, "commit", counted_commit)
+    monkeypatch.setattr(db, "commit", counted_commit)
 
     await WorkflowStore.complete_execution(
         {
@@ -212,7 +204,7 @@ async def test_complete_execution_writes_steps_and_summary_with_one_commit(
     steps, total = await WorkflowStore.list_steps("exec-complete")
     assert total == 2
     assert [step["node_id"] for step in steps] == ["n1", "n2"]
-    assert (await WorkflowStore.get_stats("wf-complete"))["callCount"] == 1
+    assert await WorkflowStore.get_stats("wf-complete") is None
 
 
 @pytest.mark.asyncio
@@ -220,17 +212,16 @@ async def test_complete_execution_reduces_28_step_writes_to_four_commits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await WorkflowStore.init()
-    await WorkflowStore.raw_completion_db()
-    # Count actual PostgreSQL transaction commits, across pooled connections.
+    db = await WorkflowStore.raw_completion_db()
     commit_count = 0
-    original_commit = PgTransaction.commit
+    original_commit = db.commit
 
-    async def counted_commit(transaction) -> None:
+    async def counted_commit() -> None:
         nonlocal commit_count
         commit_count += 1
-        await original_commit(transaction)
+        await original_commit()
 
-    monkeypatch.setattr(PgTransaction, "commit", counted_commit)
+    monkeypatch.setattr(db, "commit", counted_commit)
     steps = [
         (index, {"node_id": f"node-{index}", "outputs": {"ok": True}})
         for index in range(1, 8)
@@ -265,7 +256,7 @@ async def test_complete_execution_reduces_28_step_writes_to_four_commits(
         assert [step["node_id"] for step in persisted_steps] == [
             f"node-{step_index}" for step_index in range(1, 8)
         ]
-    assert (await WorkflowStore.get_stats("wf-trigger"))["callCount"] == 4
+    assert await WorkflowStore.get_stats("wf-trigger") is None
 
 
 @pytest.mark.asyncio
@@ -273,15 +264,15 @@ async def test_complete_execution_rolls_back_partial_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await WorkflowStore.init()
-    await WorkflowStore.raw_completion_db()
-    original_stats = WorkflowStore._increment_stats_on
+    db = await WorkflowStore.raw_completion_db()
+    original_commit = db.commit
 
-    async def fail_stats(*args, **kwargs) -> None:
-        raise RuntimeError("statistics write failed")
+    async def fail_commit() -> None:
+        raise RuntimeError("commit failed")
 
-    monkeypatch.setattr(WorkflowStore, "_increment_stats_on", fail_stats)
+    monkeypatch.setattr(db, "commit", fail_commit)
 
-    with pytest.raises(RuntimeError, match="statistics write failed"):
+    with pytest.raises(RuntimeError, match="commit failed"):
         await WorkflowStore.complete_execution(
             {
                 "id": "exec-rollback",
@@ -296,7 +287,7 @@ async def test_complete_execution_rolls_back_partial_transaction(
             [(1, {"node_id": "node-1", "outputs": {"ok": True}})],
         )
 
-    monkeypatch.setattr(WorkflowStore, "_increment_stats_on", original_stats)
+    monkeypatch.setattr(db, "commit", original_commit)
     assert await WorkflowStore.get_execution("exec-rollback") is None
     persisted_steps, total = await WorkflowStore.list_steps("exec-rollback")
     assert persisted_steps == []
@@ -309,13 +300,13 @@ async def test_complete_execution_rolls_back_cancelled_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await WorkflowStore.init()
-    await WorkflowStore.raw_completion_db()
-    original_stats = WorkflowStore._increment_stats_on
+    db = await WorkflowStore.raw_completion_db()
+    original_commit = db.commit
 
-    async def cancel_stats(*args, **kwargs) -> None:
+    async def cancel_commit() -> None:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(WorkflowStore, "_increment_stats_on", cancel_stats)
+    monkeypatch.setattr(db, "commit", cancel_commit)
 
     with pytest.raises(asyncio.CancelledError):
         await WorkflowStore.complete_execution(
@@ -331,7 +322,7 @@ async def test_complete_execution_rolls_back_cancelled_transaction(
             [(1, {"node_id": "node-1", "outputs": {"ok": True}})],
         )
 
-    monkeypatch.setattr(WorkflowStore, "_increment_stats_on", original_stats)
+    monkeypatch.setattr(db, "commit", original_commit)
     await WorkflowStore.complete_execution(
         {
             "id": "exec-after-cancel",
@@ -350,56 +341,48 @@ async def test_complete_execution_rolls_back_cancelled_transaction(
 
 
 @pytest.mark.asyncio
-async def test_concurrent_writers_and_completions_do_not_collide() -> None:
-    """Concurrent progress, completion, and stats use independent PG transactions."""
-    await WorkflowStore.init()
-    steps = [(index, {"node_id": f"node-{index}", "outputs": {"ok": True}}) for index in range(1, 6)]
-
-    async def progress(index: int) -> None:
-        for step in range(1, 6):
-            await WorkflowStore.upsert_execution(
-                {"id": f"exec-p{index}", "workflowId": "wf-race", "status": "running", "startedAt": index, "currentStepIndex": step}
-            )
-            await WorkflowStore.record_steps(f"exec-p{index}", [steps[step - 1]])
-            await WorkflowStore.increment_stats("wf-race", success=True, duration=0.001)
-
-    async def complete(index: int) -> None:
-        await WorkflowStore.complete_execution(
-            {"id": f"exec-c{index}", "workflowId": "wf-race", "status": "success", "startedAt": 100 + index, "finishedAt": 200 + index, "executionLog": [], "stepCount": 5},
-            steps,
-        )
-        await WorkflowStore.trim_executions("wf-race", keep=50)
-
-    await asyncio.gather(*(progress(i) for i in range(4)), *(complete(i) for i in range(4)))
-
-    for index in range(4):
-        _, total = await WorkflowStore.list_steps(f"exec-p{index}")
-        assert total == 5
-        _, total = await WorkflowStore.list_steps(f"exec-c{index}")
-        assert total == 5
-        completed = await WorkflowStore.get_execution(f"exec-c{index}")
-        assert completed is not None and completed["status"] == "success"
-    stats = await WorkflowStore.get_stats("wf-race")
-    assert stats is not None and stats["callCount"] == 24
-
-
-@pytest.mark.asyncio
 async def test_pid_change_drops_inherited_connections_without_closing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await WorkflowStore.init()
     original_db = await WorkflowStore.raw_db()
     original_completion_db = await WorkflowStore.raw_completion_db()
-    original_close = original_db.close
+    original_db_close = original_db.close
+    original_completion_db_close = original_completion_db.close
     db_close = AsyncMock()
-    monkeypatch.setattr(type(original_db), "close", db_close)
+    completion_db_close = AsyncMock()
+    monkeypatch.setattr(original_db, "close", db_close)
+    monkeypatch.setattr(original_completion_db, "close", completion_db_close)
+    original_lock = WorkflowStore._completion_lock
     WorkflowStore._init_pid = -1
 
     try:
         refreshed_connection = await WorkflowStore.raw_completion_db()
 
         assert refreshed_connection is not original_completion_db
+        assert WorkflowStore._completion_lock is not original_lock
         assert WorkflowStore._init_pid == os.getpid()
         db_close.assert_not_awaited()
+        completion_db_close.assert_not_awaited()
     finally:
-        await original_close()
+        await original_db_close()
+        await original_completion_db_close()
+
+
+@pytest.mark.asyncio
+async def test_trimming_history_keeps_a_run_that_is_still_going() -> None:
+    """A long run outlived by newer short ones keeps its record and its steps."""
+    await WorkflowStore.init()
+    await WorkflowStore.upsert_execution({"id": "long", "workflowId": "wf", "status": "running", "startedAt": 100})
+    await WorkflowStore.record_steps("long", [(1, {"node_id": "n1", "outputs": {}})])
+    for index in range(3):
+        await WorkflowStore.upsert_execution(
+            {"id": f"short-{index}", "workflowId": "wf", "status": "success", "startedAt": 200 + index}
+        )
+
+    trimmed = await WorkflowStore.trim_executions("wf", keep=2)
+
+    assert trimmed == ["short-0"]
+    assert {row["id"] for row in await WorkflowStore.list_executions("wf", limit=10)} == {"long", "short-1", "short-2"}
+    _, steps = await WorkflowStore.list_steps("long", offset=0, limit=10)
+    assert steps == 1

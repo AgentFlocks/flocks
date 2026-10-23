@@ -147,8 +147,8 @@ async def test_session_list():
 
 
 @pytest.mark.asyncio
-async def test_session_list_all_reads_fresh_shared_state(monkeypatch: pytest.MonkeyPatch):
-    """Repeated list_all calls read shared state so peer writes are visible."""
+async def test_session_list_all_uses_cache(monkeypatch: pytest.MonkeyPatch):
+    """Repeated list_all calls should reuse the in-memory cache."""
     Session._all_sessions_cache = None
 
     session = await Session.create(
@@ -172,7 +172,7 @@ async def test_session_list_all_reads_fresh_shared_state(monkeypatch: pytest.Mon
 
     assert any(s.id == session.id for s in first)
     assert any(s.id == session.id for s in second)
-    assert call_count == 2
+    assert call_count == 1
 
 
 @pytest.mark.asyncio
@@ -524,8 +524,8 @@ async def test_session_delete_keeps_other_sessions_cached():
         assert session.id in Session._id_index
     # A global reset bumps the epoch and aborts in-flight loads of every session.
     assert Message._cache_epoch == epoch_before
-    assert Session._all_sessions_cache is None
-    assert {s.id for s in await Session.list_all()} == {sibling.id, other_project.id}
+    assert Session._all_sessions_cache is not None
+    assert {s.id for s in Session._all_sessions_cache} == {sibling.id, other_project.id}
 
 
 if __name__ == "__main__":

@@ -14,17 +14,18 @@ it may do is decided by an administrator, for the code as it was reviewed:
   (``handlers_enabled``): code running in this process cannot be fenced off
   from it by an interface, so whether to run it is a person's decision.
 
-Approvals live in the database, so every instance applies the same ones.
+Approvals live in the runtime database, next to what they govern.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, AsyncIterator, Mapping, Optional
 
 ROLES = ("admin", "member")
 
@@ -104,17 +105,20 @@ def api_code_digest(api_dir: Path) -> str:
     return snapshot_digest(api_code_snapshot(api_dir))
 
 
-async def _ensure_schema(db) -> None:
-    from flocks.db import registry
+@asynccontextmanager
+async def _approvals_db() -> AsyncIterator[Any]:
+    """A connection to the runtime database with the approvals table in it; commits on success."""
+    from flocks.storage.storage import Storage
 
-    key = registry.current().dsn or ""
-    if key in _schema_ready:
-        return
-    # Two instances creating it at once: the lock makes the second one find it there.
-    if db.dialect.name == "postgres":
-        await db.execute("SELECT pg_advisory_xact_lock(hashtext(?))", ("flocks.webui_page_approvals.schema",))
-    await db.execute(_SCHEMA)
-    _schema_ready.add(key)
+    await Storage._ensure_init()
+    db_path = Storage.get_db_path()
+    async with Storage.connect(db_path) as db:
+        key = str(db_path)
+        if key not in _schema_ready:
+            await db.execute(_SCHEMA)
+            _schema_ready.add(key)
+        yield db
+        await db.commit()
 
 
 def _decode_roles(raw: Optional[str]) -> dict[str, tuple[str, ...]]:
@@ -132,15 +136,13 @@ def _decode_roles(raw: Optional[str]) -> dict[str, tuple[str, ...]]:
 
 
 async def get_approval(page_id: str) -> Optional[PageApproval]:
-    from flocks.storage.storage import Storage
-
-    async with Storage.transaction() as db:
-        await _ensure_schema(db)
-        row = await db.fetch_one(
+    async with _approvals_db() as db:
+        cursor = await db.execute(
             "SELECT page_id, code_sha256, secret_roles, handlers_enabled, approved_by, approved_at "
             "FROM webui_page_approvals WHERE page_id = ?",
             (page_id,),
         )
+        row = await cursor.fetchone()
     if not row:
         return None
     return PageApproval(
@@ -161,12 +163,9 @@ async def set_approval(
     handlers_enabled: bool,
     approved_by: str,
 ) -> PageApproval:
-    from flocks.storage.storage import Storage
-
     cleaned = {secret: tuple(dict.fromkeys(role for role in roles if role in ROLES)) for secret, roles in secret_roles.items()}
     approved_at = datetime.now(UTC).isoformat()
-    async with Storage.transaction() as db:
-        await _ensure_schema(db)
+    async with _approvals_db() as db:
         await db.execute(
             "INSERT INTO webui_page_approvals (page_id, code_sha256, secret_roles, handlers_enabled, approved_by, approved_at) "
             "VALUES (?, ?, ?, ?, ?, ?) "
@@ -186,12 +185,10 @@ async def set_approval(
 
 
 async def revoke_approval(page_id: str) -> bool:
-    from flocks.storage.storage import Storage
-
-    async with Storage.transaction() as db:
-        await _ensure_schema(db)
+    async with _approvals_db() as db:
         cursor = await db.execute("DELETE FROM webui_page_approvals WHERE page_id = ?", (page_id,))
-    return bool(getattr(cursor, "rowcount", 0))
+        removed = cursor.rowcount
+    return bool(removed)
 
 
 __all__ = ["PageApproval", "ROLES", "api_code_digest", "get_approval", "revoke_approval", "set_approval"]

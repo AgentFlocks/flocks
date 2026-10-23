@@ -1,5 +1,5 @@
-import asyncio
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -407,7 +407,7 @@ async def test_hub_installs_soc_webui_package(isolated_hub_env, monkeypatch: pyt
         "// built during hub install: soc-alerts\n"
     )
     assert (access_dir / "soc_alerts_operations.py").is_file()
-    assert set(built_pages) == {"soc-alerts", "soc-cases", "soc-dashboard", "soc-overview"}
+    assert set(built_pages) == {"soc-alerts", "soc-dashboard", "soc-overview"}
     assert dashboard_manifest["id"] == "soc-dashboard"
     assert workspace_manifest["version"] == record.version == load_manifest("webui", "soc_ui").version
     assert record.installPath == str(webui_dir)
@@ -478,10 +478,8 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
     monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
     _patch_webui_bundle_build(monkeypatch)
 
-    from flocks.storage.storage import Storage
-    from flocks.workflow.soc_store import ensure_schema
-
-    await asyncio.to_thread(ensure_schema)
+    db_path = isolated_hub_env["data_dir"] / "soc.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "id": "alert-1",
         "time": 1782888542,
@@ -509,8 +507,24 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
         "_source_type": "tdp",
         "is_duplicate": False,
     }
-    async with Storage.transaction() as connection:
-        await connection.execute(
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE alert_records (
+                row_id TEXT PRIMARY KEY,
+                record_id TEXT,
+                asset_date TEXT NOT NULL,
+                source_file TEXT NOT NULL,
+                line_number INTEGER NOT NULL,
+                event_time INTEGER,
+                source_type TEXT,
+                threat_name TEXT,
+                is_duplicate INTEGER NOT NULL DEFAULT 0,
+                record_json TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
             """
             INSERT INTO alert_records (
                 row_id, record_id, asset_date, source_file, line_number,
@@ -532,6 +546,7 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
             ),
         )
 
+    monkeypatch.setenv("FLOCKS_SOC_ALERTS_SQLITE_DB", str(db_path))
     await install_plugin("webui", "soc_ui")
     home_plugins = isolated_hub_env["home"] / ".flocks" / "plugins"
     monkeypatch.setattr(PluginLoader, "_plugin_root", home_plugins)
@@ -543,8 +558,7 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
     from flocks.contracts.access.runtime import OperationRuntime
 
     runtime = OperationRuntime(plugins=discover_contract_plugins(project_dir=isolated_hub_env["project_dir"]))
-    response = await asyncio.to_thread(
-        runtime.execute,
+    response = runtime.execute(
         page_id="soc-alerts",
         contract_id="soc.alerts.operations",
         operation_name="list",
@@ -565,8 +579,7 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
     assert response.body["incidents"][0]["tableCells"]["threat_severity"]["value"] == "critical"
     assert response.body["incidents"][0]["tableCells"]["threat_level"]["value"] == "high"
 
-    filtered = await asyncio.to_thread(
-        runtime.execute,
+    filtered = runtime.execute(
         page_id="soc-alerts",
         contract_id="soc.alerts.operations",
         operation_name="list",
@@ -586,8 +599,7 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
     assert filtered.body["summary"]["representativeCount"] == 1
     assert [incident["id"] for incident in filtered.body["incidents"]] == ["alert-1"]
 
-    filtered_by_model_result = await asyncio.to_thread(
-        runtime.execute,
+    filtered_by_model_result = runtime.execute(
         page_id="soc-alerts",
         contract_id="soc.alerts.operations",
         operation_name="list",
@@ -610,8 +622,7 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
         {"threat_severity": ["low"]},
         {"threat_level": ["low"]},
     ):
-        excluded = await asyncio.to_thread(
-            runtime.execute,
+        excluded = runtime.execute(
             page_id="soc-alerts",
             contract_id="soc.alerts.operations",
             operation_name="list",
@@ -1795,7 +1806,7 @@ def test_hub_component_install_stream_reports_child_progress(isolated_hub_env, m
     assert frames[0]["event"] == "start"
     assert frames[0]["type"] == "component"
     assert frames[0]["id"] == "soc-workspace"
-    assert [item["status"] for item in frames[0]["items"]] == ["pending"] * 7
+    assert [item["status"] for item in frames[0]["items"]] == ["pending", "pending", "pending", "pending"]
 
     installed_children = {
         (frame["item"]["type"], frame["item"]["id"])
@@ -1807,9 +1818,6 @@ def test_hub_component_install_stream_reports_child_progress(isolated_hub_env, m
         ("tool", "soc_workspace_query"),
         ("workflow", "stream_alert_denoise"),
         ("workflow", "stream_alert_triage"),
-        ("tool", "soc_case_manage"),
-        ("agent", "soc-investigator"),
-        ("workflow", "soc_case_investigation"),
     }
     assert frames[-1]["event"] == "complete"
     assert frames[-1]["record"]["id"] == "soc-workspace"

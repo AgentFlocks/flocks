@@ -4,9 +4,9 @@
   "type": "component",
   "name": "Alert Operations Suite",
   "nameCn": "告警运营套件",
-  "description": "Alert operations suite: alert triage, persistent investigations, governed response and incident reviews.",
-  "descriptionCn": "告警运营套件：告警研判、持续调查、受控处置及事件复盘。",
-  "version": "1.1.2",
+  "description": "Installer for Flocks alert operations: pages, tools, denoise workflow, and triage workflow.",
+  "descriptionCn": "Flocks 告警运营套件安装器：包含页面、工具、降噪工作流和研判工作流。",
+  "version": "1.0.1",
   "author": "Flocks Team",
   "license": "MIT",
   "homepage": "",
@@ -48,18 +48,15 @@
   },
   "permissions": {
     "tools": [
-      "soc_workspace_query",
-      "soc_case_manage"
+      "soc_workspace_query"
     ],
     "network": false,
     "shell": false,
     "filesystem": "read-write"
   },
   "risk": {
-    "level": "high",
-    "reasons": [
-      "Includes incident response approval and governed device execution; investigation and retrospective records remain plugin-owned."
-    ]
+    "level": "medium",
+    "reasons": []
   },
   "entrypoints": [
     "component.json"
@@ -81,18 +78,6 @@
     {
       "type": "workflow",
       "id": "stream_alert_triage"
-    },
-    {
-      "type": "tool",
-      "id": "soc_case_manage"
-    },
-    {
-      "type": "agent",
-      "id": "soc-investigator"
-    },
-    {
-      "type": "workflow",
-      "id": "soc_case_investigation"
     }
   ],
   "checksums": {}

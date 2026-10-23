@@ -41,8 +41,7 @@ async def isolate_retention_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 
     yield
 
-    # Nothing to wipe: every test runs in its own PostgreSQL schema (tests/conftest.py),
-    # and Storage.clear refuses to clear without a prefix.
+    await Storage.clear()
     Session.invalidate_cache()
     Message.invalidate_cache()
     set_log_retention_days_override(None)

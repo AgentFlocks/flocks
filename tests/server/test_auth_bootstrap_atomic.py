@@ -71,8 +71,9 @@ async def test_login_with_corrupt_temp_expiry_does_not_echo_parser_error():
 
     await AuthService.init()
     await AuthService.bootstrap_admin("admin", "Passw0rd!x")
-    async with Storage.transaction() as db:
+    async with Storage.connect() as db:
         await db.execute("UPDATE users SET temp_password_expires_at = ? WHERE username = ?", ("not-a-date", "admin"))
+        await db.commit()
     with pytest.raises(ValueError) as exc_info:
         await AuthService.login("admin", "Passw0rd!x")
     assert "Invalid isoformat" not in str(exc_info.value)

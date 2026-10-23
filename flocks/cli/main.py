@@ -37,7 +37,6 @@ from flocks.cli.commands import (
     session_app,
     skill_app,
     stats_app,
-    storage_app,
     task_app,
 )
 from flocks.cli.commands.update import update_command
@@ -92,7 +91,6 @@ app.add_typer(stats_app, name="stats")
 app.add_typer(task_app, name="task")
 app.add_typer(skill_app, name="skills")
 app.add_typer(admin_app, name="admin")
-app.add_typer(storage_app, name="storage")
 # Developer/editor-integration groups: invocable, but kept out of `flocks --help`.
 # (`agent` is registered above as part of the Agent CLI panel.)
 app.add_typer(acp_app, name="acp", hidden=True)

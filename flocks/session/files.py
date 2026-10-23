@@ -259,6 +259,12 @@ def uploads_mirror():
     return FileMirror("uploads", (Config.get_data_path() / "uploads").resolve())
 
 
+#: Storage key prefix of a removed upload's tombstone, by stored path: a sweep
+#: removed it (flocks.session.message.UploadSweep), so a message written later
+#: must not name it.  Storing a file at that path again lifts it.
+REMOVED_UPLOAD_PREFIX = "upload_removed:"
+
+
 def _uploads_relative(path: Path) -> str:
     return uploads_mirror().relative(path)
 
@@ -270,9 +276,12 @@ async def store_upload(path: Path) -> bool:
     (flocks.storage.file_mirror.max_bytes) stays on this instance only.
     """
     from flocks.storage.file_mirror import FileTooLargeToShare
+    from flocks.storage.storage import Storage
 
+    mirror = uploads_mirror()
+    await Storage.delete(REMOVED_UPLOAD_PREFIX + mirror.relative(path))
     try:
-        await uploads_mirror().put(path)
+        await mirror.put(path)
     except FileTooLargeToShare as exc:
         _log.warning("session.uploads.kept_local_only", {"reason": str(exc)})
         return False

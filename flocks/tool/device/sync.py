@@ -49,7 +49,7 @@ async def sync_service_tool_state(
 
         # Aggregate enabled state per storage_key from the live DB rows.
         key_enabled: Dict[str, bool] = defaultdict(bool)
-        async with Storage.transaction(Storage.get_db_path()) as db:
+        async with Storage.connect(Storage.get_db_path()) as db:
             async with db.execute(
                 "SELECT storage_key, enabled FROM device_integrations WHERE service_id = ?",
                 (service_id,),

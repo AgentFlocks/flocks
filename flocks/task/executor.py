@@ -19,7 +19,6 @@ from .models import (
     TaskScheduler,
     TaskStatus,
 )
-from .lease import ExecutionLease, ExecutionOwnershipError, current_execution_cancelled
 from .store import TaskStore
 
 log = Log.create(service="task.executor")
@@ -28,11 +27,10 @@ _TASK_ABSOLUTE_TIMEOUT_S: int = 2 * 3600
 _workflow_cancel_lock = threading.Lock()
 _workflow_cancel_events: dict[str, threading.Event] = {}
 _workflow_done_events: dict[str, threading.Event] = {}
-#: Workflow-mode attempts this node ran (execution id -> (generation, whether
-#: it got as far as running the workflow, so whatever its nodes do may have
-#: happened -- flocks.task.outcome)).  In-process, and for the attempt of that
-#: generation only: any other attempt is judged by the persisted state.
-_workflow_started: "OrderedDict[str, tuple[int, bool]]" = OrderedDict()
+#: Workflow-mode runs this process dispatched (execution id -> whether it got
+#: as far as running the workflow, so whatever its nodes do may have happened
+#: -- flocks.task.outcome).
+_workflow_started: "OrderedDict[str, bool]" = OrderedDict()
 _WORKFLOW_STARTED_MAX = 4096
 
 
@@ -56,22 +54,9 @@ def _release_workflow_run(
 class TaskExecutor:
     @classmethod
     def workflow_started(cls, execution: TaskExecution) -> Optional[bool]:
-        """Whether this attempt of a workflow-mode run started the workflow.
-
-        None when this process cannot tell: it did not run the attempt, or what
-        it recorded is an earlier attempt's (a recovery has since claimed the
-        run under a new generation) -- the caller then goes by what was
-        persisted.  Never False for a record of another attempt: that one may
-        well have started it.
-        """
+        """Whether this workflow-mode run started the workflow; None when this process did not run it."""
         with _workflow_cancel_lock:
-            record = _workflow_started.get(execution.id)
-        if record is None:
-            return None
-        generation, started = record
-        if generation != execution.owner_generation:
-            return None  # another attempt's: started or not, it says nothing of this one
-        return started
+            return _workflow_started.get(execution.id)
 
     @classmethod
     def forget_workflow_started(cls, execution_id: str) -> None:
@@ -93,121 +78,85 @@ class TaskExecutor:
     async def dispatch(
         cls,
         execution: TaskExecution,
-        scheduler: Optional[TaskScheduler],
+        scheduler: TaskScheduler,
     ) -> TaskExecution:
-        # Claim before creating a session, publishing events, or writing any
-        # execution fields. Another node may have reclaimed the dequeued row.
-        async with ExecutionLease(execution.id) as lease:
-            if not lease.acquired:
-                raise ExecutionOwnershipError(f"execution ownership refused: {execution.id}")
-            lease.require_owned()
+        # The execution row was already flipped to RUNNING atomically with the
+        # queue ref inside TaskStore.claim_next_queue_execution. We only need
+        # to make sure the in-memory object reflects that and to persist the
+        # session_id once the task session has been created.
+        if execution.status != TaskStatus.RUNNING:
+            execution.status = TaskStatus.RUNNING
+        if execution.started_at is None:
+            execution.started_at = datetime.now(timezone.utc)
+        if execution.execution_mode == ExecutionMode.WORKFLOW:
+            with _workflow_cancel_lock:
+                # This attempt has started nothing yet (an earlier one may have).
+                _workflow_started[execution.id] = False
+                _workflow_started.move_to_end(execution.id)
+                while len(_workflow_started) > _WORKFLOW_STARTED_MAX:
+                    _workflow_started.popitem(last=False)
 
-            execution.owner_node_id = lease.node_id
-            execution.owner_generation = lease.generation or 0
-            if execution.execution_mode == ExecutionMode.WORKFLOW:
-                with _workflow_cancel_lock:
-                    # This attempt has started nothing yet (an earlier one may have).
-                    _workflow_started[execution.id] = (execution.owner_generation, False)
-                    _workflow_started.move_to_end(execution.id)
-                    while len(_workflow_started) > _WORKFLOW_STARTED_MAX:
-                        _workflow_started.popitem(last=False)
-            resuming = bool(execution.session_id)
-            session_id: Optional[str] = None
+        session_id: Optional[str] = None
+        if execution.execution_mode == ExecutionMode.AGENT and execution.session_id:
+            # Resumed by a person after a run whose effects were not
+            # confirmed: on in the session it ran in, its checkpoint.
+            session_id = await cls._resume_task_session(execution)
+        elif execution.execution_mode == ExecutionMode.AGENT:
+            session_id = await cls._create_task_session(execution, scheduler)
+
+        execution.session_id = session_id
+        if not await TaskStore.start_execution_session(
+            execution.id, session_id, started_at=execution.started_at
+        ):
+            # Cancelled while the session was being created: do not start it.
+            return await TaskStore.get_execution(execution.id) or execution
+
+        if session_id:
             try:
-                if scheduler is None:
-                    raise ValueError(f"Scheduler {execution.scheduler_id} not found")
-                if execution.execution_mode == ExecutionMode.AGENT and resuming:
-                    # Resumed by a person after a run whose effects were not
-                    # confirmed: on in the session it ran in, its checkpoint.
-                    session_id = await cls._resume_task_session(execution)
-                elif execution.execution_mode == ExecutionMode.AGENT:
-                    session_id = await cls._create_task_session(execution, scheduler)
-                if not await TaskStore.set_execution_session(
-                    execution.id,
-                    session_id,
-                    node_id=lease.node_id,
-                    expected_generation=lease.generation or 0,
-                ):
-                    current = await TaskStore.get_execution(execution.id)
-                    if (
-                        current is not None
-                        and current.is_terminal
-                        and current.owner_generation == (lease.generation or 0)
-                    ):
-                        # Cancelled while the session was being created: do not start it.
-                        return current
-                    raise ExecutionOwnershipError(f"execution ownership superseded: {execution.id}")
-                execution.session_id = session_id
-                lease.require_owned()
+                from flocks.server.routes.event import publish_event
 
-                if session_id:
-                    try:
-                        from flocks.server.routes.event import publish_event
-
-                        await publish_event(
-                            "task.updated",
-                            {
-                                "executionID": execution.id,
-                                "schedulerID": execution.scheduler_id,
-                                "sessionID": session_id,
-                                "status": execution.status.value,
-                            },
-                        )
-                    except Exception as exc:
-                        log.warn("task.dispatch.sse_error", {"execution_id": execution.id, "error": str(exc)})
-
-                if execution.execution_mode == ExecutionMode.WORKFLOW:
-                    result = await cls._trigger_workflow(execution, scheduler)
-                else:
-                    result = await cls._run_agent_session(execution, session_id)
-                final_status = TaskStatus.COMPLETED
-                cls.forget_workflow_started(execution.id)
-                execution.result_summary = result
-                execution.delivery_status = DeliveryStatus.UNREAD
-            except ExecutionOwnershipError:
-                raise
-            except TaskExecutionStopped as exc:
-                # Stopped by the user (e.g. from the task's session): a failure
-                # would be retried automatically, so record it as cancelled.
-                final_status = TaskStatus.CANCELLED
-                execution.error = str(exc)
+                await publish_event(
+                    "task.updated",
+                    {
+                        "executionID": execution.id,
+                        "schedulerID": execution.scheduler_id,
+                        "sessionID": session_id,
+                        "status": execution.status.value,
+                    },
+                )
             except Exception as exc:
-                final_status = TaskStatus.FAILED
-                execution.error = str(exc)
-                log.error("task.dispatch.failed", {"id": execution.id, "error": str(exc)})
+                log.warn("task.dispatch.sse_error", {"execution_id": execution.id, "error": str(exc)})
 
-            lease.require_owned()
+        try:
+            if execution.execution_mode == ExecutionMode.WORKFLOW:
+                result = await cls._trigger_workflow(execution, scheduler)
+            else:
+                result = await cls._run_agent_session(execution, session_id)
+            final_status = TaskStatus.COMPLETED
+            cls.forget_workflow_started(execution.id)
+            execution.result_summary = result
+            execution.delivery_status = DeliveryStatus.UNREAD
+        except TaskExecutionStopped as exc:
+            # Stopped by the user (e.g. from the task's session): a failure
+            # would be retried automatically, so record it as cancelled.
+            final_status = TaskStatus.CANCELLED
+            execution.error = str(exc)
+        except Exception as exc:
+            final_status = TaskStatus.FAILED
+            execution.error = str(exc)
+            log.error("task.dispatch.failed", {"id": execution.id, "error": str(exc)})
 
-            current = await TaskStore.get_execution(execution.id)
-            if current is None or (
-                current.owner_node_id != lease.node_id
-                or current.owner_generation != lease.generation
-            ):
-                raise ExecutionOwnershipError(f"execution ownership superseded: {execution.id}")
-            if current and current.status != TaskStatus.RUNNING:
-                return current
-
-            completed_at = datetime.now(timezone.utc)
-            execution.status = final_status
-            execution.completed_at = completed_at
-            if execution.started_at:
-                execution.duration_ms = int(
-                    (completed_at - execution.started_at).total_seconds() * 1000
-                )
-
-            # The result is written under the claim it was produced under. A
-            # node that lost its lease while the work ran -- a long pause, a
-            # partition -- would otherwise report over the top of whichever
-            # node took the execution over, and the row would end up
-            # describing a run that is not the one that produced it.
-            written = await lease.finish_execution(execution)
-            if written is None:
-                log.warn(
-                    "task.dispatch.result_dropped_superseded",
-                    {"id": execution.id, "node_id": lease.node_id},
-                )
-                raise ExecutionOwnershipError(f"execution ownership expired or superseded: {execution.id}")
-            return execution
+        completed_at = datetime.now(timezone.utc)
+        execution.status = final_status
+        execution.completed_at = completed_at
+        if execution.started_at:
+            execution.duration_ms = int(
+                (completed_at - execution.started_at).total_seconds() * 1000
+            )
+        if not await TaskStore.update_active_execution(execution):
+            # Cancelled (or otherwise finished) while it ran: keep that outcome.
+            return await TaskStore.get_execution(execution.id) or execution
+        return execution
 
     @classmethod
     async def _create_task_session(
@@ -358,7 +307,7 @@ class TaskExecutor:
             )
             handed_off = True
             with _workflow_cancel_lock:
-                _workflow_started[execution.id] = (execution.owner_generation, True)
+                _workflow_started[execution.id] = True
             worker.add_done_callback(lambda done: done.cancelled() or done.exception())
             try:
                 result = await asyncio.shield(worker)
@@ -403,7 +352,7 @@ class TaskExecutor:
                 workflow=workflow,
                 inputs=inputs,
                 timeout_s=_TASK_ABSOLUTE_TIMEOUT_S,
-                cancel=lambda: cancel.is_set() or current_execution_cancelled(),
+                cancel=cancel.is_set,
                 tool_context=tool_context,
             )
         finally:

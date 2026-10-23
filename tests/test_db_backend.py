@@ -18,7 +18,6 @@ from pathlib import Path
 import pytest
 
 from flocks import db_backend
-from flocks.db import registry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -82,40 +81,6 @@ def test_an_unreadable_persisted_choice_stops_rather_than_guessing(tmp_path, con
 
     with pytest.raises(db_backend.BackendConfigurationError, match="database.json"):
         db_backend.backend_choice({"FLOCKS_ROOT": str(tmp_path)})
-
-
-def test_the_registry_reads_the_connection_string_a_persisted_switch_names(tmp_path):
-    dsn_file = tmp_path / "dsn"
-    dsn_file.write_text("postgresql://flocks@db.internal/flocks\n", encoding="utf-8")
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "database.json").write_text(
-        json.dumps({"backend": "postgres", "dsn_file": str(dsn_file)}), encoding="utf-8",
-    )
-
-    settings = registry.load_settings({"FLOCKS_ROOT": str(tmp_path)})
-
-    assert settings.dsn == "postgresql://flocks@db.internal/flocks"
-
-
-def test_the_connection_variables_still_win_over_a_persisted_dsn_file(tmp_path):
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "database.json").write_text(
-        json.dumps({"backend": "postgres", "dsn_file": str(tmp_path / "missing")}), encoding="utf-8",
-    )
-
-    settings = registry.load_settings({"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DB_DSN": "postgresql://flocks@env/flocks"})
-
-    assert settings.dsn == "postgresql://flocks@env/flocks"
-
-
-def test_an_unreadable_persisted_dsn_file_names_where_it_came_from(tmp_path):
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "database.json").write_text(
-        json.dumps({"backend": "postgres", "dsn_file": str(tmp_path / "missing")}), encoding="utf-8",
-    )
-
-    with pytest.raises(registry.DatabaseConfigurationError, match="database.json"):
-        registry.load_settings({"FLOCKS_ROOT": str(tmp_path)})
 
 
 # ---------------------------------------------------------------------------
@@ -367,12 +332,87 @@ def test_a_backend_nobody_provides_leaves_the_runtime_modules_in_place(tmp_path)
     assert seen["describe"]["provider"] is None
 
 
-def test_every_replaceable_module_is_a_runtime_module():
+#: Listed names the runtime does not have itself: code a backend brings imports
+#: them by these names (the database layer, and stores only a shared database has).
+ONLY_A_BACKEND_BRINGS = {
+    "flocks.db",
+    "flocks.memory.sync.ownership",
+    "flocks.runtime_state",
+    "flocks.session.message_pages",
+    "flocks.storage.file_backfill",
+    "flocks.workflow.soc_store",
+}
+
+
+def test_every_other_replaceable_module_is_a_runtime_module():
     import importlib.util
 
-    missing = sorted(name for name in db_backend.REPLACEABLE_MODULES if importlib.util.find_spec(name) is None)
+    missing = {name for name in db_backend.REPLACEABLE_MODULES if importlib.util.find_spec(name) is None}
 
-    assert missing == []
+    assert missing == ONLY_A_BACKEND_BRINGS
+
+
+REFUSE_TO_OPEN_SQLITE = """
+    import importlib.metadata
+
+    _installed_entry_points = importlib.metadata.entry_points
+
+    def _no_backend_installed(**params):
+        # Whatever this interpreter has installed, nothing provides a backend here.
+        if params.get("group") == "flocks.db_backends":
+            return importlib.metadata.EntryPoints(())
+        return _installed_entry_points(**params)
+
+    importlib.metadata.entry_points = _no_backend_installed
+
+    import asyncio, json
+    import flocks
+    from flocks import db_backend
+    from flocks.storage.storage import Storage
+
+    async def main():
+        try:
+            await Storage.init()
+        except db_backend.BackendConfigurationError as exc:
+            return {"refused": str(exc)}
+        return {"refused": None}
+
+    seen = asyncio.run(main())
+    seen["sqlite_file"] = Storage.get_db_path().exists()
+    print(json.dumps(seen))
+"""
+
+
+@pytest.mark.parametrize("configured", ["environment", "persisted"])
+def test_storage_refuses_sqlite_when_postgres_was_chosen_but_nothing_provides_it(tmp_path, configured):
+    """A deployment set to PostgreSQL must not start on a new, empty SQLite database."""
+    site = tmp_path / "site"
+    site.mkdir()
+    env = {"FLOCKS_DB_BACKEND": "postgres"}
+    if configured == "persisted":
+        env = {}
+        (tmp_path / "root" / "config").mkdir(parents=True)
+        (tmp_path / "root" / "config" / "database.json").write_text(
+            json.dumps({"backend": "postgres", "dsn_file": str(tmp_path / "dsn")}), encoding="utf-8",
+        )
+
+    result = _run(tmp_path, site, env, REFUSE_TO_OPEN_SQLITE)
+
+    assert result.returncode == 0, result.stderr
+    seen = json.loads(result.stdout.strip().splitlines()[-1])
+    assert seen["refused"] and "'postgres'" in seen["refused"] and "FLOCKS_DB_BACKEND=sqlite" in seen["refused"]
+    assert seen["sqlite_file"] is False
+
+
+def test_storage_opens_sqlite_when_sqlite_is_chosen(tmp_path):
+    site = tmp_path / "site"
+    site.mkdir()
+
+    result = _run(tmp_path, site, {"FLOCKS_DB_BACKEND": "sqlite"}, REFUSE_TO_OPEN_SQLITE)
+
+    assert result.returncode == 0, result.stderr
+    seen = json.loads(result.stdout.strip().splitlines()[-1])
+    assert seen == {"refused": None, "sqlite_file": True}
 
 
 def test_the_dotenv_beside_the_source_tree_comes_first(tmp_path):

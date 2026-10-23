@@ -277,9 +277,12 @@ class PythonExecRuntime(Runtime):
             except Exception:
                 pass
         g.setdefault("tool", ToolFacade(reg) if not isinstance(reg, ToolFacade) else reg)
-        from flocks.workflow.soc_store import SOCWriteCapability
+        from flocks.coordination import soc_write_capability
 
-        g["soc"] = SOCWriteCapability(self.cancel_checker)
+        # Alerts written straight to the database, where a backend offers it.
+        soc = soc_write_capability(self.cancel_checker)
+        if soc is not None:
+            g["soc"] = soc
 
         def get_path(path: str, data: Any = None) -> Any:
             if data is None:
@@ -865,9 +868,12 @@ sys.stdout.flush()
                 return {"type": "rpc_result", "token": token, "id": req_id, "ok": True, "output": output}
 
             if kind == "soc_alerts_write":
-                from flocks.workflow.soc_store import SOCWriteCapability
+                from flocks.coordination import soc_write_capability
 
-                output = SOCWriteCapability(effective_cancel_checker).write_alerts(
+                soc = soc_write_capability(effective_cancel_checker)
+                if soc is None:
+                    raise RuntimeError("soc.write_alerts is not available in this installation")
+                output = soc.write_alerts(
                     rpc.get("alerts"), rpc.get("run_id"), rpc.get("source_file", ""),
                 )
                 return {"type": "rpc_result", "token": token, "id": req_id, "ok": True, "output": output}

@@ -7,7 +7,7 @@ import time
 from typing import Any, Dict, Optional
 
 from flocks.retention.cleanup import RetentionReport, apply_policy
-from flocks.retention.policy import apply_log_retention, load_policy, load_saved_policy, policy_version
+from flocks.retention.policy import apply_log_retention, load_policy, load_saved_policy
 from flocks.utils.log import Log, log_cleanup_managed, set_log_cleanup_managed
 
 log = Log.create(service="retention.scheduler")
@@ -49,7 +49,7 @@ class DataRetentionScheduler:
             return
         cls._wake = asyncio.Event()
         cls._task = asyncio.create_task(cls._run_loop(), name="data-retention-scheduler")
-        # Expired logs go in its rounds, under the policy as last saved anywhere
+        # Expired logs go in its rounds, under the policy as last saved
         # (preload_log_retention has usually handed them over already).
         if cls._log_managed_before is None:
             cls._log_managed_before = log_cleanup_managed()
@@ -159,10 +159,8 @@ class DataRetentionScheduler:
             try:
                 from flocks.config.config import Config
 
-                # The shared version first: a save writes the policy, then moves
-                # it, so a policy read after it (from every source, past any
-                # cache) can only be as new or newer.
-                version = await policy_version()
+                # The policy as saved, past any cache: the CLI may have changed
+                # it since this process last read it.
                 policy = await load_saved_policy()
                 Config.clear_cache()
                 apply_log_retention(policy)
@@ -170,7 +168,6 @@ class DataRetentionScheduler:
                 report = await apply_policy(
                     policy,
                     should_continue=lambda: cls._generation == generation,
-                    policy_version=version,
                 )
             except asyncio.CancelledError:
                 raise

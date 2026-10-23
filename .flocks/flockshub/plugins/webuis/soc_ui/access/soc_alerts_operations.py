@@ -26,11 +26,11 @@ PAGE_ID = "soc-alerts"
 CONTRACT_ID = "soc.alerts.operations"
 CONTRACT_VERSION = "1.0"
 SOURCE_PAGE_ID = "soc-alerts"
-DEFAULT_SOURCE_PATH = Path("/postgresql/alert_records")
-DEFAULT_TABLE = "alert_records"
-DEFAULT_RECORD_COLUMN = "record_json"
-DEFAULT_DATE_COLUMN = "asset_date"
-DEFAULT_EVENT_TIME_COLUMN = "event_time"
+DEFAULT_SQLITE_DB = Path.home() / ".flocks" / "data" / "soc.db"
+DEFAULT_SQLITE_TABLE = "alert_records"
+DEFAULT_SQLITE_RECORD_COLUMN = "record_json"
+DEFAULT_SQLITE_DATE_COLUMN = "asset_date"
+DEFAULT_SQLITE_EVENT_TIME_COLUMN = "event_time"
 SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 DISPLAY_FIELDS = (
@@ -78,7 +78,7 @@ DISPLAY_FIELDS = (
     "is_duplicate",
     "_syslog_meta",
 )
-DRIVER_FIELDS = frozenset((*DISPLAY_FIELDS, "triage_attack_verdict", "triage_attack_success", "__flocks_source_row_id"))
+DRIVER_FIELDS = frozenset((*DISPLAY_FIELDS, "triage_attack_verdict", "triage_attack_success"))
 FILTER_FIELDS = frozenset(
     {
         "_source_type",
@@ -140,30 +140,25 @@ def _contract() -> Contract:
 
 class _BindingResolver:
     def resolve(self, *, page_id: str, slot_id: str, contract_id: str, contract_version: str) -> Binding:
-        settings = _postgres_settings()
-        source_path = DEFAULT_SOURCE_PATH
+        settings = _sqlite_settings()
+        db_path = settings["db_path"]
         return Binding(
-            binding_id="soc-alerts-postgres",
+            binding_id="soc-alerts-sqlite",
             binding_version=1,
             page_id=page_id,
             slot_id=slot_id,
             contract_id=contract_id,
             contract_version=contract_version,
-            adapter_kind="builtin-postgres-json",
+            adapter_kind="builtin-sqlite-json",
             source_page_id=SOURCE_PAGE_ID,
-            source_root=source_path,
+            source_root=db_path,
             driver_available_fields=DRIVER_FIELDS,
-            driver_allowlist_roots=(source_path.parent,),
+            driver_allowlist_roots=(db_path.parent,),
             driver_options={
                 "table": settings["table"],
                 "recordColumn": settings["record_column"],
                 "dateColumn": settings["date_column"],
                 "eventTimeColumn": settings["event_time_column"],
-                "orderColumn": settings["order_column"],
-                # Case snapshots currently target the canonical SOC store.
-                # Custom sources keep their existing query behavior.
-                **({"rowIdColumn": "row_id"} if settings["table"] == DEFAULT_TABLE
-                   and settings["record_column"] == DEFAULT_RECORD_COLUMN else {}),
             },
             predicate_value_resolver=_filter_value,
             capabilities=frozenset({"query"}),
@@ -208,10 +203,10 @@ class _ResponsePipeline:
             "schemaVersion": "soc.alerts.v1",
             "generatedAt": datetime.now().isoformat(timespec="seconds"),
             "source": {
-                "label": "SOC Contract PostgreSQL",
+                "label": "SOC Contract SQLite",
                 "pageId": binding_source_page_id,
                 "sampleMode": False,
-                "dataSource": "postgres",
+                "dataSource": "sqlite",
             },
             "summary": {
                 "sourcePageId": binding_source_page_id,
@@ -249,7 +244,6 @@ def _incident_from_row(row: InternalDataRow) -> dict[str, Any]:
     return {
         "id": record_id,
         "sourceRecordId": record_id,
-        "sourceRowId": _text(record.get("__flocks_source_row_id")),
         "observedAt": observed_at,
         "rawAlerts": 1,
         "priority": "P1" if verdict == "success" else "P2",
@@ -322,16 +316,19 @@ def _display_value(value: Any, key: str) -> str:
         return str(value)
 
 
-def _postgres_settings() -> dict[str, Any]:
-    config = _load_config().get("postgres", {})
+def _sqlite_settings() -> dict[str, Any]:
+    config = _load_config().get("sqlite", {})
     if not isinstance(config, dict):
         config = {}
     return {
-        "table": _sql_identifier(config.get("table"), DEFAULT_TABLE),
-        "record_column": _sql_identifier(config.get("recordColumn"), DEFAULT_RECORD_COLUMN),
-        "date_column": _sql_identifier(config.get("dateColumn"), DEFAULT_DATE_COLUMN),
-        "event_time_column": _sql_identifier(config.get("eventTimeColumn"), DEFAULT_EVENT_TIME_COLUMN),
-        "order_column": _sql_identifier(config.get("orderColumn"), "rowid"),
+        "db_path": _resolve_config_path(
+            _read_config_string(os.environ.get("FLOCKS_SOC_ALERTS_SQLITE_DB"), config.get("dbPath")),
+            DEFAULT_SQLITE_DB,
+        ),
+        "table": _sql_identifier(config.get("table"), DEFAULT_SQLITE_TABLE),
+        "record_column": _sql_identifier(config.get("recordColumn"), DEFAULT_SQLITE_RECORD_COLUMN),
+        "date_column": _sql_identifier(config.get("dateColumn"), DEFAULT_SQLITE_DATE_COLUMN),
+        "event_time_column": _sql_identifier(config.get("eventTimeColumn"), DEFAULT_SQLITE_EVENT_TIME_COLUMN),
     }
 
 
@@ -362,6 +359,14 @@ def _read_config_string(*values: Any) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _resolve_config_path(value: str, fallback: Path) -> Path:
+    text = _read_config_string(value, str(fallback))
+    path = Path(text).expanduser()
+    if path.is_absolute():
+        return path
+    return (_config_path().parent / path).resolve()
 
 
 def _sql_identifier(value: Any, fallback: str) -> str:
@@ -440,17 +445,22 @@ def _verdict_bucket(record: dict[str, Any]) -> str:
 
 
 def _triage_attack_success(record: dict[str, Any]) -> str:
-    raw_verdict = _text(record.get("triage_attack_verdict")).strip().lower()
+    # Same precedence as the dashboard's SQL projection: an explicit result
+    # string wins; older records carry the outcome in the verdict
+    # ("attack_success" / "attack_failed") or as a boolean result. A missing
+    # result is not an explicit "unknown".
     if _triage_attack_verdict(record) != "attack":
         return "unknown"
     value = _text(record.get("triage_attack_success")).strip().lower()
     if value in {"success", "failed", "unknown"}:
         return value
-    legacy_value = record.get("triage_attack_success")
-    if legacy_value is True:
+    raw_verdict = _text(record.get("triage_attack_verdict")).strip().lower()
+    if raw_verdict == "attack_success":
         return "success"
-    if legacy_value is False and raw_verdict == "attack_failed":
+    if raw_verdict == "attack_failed":
         return "failed"
+    if value in {"1", "true"}:
+        return "success"
     return "unknown"
 
 

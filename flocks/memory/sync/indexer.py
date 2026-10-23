@@ -10,7 +10,6 @@ import asyncio
 import math
 import uuid
 
-from flocks.db.retry import retry_deadlock_once
 from flocks.provider import Provider
 from flocks.storage import (
     Storage,
@@ -23,13 +22,9 @@ from flocks.memory.config import MemoryConfig
 from flocks.memory.paths import classify_memory_path
 from flocks.memory.utils.hash import compute_text_hash
 from flocks.memory.sync.chunking import TextChunker
-from flocks.memory.sync.ownership import MemoryIndexOwnership, MemoryOwnershipConflict
 from flocks.utils.log import Log
 
 log = Log.create(service="memory.indexer")
-
-#: How long a sync waits for another instance's indexing of the shared tree.
-_INDEX_LOCK_WAIT_S = 15.0
 
 
 class MemoryIndexer:
@@ -59,7 +54,6 @@ class MemoryIndexer:
         self.embedding_model = embedding_model
         self.config = config
         self.chunker = TextChunker(config.chunking)
-        self._ownership: MemoryIndexOwnership | None = None
     
     async def sync(
         self,
@@ -88,102 +82,62 @@ class MemoryIndexer:
         }
         
         try:
-            from flocks.config import Config
-            from flocks.db.singleton import cluster_lock
-            from flocks.memory.sync.mirror import reconcile_all
-
-            memory_root = Config.get_data_path() / "memory"
-            # The trees are copies of one shared tree, indexed under one owner:
-            # one instance indexes at a time, the others leave it to it.
-            async with cluster_lock("memory.index", wait_s=_INDEX_LOCK_WAIT_S) as held:
-                if not held:
-                    stats["skipped"] = "another_instance_indexing"
-                    log.info("indexer.sync.skipped", {"reason": "another_instance_indexing"})
-                    return stats
-                # Notes written through other instances first, so the scan
-                # below indexes the tree every instance has -- settled now,
-                # after the lock: a run that waited for another instance's
-                # must index what that one left, never what was here before.
-                settled = await reconcile_all(memory_root)
-                if settled is None:
-                    # The store could not be reached: this tree may be behind
-                    # the other instances', and the index is shared -- leave
-                    # it as it is rather than publish a stale tree into it.
-                    stats["skipped"] = "memory_store_unreachable"
-                    log.info("indexer.sync.skipped", {"reason": "memory_store_unreachable"})
-                    return stats
-                # Notes the settling could not align (changed in the store
-                # meanwhile): this copy is not the shared one, so it neither
-                # replaces their index rows nor has them cleaned.
-                unsettled = set(self._unsettled_keys(memory_root, settled, deferred_only=True))
-                self._ownership = await MemoryIndexOwnership.begin(memory_root, shared=True)
-                content_cache: Dict[str, str] = {}
-                indexed_files = await self._get_indexed_files()
-                memory_files = await self._scan_memory_files(
-                    _content_cache=content_cache,
-                    _indexed_files=None if force else indexed_files,
-                )
-                if memory_files and self._ownership is None:
-                    raise MemoryOwnershipConflict("Memory root appeared during this scan; retry with a stable root")
-                stats["files_scanned"] = len(memory_files)
+            content_cache: Dict[str, str] = {}
+            indexed_files = await self._get_indexed_files()
+            memory_files = await self._scan_memory_files(
+                _content_cache=content_cache,
+                _indexed_files=None if force else indexed_files,
+            )
+            stats["files_scanned"] = len(memory_files)
             
-                if progress_callback:
-                    progress_callback(MemorySyncProgress(
-                        completed=0,
-                        total=len(memory_files),
-                        label="Scanning files"
-                    ))
+            if progress_callback:
+                progress_callback(MemorySyncProgress(
+                    completed=0,
+                    total=len(memory_files),
+                    label="Scanning files"
+                ))
             
-                for idx, file_entry in enumerate(memory_files):
-                    if (file_entry.scope.value, file_entry.scope_id, file_entry.path) in unsettled:
+            for idx, file_entry in enumerate(memory_files):
+                if not force:
+                    indexed = indexed_files.get(
+                        (
+                            file_entry.scope.value,
+                            file_entry.scope_id,
+                            file_entry.path,
+                        )
+                    )
+                    if indexed and indexed["hash"] == file_entry.hash:
+                        if not self._metadata_matches(file_entry, indexed):
+                            await self._update_file_metadata(file_entry)
                         stats["files_skipped"] += 1
-                        stats["files_unsettled"] = stats.get("files_unsettled", 0) + 1
+                        log.debug("indexer.file.skipped", {"path": file_entry.path})
                         content_cache.pop(file_entry.abs_path, None)
                         continue
-                    if not force:
-                        indexed = indexed_files.get(
-                            (
-                                file_entry.scope.value,
-                                file_entry.scope_id,
-                                file_entry.path,
-                            )
-                        )
-                        if indexed and indexed["hash"] == file_entry.hash:
-                            if not self._metadata_matches(file_entry, indexed):
-                                await self._update_file_metadata(file_entry)
-                            stats["files_skipped"] += 1
-                            log.debug("indexer.file.skipped", {"path": file_entry.path})
-                            content_cache.pop(file_entry.abs_path, None)
-                            continue
                 
-                    result = await self._index_file(file_entry, _content_cache=content_cache)
-                    stats["files_indexed"] += 1
-                    stats["chunks_created"] += result["chunks"]
-                    stats["embeddings_generated"] += result["embeddings"]
-                    stats["cache_hits"] += result["cache_hits"]
+                result = await self._index_file(file_entry, _content_cache=content_cache)
+                stats["files_indexed"] += 1
+                stats["chunks_created"] += result["chunks"]
+                stats["embeddings_generated"] += result["embeddings"]
+                stats["cache_hits"] += result["cache_hits"]
                 
-                    if progress_callback:
-                        progress_callback(MemorySyncProgress(
-                            completed=idx + 1,
-                            total=len(memory_files),
-                            label=f"Indexed {file_entry.path}"
-                        ))
+                if progress_callback:
+                    progress_callback(MemorySyncProgress(
+                        completed=idx + 1,
+                        total=len(memory_files),
+                        label=f"Indexed {file_entry.path}"
+                    ))
             
-                # Only a tree settled with the store this time is complete
-                # enough to take a missing note for a deleted one -- and not
-                # the notes it could not settle, or that sit behind a link
-                # here: those may exist elsewhere.
-                deleted_count = await self._clean_deleted_files(
-                    current_files=[
-                        (file.scope.value, file.scope_id, file.path)
-                        for file in memory_files
-                    ] + self._unsettled_keys(memory_root, settled)
-                )
-                if deleted_count > 0:
-                    log.info("indexer.cleaned", {"deleted": deleted_count})
+            deleted_count = await self._clean_deleted_files(
+                current_files=[
+                    (file.scope.value, file.scope_id, file.path)
+                    for file in memory_files
+                ]
+            )
+            if deleted_count > 0:
+                log.info("indexer.cleaned", {"deleted": deleted_count})
             
-                log.info("indexer.sync.complete", stats)
-                return stats
+            log.info("indexer.sync.complete", stats)
+            return stats
         
         except Exception as e:
             log.error("indexer.sync.failed", {"error": str(e)})
@@ -331,20 +285,7 @@ class MemoryIndexer:
 
     async def _update_file_metadata(self, file_entry: MemoryFileEntry) -> None:
         """Refresh metadata after a content-preserving filesystem change."""
-        await retry_deadlock_once(
-            lambda: self._update_file_metadata_once(file_entry), name="memory.update_file_metadata",
-        )
-
-    async def _update_file_metadata_once(self, file_entry: MemoryFileEntry) -> None:
-        async with Storage.transaction(Storage.get_db_path()) as db:
-            await db.execute("SELECT pg_advisory_xact_lock(hashtext(?))",
-                             (f"memory:{file_entry.scope.value}:{file_entry.scope_id}:{file_entry.path}",))
-            if self._ownership is not None:
-                await self._ownership.claim(db, {
-                    "scope": file_entry.scope.value, "scope_id": file_entry.scope_id,
-                    "path": file_entry.path, "hash": file_entry.hash,
-                    "mtime": file_entry.mtime_ms / 1000, "size": file_entry.size,
-                })
+        async with Storage.connect(Storage.get_db_path()) as db:
             await db.execute(
                 """
                 UPDATE memory_files
@@ -373,16 +314,14 @@ class MemoryIndexer:
             Dict mapping path to file info
         """
         indexed: Dict[tuple[str, str, str], Dict[str, Any]] = {}
-        if self._ownership is None:
-            return indexed
         
         try:
-            async with Storage.transaction(Storage.get_db_path()) as db:
+            async with Storage.connect(Storage.get_db_path()) as db:
                 cursor = await db.execute("""
-                    SELECT f.scope, f.scope_id, f.path, f.hash, o.mtime, o.size
-                    FROM memory_files f JOIN memory_index_owners o USING(scope,scope_id,path)
-                    WHERE f.source = 'memory' AND o.root_id=? AND o.hash=f.hash
-                """, (self._ownership.root_id,))
+                    SELECT scope, scope_id, path, hash, mtime, size
+                    FROM memory_files
+                    WHERE source = 'memory'
+                """)
                 
                 rows = await cursor.fetchall()
                 for scope, scope_id, path, hash_val, mtime, size in rows:
@@ -459,7 +398,6 @@ class MemoryIndexer:
                     "size": file_entry.size,
                 },
                 chunks=chunk_records,
-                before_replace=self._ownership.claim if self._ownership is not None else None,
             )
             
             log.info("indexer.file.indexed", {
@@ -624,17 +562,6 @@ class MemoryIndexer:
             dims=dims,
         )
     
-    @staticmethod
-    def _unsettled_keys(memory_root: Path, settled, *, deferred_only: bool = False) -> List[tuple[str, str, str]]:
-        """Index keys of the notes the last settling left alone (deferred, or behind a link)."""
-        keys: List[tuple[str, str, str]] = []
-        for relative in [*settled.deferred, *([] if deferred_only else settled.linked)]:
-            classified = classify_memory_path(memory_root, memory_root / relative)
-            if classified is not None:
-                scope, scope_id, rel_path = classified
-                keys.append((scope.value, scope_id, rel_path))
-        return keys
-
     async def _clean_deleted_files(
         self,
         current_files: List[tuple[str, str, str]],
@@ -648,6 +575,52 @@ class MemoryIndexer:
         Returns:
             Number of deleted files
         """
-        if self._ownership is None:
+        try:
+            async with Storage.connect(Storage.get_db_path()) as db:
+                cursor = await db.execute("""
+                    SELECT scope, scope_id, path FROM memory_files
+                    WHERE source = 'memory'
+                """)
+                
+                indexed_paths = [tuple(row) for row in await cursor.fetchall()]
+                
+                # Find deleted files
+                deleted = [p for p in indexed_paths if p not in current_files]
+                
+                if not deleted:
+                    return 0
+                
+                for scope, scope_id, path in deleted:
+                    params = (scope, scope_id, path)
+                    await db.execute(
+                        """
+                        DELETE FROM memory_fts
+                        WHERE scope = ? AND scope_id = ?
+                            AND source = 'memory' AND path = ?
+                        """,
+                        params,
+                    )
+                    await db.execute(
+                        """
+                        DELETE FROM memory_chunks
+                        WHERE scope = ? AND scope_id = ?
+                            AND source = 'memory' AND path = ?
+                        """,
+                        params,
+                    )
+                    await db.execute(
+                        """
+                        DELETE FROM memory_files
+                        WHERE scope = ? AND scope_id = ?
+                            AND source = 'memory' AND path = ?
+                        """,
+                        params,
+                    )
+                
+                await db.commit()
+                
+                return len(deleted)
+        
+        except Exception as e:
+            log.error("indexer.clean.failed", {"error": str(e)})
             return 0
-        return await self._ownership.clean(current_files)

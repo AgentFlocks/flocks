@@ -1,4 +1,4 @@
-"""Where a prompt or a command a client sent stands, readable from any worker.
+"""Where a prompt or a command a client sent stands.
 
 The service accepts a prompt or a slash command and runs it later -- maybe
 behind others in the session's queue, maybe on another worker.  Nothing about
@@ -7,7 +7,7 @@ command runs without marking the session busy, a queued prompt waits while the
 session finishes the one before it, ``/clear`` leaves no message to look for.
 
 A client that wants to follow a turn names it (``turnID``); the service then
-keeps a receipt for it in the shared store -- written before the turn is
+keeps a receipt for it in its store -- written before the turn is
 dispatched, or the request is refused -- and moves it on as the turn goes:
 accepted or queued, then running, then how it ended.  A receipt that ended
 never changes again.  The worker that has the turn keeps the receipt fresh:
@@ -18,6 +18,10 @@ running until that run answered its message.  A receipt nobody refreshed for
 STALE_S (the worker that had the turn went away) reads as lost.  The receipt
 names the turn's user message once it exists: a client finds this turn's reply
 by it.  Requests without a turn id (the WebUI follows events) get no receipt.
+
+Receipts are records of the key-value store, changed under one lock per
+process.  A database backend whose workers share sessions replaces this
+module (``flocks.db_backend``) with one that changes them in the database.
 """
 
 from __future__ import annotations
@@ -25,10 +29,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import json
 import re
 import time
-from typing import Any, AsyncIterator, Dict, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, Optional, Tuple
 
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
@@ -62,12 +65,22 @@ ANSWER_LOOKUP_S = 60.0
 
 _TURN_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _PREFIX = "session_turn:"
-_TERMINAL_SQL = "('done', 'failed', 'removed')"
 _current: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
     "flocks_turn_receipt", default=None,
 )
 _last_prune = 0.0
 _keeper: Optional[asyncio.Task] = None
+# Every read-modify-write of a receipt happens under it.
+_changes: Optional[asyncio.Lock] = None
+_changes_loop: Any = None
+
+
+def _lock() -> asyncio.Lock:
+    global _changes, _changes_loop
+    loop = asyncio.get_running_loop()
+    if _changes is None or _changes_loop is not loop:
+        _changes, _changes_loop = asyncio.Lock(), loop
+    return _changes
 
 
 class TurnIdInUse(ValueError):
@@ -99,32 +112,31 @@ async def create(session_id: str, turn_id: str, state: str, **fields: Any) -> No
     client cannot follow is not started.
     """
     receipt = {"state": state, "updatedAt": _now_ms(), **{k: v for k, v in fields.items() if v is not None}}
-    async with Storage.transaction() as db:
-        row = await db.fetch_one(
-            "INSERT INTO runtime_state (key, value, value_type, updated_at) VALUES (?, ?::jsonb, 'json', now()) "
-            "ON CONFLICT (key) DO NOTHING RETURNING key",
-            (_key(session_id, turn_id), json.dumps(receipt)),
-        )
-    if row is None:
-        raise TurnIdInUse(f"turn {turn_id} is already in use in this session")
+    key = _key(session_id, turn_id)
+    async with _lock():
+        if await Storage.get(key) is not None:
+            raise TurnIdInUse(f"turn {turn_id} is already in use in this session")
+        await Storage.set(key, receipt)
     await _prune()
 
 
-async def _update(session_id: str, turn_id: str, condition: str, params: Tuple[Any, ...], fields: Dict[str, Any]) -> bool:
+async def _update(
+    session_id: str, turn_id: str, applies: Callable[[Dict[str, Any]], bool], fields: Dict[str, Any],
+) -> bool:
     patch = {"updatedAt": _now_ms(), **{k: v for k, v in fields.items() if v is not None}}
-    async with Storage.transaction() as db:
-        row = await db.fetch_one(
-            "UPDATE runtime_state SET value = value || ?::jsonb, updated_at = now() "
-            f"WHERE key = ? AND {condition} RETURNING key",
-            (json.dumps(patch), _key(session_id, turn_id), *params),
-        )
-    return row is not None
+    key = _key(session_id, turn_id)
+    async with _lock():
+        receipt = await Storage.get(key)
+        if not isinstance(receipt, dict) or not applies(receipt):
+            return False
+        await Storage.set(key, {**receipt, **patch})
+    return True
 
 
 async def advance(session_id: str, turn_id: str, state: str, **fields: Any) -> bool:
     """Move a turn on; a turn that already ended stays as it ended. Whether it moved."""
     return await _update(
-        session_id, turn_id, f"value ->> 'state' NOT IN {_TERMINAL_SQL}", (), {"state": state, **fields},
+        session_id, turn_id, lambda receipt: receipt.get("state") not in TERMINAL, {"state": state, **fields},
     )
 
 
@@ -140,7 +152,7 @@ async def advance_quietly(session_id: str, turn_id: str, state: str, **fields: A
 
 async def name_queue_item(session_id: str, turn_id: str, queue_id: str) -> None:
     """Name the queue item of a queued turn, unless it already left the queue."""
-    await _update(session_id, turn_id, "value ->> 'state' = ?", (QUEUED,), {"queueID": queue_id})
+    await _update(session_id, turn_id, lambda receipt: receipt.get("state") == QUEUED, {"queueID": queue_id})
 
 
 async def refresh_queued(session_id: str, turn_id: str, queue_id: str) -> bool:
@@ -150,8 +162,8 @@ async def refresh_queued(session_id: str, turn_id: str, queue_id: str) -> bool:
     """
     return await _update(
         session_id, turn_id,
-        "value ->> 'state' = ? AND (value ->> 'queueID' IS NULL OR value ->> 'queueID' = ?)",
-        (QUEUED, queue_id), {"queueID": queue_id},
+        lambda receipt: receipt.get("state") == QUEUED and receipt.get("queueID") in (None, queue_id),
+        {"queueID": queue_id},
     )
 
 
@@ -204,28 +216,42 @@ async def _answer_of(session_id: str, message_id: str) -> Tuple[bool, Optional[s
     its reply comes from the ``builtin`` provider, so neither counts.  A
     message that is gone (history cleared) has nothing left to answer.
     """
-    async with Storage.transaction() as db:
-        asked = await db.fetch_one(
-            "SELECT created_at FROM session_message_pages WHERE session_id = ? AND message_id = ?",
-            (session_id, message_id),
+    from flocks.session.message import Message
+
+    messages = await Message.list(session_id, include_archived=True)
+
+    def order(message: Any) -> Tuple[int, str]:
+        created = (getattr(message, "time", None) or {}).get("created") or 0
+        return int(created), str(message.id)
+
+    def role(message: Any) -> str:
+        value = getattr(message, "role", None)
+        return str(getattr(value, "value", value) or "")
+
+    asked = next((message for message in messages if message.id == message_id), None)
+    if asked is None:
+        return True, None
+    later_users = {
+        message.id
+        for message in messages
+        if role(message) == "user"
+        and not getattr(message, "ignored", False)
+        and order(message) >= order(asked)
+    }
+    replies = [
+        message
+        for message in messages
+        if role(message) == "assistant"
+        and (getattr(message, "providerID", None) or "") != "builtin"
+        and (
+            getattr(message, "error", None) is not None
+            or (getattr(message, "finish", None) or "") not in ("", "tool-calls", "unknown", "summary")
         )
-        if asked is None:
-            return True, None
-        row = await db.fetch_one(
-            "SELECT reply.message_id FROM session_message_pages reply"
-            " WHERE reply.session_id = ? AND reply.info ->> 'role' = 'assistant'"
-            " AND COALESCE(reply.info ->> 'providerID', '') <> 'builtin'"
-            " AND (reply.info ->> 'error' IS NOT NULL"
-            "  OR COALESCE(reply.info ->> 'finish', '') NOT IN ('', 'tool-calls', 'unknown', 'summary'))"
-            " AND reply.info ->> 'parentID' IN ("
-            "  SELECT later.message_id FROM session_message_pages later"
-            "  WHERE later.session_id = ? AND later.info ->> 'role' = 'user'"
-            "  AND COALESCE(later.info ->> 'ignored', 'false') <> 'true'"
-            "  AND (later.created_at, later.message_id) >= (?::bigint, ?::text))"
-            " ORDER BY reply.created_at, reply.message_id LIMIT 1",
-            (session_id, session_id, asked[0], message_id),
-        )
-    return (row is not None), (row[0] if row else None)
+        and getattr(message, "parentID", None) in later_users
+    ]
+    if not replies:
+        return False, None
+    return True, min(replies, key=order).id
 
 
 async def _wait_for_answer(session_id: str, message_id: Optional[str]) -> Tuple[str, Optional[str], Optional[str]]:
@@ -372,11 +398,10 @@ async def _prune() -> None:
     _last_prune = now
     cutoff = _now_ms() - int(KEEP_S * 1000)
     try:
-        async with Storage.transaction() as db:
-            await db.execute(
-                "DELETE FROM runtime_state WHERE key LIKE ? ESCAPE '\\' AND jsonb_typeof(value -> 'updatedAt') = 'number' "
-                "AND (value ->> 'updatedAt')::bigint < ?",
-                (_PREFIX.replace("_", "\\_") + "%", cutoff),  # "_" is a LIKE wildcard
-            )
+        async with _lock():
+            for key, receipt in await Storage.list_entries(_PREFIX):
+                updated = receipt.get("updatedAt") if isinstance(receipt, dict) else None
+                if isinstance(updated, (int, float)) and updated < cutoff:
+                    await Storage.delete(key)
     except Exception as exc:
         log.warning("session.turn_receipt.prune_failed", {"error_type": type(exc).__name__})

@@ -484,7 +484,7 @@ class TestMessageStoreAndParts:
         persist_mock.assert_not_awaited()
 
         await asyncio.sleep(0.02)
-        persist_mock.assert_awaited_once_with(sid)
+        persist_mock.assert_awaited_once_with(sid, message_id=msg.id)
 
     @pytest.mark.asyncio
     async def test_store_completed_tool_part_caches_prompt_output_and_revision(self):

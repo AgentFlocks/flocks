@@ -8,6 +8,13 @@ from pathlib import Path
 
 import pytest
 
+# The suite runs on the runtime's own SQLite backend: a backend chosen by the
+# developer's shell (or by a persisted choice under a real home directory)
+# must not switch it. Set before flocks is imported, which reads it once.
+os.environ["FLOCKS_DB_BACKEND"] = "sqlite"
+for _name in ("FLOCKS_DB_DSN", "FLOCKS_DB_DSN_FILE"):
+    os.environ.pop(_name, None)
+
 
 _installed_entry_points = importlib.metadata.entry_points
 
@@ -31,53 +38,6 @@ def _core_entry_points(**params):
     )
     return kept.select(**params) if params else kept
 
-
-@pytest.fixture(autouse=True)
-async def _postgres_test_database(monkeypatch, tmp_path, _isolate_runtime_root_from_shell):
-    """Use a retained, unique PG schema when the integration DSN is supplied.
-
-    Tests cannot inherit the application's production connection string.
-    Specialized PG fixtures may install their own schema after this fixture.
-    """
-    from flocks.db import registry
-
-    dsn = os.environ.get("FLOCKS_TEST_PG_DSN", "")
-    monkeypatch.delenv("FLOCKS_DB_DSN", raising=False)
-    monkeypatch.delenv("FLOCKS_DB_DSN_FILE", raising=False)
-    monkeypatch.setenv("FLOCKS_DB_BACKEND", "postgres")
-    registry.reset()
-    if not dsn:
-        yield
-        registry.reset()
-        return
-
-    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-    from uuid import uuid4
-    import asyncpg
-
-    schema = "test_" + uuid4().hex
-    connection = await asyncpg.connect(dsn, timeout=10)
-    try:
-        await connection.execute(f'CREATE SCHEMA "{schema}"')
-    finally:
-        await connection.close()
-    parts = urlsplit(dsn)
-    query = dict(parse_qsl(parts.query))
-    query["search_path"] = schema + ",public"
-    monkeypatch.setenv("FLOCKS_DB_DSN", urlunsplit(parts._replace(query=urlencode(query))))
-    from flocks.db.active import reset
-    from flocks.db.connect import close_pools
-    from flocks.db.sync_store import close_sync_reader
-    import asyncio
-
-    await reset()
-    try:
-        yield
-    finally:
-        await close_pools()
-        await asyncio.to_thread(close_sync_reader)
-        await reset()
-        registry.reset()
 
 _API_KEY_MARKERS = {
     "requires_anthropic_key": ("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY not set"),

@@ -7,6 +7,7 @@ Call order:
 """
 from __future__ import annotations
 
+import aiosqlite
 
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
@@ -40,8 +41,8 @@ async def _heal_stale_service_ids() -> None:
     try:
         from flocks.tool.device.store import storage_key_to_service_id
 
-        async with Storage.transaction(Storage.get_db_path()) as db:
-
+        async with Storage.connect(Storage.get_db_path()) as db:
+            db.row_factory = aiosqlite.Row
             cur = await db.execute("SELECT id, storage_key, service_id FROM device_integrations")
             rows = await cur.fetchall()
             updates: list[tuple[str, str]] = []
@@ -109,7 +110,7 @@ async def _sync_all() -> None:
     on every startup.
     """
     try:
-        async with Storage.transaction(Storage.get_db_path()) as db:
+        async with Storage.connect(Storage.get_db_path()) as db:
             cur = await db.execute("SELECT DISTINCT service_id FROM device_integrations")
             db_service_ids = [r[0] for r in await cur.fetchall()]
 

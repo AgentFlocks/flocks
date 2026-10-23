@@ -340,14 +340,12 @@ async def test_the_install_outlives_the_conversation_that_started_it(ready_host,
     import time
 
     from flocks.session import ownership
-    from flocks.task import lease as task_lease
 
     seen = {}
     real = validation.run_validation
 
     async def run_validation(tier, *, session_id, on_result=None):
         seen["session_lease"] = ownership.current_lease(session_id)
-        seen["task_lease"] = task_lease._current_lease.get()
         ownership.require_execution_allowed(session_id)  # what every tool call checks first
         return await real(tier, session_id=session_id, on_result=on_result)
 
@@ -363,7 +361,7 @@ async def test_the_install_outlives_the_conversation_that_started_it(ready_host,
     job = await ReaInstaller.wait()
 
     assert job.status == "succeeded", job
-    assert seen == {"session_lease": None, "task_lease": None}
+    assert seen == {"session_lease": None}
 
 
 @pytest.mark.asyncio

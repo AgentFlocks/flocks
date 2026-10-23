@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
-from contextvars import ContextVar
 from itertools import islice
 import sys
 import threading
@@ -14,16 +13,15 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tupl
 
 from flocks.session.recorder import Recorder
 from flocks.utils.log import Log
+from flocks.workflow.ownership import abandon_execution, start_renewal, stop_renewal
 from flocks.workflow.runner import RunWorkflowResult
 from flocks.workflow.store import WorkflowStore
-from flocks.workflow.ownership import abandon_execution, owned_summary, process_owner_id, start_renewal, stop_renewal
-from flocks.task.node import lease_seconds
 
 log = Log.create(service="workflow.execution_store")
 
 # Keys whose values are expected to be large alert/event lists that have
 # already been persisted elsewhere (typically JSONL on disk).  When writing
-# the execution record to PostgreSQL we replace them with a ``_<key>_count``
+# the execution record to SQLite we replace them with a ``_<key>_count``
 # integer to keep row sizes bounded.  Callers may extend or override this
 # set via the ``keys`` argument of the compact helpers below.
 DEFAULT_LARGE_LIST_KEYS: frozenset[str] = frozenset(
@@ -187,7 +185,7 @@ def compact_outputs_for_storage(
 
     Known large-list keys keep the historical ``_<key>_count`` shape. Other
     oversized strings, sequences, and dictionaries are replaced with bounded
-    summaries so unknown workflow payload names cannot inflate PostgreSQL rows or
+    summaries so unknown workflow payload names cannot inflate SQLite rows or
     tool metadata.
     """
     if not isinstance(outputs, dict):
@@ -340,7 +338,7 @@ def derive_loop_progress(
 
 # Maximum number of execution history records retained per workflow.
 # Keep this intentionally small so high-frequency workflows do not keep
-# inflating the PostgreSQL row set and matching JSONL audit files indefinitely.
+# inflating the SQLite row set and matching JSONL audit files indefinitely.
 _MAX_EXECUTION_HISTORY_PER_WORKFLOW = 30
 
 
@@ -392,7 +390,7 @@ async def record_execution_step(
 ) -> Dict[str, Any]:
     """Persist one compacted execution step and return the stored payload."""
     step_payload = compact_step_for_storage(step)
-    await WorkflowStore.record_step(exec_id, step_index, step_payload, token=owned_summary({"id": exec_id}))
+    await WorkflowStore.record_step(exec_id, step_index, step_payload)
     return step_payload
 
 
@@ -443,7 +441,7 @@ class ExecutionStepRecorder:
 
 
 class ExecutionProgressWriter:
-    """Coalesce nonblocking execution-summary updates onto one PostgreSQL writer."""
+    """Coalesce nonblocking execution-summary updates onto one SQLite writer."""
 
     def __init__(self, execution_summary: Dict[str, Any]) -> None:
         self._loop = asyncio.get_running_loop()
@@ -615,24 +613,15 @@ def build_initial_execution_record(
     }
 
 
-#: The webhook delivery the next run started in this context is for: a
-#: one-element list, emptied by the run that binds it (see for_webhook_delivery).
-_webhook_delivery: ContextVar[Optional[List[Tuple[str, str]]]] = ContextVar("workflow_webhook_delivery", default=None)
-
-
 @contextmanager
 def for_webhook_delivery(key: str, claim_token: str) -> Iterator[None]:
-    """Runs started inside are for this webhook delivery: the first one binds it.
+    """Runs started inside are for this webhook delivery.
 
-    The binding is made in the run's start transaction
-    (WorkflowStore.start_execution), so the delivery and the run that handles
-    it are recorded together or not at all.
+    The delivery was recorded when it was claimed
+    (WorkflowStore.claim_webhook_delivery), in this process, and is released
+    if the run cannot start; there is nothing more to bind it to here.
     """
-    previous = _webhook_delivery.set([(key, claim_token)])
-    try:
-        yield
-    finally:
-        _webhook_delivery.reset(previous)
+    yield
 
 
 async def create_execution_record(
@@ -640,12 +629,11 @@ async def create_execution_record(
     *,
     input_params: Optional[Dict[str, Any]] = None,
     exec_id: Optional[str] = None,
-    scope_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build and persist a running workflow execution record.
 
     *input_params* is passed through ``compact_outputs_for_storage`` before
-    writing to PostgreSQL so that batch HTTP calls whose inputs contain a key in
+    writing to SQLite so that batch HTTP calls whose inputs contain a key in
     ``DEFAULT_LARGE_LIST_KEYS`` (e.g. ``{"raw_alerts": [...10k items...]}``
     ) don't bloat the row.  Keys outside the default set — such as a generic
     ``alerts`` parameter — are stored verbatim; pass a custom *keys* argument
@@ -657,16 +645,9 @@ async def create_execution_record(
         input_params=compacted_params,
         exec_id=exec_id,
     )
-    duration = lease_seconds()
-    claimed_at = time.monotonic()
-    pending_delivery = _webhook_delivery.get()
-    delivery = pending_delivery.pop() if pending_delivery else None
-    owned = await WorkflowStore.start_execution(
-        compact_execution_summary(exec_data), owner_node_id=process_owner_id(),
-        lease_seconds=duration, scope_key=scope_key, delivery=delivery,
-    )
-    start_renewal(owned, duration=duration, claimed_at=claimed_at)
-    return owned
+    await WorkflowStore.upsert_execution(compact_execution_summary(exec_data))
+    start_renewal(exec_data)
+    return exec_data
 
 
 async def record_execution_result(
@@ -679,6 +660,7 @@ async def record_execution_result(
     """Persist the final execution record, step batch, audit trail, and stats."""
     summary_data = dict(exec_data)
     if summary_data.get("status") == "running":
+        # A run that ends without saying how was stopped on the way.
         summary_data.update(status="cancelled", currentPhase="cancelled", finishedAt=int(time.time() * 1000))
     prepared_steps = (
         list(steps)
@@ -692,24 +674,41 @@ async def record_execution_result(
     ):
         summary_data["stepCount"] = persisted_step_count
 
+    status = summary_data.get("status", "error")
+    success = status == "success"
     duration = summary_data.get("duration")
     if not isinstance(duration, (int, float)):
         started_at = summary_data.get("startedAt", 0)
         finished_at = summary_data.get("finishedAt", int(time.time() * 1000))
         duration = max(0.0, (finished_at - started_at) / 1000.0)
 
-    summary_data["duration"] = duration
     try:
-        written = await WorkflowStore.complete_execution(
-            compact_execution_summary(owned_summary(summary_data)), prepared_steps,
+        await WorkflowStore.complete_execution(
+            compact_execution_summary(summary_data),
+            prepared_steps,
         )
     except BaseException:
+        # Nothing else would end the record.
         await abandon_execution(exec_id)
         raise
     finally:
         await stop_renewal(exec_id)
-    if not written:
-        return
+
+    try:
+        await WorkflowStore.increment_stats(
+            workflow_id,
+            success=success,
+            duration=float(duration),
+        )
+    except Exception as exc:
+        log.warning(
+            "workflow.stats.update_failed",
+            {
+                "workflow_id": workflow_id,
+                "exec_id": exec_id,
+                "error": str(exc),
+            },
+        )
 
     trimmed_exec_ids: List[str] = []
     try:
@@ -732,7 +731,7 @@ async def record_execution_result(
         step for _, step in sorted(prepared_steps, key=lambda item: item[0])
     ]
 
-    # Recorder writes to its own PostgreSQL tables and can be slow under load.
+    # Recorder writes to its own SQLite tables and can be slow under load.
     # Run it as a background task so the syslog/HTTP dispatcher can release the
     # concurrency slot immediately instead of waiting on session-history I/O.
     try:

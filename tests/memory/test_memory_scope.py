@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-import json
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -242,17 +242,6 @@ async def test_indexer_scans_global_and_all_projects(
     ) in identities
 
 
-def _refuse_reading(note: Path, message: str):
-    real_read_text = Path.read_text
-
-    def read_text(self, *args, **kwargs):
-        if self == note:
-            raise AssertionError(message)
-        return real_read_text(self, *args, **kwargs)
-
-    return read_text
-
-
 @pytest.mark.asyncio
 async def test_indexer_does_not_read_unchanged_files(
     tmp_path: Path,
@@ -273,8 +262,11 @@ async def test_indexer_does_not_read_unchanged_files(
 
     with patch("flocks.config.Config.get_data_path", return_value=tmp_path):
         initial = await indexer.sync()
-        # Only the note itself: the memory store's sync reads its own record.
-        with patch.object(Path, "read_text", _refuse_reading(memory_file, "unchanged Memory file was read")):
+        with patch.object(
+            Path,
+            "read_text",
+            side_effect=AssertionError("unchanged Memory file was read"),
+        ):
             unchanged = await indexer.sync()
 
     assert initial["files_indexed"] == 1
@@ -314,7 +306,11 @@ async def test_indexer_refreshes_metadata_without_reindexing_unchanged_content(
         ) as index_file:
             touched = await indexer.sync()
         indexed_files = await indexer._get_indexed_files()
-        with patch.object(Path, "read_text", _refuse_reading(memory_file, "refreshed Memory file was read again")):
+        with patch.object(
+            Path,
+            "read_text",
+            side_effect=AssertionError("refreshed Memory file was read again"),
+        ):
             unchanged = await indexer.sync()
 
     indexed = indexed_files[("global", "", "MEMORY.md")]
@@ -331,63 +327,64 @@ async def test_old_memory_index_schema_is_rebuilt_without_other_data(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "legacy.db"
-    async with Storage.transaction(ensure_init=False) as connection:
-        await connection.executescript(
-            """
-            CREATE TABLE memory_files (
-                path TEXT PRIMARY KEY,
-                project_id TEXT NOT NULL,
-                source TEXT NOT NULL,
-                hash TEXT NOT NULL,
-                mtime REAL NOT NULL,
-                size INTEGER NOT NULL,
-                indexed_at REAL NOT NULL
-            );
-            CREATE TABLE memory_chunks (
-                id TEXT PRIMARY KEY,
-                path TEXT NOT NULL,
-                project_id TEXT NOT NULL,
-                source TEXT NOT NULL,
-                start_line INTEGER NOT NULL,
-                end_line INTEGER NOT NULL,
-                hash TEXT NOT NULL,
-                text TEXT NOT NULL,
-                embedding BYTEA,
-                embedding_model TEXT,
-                embedding_dims INTEGER,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            CREATE TABLE memory_fts (text TEXT, chunk_id TEXT, path TEXT, source TEXT,
-                project_id TEXT, start_line INTEGER, end_line INTEGER);
-            CREATE TABLE memory_embedding_cache (
-                text_hash TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                model TEXT NOT NULL,
-                embedding BYTEA NOT NULL,
-                dims INTEGER NOT NULL,
-                created_at REAL NOT NULL,
-                accessed_at REAL NOT NULL,
-                PRIMARY KEY (text_hash, provider, model)
-            );
-            INSERT INTO memory_embedding_cache
-            VALUES ('hash', 'provider', 'model', '[1.0]', 1, 1, 1);
-            CREATE TABLE session_transcript_fts(text TEXT);
-            INSERT INTO session_transcript_fts VALUES ('preserved');
-            INSERT INTO memory_files VALUES ('old.md','legacy-project','memory','hash',1,1,1);
-            CREATE INDEX idx_memory_files_source ON memory_files(source);
-            """
-        )
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE memory_files (
+            path TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            hash TEXT NOT NULL,
+            mtime REAL NOT NULL,
+            size INTEGER NOT NULL,
+            indexed_at REAL NOT NULL
+        );
+        CREATE TABLE memory_chunks (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            hash TEXT NOT NULL,
+            text TEXT NOT NULL,
+            embedding BLOB,
+            embedding_model TEXT,
+            embedding_dims INTEGER,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE VIRTUAL TABLE memory_fts USING fts5(
+            text, chunk_id, path, source, project_id, start_line, end_line
+        );
+        CREATE TABLE memory_embedding_cache (
+            text_hash TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            dims INTEGER NOT NULL,
+            created_at REAL NOT NULL,
+            accessed_at REAL NOT NULL,
+            PRIMARY KEY (text_hash, provider, model)
+        );
+        INSERT INTO memory_embedding_cache
+        VALUES ('hash', 'provider', 'model', '[1.0]', 1, 1, 1);
+        CREATE VIRTUAL TABLE session_transcript_fts USING fts5(text);
+        INSERT INTO session_transcript_fts VALUES ('preserved');
+        """
+    )
+    connection.commit()
+    connection.close()
+
     await ensure_vector_tables(db_path)
-    await ensure_vector_tables(db_path)
-    async with Storage.transaction(ensure_init=False) as connection:
-        columns = {row[0] for row in await connection.fetch_all("SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'memory_files'")}
-        cache_row = await connection.fetch_one("SELECT text_hash FROM memory_embedding_cache")
-        marker_row = await connection.fetch_one("SELECT text FROM session_transcript_fts")
-        legacy_tables = await connection.fetch_all("SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name LIKE 'memory_files_legacy_prescope_%'")
-        assert len(legacy_tables) == 1
-        assert await connection.fetch_one(f'SELECT path FROM "{legacy_tables[0][0]}"') == ('old.md',)
-        assert await connection.fetch_one("SELECT tablename FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'idx_memory_files_source'") == ('memory_files',)
+
+    connection = sqlite3.connect(db_path)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(memory_files)")}
+    cache_row = connection.execute("SELECT text_hash FROM memory_embedding_cache").fetchone()
+    marker_row = connection.execute(
+        "SELECT text FROM session_transcript_fts"
+    ).fetchone()
+    connection.close()
 
     assert {"scope", "scope_id", "path"}.issubset(columns)
     assert cache_row == ("hash",)
@@ -395,91 +392,58 @@ async def test_old_memory_index_schema_is_rebuilt_without_other_data(
 
 
 @pytest.mark.asyncio
-async def test_pg_embedding_writers_accept_arrays_and_legacy_json_bytes(tmp_path: Path):
-    from flocks.storage.vector import insert_chunks, put_embedding_to_cache, get_embedding_from_cache
+async def test_pre_scope_memory_tables_are_kept_aside_not_dropped(tmp_path: Path) -> None:
+    """An index made before scopes is renamed out of the way, rows and all; the new tables get every index."""
+    import re
 
-    path = tmp_path / "logical-memory"
-    await Storage.init(path)
-    representations = [[1.0, 0.0], '[1.0, 0.0]', b'[1.0, 0.0]', bytearray(b'[1.0, 0.0]'), memoryview(b'[1.0, 0.0]')]
-    for index, value in enumerate(representations):
-        filename = f"mixed-{index}.md"
-        chunk = _chunk('global', '', filename, 'mixed embedding', [1.0, 0.0])
-        chunk['embedding'] = value
-        await replace_memory_file_index(path, file_entry=_file_entry('global', '', filename), chunks=[chunk])
-    changed = _chunk('global', '', 'mixed-0.md', 'updated by insert_chunks', [0.5, 0.0])
-    await insert_chunks(path, [changed])
-    await put_embedding_to_cache(path, 'cache-key', 'provider', 'model', [0.5, 1.0], 2)
-    assert await get_embedding_from_cache(path, 'cache-key', 'provider', 'model') == ([0.5, 1.0], 2)
-    async with Storage.transaction() as db:
-        blobs = await db.fetch_all("SELECT embedding FROM memory_chunks ORDER BY id")
-        assert all(isinstance(row[0], bytes) and isinstance(json.loads(row[0]), list) for row in blobs)
-        assert await db.fetch_one("SELECT pg_typeof(embedding)::text FROM memory_embedding_cache WHERE text_hash = ?", ('cache-key',)) == ('bytea',)
-        # One invalid historical vector must not prevent other records from matching.
-        await db.execute("UPDATE memory_chunks SET embedding = ? WHERE id = ?", (b'invalid json', 'chunk:global::mixed-4.md'))
-    hits = await vector_search(path, 'default', [1.0, 0.0], max_results=20)
-    assert len(hits) == 4 and all(hit['score'] == 1.0 for hit in hits)
+    from flocks.storage.vector import VECTOR_SCHEMA_SQL
 
+    db_path = tmp_path / "prescope.db"
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE memory_files (
+            path TEXT PRIMARY KEY, project_id TEXT NOT NULL, source TEXT NOT NULL,
+            hash TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, indexed_at REAL NOT NULL
+        );
+        CREATE TABLE memory_chunks (
+            id TEXT PRIMARY KEY, path TEXT NOT NULL, project_id TEXT NOT NULL, source TEXT NOT NULL,
+            start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, hash TEXT NOT NULL, text TEXT NOT NULL,
+            embedding BLOB, embedding_model TEXT, embedding_dims INTEGER,
+            created_at REAL NOT NULL, updated_at REAL NOT NULL
+        );
+        CREATE INDEX idx_memory_files_source ON memory_files(source);
+        CREATE INDEX idx_memory_chunks_path ON memory_chunks(path);
+        CREATE INDEX idx_memory_chunks_source ON memory_chunks(source);
+        CREATE VIRTUAL TABLE memory_fts USING fts5(text, chunk_id, path, source, project_id, start_line, end_line);
+        INSERT INTO memory_files VALUES ('MEMORY.md', 'p', 'memory', 'h', 1, 2, 3);
+        INSERT INTO memory_chunks VALUES ('c1', 'MEMORY.md', 'p', 'memory', 1, 1, 'h', 'old text', NULL, NULL, NULL, 1, 1);
+        INSERT INTO memory_fts VALUES ('old text', 'c1', 'MEMORY.md', 'memory', 'p', 1, 1);
+        """
+    )
+    connection.commit()
+    connection.close()
 
-@pytest.mark.asyncio
-async def test_optional_keyword_index_failure_keeps_vector_chunk_transaction(tmp_path: Path):
-    from flocks.storage.vector import insert_chunks
+    await ensure_vector_tables(db_path)
+    await ensure_vector_tables(db_path)  # a second start sets nothing more aside
 
-    path = tmp_path / 'missing-keyword-index'
-    await Storage.init(path)
-    chunk = _chunk('global', '', 'preserved.md', 'original text', [1.0, 0.0])
-    await replace_memory_file_index(path, file_entry=_file_entry('global', '', 'preserved.md'), chunks=[chunk])
-    async with Storage.transaction() as db:
-        await db.execute('ALTER TABLE memory_fts RENAME TO memory_fts_retained')
-    changed = dict(chunk, text='updated vector text')
-    assert await insert_chunks(path, [changed]) == 1
-    async with Storage.transaction() as db:
-        assert await db.fetch_one('SELECT text FROM memory_chunks WHERE id = ?', (chunk['id'],)) == ('updated vector text',)
-        assert await db.fetch_one('SELECT text FROM memory_fts_retained WHERE chunk_id = ?', (chunk['id'],)) == ('original text',)
+    connection = sqlite3.connect(db_path)
+    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    backups = sorted(name for name in tables if "_bak_" in name and not re.search(r"_(data|idx|content|docsize|config)$", name))
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(memory_files)")}
+    kept = {
+        table: connection.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0]
+        for table in backups
+    }
+    indexes_on = {
+        row[0]: row[1]
+        for row in connection.execute("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index'")
+    }
+    connection.close()
 
-
-@pytest.mark.asyncio
-async def test_vector_search_batches_rows_and_scores_outside_event_loop(tmp_path: Path, monkeypatch):
-    import threading
-    from flocks.storage import vector
-    from flocks.db.backends.postgres import PostgresTransaction
-
-    path = tmp_path / 'large-memory'
-    await Storage.init(path)
-    chunks = [dict(_chunk('global', '', 'many.md', f'row {i}', [1.0, i / 600]), id=f'chunk-{i:04d}') for i in range(600)]
-    await replace_memory_file_index(path, file_entry=_file_entry('global', '', 'many.md'), chunks=chunks)
-    batch_sizes, workers = [], []
-    fetch = PostgresTransaction.fetch_all
-    score = vector._score_vector_rows
-    async def fetch_all(db, sql, params=()):
-        rows = await fetch(db, sql, params)
-        if 'FROM memory_chunks' in sql:
-            batch_sizes.append(len(rows))
-        return rows
-    def score_rows(*args):
-        workers.append(threading.get_ident())
-        return score(*args)
-    monkeypatch.setattr(PostgresTransaction, 'fetch_all', fetch_all)
-    monkeypatch.setattr(vector, '_score_vector_rows', score_rows)
-    hits = await vector_search(path, 'default', [1.0, 0.0], max_results=7)
-    assert [hit['id'] for hit in hits] == [f'chunk-{i:04d}' for i in range(7)]
-    assert batch_sizes == [256, 256, 88]
-    assert all(worker != threading.get_ident() for worker in workers)
-
-
-@pytest.mark.asyncio
-async def test_prescope_index_only_is_retained_and_rebuilt_from_scoped_chunks(tmp_path: Path):
-    from flocks.storage.vector import _vector_schema
-
-    async with Storage.transaction(ensure_init=False) as db:
-        await db.executescript(';\n'.join(_vector_schema(db.dialect)))
-        await db.execute("INSERT INTO memory_files VALUES ('global','','current.md','memory','hash',1,1,1)")
-        await db.execute("INSERT INTO memory_chunks(id,scope,scope_id,path,source,start_line,end_line,hash,text,created_at,updated_at) VALUES ('current','global','','current.md','memory',1,1,'hash','保留中文告警',1,1)")
-        await db.execute("CREATE TABLE memory_fts(text TEXT, chunk_id TEXT, project_id TEXT)")
-        await db.execute("INSERT INTO memory_fts VALUES ('legacy index','old','legacy')")
-    await ensure_vector_tables(tmp_path / 'logical-memory')
-    await ensure_vector_tables(tmp_path / 'logical-memory')
-    async with Storage.transaction(ensure_init=False) as db:
-        assert await db.fetch_one("SELECT chunk_id, text FROM memory_fts") == ('current', '保留中文告警')
-        retained = await db.fetch_all("SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_name LIKE 'memory_fts_legacy_prescope_%'")
-        assert len(retained) == 1
-        assert await db.fetch_one(f'SELECT chunk_id FROM "{retained[0][0]}"') == ('old',)
+    assert {"scope", "scope_id", "path"}.issubset(columns)
+    assert len(backups) == 3 and all(count == 1 for count in kept.values()), kept
+    assert {re.sub(r"_bak_\d{8}$", "", name) for name in backups} == {"memory_fts", "memory_chunks", "memory_files"}
+    wanted = re.findall(r"CREATE INDEX IF NOT EXISTS (\w+)\s+ON (\w+)\(", VECTOR_SCHEMA_SQL)
+    for name, table in wanted:
+        assert indexes_on.get(name) == table or indexes_on.get(f"{name}_scoped") == table, (name, indexes_on)

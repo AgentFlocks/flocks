@@ -73,8 +73,7 @@ def test_export_and_import_round_trip(monkeypatch, tmp_path) -> None:
 
     stored_entries: list[tuple[str, object, str | None]] = []
 
-    async def fake_mutate_many(*, set_entries=(), transaction_hook=None, **kwargs):
-        assert transaction_hook is not None
+    async def fake_mutate_many(*, set_entries=(), **kwargs):
         stored_entries.extend(set_entries)
 
     monkeypatch.setattr(export_cmd.Session, "get_by_id", fake_get_by_id)
@@ -156,32 +155,6 @@ async def test_import_writes_messages_in_runtime_storage_format(monkeypatch, tmp
     await asyncio.to_thread(input_path.write_text, json.dumps(payload), encoding="utf-8")
     await import_cmd._import_session(str(input_path), "proj_imported", force=True)
     assert (await Message.list_with_parts(session.id))[0].parts[0].text == "updated import"
-
-
-@pytest.mark.asyncio
-async def test_import_deleted_session_refuses_without_partial_documents(tmp_path) -> None:
-    import typer
-    from flocks.session.session import Session
-
-    session = _build_session("proj_imported")
-    message = _build_message_with_parts(session.id)
-    payload = {
-        "info": session.model_dump(by_alias=True),
-        "messages": [{"info": message.info.model_dump(), "parts": [part.model_dump() for part in message.parts]}],
-    }
-    input_path = tmp_path / "deleted-session-import.json"
-    await asyncio.to_thread(input_path.write_text, json.dumps(payload), encoding="utf-8")
-    await import_cmd._import_session(str(input_path), "proj_imported")
-    assert await Session.delete("proj_imported", session.id)
-    with pytest.raises(typer.Exit):
-        await import_cmd._import_session(str(input_path), "proj_imported", force=True)
-    assert await Storage.get(f"session:proj_imported:{session.id}") is None
-    assert await Storage.get(f"message:{session.id}") is None
-    assert await Storage.get(f"message_parts:{session.id}:{message.info.id}") is None
-
-    await import_cmd._import_session(str(input_path), "proj_imported", new_id=True)
-    entries = await Storage.list_entries(prefix="session:proj_imported:")
-    assert len(entries) == 1 and entries[0][1]["id"] != session.id
 
 
 @pytest.mark.asyncio

@@ -99,7 +99,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
     monkeypatch.setattr(
         poller_manager,
         "create_execution_record",
-        lambda workflow_id, *, input_params=None, exec_id=None, scope_key=None: asyncio.sleep(
+        lambda workflow_id, *, input_params=None, exec_id=None: asyncio.sleep(
             0,
             result={
                 "id": exec_id or f"exec-{workflow_id}",
@@ -113,14 +113,15 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
             },
         ),
     )
-    monkeypatch.setattr(
-        poller_manager,
-        "record_execution_result",
-        lambda workflow_id, exec_id, exec_data, **kwargs: asyncio.sleep(0),
-    )
+    recorded: list[tuple[str, str]] = []
+
+    async def _record_execution_result(workflow_id, exec_id, exec_data, *, steps=None):
+        # Takes what the manager passes (steps included): a mock that did not
+        # failed with a TypeError the manager swallows, and nothing was recorded.
+        recorded.append((workflow_id, exec_data.get("status")))
+
+    monkeypatch.setattr(poller_manager, "record_execution_result", _record_execution_result)
     monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
-    # This unit uses fake execution records; real lease checks are covered in test_postgres_shared_execution.
-    monkeypatch.setattr(poller_manager, "execution_cancelled", lambda _id: False)
 
     status = await manager.run_once("wf-run-once")
 
@@ -133,6 +134,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
     assert captured_inputs["input_date"]
     assert captured_inputs["_trigger"] == "poller"
     assert captured_inputs["_poller_run_id"].startswith("poller-")
+    assert recorded == [("wf-run-once", "success")]
 
 
 @pytest.mark.asyncio
@@ -156,7 +158,6 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
         *,
         input_params: dict[str, Any] | None = None,
         exec_id: str | None = None,
-        scope_key: str | None = None,
     ) -> dict[str, Any]:
         record = {
             "id": exec_id or "exec-1",
@@ -240,8 +241,6 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
     monkeypatch.setattr(poller_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(poller_manager, "record_execution_result", _fake_record_execution_result)
     monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
-    # This unit uses fake execution records; real lease checks are covered in test_postgres_shared_execution.
-    monkeypatch.setattr(poller_manager, "execution_cancelled", lambda _id: False)
 
     status = await manager.run_once("wf-business-failure")
 
@@ -304,12 +303,10 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
         return RunWorkflowResult(status="success", outputs={"load_stats": {"record_count": 1}})
 
     monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
-    # This unit uses fake execution records; real lease checks are covered in test_postgres_shared_execution.
-    monkeypatch.setattr(poller_manager, "execution_cancelled", lambda _id: False)
     monkeypatch.setattr(
         poller_manager,
         "create_execution_record",
-        lambda workflow_id, *, input_params=None, exec_id=None, scope_key=None: asyncio.sleep(
+        lambda workflow_id, *, input_params=None, exec_id=None: asyncio.sleep(
             0,
             result={
                 "id": exec_id or f"exec-{workflow_id}",
@@ -323,11 +320,14 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
             },
         ),
     )
-    monkeypatch.setattr(
-        poller_manager,
-        "record_execution_result",
-        lambda workflow_id, exec_id, exec_data, **kwargs: asyncio.sleep(0),
-    )
+    recorded: list[tuple[str, str]] = []
+
+    async def _record_execution_result(workflow_id, exec_id, exec_data, *, steps=None):
+        # Takes what the manager passes (steps included): a mock that did not
+        # failed with a TypeError the manager swallows, and nothing was recorded.
+        recorded.append((workflow_id, exec_data.get("status")))
+
+    monkeypatch.setattr(poller_manager, "record_execution_result", _record_execution_result)
     monkeypatch.setattr(
         poller_manager,
         "read_workflow_from_fs",
@@ -350,6 +350,11 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
 
     assert status["lastStatus"] == "skipped"
     assert status["lastError"] == "previous_run_still_active"
+    for _ in range(100):  # the first run records its end once its thread is done
+        if recorded:
+            break
+        await asyncio.sleep(0.02)
+    assert [workflow_id for workflow_id, _ in recorded] == ["wf-overlap"], "the first run, recorded once"
 
 
 @pytest.mark.asyncio
@@ -364,7 +369,6 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
         *,
         input_params: dict[str, Any] | None = None,
         exec_id: str | None = None,
-        scope_key: str | None = None,
     ) -> dict[str, Any]:
         _ = input_params
         return {
@@ -408,8 +412,6 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
     monkeypatch.setattr(poller_manager, "create_execution_record", _fake_create_execution_record)
     monkeypatch.setattr(poller_manager, "record_execution_result", _fake_record_execution_result)
     monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
-    # This unit uses fake execution records; real lease checks are covered in test_postgres_shared_execution.
-    monkeypatch.setattr(poller_manager, "execution_cancelled", lambda _id: False)
 
     await manager._schedule_run(
         "wf-stop",
@@ -422,9 +424,7 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
     assert manager.get_status("wf-stop")["activeRuns"] == 1
 
     release_run.set()
-    # Up to 10 s: a loaded machine can take well over a second to finish the
-    # worker thread and its bookkeeping (it took longer than 1 s under the full suite).
-    for _ in range(1000):
+    for _ in range(100):
         if manager.get_status("wf-stop")["activeRuns"] == 0:
             break
         await asyncio.sleep(0.01)
@@ -503,7 +503,7 @@ def _patch_scheduled_run(monkeypatch: pytest.MonkeyPatch, workflow_json: dict[st
     async def _fake_get_config(_workflow_id: str, *, kind: str) -> dict[str, Any]:
         return {"enabled": True, "intervalSeconds": 3600, "timeoutSeconds": 5}
 
-    async def _fake_create_execution_record(workflow_id: str, *, input_params=None, exec_id=None, scope_key=None):
+    async def _fake_create_execution_record(workflow_id: str, *, input_params=None, exec_id=None):
         record = {"id": "exec-1", "workflowId": workflow_id, "inputParams": input_params or {}}
         created.append(record)
         return dict(record)

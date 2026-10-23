@@ -8,7 +8,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from flocks.db.singleton import ClusterSingleton, wait_for_singleton
+from flocks.coordination import ClusterSingleton, wait_for_singleton
 from flocks.hooks.execution import execute_with_hooks
 from flocks.hooks.pipeline import HookPipeline
 from flocks.utils.log import Log
@@ -24,7 +24,7 @@ from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
-from flocks.workflow.ownership import execution_cancelled
+from flocks.workflow.ownership import abandon_execution, execution_cancelled
 from flocks.workflow.tool_context import (
     build_workflow_tool_context,
     cleanup_workflow_tool_context,
@@ -776,84 +776,89 @@ class SyslogManager:
                 input_params=summarized_inputs,
             )
             exec_id = exec_data["id"]
-            step_recorder = ExecutionStepRecorder()
-            start_time = time.time()
-            trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
-            tool_context = None
+            # Every way out of here ends the run: one whose end was not recorded (a
+            # cancel while its context is cleaned up, say) is let go, not left live.
             try:
-                tool_context = await build_workflow_tool_context(
-                    workflow_id=workflow_id,
-                    action_name=f"trigger:{trigger.type}",
-                )
-                result = await asyncio.to_thread(
-                    run_workflow,
-                    workflow=workflow_plan,
-                    inputs=mapped_inputs,
-                    run_id=exec_id,
-                    trace=False,
-                    execution_profile="high_frequency",
-                    cancel=lambda: run_cancel_event.is_set() or execution_cancelled(exec_id),
-                    on_step_complete=step_recorder.on_step_complete,
-                    tool_context=tool_context,
-                )
-                status, error_msg = resolve_execution_outcome(result)
-                duration = time.time() - start_time
-                step_count = step_recorder.step_count or result.steps
-                exec_data.update(step_recorder.summary)
-                exec_data.update(
-                    {
-                        "status": status,
-                        "outputResults": compact_outputs_for_storage(result.outputs),
-                        "finishedAt": int(time.time() * 1000),
-                        "duration": duration,
-                        "errorMessage": error_msg,
-                        "executionLog": [],
-                        "stepCount": step_count,
-                        "currentNodeId": result.last_node_id,
-                        "currentPhase": status,
-                        "currentStepIndex": step_count,
-                        "triggerId": trigger.id,
-                        "triggerType": trigger.type,
-                        "deliveryId": trigger_meta.get("deliveryId"),
-                        "attempt": trigger_meta.get("attempt"),
-                        "triggerSource": trigger_meta.get("source"),
-                    }
-                )
-            except Exception as exc:
-                duration = time.time() - start_time
-                log.error(
-                    "syslog.workflow_run_failed",
-                    {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
-                )
-                exec_data.update(step_recorder.summary)
-                exec_data.update(
-                    {
-                        "status": "error",
-                        "errorMessage": str(exc),
-                        "finishedAt": int(time.time() * 1000),
-                        "duration": duration,
-                        "executionLog": [],
-                        "currentPhase": "error",
-                        "triggerId": trigger.id,
-                        "triggerType": trigger.type,
-                        "deliveryId": trigger_meta.get("deliveryId"),
-                        "attempt": trigger_meta.get("attempt"),
-                        "triggerSource": trigger_meta.get("source"),
-                    }
-                )
-            finally:
-                steps = step_recorder.take_steps()
-                await cleanup_workflow_tool_context(tool_context)
+                step_recorder = ExecutionStepRecorder()
+                start_time = time.time()
+                trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
+                tool_context = None
                 try:
-                    await record_execution_result(
-                        workflow_id,
-                        exec_id,
-                        exec_data,
-                        steps=steps,
+                    tool_context = await build_workflow_tool_context(
+                        workflow_id=workflow_id,
+                        action_name=f"trigger:{trigger.type}",
+                    )
+                    result = await asyncio.to_thread(
+                        run_workflow,
+                        workflow=workflow_plan,
+                        inputs=mapped_inputs,
+                        run_id=exec_id,
+                        trace=False,
+                        execution_profile="high_frequency",
+                        cancel=lambda: run_cancel_event.is_set() or execution_cancelled(exec_id),
+                        on_step_complete=step_recorder.on_step_complete,
+                        tool_context=tool_context,
+                    )
+                    status, error_msg = resolve_execution_outcome(result)
+                    duration = time.time() - start_time
+                    step_count = step_recorder.step_count or result.steps
+                    exec_data.update(step_recorder.summary)
+                    exec_data.update(
+                        {
+                            "status": status,
+                            "outputResults": compact_outputs_for_storage(result.outputs),
+                            "finishedAt": int(time.time() * 1000),
+                            "duration": duration,
+                            "errorMessage": error_msg,
+                            "executionLog": [],
+                            "stepCount": step_count,
+                            "currentNodeId": result.last_node_id,
+                            "currentPhase": status,
+                            "currentStepIndex": step_count,
+                            "triggerId": trigger.id,
+                            "triggerType": trigger.type,
+                            "deliveryId": trigger_meta.get("deliveryId"),
+                            "attempt": trigger_meta.get("attempt"),
+                            "triggerSource": trigger_meta.get("source"),
+                        }
                     )
                 except Exception as exc:
-                    log.warning("syslog.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
-            return exec_data
+                    duration = time.time() - start_time
+                    log.error(
+                        "syslog.workflow_run_failed",
+                        {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
+                    )
+                    exec_data.update(step_recorder.summary)
+                    exec_data.update(
+                        {
+                            "status": "error",
+                            "errorMessage": str(exc),
+                            "finishedAt": int(time.time() * 1000),
+                            "duration": duration,
+                            "executionLog": [],
+                            "currentPhase": "error",
+                            "triggerId": trigger.id,
+                            "triggerType": trigger.type,
+                            "deliveryId": trigger_meta.get("deliveryId"),
+                            "attempt": trigger_meta.get("attempt"),
+                            "triggerSource": trigger_meta.get("source"),
+                        }
+                    )
+                finally:
+                    steps = step_recorder.take_steps()
+                    await cleanup_workflow_tool_context(tool_context)
+                    try:
+                        await record_execution_result(
+                            workflow_id,
+                            exec_id,
+                            exec_data,
+                            steps=steps,
+                        )
+                    except Exception as exc:
+                        log.warning("syslog.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
+                return exec_data
+            finally:
+                await abandon_execution(exec_id)
 
         try:
             action_payload = {

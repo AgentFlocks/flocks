@@ -14,15 +14,12 @@ managed service.  Through the SDK the ACP agent uses:
 from __future__ import annotations
 
 import asyncio
-import os
 import socket
 import time
 
 import pytest
 
 from flocks.server.client import FlocksClient, ServiceUnavailable
-
-pytestmark = pytest.mark.skipif(not os.environ.get("FLOCKS_TEST_PG_DSN"), reason="FLOCKS_TEST_PG_DSN is not set")
 
 TOKEN = "acp-g05-token"  # secret-guard: allow 误报：测试用假令牌
 

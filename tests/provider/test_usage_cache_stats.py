@@ -1,5 +1,6 @@
 """Usage records keep whether the provider reported cache usage, and stats tell it apart."""
 
+import sqlite3
 
 import pytest
 
@@ -61,25 +62,22 @@ async def test_record_keeps_the_response_id(storage):
 
 async def test_existing_usage_table_gains_the_new_columns(tmp_path, monkeypatch):
     db_path = tmp_path / "old.db"
-    # The table as it was before the two columns, in this test's PostgreSQL schema.
-    Storage._initialized = False
-    Storage._db_path = None
-    async with Storage.transaction(db_path, ensure_init=False) as db:
-        await db.execute(
+    with sqlite3.connect(db_path) as db:
+        db.execute(
             """CREATE TABLE usage_records (
                 id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, model_id TEXT NOT NULL,
                 credential_id TEXT, session_id TEXT, message_id TEXT,
-                input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0,
-                cached_tokens BIGINT NOT NULL DEFAULT 0, cache_write_tokens BIGINT NOT NULL DEFAULT 0,
-                reasoning_tokens BIGINT NOT NULL DEFAULT 0, total_tokens BIGINT NOT NULL DEFAULT 0,
-                input_cost DOUBLE PRECISION NOT NULL DEFAULT 0, output_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
-                total_cost DOUBLE PRECISION NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'USD',
-                latency_ms BIGINT, source TEXT NOT NULL DEFAULT 'live', created_at TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0,
+                input_cost REAL NOT NULL DEFAULT 0, output_cost REAL NOT NULL DEFAULT 0,
+                total_cost REAL NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'USD',
+                latency_ms INTEGER, source TEXT NOT NULL DEFAULT 'live', created_at TEXT NOT NULL,
                 backfilled_at TEXT)"""
         )
         # An Anthropic-style row from before the upgrade: input_tokens kept
         # only the uncached 100 next to 900 cache reads.
-        await db.execute(
+        db.execute(
             "INSERT INTO usage_records"
             " (id, provider_id, model_id, input_tokens, output_tokens, cached_tokens, total_tokens, created_at)"
             " VALUES ('old-row', 'anthropic', 'm', 100, 20, 900, 120, '2026-10-01T00:00:00+00:00')"
@@ -237,8 +235,9 @@ async def test_summary_filters_rows_stored_with_an_offset_by_their_instant(stora
     }
     for text, n in stored.items():
         record = await record_usage(_request(input_tokens=n))
-        async with Storage.transaction(Storage._db_path) as db:
+        async with Storage.connect(Storage._db_path) as db:
             await db.execute("UPDATE usage_records SET created_at = ? WHERE id = ?", (text, record.id))
+            await db.commit()
 
     async def total(**bounds) -> int:
         stats = await usage_routes.api_get_usage_stats(
@@ -270,6 +269,7 @@ async def test_recorded_time_is_stored_in_utc(storage):
     ))
 
     assert record.created_at == datetime(2026, 10, 20, 7, 0, tzinfo=timezone.utc)
-    async with Storage.transaction(Storage._db_path) as db:
-        row = await db.fetch_one("SELECT created_at FROM usage_records WHERE id = ?", (record.id,))
+    async with Storage.connect(Storage._db_path) as db:
+        cursor = await db.execute("SELECT created_at FROM usage_records WHERE id = ?", (record.id,))
+        row = await cursor.fetchone()
     assert row[0] == "2026-10-20T07:00:00+00:00"

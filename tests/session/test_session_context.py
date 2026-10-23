@@ -891,32 +891,40 @@ async def test_context_pages_all_history_and_opens_old_file_without_snapshot(tmp
         )
         for index in range(1005)
     ]
-    from flocks.storage.storage import Storage
-    await Storage.set(f"message:{session.id}", [message.model_dump() for message in messages])
-    await Storage.set(f"message_parts:{session.id}:msg_0000", [upload.model_dump()])
-    Message.invalidate_cache(session.id)
-    with patch.object(Message, "list", side_effect=AssertionError("must not hydrate full history")):
+    by_id = {message.id: message for message in messages}
+    monkeypatch.setattr(Message, "_parts_cache", {session.id: {message.id: [] for message in messages}})
+    load_parts = AsyncMock(side_effect=lambda _session, message_id, **_kwargs: [upload] if message_id == "msg_0000" else [])
+    with (
+        patch.object(Message, "list", new=AsyncMock(return_value=messages)) as list_messages,
+        patch.object(Message, "get", new=AsyncMock(side_effect=lambda _session, message_id: by_id.get(message_id))),
+        patch.object(Message, "_load_parts_for_message", new=load_parts),
+    ):
         page = await build_session_context(session, include_roots=False, limit=200)
         assert page["contextFiles"] == []
         assert page["hasMore"] is True
         assert page["nextBefore"] == "msg_0805"
         assert page["messageIDs"] == [message.id for message in messages[-200:]]
+        assert load_parts.await_count == 200
+        load_parts.reset_mock()
         resource = await resolve_session_resource(session, public_resource_id("msg_0000", upload.id))
         assert resource.path.read_text() == "older than 1000 messages"
+        load_parts.assert_awaited_once_with(session.id, "msg_0000")
+
         seen_ids = list(page["messageIDs"])
         while page["hasMore"]:
+            load_parts.reset_mock()
             page = await build_session_context(session, include_roots=False, before=page["nextBefore"], limit=200)
+            assert load_parts.await_count <= 200
             seen_ids.extend(page["messageIDs"])
         assert len(seen_ids) == len(set(seen_ids)) == 1005
         assert page["nextBefore"] is None
         assert page["contextFiles"][0]["resourceID"] == public_resource_id("msg_0000", upload.id)
-        assert session.id not in Message._messages_cache
+        assert all(call.kwargs["include_archived"] for call in list_messages.await_args_list)
         with pytest.raises(ValueError, match="cursor"):
             await build_session_context(session, include_roots=False, before="missing")
         for limit in (0, 201):
             with pytest.raises(ValueError, match="page size"):
                 await build_session_context(session, include_roots=False, limit=limit)
-
 
 
 @pytest.mark.asyncio

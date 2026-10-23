@@ -44,8 +44,14 @@ def rea_isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(runtime, "unpatched_java_home_candidates", runtime.java_home_candidates, raising=False)
     monkeypatch.setattr(runtime, "java_home_candidates", lambda: [os.environ["FLOCKS_REA_JAVA_HOME"]])
     monkeypatch.setattr(components, "_RETRY_DELAY_SECONDS", 0.0)
+    from flocks.storage.storage import Storage
+
     Config._global_config = None
     Config._cached_config = None
+    # REA keeps job state in the key-value store: each test gets its own
+    # database under its data dir, as it gets its own HOME.
+    Storage._initialized = False
+    Storage._db_path = None
     original_workspace = WorkspaceManager._instance
     WorkspaceManager._instance = None
     runtime.reset_environment_cache()
@@ -55,6 +61,8 @@ def rea_isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yield home
     ReaInstaller.reset_for_testing()
     ReaUninstaller.reset_for_testing()
+    Storage._initialized = False
+    Storage._db_path = None
     runtime.reset_environment_cache()
     Skill.clear_cache()
     WorkspaceManager._instance = original_workspace

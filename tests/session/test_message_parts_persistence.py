@@ -91,7 +91,7 @@ async def test_legacy_blob_reads_without_migration() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recent_legacy_page_does_not_transfer_the_whole_legacy_blob(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_recent_legacy_page_reads_legacy_blob_once(monkeypatch: pytest.MonkeyPatch) -> None:
     session_id = "ses_parts_legacy_recent_page"
     await _write_legacy_session(
         session_id,
@@ -119,7 +119,7 @@ async def test_recent_legacy_page_does_not_transfer_the_whole_legacy_blob(monkey
     assert [message.parts[0].text for message in messages] == ["legacy a", "legacy b", "legacy c"]
     assert has_more is False
     assert next_before is None
-    assert legacy_blob_reads == 0
+    assert legacy_blob_reads == 1
 
 
 @pytest.mark.asyncio
@@ -193,11 +193,10 @@ async def test_delete_restores_caches_when_message_persistence_fails(
         id="msg_a",
         part_id="part_a",
     )
-    from flocks.session import message_pages
-    sync_document = AsyncMock(
+    mutate_many = AsyncMock(
         side_effect=RuntimeError("message storage unavailable")
     )
-    monkeypatch.setattr(message_pages, "sync_document", sync_document)
+    monkeypatch.setattr(Storage, "mutate_many", mutate_many)
 
     with pytest.raises(RuntimeError, match="message storage unavailable"):
         await Message.delete(session_id, "msg_a")
@@ -216,7 +215,6 @@ async def test_a_part_change_whose_write_failed_is_not_written_later(
     monkeypatch: pytest.MonkeyPatch, change: str,
 ) -> None:
     """The message also has a running tool's change waiting to be written: that one is, the failed one is not."""
-    from flocks.session import message_pages
     from flocks.session.message import ToolPart, ToolStateRunning
 
     session_id = f"ses_parts_failed_{change}"
@@ -226,9 +224,8 @@ async def test_a_part_change_whose_write_failed_is_not_written_later(
         state=ToolStateRunning(input={}, time={"start": 1}),
     ))  # running: written a little later
     new_text = TextPart(id="part_new", sessionID=session_id, messageID="msg_a", text="never written")
-    merge_parts = message_pages.merge_parts
-    monkeypatch.setattr(message_pages, "merge_parts", AsyncMock(side_effect=RuntimeError("storage unavailable")))
-    with pytest.raises(RuntimeError, match="storage unavailable"):
+    with monkeypatch.context() as failing, pytest.raises(RuntimeError, match="storage unavailable"):
+        failing.setattr(Storage, "mutate_many", AsyncMock(side_effect=RuntimeError("storage unavailable")))
         if change == "store_part":
             await Message.store_part(session_id, "msg_a", new_text)
         elif change == "add_part":
@@ -237,7 +234,6 @@ async def test_a_part_change_whose_write_failed_is_not_written_later(
             await Message.update_part(session_id, "msg_a", "part_a", text="never written")
         else:
             await Message.remove_part(session_id, "msg_a", "part_a")
-    monkeypatch.setattr(message_pages, "merge_parts", merge_parts)
 
     def shape(message):
         return [(part.type, part.text if part.type == "text" else part.state.status) for part in message.parts]
@@ -254,7 +250,6 @@ async def test_an_error_text_whose_write_failed_is_not_written_later(monkeypatch
     """The runner's visible error text, under the same failure: not changed in the cache before it is written."""
     from types import SimpleNamespace
 
-    from flocks.session import message_pages
     from flocks.session.message import ToolPart, ToolStateRunning
     from flocks.session.runner import SessionRunner
 
@@ -265,12 +260,10 @@ async def test_an_error_text_whose_write_failed_is_not_written_later(monkeypatch
         id="part_tool", sessionID=session_id, messageID="msg_a", callID="call_a", tool="read",
         state=ToolStateRunning(input={}, time={"start": 1}),
     ))  # running: written a little later
-    merge_parts = message_pages.merge_parts
-    monkeypatch.setattr(message_pages, "merge_parts", AsyncMock(side_effect=RuntimeError("storage unavailable")))
     runner = SimpleNamespace(session=SimpleNamespace(id=session_id))
-    with pytest.raises(RuntimeError, match="storage unavailable"):
+    with monkeypatch.context() as failing, pytest.raises(RuntimeError, match="storage unavailable"):
+        failing.setattr(Storage, "mutate_many", AsyncMock(side_effect=RuntimeError("storage unavailable")))
         await SessionRunner._ensure_visible_error_text(runner, reply, "the model returned nothing")
-    monkeypatch.setattr(message_pages, "merge_parts", merge_parts)
 
     def texts(message):
         return [part.text for part in message.parts if part.type == "text"]

@@ -88,28 +88,6 @@ async def test_saving_writes_flocks_json_applies_log_days_and_starts_cleanup(cli
     assert again.json()["sessionDays"] == 90
 
 
-async def test_both_save_paths_move_the_shared_policy_version(client, run_requests):
-    # Cleanups in every worker hold this version while deleting and stop once a
-    # save moved it; an in-process generation alone never reaches them.
-    from flocks.retention.policy import policy_version
-
-    before = await policy_version()
-    response = await client.patch(
-        "/api/config/data-retention",
-        json={"logDays": 14, "messageDays": 30, "sessionDays": 90},
-    )
-    assert response.status_code == 200, response.text
-    assert await policy_version() == before + 1
-
-    response = await client.patch("/api/config/", json={"toolFailure": {"disableOnRepeatedFailure": True}})
-    assert response.status_code == 200, response.text
-    assert await policy_version() == before + 1  # nothing about retention changed
-
-    response = await client.patch(
-        "/api/config/", json={"dataRetention": {"logDays": 0, "messageDays": 0, "sessionDays": 0}},
-    )
-    assert response.status_code == 200, response.text
-    assert await policy_version() == before + 2
 
 
 async def test_saving_keeps_unrelated_config_and_extra_keys(client, run_requests):

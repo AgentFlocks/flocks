@@ -1307,9 +1307,12 @@ async def test_evolution_schema_preserves_legacy_skill_tables(
     await EvolutionCheckpointStore.ensure_schema()
 
     async with Storage.connect() as db:
-        cursor = await db.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name LIKE 'memory_skill_%' ORDER BY table_name")
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'memory_skill_%' ORDER BY name"
+        )
         rows = await cursor.fetchall()
-        marker = await db.fetch_one("SELECT id FROM memory_skill_proposals WHERE id = ?", ("preserved",))
+        cursor = await db.execute("SELECT id FROM memory_skill_proposals WHERE id = ?", ("preserved",))
+        marker = tuple(await cursor.fetchone())
 
     assert [row[0] for row in rows] == ["memory_skill_evolution_state", "memory_skill_proposals"]
     assert marker == ("preserved",)

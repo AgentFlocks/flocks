@@ -24,6 +24,22 @@ _ROUTES = (
 )
 
 
+@pytest.fixture(autouse=True)
+async def _own_database(tmp_path, monkeypatch):
+    """Approvals live in the runtime database: each test starts with an empty one."""
+    from flocks.config.config import Config
+    from flocks.storage.storage import Storage
+
+    monkeypatch.setenv("FLOCKS_DATA_DIR", str(tmp_path / "data"))
+    Config._global_config = None
+    Storage._initialized = False
+    Storage._db_path = None
+    yield
+    Config._global_config = None
+    Storage._initialized = False
+    Storage._db_path = None
+
+
 def _handlers(marker: Path) -> str:
     # Module-level code: it runs on import, before any handler is called.
     return (

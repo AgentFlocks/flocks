@@ -196,7 +196,8 @@ async def test_delete_rechecks_locked_rows_before_committing(monkeypatch):
     monkeypatch.setattr(Storage, "mutate_many", classmethod(reassign_then_mutate))
     with acting_as(OWNER):
         assert not await Session.delete(session.project_id, session.id)
-    current = await Session.get_by_id_unfiltered(session.id)
+    # As stored: the other writer went around this process's session cache.
+    current = await Storage.get(f"session:{session.project_id}:{session.id}", SessionInfo)
     assert current is not None and current.owner_user_id == READER.id
     assert len(await Message.list(session.id)) == 1
     assert not Session.is_lifecycle_transitioning(session.id)
@@ -220,86 +221,6 @@ async def test_generic_update_cannot_change_session_topology(field):
     assert current is not None and current.parent_id is None
     with acting_as(OWNER):
         assert await Session.archive(parent.project_id, parent.id)
-
-
-async def peer_patch(session, changes, *, started=None):
-    """Use only this test's retained schema for a separate PG connection."""
-    import asyncpg
-    from urllib.parse import urlsplit
-
-    dsn = os.environ["FLOCKS_DB_DSN"]
-    parts = urlsplit(dsn)
-    assert parts.hostname in {"127.0.0.1", "localhost"}
-    connection = await asyncpg.connect(dsn)
-    try:
-        assert (await connection.fetchval("SELECT current_schema()")).startswith("test_")
-        if started is not None:
-            started.set()
-        await connection.execute(
-            "UPDATE runtime_state SET value = value || $2::jsonb WHERE key = $1",
-            f"session:{session.project_id}:{session.id}", json.dumps(changes),
-        )
-    finally:
-        await connection.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["owner", "status"])
-async def test_create_uses_latest_locked_parent(change, monkeypatch):
-    from flocks.db.backends.postgres import PostgresTransaction
-
-    parent = await make_session("create")
-    original_fetch = PostgresTransaction.fetch_one
-    changed = False
-
-    async def change_before_lock(transaction, sql, params=()):
-        nonlocal changed
-        if not changed and sql == "SELECT value FROM runtime_state WHERE key = ? FOR UPDATE":
-            changed = True
-            patch = {"ownerUserID": READER.id, "ownerUsername": READER.username} if change == "owner" else {"status": "archived"}
-            await peer_patch(parent, patch)
-        return await original_fetch(transaction, sql, params)
-
-    monkeypatch.setattr(PostgresTransaction, "fetch_one", change_before_lock)
-    with acting_as(OWNER):
-        with pytest.raises(PermissionError if change == "owner" else ValueError):
-            await Session.create(project_id=parent.project_id, directory="/fixture", parent_id=parent.id)
-    assert changed
-    assert await Session.children(parent.project_id, parent.id) == []
-
-
-@pytest.mark.asyncio
-async def test_parent_row_remains_locked_until_child_insert_commits(monkeypatch):
-    from flocks.db.backends.postgres import PostgresTransaction
-
-    parent = await make_session("create")
-    original_execute = PostgresTransaction.execute
-    peer = None
-    started = asyncio.Event()
-    observed_lock = False
-
-    async def gate_insert(transaction, sql, params):
-        nonlocal peer, observed_lock
-        peer = asyncio.create_task(peer_patch(parent, {"ownerUserID": READER.id}, started=started))
-        await asyncio.wait_for(started.wait(), 2)
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(asyncio.shield(peer), 0.1)
-        observed_lock = True
-        return await original_execute(transaction, sql, params)
-
-    def execute(transaction, sql, params=()):
-        if sql.startswith("INSERT INTO runtime_state (key, value, value_type, updated_at)"):
-            return gate_insert(transaction, sql, params)
-        return original_execute(transaction, sql, params)
-
-    monkeypatch.setattr(PostgresTransaction, "execute", execute)
-    with acting_as(OWNER):
-        child = await Session.create(project_id=parent.project_id, directory="/fixture", parent_id=parent.id)
-    assert observed_lock
-    await asyncio.wait_for(peer, 2)
-    assert child.owner_user_id == OWNER.id
-    assert child.parent_id == parent.id
-    assert (await Session.get_by_id_unfiltered(parent.id)).owner_user_id == READER.id
 
 
 @pytest.mark.asyncio

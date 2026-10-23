@@ -1,16 +1,18 @@
 """Task Manager for scheduler/execution domain."""
 
 import asyncio
+import json
+import sqlite3
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel as _BaseModel
 
+from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
 from .executor import _TASK_ABSOLUTE_TIMEOUT_S, TaskExecutor
-from .lease import ExecutionOwnershipError
-from .node import process_owner_id, heartbeat_seconds, lease_seconds
 from .models import (
     DeliveryStatus,
     ExecutionMode,
@@ -357,16 +359,20 @@ class TaskManager:
         trigger_type: ExecutionTriggerType,
         enqueue: bool = True,
     ) -> TaskExecution:
-        execution = cls.build_execution(scheduler, trigger_type=trigger_type)
+        execution = cls.build_execution_from_scheduler(scheduler, trigger_type=trigger_type)
         await TaskStore.create_execution(execution)
         if enqueue:
             await cls._enqueue_execution(execution)
         return execution
 
     @classmethod
-    def build_execution(
-        cls, scheduler: TaskScheduler, *, trigger_type: ExecutionTriggerType
+    def build_execution_from_scheduler(
+        cls,
+        scheduler: TaskScheduler,
+        *,
+        trigger_type: ExecutionTriggerType,
     ) -> TaskExecution:
+        """A pending execution of *scheduler*, not yet stored."""
         execution = TaskExecution(
             scheduler_id=scheduler.id,
             title=scheduler.title,
@@ -502,7 +508,7 @@ class TaskManager:
         execution.error = None
         execution.result_summary = None
         execution.session_id = None
-        return await cls._enqueue_execution(execution)
+        return await cls._enqueue_execution(execution, expected_status=TaskStatus.FAILED)
 
     @classmethod
     async def resume_execution(cls, execution_id: str) -> Optional[TaskExecution]:
@@ -524,10 +530,7 @@ class TaskManager:
             raise ValueError("this run has no session to go on in; retry it instead")
         execution.retry.blocked_reason = None
         execution.retry.retry_after = None
-        return await TaskStore.requeue_execution(
-            execution, expected_generation=execution.owner_generation,
-            expected_status=TaskStatus.FAILED, keep_session=True,
-        )
+        return await cls._requeue_execution(execution, keep_session=True)
 
     @classmethod
     async def rerun_execution(
@@ -624,9 +627,6 @@ class TaskManager:
             elapsed = max(int((now - started_at).total_seconds()), 0)
             if oldest_running_seconds is None or elapsed > oldest_running_seconds:
                 oldest_running_seconds = elapsed
-            if execution.lease_is_live(now=now):
-                # Someone is still renewing this claim; it is running, not stuck.
-                continue
             if started_at < stale_cutoff:
                 stale_running += 1
         status["stale_running"] = stale_running
@@ -651,8 +651,21 @@ class TaskManager:
 
     @classmethod
     async def get_task_page_notice(cls) -> Optional[Dict[str, Any]]:
-        # Legacy-file import is an explicit offline migration.
-        return None
+        state = cls._read_migration_state()
+        if not state.get("failed") or not cls._legacy_tables_exist():
+            return None
+        count = int(state.get("notice_count") or 0)
+        count += 1
+        state["notice_count"] = count
+        cls._write_migration_state(state)
+        if count >= 3:
+            # Shown enough: stop asking.  The old tables stay where they are;
+            # nothing reads them any more.
+            cls._clear_migration_state()
+        return {
+            "message": "系统更新了任务表的存储，旧表自动迁移失败，请手动重建任务 scheduler",
+            "displayCount": count,
+        }
 
     @classmethod
     def pause_queue(cls) -> None:
@@ -673,16 +686,8 @@ class TaskManager:
     async def _execution_loop(self) -> None:
         import time
 
-        from flocks.db.health import execution_allowed
-
         while self._running:
             try:
-                if not execution_allowed():
-                    # The database is down, a standby, or only just back:
-                    # work started now would fail half-way. Leases already keep
-                    # two nodes off one run; this keeps a node off all of them.
-                    await asyncio.sleep(self._poll_interval)
-                    continue
                 now = time.monotonic()
                 if now - self._last_retry_check >= _RETRY_CHECK_INTERVAL_S:
                     self._last_retry_check = now
@@ -719,24 +724,20 @@ class TaskManager:
 
     async def _run_execution(self, execution: TaskExecution) -> None:
         scheduler = await TaskStore.get_scheduler(execution.scheduler_id)
+        if not scheduler:
+            execution.status = TaskStatus.FAILED
+            execution.error = f"Scheduler {execution.scheduler_id} not found"
+            execution.completed_at = datetime.now(timezone.utc)
+            await TaskStore.update_execution(execution)
+            return
         should_finish_queue_ref = True
         try:
             execution = await asyncio.wait_for(
                 TaskExecutor.dispatch(execution, scheduler),
                 timeout=_DISPATCH_GUARD_TIMEOUT_S,
             )
-        except ExecutionOwnershipError as exc:
-            # Only release our local concurrency slot. The peer owns the work
-            # and its queue reference, including any failure/retry handling.
-            should_finish_queue_ref = False
-            log.info("manager.execution_owned_elsewhere", {"id": execution.id, "reason": str(exc)})
-            return
         except asyncio.CancelledError:
             current = await TaskStore.get_execution(execution.id)
-            if not self._same_dispatch_owner(execution, current):
-                should_finish_queue_ref = False
-                raise
-            generation = execution.owner_generation
             if current is not None:
                 execution = current
             if not execution.is_terminal:
@@ -745,86 +746,53 @@ class TaskManager:
                 outcome = await run_outcome(execution)
                 TaskExecutor.forget_workflow_started(execution.id)
                 if outcome.safe_to_retry:
-                    should_finish_queue_ref = False
-                    try:
-                        execution = await self._requeue_execution(execution, expected_generation=generation)
-                    except ExecutionOwnershipError:
-                        pass
-                    else:
-                        await self._publish_execution_update(execution)
+                    execution = await self._requeue_execution(execution)
+                    should_finish_queue_ref = execution.status != TaskStatus.QUEUED
                 else:
                     # Interrupted (a shutdown) after starting work whose
                     # effects nobody confirmed: not started over by itself.
-                    try:
-                        execution = await self._mark_execution_failed(
-                            execution, self._interrupted_unverified_message(),
-                            expected_generation=generation, hold=outcome,
-                        )
-                    except ExecutionOwnershipError:
-                        should_finish_queue_ref = False
-                    else:
-                        await self._publish_execution_update(execution)
+                    execution = await self._mark_execution_failed(
+                        execution, self._interrupted_unverified_message(), hold=outcome,
+                    )
+                await self._publish_execution_update(execution)
             raise
         except asyncio.TimeoutError:
-            current = await TaskStore.get_execution(execution.id)
-            if not self._same_dispatch_owner(execution, current):
-                should_finish_queue_ref = False
-                return
             await self._cancel_execution_runtime(execution)
             log.error(
                 "manager.execution_timeout",
                 {"id": execution.id, "timeout_s": _DISPATCH_GUARD_TIMEOUT_S},
             )
-            try:
-                execution = await self._mark_execution_failed(
-                    execution,
-                    self._dispatch_timeout_message(),
-                    expected_generation=execution.owner_generation,
-                )
-            except ExecutionOwnershipError:
-                should_finish_queue_ref = False
-                return
+            execution = await self._mark_execution_failed(
+                execution,
+                self._dispatch_timeout_message(),
+            )
         except Exception as exc:
-            current = await TaskStore.get_execution(execution.id)
-            if not self._same_dispatch_owner(execution, current):
-                should_finish_queue_ref = False
-                return
             log.error("manager.execution_error", {"id": execution.id, "error": str(exc)})
-            try:
-                execution = await self._mark_execution_failed(
-                    execution, str(exc), expected_generation=execution.owner_generation,
-                )
-            except ExecutionOwnershipError:
-                should_finish_queue_ref = False
-                return
+            execution = await self._mark_execution_failed(execution, str(exc))
         finally:
             self.queue.mark_finished(execution.id)
             if should_finish_queue_ref:
-                await TaskStore.finish_queue_ref(execution.id, expected_generation=execution.owner_generation)
+                await TaskStore.finish_queue_ref(execution.id)
 
         await self._publish_execution_update(execution)
         if execution.status == TaskStatus.FAILED:
             await self._handle_failure(execution)
 
-    @staticmethod
-    def _same_dispatch_owner(execution: TaskExecution, current: Optional[TaskExecution]) -> bool:
-        # Exiting ExecutionLease releases the owner before cancellation reaches
-        # the manager. Its generation remains and still fences a later claim.
-        return current is not None and (
-            current.owner_generation == execution.owner_generation
-            and current.owner_node_id in (None, execution.owner_node_id)
-        )
-
     async def _handle_failure(self, execution: TaskExecution) -> None:
         from flocks.task.outcome import hold_for_verification, run_outcome
 
+        # The failure as it was written: a retry or a newer failure that lands
+        # while the outcome is worked out wins over this snapshot.
+        version = execution.updated_at
         outcome = await run_outcome(execution)
         TaskExecutor.forget_workflow_started(execution.id)
         if not outcome.safe_to_retry:
             # Running it again could repeat what it already did: a person
             # checks, then resumes it in its session or retries it.
             hold_for_verification(execution, outcome)
-            await TaskStore.update_execution(execution)
+            if not await TaskStore.update_execution_if_unchanged(execution, expected_updated_at=version):
+                log.info("manager.failure_handling_superseded", {"id": execution.id})
+                return
             log.warn("manager.execution_held_for_verification", {
                 "id": execution.id, "effects": list(outcome.effects)[:20],
             })
@@ -836,7 +804,8 @@ class TaskManager:
             execution.retry.retry_after = (
                 datetime.now(timezone.utc) + timedelta(seconds=delay)
             )
-            await TaskStore.update_execution(execution)
+            if not await TaskStore.update_execution_if_unchanged(execution, expected_updated_at=version):
+                log.info("manager.failure_handling_superseded", {"id": execution.id})
         else:
             await self._publish_event(
                 "task.failed",
@@ -849,44 +818,42 @@ class TaskManager:
         retryable = await TaskStore.list_retryable_failed_executions()
         for execution in retryable:
             execution.retry.retry_after = None
-            try:
-                await self._requeue_execution(
-                    execution, expected_generation=execution.owner_generation,
-                    expected_status=TaskStatus.FAILED,
-                )
-            except ExecutionOwnershipError:
-                continue
+            execution.status = TaskStatus.QUEUED
+            execution.queued_at = datetime.now(timezone.utc)
+            execution.started_at = None
+            execution.completed_at = None
+            execution.duration_ms = None
+            execution.session_id = None
+            await self._enqueue_execution(execution, expected_status=TaskStatus.FAILED)
 
     async def _recover_orphaned_executions(self) -> int:
-        """Settle expired work at startup, leaving every live lease alone.
+        """Settle the runs a previous process left running.
 
-        Every ``running`` execution used to be treated as this node's leftover.
-        With two instances on one database that is wrong in the dangerous
-        direction: restarting one node put the other node's in-progress
-        executions back in the queue, and the same task ran twice. Only expiry
-        or an old unclaimed row is evidence that execution was abandoned.
-
-        An abandoned execution is failed, not run again from the start: it may
-        have done part of its work (sent a message, written a record), and
-        whether it did is unknown. Running it again is a decision for its
-        retry policy (the retry queue honours one) or for a person -- the same
-        outcome the periodic recovery reaches for the same evidence.
+        One that may have done part of its work (run a command, sent a
+        message) is failed and held for a person instead of being started
+        again from the beginning (flocks.task.outcome).
         """
-        return await self._recover_stale_active_executions()
+        from flocks.task.outcome import run_outcome
+
+        orphans = await TaskStore.list_executions_by_status(TaskStatus.RUNNING)
+        await TaskStore.requeue_running_refs()
+        for execution in orphans:
+            outcome = await run_outcome(execution)
+            TaskExecutor.forget_workflow_started(execution.id)
+            if outcome.safe_to_retry:
+                await self._requeue_execution(execution)
+                continue
+            execution = await self._mark_execution_failed(
+                execution, self._interrupted_unverified_message(), hold=outcome,
+            )
+            await TaskStore.finish_queue_ref(execution.id)
+        return len(orphans)
 
     async def _recover_orphaned_queued_executions(self) -> int:
         orphans = await TaskStore.list_orphaned_queued_executions()
-        recovered = 0
         for execution in orphans:
-            try:
-                await self._requeue_execution(
-                    execution, expected_generation=execution.owner_generation,
-                    expected_status=TaskStatus.QUEUED,
-                )
-                recovered += 1
-            except ExecutionOwnershipError:
-                continue
-        return recovered
+            await self._requeue_execution(execution)
+        return len(orphans)
 
     async def _cleanup_loop(self) -> None:
         while self._running:
@@ -901,74 +868,37 @@ class TaskManager:
         stale = await TaskStore.list_stale_queued_executions(before=cutoff)
         expired = 0
         for execution in stale:
-            previous_status = execution.status
-            execution.status = TaskStatus.CANCELLED
-            execution.completed_at = datetime.now(timezone.utc)
-            execution.error = (
-                f"任务创建后超过 {_TASK_EXPIRY_HOURS} 小时未能执行，已自动取消。"
-            )
-            try:
-                await TaskStore.update_execution(
-                    execution, expected_generation=execution.owner_generation,
-                    expected_status=previous_status,
-                )
-            except ExecutionOwnershipError:
-                continue
-            await TaskStore.finish_queue_ref(execution.id, expected_generation=execution.owner_generation)
-            expired += 1
+            # Only while it still waits: one claimed since it was read runs on.
+            if await TaskStore.expire_queued_execution(
+                execution.id,
+                completed_at=datetime.now(timezone.utc),
+                error=f"任务创建后超过 {_TASK_EXPIRY_HOURS} 小时未能执行，已自动取消。",
+            ):
+                expired += 1
         return expired
 
     async def _recover_stale_active_executions(self) -> int:
-        """Fail expired executions, leaving every live lease alone.
-
-        Age alone does not mean abandoned once two instances share one database:
-        a long-running execution on the other node looks exactly like a stale
-        one from here. Lease expiry decides, so restarting this node cannot
-        cancel work its peer is still running.
-        """
-        node_id = process_owner_id()
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=_RUNNING_RECOVERY_TIMEOUT_S)
-        stale = await TaskStore.list_reclaimable_executions(
-            node_id=node_id,
-            stale_before=cutoff,
-            # This loop runs next to this node's own live executions; only a
-            # claim nobody renews (or an unclaimed old row) is abandoned.
-            include_own_live=False,
-        )
+        stale = await TaskStore.list_stale_running_executions(before=cutoff)
         recovered = 0
         for execution in stale:
-            claimed = await TaskStore.claim_execution(
-                execution.id, node_id=node_id, lease_seconds=lease_seconds(),
-                expected_generation=execution.owner_generation, allow_own_live=False,
-            )
-            if claimed is None:
-                continue
-            try:
-                from flocks.task.outcome import run_outcome
+            from flocks.task.outcome import run_outcome
 
-                await self._cancel_execution_runtime(claimed, expected_generation=claimed.owner_generation)
-                outcome = await run_outcome(claimed)
-                await self._mark_execution_failed(
-                    claimed, self._stale_execution_message(), expected_generation=claimed.owner_generation,
-                    hold=None if outcome.safe_to_retry else outcome,
-                )
-                self.queue.mark_finished(claimed.id)
-                await TaskStore.finish_queue_ref(claimed.id, expected_generation=claimed.owner_generation)
-                recovered += 1
-            except ExecutionOwnershipError:
-                continue
-            finally:
-                await TaskStore.release_execution_lease(
-                    claimed.id, node_id=node_id, expected_generation=claimed.owner_generation,
-                )
+            await self._cancel_execution_runtime(execution)
+            outcome = await run_outcome(execution)
+            TaskExecutor.forget_workflow_started(execution.id)
+            execution = await self._mark_execution_failed(
+                execution,
+                self._stale_execution_message(),
+                hold=None if outcome.safe_to_retry else outcome,
+            )
+            self.queue.mark_finished(execution.id)
+            await TaskStore.finish_queue_ref(execution.id)
+            recovered += 1
         if recovered:
             log.warn(
                 "manager.stale_active_recovered",
-                {
-                    "count": recovered,
-                    "timeout_s": _RUNNING_RECOVERY_TIMEOUT_S,
-                    "node_id": node_id,
-                },
+                {"count": recovered, "timeout_s": _RUNNING_RECOVERY_TIMEOUT_S},
             )
         return recovered
 
@@ -976,18 +906,96 @@ class TaskManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _migration_state_path() -> Path:
+        return Storage.get_db_path().with_name("task_migration_state.json")
+
     @classmethod
-    async def _enqueue_execution(cls, execution: TaskExecution) -> TaskExecution:
-        return await cls._requeue_execution(execution)
+    def _read_migration_state(cls) -> Dict[str, Any]:
+        path = cls._migration_state_path()
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    @classmethod
+    def _write_migration_state(cls, state: Dict[str, Any]) -> None:
+        path = cls._migration_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, ensure_ascii=True), encoding="utf-8")
+
+    @classmethod
+    def _clear_migration_state(cls) -> None:
+        path = cls._migration_state_path()
+        if path.exists():
+            path.unlink()
+
+    @staticmethod
+    def _with_db_connection() -> sqlite3.Connection:
+        return Storage.connect_sync()
+
+    @staticmethod
+    def _legacy_table_db_paths() -> list[Path]:
+        paths = [Storage.get_db_path(), TaskStore.get_db_path()]
+        unique: list[Path] = []
+        for path in paths:
+            if path not in unique:
+                unique.append(path)
+        return unique
+
+    @classmethod
+    def _legacy_tables_exist(cls) -> bool:
+        for db_path in cls._legacy_table_db_paths():
+            if not db_path.exists():
+                continue
+            with Storage.connect_sync(db_path) as conn:
+                for table_name in ("tasks", "task_execution_records", "task_queue_refs"):
+                    row = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+                        (table_name,),
+                    ).fetchone()
+                    if row is not None:
+                        return True
+        return False
+
+    @classmethod
+    async def _enqueue_execution(
+        cls, execution: TaskExecution, *, expected_status: Optional[TaskStatus] = None,
+    ) -> TaskExecution:
+        return await cls._requeue_execution(execution, expected_status=expected_status)
 
     @classmethod
     async def _requeue_execution(
-        cls, execution: TaskExecution, *, expected_generation: Optional[int] = None,
+        cls,
+        execution: TaskExecution,
+        *,
+        keep_session: bool = False,
         expected_status: Optional[TaskStatus] = None,
     ) -> TaskExecution:
-        return await TaskStore.requeue_execution(
-            execution, expected_generation=expected_generation, expected_status=expected_status,
-        )
+        """Queue *execution* again while the row is still as it was read.
+
+        *expected_status* is the status it was read in when the caller already
+        changed it on the object (the object's ``updated_at`` is still the
+        read one).  One that moved on meanwhile (claimed, cancelled, retried
+        elsewhere, failed again) is returned as it is now, and nothing is written.
+        """
+        expected = execution.status if expected_status is None else expected_status
+        version = execution.updated_at
+        execution.status = TaskStatus.QUEUED
+        execution.queued_at = datetime.now(timezone.utc)
+        execution.started_at = None
+        execution.completed_at = None
+        execution.duration_ms = None
+        if not keep_session:
+            execution.session_id = None
+        execution.result_summary = None
+        execution.error = None
+        if await TaskStore.requeue_execution(execution, expected_status=expected, expected_updated_at=version):
+            return execution
+        log.info("manager.requeue_skipped", {"id": execution.id, "expected": expected.value})
+        return await TaskStore.get_execution(execution.id) or execution
 
     @staticmethod
     def _default_workspace_directory(execution_id: str) -> str:
@@ -1017,21 +1025,14 @@ class TaskManager:
     @staticmethod
     def _stale_execution_message() -> str:
         return (
-            "Task execution was still marked running with no live owner "
-            f"(recovery threshold {_RUNNING_RECOVERY_TIMEOUT_S}s) and was failed "
-            "automatically to unblock scheduled tasks."
+            "Task execution was still marked running past the recovery threshold "
+            f"({_RUNNING_RECOVERY_TIMEOUT_S}s) and was failed automatically "
+            "to unblock scheduled tasks."
         )
 
     @classmethod
-    async def _cancel_execution_runtime(
-        cls, execution: TaskExecution, *, expected_generation: Optional[int] = None,
-    ) -> None:
+    async def _cancel_execution_runtime(cls, execution: TaskExecution) -> None:
         latest = await TaskStore.get_execution(execution.id)
-        if expected_generation is not None and (
-            latest is None or latest.owner_generation != expected_generation
-            or latest.owner_node_id != execution.owner_node_id
-        ):
-            raise ExecutionOwnershipError(f"execution ownership superseded: {execution.id}")
         if latest is not None:
             execution.execution_mode = latest.execution_mode
             execution.session_id = execution.session_id or latest.session_id
@@ -1068,14 +1069,11 @@ class TaskManager:
         execution: TaskExecution,
         error: str,
         *,
-        expected_generation: Optional[int] = None,
         hold: Any = None,
     ) -> TaskExecution:
         """Fail the run; *hold* (a flocks.task.outcome.RunOutcome) keeps it from automatic retries."""
         current = await TaskStore.get_execution(execution.id)
         if current is not None:
-            if expected_generation is not None and current.owner_generation != expected_generation:
-                raise ExecutionOwnershipError(f"execution ownership superseded: {execution.id}")
             execution = current
             if execution.is_terminal:
                 return execution
@@ -1092,7 +1090,10 @@ class TaskManager:
             execution.duration_ms = int(
                 (completed_at - execution.started_at).total_seconds() * 1000
             )
-        return await TaskStore.update_execution(execution, expected_generation=expected_generation)
+        if await TaskStore.update_active_execution(execution):
+            return execution
+        # It ended (or was cancelled) after it was read: that end stands.
+        return await TaskStore.get_execution(execution.id) or execution
 
     @classmethod
     async def _publish_execution_update(cls, execution: TaskExecution) -> None:

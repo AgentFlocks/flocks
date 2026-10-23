@@ -1026,14 +1026,20 @@ async def run_workflow_tool(
                     "updatedAt": int(time.time() * 1000),
                 }
             )
-            if progress_writer is not None:
-                await progress_writer.close_and_drain()
-            await record_execution_result(
-                canonical_workflow_id,
-                tracked_execution["id"],
-                current_data,
-                steps=tracked_steps,
-            )
+            try:
+                if progress_writer is not None:
+                    await progress_writer.close_and_drain()
+                await record_execution_result(
+                    canonical_workflow_id,
+                    tracked_execution["id"],
+                    current_data,
+                    steps=tracked_steps,
+                )
+            except BaseException:
+                # Cancelled (or failed) on the way to recording its end: let it go,
+                # not left live and running.
+                await abandon_execution(str(tracked_execution["id"]))
+                raise
             _emit_metadata(
                 {
                     "title": f"Workflow: {workflow_name}",

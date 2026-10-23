@@ -167,8 +167,7 @@ def test_export_interactive_prompt_keeps_stdout_clean(monkeypatch) -> None:
 def _fake_storage(monkeypatch, existing: dict[str, object] | None = None) -> dict[str, object]:
     stored: dict[str, object] = dict(existing or {})
 
-    async def fake_mutate_many(*, set_entries=(), transaction_hook=None, **kwargs):
-        assert transaction_hook is not None
+    async def fake_mutate_many(*, set_entries=(), **kwargs):
         for key, value, category in set_entries:
             stored[key] = value
 

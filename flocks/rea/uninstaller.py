@@ -66,21 +66,11 @@ class OperationRunning(Exception):
 
 
 async def _sessions_running_elsewhere() -> list[str]:
-    """Conversations another Flocks process runs now: they hold a live execution lease."""
+    """Conversations another Flocks process runs now (only a backend that shares sessions has any)."""
 
-    from flocks.runtime_state.postgres import _like_prefix
-    from flocks.storage.storage import Storage
-    from flocks.task.node import process_owner_id
+    from flocks.coordination import sessions_running_elsewhere
 
-    async with Storage.transaction() as db:
-        rows = await db.fetch_all(
-            "SELECT lease.session_id FROM session_execution_leases lease "
-            "WHERE lease.expires_at > clock_timestamp() AND NOT (lease.owner_id LIKE ? ESCAPE '\\') "
-            "AND EXISTS (SELECT 1 FROM runtime_state document WHERE document.key LIKE 'session:%' "
-            "AND document.value ->> 'id' = lease.session_id) ORDER BY lease.session_id",
-            (_like_prefix(f"{process_owner_id()}:"),),
-        )
-    return [row[0] for row in rows]
+    return await sessions_running_elsewhere()
 
 
 async def _busy_sessions() -> dict[str, bool]:

@@ -12,6 +12,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import aiosqlite
 from pydantic import BaseModel, Field
 
 from flocks.provider.cost_calculator import CostCalculator
@@ -19,7 +20,6 @@ from flocks.provider.provider import Provider
 from flocks.provider.types import PriceConfig, UsageCost, UsageRecord
 from flocks.session.message import Message
 from flocks.session.session import Session
-from flocks.db.params import Params, in_clause
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -35,19 +35,13 @@ _CACHE_REPORTED_SQL = "cache_reported = 1"
 
 # created_at is ISO text. The service writes UTC (+00:00), but rows posted to
 # /api/usage/record before it did may carry any offset Python accepts (under
-# ±24h, past the ±15:59 PostgreSQL's own parsing takes, hence the offset is
-# subtracted here) or none (UTC). Date bounds and the daily grouping
-# therefore use created_at in UTC; a text range widened by the largest offset
-# only narrows the scan, so idx_usage_time stays usable.
+# ±24h, past the ±14:00 SQLite's own date functions take) or none (UTC). Date
+# bounds and the daily grouping therefore use created_at in UTC, through a
+# function registered on the connection; a text range widened by the largest
+# offset only narrows the scan, so idx_usage_time stays usable.
 _MAX_UTC_OFFSET = timedelta(hours=24)
-_CREATED_AT_OFFSET_RE = "[+-][0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]+)?)?$"
-_CREATED_AT_UTC_SQL = (
-    "(CASE WHEN right(created_at, 6) = '+00:00' THEN left(created_at, -6)::timestamp"
-    f" WHEN created_at ~ '{_CREATED_AT_OFFSET_RE}'"
-    f" THEN regexp_replace(created_at, '{_CREATED_AT_OFFSET_RE}', '')::timestamp"
-    f" - substring(created_at from '({_CREATED_AT_OFFSET_RE})')::interval"
-    " ELSE rtrim(created_at, 'Z')::timestamp END)"
-)
+_UTC_FUNCTION = "flocks_usage_utc"
+_CREATED_AT_UTC_SQL = f"{_UTC_FUNCTION}(created_at)"
 
 
 class RecordUsageRequest(BaseModel):
@@ -243,7 +237,7 @@ def usage_record_reports_cache(record: UsageRecord) -> bool:
     return record.cache_reported is True
 
 
-def _usage_record_from_row(row) -> UsageRecord:
+def _usage_record_from_row(row: aiosqlite.Row) -> UsageRecord:
     """Convert a database row into a UsageRecord."""
     created_at = datetime.fromisoformat(row["created_at"])
     backfilled_at = (
@@ -283,63 +277,85 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def _utc_text(value: Optional[str]) -> Optional[str]:
+    """A stored created_at (or a bound) as the UTC text the filters compare: ``YYYY-MM-DD HH:MM:SS.ffffff``."""
+    if value is None:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return _utc(moment).replace(tzinfo=None).isoformat(sep=" ", timespec="microseconds")
+
+
+async def _with_utc_function(db: aiosqlite.Connection) -> aiosqlite.Connection:
+    await db.create_function(_UTC_FUNCTION, 1, _utc_text, deterministic=True)
+    return db
+
+
 def _created_at_text_bound(value: datetime) -> str:
     """*value* as the ISO text (to the second, no offset) a created_at range compares with."""
     return value.replace(tzinfo=None).isoformat(timespec="seconds")
 
 
 def _build_filters(
-    dialect,
     *,
     start_date: Optional[str],
     end_date: Optional[str],
     provider_id: Optional[str],
     model_id: Optional[str],
     session_ids: Optional[Sequence[str]],
-) -> tuple[str, tuple]:
+) -> tuple[str, List[str]]:
     """Build SQL filters for usage queries.
 
-    Markers come from Params rather than a literal ``?`` so the clause is
-    correct on a backend that numbers its parameters. Date bounds are ISO
-    strings; one without an offset is UTC.
+    Date bounds are ISO strings; one without an offset is UTC. The connection
+    the clause runs on needs ``_with_utc_function``.
     """
-    params = Params(dialect)
     clauses: List[str] = []
+    params: List[str] = []
 
     if start_date:
         start = _utc(datetime.fromisoformat(start_date))
         try:
-            clauses.append(f"created_at >= {params.add(_created_at_text_bound(start - _MAX_UTC_OFFSET))}")
+            floor = start - _MAX_UTC_OFFSET
+            clauses.append("created_at >= ?")
+            params.append(_created_at_text_bound(floor))
         except OverflowError:
             pass
-        clauses.append(
-            f"{_CREATED_AT_UTC_SQL} >= {params.add(start.replace(tzinfo=None).isoformat())}::text::timestamp"
-        )
+        clauses.append(f"{_CREATED_AT_UTC_SQL} >= ?")
+        params.append(_utc_text(start.isoformat()))
     if end_date:
         end = _utc(datetime.fromisoformat(end_date))
         try:
             # Whole seconds: a stored value equal to the bound up to the
             # seconds sorts after it whatever fraction or offset follows.
             ceiling = end.replace(microsecond=0) + _MAX_UTC_OFFSET + timedelta(seconds=1)
-            clauses.append(f"created_at < {params.add(_created_at_text_bound(ceiling))}")
+            clauses.append("created_at < ?")
+            params.append(_created_at_text_bound(ceiling))
         except OverflowError:
             pass
-        clauses.append(
-            f"{_CREATED_AT_UTC_SQL} <= {params.add(end.replace(tzinfo=None).isoformat())}::text::timestamp"
-        )
+        clauses.append(f"{_CREATED_AT_UTC_SQL} <= ?")
+        params.append(_utc_text(end.isoformat()))
     if provider_id:
-        clauses.append(f"provider_id = {params.add(provider_id)}")
+        clauses.append("provider_id = ?")
+        params.append(provider_id)
     if model_id:
-        clauses.append(f"model_id = {params.add(model_id)}")
+        clauses.append("model_id = ?")
+        params.append(model_id)
     if session_ids is not None:
-        clauses.append(in_clause(params, "session_id", session_ids))
+        if not session_ids:
+            clauses.append("1 = 0")
+        else:
+            placeholders = ", ".join("?" for _ in session_ids)
+            clauses.append(f"session_id IN ({placeholders})")
+            params.extend(session_ids)
 
     where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    return where_sql, params.values
+    return where_sql, params
 
 
 async def _get_existing_usage_record(
-    handle,
+    db: aiosqlite.Connection,
     *,
     session_id: Optional[str],
     message_id: Optional[str],
@@ -347,41 +363,41 @@ async def _get_existing_usage_record(
     """Look up an existing usage record for an assistant message."""
     if not session_id or not message_id:
         return None
-    mark = handle.dialect.placeholder
-    row = await handle.fetch_one_mapping(
-        f"""SELECT id, provider_id, model_id, credential_id, session_id, message_id,
+    async with db.execute(
+        """SELECT id, provider_id, model_id, credential_id, session_id, message_id,
                   input_tokens, output_tokens, cached_tokens, cache_write_tokens, cache_reported,
                   reasoning_tokens, total_tokens, input_cost, output_cost, total_cost, currency,
                   latency_ms, source, response_id, created_at, backfilled_at
            FROM usage_records
-           WHERE session_id = {mark(1)} AND message_id = {mark(2)}
+           WHERE session_id = ? AND message_id = ?
            LIMIT 1""",
         (session_id, message_id),
-    )
+    ) as cursor:
+        row = await cursor.fetchone()
     return _usage_record_from_row(row) if row else None
 
 
 async def usage_record_exists(*, session_id: str, message_id: str) -> bool:
     """Check whether a usage row already exists for a message."""
-    async with Storage.transaction(Storage._db_path) as handle:
-        mark = handle.dialect.placeholder
-        row = await handle.fetch_one(
-            f"SELECT 1 FROM usage_records WHERE session_id = {mark(1)} "
-            f"AND message_id = {mark(2)} LIMIT 1",
+    await Storage._ensure_init()
+    async with Storage.connect(Storage._db_path) as db:
+        async with db.execute(
+            "SELECT 1 FROM usage_records WHERE session_id = ? AND message_id = ? LIMIT 1",
             (session_id, message_id),
-        )
+        ) as cursor:
+            row = await cursor.fetchone()
     return row is not None
 
 
 async def _get_recorded_message_ids(session_id: str) -> set[str]:
     """Return all assistant message ids already present in usage_records."""
-    async with Storage.transaction(Storage._db_path) as handle:
-        mark = handle.dialect.placeholder
-        rows = await handle.fetch_all(
-            f"SELECT message_id FROM usage_records WHERE session_id = {mark(1)} "
-            "AND message_id IS NOT NULL",
+    await Storage._ensure_init()
+    async with Storage.connect(Storage._db_path) as db:
+        async with db.execute(
+            "SELECT message_id FROM usage_records WHERE session_id = ? AND message_id IS NOT NULL",
             (session_id,),
-        )
+        ) as cursor:
+            rows = await cursor.fetchall()
     return {row[0] for row in rows if row[0]}
 
 
@@ -431,10 +447,10 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
         total_cost = 0.0
         currency = "USD"
 
-    async with Storage.transaction(Storage._db_path) as handle:
-        mark = handle.dialect.placeholder
+    async with Storage.connect(Storage._db_path) as db:
+        db.row_factory = aiosqlite.Row
         existing = await _get_existing_usage_record(
-            handle,
+            db,
             session_id=req.session_id,
             message_id=req.message_id,
         )
@@ -442,14 +458,13 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
             return existing
 
         record_id = str(uuid.uuid4())
-        markers = ", ".join(mark(position) for position in range(1, 23))
-        await handle.execute(
-            f"""INSERT INTO usage_records
+        await db.execute(
+            """INSERT INTO usage_records
                (id, provider_id, model_id, credential_id, session_id, message_id,
                 input_tokens, output_tokens, cached_tokens, cache_write_tokens, cache_reported,
                 reasoning_tokens, total_tokens, input_cost, output_cost, total_cost, currency,
                 latency_ms, source, response_id, created_at, backfilled_at)
-               VALUES ({markers})""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record_id,
                 req.provider_id,
@@ -475,7 +490,7 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
                 req.backfilled_at.isoformat() if req.backfilled_at else None,
             ),
         )
-        # Storage.transaction commits when the block exits.
+        await db.commit()
 
     return UsageRecord(
         id=record_id,
@@ -513,16 +528,18 @@ async def get_usage_records(
 ) -> List[UsageRecord]:
     """Return raw usage rows for callers that need custom aggregation."""
     await ensure_usage_backfilled()
-    async with Storage.transaction(Storage._db_path) as handle:
-        where_sql, params = _build_filters(
-            handle.dialect,
-            start_date=start_date,
-            end_date=end_date,
-            provider_id=provider_id,
-            model_id=model_id,
-            session_ids=session_ids,
-        )
-        rows = await handle.fetch_all_mappings(
+    await Storage._ensure_init()
+    where_sql, params = _build_filters(
+        start_date=start_date,
+        end_date=end_date,
+        provider_id=provider_id,
+        model_id=model_id,
+        session_ids=session_ids,
+    )
+    async with Storage.connect(Storage._db_path) as db:
+        db.row_factory = aiosqlite.Row
+        await _with_utc_function(db)
+        async with db.execute(
             f"""SELECT id, provider_id, model_id, credential_id, session_id, message_id,
                        input_tokens, output_tokens, cached_tokens, cache_write_tokens, cache_reported,
                        reasoning_tokens, total_tokens, input_cost, output_cost, total_cost, currency,
@@ -530,7 +547,8 @@ async def get_usage_records(
                 FROM usage_records{where_sql}
                 ORDER BY created_at ASC""",
             params,
-        )
+        ) as cursor:
+            rows = await cursor.fetchall()
     return [_usage_record_from_row(row) for row in rows]
 
 
@@ -544,17 +562,20 @@ async def get_usage_stats(
 ) -> UsageStatsResponse:
     """Query aggregated usage stats from SQLite."""
     await ensure_usage_backfilled()
-    async with Storage.transaction(Storage._db_path) as handle:
-        where_sql, params = _build_filters(
-            handle.dialect,
-            start_date=start_date,
-            end_date=end_date,
-            provider_id=provider_id,
-            model_id=model_id,
-            session_ids=session_ids,
-        )
+    await Storage._ensure_init()
+    where_sql, params = _build_filters(
+        start_date=start_date,
+        end_date=end_date,
+        provider_id=provider_id,
+        model_id=model_id,
+        session_ids=session_ids,
+    )
 
-        totals_row = await handle.fetch_one_mapping(
+    async with Storage.connect(Storage._db_path) as db:
+        db.row_factory = aiosqlite.Row
+        await _with_utc_function(db)
+
+        async with db.execute(
             f"""SELECT
                     COALESCE(SUM(total_tokens), 0) AS total_tokens,
                     COALESCE(SUM(input_tokens), 0) AS total_input,
@@ -570,15 +591,17 @@ async def get_usage_stats(
                         AS cache_reported_input
                 FROM usage_records{where_sql}""",
             params,
-        )
+        ) as cursor:
+            totals_row = await cursor.fetchone()
 
-        summary_cost_rows = await handle.fetch_all_mappings(
+        async with db.execute(
             f"""SELECT currency, COALESCE(SUM(total_cost), 0) AS total_cost
                 FROM usage_records{where_sql}
                 GROUP BY currency
                 ORDER BY currency ASC""",
             params,
-        )
+        ) as cursor:
+            summary_cost_rows = await cursor.fetchall()
 
         summary_total_cost, summary_currency, summary_cost_by_currency = _currency_rollup(
             [(row["currency"], row["total_cost"]) for row in summary_cost_rows]
@@ -598,7 +621,7 @@ async def get_usage_stats(
             cache_reported_input_tokens=totals_row["cache_reported_input"],
         )
 
-        provider_rows = await handle.fetch_all_mappings(
+        async with db.execute(
             f"""SELECT provider_id, currency,
                        COALESCE(SUM(total_tokens), 0) AS total_tokens,
                        COALESCE(SUM(total_cost), 0) AS total_cost,
@@ -607,7 +630,8 @@ async def get_usage_stats(
                 GROUP BY provider_id, currency
                 ORDER BY provider_id ASC, currency ASC""",
             params,
-        )
+        ) as cursor:
+            provider_rows = await cursor.fetchall()
 
         provider_agg: Dict[str, Dict[str, object]] = {}
         for row in provider_rows:
@@ -638,7 +662,7 @@ async def get_usage_stats(
                 )
             )
 
-        model_rows = await handle.fetch_all_mappings(
+        async with db.execute(
             f"""SELECT provider_id, model_id, currency,
                        COALESCE(SUM(total_tokens), 0) AS total_tokens,
                        COALESCE(SUM(total_cost), 0) AS total_cost,
@@ -647,7 +671,8 @@ async def get_usage_stats(
                 GROUP BY provider_id, model_id, currency
                 ORDER BY provider_id ASC, model_id ASC, currency ASC""",
             params,
-        )
+        ) as cursor:
+            model_rows = await cursor.fetchall()
 
         model_agg: Dict[tuple[str, str], Dict[str, object]] = {}
         for row in model_rows:
@@ -681,17 +706,18 @@ async def get_usage_stats(
                 )
             )
 
-        daily_rows = await handle.fetch_all_mappings(
-            f"""SELECT {handle.dialect.date_of(_CREATED_AT_UTC_SQL)} AS date, currency,
+        async with db.execute(
+            f"""SELECT substr({_CREATED_AT_UTC_SQL}, 1, 10) AS date, currency,
                        COALESCE(SUM(total_tokens), 0) AS total_tokens,
                        COALESCE(SUM(total_cost), 0) AS total_cost,
                        COUNT(*) AS request_count
                 FROM usage_records{where_sql}
-                GROUP BY {handle.dialect.date_of(_CREATED_AT_UTC_SQL)}, currency
+                GROUP BY substr({_CREATED_AT_UTC_SQL}, 1, 10), currency
                 ORDER BY date DESC, currency ASC
                 LIMIT 180""",
             params,
-        )
+        ) as cursor:
+            daily_rows = await cursor.fetchall()
 
         daily_agg: Dict[str, Dict[str, object]] = {}
         for row in daily_rows:
@@ -714,7 +740,7 @@ async def get_usage_stats(
             total_cost, currency, cost_by_currency = _currency_rollup(aggregate["cost_rows"])
             daily.append(
                 DailyUsageSummary(
-                    date=date_key.isoformat() if hasattr(date_key, "isoformat") else str(date_key),
+                    date=date_key,
                     total_tokens=aggregate["total_tokens"],
                     total_cost=total_cost,
                     request_count=aggregate["request_count"],
