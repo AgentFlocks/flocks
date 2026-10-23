@@ -1090,7 +1090,7 @@ export default function EventList({
           <label
             className={`inline-flex items-center gap-2 ${!group ? "opacity-40" : ""}`}
           >
-            聚合窗口
+            相邻事件间隔
             <select
               aria-label="关联时间窗口"
               value={windowHours}

@@ -131,7 +131,7 @@ def _extract_iocs(event, investigation, tz):
         warnings.append('列表仅采用此事件前 50 条明确 IOC；未读取部分不参与关联。')
     from .investigation import fingerprint
     if not same_evidence_version(canonical, event):
-        return {}, ['最新事件版本与已保存取证版本不同，未用旧证据自动合并。']
+        return {}, ['最新事件版本与已保存取证版本不同，未展示旧版本 IOC。']
     for proof in proofs[:50] if compact else proofs[:24]:
         if (not isinstance(proof, dict) or proof.get('success') not in (True, 1)
                 or proof.get('event') != event.get('id') or proof.get('device') != event.get('device')
@@ -307,25 +307,31 @@ def _sort_items(items, field, order):
 
 
 def group_events(members, window_hours=24, enabled=True):
-    """Same device and named event type; whole-group span prevents bridges.
+    """Connect nearby source intervals for the same XDR, host IP and event.
 
-    Hosts and outcomes may differ. This groups rows, not incident identities,
-    notifications, evidence, or permissions. Missing times remain independent.
+    The window limits each gap, not the group's total duration. Outcomes may
+    differ; identities, evidence, notifications and permissions stay separate.
     """
     groups = []
+    latest = {}
     for member, iocs, first, last in sorted(members, key=lambda item: (item[2] or datetime.min.replace(tzinfo=timezone.utc), item[0]['key'])):
         event_type = _event_type(member['name'])
+        try:
+            host_ip = str(ipaddress.ip_address(_host(member.get('host'))))
+        except ValueError:
+            host_ip = ''
+        bucket = member['device'], host_ip, event_type
         chosen = None
-        valid = bool(member.get('identity_valid', True) and member['device'] and event_type and member['name'] != '名称未提供' and first and last
-                     and (last-first).total_seconds() <= window_hours * 3600)
+        valid = bool(member.get('identity_valid', True) and member['device'] and host_ip and event_type
+                     and member['name'] != '名称未提供' and first and last and first <= last)
         if enabled and valid:
-            for group in groups:
-                if (group['device'] == member['device'] and group['_type'] == event_type and group['_first']
-                        and (max(last, group['_last']) - min(first, group['_first'])).total_seconds() <= window_hours * 3600):
-                    chosen = group
-                    break
+            previous = latest.get(bucket)
+            # Sorted starts and the running latest end retain overlapping or
+            # long-lived intervals as bridges, independent of input order.
+            if previous and (first - previous['_last']).total_seconds() <= window_hours * 3600:
+                chosen = previous
         if chosen is None:
-            chosen = {'device': member['device'], '_type': event_type, '_first': first, '_last': last,
+            chosen = {'_first': first, '_last': last,
                       '_common': set(iocs), 'members': []}
             groups.append(chosen)
         else:
@@ -333,6 +339,8 @@ def group_events(members, window_hours=24, enabled=True):
             chosen['_last'] = max(chosen['_last'], last)
             chosen['_common'] &= iocs.keys()
         chosen['members'].append(member)
+        if enabled and valid:
+            latest[bucket] = chosen
     output = []
     for group in groups:
         members = _sort_items(group['members'], 'first_seen_at', 'desc')
@@ -358,8 +366,9 @@ def group_events(members, window_hours=24, enabled=True):
             'is_backlog': any(m['carried_over'] for m in members),
             'mail': {field: sum(bool(m['mail'][field]) for m in members) for field in ('sent', 'replied', 'failed')},
             'ioc_matches': [{'type': kind, 'value': value} for kind, value in sorted(group['_common'])] if len(members) > 1 else [],
-            'merge_reason': (f'同一 XDR、同类安全事件，整组发生时间跨度不超过 {window_hours} 小时；可涉及不同主机。仅合并展示，各子事件独立研判和处置。'
-                             if len(members) > 1 else '当前未找到同一设备、同类事件且在聚合时间范围内的其他事件；缺少发生时间的事件保持独立。'),
+            'merge_reason': (f'同一 XDR、同一主机 IP、相同事件，相邻发生时间间隔不超过 {window_hours} 小时，连续合并；整组跨度可超过该间隔。各子事件独立研判和处置。'
+                             if len(members) > 1 else '未找到同一 XDR、同一主机 IP、相同事件且时间相邻的其他事件；缺少有效主机 IP 或发生时间的事件保持独立。'
+                             if enabled else '已关闭关联聚合，当前按原事件独立展示。'),
             'members': members})
     return _sort_items(output, 'first_seen_at', 'desc')
 

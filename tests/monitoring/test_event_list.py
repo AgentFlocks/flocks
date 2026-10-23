@@ -1,5 +1,5 @@
 """Event follow-up is a scoped read projection, never a disposition workflow."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -99,7 +99,7 @@ async def test_same_device_same_type_groups_and_keeps_members():
 
 @pytest.mark.parametrize('changed', [
     {'device': 'b'}, {'name': '另一类安全事件'}, {'name': ''}, {'startTime': None, 'endTime': None},
-    {'startTime': 0, 'endTime': 0},
+    {'startTime': 0, 'endTime': 0}, {'host': '192.0.2.11'}, {'host': ''}, {'host': 'host.example'},
 ])
 async def test_missing_identity_time_or_different_device_never_merges(changed):
     await install()
@@ -111,16 +111,68 @@ async def test_missing_identity_time_or_different_device_never_merges(changed):
     assert (await listing())['total'] == 2
 
 
-async def test_whole_group_time_span_prevents_bridges_without_requiring_common_ioc():
+async def test_adjacent_source_times_chain_without_requiring_common_ioc():
     await install()
     for identifier, hour, iocs in [('one', 0, ['x.example']), ('two', 2, ['x.example', 'y.example']), ('three', 4, ['y.example'])]:
         event = incident(identifier, hour=hour)
         await observe(event)
         await investigate(event, values=iocs)
     result = await listing(window_hours=3)
-    assert sorted(item['member_count'] for item in result['items']) == [1, 2]
+    assert [item['member_count'] for item in result['items']] == [3]
+    assert result['items'][0]['ioc_matches'] == []
     result = await listing(window_hours=6)
-    assert sorted(item['member_count'] for item in result['items']) == [3]
+    assert [item['member_count'] for item in result['items']] == [3]
+
+
+async def test_chain_includes_exact_24_hour_gaps_but_stops_after_the_window():
+    await install()
+    start = incident()['startTime']
+    for identifier, seconds in [('a', 0), ('b', 86400), ('c', 172800), ('d', 259201)]:
+        await observe(incident(identifier, startTime=start+seconds, endTime=start+seconds))
+    result = await listing()
+    assert result['metrics']['events'] == 4 and result['metrics']['groups'] == 1 and result['total'] == 2
+    chain = next(item for item in result['items'] if item['grouped'])
+    assert chain['event_keys'] == ['a:incident:a', 'a:incident:b', 'a:incident:c']
+    assert chain['host_count'] == 1
+    assert datetime.fromisoformat(chain['last_event_at']) - datetime.fromisoformat(chain['first_event_at']) == timedelta(hours=48)
+    assert '相邻发生时间间隔不超过 24 小时' in chain['merge_reason']
+    assert (await listing(group=False))['total'] == 4
+
+
+async def test_long_source_interval_and_overlaps_keep_the_latest_end_as_a_bridge():
+    await install()
+    start = incident()['startTime']
+    # The short middle interval must not replace the long event's latest end.
+    for identifier, first, last in [('a', 0, 96), ('b', 10, 10), ('c', 120, 120)]:
+        await observe(incident(identifier, startTime=start+first*3600, endTime=start+last*3600))
+    result = await listing()
+    assert [item['member_count'] for item in result['items']] == [3]
+    assert result['items'][0]['ioc_matches'] == []
+
+
+@pytest.mark.parametrize('host', ['', 'host.example', '192.0.2.0/24'])
+async def test_identical_missing_or_non_ip_hosts_do_not_create_a_group(host):
+    await install()
+    for identifier in ('a', 'b'):
+        await observe(incident(identifier, host=host))
+    assert (await listing())['total'] == 2
+
+
+async def test_other_host_cannot_bridge_a_gap_and_input_order_does_not_change_groups():
+    await install()
+    start = incident()['startTime']
+    for identifier, hour, host in [('c', 48, '192.0.2.10'), ('b', 24, '192.0.2.11'), ('a', 0, '192.0.2.10')]:
+        await observe(incident(identifier, host=host, startTime=start+hour*3600, endTime=start+hour*3600))
+    assert (await listing())['total'] == 3
+    await observe(incident('bridge', startTime=start+86400, endTime=start+86400))
+    result = await listing()
+    chain = next(item for item in result['items'] if item['grouped'])
+    tuples = [(member, {}, datetime.fromisoformat(member['event_at']), datetime.fromisoformat(member['event_end_at']))
+              for member in chain['members']]
+    forward = event_list.group_events(tuples)
+    backward = event_list.group_events(list(reversed(tuples)))
+    assert forward == backward
+    assert forward[0]['id'] == chain['id'] and forward[0]['member_count'] == 3
 
 
 async def test_repeat_observations_deduplicate_and_latest_disposition_updates_old_day():
@@ -400,9 +452,10 @@ async def test_ip_and_host_normalization_are_exact_and_do_not_expand_subnets():
             'facts': {'data': {'item': [{'ip': ip, 'threatLevel': 3}]}}}
         await investigate(event, evidence=[proof])
     result = await listing()
-    assert sorted(item['member_count'] for item in result['items']) == [3]
-    assert result['items'][0]['host_count'] == 2
-    assert result['items'][0]['ioc_matches'] == [{'type': 'ip', 'value': '2001:db8::9'}]
+    assert sorted(item['member_count'] for item in result['items']) == [1, 2]
+    grouped = next(item for item in result['items'] if item['grouped'])
+    assert grouped['host_count'] == 1 and grouped['host'] == '2001:db8::1'
+    assert grouped['ioc_matches'] == [{'type': 'ip', 'value': '2001:db8::9'}]
 
 
 async def test_large_packets_not_read_in_list_projection_and_ioc_cap_is_explicit():
@@ -417,17 +470,18 @@ async def test_large_packets_not_read_in_list_projection_and_ioc_cap_is_explicit
     assert 'PRIVATE_PACKET' not in encode(result)
 
 
-async def test_same_type_across_hosts_and_unjudged_events_are_visible_without_iocs():
+async def test_unjudged_events_group_without_iocs_only_on_the_same_host_and_xdr():
     await install()
     for event in [incident('one', host='192.0.2.11', risk='benign'),
                   incident('two', host='192.0.2.12', risk='unknown'),
-                  incident('three', device='b', host='192.0.2.13', risk='ignored')]:
+                  incident('three', device='b', host='192.0.2.13', risk='ignored'),
+                  incident('four', host='192.0.2.11', risk='unknown')]:
         await observe(event)
     result = await listing()
-    assert result['metrics']['events'] == 3
-    assert sorted(item['member_count'] for item in result['items']) == [1, 2]
+    assert result['metrics']['events'] == 4
+    assert sorted(item['member_count'] for item in result['items']) == [1, 1, 2]
     grouped = next(item for item in result['items'] if item['grouped'])
-    assert grouped['host_count'] == 2
+    assert grouped['host_count'] == 1 and grouped['host'] == '192.0.2.11'
     assert grouped['assessment_counts']['insufficient'] == 2
     assert await rows('SELECT * FROM monitor_dispositions') == []
 
@@ -466,13 +520,13 @@ async def test_mixed_assessments_remain_separate_in_group_and_filters_match_orig
         assert detailed['overview']['conclusion'] and detailed['story']['key_evidence']
 
 
-async def test_type_group_does_not_chain_across_more_than_24_hours():
+async def test_type_group_chains_across_more_than_24_hours():
     await install()
     start = incident('one')['startTime']
     for identifier, hours in [('one', 0), ('two', 20), ('three', 40)]:
         await observe(incident(identifier, startTime=start+hours*3600, endTime=start+hours*3600))
     result = await event_list.list_events('owner', COMPONENT_ID, start_date=DAY, end_date='2026-10-14')
-    assert sorted(item['member_count'] for item in result['items']) == [1, 2]
+    assert [item['member_count'] for item in result['items']] == [3]
 
 
 async def test_compact_assessment_does_not_return_large_packet_data():

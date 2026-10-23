@@ -74,7 +74,7 @@ const row = (overrides: Partial<EventListRow> = {}): EventListRow => ({
   handling: "open",
   mail: { sent: 2, replied: 1, failed: 0 },
   ioc_matches: [{ type: "domain", value: "suspicious.example" }],
-  merge_reason: "同设备、同主机、12 小时内命中相同域名",
+  merge_reason: "同一 XDR、同一主机 IP、相同事件，相邻间隔不超过 24 小时，连续合并。",
   members: [
     member(),
     member({
@@ -462,6 +462,7 @@ it("defaults to this week and 24-hour aggregation with ten rows and the latest e
 it("supports device and assessment filters, disables correlation window when grouping is off and guards reversed dates", async () => {
   renderPage();
   await screen.findByText("同类事件聚合");
+  expect(screen.getByText("相邻事件间隔")).toBeInTheDocument();
   fireEvent.change(screen.getByRole("combobox", { name: "设备筛选" }), {
     target: { value: "device-b" },
   });
