@@ -26,6 +26,8 @@ export default defineConfig({
     dedupe: ['react', 'react-dom'],
     alias: {
       '@': path.resolve(__dirname, './src'),
+      // Same shim the page builder aliases in (reads the runtime the test installs on globalThis).
+      '@flocks/webui-contract-sdk': path.resolve(__dirname, '../flocks/contracts/webui/shims/sdk.js'),
     },
   },
 });
