@@ -325,3 +325,55 @@ async def test_resolve_model_limits_falls_back_when_models_dev_unavailable(monke
     assert resolved.context_window == custom_provider.FALLBACK_CONTEXT_WINDOW
     assert resolved.max_output_tokens == custom_provider.FALLBACK_MAX_OUTPUT_TOKENS
     assert resolved.source == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_edit_model_preserves_provider_metadata_and_updates_submitted_fields(tmp_path, monkeypatch):
+    import json
+
+    from flocks.config.config_writer import ConfigWriter
+
+    model_id = "vendor/reasoning-model"
+    original = {
+        "name": "Original Name",
+        "created_at": "2026-01-02T03:04:05+00:00",
+        "context_window": 64000,
+        "max_output_tokens": 8192,
+        "supports_tools": True,
+        "interleaved": {"field": "reasoning_content", "echo": "tool_calls"},
+        "thinking_level_map": {"high": "enabled"},
+        "max_input_tokens": 56000,
+        "provider_metadata": {"deployment": "private", "routing": ["region-a"]},
+    }
+    config_path = tmp_path / "flocks.json"
+    config_path.write_text(json.dumps({
+        "provider": {"custom-edit": {"models": {model_id: original}}},
+    }), encoding="utf-8")
+    monkeypatch.setattr(ConfigWriter, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(Provider, "_initialized", True)
+    monkeypatch.setattr(Provider, "_providers", {})
+    monkeypatch.setattr(Provider, "_models", {})
+
+    await custom_provider.create_model(
+        "custom-edit",
+        CreateModelReq(
+            model_id=model_id,
+            name="Renamed Model",
+            context_window=96000,
+            max_output_tokens=4096,
+            supports_tools=False,
+            input_price=2.5,
+            currency="CNY",
+        ),
+        _admin=object(),
+    )
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))["provider"]["custom-edit"]["models"][model_id]
+    for field in ("interleaved", "thinking_level_map", "max_input_tokens", "provider_metadata", "created_at"):
+        assert saved[field] == original[field]
+    assert saved["name"] == "Renamed Model"
+    assert saved["context_window"] == 96000
+    assert saved["max_output_tokens"] == 4096
+    assert saved["supports_tools"] is False
+    assert saved["input_price"] == 2.5
+    assert saved["currency"] == "CNY"

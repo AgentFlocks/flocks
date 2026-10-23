@@ -115,6 +115,7 @@ class CreateProviderReq(BaseModel):
     base_url: str = Field(..., min_length=1)
     api_key: Optional[str] = Field(None)
     description: Optional[str] = Field(None)
+    skip_catalog_bootstrap: bool = False
 
 
 class ProviderResp(BaseModel):
@@ -203,6 +204,8 @@ async def create_provider(body: CreateProviderReq, _admin: object = Depends(requ
     config_dict["created_at"] = now
 
     # Write to flocks.json
+    if body.skip_catalog_bootstrap:
+        config_dict["model_sync"] = "manual"
     ConfigWriter.add_provider(pid, config_dict)
 
     # Save API key to .secret.json using the LLM provider convention (_llm_key)
@@ -309,6 +312,9 @@ async def create_model(provider_id: str, body: CreateModelReq, _admin: object = 
 
     now = datetime.now(UTC).isoformat()
     model_config = {
+        # Editing the common form fields must retain provider-specific metadata
+        # which this form cannot represent (reasoning replay, input limits, etc.).
+        **(existing_model or {}),
         "name": body.name,
         "context_window": limits.context_window,
         "max_output_tokens": limits.max_output_tokens,
@@ -359,17 +365,14 @@ async def create_model(provider_id: str, body: CreateModelReq, _admin: object = 
 @serialized_config_mutation
 async def delete_model(provider_id: str, model_id: str, _admin: object = Depends(require_admin)):
     """Remove a model from a provider in flocks.json."""
-    removed = ConfigWriter.remove_model(provider_id, model_id)
+    from flocks.server.routes.model import _delete_model_inventory
+
+    removed = await _delete_model_inventory(provider_id, model_id)
     if not removed:
         raw = ConfigWriter.get_provider_raw(provider_id)
         if raw is None:
             raise HTTPException(404, f"Provider '{provider_id}' not found")
         raise HTTPException(404, f"Model '{model_id}' not found for provider '{provider_id}'")
-
-    # Remove from runtime
-    Provider.remove_model_from_runtime(provider_id, model_id)
-
-    ConfigWriter.clear_default_models_for_model(provider_id, model_id)
 
     log.info("custom_model.deleted", {"unique": f"{provider_id}/{model_id}"})
 
