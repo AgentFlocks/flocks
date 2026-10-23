@@ -276,9 +276,8 @@ class MemoryManager:
     def _resolve_embedding_provider(self) -> Optional[str]:
         """Resolve the requested embedding Provider from configured credentials.
 
-        ``local`` (the default) only takes a provider whose endpoint is on this
-        host or a private network; an external service is used only when asked
-        for by name or with ``auto``.
+        ``auto`` (the default) tries openai, then google; ``local`` only takes a
+        provider whose endpoint is on this host or a private network.
         """
         if not self._embedding_enabled:
             return None

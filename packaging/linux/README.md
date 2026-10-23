@@ -2,7 +2,7 @@
 
 给装机时不能联网的 RHEL 8 / 9 系机器（glibc ≥ 2.28）用的单文件安装包，在 RHEL 8.10（UBI 8.10）容器里构建。客户只需要 `scp` 上去、`sudo bash /var/tmp/flocks-offline.run`，装完浏览器开 `http://服务器IP:5173`。包里带齐 Python 3.12、Node.js、uv、预建好的 `.venv`、构建好的 WebUI，安装过程不需要 PyPI、npm、GitHub。想整体放到数据盘上，就用 `sudo FLOCKS_OFFLINE_BASE=/data bash /var/tmp/flocks-offline.run`，程序、数据、配置、日志全进 `/data/flocks`，见[装到指定目录](#装到指定目录flocks_offline_base)。变量要写在 `sudo` 后面：写成 `FLOCKS_OFFLINE_BASE=/data sudo bash …` 会被 sudo 的 `env_reset` 清掉，照样装到 `/opt/flocks`。
 
-包里只有开源版，不打包任何扩展组件。装好以后升级和普通源码安装一样走网络（页面上「检查更新」），也可以拿新版 `.run` 覆盖；`flocks.env` 里写的是 `FLOCKS_DEPLOY_MODE=source`，没有离线开关。2026-10-15 之前的包可以用 `--flockspro-wheel` 带上 Pro bundle 做整机离线，这一套已经去掉：构建脚本再收到这几个参数直接报错，老包装的机器重跑新包时，安装脚本会把它们写进 env 的离线开关删掉，装过 Pro 的机器则拒绝覆盖（见下文）。
+包里只有开源版，不打包任何扩展组件。装好以后升级和普通源码安装一样走网络（页面上「检查更新」），也可以拿新版 `.run` 覆盖；`flocks.env` 里写的是 `FLOCKS_DEPLOY_MODE=source`，没有离线开关。老包装的机器重跑新包时，安装脚本会把老包写进 env 的离线开关删掉；装过本包以外组件的机器拒绝覆盖（见下文）。
 
 这套东西和 `install.sh` / Docker / Windows 包互不影响：装到机器上的形态还是"仓库根 + `.venv` + `webui/dist`"，只是放在 `/opt/flocks/flocks`、以 `flocks` 用户跑、由 `/etc/flocks/flocks.env` 提供环境变量。
 
@@ -60,8 +60,6 @@ docker run --rm -it -v "$PWD":/src -v ~/.cache/flocks-offline-build:/root/.cache
     dnf -y install tar gzip findutils which git python3 diffutils procps-ng iproute &&
     cd /src && bash packaging/linux/build-offline-run.sh --output-dir /root/.cache/flocks-offline-build/out'
 ```
-
-以前的 `--flockspro-wheel`、`--pro-release-id`、`--pro-bundle-version`、`--pro-build-id` 已经去掉，传了直接报错退出。
 
 国内构建机可以走镜像：`FLOCKS_NODE_BASE_URL=https://registry.npmmirror.com/-/binary/node`、`FLOCKS_NPM_REGISTRY=https://registry.npmmirror.com/`、`FLOCKS_UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple`。下载的工具链缓存在 `~/.cache/flocks-offline-build`，改 manifest 才会重新下。
 
@@ -152,7 +150,7 @@ SELinux：`/data` 这类目录在策略里没有文件上下文，下面的文�
 
 ## 和原来的升级方式是什么关系
 
-装出来的实例升级就是普通源码安装的在线路径。老包（带 Pro bundle 的整机离线包）装的机器，env 里的 `FLOCKS_DEPLOY_MODE=offline` 会让页面"检查更新 → 升级"、`flocks update` 和 `/api/update/apply` 在动任何文件之前就拒绝联网升级并提示用新 `.run`；没装过 Pro 的这种机器直接用新包重跑，安装脚本会把离线开关删掉、切回在线；装过 Pro 的会被拒绝覆盖，按 Pro 自己的方式升级。
+装出来的实例升级就是普通源码安装的在线路径。老的整机离线包装的机器，env 里的 `FLOCKS_DEPLOY_MODE=offline` 会让页面"检查更新 → 升级"、`flocks update` 和 `/api/update/apply` 在动任何文件之前就拒绝联网升级并提示用新 `.run`；这种机器直接用新包重跑，安装脚本会把离线开关删掉、切回在线；装过本包以外组件的会被拒绝覆盖，按那个组件自己的方式升级。
 
 `install.sh` 装的实例改用 `.run`：`.run` 是另一种部署形态（`/opt/flocks` 或 `<基目录>/flocks/app`、`flocks` 用户、`/var/lib/flocks/.flocks` 或 `<基目录>/flocks/data/.flocks`），旧实例的 `~/.flocks` 会按上面「旧数据怎么带过来」自动拷一份；旧实例要先停，端口还被它占着时安装脚本会报错退出，并提示先 `flocks stop`。
 

@@ -24,6 +24,7 @@ from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
 from starlette.requests import ClientDisconnect
 
+from flocks.contracts.webui.api_code import api_code_digest, api_code_snapshot, page_code_policy, snapshot_digest
 from flocks.contracts.webui.models import WebUIPageApiMeta
 from flocks.contracts.webui.store import WebUIPagesStore
 from flocks.utils.log import Log
@@ -67,12 +68,10 @@ class _PageRuntime:
     routes_mtime_ns: int
     handlers_mtime_ns: int
     loaded_at: int
-    #: Secret ids the page declares (the ``secrets`` list in ``api/routes.yaml``).
-    #: A handler reads one only where an administrator approved it for the
-    #: caller's role (flocks.contracts.webui.approvals).
+    #: Secret ids the page declares (the ``secrets`` list in ``api/routes.yaml``);
+    #: a handler reads no others (flocks.contracts.webui.api_code).
     secrets: frozenset[str] = frozenset()
-    #: Digest of the server code this runtime was compiled from; an approval
-    #: holds for exactly this code.
+    #: Digest of the server code this runtime was compiled from.
     code_sha256: str = ""
 
 
@@ -101,7 +100,7 @@ def _regular_module_elsewhere(name: str, root: Path) -> bool:
 
 
 class _PageModules:
-    """A page's own Python modules, compiled from the snapshot an approval was checked against.
+    """A page's own Python modules, compiled from one snapshot of its code (flocks.contracts.webui.api_code).
 
     They are put together here, never through the import system, which would
     take a compiled cache planted next to the source or a module the snapshot
@@ -270,8 +269,8 @@ class WebUIPageApiRuntime:
         self._cache.pop(page_id, None)
 
     async def list_routes(self, page_id: str) -> list[dict[str, str]]:
-        approved = await self._require_runnable(page_id)
-        runtime = await self._load_page_runtime(page_id, force_reload=False, approved=approved)
+        checked = await self._require_runnable(page_id)
+        runtime = await self._load_page_runtime(page_id, force_reload=False, expected_sha256=checked)
         return [
             {
                 "method": entry.spec.method,
@@ -283,8 +282,8 @@ class WebUIPageApiRuntime:
         ]
 
     async def reload_page(self, page_id: str) -> list[dict[str, str]]:
-        approved = await self._require_runnable(page_id)
-        runtime = await self._load_page_runtime(page_id, force_reload=True, approved=approved)
+        checked = await self._require_runnable(page_id)
+        runtime = await self._load_page_runtime(page_id, force_reload=True, expected_sha256=checked)
         return [
             {
                 "method": entry.spec.method,
@@ -308,10 +307,10 @@ class WebUIPageApiRuntime:
             )
             return Response(status_code=_CLIENT_CLOSED_REQUEST_STATUS)
 
-        # Loading runs the page's module code: on a managed install, only code
-        # an administrator approved gets that far.
-        approved = await self._require_runnable(page_id)
-        runtime = await self._load_page_runtime(page_id, force_reload=False, approved=approved)
+        # Loading runs the page's module code: a policy over page code decides
+        # before that whether it may run (flocks.contracts.webui.api_code).
+        checked = await self._require_runnable(page_id)
+        runtime = await self._load_page_runtime(page_id, force_reload=False, expected_sha256=checked)
         normalized_path = "/" + api_path.strip("/")
         key = (request.method.upper(), normalized_path)
         entry = runtime.routes.get(key)
@@ -343,59 +342,33 @@ class WebUIPageApiRuntime:
         return response
 
     async def _require_runnable(self, page_id: str) -> Optional[str]:
-        """On a managed install, run a page's server code only as an administrator approved it.
+        """Ask the policy over page code, if one is set, whether this page's code may run.
 
-        Checked against the files as they are now, before anything of them is
-        imported: module-level code runs on import.  Returns the approved
-        digest (None off a managed install): loading checks it again against
-        the very bytes it is about to execute.
+        Asked about the files as they are now, before anything of them is
+        imported: module-level code runs on import.  Returns the digest it was
+        asked about (None with no policy): loading checks it again against the
+        very bytes it is about to execute.
         """
-        from flocks.contracts.webui.approvals import api_code_digest, get_approval
-        from flocks.updater.deploy import declared_managed
-
-        if not declared_managed():
+        policy = page_code_policy()
+        if policy is None:
             return None
         api_dir = self._store.routes_path(page_id).parent
         if not api_dir.is_dir():
             return None  # nothing to run; dispatch answers "not configured"
-        approval = await get_approval(page_id)
         digest = await asyncio.to_thread(api_code_digest, api_dir)
-        if approval is None or not approval.handlers_enabled or approval.code_sha256 != digest:
-            log.warning(
-                "webui_pages.api.code_not_approved",
-                {"pageId": page_id, "approved": approval is not None, "codeSha256": digest},
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="this page's server code has not been approved by an administrator",
-            )
-        return approval.code_sha256
+        refusal = await policy.run_refusal(page_id, digest)
+        if refusal:
+            log.warning("webui_pages.api.code_refused", {"pageId": page_id, "codeSha256": digest})
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
+        return digest
 
     async def _readable_secrets(self, runtime: _PageRuntime, user: Any) -> frozenset[str]:
-        """What this call may read: declared, approved for this code, and for the caller's role.
-
-        On a managed install the handlers do not run at all until an
-        administrator approved this code: an interface cannot keep code running
-        in this process away from the rest of it, so whether it runs is a
-        person's decision.
-        """
-        from flocks.contracts.webui.approvals import get_approval
-        from flocks.updater.deploy import declared_managed
-
-        approval = await get_approval(runtime.page_id)
-        current = approval if approval is not None and approval.code_sha256 == runtime.code_sha256 else None
-        if declared_managed() and (current is None or not current.handlers_enabled):
-            log.warning(
-                "webui_pages.api.code_not_approved",
-                {"pageId": runtime.page_id, "approved": approval is not None, "codeSha256": runtime.code_sha256},
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="this page's server code has not been approved by an administrator",
-            )
-        if current is None:
-            return frozenset()
-        return runtime.secrets & current.secrets_for(_caller_role(user))
+        """What this call may read: what the page declares, narrowed by the policy over page code."""
+        policy = page_code_policy()
+        if policy is None:
+            return runtime.secrets
+        allowed = await policy.readable_secrets(runtime.page_id, runtime.code_sha256, runtime.secrets, user)
+        return runtime.secrets & frozenset(allowed)
 
     async def _guard_request_size(self, request: Request) -> None:
         header_value = request.headers.get("content-length")
@@ -421,7 +394,9 @@ class WebUIPageApiRuntime:
                 )
         request._body = bytes(body)  # type: ignore[attr-defined]
 
-    async def _load_page_runtime(self, page_id: str, *, force_reload: bool, approved: Optional[str] = None) -> _PageRuntime:
+    async def _load_page_runtime(
+        self, page_id: str, *, force_reload: bool, expected_sha256: Optional[str] = None,
+    ) -> _PageRuntime:
         page_id = self._store.validate_page_id(page_id)
         async with self._lock:
             routes_path = self._store.routes_path(page_id)
@@ -437,12 +412,13 @@ class WebUIPageApiRuntime:
                 and cached is not None
                 and cached.routes_mtime_ns == routes_mtime_ns
                 and cached.handlers_mtime_ns == handlers_mtime_ns
-                and (approved is None or cached.code_sha256 == approved)
+                and (expected_sha256 is None or cached.code_sha256 == expected_sha256)
             ):
                 return cached
 
             runtime = self._compile_runtime(
-                page_id, routes_path, handlers_path, routes_mtime_ns, handlers_mtime_ns, approved=approved,
+                page_id, routes_path, handlers_path, routes_mtime_ns, handlers_mtime_ns,
+                expected_sha256=expected_sha256,
             )
             self._cache[page_id] = runtime
             self._store.write_api_meta(
@@ -471,18 +447,16 @@ class WebUIPageApiRuntime:
         routes_mtime_ns: int,
         handlers_mtime_ns: int,
         *,
-        approved: Optional[str] = None,
+        expected_sha256: Optional[str] = None,
     ) -> _PageRuntime:
-        from flocks.contracts.webui.approvals import api_code_snapshot, snapshot_digest
-
-        # One read of the page's code: the digest an approval is held against
+        # One read of the page's code: the digest the policy was asked about
         # and the source compiled below are the same bytes.
         snapshot = api_code_snapshot(handlers_path.parent)
         code_sha256 = snapshot_digest(snapshot)
-        if approved is not None and code_sha256 != approved:
+        if expected_sha256 is not None and code_sha256 != expected_sha256:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="this page's server code has not been approved by an administrator",
+                detail="this page's server code changed after it was checked; try again",
             )
         try:
             routes_text = snapshot.get("routes.yaml", b"").decode("utf-8")
@@ -693,14 +667,9 @@ class WebUIPageApiRuntime:
 
 
 class SecretNotDeclared(PermissionError):
-    """A page handler asked for a secret it may not read on this call: not declared
-    in its routes.yaml, not approved by an administrator for this code, or not for
-    the caller's role."""
-
-
-def _caller_role(user: Any) -> Optional[str]:
-    role = user.get("role") if isinstance(user, dict) else getattr(user, "role", None)
-    return role if isinstance(role, str) else None
+    """A page handler asked for a secret it may not read on this call: one its
+    routes.yaml does not declare, or one the policy over page code kept from
+    this call (flocks.contracts.webui.api_code)."""
 
 
 class _SecretAccessor:
@@ -708,9 +677,9 @@ class _SecretAccessor:
 
     A page plugin is extension code.  Handing every handler the whole secret
     store would make any page able to read every credential the install holds,
-    so a page lists the secret ids it needs (``secrets:`` in ``api/routes.yaml``),
-    an administrator approves them for the page's current code and for caller
-    roles, and a call gets what both allow.  Values are never logged.
+    so a page lists the secret ids it needs (``secrets:`` in ``api/routes.yaml``)
+    and a call reads those, as far as the policy over page code allows.
+    Values are never logged.
     """
 
     __slots__ = ("_page_id", "_allowed")
@@ -730,7 +699,7 @@ class _SecretAccessor:
             )
             raise SecretNotDeclared(
                 f"page {self._page_id or '?'} may not read secret {key!r} on this call; "
-                "a page lists it under 'secrets' in api/routes.yaml and an administrator approves it"
+                "a page lists the secrets it reads under 'secrets' in api/routes.yaml"
             )
         from flocks.security import get_secret_manager
 

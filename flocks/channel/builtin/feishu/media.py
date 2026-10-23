@@ -117,7 +117,8 @@ async def _fetch_url_bytes(url: str, max_bytes: int = _DEFAULT_MAX_MEDIA_BYTES) 
 
     Raises ``ValueError`` if the response exceeds *max_bytes*.
     """
-    async with httpx.AsyncClient(timeout=60) as client:
+    import httpx as _httpx
+    async with _httpx.AsyncClient(timeout=60) as client:
         async with client.stream("GET", url, follow_redirects=True) as resp:
             resp.raise_for_status()
             chunks: list[bytes] = []

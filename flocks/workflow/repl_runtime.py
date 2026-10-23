@@ -211,6 +211,38 @@ def _legacy_registry_cancel_scope(registry: Any, checker: Optional[Callable[[], 
         return contextlib.nullcontext()
 
 
+#: Names a node's code always has; a backend's service cannot take one of them.
+_NODE_GLOBALS = frozenset({"__builtins__", "inputs", "outputs", "cancelled", "is_cancelled", "llm", "tool", "get_path"})
+
+
+def _workflow_services(cancel_checker: Optional[Callable[[], bool]]) -> Dict[str, Any]:
+    """What the backend offers python nodes by name (flocks.coordination.workflow_services)."""
+    from flocks.coordination import workflow_services
+
+    return {
+        name: service
+        for name, service in workflow_services(cancel_checker).items()
+        if isinstance(name, str) and name.isidentifier() and name not in _NODE_GLOBALS
+    }
+
+
+def _exposed_methods(service: Any) -> Tuple[str, ...]:
+    """The methods a node may call on a service: the ones it lists, none private."""
+    return tuple(
+        method for method in getattr(service, "exposed_methods", ())
+        if isinstance(method, str) and method.isidentifier() and not method.startswith("_")
+    )
+
+
+def _service_specs(services: Dict[str, Any]) -> Dict[str, Any]:
+    """For an isolated node: each service's name, callable methods and call time limit."""
+    specs: Dict[str, Any] = {}
+    for name, service in services.items():
+        timeout = getattr(service, "rpc_timeout_s", None)
+        specs[name] = [list(_exposed_methods(service)), float(timeout) if timeout else None]
+    return specs
+
+
 @dataclass
 class PythonExecRuntime(Runtime):
     """Trusted host-process runtime.
@@ -236,7 +268,6 @@ class PythonExecRuntime(Runtime):
             "is_cancelled",
             "llm",
             "tool",
-            "soc",
             "get_path",
         }
     )
@@ -277,12 +308,9 @@ class PythonExecRuntime(Runtime):
             except Exception:
                 pass
         g.setdefault("tool", ToolFacade(reg) if not isinstance(reg, ToolFacade) else reg)
-        from flocks.coordination import soc_write_capability
-
-        # Alerts written straight to the database, where a backend offers it.
-        soc = soc_write_capability(self.cancel_checker)
-        if soc is not None:
-            g["soc"] = soc
+        # What the backend offers python nodes by name (flocks.coordination.workflow_services).
+        for name, service in _workflow_services(self.cancel_checker).items():
+            g[name] = service
 
         def get_path(path: str, data: Any = None) -> Any:
             if data is None:
@@ -444,7 +472,10 @@ class SandboxPythonExecRuntime(Runtime):
         if not isinstance(env, dict):
             env = {}
         token = uuid.uuid4().hex
-        python_cmd = self._build_python_cmd(code=code, bridge_token=token)
+        # One set of the backend's services for this execution: the node's
+        # calls, one after another, reach the same objects.
+        services = _workflow_services(self.cancel_checker)
+        python_cmd = self._build_python_cmd(code=code, bridge_token=token, services=services)
         cmd = [
             "docker",
             "exec",
@@ -503,7 +534,7 @@ class SandboxPythonExecRuntime(Runtime):
                     continue
                 msg_type = str(msg.get("type") or "").strip().lower()
                 if msg_type == "rpc":
-                    resp = self._handle_rpc_request(msg=msg, token=token)
+                    resp = self._handle_rpc_request(msg=msg, token=token, services=services)
                     self._write_json_line(proc.stdin, resp)
                 elif msg_type == "final" and msg.get("token") == token:
                     payload = msg.get("payload")
@@ -567,6 +598,7 @@ class SandboxPythonExecRuntime(Runtime):
         bridge_token: str,
         rpc_max_bytes: Optional[int] = _RPC_MAX_BYTES,
         extra_site_packages: str = _WORKFLOW_SITE_PACKAGES,
+        services: Optional[Dict[str, Any]] = None,
     ) -> str:
         wrapped = f"""
 import contextlib
@@ -707,10 +739,22 @@ class _ToolProxy:
     def run_safe(self, name, **kwargs):
         return _rpc_call({{"kind": "tool_safe", "name": name, "kwargs": kwargs}})
 
-class _SOCProxy:
-    def write_alerts(self, alerts, run_id, source_file=""):
-        return _rpc_call({{"kind": "soc_alerts_write", "alerts": alerts,
-                          "run_id": run_id, "source_file": source_file}}, timeout_s=60.0)
+# A backend's service, reached through the host: only the methods it exposes.
+class _ServiceProxy:
+    def __init__(self, name, methods, timeout_s):
+        self._name = name
+        self._methods = frozenset(methods)
+        self._timeout_s = timeout_s
+
+    def __getattr__(self, method):
+        if method.startswith("_") or method not in self._methods:
+            raise AttributeError(f"{{self._name}}.{{method}} is not available")
+
+        def call(*args, **kwargs):
+            return _rpc_call({{"kind": "service", "service": self._name, "method": method,
+                              "args": list(args), "kwargs": kwargs}}, timeout_s=self._timeout_s)
+
+        return call
 
 class _LLMProxy:
     def ask(
@@ -773,9 +817,10 @@ g = {{
     "is_cancelled": _cancel_requested,
     "get_path": get_path,
     "tool": _ToolProxy(),
-    "soc": _SOCProxy(),
     "llm": _LLMProxy(),
 }}
+for _service_name, (_service_methods, _service_timeout) in {_service_specs(services or {})!r}.items():
+    g[_service_name] = _ServiceProxy(_service_name, _service_methods, _service_timeout)
 
 _extra_site = {json.dumps(extra_site_packages, ensure_ascii=False)}
 if _extra_site and os.path.isdir(_extra_site) and _extra_site not in sys.path:
@@ -817,12 +862,14 @@ sys.stdout.flush()
         rpc_max_bytes: Optional[int] = _RPC_MAX_BYTES,
         extra_site_packages: str = _WORKFLOW_SITE_PACKAGES,
         python_executable: str = "python3",
+        services: Optional[Dict[str, Any]] = None,
     ) -> str:
         wrapped = self._build_python_source(
             code=code,
             bridge_token=bridge_token,
             rpc_max_bytes=rpc_max_bytes,
             extra_site_packages=extra_site_packages,
+            services=services,
         )
         return f"{shlex.quote(python_executable)} -I -c {shlex.quote(wrapped)}"
 
@@ -852,6 +899,7 @@ sys.stdout.flush()
         msg: Dict[str, Any],
         token: str,
         cancel_checker: Optional[Callable[[], bool]] = None,
+        services: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         req_id = str(msg.get("id") or "")
         if msg.get("token") != token:
@@ -867,15 +915,17 @@ sys.stdout.flush()
                 output = bool(effective_cancel_checker and effective_cancel_checker())
                 return {"type": "rpc_result", "token": token, "id": req_id, "ok": True, "output": output}
 
-            if kind == "soc_alerts_write":
-                from flocks.coordination import soc_write_capability
-
-                soc = soc_write_capability(effective_cancel_checker)
-                if soc is None:
-                    raise RuntimeError("soc.write_alerts is not available in this installation")
-                output = soc.write_alerts(
-                    rpc.get("alerts"), rpc.get("run_id"), rpc.get("source_file", ""),
-                )
+            if kind == "service":
+                name = str(rpc.get("service") or "")
+                method = str(rpc.get("method") or "")
+                service = (services or {}).get(name)
+                if service is None or method not in _exposed_methods(service):
+                    raise RuntimeError(f"{name}.{method} is not available in this installation")
+                args = rpc.get("args") or []
+                kwargs = rpc.get("kwargs") or {}
+                if not isinstance(args, list) or not isinstance(kwargs, dict):
+                    raise RuntimeError("Service call arguments must be a list and a mapping")
+                output = getattr(service, method)(*args, **kwargs)
                 return {"type": "rpc_result", "token": token, "id": req_id, "ok": True, "output": output}
 
             if kind in ("tool", "tool_safe"):
@@ -1041,6 +1091,15 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                     message="rpc_max_response_bytes and rpc_max_workers exceed rpc_max_inflight_bytes",
                 )
 
+        bridge_closed = threading.Event()
+
+        def _rpc_cancel_requested() -> bool:
+            return bridge_closed.is_set() or self._cancel_requested()
+
+        # One set of the backend's services for this execution: the node's
+        # calls, one after another, reach the same objects.
+        services = _workflow_services(_rpc_cancel_requested)
+
         inherited_fds = self._resolve_inherited_fds(inputs)
         retained_fds = self._resolve_retained_fds(inputs)
         managed_fds = tuple(dict.fromkeys((*inherited_fds, *retained_fds.values())))
@@ -1069,6 +1128,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 bridge_token=token,
                 rpc_max_bytes=rpc_max_bytes,
                 extra_site_packages=package_root,
+                services=services,
             )
             with tempfile.NamedTemporaryFile(
                 mode="w",
@@ -1086,6 +1146,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 rpc_max_bytes=rpc_max_bytes,
                 extra_site_packages=package_root,
                 python_executable=sys.executable,
+                services=services,
             )
             process_args = ["sh", "-lc", python_cmd]
 
@@ -1126,7 +1187,6 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
         )
         stderr_thread.start()
 
-        bridge_closed = threading.Event()
         stdout_reader_stop = threading.Event()
         bridge_errors: list[str] = []
         inflight_budget = _InflightByteBudget(rpc_max_inflight_bytes)
@@ -1186,9 +1246,6 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
             thread_name_prefix="wf-process-rpc",
         )
 
-        def _rpc_cancel_requested() -> bool:
-            return bridge_closed.is_set() or self._cancel_requested()
-
         def _handle_rpc(message: Dict[str, Any], request_bytes: int) -> None:
             response_reservation = rpc_response_limit or 0
             response_reserved = False
@@ -1200,6 +1257,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                     msg=message,
                     token=token,
                     cancel_checker=_rpc_cancel_requested,
+                    services=services,
                 )
                 response_error: Optional[str] = None
                 try:

@@ -23,8 +23,6 @@ export interface ExtensionRoute {
   adminOnly?: boolean;
   /** i18n namespaces to preload before the page renders. */
   i18nNamespaces?: string[];
-  /** `app` (default) renders inside the main layout; `bare` renders without it. */
-  layout?: 'app' | 'bare';
   /**
    * `settings` counts the route (and the paths under it) as system settings:
    * the sidebar shows the settings menu there and no module remembers it as
@@ -88,8 +86,18 @@ export type SlotName =
   | 'chat.composer'
   /** Replaces the account list on the account-management settings page. */
   | 'settings.account'
-  /** Action on a scene suite that is locked; context `{ suiteId, reason: 'edition' | 'license' }`. */
-  | 'sceneSuites.lockedAction';
+  /** Next to a scene suite's state badge; context `{ suite }` (a HubSceneSuite). */
+  | 'sceneSuites.badges'
+  /** Under a scene suite's versions; context `{ suite, awaitingLaunch }`. */
+  | 'sceneSuites.notice'
+  /** Action on a scene suite an extension locked; context `{ suiteId, reason }` (the suite's lockReason). */
+  | 'sceneSuites.lockedAction'
+  /**
+   * In place of a scene an extension locked, or one missing because its suite
+   * is locked; context `{ workspaceId, suiteId, reason, suite }`. Without a
+   * registration a generic notice is shown.
+   */
+  | 'workspace.lockedNotice';
 
 /**
  * Work a `session.settings` component needs done on a new session before its

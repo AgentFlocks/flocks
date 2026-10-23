@@ -56,8 +56,6 @@ while [[ $# -gt 0 ]]; do
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
     --install-root) INSTALL_ROOT="$2"; shift 2 ;;
     --cache-dir) CACHE_DIR="$2"; shift 2 ;;
-    --flockspro-wheel|--pro-bundle-version|--pro-release-id|--pro-build-id)
-      fail "$1 is no longer supported: this package is the open-source edition, extensions are not packed into it" ;;
     --skip-webui-build) SKIP_WEBUI_BUILD=1; shift ;;
     --no-dev-group) DEV_GROUP=0; shift ;;
     --ship-uv-cache) SHIP_UV_CACHE=1; shift ;;

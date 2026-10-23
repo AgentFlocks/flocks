@@ -173,24 +173,67 @@ def register_content_source(
     register_source(source, priority=priority, exclusive_kinds=exclusive_kinds)
 
 
-def register_sealed_hub_source(source: Any) -> None:
-    """Register a source of hub packages delivered sealed.
+def register_hub_package_provider(provider: Any) -> None:
+    """Register a provider of hub plugins of an extension's own.
 
-    The catalog lists what the source says its packages hold; a package's
-    contents are unsealed only while it is installed or its update is
-    previewed, into a private staging directory that is removed afterwards.
-    See :mod:`flocks.hub.sealed` for the interface a source implements.
+    The catalog lists the manifests the provider gives; an install, update or
+    update preview draws the plugin's files from the provider, which stages
+    them for that operation only.  See :mod:`flocks.hub.providers` for the
+    interface a provider implements.
     """
 
-    from flocks.hub.sealed import register_sealed_source
+    from flocks.hub.catalog import clear_catalog_caches
+    from flocks.hub.providers import register_provider
 
-    register_sealed_source(source)
+    register_provider(provider)
+    clear_catalog_caches()
 
 
-def unregister_sealed_hub_source(source: Any) -> None:
-    from flocks.hub.sealed import unregister_sealed_source
+def unregister_hub_package_provider(provider: Any) -> None:
+    from flocks.hub.catalog import clear_catalog_caches
+    from flocks.hub.providers import unregister_provider
 
-    unregister_sealed_source(source)
+    unregister_provider(provider)
+    clear_catalog_caches()
+
+
+def register_hub_access_policy(policy: Any) -> None:
+    """Register a policy over hub content and the pages it ships.
+
+    The policy may refuse installs, add what it knows about each scene suite
+    to the suite listing, refuse to serve pages, and narrow the page and
+    workspace listings.  See :mod:`flocks.hub.access` for the methods (all
+    optional) a policy implements.
+    """
+    from flocks.hub.access import register_policy
+
+    register_policy(policy)
+
+
+def unregister_hub_access_policy(policy: Any) -> None:
+    from flocks.hub.access import unregister_policy
+
+    unregister_policy(policy)
+
+
+def register_page_code_policy(policy: Any) -> None:
+    """Set the policy over WebUI page plugins' server code.
+
+    The policy may refuse to run a page's code (asked before any of it is
+    imported, with the digest of exactly the code that would run) and picks
+    which of the secrets the page declares a call may read.  Without one,
+    every page's handlers run and read what they declare.  See
+    :mod:`flocks.contracts.webui.api_code` for the interface.
+    """
+    from flocks.contracts.webui.api_code import register_page_code_policy as _register
+
+    _register(policy)
+
+
+def unregister_page_code_policy(policy: Any) -> None:
+    from flocks.contracts.webui.api_code import unregister_page_code_policy as _unregister
+
+    _unregister(policy)
 
 
 def register_response_transform(
@@ -512,13 +555,16 @@ __all__ = [
     "register_content_source",
     "register_error_response",
     "register_http_hook",
+    "register_hub_access_policy",
     "register_hub_root",
     "register_license_checker",
     "register_response_transform",
     "register_route_provider",
-    "register_sealed_hub_source",
-    "unregister_sealed_hub_source",
+    "register_hub_package_provider",
+    "unregister_hub_package_provider",
     "register_lifecycle_hook",
+    "register_page_code_policy",
+    "unregister_page_code_policy",
     "register_event_hook",
     "register_public_path",
     "register_shutdown_hook",
@@ -529,5 +575,6 @@ __all__ = [
     "run_startup_hooks",
     "error_response",
     "unregister_error_response",
+    "unregister_hub_access_policy",
     "unregister_hub_root",
 ]

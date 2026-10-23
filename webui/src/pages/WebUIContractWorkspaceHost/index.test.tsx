@@ -5,18 +5,28 @@ import WebUIContractWorkspaceHost from './index';
 import { setupSSEMock } from '@/test/mocks/sse';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
+import { __resetExtensionSlotCacheForTesting } from '@/components/extensions/ExtensionSlot';
 
-const { useWebUIContractPagesMock, sceneSuitesMock } = vi.hoisted(() => ({
+const { useWebUIContractPagesMock, sceneSuitesMock, extensionRegistry } = vi.hoisted(() => ({
   useWebUIContractPagesMock: vi.fn(),
   sceneSuitesMock: vi.fn(),
+  // Extensions reach this page only through its slots.
+  extensionRegistry: {
+    routes: [],
+    navItems: [],
+    settingsSections: [],
+    slots: [] as Array<{ id: string; slot: string; component: (props: { context: Record<string, unknown> }) => JSX.Element | null }>,
+    i18n: {},
+  },
 }));
+
+vi.mock('@ext/registry', () => ({ __esModule: true, default: extensionRegistry }));
 
 vi.mock('@/hooks/useWebUIContractPages', () => ({
   useWebUIContractPages: useWebUIContractPagesMock,
 }));
 
-vi.mock('@/api/hub', async (importOriginal) => ({
-  editionNeedsLicence: (await importOriginal<typeof import('@/api/hub')>()).editionNeedsLicence,
+vi.mock('@/api/hub', () => ({
   hubAPI: {
     sceneSuites: sceneSuitesMock,
   },
@@ -62,6 +72,8 @@ describe('WebUIContractWorkspaceHost', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    extensionRegistry.slots = [];
+    __resetExtensionSlotCacheForTesting();
     sceneSuitesMock.mockResolvedValue({ data: [] });
     useWebUIContractPagesMock.mockReturnValue({
       pages: [],
@@ -144,69 +156,72 @@ describe('WebUIContractWorkspaceHost', () => {
     });
   });
 
-  it('sends a scene whose licensed suite is not licensed to the licence settings', async () => {
+  const lockedWorkspace = {
+    id: 'code_audit_ui',
+    title: '代码漏洞审计工作区',
+    route: '/contracts/webui/workspaces/code_audit_ui',
+    icon: 'FileSearch',
+    order: 20,
+    enabled: true,
+    placement: 'sceneWorkspace',
+    defaultPageId: 'code-security-workspace',
+    suiteId: 'code-audit-workspace',
+    locked: true,
+    lockReason: 'license',
+    pages: [],
+  };
+
+  it('shows a generic notice for a scene whose suite an extension locked', async () => {
     useWebUIContractPagesMock.mockReturnValue({ pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: [] });
     sceneSuitesMock.mockResolvedValue({
-      data: [{ id: 'code-audit-workspace', edition: 'pro', workspaceId: 'code_audit_ui', licensed: false, licenseState: 'expired' }],
+      data: [{ id: 'code-audit-workspace', edition: 'pro', workspaceId: 'code_audit_ui', locked: true, lockReason: 'edition' }],
     });
 
     renderHostAt('/contracts/webui/workspaces/code_audit_ui');
 
-    expect(await screen.findByText('workspace.unlicensedTitle')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'workspace.unlicensedAction' })).toHaveAttribute('href', '/settings/suite-licenses');
-    expect(screen.queryByText('workspace.editionRequiredTitle')).not.toBeInTheDocument();
+    expect(await screen.findByText('workspace.lockedTitle')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'workspace.suitesAction' })).toHaveAttribute('href', '/scenes/suites');
   });
 
-  it('still asks for the upgrade when no suite licence applies', async () => {
+  it('says not found for a missing scene whose suite is not locked', async () => {
     useWebUIContractPagesMock.mockReturnValue({ pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: [] });
     sceneSuitesMock.mockResolvedValue({
-      data: [{ id: 'code-audit-workspace', edition: 'pro', workspaceId: 'code_audit_ui', licensed: null }],
+      data: [{ id: 'code-audit-workspace', edition: 'pro', workspaceId: 'code_audit_ui', locked: false }],
     });
 
     renderHostAt('/contracts/webui/workspaces/code_audit_ui');
 
-    expect(await screen.findByText('workspace.editionRequiredTitle')).toBeInTheDocument();
-    expect(screen.queryByText('workspace.unlicensedTitle')).not.toBeInTheDocument();
+    expect(await screen.findByText('workspace.notFound')).toBeInTheDocument();
+    expect(screen.queryByText('workspace.lockedTitle')).not.toBeInTheDocument();
   });
 
-  it('keeps an installed workspace of an unlicensed suite closed and points to the licence settings', async () => {
-    const lockedWorkspace = {
-      id: 'code_audit_ui',
-      title: '代码漏洞审计工作区',
-      route: '/contracts/webui/workspaces/code_audit_ui',
-      icon: 'FileSearch',
-      order: 20,
-      enabled: true,
-      placement: 'sceneWorkspace',
-      defaultPageId: 'code-security-workspace',
-      suiteId: 'code-audit-workspace',
-      licensed: false,
-      locked: true,
-      pages: [],
-    };
+  it('keeps an installed workspace an extension locked closed', async () => {
     useWebUIContractPagesMock.mockReturnValue({ pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: [lockedWorkspace] });
 
     renderHostAt('/contracts/webui/workspaces/code_audit_ui');
 
-    expect(await screen.findByText('workspace.unlicensedTitle')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'workspace.unlicensedAction' })).toHaveAttribute('href', '/settings/suite-licenses');
-    expect(screen.queryByText('workspace.editionRequiredTitle')).not.toBeInTheDocument();
+    expect(await screen.findByText('workspace.lockedTitle')).toBeInTheDocument();
+    expect(screen.queryByText(/^page:/)).not.toBeInTheDocument();
   });
 
-  it('keeps a locked workspace whose suite needs an edition licence on the upgrade notice', async () => {
-    useWebUIContractPagesMock.mockReturnValue({
-      pages: [], loading: false, error: null, refetch: vi.fn(),
-      workspaces: [{
-        id: 'code_audit_ui', title: '代码漏洞审计工作区', route: '/contracts/webui/workspaces/code_audit_ui',
-        icon: 'FileSearch', order: 20, enabled: true, placement: 'sceneWorkspace',
-        suiteId: 'code-audit-workspace', locked: true, pages: [],
-      }],
-    });
+  it('lets the extension word the notice for a scene it locked', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    extensionRegistry.slots = [{
+      id: 'test-locked-notice',
+      slot: 'workspace.lockedNotice',
+      component: ({ context }) => {
+        seen.push(context);
+        return <div>{`locked-because-${String(context.reason)}`}</div>;
+      },
+    }];
+    __resetExtensionSlotCacheForTesting();
+    useWebUIContractPagesMock.mockReturnValue({ pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: [lockedWorkspace] });
 
     renderHostAt('/contracts/webui/workspaces/code_audit_ui');
 
-    expect(await screen.findByText('workspace.editionRequiredTitle')).toBeInTheDocument();
-    expect(screen.queryByText('workspace.unlicensedTitle')).not.toBeInTheDocument();
+    expect(await screen.findByText('locked-because-license')).toBeInTheDocument();
+    expect(screen.queryByText('workspace.lockedTitle')).not.toBeInTheDocument();
+    expect(seen[0]).toMatchObject({ workspaceId: 'code_audit_ui', suiteId: 'code-audit-workspace', reason: 'license', suite: null });
   });
 
   it('redirects the workspace root to its default page', async () => {

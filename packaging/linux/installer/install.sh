@@ -548,8 +548,8 @@ elif env_file:
         print(env_file)
 PY
 }
-# This package runs on SQLite only. An install on another database (PostgreSQL: the enterprise
-# edition, or an earlier package) keeps its data there, and its settings would make the new
+# This package runs on SQLite only. An install on another database (set up by another package
+# or an extension) keeps its data there, and its settings would make the new
 # program refuse to start; it is refused here, before anything changes. Decided by the new
 # program's own rule (flocks/db_backend.py backend_choice, loaded from this package) on the
 # environment the service will get: its env file over the first .env the program loads
@@ -642,7 +642,7 @@ for root in "$DATA_ROOT" ${MIGRATE_FROM:+"$MIGRATE_FROM"}; do
     fail "${root} 属于一个由外部管理进程托管的安装（${declared_in} 声明了 managed），它的升级由那个管理进程负责，开源版离线包不能覆盖。本次未做任何改动"
   fi
   if [[ -n "$database_in" ]]; then
-    fail "${root} 所属的安装${database_in}；开源版离线包只支持 SQLite，覆盖安装后服务会起不来。请用企业版升级，或先把数据迁回 SQLite 再用本安装包。本次未做任何改动"
+    fail "${root} 所属的安装${database_in}；本离线包只支持 SQLite，覆盖安装后服务会起不来。请按那套安装原来的方式升级，或先把数据迁回 SQLite 再用本安装包。本次未做任何改动"
   fi
   if [[ -f "$root/$COMPONENT_MARKER" ]]; then
     fail "${root} 所属的安装装过本安装包不带的组件（${root}/${COMPONENT_MARKER}），覆盖安装会让它失效；请按该组件提供的方式升级，或先在页面上把它卸掉再用本安装包升级。本次未做任何改动"

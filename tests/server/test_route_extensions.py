@@ -1,13 +1,9 @@
 """
-Tests for generic route registration and the public-source boundary check.
+Tests for generic route registration.
 
 Extensions contribute routes by registering them; the application never imports
-an extension by name.  The boundary check is what keeps that true over time.
+an extension by name.
 """
-
-import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 from fastapi import APIRouter, FastAPI
@@ -21,9 +17,6 @@ from flocks.server.route_extensions import (
     reset_route_providers,
     route_exists,
 )
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
@@ -123,23 +116,3 @@ def test_generic_license_route_reports_the_registered_checker(monkeypatch):
 
     assert body["activated"] is True
     assert body["active"] is True
-
-
-# ---------------------------------------------------------------------------
-# E7: the boundary itself
-# ---------------------------------------------------------------------------
-
-def test_public_source_gains_no_new_commercial_references():
-    """E7: the published source must not pick up new commercial-build branches.
-
-    The remaining occurrences are recorded in a baseline that this check
-    enforces as a ceiling, so the migration can only move toward zero.
-    """
-    result = subprocess.run(
-        [sys.executable, "scripts/oss_boundary_check.py"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr

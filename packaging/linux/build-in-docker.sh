@@ -39,8 +39,6 @@ fail() { printf '[build-in-docker] error: %s\n' "$*" >&2; exit 1; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --arch) ARCHES="$2"; shift 2 ;;
-    --flockspro-wheel|--pro-release-id|--pro-bundle-version)
-      fail "$1 is no longer supported: this package is the open-source edition, extensions are not packed into it" ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
     --cache-dir) CACHE_DIR="$2"; shift 2 ;;
     --cn) CN=1; shift ;;

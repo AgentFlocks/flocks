@@ -870,8 +870,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     [openTabPathByHref],
   );
 
-  // A scene whose workspace closed (uninstalled, disabled or license lapsed)
-  // cannot stay on screen: fall back to its suite manager.
+  // A scene whose workspace closed (uninstalled, disabled or locked by an
+  // extension) cannot stay on screen: fall back to its suite manager.
   const routeSceneId = routeWorkspace && sceneWorkspaceIdOf(routeWorkspace)
     ? workspaceIdFromPath(location.pathname) : null;
   useEffect(() => {

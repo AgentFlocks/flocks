@@ -171,7 +171,7 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
         return
     refusal = update_refusal_reason(deploy_mode)
     if refusal is not None or not info.update_allowed:
-        # Managed release packages are upgraded by the commercial core; the built-in
+        # Managed release packages are upgraded by their supervisor; the built-in
         # updater must not replace sources or run `uv sync` inside the managed venv.
         append_upgrade_text_log(f"INFO update_refused deploy_mode={deploy_mode}")
         console.print(f"\n[yellow]{refusal or 'In-place upgrade is not available for this deployment.'}[/yellow]")

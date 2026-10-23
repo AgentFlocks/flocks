@@ -1,5 +1,6 @@
 """Text sent for embedding passes the same outbound stage as a prompt, and the
-default provider choice stays on this host or a private network."""
+``local`` provider choice stays on this host or a private network (the default
+is ``auto``, as in dev)."""
 
 from __future__ import annotations
 
@@ -94,12 +95,13 @@ async def test_a_refused_embedding_is_not_sent(hook_pipeline, monkeypatch):
     assert sent == []
 
 
-def test_the_default_provider_choice_is_local(monkeypatch):
+def test_the_local_provider_choice_stays_on_this_host(monkeypatch):
     from flocks.memory.config import MemoryEmbeddingConfig
     from flocks.memory.manager import MemoryManager
     from flocks.provider.provider import Provider
 
-    assert MemoryEmbeddingConfig().provider == "local"
+    assert MemoryEmbeddingConfig().provider == "auto"
+    assert MemoryEmbeddingConfig(provider="local").provider == "local"
     providers = {
         "openai": SimpleNamespace(_config=SimpleNamespace(base_url="https://api.openai.com/v1")),
         "ollama": SimpleNamespace(_config=SimpleNamespace(base_url="http://127.0.0.1:11434/v1")),

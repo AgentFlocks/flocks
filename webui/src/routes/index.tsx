@@ -12,7 +12,6 @@ import {
   ForceChangePasswordPage,
   LoginPage,
   SetupAdminPage,
-  bareExtensionRoutes,
 } from './contentRoutes';
 
 export { LegacyWebUIContractPageRedirect } from './contentRoutes';
@@ -100,10 +99,6 @@ export function Routes() {
     <RouterRoutes>
       <Route path="/login" element={<AuthReturnRedirect />} />
       <Route path="/setup-admin" element={<AuthReturnRedirect />} />
-      {/* Extension pages that opted out of the layout (full-page flows). */}
-      {bareExtensionRoutes.map((route) => (
-        <Route key={route.path} path={route.path} element={route.element} />
-      ))}
       {/* Every in-app page renders inside the layout, which keeps one pane per
           open tab alive; see routes/contentRoutes.tsx for the page list. */}
       <Route path="/*" element={<Layout />} />

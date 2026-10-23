@@ -81,13 +81,17 @@ def page_api_database() -> Any:
     return None
 
 
-def soc_write_capability(cancel_checker: Optional[Callable[[], bool]]) -> Any:
-    """The ``soc`` object a workflow's python node writes alerts through: none here."""
-    return None
+def workflow_services(cancel_checker: Optional[Callable[[], bool]]) -> dict[str, Any]:
+    """Objects a backend hands workflow python nodes by name, next to ``tool`` and ``llm``: none here.
+
+    Each lists the methods a node may call (``exposed_methods``) and may set a
+    time limit, in seconds, for a call from an isolated node (``rpc_timeout_s``).
+    """
+    return {}
 
 
 def is_unique_violation(exc: BaseException) -> bool:
-    """Whether *exc* says the row would duplicate a unique key, from SQLite or PostgreSQL."""
+    """Whether *exc* says the row would duplicate a unique key (SQLSTATE 23505, or SQLite's IntegrityError)."""
     if getattr(exc, "sqlstate", None) == "23505":
         return True
     import sqlite3
@@ -101,6 +105,6 @@ __all__ = [
     "page_api_database",
     "sessions_running_elsewhere",
     "shared_setdefault",
-    "soc_write_capability",
     "wait_for_singleton",
+    "workflow_services",
 ]

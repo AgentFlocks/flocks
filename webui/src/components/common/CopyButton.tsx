@@ -9,8 +9,6 @@ interface CopyButtonProps {
   /** Icon size class, e.g. "w-3 h-3" or "w-3.5 h-3.5". Defaults to "w-3.5 h-3.5". */
   size?: string;
   label?: string;
-  /** Classes for the visible label, e.g. to hide it on phones while it stays the accessible name. */
-  labelClassName?: string;
   className?: string;
 }
 
@@ -18,7 +16,6 @@ export default function CopyButton({
   text,
   size = 'w-3.5 h-3.5',
   label,
-  labelClassName,
   className,
 }: CopyButtonProps) {
   const { t } = useTranslation('common');
@@ -49,7 +46,7 @@ export default function CopyButton({
         {copied
           ? <Check className={`${size} text-green-500`} />
           : <Copy className={size} />}
-        {label && <span className={labelClassName}>{label}</span>}
+        {label && <span>{label}</span>}
       </span>
     </button>
   );

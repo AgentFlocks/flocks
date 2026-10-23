@@ -108,6 +108,26 @@ def test_a_backend_cannot_replace_a_module_outside_the_list():
         db_backend._replacements("pg", _Provider(_everything(**{"flocks.server.auth": "elsewhere.auth"})))
 
 
+def test_a_backend_may_bring_modules_the_runtime_does_not_have():
+    added = {"flocks.vendor_layer": "vendor.layer", "flocks.workflow.vendor_store": "vendor.workflow_store"}
+
+    assert db_backend._replacements("pg", _Provider(_everything(**added))) == _everything(**added)
+
+
+@pytest.mark.parametrize("name", [
+    "flocks.workflow",              # a package the runtime has
+    "flocks.task.store.extra",      # inside a module it replaces
+    "flocks.coordination.extra",
+    "flocks",                       # the runtime itself
+    "elsewhere.module",             # not a flocks name
+    "flocks.not-an-identifier",
+])
+def test_an_addition_cannot_be_a_runtime_name(name):
+    assert not db_backend._added_module(name)
+    with pytest.raises(db_backend.BackendConfigurationError):
+        db_backend._replacements("pg", _Provider(_everything(**{name: "vendor.x"})))
+
+
 def test_a_backend_cannot_leave_a_listed_module_out():
     """A message store on PostgreSQL next to the single-process session lease would run, unchecked."""
     modules = _everything()
@@ -147,17 +167,26 @@ def _stand_in_name(package: str, module: str) -> str:
     return f"{package}.mods.{module.removeprefix('flocks.').replace('.', '__')}"
 
 
+#: A module the stand-in brings of its own: a database layer the runtime does not have.
+ADDED = "flocks.db"
+
+
+def _stand_in_modules(package: str = "stand_in_backend") -> dict:
+    """Every replaceable module, plus the stand-in's own database layer."""
+    return {module: _stand_in_name(package, module) for module in [*db_backend.REPLACEABLE_MODULES, ADDED]}
+
+
 def _install_backend(
     site: Path, name: str, modules: dict | None = None, *, dist: str = "stand_in_backend", package: str = "stand_in_backend",
 ) -> None:
     """A distribution on *site* registering *name* under ``flocks.db_backends``.
 
     By default it replaces every replaceable module with a stand-in that answers
-    any name with a placeholder class; the task store and the database package
-    say who they are.
+    any name with a placeholder class, and brings a database package of its own
+    (``flocks.db``); the task store and the database package say who they are.
     """
     if modules is None:
-        modules = {module: _stand_in_name(package, module) for module in db_backend.REPLACEABLE_MODULES}
+        modules = _stand_in_modules(package)
     pkg = site / package
     mods = pkg / "mods"
     mods.mkdir(parents=True, exist_ok=True)
@@ -254,7 +283,7 @@ def test_the_registered_backend_replaces_what_it_names(tmp_path):
         "backend": "standin",
         "source": "FLOCKS_DB_BACKEND",
         "provider": "stand_in_backend==1.0",
-        "replaced": sorted(db_backend.REPLACEABLE_MODULES),
+        "replaced": sorted([*db_backend.REPLACEABLE_MODULES, ADDED]),
     }
 
 
@@ -287,8 +316,7 @@ def test_a_persisted_choice_selects_the_backend(tmp_path):
 
 def test_a_backend_reaching_outside_the_list_stops_the_process(tmp_path):
     site = tmp_path / "site"
-    everything = {module: _stand_in_name("stand_in_backend", module) for module in db_backend.REPLACEABLE_MODULES}
-    _install_backend(site, "standin", {**everything, "flocks.server.auth": "stand_in_backend.mods.task__store"})
+    _install_backend(site, "standin", {**_stand_in_modules(), "flocks.server.auth": "stand_in_backend.mods.task__store"})
 
     result = _run(tmp_path, site, {"FLOCKS_DB_BACKEND": "standin"}, "import flocks")
 
@@ -332,24 +360,12 @@ def test_a_backend_nobody_provides_leaves_the_runtime_modules_in_place(tmp_path)
     assert seen["describe"]["provider"] is None
 
 
-#: Listed names the runtime does not have itself: code a backend brings imports
-#: them by these names (the database layer, and stores only a shared database has).
-ONLY_A_BACKEND_BRINGS = {
-    "flocks.db",
-    "flocks.memory.sync.ownership",
-    "flocks.runtime_state",
-    "flocks.session.message_pages",
-    "flocks.storage.file_backfill",
-    "flocks.workflow.soc_store",
-}
-
-
-def test_every_other_replaceable_module_is_a_runtime_module():
+def test_every_replaceable_module_is_a_runtime_module():
     import importlib.util
 
     missing = {name for name in db_backend.REPLACEABLE_MODULES if importlib.util.find_spec(name) is None}
 
-    assert missing == ONLY_A_BACKEND_BRINGS
+    assert missing == set()
 
 
 REFUSE_TO_OPEN_SQLITE = """
@@ -574,7 +590,7 @@ def test_coordination_answers_for_one_process():
 
     assert asyncio.run(scenario()) == (True, True, False, None, [])
     assert coordination.page_api_database() is None
-    assert coordination.soc_write_capability(lambda: False) is None
+    assert coordination.workflow_services(lambda: False) == {}
 
 
 def test_coordination_recognises_a_duplicate_key_on_either_database():

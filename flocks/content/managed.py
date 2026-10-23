@@ -3,7 +3,7 @@ Content a deployment manages, as the loaders see it.
 
 The loaders for Agents, Skills and Workflows keep reading the local plugin
 directories exactly as before.  What a deployment registers through
-:func:`flocks.content.register_source` -- packages a commercial core decrypts,
+:func:`flocks.content.register_source` -- packages another source provides,
 a central catalogue -- is layered on top of that here:
 
 * an id a registered source lists is **reserved**: the local item with that id

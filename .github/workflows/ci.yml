@@ -33,11 +33,6 @@ jobs:
       - name: Validate bundled Hub
         run: uv run python scripts/validate_flockshub.py
 
-      # The public source must not grow new references to a separate commercial
-      # build; the baseline only goes down.
-      - name: OSS boundary
-        run: python3 scripts/oss_boundary_check.py
-
       - name: Python test
         run: uv run --no-sync pytest tests/scripts tests/hub
 

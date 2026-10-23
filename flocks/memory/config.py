@@ -15,10 +15,10 @@ class MemoryEmbeddingConfig(BaseModel):
         description="Enable vector embeddings for Memory search",
     )
     provider: str = Field(
-        "local",
+        "auto",
         description=(
-            "Embedding provider: local (default: a configured provider whose endpoint is on "
-            "this host or a private network), auto (openai, then google), or a provider id"
+            "Embedding provider: auto (default: openai, then google), local (a configured "
+            "provider whose endpoint is on this host or a private network), or a provider id"
         ),
     )
     model: str = Field(

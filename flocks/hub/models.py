@@ -8,17 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
 PluginType = Literal["skill", "agent", "tool", "device", "workflow", "webui", "component"]
-#: The edition that installs without a licence.
-OPEN_EDITION = "oss"
-# Which edition may install a plugin: the open edition, or the name of an
-# edition a registered licence checker grants. What any other name means is
-# the checker's business, not the hub's.
+# Which edition a plugin belongs to: "oss" for the open product's own, or a
+# name an extension gives its plugins. What any other name means is the
+# extension's business, not the hub's.
 PluginEdition = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]{0,31}$")]
-
-
-def edition_needs_licence(edition: Optional[str]) -> bool:
-    """Whether a plugin of this edition needs a licence to install and run."""
-    return bool(edition) and edition != OPEN_EDITION
 
 PluginState = Literal[
     "available",
@@ -32,9 +25,9 @@ PluginState = Literal[
 
 
 class HubSource(BaseModel):
-    # "sealed": the payload is delivered encrypted by an extension and only
-    # unsealed while it is installed (see flocks.hub.sealed).
-    kind: Literal["bundled", "github", "cloud", "sealed"] = "bundled"
+    # bundled, github, cloud, or a kind of its own that an extension's
+    # provider gives the plugins it delivers (see flocks.hub.providers).
+    kind: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]{0,31}$")] = "bundled"
     path: Optional[str] = None
     repo: Optional[str] = None
     ref: Optional[str] = None
@@ -102,7 +95,7 @@ class HubPluginManifest(BaseModel):
     domains: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
     trust: Literal["official", "verified", "community", "experimental", "deprecated"] = "community"
-    edition: PluginEdition = OPEN_EDITION
+    edition: PluginEdition = "oss"
     source: HubSource = Field(default_factory=HubSource)
     compatibility: HubCompatibility = Field(default_factory=HubCompatibility)
     dependencies: HubDependencies = Field(default_factory=HubDependencies)
@@ -127,7 +120,7 @@ class HubIndexEntry(BaseModel):
     useCases: list[str] = Field(default_factory=list)
     trust: str = "community"
     riskLevel: str = "low"
-    edition: PluginEdition = OPEN_EDITION
+    edition: PluginEdition = "oss"
     manifestPath: str
     guidedInstall: Optional[HubGuidedInstall] = None
 
@@ -197,7 +190,7 @@ class HubCatalogEntry(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     trust: str = "community"
     riskLevel: str = "low"
-    edition: PluginEdition = OPEN_EDITION
+    edition: PluginEdition = "oss"
     state: PluginState = "available"
     installedVersion: Optional[str] = None
     source: str = "bundled"

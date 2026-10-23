@@ -27,7 +27,7 @@ DOCKER_UPGRADE_REFUSAL = (
 MANAGED_UPGRADE_REFUSAL = (
     "In-place upgrade is disabled for managed release packages: this installation is "
     "maintained by an external manager that owns package upgrades "
-    "(受管发布包由核心升级，内置更新器不会修改受管的运行环境)."
+    "(受管安装由管理它的进程负责升级，内置更新器不会修改受管的运行环境)."
 )
 OFFLINE_UPGRADE_REFUSAL = (
     "此实例由离线安装包部署，不支持联网就地升级：核心升级请用新版 flocks-offline.run 覆盖安装，"
@@ -165,7 +165,7 @@ def install_modification_refusal(mode: str | None = None) -> str | None:
     """Reason the built-in updater must not touch this installation's tree, else ``None``.
 
     Docker images are replaced by pulling a new image and managed release
-    packages are upgraded by the commercial core; ``uv sync`` / source
+    packages are upgraded by the supervisor that manages them; ``uv sync`` / source
     replacement from inside the runtime would corrupt either. An offline
     installation is *not* in this set: a release shipped with it is installed
     from disk by the same code paths, only network-based upgrades are refused

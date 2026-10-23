@@ -30,10 +30,7 @@ const { hubAPI, webuiContractPagesAPI, extensionRegistry, toast } = vi.hoisted((
   toast: { success: vi.fn(), error: vi.fn() },
 }));
 
-vi.mock('@/api/hub', async (importOriginal) => ({
-  editionNeedsLicence: (await importOriginal<typeof import('@/api/hub')>()).editionNeedsLicence,
-  hubAPI,
-}));
+vi.mock('@/api/hub', () => ({ hubAPI }));
 vi.mock('@/api/webuiContractPages', () => ({ webuiContractPagesAPI }));
 vi.mock('@ext/registry', () => ({ __esModule: true, default: extensionRegistry }));
 vi.mock('@/components/common/Toast', () => ({ useToast: () => toast }));
@@ -157,22 +154,21 @@ describe('SceneSuitesPage', () => {
     expect(within(soc).queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
   });
 
-  it('locks a suite the install lacks the edition for, with no action of its own', async () => {
-    // The red team suite is edition-locked too, but it is not launched yet: no hint, no action.
-    hubAPI.sceneSuites.mockResolvedValue({ data: [SOC, { ...AI_REDTEAM, editionLocked: true }, { ...CODE_AUDIT, editionLocked: true }] });
+  it('locks a suite an extension locked, with no action of its own', async () => {
+    // The red team suite is locked too, but it is not launched yet: no action.
+    hubAPI.sceneSuites.mockResolvedValue({ data: [
+      SOC, { ...AI_REDTEAM, locked: true, lockReason: 'edition' }, { ...CODE_AUDIT, locked: true, lockReason: 'edition' },
+    ] });
     renderPage();
 
     const audit = await waitFor(() => card('code-audit-workspace'));
-    expect(within(audit).getByText('sceneSuites.editionBadge')).toBeInTheDocument();
-    expect(within(audit).getByText('sceneSuites.editionHint')).toBeInTheDocument();
     expect(within(audit).queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
-    // Where to get the edition is for an extension to offer; the open build offers nothing.
+    // What to do about the lock is for an extension to offer; the open build offers nothing.
     expect(within(audit).queryByRole('link')).not.toBeInTheDocument();
     const redteam = within(card('ai-redteam-workspace'));
     expect(redteam.getByText('预计 2026年11月上线')).toBeInTheDocument();
     expect(redteam.queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
     expect(redteam.queryByRole('link')).not.toBeInTheDocument();
-    expect(redteam.queryByText('sceneSuites.editionHint')).not.toBeInTheDocument();
   });
 
   it('lets an extension offer the action on a locked suite', async () => {
@@ -187,23 +183,63 @@ describe('SceneSuitesPage', () => {
     }];
     __resetExtensionSlotCacheForTesting();
     hubAPI.sceneSuites.mockResolvedValue({ data: [
-      { ...CODE_AUDIT, editionLocked: true },
-      { ...CODE_AUDIT, id: 'threat-hunting-workspace', nameCn: '威胁狩猎场景套件', editionLocked: false, licensed: false, licenseState: 'unlicensed' },
+      { ...CODE_AUDIT, locked: true, lockReason: 'edition' },
+      { ...CODE_AUDIT, id: 'threat-hunting-workspace', nameCn: '威胁狩猎场景套件', locked: true, lockReason: 'license' },
+      SOC,
     ] });
     renderPage();
 
     const audit = await waitFor(() => card('code-audit-workspace'));
     expect(within(audit).getByRole('link', { name: 'get-edition' })).toBeInTheDocument();
-    const licensedSuite = card('threat-hunting-workspace');
-    expect(within(licensedSuite).getByRole('link', { name: 'get-license' })).toBeInTheDocument();
-    expect(within(licensedSuite).queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
+    const lockedSuite = card('threat-hunting-workspace');
+    expect(within(lockedSuite).getByRole('link', { name: 'get-license' })).toBeInTheDocument();
+    expect(within(lockedSuite).queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
+    expect(within(card('soc-workspace')).queryByRole('link')).not.toBeInTheDocument();
     expect(seen).toEqual(expect.arrayContaining([
       { suiteId: 'code-audit-workspace', reason: 'edition' },
       { suiteId: 'threat-hunting-workspace', reason: 'license' },
     ]));
   });
 
-  it('lets a licensed edition install a licensed suite', async () => {
+  it('lets an extension add badges and a notice to each suite', async () => {
+    const badges: Array<Record<string, unknown>> = [];
+    const notices: Array<Record<string, unknown>> = [];
+    extensionRegistry.slots = [
+      {
+        id: 'test-badges',
+        slot: 'sceneSuites.badges',
+        component: ({ context }) => {
+          badges.push(context);
+          const suite = context.suite as { id: string; annotations?: { note?: string } };
+          return suite.annotations?.note ? <span>{suite.annotations.note}</span> : null;
+        },
+      },
+      {
+        id: 'test-notice',
+        slot: 'sceneSuites.notice',
+        component: ({ context }) => {
+          notices.push(context);
+          return context.awaitingLaunch ? null : <p>{`notice-${(context.suite as { id: string }).id}`}</p>;
+        },
+      },
+    ];
+    __resetExtensionSlotCacheForTesting();
+    hubAPI.sceneSuites.mockResolvedValue({ data: [
+      SOC, { ...CODE_AUDIT, annotations: { note: 'from-extension' } }, AI_REDTEAM,
+    ] });
+    renderPage();
+
+    const audit = await waitFor(() => card('code-audit-workspace'));
+    expect(within(audit).getByText('from-extension')).toBeInTheDocument();
+    expect(within(audit).getByText('notice-code-audit-workspace')).toBeInTheDocument();
+    expect(within(card('ai-redteam-workspace')).queryByText('notice-ai-redteam-workspace')).not.toBeInTheDocument();
+    expect(badges.map((context) => (context.suite as { id: string }).id)).toEqual(
+      expect.arrayContaining(['soc-workspace', 'code-audit-workspace', 'ai-redteam-workspace']),
+    );
+    expect(notices.find((context) => (context.suite as { id: string }).id === 'ai-redteam-workspace')?.awaitingLaunch).toBe(true);
+  });
+
+  it('installs a suite of another edition when no extension locks it', async () => {
     const user = userEvent.setup();
     renderPage();
 
@@ -225,42 +261,17 @@ describe('SceneSuitesPage', () => {
     await waitFor(() => expect(hubAPI.sceneSuites).toHaveBeenCalledTimes(2));
   });
 
-  it('requires a licensed suite\'s own licence under its edition before it can be installed', async () => {
-    hubAPI.sceneSuites.mockResolvedValue({ data: [SOC, { ...CODE_AUDIT, editionLocked: false, licensed: false, licenseState: 'unlicensed' }] });
-    renderPage();
-
-    const audit = await waitFor(() => card('code-audit-workspace'));
-    await waitFor(() => expect(within(audit).getByText('未授权')).toBeInTheDocument());
-    expect(within(audit).getByText(/需要单独授权/)).toBeInTheDocument();
-    expect(within(audit).queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
-    expect(within(audit).queryByText('sceneSuites.editionHint')).not.toBeInTheDocument();
-  });
-
-  it('keeps uninstall, and nothing else, for an installed suite whose licence lapsed', async () => {
+  it('keeps uninstall, and nothing else, for an installed suite an extension locked', async () => {
     hubAPI.sceneSuites.mockResolvedValue({ data: [{
       ...CODE_AUDIT, installedVersion: '1.0.0', state: 'updateAvailable', workspaceEnabled: true,
-      licensed: false, licenseState: 'expired',
+      locked: true, lockReason: 'license',
     }] });
     renderPage();
 
     const audit = await waitFor(() => card('code-audit-workspace'));
-    await waitFor(() => expect(within(audit).getByText('授权已过期')).toBeInTheDocument());
-    expect(within(audit).getByRole('button', { name: '卸载' })).toBeInTheDocument();
+    await waitFor(() => expect(within(audit).getByRole('button', { name: '卸载' })).toBeInTheDocument());
     expect(within(audit).queryByRole('button', { name: '更新' })).not.toBeInTheDocument();
     expect(within(audit).queryByRole('button', { name: '停用' })).not.toBeInTheDocument();
-  });
-
-  it('shows when a licensed suite\'s own licence ends', async () => {
-    const expires = Date.UTC(2027, 0, 31, 12);
-    hubAPI.sceneSuites.mockResolvedValue({ data: [{ ...CODE_AUDIT, licensed: true, licenseState: 'commercial', licenseExpiresAt: expires }] });
-    renderPage();
-
-    const audit = await waitFor(() => card('code-audit-workspace'));
-    await waitFor(() => {
-      expect(within(audit).getByText(new RegExp(`授权至 ${new Date(expires).toLocaleDateString('zh-CN')}`))).toBeInTheDocument();
-    });
-    expect(await within(audit).findByRole('button', { name: '安装' })).toBeInTheDocument();
-    expect(within(audit).queryByText('未授权')).not.toBeInTheDocument();
   });
 
   it('shows per-component install progress while a suite installs', async () => {

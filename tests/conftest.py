@@ -247,22 +247,3 @@ def _isolate_runtime_root_from_shell(monkeypatch):
     """
     for name in ("FLOCKS_ROOT", "FLOCKS_CONFIG_DIR", "FLOCKS_DATA_DIR", "FLOCKS_WORKSPACE_DIR"):
         monkeypatch.delenv(name, raising=False)
-
-
-@pytest.fixture()
-def announced_suites():
-    """List two licensed-edition scene suites the way an extension does.
-
-    The bundled hub lists open-edition plugins only; an extension that
-    licenses suites lists them from a hub root of its own
-    (``tests/fixtures/licensed_suites_hub``), with the contents delivered
-    sealed (see tests.sealed_fakes).
-    """
-    from flocks.extensions import register_hub_root, unregister_hub_root
-
-    root = Path(__file__).parent / "fixtures" / "licensed_suites_hub"
-    register_hub_root("tests-licensed-suites", root)
-    try:
-        yield root
-    finally:
-        unregister_hub_root("tests-licensed-suites")

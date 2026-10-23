@@ -138,16 +138,13 @@ class WebUIWorkspaceListItem(BaseModel):
     # Scene suite (hub component) that ships this workspace; None for a
     # workspace no suite in the catalog knows about.
     suiteId: Optional[str] = Field(None, alias="suiteId")
-    # Whether a licensed-edition suite's own licence is in force (False also
-    # locks the workspace); None when no suite licence applies.
-    licensed: Optional[bool] = None
     # Checked into the project (<project>/.flocks/plugins/contracts/webui)
     # rather than installed into the user root.
     native: bool = False
-    # Its suite needs a licensed edition, which is not granted, or its own suite
-    # licence, which is not in force: the workspace stays installed but must
-    # not open until a licence is active again.
+    # A hub access policy locked it (flocks.hub.access): the workspace stays
+    # installed but must not open; the reason is the policy's own.
     locked: bool = False
+    lockReason: Optional[str] = Field(None, alias="lockReason")
 
 
 class WebUIPageDetail(BaseModel):

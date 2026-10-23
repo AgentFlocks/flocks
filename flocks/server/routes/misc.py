@@ -12,7 +12,6 @@ from pydantic import BaseModel
 from flocks.server.auth import require_admin
 from flocks.utils.log import Log
 from flocks.provider.provider import Provider, ProviderConfig
-from flocks.server.auth import require_admin
 from flocks.tool.skill.skill_load import get_all_skills, get_skill
 from flocks.command.command import Command
 
@@ -53,10 +52,12 @@ async def flocks_auth(request: Request) -> Dict[str, Any]:
     summary="Set provider auth",
     description="Set authentication for a provider"
 )
-async def set_provider_auth(provider_id: str, request: Request) -> Dict[str, Any]:
-    """Set provider authentication"""
-    # Overwrites the provider's runtime API key for every user: admin only.
-    require_admin(request)
+async def set_provider_auth(
+    provider_id: str,
+    request: Request,
+    _admin: object = Depends(require_admin),
+) -> Dict[str, Any]:
+    """Set provider authentication (replaces the shared runtime key, so admins only)"""
     try:
         body = await request.json()
         auth = body.get("auth", {})

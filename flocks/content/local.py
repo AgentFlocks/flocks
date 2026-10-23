@@ -56,8 +56,8 @@ def _is_safe_content_id(content_id: str) -> bool:
     An id arrives from a caller -- a model-chosen skill name, a request
     parameter -- and is substituted into a path.  ``../../etc/passwd`` has to be
     refused here rather than resolved, and a leading dot would reach hidden
-    files that are not content.  This mirrors the same check the commercial
-    core applies to the ids it is handed.
+    files that are not content.  A registered source is expected to apply the
+    same check to the ids it is handed.
     """
 
     if not content_id or len(content_id) > 200:

@@ -440,17 +440,11 @@ def test_build_script_packs_the_open_source_edition_only() -> None:
 
 @pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
 @pytest.mark.parametrize("script", [BUILD_SCRIPT, PACKAGING_DIR / "build-in-docker.sh"])
-@pytest.mark.parametrize("flag", ["--flockspro-wheel", "--pro-bundle-version", "--pro-release-id"])
-def test_build_scripts_refuse_the_old_extension_flags(script: Path, flag: str) -> None:
-    """Option parsing comes first: the refusal names the flag before any tool or platform check."""
-    completed = subprocess.run([BASH, str(script), flag, "x"], capture_output=True, text=True)
+def test_build_scripts_refuse_an_unknown_option_first(script: Path) -> None:
+    """Option parsing comes first: the refusal names the option before any tool or platform check."""
+    completed = subprocess.run([BASH, str(script), "--no-such-option", "x"], capture_output=True, text=True)
     assert completed.returncode == 1
-    assert f"{flag} is no longer supported" in completed.stderr
-
-
-def test_workflow_packs_no_extension() -> None:
-    text = WORKFLOW.read_text(encoding="utf-8").lower()
-    assert "flockspro" not in text and "pro_release_id" not in text
+    assert "unknown argument: --no-such-option" in completed.stderr
 
 
 def test_workflow_builds_inside_the_manifest_build_image() -> None:

@@ -59,16 +59,7 @@ async def test_page_reads_only_the_secrets_it_declares(runtime_store, secret_sto
         "routes:\n  - method: GET\n    path: /read\n    handler: handlers.read\nsecrets:\n  - tdp_api_key\n",
     )
     runtime_store.save_source_file("secret-page", "api/handlers.py", _HANDLERS)
-    # Declared is not enough: an administrator approves it for this code (test_page_api_approvals).
-    from flocks.contracts.webui import approvals
-
-    await approvals.set_approval(
-        "secret-page",
-        code_sha256=approvals.api_code_digest(runtime_store.routes_path("secret-page").parent),
-        secret_roles={"tdp_api_key": ["admin"]},
-        handlers_enabled=False,
-        approved_by="admin",
-    )
+    # With a policy over page code, it narrows these further (test_page_api_code).
 
     async with AsyncClient(transport=ASGITransport(app=_app(runtime_store)), base_url="http://test") as client:
         declared = await client.get("/api/contracts/webui/pages/secret-page/api/read", params={"key": "tdp_api_key"})

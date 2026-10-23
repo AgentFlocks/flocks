@@ -13,7 +13,7 @@ from flocks.server.routes.hub import _suite_workspace_id
 ROOT_NAME = "test-extension"
 
 
-def _manifest(plugin_id: str, plugin_type: str, *, components=(), entrypoints=(), edition="pro") -> dict:
+def _manifest(plugin_id: str, plugin_type: str, *, components=(), entrypoints=(), edition="acme") -> dict:
     folder = f"plugins/{plugin_type}s/{plugin_id}"
     return {
         "schemaVersion": "hub.plugin.v1",
@@ -58,7 +58,7 @@ def _write(root: Path, manifest: dict, extra_files: dict[str, str] | None = None
 def extension_root(tmp_path: Path):
     root = tmp_path / "extension-hub"
     suite = _manifest(
-        "code-audit-workspace",
+        "soc-workspace",
         "component",
         components=[{"type": "webui", "id": "ext_demo_ui"}],
         entrypoints=["component.json"],
@@ -75,7 +75,7 @@ def extension_root(tmp_path: Path):
 
 
 def test_the_earlier_listing_is_used_without_another_extension():
-    assert _suite_workspace_id("code-audit-workspace") == "code_audit_ui"
+    assert _suite_workspace_id("soc-workspace") == "soc_ui"
     assert all(item.id != "ext_demo_ui" for item in load_index().plugins)
 
 
@@ -83,28 +83,26 @@ def test_extension_replaces_an_earlier_listing_and_adds_its_packages(extension_r
     register_hub_root(ROOT_NAME, extension_root)
 
     by_key = {(item.type, item.id): item for item in load_index().plugins}
-    assert by_key[("component", "code-audit-workspace")].version == "2.0.0"
+    assert by_key[("component", "soc-workspace")].version == "2.0.0"
     assert ("webui", "ext_demo_ui") in by_key
-    # The earlier listing only names the suite: its pages come with the suite.
-    assert ("webui", "code_audit_ui") not in by_key
 
-    assert manifest_path("component", "code-audit-workspace").is_relative_to(extension_root)
-    assert [ref.id for ref in load_manifest("component", "code-audit-workspace").components] == ["ext_demo_ui"]
+    assert manifest_path("component", "soc-workspace").is_relative_to(extension_root)
+    assert [ref.id for ref in load_manifest("component", "soc-workspace").components] == ["ext_demo_ui"]
     assert plugin_root("webui", "ext_demo_ui", prefer_bundled=True) == (extension_root / "plugins/webuis/ext_demo_ui").resolve()
-    assert _suite_workspace_id("code-audit-workspace") == "ext_demo_ui"
+    assert _suite_workspace_id("soc-workspace") == "ext_demo_ui"
 
     catalog = {(entry.type, entry.id): entry for entry in list_catalog()}
-    assert catalog[("component", "code-audit-workspace")].version == "2.0.0"
-    assert catalog[("webui", "ext_demo_ui")].edition == "pro"
+    assert catalog[("component", "soc-workspace")].version == "2.0.0"
+    assert catalog[("webui", "ext_demo_ui")].edition == "acme"
 
 
 def test_unregistering_restores_the_earlier_listing(extension_root: Path):
     register_hub_root(ROOT_NAME, extension_root)
     assert unregister_hub_root(ROOT_NAME)
 
-    assert manifest_path("component", "code-audit-workspace").name == "manifest.json"
-    assert not manifest_path("component", "code-audit-workspace").is_relative_to(extension_root)
-    assert _suite_workspace_id("code-audit-workspace") == "code_audit_ui"
+    assert manifest_path("component", "soc-workspace").name == "manifest.json"
+    assert not manifest_path("component", "soc-workspace").is_relative_to(extension_root)
+    assert _suite_workspace_id("soc-workspace") == "soc_ui"
 
 
 def test_invalid_extension_index_is_ignored(tmp_path: Path):
@@ -113,7 +111,7 @@ def test_invalid_extension_index_is_ignored(tmp_path: Path):
     (broken / "index.json").write_text("{not json", encoding="utf-8")
     register_hub_root(ROOT_NAME, broken)
     try:
-        assert _suite_workspace_id("code-audit-workspace") == "code_audit_ui"
+        assert _suite_workspace_id("soc-workspace") == "soc_ui"
     finally:
         unregister_hub_root(ROOT_NAME)
 

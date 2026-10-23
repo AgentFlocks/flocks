@@ -15,10 +15,9 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from flocks.config.config import Config
-from flocks.hub import local
+from flocks.hub import local, providers
 from flocks.hub.catalog import _catalog_install_state, clear_catalog_caches, load_manifest
 from flocks.hub.custom_pages import carry_over, classify_pages
-from flocks.hub.sealed import staged_payloads
 from flocks.hub.files import plugin_root
 from flocks.hub.models import (
     HubComponentRef,
@@ -548,8 +547,8 @@ def _build_webui_pages(plugin_id: str, install_dir: Path) -> None:
     for page in pages:
         entry = store.page_dir(page.id) / store.get_page(page.id).manifest.entry
         if not entry.is_file():
-            # Shipped already built and without its source (a sealed
-            # package's pages are): the bundle is used as it is, provided it
+            # Shipped already built and without its source (a provider may
+            # ship pages that way): the bundle is used as it is, provided it
             # was built for this runtime.
             problem = prebuilt_bundle_problem(store, page.id)
             if problem is not None:
@@ -1001,10 +1000,16 @@ def _clear_device_template_cache_if_needed(plugin_type: PluginType) -> None:
         pass
 
 
+def _record_kind(plugin_type: str, plugin_id: str, manifest: HubPluginManifest) -> str:
+    if providers.staged_root(plugin_type, plugin_id) is not None:
+        return manifest.source.kind
+    return "bundled"
+
+
 async def preview_plan(plugin_type: PluginType, plugin_id: str, scope: str = "global") -> dict:
-    """The update plan for a plugin, with any sealed payload it compares
-    against unsealed for the length of the preview."""
-    async with staged_payloads(plugin_type, plugin_id):
+    """The update plan for a plugin, with the files of whatever a provider
+    delivers of it staged for the length of the preview."""
+    async with providers.operation(plugin_type, plugin_id):
         return await asyncio.to_thread(build_plan, plugin_type, plugin_id, scope)
 
 
@@ -1023,7 +1028,7 @@ async def install_plugin(
         raise PermissionError(
             f"{plugin_type} {plugin_id} is managed by the deployment; a local copy would never load"
         )
-    async with mutation_lock(), staged_payloads(plugin_type, plugin_id):
+    async with mutation_lock(), providers.operation(plugin_type, plugin_id):
         plan = build_plan(plugin_type, plugin_id, scope)
         # Block the whole operation before replacing any suite child when an
         # earlier failure left an unresolved original in a temporary backup.
@@ -1156,7 +1161,8 @@ async def _install_plugin(
             plugin_type=plugin_type,
             plugin_id=plugin_id,
             version=manifest.version,
-            source=f"{'sealed' if manifest.source.kind == 'sealed' else 'bundled'}:{manifest.source.path or ''}",
+            # A provided plugin is recorded under its own kind of source.
+            source=f"{_record_kind(plugin_type, plugin_id, manifest)}:{manifest.source.path or ''}",
             install_path=dst,
             enabled=True,
             scope=scope,

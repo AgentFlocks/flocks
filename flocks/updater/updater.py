@@ -600,7 +600,7 @@ def _install_modification_refusal() -> str | None:
     """Reason the built-in updater must not touch this installation (venv/source), else ``None``.
 
     Docker images are replaced by pulling a new image and managed release packages
-    are upgraded by the commercial core; in both cases ``uv sync`` / source
+    are upgraded by the supervisor that manages them; in both cases ``uv sync`` / source
     replacement from inside the runtime would corrupt the deployment. Offline
     installations are allowed through: a release shipped with the package is
     installed from disk (see ``perform_update(release=...)``).

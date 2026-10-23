@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -19,14 +19,8 @@ from flocks.hub.catalog import (
     load_taxonomy,
 )
 from flocks.hub.files import file_tree, read_file_content
+from flocks.hub import access as hub_access
 from flocks.hub.installer import install_plugin, preview_plan, uninstall_plugin, update_plugin
-from flocks.hub.suite_license import (
-    clear_page_suite_cache,
-    edition_status,
-    install_decision,
-    licensed_edition_active,
-    suite_license,
-)
 from flocks.hub.update_protection import UpdateConfirmationRequired, public_plan
 from flocks.hub.models import (
     HubCatalogEntry,
@@ -35,9 +29,7 @@ from flocks.hub.models import (
     HubInstallProgressEvent,
     HubPluginManifest,
     InstalledPluginRecord,
-    OPEN_EDITION,
     PluginType,
-    edition_needs_licence,
 )
 from flocks.server.auth import require_admin, require_user
 from flocks.utils.log import Log
@@ -92,7 +84,7 @@ def _guard_legacy_removed_plugin(plugin_type: PluginType, plugin_id: str) -> Non
 
 
 def _clear_hub_runtime_caches() -> None:
-    clear_page_suite_cache()
+    hub_access.contents_changed()
     clear_catalog_caches()
     try:
         from flocks.tool.device.plugin_index import clear_device_template_cache
@@ -246,7 +238,7 @@ class SceneSuiteEntry(BaseModel):
     descriptionCn: Optional[str] = None
     version: str = "0.0.0"
     installedVersion: Optional[str] = None
-    edition: str = OPEN_EDITION
+    edition: str = "oss"
     state: str = "available"
     workspaceId: Optional[str] = None
     workspaceTitle: Optional[str] = None
@@ -256,16 +248,12 @@ class SceneSuiteEntry(BaseModel):
     # there while the suite version itself has not moved.
     workspaceVersion: Optional[str] = None
     workspaceLatestVersion: Optional[str] = None
-    # A licensed-edition suite's own licence (each one is licensed separately),
-    # when the registered licence checker licenses suites. None for an
-    # open-edition suite and under the built-in checker.
-    licensed: Optional[bool] = None
-    licenseState: Optional[str] = None
-    licenseExpiresAt: Optional[int] = None  # epoch ms; None when it does not expire
-    # A licensed-edition suite while the platform licence does not grant that
-    # edition: it is listed but cannot be installed (install_decision refuses
-    # it with "edition_required"). None for an open-edition suite.
-    editionLocked: Optional[bool] = None
+    # Filled in by a hub access policy (flocks.hub.access), when one is
+    # registered: a locked suite is listed but does not install; what else
+    # the policy knows about it is for its own part of the page.
+    locked: Optional[bool] = None
+    lockReason: Optional[str] = None
+    annotations: dict[str, Any] = Field(default_factory=dict)
 
 
 def _suite_workspace_id(plugin_id: str) -> Optional[str]:
@@ -283,32 +271,7 @@ def _suite_workspace_id(plugin_id: str) -> Optional[str]:
 async def hub_scene_suites(_user: object = Depends(require_user)):
     """Scene suites with the same install state exposed in the Hub catalog."""
     suites = await asyncio.to_thread(_load_scene_suites)
-    return await _attach_suite_licenses(suites)
-
-
-async def _attach_suite_licenses(suites: list[SceneSuiteEntry]) -> list[SceneSuiteEntry]:
-    """Fill in each licensed-edition suite's edition lock and its own licence verdict."""
-    licensed = [suite for suite in suites if edition_needs_licence(suite.edition)]
-    if not licensed:
-        return suites
-    if not licensed_edition_active(await edition_status()):
-        # The same test install_decision applies: without the edition no
-        # licensed suite installs, whatever its own licence says.
-        return [
-            suite.model_copy(update={"editionLocked": True}) if edition_needs_licence(suite.edition) else suite
-            for suite in suites
-        ]
-    verdicts = await asyncio.gather(*(suite_license(suite.id) for suite in licensed))
-    by_id = {suite.id: verdict for suite, verdict in zip(licensed, verdicts)}
-    return [
-        suite.model_copy(update={
-            "editionLocked": False,
-            "licensed": by_id[suite.id].licensed,
-            "licenseState": by_id[suite.id].state,
-            "licenseExpiresAt": by_id[suite.id].expires_at,
-        }) if suite.id in by_id else suite
-        for suite in suites
-    ]
+    return await hub_access.decorate_scene_suites(suites)
 
 
 def _load_scene_suites() -> list[SceneSuiteEntry]:
@@ -346,15 +309,15 @@ def _load_scene_suites() -> list[SceneSuiteEntry]:
                 workspaceLatestVersion=child.version if child is not None else None,
             )
         )
-    suites.sort(key=lambda item: (item.edition != OPEN_EDITION, item.id))
+    suites.sort(key=lambda item: (item.edition != "oss", item.id))
     return suites
 
 
 async def _publish_scene_suites_changed(plugin_type: PluginType, plugin_id: str, action: str) -> None:
     from flocks.server.routes.event import publish_event
 
-    # Which pages belong to a licensed suite may have changed with this action.
-    clear_page_suite_cache()
+    # What a hub access policy decided about this content may have changed with this action.
+    hub_access.contents_changed()
     try:
         suite_ids = [plugin_id] if plugin_type == "component" else []
         if plugin_type != "component":
@@ -392,19 +355,11 @@ def _guard_guided_install(plugin_type: PluginType, plugin_id: str) -> None:
     )
 
 
-async def _assert_edition_allowed(plugin_type: PluginType, plugin_id: str) -> None:
-    """Licensed-edition suites stay listed in the catalog but only install
-    while the platform licence grants their edition, and each such suite only
-    with its own suite licence."""
-    decision = await install_decision(plugin_type, plugin_id)
-    if decision.allowed:
-        return
-    if decision.reason == "edition_required":
-        raise HTTPException(
-            status_code=403,
-            detail="该套件需要授权后才能安装，请先在系统设置中完成授权。",
-        )
-    raise HTTPException(status_code=403, detail=decision.message)
+async def _assert_install_allowed(plugin_type: PluginType, plugin_id: str) -> None:
+    """A registered hub access policy may refuse an install or update (flocks.hub.access)."""
+    refusal = await hub_access.install_refusal(plugin_type, plugin_id)
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
 
 
 @router.post("/hub/plugins/{plugin_type}/{plugin_id}/install", response_model=InstalledPluginRecord)
@@ -416,7 +371,7 @@ async def hub_install_plugin(
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
     _guard_guided_install(plugin_type, plugin_id)
-    await _assert_edition_allowed(plugin_type, plugin_id)
+    await _assert_install_allowed(plugin_type, plugin_id)
     try:
         return await install_plugin(plugin_type, plugin_id, scope=req.scope)
     except UpdateConfirmationRequired as exc:
@@ -437,7 +392,7 @@ async def hub_install_plugin_stream(
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
     _guard_guided_install(plugin_type, plugin_id)
-    await _assert_edition_allowed(plugin_type, plugin_id)
+    await _assert_install_allowed(plugin_type, plugin_id)
     if plugin_type != "component":
         raise HTTPException(status_code=400, detail="Streaming install progress is only supported for components.")
     try:
@@ -493,7 +448,7 @@ async def hub_preview_update(
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
     _guard_guided_install(plugin_type, plugin_id)
-    await _assert_edition_allowed(plugin_type, plugin_id)
+    await _assert_install_allowed(plugin_type, plugin_id)
     try:
         return public_plan(await preview_plan(plugin_type, plugin_id, req.scope))
     except Exception as exc:
@@ -509,7 +464,7 @@ async def hub_update_plugin(
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
     _guard_guided_install(plugin_type, plugin_id)
-    await _assert_edition_allowed(plugin_type, plugin_id)
+    await _assert_install_allowed(plugin_type, plugin_id)
     try:
         return await update_plugin(plugin_type, plugin_id, scope=req.scope,
                                    confirmation_token=req.confirmationToken, confirm_changes=req.confirmChanges)

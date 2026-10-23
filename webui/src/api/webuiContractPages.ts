@@ -47,10 +47,10 @@ export interface WebUIContractWorkspaceListItem {
   pages: WebUIContractPageListItem[];
   /** Scene suite that ships the workspace; the API only lists scenes that have one. */
   suiteId?: string | null;
-  /** The suite needs a licence that is not active: it stays installed but cannot open. */
+  /** An extension locked it: it stays installed but cannot open. */
   locked?: boolean;
-  /** Whether a suite's own licence is in force (false also locks it); null when no suite licence applies. */
-  licensed?: boolean | null;
+  /** The extension's own reason, handed to its `workspace.lockedNotice` component. */
+  lockReason?: string | null;
 }
 
 export interface WebUIContractPageManifest {

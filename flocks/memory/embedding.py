@@ -9,10 +9,9 @@ provider is a local / private-network endpoint, so an extension can apply its
 outbound rules only where they matter.  With no handler registered nothing
 changes.
 
-The default provider choice is local too (``local`` in the memory config):
-only providers whose endpoint is on this host or a private network qualify,
-and an external provider is used only when configured by name or with
-``auto``.
+The provider is ``auto`` by default (openai, then google, as configured);
+``local`` in the memory config takes only providers whose endpoint is on this
+host or a private network.
 """
 
 from __future__ import annotations

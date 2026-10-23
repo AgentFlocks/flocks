@@ -404,8 +404,8 @@ export default function UpdateModal({
                 deployment usually cannot reach the update server at all, and the answer to
                 "how do I upgrade" is the .run either way. */}
             {info?.update_allowed === false && info.deploy_mode === 'managed' && (
-              // Managed (commercial-core supervised) install: the core owns
-              // package upgrades, so the Docker guidance would be misleading.
+              // Managed install: its supervisor owns package upgrades, so the
+              // Docker guidance would be misleading.
               <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-700">
                 <div className="flex items-center gap-1.5 font-medium">
                   <ShieldCheck className="w-4 h-4 flex-shrink-0" />

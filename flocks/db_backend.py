@@ -9,8 +9,11 @@ reimplements, the module that takes its place.  A replaced package takes its
 submodules with it.
 
 A backend replaces exactly the names in :data:`REPLACEABLE_MODULES`.  That
-list is the whole surface a backend takes over; a backend naming anything else,
-or leaving any of them out, stops the process rather than run half-replaced.  The entry point
+list is the whole surface a backend takes over; a backend naming another module
+the runtime has, or leaving any of them out, stops the process rather than run
+half-replaced.  A backend may also bring modules of its own under ``flocks``
+names the runtime does not have (outside every replaced module), for code that
+imports them by those names; that replaces nothing.  The entry point
 is loaded while ``flocks`` itself is still being imported, so the module it
 names should hold the mapping and little else.
 
@@ -63,19 +66,14 @@ SQLITE = "sqlite"
 #: quietly stop checking.  A package listed here is replaced whole, submodules
 #: included; a backend cannot name a submodule on its own.
 REPLACEABLE_MODULES: frozenset[str] = frozenset({
-    # The PostgreSQL runtime itself, for code that imports it by these names.
-    "flocks.db",
-    "flocks.runtime_state",
     # Storage: key-value documents, transcript search, memory vectors, shared files.
     "flocks.storage.storage",
     "flocks.storage.session_search",
     "flocks.storage.vector",
     "flocks.storage.file_mirror",
-    "flocks.storage.file_backfill",
     # Sessions, their messages and who runs them.
     "flocks.session.session",
     "flocks.session.message",
-    "flocks.session.message_pages",
     "flocks.session.ownership",
     "flocks.session.turn_receipt",
     "flocks.session.agent_policy",
@@ -91,11 +89,9 @@ REPLACEABLE_MODULES: frozenset[str] = frozenset({
     "flocks.workflow.execution_store",
     "flocks.workflow.poller_manager",
     "flocks.workflow.ownership",
-    "flocks.workflow.soc_store",
     # Memory index and notes shared between nodes.
     "flocks.memory.sync.indexer",
     "flocks.memory.sync.mirror",
-    "flocks.memory.sync.ownership",
     "flocks.memory.evolution.common",
     # Retention.
     "flocks.retention.cleanup",
@@ -111,7 +107,6 @@ REPLACEABLE_MODULES: frozenset[str] = frozenset({
     "flocks.tool.device.startup",
     "flocks.tool.device.sync",
     "flocks.contracts.access.driver",
-    "flocks.contracts.webui.approvals",
     "flocks.cli.commands.import_",
     # What processes sharing the database agree on (single-process answers here).
     "flocks.coordination",
@@ -231,13 +226,29 @@ def _distribution(entry: importlib.metadata.EntryPoint) -> str:
     return f"{dist.metadata['Name']}=={dist.version}"
 
 
+#: The runtime's own package, read from the disk: nothing here may import any of it early.
+_PACKAGE_DIR = Path(__file__).resolve().parent
+
+
+def _added_module(name: str) -> bool:
+    """Whether a backend may bring *name* as a module of its own: a ``flocks``
+    name the runtime has no module or package for, outside every replaced module."""
+    parts = name.split(".")
+    if len(parts) < 2 or parts[0] != "flocks" or not all(part.isidentifier() for part in parts[1:]):
+        return False
+    if name in REPLACEABLE_MODULES or any(name.startswith(replaced + ".") for replaced in REPLACEABLE_MODULES):
+        return False
+    path = _PACKAGE_DIR.joinpath(*parts[1:])
+    return not (path.with_suffix(".py").exists() or path.is_dir())
+
+
 def _replacements(backend: str, provider: Any) -> dict[str, str]:
     modules = getattr(provider, "modules", None)
     if not isinstance(modules, Mapping):
         raise BackendConfigurationError(f"The {backend!r} database backend does not say which modules it replaces")
     replacements: dict[str, str] = {}
     for name, target in modules.items():
-        if name not in REPLACEABLE_MODULES:
+        if name not in REPLACEABLE_MODULES and not _added_module(name):
             raise BackendConfigurationError(
                 f"The {backend!r} database backend wants to replace {name!r}, which is not a replaceable runtime module"
             )

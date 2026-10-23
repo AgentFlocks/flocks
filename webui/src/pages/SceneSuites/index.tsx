@@ -1,16 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import {
-  AlertCircle,
-  ArrowUpCircle,
-  Download,
-  Loader2,
-  Power,
-  RefreshCw,
-  Trash2,
-} from 'lucide-react';
-import { editionNeedsLicence, hubAPI, type HubInstallProgressEvent, type HubSceneSuite } from '@/api/hub';
+import { AlertCircle, ArrowUpCircle, Download, Loader2, Power, RefreshCw, Trash2 } from 'lucide-react';
+import { hubAPI, type HubInstallProgressEvent, type HubSceneSuite } from '@/api/hub';
 import SuiteInstallProgressPanel, {
   applySuiteInstallProgressEvent,
   createSuiteInstallProgressState,
@@ -46,21 +38,6 @@ const TEXT = {
     incompatible: '不兼容',
     localOnly: '仅本地',
     disabled: '已停用',
-    licenseState: {
-      unlicensed: '未授权',
-      expired: '授权已过期',
-      revoked: '授权已吊销',
-      not_yet_valid: '授权未生效',
-      machine_mismatch: '授权不属于本机',
-      watermark_mismatch: '授权与版本不符',
-      clock_rollback: '系统时间异常',
-      platform_inactive: '平台授权未生效',
-      unavailable: '授权状态未知',
-    } as Record<string, string>,
-    licenseGrace: '授权宽限期',
-    licensedUntil: '授权至 {date}',
-    licensedNoExpiry: '已授权',
-    licenseHint: '这个场景套件需要单独授权。把本机申请码发给授权负责人，拿到授权文件后在「场景套件授权」中导入即可，不需要联网。',
     currentVersion: '已装 v{v}',
     latestVersion: '最新 v{v}',
     pagesVersion: '场景页面 v{installed} → v{latest}',
@@ -99,21 +76,6 @@ const TEXT = {
     incompatible: 'Incompatible',
     localOnly: 'Local only',
     disabled: 'Disabled',
-    licenseState: {
-      unlicensed: 'Not licensed',
-      expired: 'Licence expired',
-      revoked: 'Licence revoked',
-      not_yet_valid: 'Licence not yet valid',
-      machine_mismatch: 'Licensed to another machine',
-      watermark_mismatch: 'Licensed to another build',
-      clock_rollback: 'System clock is behind',
-      platform_inactive: 'Platform licence inactive',
-      unavailable: 'Licence status unknown',
-    } as Record<string, string>,
-    licenseGrace: 'Licence in grace period',
-    licensedUntil: 'licensed until {date}',
-    licensedNoExpiry: 'licensed',
-    licenseHint: 'This scene suite is licensed on its own. Send this install\'s activation code to your licence contact, then import the licence file under Suite licences. No network connection is needed.',
     currentVersion: 'installed v{v}',
     latestVersion: 'latest v{v}',
     pagesVersion: 'scene pages v{installed} → v{latest}',
@@ -177,14 +139,8 @@ function suiteDescription(suite: HubSceneSuite, zh: boolean): string {
   return (zh && suite.descriptionCn) ? suite.descriptionCn : suite.description;
 }
 
-function licenseDate(ms: number, zh: boolean): string {
-  return new Date(ms).toLocaleDateString(zh ? 'zh-CN' : 'en-US');
-}
-
 export default function SceneSuitesPage() {
   const { i18n } = useTranslation('nav');
-  // Edition wording comes from the up-front bundle an extension may override.
-  const { t: tScene } = useTranslation('webuiContractPage');
   const zh = i18n.language.toLowerCase().startsWith('zh');
   const text = zh ? TEXT.zh : TEXT.en;
   const toast = useToast();
@@ -334,7 +290,7 @@ export default function SceneSuitesPage() {
           type="button"
           onClick={() => void refetch()}
           disabled={busyId !== null}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900 shrink-0"
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
         >
           <RefreshCw aria-hidden="true" className="h-4 w-4" />
           {text.refresh}
@@ -354,11 +310,9 @@ export default function SceneSuitesPage() {
 
       <div className="space-y-3">
         {orderedSuites.map((suite) => {
-          // The server says whether this install has the edition the suite
-          // needs (the same test its install refusal applies).
-          const editionLocked = suite.editionLocked === true;
-          // With the edition, each licensed-edition suite still needs its own licence.
-          const licenseLocked = !editionLocked && editionNeedsLicence(suite.edition) && suite.licensed === false;
+          // An extension's hub access policy may lock a suite: it is listed but
+          // does not install; what to do about it is the extension's to say.
+          const locked = suite.locked === true;
           const isPartial = suite.state === 'partial';
           const isInstalled = isPartial || suite.state === 'installed' || suite.state === 'updateAvailable' || suite.state === 'localOnly';
           const awaitingLaunch = suite.id === 'ai-redteam-workspace' && (!isInstalled || isPartial);
@@ -386,21 +340,7 @@ export default function SceneSuitesPage() {
                     <span className="rounded border border-zinc-200 px-1.5 py-0.5 text-[11px] font-medium text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
                       {stateLabel[suite.state] ?? suite.state}
                     </span>
-                    {editionNeedsLicence(suite.edition) && (
-                      <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
-                        {tScene('sceneSuites.editionBadge')}
-                      </span>
-                    )}
-                    {licenseLocked && (
-                      <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
-                        {text.licenseState[suite.licenseState ?? 'unlicensed'] ?? text.licenseState.unlicensed}
-                      </span>
-                    )}
-                    {!editionLocked && suite.licensed === true && suite.licenseState === 'grace' && (
-                      <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
-                        {text.licenseGrace}
-                      </span>
-                    )}
+                    <ExtensionSlot name="sceneSuites.badges" context={{ suite }} />
                     {isInstalled && suite.workspaceEnabled === false && (
                       <span className="rounded border border-zinc-300 px-1.5 py-0.5 text-[11px] font-medium text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
                         {text.disabled}
@@ -411,14 +351,6 @@ export default function SceneSuitesPage() {
                   <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
                     {suite.installedVersion ? text.currentVersion.replace('{v}', suite.installedVersion) + ' · ' : ''}
                     {text.latestVersion.replace('{v}', suite.version)}
-                    {!editionLocked && suite.licensed === true && (
-                      <>
-                        {' · '}
-                        {suite.licenseExpiresAt
-                          ? text.licensedUntil.replace('{date}', licenseDate(suite.licenseExpiresAt, zh))
-                          : text.licensedNoExpiry}
-                      </>
-                    )}
                     {pagesBehind && (
                       <>
                         {' · '}
@@ -428,12 +360,7 @@ export default function SceneSuitesPage() {
                       </>
                     )}
                   </p>
-                  {editionLocked && !awaitingLaunch && (
-                    <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{tScene('sceneSuites.editionHint')}</p>
-                  )}
-                  {licenseLocked && !awaitingLaunch && (
-                    <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{text.licenseHint}</p>
-                  )}
+                  <ExtensionSlot name="sceneSuites.notice" context={{ suite, awaitingLaunch }} />
                   {isPartial && !awaitingLaunch && (
                     <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">
                       {hasWorkspace ? text.partialWorkspace : text.partialSuite}
@@ -451,15 +378,12 @@ export default function SceneSuitesPage() {
                     <p className="py-1.5 text-sm font-medium text-zinc-500 dark:text-zinc-400">
                       {text.redteamLaunch}
                     </p>
-                  ) : editionLocked ? (
-                    // Where to get the edition is the licensing extension's to say.
-                    <ExtensionSlot name="sceneSuites.lockedAction" context={{ suiteId: suite.id, reason: 'edition' }} />
                   ) : (
                     <>
-                      {licenseLocked && (
-                        <ExtensionSlot name="sceneSuites.lockedAction" context={{ suiteId: suite.id, reason: 'license' }} />
+                      {locked && (
+                        <ExtensionSlot name="sceneSuites.lockedAction" context={{ suiteId: suite.id, reason: suite.lockReason ?? null }} />
                       )}
-                      {!licenseLocked && (!isInstalled || isPartial) && (
+                      {!locked && (!isInstalled || isPartial) && (
                         <button
                           type="button"
                           disabled={busyId !== null}
@@ -470,7 +394,7 @@ export default function SceneSuitesPage() {
                           {isPartial ? text.completeInstall : text.install}
                         </button>
                       )}
-                      {!licenseLocked && suite.state === 'updateAvailable' && (
+                      {!locked && suite.state === 'updateAvailable' && (
                         <button
                           type="button"
                           disabled={busyId !== null}
@@ -481,7 +405,7 @@ export default function SceneSuitesPage() {
                           {text.update}
                         </button>
                       )}
-                      {!licenseLocked && isInstalled && suite.workspaceId && hasWorkspace && (
+                      {!locked && isInstalled && suite.workspaceId && hasWorkspace && (
                         <button
                           type="button"
                           disabled={busyId !== null}

@@ -26,20 +26,18 @@ _MAX_PREVIEW_BYTES = 512_000
 
 def plugin_root(plugin_type: PluginType, plugin_id: str, *, prefer_bundled: bool = False) -> Path:
     from flocks.hub.catalog import manifest_path, system_plugin_root
-    from flocks.hub.sealed import delivered_sealed, staged_root
+    from flocks.hub.providers import claimed, staged_root
 
     if prefer_bundled:
-        # The release payload of a sealed plugin exists only while an
-        # operation has it unsealed; outside one there is nothing to install
-        # from: not the bundled listing of it (if any), nor -- while the
-        # sources cannot answer -- another listing of an id a hub listing
-        # announces as sealed.
+        # The release files of a plugin a provider delivers exist only while
+        # an operation has them staged; outside one there is nothing to
+        # install from: not a hub root's listing of it, if any.
         staged = staged_root(plugin_type, plugin_id)
         if staged is not None:
             return staged.resolve()
-        if delivered_sealed(plugin_type, plugin_id):
+        if claimed(plugin_type, plugin_id):
             raise FileNotFoundError(
-                f"{plugin_type} {plugin_id} is delivered sealed; its payload exists only while it is being installed"
+                f"{plugin_type} {plugin_id} is delivered by an extension; its files exist only while it is being installed"
             )
 
     published_manifest = manifest_path(plugin_type, plugin_id)
@@ -88,23 +86,23 @@ def _node(path: Path, base: Path) -> HubFileNode:
 def _preview_root(plugin_type: PluginType, plugin_id: str) -> Path:
     """What a preview shows: the plugin as it is delivered.
 
-    A plugin delivered sealed has no readable payload outside an install (the
-    unsealed copy, while one runs) or a local install of it; a listing of the
-    same id elsewhere -- an extension's sources, the listing announcing it --
-    is not that plugin, and is not shown in its place.
+    A plugin an extension delivers (flocks.hub.providers) has no readable
+    files outside an operation (the staged copy, while one runs) or a local
+    install of it; a listing of the same id elsewhere is not that plugin, and
+    is not shown in its place.
     """
     from flocks.hub.catalog import _system_plugin_roots
-    from flocks.hub.sealed import delivered_sealed, staged_root
+    from flocks.hub.providers import claimed, staged_root
 
     staged = staged_root(plugin_type, plugin_id)
     if staged is not None:
         return staged.resolve()
-    if delivered_sealed(plugin_type, plugin_id):
+    if claimed(plugin_type, plugin_id):
         # A local install only, not a bundled copy of the same id.
         installed = _system_plugin_roots().get((plugin_type, plugin_id))
         if installed is not None:
             return installed.resolve()
-        raise FileNotFoundError(f"{plugin_type} {plugin_id} is delivered sealed; there is nothing to preview")
+        raise FileNotFoundError(f"{plugin_type} {plugin_id} is delivered by an extension; there is nothing to preview")
     return plugin_root(plugin_type, plugin_id)
 
 

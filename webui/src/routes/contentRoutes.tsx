@@ -90,15 +90,8 @@ function extensionRouteObject(route: (typeof extensionRoutes)[number]): RouteObj
   };
 }
 
-/** Extension pages that render inside the main layout (one keep-alive pane each). */
-export const appExtensionRoutes: RouteObject[] = extensionRoutes
-  .filter((route) => route.layout !== 'bare')
-  .map(extensionRouteObject);
-
-/** Extension pages that render without the layout (full-page flows). */
-export const bareExtensionRoutes: RouteObject[] = extensionRoutes
-  .filter((route) => route.layout === 'bare')
-  .map(extensionRouteObject);
+/** Extension pages, inside the main layout (one keep-alive pane each). */
+export const appExtensionRoutes: RouteObject[] = extensionRoutes.map(extensionRouteObject);
 
 export function LegacyWebUIContractPageRedirect() {
   const params = useParams();

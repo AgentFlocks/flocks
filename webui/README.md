@@ -42,7 +42,7 @@ bun run preview
 - **Zustand** - 状态管理
 - **Axios** - HTTP 客户端
 - **@xyflow/react** - 工作流 DAG 可视化
-- **lucide-react** - 图标库
+- **Lucide React** - 图标库
 
 ## 项目结构
 
@@ -59,10 +59,6 @@ src/
 ├── config/        # 配置
 └── styles/        # 样式文件
 ```
-
-## 界面规范
-
-界面样式以 flocksdev 的 dev 分支为准：页面直接写 Tailwind 默认色板类（`bg-white`、`text-gray-500`、`border-gray-200`…），深色模式由 `src/styles/index.css` 里的 `.dark` 兼容表和 `dark:` 变体处理，图标用 `lucide-react`。新页面照 dev 里同类页面的写法来。`src/styles/tokens.css` 的语义变量和 `index.css` 末尾的 `ui-*` 类只留给 dev 没有的界面（扩展注册的页面等），取值已对齐 dev 配色。
 
 ## 开发规范
 

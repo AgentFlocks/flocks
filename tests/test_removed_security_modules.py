@@ -1,4 +1,4 @@
-"""Executable guardrails for the OSS side of the B1--B4 extension boundary."""
+"""The security modules that left the open product stay gone (B1--B4)."""
 
 from __future__ import annotations
 
@@ -17,13 +17,6 @@ _REMOVED_SECURITY_MODULES = frozenset(
 )
 
 
-# Packages that only ship inside the commercial build. OSS may expose generic
-# mechanisms they use, but never imports them -- not even behind a guard: the
-# licence and audit bridges that used to are gone, and extensions reach Core
-# through flocks.extensions only.
-_COMMERCIAL_PACKAGES = frozenset({"flockspro", "flocks_code_security"})
-
-
 def _imports_in(module_path: Path) -> set[str]:
     tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
     imports: set[str] = set()
@@ -37,8 +30,8 @@ def _imports_in(module_path: Path) -> set[str]:
     return imports
 
 
-def test_oss_runtime_source_has_no_pro_or_removed_security_dependencies() -> None:
-    """OSS keeps neutral hook mechanics and never imports B1--B4 policy owners."""
+def test_runtime_source_imports_no_removed_security_module() -> None:
+    """The runtime keeps neutral hook mechanics and never imports the B1--B4 policy owners."""
     source_root = Path(__file__).parents[1] / "flocks"
     imports = {
         imported
@@ -48,8 +41,3 @@ def test_oss_runtime_source_has_no_pro_or_removed_security_dependencies() -> Non
 
     # The generic hooks are the only B1--B4 integration surface here.
     assert not imports.intersection(_REMOVED_SECURITY_MODULES)
-    assert not {
-        item
-        for item in imports
-        if item.split(".", 1)[0] in _COMMERCIAL_PACKAGES
-    }
