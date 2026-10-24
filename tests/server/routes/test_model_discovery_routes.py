@@ -401,6 +401,24 @@ def test_legacy_provider_keeps_automatic_catalog_sync(inventory):
     assert set(saved(inventory)["provider"]["openai"]["models"]) == expected
 
 
+@pytest.mark.asyncio
+async def test_manual_inventory_leaves_a_model_id_another_provider_publishes_with_it(inventory):
+    """A deployment named like another provider's model must not take over that model's routing."""
+    from flocks.provider.provider import ModelInfo
+    from flocks.provider.sdk.azure import AzureProvider
+
+    openai_model = ModelInfo(id="gpt-5.4", name="GPT-5.4", provider_id="openai")
+    Provider._models["gpt-5.4"] = openai_model
+    Provider._providers["azure"] = AzureProvider()
+    models = {"gpt-5.4": {"name": "Azure deployment"}, "deployment-private": {"name": "Private Deployment"}}
+    config = SimpleNamespace(provider={"azure": ProviderConfig.model_validate({"models": models, "model_sync": "manual"})})
+
+    await inventory.actual_apply_config(config)
+
+    assert Provider._models["gpt-5.4"] is openai_model
+    assert Provider._models["deployment-private"].provider_id == "azure"
+
+
 @pytest.mark.parametrize("models", [{}, {"deployment-private": {"name": "Private Deployment"}}])
 def test_manual_azure_inventory_survives_runtime_reconstruction(models, inventory):
     from flocks.provider.sdk.azure import AzureProvider

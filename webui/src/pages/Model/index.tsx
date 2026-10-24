@@ -1357,6 +1357,8 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   // Model selection (for catalog providers)
   const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
   const [discoveryImportResult, setDiscoveryImportResult] = useState<ModelImportResult | null>(null);
+  // What the last import submitted, Azure deployments typed by hand included: retries pick from it.
+  const lastImportCandidates = useRef<DiscoveredModel[]>([]);
   const [discoveryReady, setDiscoveryReady] = useState(true);
 
   // State
@@ -1433,6 +1435,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   // Save — catalog provider (transitions to next wizard step instead of closing)
   const importSelectedModels = async (providerId: string, models = discoveredModels): Promise<ModelImportResult | null> => {
     if (!models.length) return null;
+    lastImportCandidates.current = models;
     let result: ModelImportResult;
     try {
       result = (await providerAPI.importModels(providerId, models.map(toModelImport))).data;
@@ -1852,7 +1855,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                   if (saving) return;
                   setSaving(true);
                   const failedIds = new Set(discoveryImportResult.failed.map(item => item.id));
-                  try { await importSelectedModels(savedProviderId, discoveredModels.filter(model => failedIds.has(model.id))); }
+                  try { await importSelectedModels(savedProviderId, lastImportCandidates.current.filter(model => failedIds.has(model.id))); }
                   finally { setSaving(false); }
                 }} className="rounded-lg border border-amber-300 px-3 py-2 text-sm text-amber-800 disabled:opacity-50">{saving ? t('discovery.importing') : t('discovery.retryFailed')}</button>
               )}
@@ -2324,6 +2327,9 @@ function ConfigureProviderDialog({ provider, existingCredentials, loadingModels,
   const { t } = useTranslation('model');
   const toast = useToast();
   const [apiKey, setApiKey] = useState(existingCredentials?.api_key ?? '');
+  // The key shown when the dialog opened. Saving sends a key only when it differs:
+  // sending this one back would undo a rotation made elsewhere in the meantime.
+  const [openedApiKey] = useState(() => (existingCredentials?.api_key ?? '').trim());
   const [baseUrl, setBaseUrl] = useState(existingCredentials?.base_url ?? '');
   const [name, setName] = useState(provider.name);
   const [showKey, setShowKey] = useState(false);
@@ -2341,7 +2347,12 @@ function ConfigureProviderDialog({ provider, existingCredentials, loadingModels,
     lock.current = true; setSaving(true); setSaveError(null);
     let credentialsSaved = false;
     try {
-      await providerAPI.setCredentials(provider.id, { ...credentials, provider_name: custom ? name.trim() || undefined : undefined, skip_catalog_bootstrap: true });
+      await providerAPI.setCredentials(provider.id, {
+        ...credentials,
+        api_key: credentials.api_key !== openedApiKey ? credentials.api_key : undefined,
+        provider_name: custom ? name.trim() || undefined : undefined,
+        skip_catalog_bootstrap: true,
+      });
       credentialsSaved = true;
       await providerAPI.saveModelInventory(provider.id, inventory);
       onModelsChanged(); toast.success(t('credentialsSaved')); onConfigured();
