@@ -19,6 +19,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -1301,8 +1302,9 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     """Handle validation errors"""
     # ``exc.errors()`` echoes the offending ``input`` back; for a malformed
     # body that is raw ``bytes``, which ``JSONResponse`` cannot serialise and
-    # would turn this 422 into a 500.  Encode it first.
-    details = jsonable_encoder(exc.errors())
+    # would turn this 422 into a 500.  Encode it first (an exception in an
+    # error's ``ctx`` by its message).
+    details = jsonable_encoder(exc.errors(), custom_encoder={Exception: str})
     log.warning("validation.error", {
         "path": request.url.path,
         "errors": details,
@@ -1387,6 +1389,7 @@ app.add_middleware(_DeferredCORSMiddleware)
 from flocks.server.routes.health import router as health_router, public_router as public_health_router
 from flocks.server.routes.session import router as session_router
 from flocks.server.routes.provider import router as provider_router
+from flocks.server.routes.model_discovery import router as model_discovery_router
 from flocks.server.routes.config import router as config_router
 from flocks.server.routes.project import router as project_router
 from flocks.server.routes.file import router as file_router
@@ -1454,6 +1457,7 @@ app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(public_health_router, tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
 app.include_router(provider_router, prefix="/api/provider", tags=["Provider"])
+app.include_router(model_discovery_router, prefix="/api/provider", tags=["Provider"])
 app.include_router(model_router, prefix="/api/model", tags=["Model"])
 app.include_router(config_router, prefix="/api/config", tags=["Config"])
 app.include_router(project_router, prefix="/api/project", tags=["Project"])

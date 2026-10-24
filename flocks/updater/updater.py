@@ -568,8 +568,13 @@ def _dependency_sync_timeout_seconds() -> int:
 
 
 def _build_dependency_sync_command(uv_path: str, *, uv_default_index: str | None = None) -> list[str]:
-    """Build the ``uv sync`` command used by the self-updater."""
-    cmd = [uv_path, "sync", "--no-python-downloads"]
+    """Build the ``uv sync`` command used by the self-updater.
+
+    ``--inexact`` keeps packages that are not in the lock file: the upgrade reuses
+    the existing ``.venv``, and libraries the user (or Rex) installed into it for
+    tools and workflows must survive the update. A plain ``uv sync`` removes them.
+    """
+    cmd = [uv_path, "sync", "--inexact", "--no-python-downloads"]
     if uv_default_index:
         cmd.extend(["--default-index", uv_default_index])
     return cmd
@@ -1480,10 +1485,14 @@ def _venv_python_path(install_root: Path) -> Path:
 
 
 def _build_prebuilt_dependency_sync_command(uv_path: str, wheels_dir: Path) -> list[str]:
-    """Build the offline ``uv sync`` used when a prebuilt bundle ships dependency wheels."""
+    """Build the offline ``uv sync`` used when a prebuilt bundle ships dependency wheels.
+
+    ``--inexact`` for the same reason as the online sync: keep user-installed packages.
+    """
     return [
         uv_path,
         "sync",
+        "--inexact",
         "--frozen",
         "--offline",
         "--no-python-downloads",

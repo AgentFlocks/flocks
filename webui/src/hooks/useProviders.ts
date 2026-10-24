@@ -57,10 +57,8 @@ const providersResource = createSharedResource<ProvidersResourceData>({
     const response = await providerAPI.list();
     return normalizeProvidersPayload(response.data);
   },
-  fallbackDataOnError: {
-    providers: [],
-    connectedIds: [],
-  },
+  // A failed background refresh must not discard the inventory already shown.
+  fallbackDataOnError: (previous) => previous,
   getErrorMessage: (err) => (err instanceof Error && err.message ? err.message : 'Failed to fetch providers'),
 });
 

@@ -458,6 +458,26 @@ const REFRESH_INTERVAL_MS: Record<RefreshKey, number> = {
 };
 
 const DEFAULT_TIME_RANGE: TimeRangeKey = '7d';
+
+// Inline SVG colours get no dark mapping from the host, so they read these instead.
+const THEME_CSS = `
+[data-soc-alerts-root] {
+  --soc-alerts-chart-grid: #dbe3ef;
+  --soc-alerts-chart-axis: #475569;
+  --soc-alerts-chart-label: #475569;
+  --soc-alerts-stamp-band: #fff;
+}
+.dark [data-soc-alerts-root] {
+  --soc-alerts-chart-grid: rgb(var(--ui-border, 74 85 99));
+  --soc-alerts-chart-axis: rgb(var(--ui-control, 125 135 148));
+  --soc-alerts-chart-label: rgb(var(--ui-muted, 161 172 184));
+  --soc-alerts-stamp-band: rgb(var(--ui-surface, 48 56 66));
+}
+`;
+const CHART_GRID_STYLE = { stroke: 'var(--soc-alerts-chart-grid, #dbe3ef)' };
+const CHART_AXIS_STYLE = { stroke: 'var(--soc-alerts-chart-axis, #475569)' };
+const CHART_LABEL_STYLE = { fill: 'var(--soc-alerts-chart-label, #475569)' };
+
 const PAGE_SIZE = 50;
 const QUERY_LIMIT = 10000;
 const ALERT_TABLE_COLUMN_WIDTH = 220;
@@ -1606,6 +1626,7 @@ export default function SocAlertsPage() {
   const timeline = useMemo(() => buildTimeline(filteredIncidents, resolveTimeWindow(appliedTimeFilter)), [appliedTimeFilter, filteredIncidents]);
   return (
     <div className="relative min-h-full overflow-y-auto bg-[#f5f7fb] text-slate-900" style={{ isolation: 'isolate' }} data-soc-alerts-root="true">
+      <style>{THEME_CSS}</style>
       {openMenu && <button type="button" aria-label={tr('关闭筛选菜单')} className="absolute inset-0 cursor-default" style={{ zIndex: 5 }} onClick={() => setOpenMenu(null)} />}
       <div className="relative border-b border-slate-200 bg-white" style={{ zIndex: 10 }}>
         <div className="px-6 py-4">
@@ -1818,7 +1839,7 @@ function TimelineChart({ buckets, tr }: { buckets: TimelineBucket[]; tr: Transla
         onMouseLeave={() => setActiveBucket(null)}
       >
         {[plotTop, plotMiddle, plotBottom].map((y) => (
-          <line key={y} x1={plotLeft} x2={chartWidth - plotRight} y1={y} y2={y} stroke="#dbe3ef" strokeWidth="1" />
+          <line key={y} x1={plotLeft} x2={chartWidth - plotRight} y1={y} y2={y} style={CHART_GRID_STYLE} strokeWidth="1" />
         ))}
         {buckets.map((bucket, index) => {
           const x = xForIndex(index);
@@ -1842,15 +1863,15 @@ function TimelineChart({ buckets, tr }: { buckets: TimelineBucket[]; tr: Transla
             </g>
           );
         })}
-        <line x1={plotLeft} x2={chartWidth - plotRight} y1={plotBottom} y2={plotBottom} stroke="#475569" strokeWidth="1" />
-        <text x="8" y={plotTop + 4} fontSize="11" fill="#475569">{formatNumber(maxValue)}</text>
-        <text x="8" y={plotMiddle + 4} fontSize="11" fill="#475569">{formatNumber(midValue)}</text>
-        <text x="22" y={plotBottom + 4} fontSize="11" fill="#475569">0</text>
+        <line x1={plotLeft} x2={chartWidth - plotRight} y1={plotBottom} y2={plotBottom} style={CHART_AXIS_STYLE} strokeWidth="1" />
+        <text x="8" y={plotTop + 4} fontSize="11" style={CHART_LABEL_STYLE}>{formatNumber(maxValue)}</text>
+        <text x="8" y={plotMiddle + 4} fontSize="11" style={CHART_LABEL_STYLE}>{formatNumber(midValue)}</text>
+        <text x="22" y={plotBottom + 4} fontSize="11" style={CHART_LABEL_STYLE}>0</text>
         {labelIndexes.map((bucketIndex, labelIndex) => {
           const bucket = buckets[bucketIndex];
           const anchor = labelIndex === 0 ? 'start' : labelIndex === labelIndexes.length - 1 ? 'end' : 'middle';
           return (
-            <text key={`${bucket.label}-label-${bucketIndex}`} x={xForIndex(bucketIndex)} y={chartHeight - 4} fontSize="11" fill="#475569" textAnchor={anchor}>{bucket.label}</text>
+            <text key={`${bucket.label}-label-${bucketIndex}`} x={xForIndex(bucketIndex)} y={chartHeight - 4} fontSize="11" style={CHART_LABEL_STYLE} textAnchor={anchor}>{bucket.label}</text>
           );
         })}
       </svg>
@@ -2476,7 +2497,7 @@ function AttackResultStamp({ bucket, tr }: { bucket: 'success' | 'failed' | 'unk
             <text x="130" y="149" style={{ fontSize: 18 }}>★</text>
             <text x="147" y="145" style={{ fontSize: 13 }}>★</text>
           </g>
-          <path d="M32 78 H228 V122 H32 Z" fill="#fff" strokeWidth="5.2" />
+          <path d="M32 78 H228 V122 H32 Z" style={{ fill: 'var(--soc-alerts-stamp-band, #fff)' }} strokeWidth="5.2" />
           <path d="M42 88 H218" opacity="0.36" strokeWidth="2" />
           <path d="M42 112 H218" opacity="0.36" strokeWidth="2" />
           <text

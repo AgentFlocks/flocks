@@ -1854,6 +1854,7 @@ class ProviderCredentialRequest(BaseModel):
     username: Optional[str] = Field(None, description="Optional username for API services")
     fields: Optional[Dict[str, Optional[str]]] = Field(None, description="Dynamic service credential fields")
     provider_name: Optional[str] = Field(None, description="Display name for the provider")
+    skip_catalog_bootstrap: bool = Field(False, description="Keep the model inventory explicitly managed instead of adding catalog defaults")
 
 
 class ProviderCredentialResponse(BaseModel):
@@ -2003,7 +2004,7 @@ async def set_provider_credentials(
         # the existing secret" so callers can safely update only the base URL
         # or model selection without receiving the original key back first.
         api_key_optional = (
-            provider_id == "openai-compatible" or provider_id.startswith("custom-")
+            provider_id in {"openai-compatible", "cherry", "ollama", "local"} or provider_id.startswith("custom-")
         )
         _validated_base_url(request.base_url)
         if (
@@ -2073,7 +2074,12 @@ async def set_provider_credentials(
         if raw_provider:
             # ThreatBook onboarding may precede catalog sync on first run or
             # upgrade. Other providers keep their model list when rotating keys.
-            if not preserve_existing_secret and provider_id in _THREATBOOK_LLM_PROVIDER_IDS:
+            if (
+                not preserve_existing_secret
+                and not request.skip_catalog_bootstrap
+                and raw_provider.get("model_sync") != "manual"
+                and provider_id in _THREATBOOK_LLM_PROVIDER_IDS
+            ):
                 from flocks.provider.model_catalog import get_provider_model_definitions
 
                 existing_models = raw_provider.get("models") or {}
@@ -2101,6 +2107,8 @@ async def set_provider_credentials(
                 ConfigWriter.update_provider_field(
                     provider_id, "name", request.provider_name
                 )
+            if request.skip_catalog_bootstrap:
+                ConfigWriter.update_provider_field(provider_id, "model_sync", "manual")
         else:
             # Provider not yet in flocks.json — create a minimal entry, but only
             # for ids the system actually knows (catalog / registered SDK
@@ -2149,6 +2157,10 @@ async def set_provider_credentials(
                 base_url=effective_base_url,
                 models=models,
             )
+            if request.skip_catalog_bootstrap:
+                models = {}
+                config_dict["models"] = {}
+                config_dict["model_sync"] = "manual"
             if request.provider_name:
                 config_dict["name"] = request.provider_name
             ConfigWriter.add_provider(provider_id, config_dict)
@@ -2182,6 +2194,8 @@ async def set_provider_credentials(
             # Update display name if provided
             if request.provider_name:
                 provider.name = request.provider_name
+            if request.skip_catalog_bootstrap:
+                await Provider.apply_config(await Config.get(), provider_id=provider_id)
 
 
         log.info("provider.credentials.set", {
@@ -2677,6 +2691,9 @@ async def _prepare_isolated_provider(provider: BaseProvider) -> BaseProvider:
     if settings is not None:
         provider._config_models = []
         Provider.apply_provider_config(provider, settings)
+
+    if getattr(provider, "_model_sync_manual", False):
+        return provider
 
     # Backfill even a nonempty list: an upgrade can introduce the onboarding
     # default before the background catalog sync has reached this provider.

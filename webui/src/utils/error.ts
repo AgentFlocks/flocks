@@ -18,11 +18,15 @@ export function extractErrorMessage(err: unknown, fallback = '操作失败'): st
   const asMessage = (value: unknown): string | undefined => (
     typeof value === 'string' && value.trim() ? value : undefined
   );
-  const detail = e?.response?.data?.detail;
+  const data = e?.response?.data;
+  const detail = data?.error === 'ValidationError' && Array.isArray(data.details) ? data.details : data?.detail;
   if (Array.isArray(detail)) {
     const msgs = detail.map((d: any) => {
       const message = asMessage(d) || asMessage(d?.msg);
-      if (message) return message;
+      if (message) {
+        const field = Array.isArray(d?.loc) ? d.loc.filter((part: unknown) => part !== 'body').join('.') : '';
+        return field ? `${field}: ${message}` : message;
+      }
       try {
         return d == null ? undefined : JSON.stringify(d);
       } catch {

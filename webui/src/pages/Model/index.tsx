@@ -24,7 +24,9 @@ import {
   providerAPI, modelV2API, usageAPI,
   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
 } from '@/api/provider';
-import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
+import ProviderKeyCheck from './ProviderKeyCheck';
+import ProviderCatalogPicker from './ProviderCatalogPicker';
+import ModelDiscovery, { ModelImportSummary, toModelImport } from './ModelDiscovery';
 import TokenUsageCard from './TokenUsageCard';
 import { formatPricePerMillion, formatPricingPerMillion, formatPricingTierRange, isPricingFree } from '@/utils/modelPricing';
 import { extractErrorMessage } from '@/utils/error';
@@ -36,9 +38,9 @@ import {
 } from './usageDisplay';
 import type {
   ProviderCredentials, ModelDefinitionV2, UsageStats,
-  CatalogProvider, CatalogModel, CatalogCredentialField, ModelSettingV2,
+  CatalogProvider, CatalogCredentialField, ModelSettingV2,
   CustomModelCreate, ProviderCredentialInput, FallbackModelRef,
-  PriceConfigV2,
+  DiscoveredModel, ModelImportResult, ModelInventoryDraft, PriceConfigV2,
 } from '@/types';
 
 // ==================== Provider Auth Helpers ====================
@@ -153,6 +155,7 @@ export default function ModelPage() {
   // Dialog states
   const [showAddProvider, setShowAddProvider] = useState(false);
   const [showAddModel, setShowAddModel] = useState(false);
+  const [addModelMethod, setAddModelMethod] = useState<'automatic' | 'manual'>('automatic');
   const [selectedModelForDetail, setSelectedModelForDetail] = useState<{ provider: EnrichedProvider; model: ModelDefinitionV2 } | null>(null);
 
   // Model enabled/disabled states (maps "provider/model" -> enabled)
@@ -254,17 +257,16 @@ export default function ModelPage() {
         m => m.provider_id === dm.provider_id && m.id === dm.model_id
       );
 
-      if (isValid) {
-        setDefaultModel(dm);
-      } else {
+      // Viewing this page must never mutate routing configuration. Keep an
+      // unavailable default visible so an administrator can change it explicitly.
+      setDefaultModel(dm);
+      if (!isValid) {
         const modelLabel = `${dm.provider_id} / ${dm.model_id}`;
         if (isAdminRef.current) {
           toast.warning(t('dashboard.defaultModelInvalid', { model: modelLabel }));
-          defaultModelAPI.delete('llm').catch(() => {});
         } else {
           toast.warning(t('dashboard.defaultModelInvalidMember', { model: modelLabel }));
         }
-        setDefaultModel(null);
       }
     }).catch(() => {
       // Keep the current default model when model definitions cannot be loaded.
@@ -319,11 +321,14 @@ export default function ModelPage() {
 
   const handleSelectProvider = useCallback(async (provider: EnrichedProvider) => {
     const requestSeq = ++providerLoadSeqRef.current;
+    const switchingProvider = selectedProviderRef.current?.id !== provider.id;
     setSelectedProvider(provider);
     selectedProviderRef.current = provider;
     sessionStorage.setItem('model_page_selected_provider', provider.id);
-    setCredentials(null);
-    setProviderModels([]);
+    if (switchingProvider) {
+      setCredentials(null);
+      setProviderModels([]);
+    }
     setLoadingModels(true);
 
     try {
@@ -437,6 +442,7 @@ export default function ModelPage() {
     try {
       await modelSettingsAPI.update(providerId, modelId, { enabled });
       setModelEnabledMap(prev => ({ ...prev, [key]: enabled }));
+      void refreshModelRouting();
       toast.success(enabled ? t('modelEnabled') : t('modelDisabled'), modelId);
     } catch (err: any) {
       toast.error(t('operationFailed'), err.message);
@@ -465,14 +471,25 @@ export default function ModelPage() {
     }
   }, [providers, pendingSelectId, loading]);
 
+  const refreshModelRouting = useCallback(async () => {
+    const [defaultResult, modelsResult] = await Promise.allSettled([
+      defaultModelAPI.getResolved(),
+      modelV2API.listDefinitions({ enabled_only: true }),
+      loadFallbackModels(),
+    ]);
+    if (defaultResult.status === 'fulfilled') setDefaultModel(defaultResult.value.data);
+    else if (defaultResult.reason?.response?.status === 404) setDefaultModel(null);
+    if (modelsResult.status === 'fulfilled') setAvailableRoutingModels(modelsResult.value.data.models || []);
+  }, [loadFallbackModels]);
+
   const handleModelCreated = useCallback(() => {
-    // Creating the first model may also set the default on the server.
-    defaultModelAPI.getResolved().then(r => setDefaultModel(r.data)).catch(() => {});
+    // Manual additions and explicit model changes may affect routing references.
+    void refreshModelRouting();
     if (selectedProvider) {
       handleSelectProvider(selectedProvider);
     }
     refetch();
-  }, [selectedProvider, refetch]);
+  }, [selectedProvider, refetch, refreshModelRouting]);
 
   const handleDeleteModel = async (modelId: string) => {
     if (!selectedProvider) return;
@@ -494,6 +511,8 @@ export default function ModelPage() {
         toast.success(t('defaultModelCleared'));
       }
 
+      await refreshModelRouting();
+
       if (selectedProvider) {
         handleSelectProvider(selectedProvider);
       }
@@ -505,7 +524,7 @@ export default function ModelPage() {
 
   // ==================== Render ====================
 
-  if (loading) {
+  if (loading && providers.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
         <LoadingSpinner delayMs={180} />
@@ -513,13 +532,13 @@ export default function ModelPage() {
     );
   }
 
-  if (error) {
+  if (error && providers.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
           <p className="text-red-600 mb-4">{error}</p>
           <button onClick={refetch} className="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-900">
-            {t('form.retry')}
+            {t('providerList.retry')}
           </button>
         </div>
       </div>
@@ -527,7 +546,7 @@ export default function ModelPage() {
   }
 
   return (
-    <div className="h-full flex flex-col overflow-y-auto">
+    <div className="h-full flex flex-col overflow-y-auto" aria-busy={loading}>
       {/* Header */}
       <PageHeader
         title={t('pageTitle')}
@@ -546,7 +565,7 @@ export default function ModelPage() {
             )}
             {isAdmin && selectedProvider && (
               <button
-                onClick={() => setShowAddModel(true)}
+                onClick={() => { setAddModelMethod('automatic'); setShowAddModel(true); }}
                 className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
               >
                 <Plus className="w-4 h-4" />
@@ -556,6 +575,13 @@ export default function ModelPage() {
           </div>
         }
       />
+
+      {error && (
+        <div role="alert" className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <span>{t('providerList.refreshFailed', { error })}</span>
+          <button type="button" onClick={refetch} disabled={loading} className="shrink-0 rounded border border-amber-300 px-2 py-1 text-xs hover:bg-amber-100 disabled:opacity-50">{t('providerList.retry')}</button>
+        </div>
+      )}
 
       {/* Dashboard Strip */}
       <DashboardStrip
@@ -572,11 +598,11 @@ export default function ModelPage() {
         onEditFallbacks={isAdmin ? () => setShowFallbackModelsDialog(true) : undefined}
       />
 
-      {/* Main Content: Provider List + Detail Panel (phones: list above the detail) */}
-      <div className="flex gap-3 flex-1 overflow-hidden min-h-[18rem] max-md:flex-col max-md:overflow-visible">
+      {/* Main Content: Provider List + Detail Panel */}
+      <div className="flex flex-col md:flex-row gap-3 flex-1 overflow-hidden min-h-[18rem]">
         {/* Provider List */}
-        <div className="w-64 flex-shrink-0 flex flex-col min-w-0 max-md:w-full">
-          <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 max-md:max-h-64 max-md:pr-0">
+        <div className="w-full md:w-64 max-h-40 md:max-h-none flex-shrink-0 flex flex-col min-w-0">
+          <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
             {configuredProviders.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mb-3">
@@ -625,7 +651,7 @@ export default function ModelPage() {
         </div>
 
         {/* Detail Panel */}
-        <div className="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+        <div className="flex-1 min-h-0 min-w-0 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
           {selectedProvider ? (
             <ProviderDetail
               key={selectedProvider.id}
@@ -662,9 +688,18 @@ export default function ModelPage() {
       {/* Dialogs */}
       {showConfigDialog && selectedProvider && (
         <ConfigureProviderDialog
+          key={selectedProvider.id}
           provider={selectedProvider}
           existingCredentials={credentials}
           models={providerModels}
+          loadingModels={loadingModels}
+          modelEnabledMap={modelEnabledMap}
+          defaultModelId={defaultModel?.provider_id === selectedProvider.id ? defaultModel.model_id : undefined}
+          onAddModel={() => { setAddModelMethod('manual'); setShowAddModel(true); }}
+          onEditModel={(model) => setSelectedModelForDetail({ provider: selectedProvider, model })}
+          onToggleModel={(modelId, enabled) => handleToggleModel(selectedProvider.id, modelId, enabled)}
+          onDeleteModel={handleDeleteModel}
+          onModelsChanged={handleModelCreated}
           onClose={() => {
             setShowConfigDialog(false);
             setCredentials(null);
@@ -701,7 +736,10 @@ export default function ModelPage() {
 
       {showAddModel && selectedProvider && (
         <AddModelDialog
+          initialMethod={addModelMethod}
           provider={selectedProvider}
+          models={providerModels}
+          loadingModels={loadingModels}
           onClose={() => setShowAddModel(false)}
           onCreated={handleModelCreated}
         />
@@ -715,6 +753,7 @@ export default function ModelPage() {
           onClose={() => setSelectedModelForDetail(null)}
           onSaved={() => {
             setSelectedModelForDetail(null);
+            void refreshModelRouting();
             if (selectedProvider && selectedProvider.id === selectedModelForDetail.provider.id) {
               handleSelectProvider(selectedProvider);
             }
@@ -973,6 +1012,10 @@ function ProviderDetail({
   const [batchTesting, setBatchTesting] = useState(false);
 
   const batchResultsRef = useRef<Record<string, ModelTestStatus>>({});
+  const enabledModels = useMemo(
+    () => models.filter(model => modelEnabledMap[`${provider.id}/${model.id}`] !== false),
+    [models, modelEnabledMap, provider.id],
+  );
 
   const handleTestSingleModel = async (modelId: string): Promise<ModelTestStatus> => {
     setModelTestStatus(prev => ({ ...prev, [modelId]: { status: 'testing' } }));
@@ -996,10 +1039,6 @@ function ProviderDetail({
   };
 
   const handleBatchTest = async () => {
-    const enabledModels = models.filter(m => {
-      const key = `${provider.id}/${m.id}`;
-      return modelEnabledMap[key] !== false;
-    });
     if (enabledModels.length === 0) {
       toast.warning(t('form.noModelsToTest'));
       return;
@@ -1036,16 +1075,17 @@ function ProviderDetail({
     }
   };
 
-  const testedCount = Object.values(modelTestStatus).filter(s => s.status === 'success' || s.status === 'failed').length;
-  const successCount = Object.values(modelTestStatus).filter(s => s.status === 'success').length;
-  const failedCount = Object.values(modelTestStatus).filter(s => s.status === 'failed').length;
+  const visibleTestStatuses = enabledModels.map(model => modelTestStatus[model.id]);
+  const testedCount = visibleTestStatuses.filter(s => s?.status === 'success' || s?.status === 'failed').length;
+  const successCount = visibleTestStatuses.filter(s => s?.status === 'success').length;
+  const failedCount = visibleTestStatuses.filter(s => s?.status === 'failed').length;
 
   return (
     <div className="h-full flex flex-col">
       <div className="flex-1 overflow-y-auto px-4 py-3">
         <div className="flex items-center justify-between gap-3 mb-2">
           <h3 className="text-sm font-medium text-gray-800 shrink-0">
-            {t('detail.modelList')}{!loadingModels && <span className="text-gray-400 font-normal"> ({models.length})</span>}
+            {t('detail.modelList')}{!loadingModels && <span className="text-gray-400 font-normal"> ({enabledModels.length})</span>}
           </h3>
           <div className="flex items-center gap-1.5 shrink-0">
             {testedCount > 0 && (
@@ -1054,7 +1094,7 @@ function ProviderDetail({
                 {failedCount > 0 && <span className="text-red-600 ml-1">{failedCount} {t('detail.failed')}</span>}
                 {batchTesting && (
                   <span className="text-red-600 ml-1">
-                    {t('detail.testing')} {testedCount}/{models.filter(m => modelEnabledMap[`${provider.id}/${m.id}`] !== false).length}
+                    {t('detail.testing')} {testedCount}/{enabledModels.length}
                   </span>
                 )}
               </span>
@@ -1062,7 +1102,7 @@ function ProviderDetail({
             {!canEdit && <span className="text-[11px] text-gray-400">{t('detail.configAdminOnly')}</span>}
             <button
               onClick={handleBatchTest}
-              disabled={batchTesting || loadingModels || models.length === 0}
+              disabled={batchTesting || loadingModels || enabledModels.length === 0}
               className="flex items-center gap-1 px-2 py-1 text-xs border border-gray-300 text-gray-600 rounded hover:border-slate-400 hover:text-slate-800 hover:bg-slate-50 disabled:opacity-50"
             >
               {batchTesting ? <Loader2 className="w-3 h-3 animate-spin" /> : <TestTube className="w-3 h-3" />}
@@ -1075,7 +1115,7 @@ function ProviderDetail({
           <div className="flex items-center justify-center py-8">
             <LoadingSpinner />
           </div>
-        ) : models.length === 0 ? (
+        ) : enabledModels.length === 0 ? (
           <EmptyState
             icon={<Brain className="w-10 h-10" />}
             title={t('detail.noModels')}
@@ -1085,18 +1125,16 @@ function ProviderDetail({
           />
         ) : (
           <div className="space-y-1.5">
-            {models.map((model) => {
-              const key = `${provider.id}/${model.id}`;
-              const enabled = modelEnabledMap[key] !== false;
+            {enabledModels.map((model) => {
               return (
                 <ModelCard
                   key={model.id}
                   model={model}
-                  enabled={enabled}
+                  enabled
                   testStatus={modelTestStatus[model.id]}
                   onOpenDetail={onOpenModelDetail ? () => onOpenModelDetail(model) : undefined}
                   onTestModel={() => handleTestSingleModel(model.id)}
-                  onToggle={onToggleModel ? () => onToggleModel(provider.id, model.id, !enabled) : undefined}
+                  onToggle={onToggleModel ? () => onToggleModel(provider.id, model.id, false) : undefined}
                   onDelete={onDeleteModel ? () => onDeleteModel(model.id) : undefined}
                 />
               );
@@ -1300,11 +1338,11 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   // Catalog data
   const [catalog, setCatalog] = useState<CatalogProvider[]>([]);
   const [loadingCatalog, setLoadingCatalog] = useState(true);
+  const [catalogFailed, setCatalogFailed] = useState(false);
 
   // Selected provider (catalog tab)
   const [selectedCatalogId, setSelectedCatalogId] = useState<string>('');
-  const [showDropdown, setShowDropdown] = useState(false);
-  const [dropdownSearch, setDropdownSearch] = useState('');
+  const [showProviderPicker, setShowProviderPicker] = useState(true);
 
   // Shared form fields
   const [displayName, setDisplayName] = useState('');
@@ -1317,12 +1355,12 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   const [azureDeploymentDisplayName, setAzureDeploymentDisplayName] = useState('');
 
   // Model selection (for catalog providers)
-  const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set());
+  const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
+  const [discoveryImportResult, setDiscoveryImportResult] = useState<ModelImportResult | null>(null);
+  const [discoveryReady, setDiscoveryReady] = useState(true);
 
   // State
   const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // ── Wizard step management ──
   const [step, setStep] = useState<'provider' | 'success' | 'add-model'>('provider');
@@ -1336,17 +1374,14 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   const [modelTestResult, setModelTestResult] = useState<{ success: boolean; message: string; latency?: number } | null>(null);
   const [modelTesting, setModelTesting] = useState(false);
 
-  // Load catalog
-  useEffect(() => {
-    catalogAPI.list()
-      .then(res => {
-        setCatalog(res.data.providers || []);
-      })
-      .catch(() => {
-        toast.error(t('form.loadFailed'));
-      })
-      .finally(() => setLoadingCatalog(false));
+  const loadCatalog = useCallback(async () => {
+    setLoadingCatalog(true);
+    setCatalogFailed(false);
+    try { setCatalog((await catalogAPI.list()).data.providers || []); }
+    catch { setCatalogFailed(true); }
+    finally { setLoadingCatalog(false); }
   }, []);
+  useEffect(() => { void loadCatalog(); }, [loadCatalog]);
 
   // Connected set for uniqueness check
   const connectedSet = useMemo(() => new Set(connectedIds), [connectedIds]);
@@ -1360,16 +1395,6 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       return 0;
     });
   }, [catalog, connectedSet]);
-
-  // Filtered dropdown items
-  const filteredDropdownItems = useMemo(() => {
-    if (!dropdownSearch.trim()) return availableProviders;
-    const q = dropdownSearch.toLowerCase();
-    return availableProviders.filter(p =>
-      p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q) ||
-      (p.description || '').toLowerCase().includes(q)
-    );
-  }, [availableProviders, dropdownSearch]);
 
   // Selected catalog provider
   const selectedCatalog = useMemo(
@@ -1386,10 +1411,12 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
 
   // Auto-fill when selecting a catalog provider
   const handleSelectCatalogProvider = (providerId: string) => {
+    setShowProviderPicker(false);
+    if (providerId === selectedCatalogId) return;
     setSelectedCatalogId(providerId);
-    setShowDropdown(false);
-    setDropdownSearch('');
-    setTestResult(null);
+    setDiscoveredModels([]);
+    setDiscoveryImportResult(null);
+    setDiscoveryReady(true);
 
     const provider = catalog.find(p => p.id === providerId);
     if (provider) {
@@ -1397,65 +1424,28 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       setBaseUrl(provider.default_base_url || '');
       setApiKey('');
       setDescription(provider.description || '');
-      setSelectedModelIds(new Set(provider.models.map(m => m.id)));
       setProviderName('');
       setAzureDeploymentName('');
       setAzureDeploymentDisplayName('');
     }
   };
 
-  // Toggle model selection
-  const handleToggleModel = (modelId: string) => {
-    setSelectedModelIds(prev => {
-      const next = new Set(prev);
-      if (next.has(modelId)) next.delete(modelId); else next.add(modelId);
-      return next;
-    });
-  };
-
-  // Select/deselect all models
-  const handleToggleAllModels = () => {
-    if (!selectedCatalog) return;
-    if (selectedModelIds.size === selectedCatalog.models.length) {
-      setSelectedModelIds(new Set());
-    } else {
-      setSelectedModelIds(new Set(selectedCatalog.models.map(m => m.id)));
-    }
-  };
-
-  // Test credentials
-  const handleTest = async () => {
-    if (selectedCatalogId === 'openai-compatible') {
-      toast.info(t('form.compatCreateFirst'));
-      return;
-    }
-    if (!apiKey.trim() && !providerAllowsEmptyApiKey(selectedCatalogId)) {
-      toast.warning(t('form.apiKeyRequiredFirst'));
-      return;
-    }
-    try {
-      setTesting(true);
-      setTestResult(null);
-      await providerAPI.setCredentials(selectedCatalogId, {
-        api_key: apiKey.trim(),
-        base_url: baseUrl.trim() || undefined,
-        provider_name: selectedCatalogId === 'openai-compatible' && providerName.trim() ? providerName.trim() : undefined,
-      });
-      const azureModelId = isAzureProviderId(selectedCatalogId) ? azureDeploymentName.trim() : '';
-      const res = await providerAPI.testCredentials(selectedCatalogId, azureModelId || undefined);
-      setTestResult({
-        success: res.data.success,
-        message: res.data.message || (res.data.success ? t('status.connected') : t('form.testFailed')),
-      });
-    } catch (err: any) {
-      setTestResult({ success: false, message: err.response?.data?.detail || err.message });
-    } finally {
-      setTesting(false);
-    }
-  };
-
   // Save — catalog provider (transitions to next wizard step instead of closing)
+  const importSelectedModels = async (providerId: string, models = discoveredModels): Promise<ModelImportResult | null> => {
+    if (!models.length) return null;
+    let result: ModelImportResult;
+    try {
+      result = (await providerAPI.importModels(providerId, models.map(toModelImport))).data;
+    } catch (importError) {
+      result = { added: [], skipped: [], failed: models.map(model => ({ id: model.id, error: extractErrorMessage(importError) })) };
+    }
+    setDiscoveryImportResult(result);
+    setAddedModelCount(count => count + result.added.length);
+    return result;
+  };
+
   const handleSaveCatalog = async () => {
+    if (saving || !discoveryReady) return;
     if (!selectedCatalogId) { toast.warning(t('form.selectProviderRequired')); return; }
     if (selectedCatalogId === 'openai-compatible' && !providerName.trim()) {
       toast.warning(t('form.providerNameRequired'));
@@ -1470,10 +1460,6 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       return;
     }
     const azureModelId = isAzureProviderId(selectedCatalogId) ? azureDeploymentName.trim() : '';
-    if (isAzureProviderId(selectedCatalogId) && selectedModelIds.size === 0 && !azureModelId) {
-      toast.warning(t('form.azureDeploymentRequired'));
-      return;
-    }
     try {
       setSaving(true);
       if (selectedCatalogId === 'openai-compatible') {
@@ -1482,36 +1468,29 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
           base_url: baseUrl.trim(),
           api_key: apiKey.trim() || 'not-needed',
           description: description.trim() || selectedCatalog?.description || undefined,
+          skip_catalog_bootstrap: true,
         });
         toast.success(t('providerAdded'), providerName.trim());
         setSavedProviderId(created.data.id);
         setSavedProviderName(providerName.trim());
-        setStep('add-model');
+        await importSelectedModels(created.data.id);
+        setStep('success');
         return;
       }
 
       await providerAPI.setCredentials(selectedCatalogId, {
         api_key: apiKey.trim() || 'not-needed',
         base_url: baseUrl.trim() || undefined,
+        skip_catalog_bootstrap: true,
       });
-      if (selectedCatalog) {
-        const unselected = selectedCatalog.models.filter(m => !selectedModelIds.has(m.id)).map(m => m.id);
-        await Promise.all(unselected.map(id => modelV2API.deleteDefinition(selectedCatalogId, id).catch(() => {})));
-      }
+      const selectedCandidates = [...discoveredModels];
       if (azureModelId) {
-        await modelV2API.createDefinition(selectedCatalogId, {
-          model_id: azureModelId,
-          name: azureDeploymentDisplayName.trim() || azureModelId,
+        if (!selectedCandidates.some(model => model.id === azureModelId)) selectedCandidates.push({
+          id: azureModelId, name: azureDeploymentDisplayName.trim() || azureModelId,
+          already_added: false, selectable: true,
         });
-        try {
-          const res = await providerAPI.testCredentials(selectedCatalogId, azureModelId);
-          if (!res.data.success) {
-            toast.warning(t('form.testFailed'), res.data.error || res.data.message);
-          }
-        } catch (testErr: any) {
-          toast.warning(t('form.testFailed'), testErr.response?.data?.detail || testErr.message);
-        }
       }
+      await importSelectedModels(selectedCatalogId, selectedCandidates);
       toast.success(t('providerAdded'), displayName);
       setSavedProviderId(selectedCatalogId);
       setSavedProviderName(displayName);
@@ -1578,20 +1557,23 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     setModelTesting(false);
   };
 
-  const canSave = !!selectedCatalogId && (
+  const canSave = !showProviderPicker && !!selectedCatalogId && (
     selectedCatalogId !== 'openai-compatible' ||
     (!!providerName.trim() && !!baseUrl.trim())
   );
-  const canTest = !!selectedCatalogId && selectedCatalogId !== 'openai-compatible';
+  const pendingModelCount = new Set([
+    ...discoveredModels.map(model => model.id),
+    ...(isAzureProviderId(selectedCatalogId) && azureDeploymentName.trim() ? [azureDeploymentName.trim()] : []),
+  ]).size;
 
   // Dynamic EntitySheet props based on wizard step
   const getSheetProps = () => {
     switch (step) {
       case 'provider':
         return {
-          submitDisabled: !canSave,
-          submitLoading: saving || testing,
-          submitLabel: t('form.save'),
+          submitDisabled: !canSave || saving || !discoveryReady,
+          submitLoading: saving,
+          submitLabel: t(pendingModelCount > 0 ? 'wizard.saveAndAddModels' : 'wizard.saveProvider', { count: pendingModelCount }),
           onSubmit: handleSave,
           footerLeft: undefined as React.ReactNode,
         };
@@ -1674,7 +1656,10 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     <EntitySheet
       open
       mode="create"
-      entityType={step === 'add-model' ? 'Custom Model' : t('form.model')}
+      entityType={step === 'add-model' ? t('form.model') : t('configuration.provider')}
+      width={720}
+      minWidth={360}
+      maxWidth={960}
       entityName={step !== 'provider' ? savedProviderName : undefined}
       icon={<Brain className="w-5 h-5" />}
       rexSystemContext={rexContext}
@@ -1685,294 +1670,161 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       onClose={handleWizardClose}
       onSubmit={sheetProps.onSubmit}
       footerLeft={sheetProps.footerLeft}
+      hideRex={step !== 'add-model'}
+      hideTest
       initialTab="form"
     >
       {/* ── Step 1: Provider Configuration ── */}
       {step === 'provider' && (
         <div className="space-y-0">
           <div className="space-y-5">
-            {loadingCatalog ? (
-                <div className="flex items-center justify-center py-12"><LoadingSpinner /></div>
-              ) : (
-                <>
-                  {/* Provider Selector Dropdown */}
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                      {t('form.providerType')} <span className="text-slate-500">*</span>
-                    </label>
-                    <div className="relative">
-                      <button
-                        type="button"
-                        onClick={() => setShowDropdown(!showDropdown)}
-                        className="w-full flex items-center justify-between px-3 py-2.5 border border-gray-300 rounded-lg text-left text-sm hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-slate-400 bg-white"
-                      >
-                        {selectedCatalog ? (
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium">{selectedCatalog.name}</span>
-                            <span className="text-gray-400 text-xs">
-                              {t('status.models', { count: selectedCatalog.model_count })}
-                            </span>
-                            {connectedSet.has(selectedCatalog.id) && !selectedCatalog.allow_multiple && (
-                              <span className="text-amber-600 text-xs">({t('form.alreadyAdded')})</span>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-gray-400">{t('form.selectProvider')}</span>
-                        )}
-                        <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${showDropdown ? 'rotate-180' : ''}`} />
-                      </button>
+            {showProviderPicker || !selectedCatalog ? (
+              <ProviderCatalogPicker
+                providers={availableProviders}
+                selectedId={selectedCatalogId}
+                loading={loadingCatalog}
+                failed={catalogFailed}
+                onSelect={handleSelectCatalogProvider}
+                onRetry={loadCatalog}
+                onBack={selectedCatalog ? () => setShowProviderPicker(false) : undefined}
+              />
+            ) : (
+              <div>
+                <label className="mb-1.5 block text-sm font-medium text-gray-700">{t('form.providerType')}</label>
+                <button type="button" disabled={saving} onClick={() => setShowProviderPicker(true)} className="flex w-full items-center justify-between gap-3 rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-left text-sm hover:border-gray-400">
+                  <span className="font-medium text-gray-900">{selectedCatalog.name}</span>
+                  <span className="flex shrink-0 items-center gap-1 text-xs text-gray-500">{t('providerPicker.change')}<ChevronDown className="h-3.5 w-3.5" /></span>
+                </button>
+              </div>
+            )}
 
-                      {showDropdown && (
-                        <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-[50vh] overflow-hidden">
-                          <div className="p-2 border-b border-gray-100">
-                            <div className="relative">
-                              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
-                              <input
-                                type="text"
-                                value={dropdownSearch}
-                                onChange={e => setDropdownSearch(e.target.value)}
-                                placeholder={t('form.searchProvider')}
-                                className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-slate-400"
-                                autoFocus
-                              />
-                            </div>
-                          </div>
-                          <div className="overflow-y-auto max-h-[calc(50vh-3rem)]">
-                            {filteredDropdownItems.length === 0 ? (
-                              <div className="px-3 py-4 text-center text-sm text-gray-500">{t('form.noResults')}</div>
-                            ) : (
-                              filteredDropdownItems.map(p => {
-                                const alreadyAdded = connectedSet.has(p.id) && !p.allow_multiple;
-                                return (
-                                  <button
-                                    key={p.id}
-                                    type="button"
-                                    disabled={alreadyAdded}
-                                    onClick={() => handleSelectCatalogProvider(p.id)}
-                                    className={`w-full flex items-center gap-3 px-3 py-2.5 text-left text-sm hover:bg-slate-50 transition-colors ${
-                                      alreadyAdded ? 'opacity-40 cursor-not-allowed' : ''
-                                    } ${selectedCatalogId === p.id ? 'bg-slate-100' : ''}`}
-                                  >
-                                    <div className="flex-1 min-w-0">
-                                      <div className="flex items-center gap-2">
-                                        <span className="font-medium text-gray-900">{p.name}</span>
-                                        {alreadyAdded && (
-                                          <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-[9px] rounded font-medium">
-                                            {t('form.alreadyAdded')}
-                                          </span>
-                                        )}
-                                      </div>
-                                      <p className="text-xs text-gray-500 mt-0.5 truncate">{p.description}</p>
-                                    </div>
-                                    <span className="text-xs text-gray-400 flex-shrink-0">{t('status.models', { count: p.model_count })}</span>
-                                    {selectedCatalogId === p.id && <Check className="w-4 h-4 text-slate-700 flex-shrink-0" />}
-                                  </button>
-                                );
-                              })
-                            )}
-                          </div>
-                        </div>
+            {/* Catalog provider form */}
+            {selectedCatalog && (
+              <div hidden={showProviderPicker} className="space-y-5">
+                {selectedCatalogId === 'openai-compatible' && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      {t('configuration.providerName')}
+                      <span className="text-slate-500 ml-1">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={providerName}
+                      onChange={e => setProviderName(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                      placeholder="e.g. SiliconFlow, LM Studio, My API"
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    API Key
+                    {!providerAllowsEmptyApiKey(selectedCatalogId) && <span className="text-slate-500"> *</span>}
+                    {selectedCatalogId === 'ollama' && <span className="text-gray-400 font-normal ml-1">{t('form.ollamaNoKey')}</span>}
+                    {selectedCatalogId !== 'ollama' && providerAllowsEmptyApiKey(selectedCatalogId) && (
+                      <span className="text-gray-400 font-normal ml-1">{t('form.apiKeyOptional')}</span>
+                    )}
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showApiKey ? 'text' : 'password'}
+                      value={apiKey}
+                      onChange={e => setApiKey(e.target.value)}
+                      className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                      placeholder={
+                        providerAllowsEmptyApiKey(selectedCatalogId) && selectedCatalogId !== 'ollama'
+                          ? t('form.apiKeyOptionalPlaceholder')
+                          : (credentialFields.find(f => f.name === 'api_key')?.placeholder || 'sk-...')
+                      }
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey(!showApiKey)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 rounded"
+                      title={showApiKey ? t('form.hide') : t('form.show')}
+                    >
+                      {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  {isThreatBookLLMProviderId(selectedCatalogId) && (
+                    <a
+                      href={THREATBOOK_FREE_KEY_URL}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:border-green-300 hover:bg-green-100"
+                    >
+                      <ExternalLink className="h-4 w-4" />
+                      {t('form.claimFreeKey')}
+                    </a>
+                  )}
+                </div>
+
+                <div className="col-span-2">
+                  <div className="mb-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                    <label htmlFor="catalog-provider-base-url" className="text-sm font-medium text-gray-700">
+                      {t('configuration.proxyUrl')}
+                      {isCatalogBaseUrlRequired(selectedCatalogId) ? (
+                        <span className="text-slate-500 ml-1">*</span>
+                      ) : (
+                        <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
                       )}
+                    </label>
+                    {selectedCatalogId === 'threatbook-io-llm' && <span id="catalog-provider-node-notice" className="text-xs text-gray-500">{t('form.threatbookIoNodeNotice')}</span>}
+                  </div>
+                  <input
+                    id="catalog-provider-base-url"
+                    aria-describedby={selectedCatalogId === 'threatbook-io-llm' ? 'catalog-provider-node-notice' : undefined}
+                    type="text"
+                    value={baseUrl}
+                    onChange={e => setBaseUrl(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                    placeholder={selectedCatalog.default_base_url || 'https://api.example.com/v1'}
+                  />
+                </div>
+
+                {isAzureProviderId(selectedCatalogId) && (
+                  <div className="space-y-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        {t('form.azureDeploymentName')}
+                      </label>
+                      <input
+                        type="text"
+                        value={azureDeploymentName}
+                        onChange={e => setAzureDeploymentName(e.target.value)}
+                        className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                        placeholder={t('form.azureDeploymentPlaceholder')}
+                      />
+                      <p className="mt-1 text-xs text-blue-800">{t('form.azureDeploymentHint')}</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        {t('form.azureDeploymentDisplayName')}
+                      </label>
+                      <input
+                        type="text"
+                        value={azureDeploymentDisplayName}
+                        onChange={e => setAzureDeploymentDisplayName(e.target.value)}
+                        className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                        placeholder={azureDeploymentName.trim() || t('form.azureDeploymentDisplayPlaceholder')}
+                      />
                     </div>
                   </div>
+                )}
 
-                  {/* Catalog provider form */}
-                  {selectedCatalog && (
-                    <>
-                      {selectedCatalogId === 'openai-compatible' && (
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">
-                            {t('form.providerName')}
-                            <span className="text-slate-500 ml-1">*</span>
-                          </label>
-                          <input
-                            type="text"
-                            value={providerName}
-                            onChange={e => setProviderName(e.target.value)}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-                            placeholder="e.g. SiliconFlow, LM Studio, My API"
-                          />
-                          <p className="mt-1 text-xs text-gray-500">
-                            {t('form.providerNameHint')}
-                          </p>
-                        </div>
-                      )}
-
-                      <div className="col-span-2">
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          Base URL
-                          {isCatalogBaseUrlRequired(selectedCatalogId) ? (
-                            <span className="text-slate-500 ml-1">*</span>
-                          ) : (
-                            <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
-                          )}
-                        </label>
-                        <input
-                          type="text"
-                          value={baseUrl}
-                          onChange={e => setBaseUrl(e.target.value)}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-                          placeholder={selectedCatalog.default_base_url || 'https://api.example.com/v1'}
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          API Key
-                          {!providerAllowsEmptyApiKey(selectedCatalogId) && <span className="text-slate-500"> *</span>}
-                          {selectedCatalogId === 'ollama' && <span className="text-gray-400 font-normal ml-1">{t('form.ollamaNoKey')}</span>}
-                          {selectedCatalogId !== 'ollama' && providerAllowsEmptyApiKey(selectedCatalogId) && (
-                            <span className="text-gray-400 font-normal ml-1">{t('form.apiKeyOptional')}</span>
-                          )}
-                        </label>
-                        <div className="relative">
-                          <input
-                            type={showApiKey ? 'text' : 'password'}
-                            value={apiKey}
-                            onChange={e => setApiKey(e.target.value)}
-                            className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-                            placeholder={
-                              providerAllowsEmptyApiKey(selectedCatalogId) && selectedCatalogId !== 'ollama'
-                                ? t('form.apiKeyOptionalPlaceholder')
-                                : (credentialFields.find(f => f.name === 'api_key')?.placeholder || 'sk-...')
-                            }
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setShowApiKey(!showApiKey)}
-                            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 rounded"
-                            title={showApiKey ? t('form.hide') : t('form.show')}
-                          >
-                            {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                          </button>
-                        </div>
-                        {isThreatBookLLMProviderId(selectedCatalogId) && (
-                          <a
-                            href={THREATBOOK_FREE_KEY_URL}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:border-green-300 hover:bg-green-100"
-                          >
-                            <ExternalLink className="h-4 w-4" />
-                            {t('form.claimFreeKey')}
-                          </a>
-                        )}
-                        {selectedCatalogId !== 'ollama' && providerAllowsEmptyApiKey(selectedCatalogId) && (
-                          <p className="text-xs text-gray-500 mt-1">{t('form.apiKeyOptionalHint')}</p>
-                        )}
-                      </div>
-
-                      {testResult && (
-                        <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${
-                          testResult.success ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'
-                        }`}>
-                          {testResult.success ? <Check className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
-                          <span>{testResult.message}</span>
-                        </div>
-                      )}
-
-                      {isAzureProviderId(selectedCatalogId) && (
-                        <div className="space-y-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                          <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                              {t('form.azureDeploymentName')}
-                            </label>
-                            <input
-                              type="text"
-                              value={azureDeploymentName}
-                              onChange={e => setAzureDeploymentName(e.target.value)}
-                              className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
-                              placeholder={t('form.azureDeploymentPlaceholder')}
-                            />
-                            <p className="mt-1 text-xs text-blue-800">{t('form.azureDeploymentHint')}</p>
-                          </div>
-                          <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                              {t('form.azureDeploymentDisplayName')}
-                            </label>
-                            <input
-                              type="text"
-                              value={azureDeploymentDisplayName}
-                              onChange={e => setAzureDeploymentDisplayName(e.target.value)}
-                              className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
-                              placeholder={azureDeploymentName.trim() || t('form.azureDeploymentDisplayPlaceholder')}
-                            />
-                          </div>
-                        </div>
-                      )}
-
-                      {selectedCatalog.models.length > 0 && (
-                        <div>
-                          <div className="flex items-center justify-between mb-2">
-                            <label className="text-sm font-medium text-gray-700">
-                              {t('form.availableModels')}
-                              <span className="text-gray-400 font-normal ml-1">
-                                ({selectedModelIds.size}/{selectedCatalog.models.length} {t('form.selected')})
-                              </span>
-                            </label>
-                            <button type="button" onClick={handleToggleAllModels} className="text-xs text-slate-600 hover:text-slate-800">
-                              {selectedModelIds.size === selectedCatalog.models.length ? t('form.deselectAll') : t('form.selectAll')}
-                            </button>
-                          </div>
-                          <div className="border border-gray-200 rounded-lg max-h-64 overflow-y-auto divide-y divide-gray-100">
-                            {selectedCatalog.models.map(model => (
-                              <label key={model.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
-                                <input
-                                  type="checkbox"
-                                  checked={selectedModelIds.has(model.id)}
-                                  onChange={() => handleToggleModel(model.id)}
-                                  className="w-4 h-4 text-slate-600 rounded border-gray-300 focus:ring-slate-400"
-                                />
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-sm font-medium text-gray-900">{model.name}</span>
-                                    <CatalogModelBadges model={model} />
-                                  </div>
-                                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 mt-0.5">
-                                    <span className="font-mono break-all">{model.id}</span>
-                                    {model.limits && (
-                                      <span>
-                                        {model.limits.context_window >= 1000000
-                                          ? `${(model.limits.context_window / 1000000).toFixed(0)}M`
-                                          : `${(model.limits.context_window / 1000).toFixed(0)}K`} ctx
-                                      </span>
-                                    )}
-                                    {model.pricing && !isPricingFree(model.pricing) && (
-                                      <span className="min-w-0 break-words" title={t('pricing.priceOrder')}>{formatPricingPerMillion(model.pricing)}</span>
-                                    )}
-                                    {model.pricing && isPricingFree(model.pricing) && (
-                                      <span className="text-green-600">{t('status.free')}</span>
-                                    )}
-                                  </div>
-                                </div>
-                              </label>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      <div className="flex items-start gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                        <Shield className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
-                        <p className="text-xs text-slate-700">
-                          {t('form.credentialNote')}
-                        </p>
-                      </div>
-                    </>
-                  )}
-                </>
-              )}
-          </div>
-
-          {/* Test Connection Button (inside form) */}
-          <div className="pt-2">
-            <button
-              onClick={handleTest}
-              disabled={!canTest || testing || saving}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm"
-            >
-              {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
-              {testing ? t('form.testingConnection') : t('form.testConnection')}
-            </button>
+                <ProviderKeyCheck providerId={selectedCatalogId} credentials={{ api_key: apiKey.trim(), base_url: baseUrl.trim() || undefined }} disabled={saving} />
+                <ModelDiscovery
+                  providerId={selectedCatalogId}
+                  mode="stage"
+                  newInstance={selectedCatalogId === 'openai-compatible'}
+                  credentials={{ api_key: apiKey.trim(), base_url: baseUrl.trim() || undefined }}
+                  disabled={saving}
+                  onReadyChange={setDiscoveryReady}
+                  onSelectionChange={setDiscoveredModels}
+                />
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1991,6 +1843,20 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
             <p className="mt-3 text-sm text-green-600 font-medium">
               {t('wizard.modelsAdded', { count: addedModelCount })}
             </p>
+          )}
+          {discoveryImportResult && (
+            <div className="mt-4 w-full space-y-3 text-left">
+              <ModelImportSummary result={discoveryImportResult} />
+              {discoveryImportResult.failed.length > 0 && savedProviderId && (
+                <button type="button" disabled={saving} onClick={async () => {
+                  if (saving) return;
+                  setSaving(true);
+                  const failedIds = new Set(discoveryImportResult.failed.map(item => item.id));
+                  try { await importSelectedModels(savedProviderId, discoveredModels.filter(model => failedIds.has(model.id))); }
+                  finally { setSaving(false); }
+                }} className="rounded-lg border border-amber-300 px-3 py-2 text-sm text-amber-800 disabled:opacity-50">{saving ? t('discovery.importing') : t('discovery.retryFailed')}</button>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -2020,28 +1886,6 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
         </div>
       )}
     </EntitySheet>
-  );
-}
-
-function CatalogModelBadges({ model }: { model: CatalogModel }) {
-  return (
-    <div className="flex items-center gap-1">
-      {model.capabilities.supports_tools && (
-        <span className="inline-flex items-center px-1 py-0.5 bg-slate-100 text-slate-700 text-[9px] rounded">
-          <Wrench className="w-2.5 h-2.5" />
-        </span>
-      )}
-      {model.capabilities.supports_vision && (
-        <span className="inline-flex items-center px-1 py-0.5 bg-purple-100 text-purple-700 text-[9px] rounded">
-          <Eye className="w-2.5 h-2.5" />
-        </span>
-      )}
-      {model.capabilities.supports_reasoning && (
-        <span className="inline-flex items-center px-1 py-0.5 bg-amber-100 text-amber-700 text-[9px] rounded">
-          <Zap className="w-2.5 h-2.5" />
-        </span>
-      )}
-    </div>
   );
 }
 
@@ -2262,8 +2106,13 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
 
 // ==================== Add Model Dialog ====================
 
-function AddModelDialog({ provider, onClose, onCreated }: {
-  provider: EnrichedProvider; onClose: () => void; onCreated: () => void;
+function AddModelDialog({ provider, models, loadingModels, onClose, onCreated, initialMethod = 'automatic' }: {
+  initialMethod?: 'automatic' | 'manual';
+  provider: EnrichedProvider;
+  models: ModelDefinitionV2[];
+  loadingModels: boolean;
+  onClose: () => void;
+  onCreated: () => void;
 }) {
   const toast = useToast();
   const { t } = useTranslation('model');
@@ -2271,7 +2120,8 @@ function AddModelDialog({ provider, onClose, onCreated }: {
   const [loading, setLoading] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; latency?: number } | null>(null);
   const [testing, setTesting] = useState(false);
-  const modelSavedRef = useRef(false);
+  const [method, setMethod] = useState<'automatic' | 'manual'>(initialMethod);
+  const [discoveryReady, setDiscoveryReady] = useState(true);
 
   const handleSubmit = async () => {
     if (!form.isValid) {
@@ -2282,7 +2132,6 @@ function AddModelDialog({ provider, onClose, onCreated }: {
       setLoading(true);
       setTestResult(null);
       await modelV2API.createDefinition(provider.id, form.toPayload());
-      modelSavedRef.current = true;
       onCreated();
       toast.success(t('modelAdded'), `${form.name.trim()} (${form.modelId.trim()})`);
 
@@ -2335,16 +2184,21 @@ Provider: ${provider.name} (${provider.id})
     <EntitySheet
       open
       mode="create"
-      entityType="Custom Model"
+      entityType={t('form.model')}
+      width={720}
+      minWidth={360}
+      maxWidth={960}
       entityName={provider.name}
       icon={<Plus className="w-5 h-5" />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
-      submitDisabled={loading || testing || !form.isValid}
+      submitDisabled={loading || testing || (method === 'automatic' ? !discoveryReady : !form.isValid)}
       submitLoading={loading || testing}
-      submitLabel={testResult ? t('form.done') : t('form.addModelBtn')}
+      submitLabel={method === 'automatic' ? t('form.close') : testResult ? t('form.done') : t('form.addModelBtn')}
       onClose={handleClose}
-      onSubmit={testResult ? handleClose : handleSubmit}
+      onSubmit={method === 'automatic' || testResult ? handleClose : handleSubmit}
+      hideRex={method === 'automatic'}
+      hideTest={method === 'automatic'}
       initialTab="form"
     >
       <div className="space-y-4">
@@ -2357,13 +2211,25 @@ Provider: ${provider.name} (${provider.id})
             className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-sm text-gray-900 cursor-default"
           />
         </div>
-        <ModelFormFields
-          form={form}
-          testResult={testResult}
-          testing={testing}
-          modelIdPlaceholder={isAzureProviderId(provider.id) ? t('form.azureDeploymentPlaceholder') : undefined}
-          modelIdHint={isAzureProviderId(provider.id) ? t('form.azureModelIdHint') : undefined}
-        />
+        <div role="tablist" aria-label={t('discovery.addMethod')} className="flex gap-1 rounded-lg bg-gray-100 p-1">
+          {(['automatic', 'manual'] as const).map(value => (
+            <button key={value} type="button" role="tab" aria-selected={method === value} aria-controls={`add-model-${value}`} id={`add-model-tab-${value}`} disabled={loading || testing} onClick={() => setMethod(value)} className={`flex-1 rounded-md px-3 py-2 text-sm transition-colors disabled:opacity-50 ${method === value ? 'bg-white font-medium text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}>
+              {t(`discovery.${value}`)}
+            </button>
+          ))}
+        </div>
+        <div role="tabpanel" id="add-model-automatic" aria-labelledby="add-model-tab-automatic" hidden={method !== 'automatic'} className="space-y-3">
+          <ModelDiscovery providerId={provider.id} mode="import" existingModelIds={models.map(model => model.id)} disabled={loading || testing || loadingModels} onReadyChange={setDiscoveryReady} onImported={onCreated} />
+        </div>
+        <div role="tabpanel" id="add-model-manual" aria-labelledby="add-model-tab-manual" hidden={method !== 'manual'} className="space-y-4">
+          <ModelFormFields
+            form={form}
+            testResult={testResult}
+            testing={testing}
+            modelIdPlaceholder={isAzureProviderId(provider.id) ? t('form.azureDeploymentPlaceholder') : undefined}
+            modelIdHint={isAzureProviderId(provider.id) ? t('form.azureModelIdHint') : undefined}
+          />
+        </div>
       </div>
     </EntitySheet>
   );
@@ -2438,484 +2304,71 @@ function allowsBuiltInVisionToggle(modelId: string): boolean {
 
 // ==================== Configure Dialog ====================
 
-function ConfigureProviderDialog({ provider, existingCredentials, models, onClose, onConfigured, onTestResult, onDelete }: {
-  provider: EnrichedProvider; existingCredentials: ProviderCredentials | null;
+function ConfigureProviderDialog({ provider, existingCredentials, loadingModels, onClose, onConfigured, onDelete, onAddModel, onModelsChanged, models }: {
+  provider: EnrichedProvider;
+  existingCredentials: ProviderCredentials | null;
   models: ModelDefinitionV2[];
-  onClose: () => void; onConfigured: () => void; onTestResult: (success: boolean) => void; onDelete: () => void;
+  loadingModels: boolean;
+  modelEnabledMap: Record<string, boolean>;
+  defaultModelId?: string;
+  onClose: () => void;
+  onConfigured: () => void;
+  onTestResult: (success: boolean) => void;
+  onDelete: () => void;
+  onAddModel: () => void;
+  onEditModel: (model: ModelDefinitionV2) => void;
+  onToggleModel: (modelId: string, enabled: boolean) => Promise<void>;
+  onDeleteModel: (modelId: string) => Promise<void>;
+  onModelsChanged: () => void;
 }) {
-  const toast = useToast();
   const { t } = useTranslation('model');
-  const hasExisting = existingCredentials?.has_credential ?? false;
-  const existingKey = existingCredentials?.api_key ?? '';
-  const existingBaseUrl = existingCredentials?.base_url ?? '';
-
+  const toast = useToast();
+  const [apiKey, setApiKey] = useState(existingCredentials?.api_key ?? '');
   const [baseUrl, setBaseUrl] = useState(existingCredentials?.base_url ?? '');
-  const [apiKey, setApiKey] = useState(existingKey);
-  const [providerName, setProviderName] = useState(provider.name);
-  const [showApiKey, setShowApiKey] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const isComposingRef = useRef(false);
-  const [testing, setTesting] = useState(false);
-  const [testModelId, setTestModelId] = useState(models.length > 0 ? models[0].id : '');
-  const [testChat, setTestChat] = useState<{ question: string; answer: string; model: string; latency: number } | null>(null);
-  const [testError, setTestError] = useState<string | null>(null);
-
-  // Catalog model management
-  const [catalogModels, setCatalogModels] = useState<CatalogModel[]>([]);
-  const [catalogModelsLoaded, setCatalogModelsLoaded] = useState(false);
-  const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set(models.map(m => m.id)));
-  const [newAzureDeploymentName, setNewAzureDeploymentName] = useState('');
-  const [newAzureDeploymentDisplayName, setNewAzureDeploymentDisplayName] = useState('');
-  const isAzureProvider = isAzureProviderId(provider.id);
-  const catalogModelIds = useMemo(() => new Set(catalogModels.map(m => m.id)), [catalogModels]);
-  const selectedCatalogModelCount = useMemo(
-    () => catalogModels.filter(m => selectedModelIds.has(m.id)).length,
-    [catalogModels, selectedModelIds]
-  );
-  const azureCustomModels = useMemo(
-    () => isAzureProvider && catalogModelsLoaded ? models.filter(m => !catalogModelIds.has(m.id)) : [],
-    [catalogModelIds, catalogModelsLoaded, isAzureProvider, models]
-  );
-
-  useEffect(() => {
-    setApiKey(existingKey);
-    setBaseUrl(existingBaseUrl);
-    setProviderName(provider.name);
-  }, [existingBaseUrl, existingKey, provider.id, provider.name]);
-
-  useEffect(() => {
-    setSelectedModelIds(new Set(models.map(m => m.id)));
-    setTestModelId(prev => (
-      prev && models.some(m => m.id === prev)
-        ? prev
-        : (models[0]?.id ?? '')
-    ));
-  }, [provider.id, models]);
-
-  useEffect(() => {
-    setCatalogModelsLoaded(false);
-    catalogAPI.list().then(res => {
-      const found = res.data.providers.find(p => p.id === provider.id);
-      if (found) {
-        setCatalogModels(found.models);
-        setCatalogModelsLoaded(true);
-      } else {
-        setCatalogModels([]);
-      }
-    }).catch(() => {
-      setCatalogModels([]);
-      setCatalogModelsLoaded(false);
-    });
-  }, [provider.id]);
-
-  const handleToggleCatalogModel = (modelId: string) => {
-    setSelectedModelIds(prev => {
-      const next = new Set(prev);
-      if (next.has(modelId)) next.delete(modelId); else next.add(modelId);
-      return next;
-    });
-  };
-
-  const handleToggleAllCatalogModels = () => {
-    if (catalogModels.length === 0) return;
-    const allSelected = catalogModels.every(m => selectedModelIds.has(m.id));
-    setSelectedModelIds(new Set(allSelected ? [] : catalogModels.map(m => m.id)));
-  };
-
-  const handleSubmit = async () => {
-    const nextApiKey = apiKey.trim();
-    const apiKeyChanged = nextApiKey !== existingKey.trim();
-    if (!nextApiKey && !hasExisting && !providerAllowsEmptyApiKey(provider.id)) {
-      toast.warning(t('form.apiKeyRequired'));
-      return;
-    }
+  const [name, setName] = useState(provider.name);
+  const [showKey, setShowKey] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [ready, setReady] = useState(true);
+  const [inventory, setInventory] = useState<ModelInventoryDraft>({ models: [], deleted: [] });
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const lock = useRef(false);
+  const custom = provider.id === 'openai-compatible' || provider.id.startsWith('custom-');
+  const credentials = { api_key: apiKey.trim() || undefined, base_url: baseUrl.trim() || undefined };
+  const save = async () => {
+    if (lock.current || !ready || loadingModels) return;
+    if (!apiKey.trim() && !existingCredentials?.has_credential && !providerAllowsEmptyApiKey(provider.id)) { setSaveError(t('discovery.codes.missing_credentials')); return; }
+    if ((custom || isAzureProviderId(provider.id)) && !baseUrl.trim()) { setSaveError(t('form.baseUrlRequired')); return; }
+    lock.current = true; setSaving(true); setSaveError(null);
+    let credentialsSaved = false;
     try {
-      setLoading(true);
-      const payload: ProviderCredentialInput = {
-        base_url: baseUrl.trim() || undefined,
-        provider_name: (provider.id === 'openai-compatible' || provider.id.startsWith('custom-'))
-          ? (providerName.trim() || undefined)
-          : undefined,
-      };
-      if (nextApiKey && apiKeyChanged) payload.api_key = nextApiKey;
-      await providerAPI.setCredentials(provider.id, payload);
-
-      // Sync catalog model list: add newly selected, delete deselected
-      if (catalogModels.length > 0) {
-        const currentModelIds = new Set(models.map(m => m.id));
-        const toDelete = catalogModels.filter(m => currentModelIds.has(m.id) && !selectedModelIds.has(m.id));
-        const toAdd = catalogModels.filter(m => !currentModelIds.has(m.id) && selectedModelIds.has(m.id));
-        await Promise.all([
-          ...toDelete.map(m => modelV2API.deleteDefinition(provider.id, m.id).catch(() => {})),
-          ...toAdd.map(m => modelV2API.createDefinition(provider.id, { model_id: m.id, name: m.name }).catch(() => {})),
-        ]);
-      }
-      const azureModelId = newAzureDeploymentName.trim();
-      if (isAzureProvider && azureModelId) {
-        await modelV2API.createDefinition(provider.id, {
-          model_id: azureModelId,
-          name: newAzureDeploymentDisplayName.trim() || azureModelId,
-        });
-      }
-
-      toast.success(t('credentialsSaved'));
-      onConfigured();
-    } catch (err: any) {
-      toast.error(t('configFailed'), err.message);
-    } finally {
-      setLoading(false);
+      await providerAPI.setCredentials(provider.id, { ...credentials, provider_name: custom ? name.trim() || undefined : undefined, skip_catalog_bootstrap: true });
+      credentialsSaved = true;
+      await providerAPI.saveModelInventory(provider.id, inventory);
+      onModelsChanged(); toast.success(t('credentialsSaved')); onConfigured();
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      setSaveError(credentialsSaved ? t('compact.inventorySaveFailedAfterCredentials', { error: message }) : message);
     }
+    finally { lock.current = false; setSaving(false); }
   };
-
-  const handleTest = async () => {
-    if (models.length === 0) {
-      toast.warning(t('form.noAvailableModel'));
-      return;
-    }
-    const hasPendingChanges = hasPendingProviderCredentialChanges(
-      { apiKey: existingKey, baseUrl: existingBaseUrl },
-      { apiKey, baseUrl },
-    );
-
-    const nextApiKey = apiKey.trim();
-    const apiKeyChanged = nextApiKey !== existingKey.trim();
-    if (!nextApiKey && !hasExisting && !providerAllowsEmptyApiKey(provider.id)) {
-      toast.warning(t('form.apiKeyRequiredFirst'));
-      return;
-    }
-
-    // Persist pending credential changes before testing so the backend uses
-    // the latest base URL even when the API key itself did not change.
-    if (hasPendingChanges) {
-      try {
-        const payload: ProviderCredentialInput = {
-          base_url: baseUrl.trim() || undefined,
-          provider_name: (provider.id === 'openai-compatible' || provider.id.startsWith('custom-'))
-            ? (providerName.trim() || undefined)
-            : undefined,
-        };
-        if (nextApiKey && apiKeyChanged) payload.api_key = nextApiKey;
-        await providerAPI.setCredentials(provider.id, payload);
-      } catch (err: any) {
-        toast.error(t('configFailed'), err.message);
-        return;
-      }
-    }
-    try {
-      setTesting(true);
-      setTestChat(null);
-      setTestError(null);
-      const response = await providerAPI.testCredentials(provider.id, testModelId || undefined);
-      if (response.data.success) {
-        setTestChat({
-          question: response.data.question || '',
-          answer: response.data.answer || '',
-          model: response.data.model_id || testModelId,
-          latency: response.data.latency_ms || 0,
-        });
-        onTestResult(true);
-      } else {
-        setTestError(response.data.message || t('testFailed'));
-        onTestResult(false);
-      }
-    } catch (err: any) {
-      setTestError(err.response?.data?.detail || err.message);
-      onTestResult(false);
-    } finally {
-      setTesting(false);
-    }
-  };
-
-  const rexContext = `你是 AI 模型配置助手，帮助用户配置 ${provider.name} 的 API 凭证。
-
-Provider: ${provider.name} (${provider.id})
-当前状态: ${hasExisting ? '已配置凭证' : '未配置凭证'}
-
-请帮助用户：
-1. 获取正确的 API Key（告知去哪里获取）
-2. 解释各个字段的含义
-3. 解决配置过程中的问题`;
-
-  const rexWelcome = `你好！我来帮你配置 **${provider.name}** 的连接凭证。
-
-${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请告诉我你遇到了什么问题，或者需要如何获取 API Key？'}
-
-我可以帮你：
-- 获取 ${provider.name} API Key 的方式
-- 解释 Base URL 的作用
-- 诊断连接问题`;
-
-  const canSave = true;
-
-  return (
-    <EntitySheet
-      open
-      mode="edit"
-      entityType={t('form.model')}
-      entityName={provider.name}
-      icon={<Brain className="w-5 h-5" />}
-      rexSystemContext={rexContext}
-      rexWelcomeMessage={rexWelcome}
-      submitDisabled={!canSave}
-      submitLoading={loading}
-      submitLabel={t('form.save')}
-      onClose={onClose}
-      onSubmit={handleSubmit}
-      footerLeft={
-        <button
-          onClick={onDelete}
-          className="flex items-center gap-1.5 px-3 py-2 text-sm text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors"
-        >
-          <Trash2 className="w-4 h-4" />
-          {t('form.removeProvider')}
-        </button>
-      }
-    >
-      <div className="space-y-5">
-        {/* openai-compatible badge */}
-        {(provider.id === 'openai-compatible' || provider.id.startsWith('custom-')) && (
-          <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-100 border border-slate-200 rounded-md w-fit">
-            <span className="text-[11px] font-medium text-slate-700">openai-compatible</span>
+  return <EntitySheet open mode="edit" entityType={t('configuration.provider')} entityName={provider.name} width={720} minWidth={360} maxWidth={960} icon={<Brain className="h-5 w-5" />} rexSystemContext="" rexWelcomeMessage="" hideRex hideTest initialTab="form" submitLabel={t('compact.save')} submitLoading={saving} submitDisabled={saving || !ready || loadingModels} onSubmit={save} onClose={onClose} footerLeft={<button type="button" disabled={saving} onClick={onDelete} className="flex items-center gap-1.5 text-xs text-red-600"><Trash2 className="h-3.5 w-3.5" />{t('form.removeProvider')}</button>}>
+    <div className="space-y-6">
+      <div className="space-y-4">
+        {custom && <label className="block space-y-1.5 text-sm font-medium text-gray-700">{t('configuration.providerName')}<input value={name} disabled={saving} onChange={e => setName(e.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 font-normal" /></label>}
+        <div><label className="mb-1.5 block text-sm font-medium text-gray-700" htmlFor="provider-api-key">API Key</label><div className="relative"><input id="provider-api-key" type={showKey ? 'text' : 'password'} value={apiKey} disabled={saving} onChange={e => setApiKey(e.target.value)} placeholder={existingCredentials?.has_credential ? t('form.apiKeyKeepExisting') : 'sk-...'} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 pr-10 text-sm" /><button type="button" onClick={() => setShowKey(value => !value)} title={t(showKey ? 'form.hide' : 'form.show')} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400">{showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</button></div></div>
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <label htmlFor="provider-base-url" className="text-sm font-medium text-gray-700">{t('configuration.proxyUrl')}<span className="ml-1 font-normal text-gray-400">{custom || isAzureProviderId(provider.id) ? '*' : t('form.baseUrlOptional')}</span></label>
+            {provider.id === 'threatbook-io-llm' && <span id="provider-node-notice" className="text-xs text-gray-500">{t('form.threatbookIoNodeNotice')}</span>}
           </div>
-        )}
-
-        {(provider.id === 'openai-compatible' || provider.id.startsWith('custom-')) && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">
-              {t('form.providerName')}
-            </label>
-            <input
-              type="text"
-              value={providerName}
-              onChange={(e) => setProviderName(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-              placeholder="e.g. SiliconFlow, LM Studio, My API"
-            />
-          </div>
-        )}
-
-        {/* Base URL */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1.5">
-            Base URL
-            <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
-          </label>
-          <input
-            type="text"
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-            placeholder="https://api.example.com/v1"
-          />
+          <input id="provider-base-url" aria-describedby={provider.id === 'threatbook-io-llm' ? 'provider-node-notice' : undefined} value={baseUrl} disabled={saving} onChange={e => setBaseUrl(e.target.value)} placeholder="https://api.example.com/v1" className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm font-normal" />
         </div>
-
-        {/* API Key */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1.5">
-            API Key
-            {!hasExisting && !providerAllowsEmptyApiKey(provider.id) && <span className="text-slate-500"> *</span>}
-            {provider.id === 'ollama' && <span className="text-gray-400 font-normal ml-1">{t('form.ollamaNoKey')}</span>}
-            {provider.id !== 'ollama' && providerAllowsEmptyApiKey(provider.id) && (
-              <span className="text-gray-400 font-normal ml-1">{t('form.apiKeyOptional')}</span>
-            )}
-          </label>
-          <div className="relative">
-            <input
-              type={showApiKey ? 'text' : 'password'}
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-              placeholder={
-                hasExisting
-                  ? t('form.apiKeyKeepExisting')
-                  : provider.id === 'ollama'
-                  ? 'Not required, leave empty'
-                  : providerAllowsEmptyApiKey(provider.id)
-                    ? t('form.apiKeyOptionalPlaceholder')
-                    : 'sk-...'
-              }
-              onCompositionStart={() => { isComposingRef.current = true; }}
-              onCompositionEnd={() => { isComposingRef.current = false; }}
-              onKeyDown={(e) => e.key === 'Enter' && !isComposingRef.current && handleSubmit()}
-            />
-            <button
-              type="button"
-              onClick={() => setShowApiKey(!showApiKey)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 rounded"
-              title={showApiKey ? t('form.hide') : t('form.show')}
-            >
-              {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
-          </div>
-          {isThreatBookLLMProviderId(provider.id) && (
-            <a
-              href={THREATBOOK_FREE_KEY_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:border-green-300 hover:bg-green-100"
-            >
-              <ExternalLink className="h-4 w-4" />
-              {t('form.claimFreeKey')}
-            </a>
-          )}
-          {provider.id !== 'ollama' && providerAllowsEmptyApiKey(provider.id) && (
-            <p className="text-xs text-gray-500 mt-1">{t('form.apiKeyOptionalHint')}</p>
-          )}
-        </div>
-
-        {/* Catalog model management */}
-        {catalogModels.length > 0 && (
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <label className="text-sm font-medium text-gray-700">
-                {t('form.availableModels')}
-                <span className="text-gray-400 font-normal ml-1">
-                  ({selectedCatalogModelCount}/{catalogModels.length} {t('form.selected')})
-                </span>
-              </label>
-              <button type="button" onClick={handleToggleAllCatalogModels} className="text-xs text-slate-600 hover:text-slate-800">
-                {catalogModels.every(m => selectedModelIds.has(m.id)) ? t('form.deselectAll') : t('form.selectAll')}
-              </button>
-            </div>
-            <div className="border border-gray-200 rounded-lg max-h-48 overflow-y-auto divide-y divide-gray-100">
-              {catalogModels.map(model => (
-                <label key={model.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={selectedModelIds.has(model.id)}
-                    onChange={() => handleToggleCatalogModel(model.id)}
-                    className="w-4 h-4 text-slate-600 rounded border-gray-300 focus:ring-slate-400"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-gray-900">{model.name}</span>
-                      <CatalogModelBadges model={model} />
-                    </div>
-                    <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
-                      <span className="font-mono truncate">{model.id}</span>
-                      {model.limits && (
-                        <span>
-                          {model.limits.context_window >= 1000000
-                            ? `${(model.limits.context_window / 1000000).toFixed(0)}M`
-                            : `${(model.limits.context_window / 1000).toFixed(0)}K`} ctx
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </label>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {isAzureProvider && catalogModelsLoaded && (
-          <div className="space-y-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-            <div>
-              <h4 className="text-sm font-medium text-gray-900">{t('form.azureCustomDeployments')}</h4>
-              <p className="mt-1 text-xs text-blue-800">{t('form.azureDeploymentHint')}</p>
-            </div>
-
-            {azureCustomModels.length > 0 ? (
-              <div className="space-y-2">
-                {azureCustomModels.map(model => (
-                  <div key={model.id} className="px-3 py-2 bg-white border border-blue-100 rounded-lg">
-                    <div className="text-sm font-medium text-gray-900">{model.name || model.id}</div>
-                    <div className="text-xs text-gray-500 font-mono mt-0.5">{model.id}</div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-gray-500">{t('form.azureNoCustomDeployments')}</p>
-            )}
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {t('form.azureDeploymentName')}
-                </label>
-                <input
-                  type="text"
-                  value={newAzureDeploymentName}
-                  onChange={e => setNewAzureDeploymentName(e.target.value)}
-                  className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
-                  placeholder={t('form.azureDeploymentPlaceholder')}
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {t('form.azureDeploymentDisplayName')}
-                </label>
-                <input
-                  type="text"
-                  value={newAzureDeploymentDisplayName}
-                  onChange={e => setNewAzureDeploymentDisplayName(e.target.value)}
-                  className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
-                  placeholder={newAzureDeploymentName.trim() || t('form.azureDeploymentDisplayPlaceholder')}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Test connection — 与添加模型抽屉一致 */}
-        <div>
-          <div className="flex items-center gap-2 mb-2">
-            <label className="block text-sm font-medium text-gray-700 flex-shrink-0">{t('form.testConnection2')}</label>
-            {models.length > 0 ? (
-              <select
-                value={testModelId}
-                onChange={(e) => setTestModelId(e.target.value)}
-                className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-slate-400"
-              >
-                {models.map(m => (
-                  <option key={m.id} value={m.id}>{m.name || m.id}</option>
-                ))}
-              </select>
-            ) : (
-              <span className="text-sm text-gray-400 flex-1">{t('form.noAvailableModel')}</span>
-            )}
-            <button
-              onClick={handleTest}
-              disabled={models.length === 0 || loading || testing}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm flex-shrink-0"
-            >
-              {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
-              {testing ? t('form.testingConnection') : t('form.testConnection2')}
-            </button>
-          </div>
-
-          {testChat && (
-            <div className="p-3 rounded-lg border border-green-200 bg-green-50 space-y-1.5">
-              <div className="flex items-start gap-2">
-                <span className="text-xs font-medium text-slate-600 flex-shrink-0 mt-0.5">Q:</span>
-                <p className="text-sm text-gray-700">{testChat.question}</p>
-              </div>
-              <div className="flex items-start gap-2">
-                <span className="text-xs font-medium text-green-600 flex-shrink-0 mt-0.5">A:</span>
-                <p className="text-sm text-gray-900 font-medium">{testChat.answer}</p>
-              </div>
-              <p className="text-xs text-gray-400">{t('form.latencyMs', { model: testChat.model, latency: testChat.latency })}</p>
-            </div>
-          )}
-          {testError && (
-            <div className="flex items-start gap-2 p-3 rounded-lg border border-red-200 bg-red-50">
-              <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
-              <span className="text-sm text-red-700">{testError}</span>
-            </div>
-          )}
-        </div>
-
-        {/* 凭证说明 — 与添加模型抽屉一致 */}
-        <div className="flex items-start gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg">
-          <Shield className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
-          <p className="text-xs text-slate-700">
-            {t('form.credentialNote')}
-          </p>
-        </div>
-
+        <ProviderKeyCheck providerId={provider.id} credentials={credentials} disabled={saving} />
       </div>
-    </EntitySheet>
-  );
+      <ModelDiscovery providerId={provider.id} mode="stage" existingModelIds={models.map(model => model.id)} credentials={credentials} disabled={saving} onInventoryChange={setInventory} onReadyChange={setReady} onAddModel={onAddModel} />
+      {saveError && <p role="alert" className="text-xs text-red-600">{saveError}</p>}
+    </div>
+  </EntitySheet>;
 }
 
 // ==================== Model Detail Sheet ====================
@@ -2969,6 +2422,7 @@ function ModelDetailSheet({
   const [defaultParameters, setDefaultParameters] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(false);
   const [loadingSettings, setLoadingSettings] = useState(true);
+  const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
 
   const handleCurrencyChange = (nextCurrency: string) => {
     if (nextCurrency === currency) return;
@@ -2980,8 +2434,11 @@ function ModelDetailSheet({
     setPricingEdited(true);
   };
 
-  useEffect(() => {
-    modelSettingsAPI.get(provider.id, model.id).then(r => {
+  const loadModelSettings = useCallback(async () => {
+    setLoadingSettings(true);
+    setSettingsLoadError(null);
+    try {
+      const r = await modelSettingsAPI.get(provider.id, model.id);
       setEnabled(r.data.enabled !== false);
       setDefaultParameters(r.data.default_parameters || {});
       if (modelSupportsReasoning) {
@@ -2992,17 +2449,17 @@ function ModelDetailSheet({
             : getDefaultReasoningToggleValue(provider.id, model.id)
         );
       }
-    }).catch(() => {
-      setEnabled(true);
-      setDefaultParameters({});
-      if (modelSupportsReasoning) {
-        setSupportsReasoning(getDefaultReasoningToggleValue(provider.id, model.id));
-      }
-    }).finally(() => setLoadingSettings(false));
+    } catch (settingsError) {
+      setSettingsLoadError(extractErrorMessage(settingsError));
+    } finally {
+      setLoadingSettings(false);
+    }
   }, [model.id, modelSupportsReasoning, provider.id]);
 
+  useEffect(() => { void loadModelSettings(); }, [loadModelSettings]);
+
   const handleSave = async () => {
-    if (readOnly) return;
+    if (readOnly || loading || loadingSettings || settingsLoadError) return;
     if (saveFixedPricing && (
       [inputPrice, outputPrice].some(value => value.trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0)
       || (cacheReadPrice.trim() !== '' && (!Number.isFinite(Number(cacheReadPrice)) || Number(cacheReadPrice) < 0))
@@ -3042,7 +2499,7 @@ function ModelDetailSheet({
       toast.success(t('credentialsSaved'));
       onSaved();
     } catch (e: any) {
-      toast.error(e?.message || t('deleteFailed'));
+      toast.error(e?.message || t('configFailed'));
     } finally {
       setLoading(false);
     }
@@ -3057,7 +2514,7 @@ function ModelDetailSheet({
       icon={<Brain className="w-5 h-5" />}
       rexSystemContext=""
       rexWelcomeMessage=""
-      submitDisabled={readOnly}
+      submitDisabled={readOnly || loading || loadingSettings || !!settingsLoadError}
       submitLoading={loading}
       submitLabel={t('form.save')}
       onClose={onClose}
@@ -3065,6 +2522,13 @@ function ModelDetailSheet({
       hideRex
       hideTest
     >
+      {settingsLoadError && (
+        <div role="alert" className="mb-4 space-y-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          <p>{t('configuration.settingsLoadFailed')}</p>
+          <p className="break-words text-xs">{settingsLoadError}</p>
+          <button type="button" onClick={loadModelSettings} disabled={loadingSettings} className="rounded border border-red-300 px-3 py-1.5 text-xs hover:bg-red-100 disabled:opacity-40">{t('configuration.retry')}</button>
+        </div>
+      )}
       <fieldset disabled={readOnly} className="space-y-4 min-w-0">
         {readOnly && <p className="text-xs text-gray-500">{t('detail.configAdminOnly')}</p>}
         {loadingSettings ? (

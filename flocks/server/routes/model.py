@@ -451,6 +451,43 @@ async def update_model_settings(
     )
     return setting
 
+async def _delete_model_inventory(provider_id: str, model_id: str) -> bool:
+    """Shared explicit deletion semantics for the V2 and custom model routes.
+
+    Called under the global configuration mutation lock. Rebuild only model
+    metadata: unresolved raw credential references must not reconfigure a
+    live provider while updating its inventory.
+    """
+    if not ConfigWriter.remove_model(provider_id, model_id):
+        return False
+
+    from flocks.config.config import ProviderConfig as ProviderSettings
+    from flocks.server.routes.model_discovery import publish_provider_updated
+    from flocks.server.routes.provider import _ensure_provider_initialized
+
+    await _ensure_provider_initialized()
+    provider = Provider._providers.get(provider_id)
+    if provider is not None:
+        raw = ConfigWriter.get_provider_raw(provider_id) or {}
+        Provider.apply_provider_config(
+            provider,
+            ProviderSettings.model_validate({"models": raw.get("models", {}), "model_sync": "manual"}),
+        )
+        if hasattr(provider, "_custom_models"):
+            provider._custom_models = list(provider._config_models)
+        desired = {model.id: model for model in provider.get_models()}
+        for cached_id, model in list(Provider._models.items()):
+            if model.provider_id == provider_id and cached_id not in desired:
+                del Provider._models[cached_id]
+        for cached_id, model in desired.items():
+            existing = Provider._models.get(cached_id)
+            if existing is None or existing.provider_id == provider_id:
+                Provider._models[cached_id] = model
+
+    await publish_provider_updated(provider_id)
+    return True
+
+
 @router.delete(
     "/v2/definitions/{provider_id}/{model_id:path}",
     status_code=204,
@@ -465,22 +502,16 @@ async def delete_model_definition(
 ):
     """Delete a model from a provider.
 
-    Removes the model entry from flocks.json and the runtime cache.
-    flocks.json is the single source of truth for the model list, so a
-    simple removal is sufficient — catalog models do not reappear because
-    they are no longer loaded from catalog at runtime.
+    Removes the model and its routing/settings references atomically, opts
+    the inventory into manual management, and immediately refreshes runtime.
     """
     try:
-        removed = ConfigWriter.remove_model(provider_id, model_id)
+        removed = await _delete_model_inventory(provider_id, model_id)
         if not removed:
             raise HTTPException(
                 status_code=404,
                 detail=f"Model '{model_id}' not found for provider '{provider_id}'",
             )
-
-        Provider.remove_model_from_runtime(provider_id, model_id)
-
-        ConfigWriter.clear_default_models_for_model(provider_id, model_id)
 
         log.info("model_definition.deleted", {
             "provider_id": provider_id,

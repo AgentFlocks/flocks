@@ -29,6 +29,8 @@ export default defineConfig({
     alias: [
       ...extensionAliases(extensionRegistry),
       { find: '@', replacement: path.resolve(__dirname, './src') },
+      // Same shim the page builder aliases in (reads the runtime the test installs on globalThis).
+      { find: '@flocks/webui-contract-sdk', replacement: path.resolve(__dirname, '../flocks/contracts/webui/shims/sdk.js') },
     ],
     dedupe: EXTENSION_DEDUPE_PACKAGES,
   },

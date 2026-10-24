@@ -442,23 +442,52 @@ class ConfigWriter:
 
     @classmethod
     def remove_model(cls, provider_id: str, model_id: str) -> bool:
-        """Remove a model entry from a provider's models dict.
+        """Permanently delete a user-selected model and its exact references.
+
+        Both user deletion routes call this method; catalog retirement uses
+        its own migration helper. Inventory ownership and reference cleanup
+        are committed in the same atomic write as the removal.
 
         Returns:
-            True if the model existed and was removed.
+            True if the model existed and was removed. A missing model does
+            not change configuration or the provider's sync policy.
         """
         data = cls._read_raw()
         pconfig = data.get("provider", {}).get(provider_id)
-        if pconfig is None:
+        if not isinstance(pconfig, dict):
             return False
 
         models = pconfig.get("models", {})
-        if model_id not in models:
+        if not isinstance(models, dict) or model_id not in models:
             return False
 
         del models[model_id]
         pconfig["models"] = models
-        data["provider"][provider_id] = pconfig
+        pconfig["model_sync"] = "manual"
+
+        def is_deleted_reference(value: Any) -> bool:
+            return (
+                isinstance(value, dict)
+                and value.get("provider_id") == provider_id
+                and value.get("model_id") == model_id
+            )
+
+        identity = f"{provider_id}/{model_id}"
+        settings = data.get("model_settings")
+        if isinstance(settings, dict):
+            settings.pop(identity, None)
+        defaults = data.get("default_models")
+        if isinstance(defaults, dict):
+            for model_type, value in list(defaults.items()):
+                if is_deleted_reference(value):
+                    del defaults[model_type]
+        for field in ("model", "small_model", "smallModel"):
+            if data.get(field) == identity:
+                del data[field]
+        fallbacks = data.get("fallback_providers")
+        if isinstance(fallbacks, list):
+            data["fallback_providers"] = [entry for entry in fallbacks if not is_deleted_reference(entry)]
+
         cls._write_raw(data)
         log.info("config_writer.model_removed", {
             "provider_id": provider_id,
