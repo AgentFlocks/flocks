@@ -1,4 +1,6 @@
 {
+  "reorderModulesHint": "Drag to reorder, or press Alt + Left/Right arrow",
+  "moduleMoved": "Moved {{name}} to position {{position}} of {{count}}",
   "home": "Home",
   "flocksHome": "Home",
   "aiWorkbench": "AI Workbench",

@@ -1,4 +1,6 @@
 {
+  "reorderModulesHint": "拖拽调整顺序，或按 Alt + 左右方向键移动",
+  "moduleMoved": "已将{{name}}移至第 {{position}} 项，共 {{count}} 项",
   "home": "首页",
   "flocksHome": "首页",
   "aiWorkbench": "AI 工作台",
