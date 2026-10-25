@@ -26,7 +26,7 @@ def test_sources_the_updater_cannot_read_itself_are_ignored(configured, expected
 async def test_installed_extension_state_does_not_change_the_sources(monkeypatch, tmp_path):
     from flocks.storage.storage import Storage
 
-    marker = tmp_path / "run" / "pro-bundle-installed.json"
+    marker = tmp_path / "run" / "sample-bundle-installed.json"
     marker.parent.mkdir(parents=True)
     marker.write_text('{"bundle_version": "v2026.5.23", "core_version": "v2026.5.23"}', encoding="utf-8")
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))

@@ -7,13 +7,14 @@ Provides /find/* endpoints that Flocks SDK expects.
 import asyncio
 import os
 import subprocess
+from pathlib import Path
 from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from flocks.config.config import Config
-from flocks.utils.http_file_read_guard import resolve_path_for_http_file_access
+from flocks.utils.http_file_read_guard import assert_http_workspace_path_access, resolve_path_for_http_file_access
 from flocks.utils.log import Log
 
 
@@ -46,6 +47,31 @@ async def _resolve_search_directory(directory: Optional[str]) -> str:
 def _validate_search_input(value: str, *, label: str, max_length: int = 500) -> None:
     if not value or len(value) > max_length or "\x00" in value:
         raise HTTPException(status_code=400, detail=f"Invalid {label}")
+
+
+def _readable_search_hits(cwd: str, results: list) -> list:
+    """A readable search root does not authorize every descendant or alias."""
+    from flocks.workspace.manager import WorkspaceManager
+
+    root = Path(cwd).resolve()
+    manager = WorkspaceManager.get_instance()
+    workspace = manager.get_workspace_dir().resolve()
+    decisions: dict[str, bool] = {}
+    visible = []
+    for result in results:
+        relative = result.file if isinstance(result, FindResult) else result
+        if relative not in decisions:
+            try:
+                target = (root / relative).resolve()
+                if not target.is_relative_to(root):
+                    raise PermissionError("Search hit escapes its readable root")
+                assert_http_workspace_path_access(str(target), manager=manager, workspace=workspace)
+                decisions[relative] = True
+            except (OSError, RuntimeError, ValueError):
+                decisions[relative] = False
+        if decisions[relative]:
+            visible.append(result)
+    return visible
 
 
 @router.get(
@@ -92,7 +118,7 @@ async def find_text(
             except Exception:
                 continue
         
-        return results
+        return await asyncio.to_thread(_readable_search_hits, cwd, results)
     except FileNotFoundError:
         # ripgrep not available, use grep
         try:
@@ -115,7 +141,7 @@ async def find_text(
                         content=parts[2][:200] if len(parts) > 2 else None,
                     ))
             
-            return results
+            return await asyncio.to_thread(_readable_search_hits, cwd, results)
         except Exception:
             return []
     except Exception as e:
@@ -157,7 +183,8 @@ async def find_files(
             timeout=10,
         )
         
-        return result.stdout.strip().splitlines() if result.stdout else []
+        files = result.stdout.strip().splitlines() if result.stdout else []
+        return await asyncio.to_thread(_readable_search_hits, cwd, files)
     except FileNotFoundError:
         # fd not available, use find
         try:
@@ -177,7 +204,7 @@ async def find_files(
             )
             
             files = result.stdout.strip().splitlines() if result.stdout else []
-            return files[:limit or 50]
+            return await asyncio.to_thread(_readable_search_hits, cwd, files[:limit or 50])
         except Exception:
             return []
     except Exception as e:

@@ -924,31 +924,31 @@ class TestConfigRoutes:
         assert resp.json()["faviconUrl"] is None
 
     @pytest.mark.asyncio
-    async def test_ui_display_defaults_to_flockspro_when_pro_is_enabled(
+    async def test_ui_display_defaults_to_the_registered_branding_provider(
         self,
         client: AsyncClient,
         tmp_path,
         monkeypatch,
     ):
-        """Empty display-name config falls back to the registered branding provider (Pro)."""
+        """Empty display-name config falls back to the registered branding provider."""
         from flocks.config.config import Config
         from flocks.server import branding
 
-        class _ProBranding:
-            # 与 flockspro.branding.ProBranding 同名：许可证有效时给 "FlocksPro"
+        class _CustomBranding:
+            # Any extension may supply a display name through the branding protocol.
             def display_name(self):
-                return "FlocksPro"
+                return "Sample Workspace"
 
         monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
         monkeypatch.setattr(branding, "_providers", [])
-        branding.register_branding_provider(_ProBranding())
+        branding.register_branding_provider(_CustomBranding())
         Config._global_config = None
         Config._cached_config = None
 
         resp = await client.get("/api/config/ui-display")
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json() == {
-            "displayName": "FlocksPro",
+            "displayName": "Sample Workspace",
             "configuredDisplayName": None,
             "faviconUrl": None,
         }
@@ -960,7 +960,7 @@ class TestConfigRoutes:
 
         resp = await client.patch("/api/config/ui", json={"displayName": ""})
         assert resp.status_code == status.HTTP_200_OK
-        assert resp.json()["displayName"] == "FlocksPro"
+        assert resp.json()["displayName"] == "Sample Workspace"
         assert resp.json()["configuredDisplayName"] is None
 
     @pytest.mark.parametrize(

@@ -104,7 +104,7 @@ async def test_remote_console_login_keeps_console_passport_url(monkeypatch: pyte
     monkeypatch.setenv("FLOCKS_PORTAL_BASE_URL", "http://127.0.0.1:3000")
     monkeypatch.setattr("flocks.console.login.httpx.AsyncClient", _Client)
 
-    result = await ConsoleLoginService.start_console_login("http://127.0.0.1:5173/flockspro-upgrade/callback")
+    result = await ConsoleLoginService.start_console_login("http://127.0.0.1:5173/extension-upgrade/callback")
 
     parsed = urlparse(result["passport_login_url"])
     assert parsed.scheme == "https"

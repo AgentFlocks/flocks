@@ -628,11 +628,13 @@ async def update_ui_config(
 @router.get("/ui-favicon", summary="Get custom UI favicon")
 async def get_ui_favicon() -> FileResponse:
     """Return the uploaded favicon, if one is configured."""
+    from flocks.utils.http_file_read_guard import require_http_private_path_access
     try:
         complete_config = await Config.get()
         path = _configured_favicon_path(complete_config)
         if not path:
             raise HTTPException(status_code=404, detail="custom favicon is not configured")
+        require_http_private_path_access(path)
         return FileResponse(path, media_type=_favicon_media_type(path))
     except HTTPException:
         raise

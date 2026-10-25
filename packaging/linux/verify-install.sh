@@ -159,7 +159,7 @@ fi
 check "session valid (/api/auth/me)" me_ok
 online_env_ok() {
   grep -q '^FLOCKS_DEPLOY_MODE=source$' "$ENV_FILE" \
-    && ! grep -Eq '^(FLOCKS_OFFLINE_INSTALL|FLOCKS_UPDATE_CHANNEL|FLOCKS_PRO_BUNDLE_DIR|UV_OFFLINE|npm_config_offline)=' "$ENV_FILE"
+    && ! grep -Eq '^(FLOCKS_OFFLINE_INSTALL|FLOCKS_UPDATE_CHANNEL|UV_OFFLINE|npm_config_offline)=' "$ENV_FILE"
 }
 source_mode_ok() {
   # read-only: this instance upgrades online, so never POST /api/update/apply here

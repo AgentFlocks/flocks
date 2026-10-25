@@ -142,7 +142,7 @@ def test_env_template_pins_service_settings() -> None:
     assert "@INSTALL_ROOT@/tools/uv" in values["PATH"]
 
 
-OFFLINE_ONLY_KEYS = ("FLOCKS_OFFLINE_INSTALL", "FLOCKS_UPDATE_CHANNEL", "FLOCKS_PRO_BUNDLE_DIR", "UV_OFFLINE", "npm_config_offline")
+OFFLINE_ONLY_KEYS = ("FLOCKS_OFFLINE_INSTALL", "FLOCKS_UPDATE_CHANNEL", "UV_OFFLINE", "npm_config_offline")
 
 
 def _render_env(tmp_path: Path) -> dict[str, str]:
@@ -193,6 +193,24 @@ def test_installer_removes_the_offline_pins_an_older_package_left() -> None:
     line = next(line for line in text.splitlines() if strip in line)
     assert not line.startswith(" "), "the strip must not sit inside a condition"
     assert "UPGRADE_MODE" not in text and "pro_bundle" not in text
+
+
+@pytest.mark.skipif(BASH is None, reason="requires bash")
+def test_offline_cleanup_keeps_unknown_extension_settings() -> None:
+    text = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    keys_re = re.search(r"^OFFLINE_ONLY_KEYS_RE='([^']+)'$", text, re.MULTILINE).group(1)
+    custom = "\n".join([
+        "FLOCKS_EXTENSION_BUNDLE_DIR=/private/extensions",
+        "CUSTOM_PLUGIN_TOKEN=example",
+        "",
+    ])
+    completed = subprocess.run(
+        [BASH, "-c", 'sed -E "/$1/d"', "filter", keys_re],
+        input=custom + "FLOCKS_OFFLINE_INSTALL=1\nUV_OFFLINE=1\n",
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == custom
 
 
 def test_systemd_unit_matches_updater_restart_model() -> None:
@@ -1036,7 +1054,7 @@ def test_installer_refuses_an_install_carrying_a_component_it_does_not_ship(tmp_
     """Replacing the venv would drop a component an earlier package or an online upgrade added."""
     payload = _fake_payload(tmp_path)
     data_home = _fake_existing_install(tmp_path)
-    marker = data_home / ".flocks" / "run" / "pro-bundle-installed.json"
+    marker = data_home / ".flocks" / "run" / "sample-bundle-installed.json"
     marker.write_text('{"bundle_version": "v2026.9.14"}', encoding="utf-8")
     result = _dry_run(payload, data_home)
     assert result.returncode == 1, result.stdout + result.stderr
@@ -1056,7 +1074,7 @@ def test_installer_refuses_a_supervised_install(tmp_path: Path) -> None:
     payload = _fake_payload(tmp_path)
     data_home = _fake_existing_install(tmp_path)
     descriptor = data_home / ".flocks" / "config" / "deployment.json"
-    descriptor.write_text('{"mode": "managed", "managed_by": "flockspro-go"}', encoding="utf-8")
+    descriptor.write_text('{"mode": "managed", "managed_by": "sample-manager"}', encoding="utf-8")
     result = _dry_run(payload, data_home)
     assert result.returncode == 1, result.stdout + result.stderr
     assert str(descriptor) in result.stderr and "本次未做任何改动" in result.stderr
@@ -1830,6 +1848,73 @@ def test_an_install_on_sqlite_goes_on_to_the_controlled_stop(tmp_path):
     assert events[:1] == ["stop"], result.stderr
 
 
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+@pytest.mark.parametrize("layout", ["default", "data", "xdg", "root", "linked-data"])
+def test_storage_commitment_without_database_config_blocks_installer_before_stop(tmp_path, layout):
+    data = tmp_path / "service-home/.flocks/data"
+    env = ""
+    if layout == "data":
+        data = tmp_path / "separate-data"
+        env = f"FLOCKS_DATA_DIR={data}\n"
+    elif layout == "xdg":
+        data = tmp_path / "xdg/flocks"
+        env = f"XDG_DATA_HOME={tmp_path / 'xdg'}\n"
+    elif layout == "root":
+        data = tmp_path / "separate-root/data"
+        env = f"FLOCKS_ROOT={data.parent}\n"
+    elif layout == "linked-data":
+        data.parent.mkdir(parents=True)
+        external = tmp_path / "existing-disk"
+        external.mkdir()
+        data.symlink_to(external, target_is_directory=True)
+    data.mkdir(parents=True, exist_ok=True)
+    marker = data / "storage-backend.json"
+    marker.write_text('{"version":1,"backend":"postgres"}')
+    (data / "flocks.db").write_bytes(b"retained old SQLite")
+    before = marker.read_bytes()
+    result, events = _install_over_existing(tmp_path, existing_env=env)
+    assert result.returncode != 0 and "只支持 SQLite" in result.stderr
+    assert "stop" not in events
+    assert marker.read_bytes() == before and (data / "flocks.db").read_bytes() == b"retained old SQLite"
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+@pytest.mark.parametrize("content", ['{broken', '{"version":2,"backend":"sqlite"}'])
+def test_corrupt_storage_commitment_blocks_installer_before_stop(tmp_path, content):
+    data = tmp_path / "service-home/.flocks/data"
+    data.mkdir(parents=True)
+    (data / "storage-backend.json").write_text(content)
+    result, events = _install_over_existing(tmp_path)
+    assert result.returncode != 0 and "只支持 SQLite" in result.stderr
+    assert "stop" not in events
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+@pytest.mark.parametrize("value", ["~/existing-data", " /existing-data", "/existing-data "])
+def test_installer_does_not_trim_or_expand_an_ambiguous_data_path(tmp_path, value):
+    result, events = _install_over_existing(tmp_path, existing_env=f"FLOCKS_DATA_DIR='{value}'\n")
+    assert "只支持 SQLite" in result.stderr and "ambiguous" in result.stderr
+    assert "stop" not in events
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+@pytest.mark.parametrize("linked", [False, True])
+def test_migration_source_commitment_is_checked_in_its_own_data_root(tmp_path, linked):
+    payload = _fake_payload(tmp_path)
+    source = _previous_data(tmp_path / "old-home/.flocks")
+    if linked:
+        external = tmp_path / "old-disk"
+        (source / "data").rename(external)
+        (source / "data").symlink_to(external, target_is_directory=True)
+    marker = source / "data/storage-backend.json"
+    marker.write_text('{"version":1,"backend":"postgres"}')
+    before = _tree_fingerprint(source)
+    result = _dry_run(payload, extra_env={"FLOCKS_OFFLINE_MIGRATE_FROM": str(source), "FLOCKS_OFFLINE_HOME_CANDIDATES": ""})
+    assert result.returncode != 0 and "只支持 SQLite" in result.stderr
+    assert "storage-backend.json" in result.stderr
+    assert _tree_fingerprint(source) == before
+
+
 # ---------------------------------------------------------------------------
 # data of a previous installation (installer/migrate_data.py + install.sh)
 # ---------------------------------------------------------------------------
@@ -1845,9 +1930,9 @@ def _load_migrate_helper():
     return module
 
 
-def _previous_data(root: Path, *, pro: bool = False) -> Path:
+def _previous_data(root: Path, *, extension: bool = False) -> Path:
     """A ~/.flocks of an earlier instance: config with an absolute path, DB, hub record, license, symlink."""
-    for sub in ("config", "data/hub", "plugins/skills/my-skill", "flockspro", "run", "logs"):
+    for sub in ("config", "data/hub", "plugins/skills/my-skill", "sample-extension", "run", "logs"):
         (root / sub).mkdir(parents=True, exist_ok=True)
     (root / "config" / "flocks.json").write_text(
         json.dumps({"mcp": {"local": {"command": f"{root}/plugins/skills/my-skill/run.sh"}}, "other": "/opt/keep"}),
@@ -1861,10 +1946,10 @@ def _previous_data(root: Path, *, pro: bool = False) -> Path:
         encoding="utf-8",
     )
     (root / "plugins" / "skills" / "my-skill" / "SKILL.md").write_text("# mine\n", encoding="utf-8")
-    (root / "flockspro" / "install_id").write_text("inst-1\n", encoding="utf-8")
+    (root / "sample-extension" / "install_id").write_text("inst-1\n", encoding="utf-8")
     os.symlink(root / "plugins" / "skills" / "my-skill", root / "plugins" / "pinned-skill")
-    if pro:
-        (root / "run" / "pro-bundle-installed.json").write_text('{"bundle_version": "v2026.9.14"}', encoding="utf-8")
+    if extension:
+        (root / "run" / "sample-bundle-installed.json").write_text('{"bundle_version": "v2026.9.14"}', encoding="utf-8")
     return root
 
 
@@ -1885,7 +1970,7 @@ def _tree_fingerprint(root: Path) -> list[tuple[str, int, str]]:
 @pytest.mark.skipif(sys.platform == "win32", reason="posix paths and modes")
 def test_migrate_helper_copies_previous_data_and_leaves_the_source_untouched(tmp_path: Path) -> None:
     helper = _load_migrate_helper()
-    source = _previous_data(tmp_path / "root-home" / ".flocks", pro=True)
+    source = _previous_data(tmp_path / "root-home" / ".flocks", extension=True)
     target = tmp_path / "var-lib-flocks" / ".flocks"
     (target / "config").mkdir(parents=True)
     (target / "config" / "install_profile.json").write_text('{"Language": "zh-CN"}', encoding="utf-8")
@@ -1894,7 +1979,7 @@ def test_migrate_helper_copies_previous_data_and_leaves_the_source_untouched(tmp
     lines = helper.copy(source, target, "20260928000000")
 
     assert _tree_fingerprint(source) == before, "the previous installation's directory is only read"
-    for rel in ("config/.secret.json", "data/flocks.db", "flockspro/install_id", "run/pro-bundle-installed.json",
+    for rel in ("config/.secret.json", "data/flocks.db", "sample-extension/install_id", "run/sample-bundle-installed.json",
                 "plugins/skills/my-skill/SKILL.md"):
         assert (target / rel).read_bytes() == (source / rel).read_bytes(), rel
     assert (target / "config" / ".secret.json").stat().st_mode & 0o777 == 0o600
@@ -2108,18 +2193,18 @@ def test_installer_refuses_to_migrate_data_a_newer_version_already_used(tmp_path
 def test_installer_checks_migrated_or_relocated_data_for_what_it_cannot_take_over(tmp_path: Path) -> None:
     payload = _fake_payload(tmp_path)
     # a component installed in the data about to be migrated → refuse before changing anything
-    previous = _previous_data(tmp_path / "root" / ".flocks", pro=True)
+    previous = _previous_data(tmp_path / "root" / ".flocks", extension=True)
     result = _dry_run(payload, extra_env={"FLOCKS_OFFLINE_HOME_CANDIDATES": str(previous)})
     assert result.returncode == 1
-    assert str(previous / "run" / "pro-bundle-installed.json") in result.stderr and "本次未做任何改动" in result.stderr
+    assert str(previous / "run" / "sample-bundle-installed.json") in result.stderr and "本次未做任何改动" in result.stderr
 
     # the same under a FLOCKS_ROOT moved off /var/lib/flocks/.flocks
-    custom = _previous_data(tmp_path / "data-disk" / ".flocks", pro=True)
+    custom = _previous_data(tmp_path / "data-disk" / ".flocks", extension=True)
     env_file = tmp_path / "flocks.env"
     env_file.write_text(f"FLOCKS_ROOT={custom}\n", encoding="utf-8")
     result = _dry_run(payload, extra_env={"FLOCKS_OFFLINE_ENV_FILE": str(env_file)})
     assert result.returncode == 1
-    assert str(custom / "run" / "pro-bundle-installed.json") in result.stderr
+    assert str(custom / "run" / "sample-bundle-installed.json") in result.stderr
 
     # and a supervised install's data about to be migrated
     managed = _previous_data(tmp_path / "srv-home" / ".flocks")
@@ -2215,6 +2300,18 @@ def test_migrate_helper_refuses_data_dirs_that_are_not_flocks_data(tmp_path: Pat
     monkeypatch.setattr(helper.os.path, "ismount", lambda path: os.path.realpath(path) == str(real_skeleton))
     with pytest.raises(helper.MigrationError, match="挂载点"):
         helper.check(source, skeleton, tmp_path / "no-proc")
+
+
+@pytest.mark.parametrize("unrecognized", ["sample-extension", "extension-audit.db"])
+def test_migrate_helper_does_not_claim_an_extension_only_target(tmp_path: Path, unrecognized: str) -> None:
+    helper = _load_migrate_helper()
+    target = tmp_path / "existing"
+    target.mkdir()
+    (target / unrecognized).write_bytes(b"owned by an unknown extension")
+    before = _tree_fingerprint(target)
+    with pytest.raises(helper.MigrationError, match="不属于 Flocks"):
+        helper.validate_target(target)
+    assert _tree_fingerprint(target) == before
 
 
 def test_migrate_helper_explicit_source_never_silently_skipped(tmp_path: Path) -> None:
@@ -2779,7 +2876,7 @@ def test_makeself_header_extracts_below_the_base(tmp_path: Path) -> None:
     assert root.returncode == 1 and "不能是 /" in root.stderr
     # /opt/flocks/app would be inside the default install root /opt/flocks (archdirname above)
     nested = subprocess.run(
-        ["sh", "-c", f'mkdir -p "$1/opt" && FLOCKS_OFFLINE_BASE="$1/opt" sh "$2"', "sh", str(tmp_path), str(header)],
+        ["sh", "-c", 'mkdir -p "$1/opt" && FLOCKS_OFFLINE_BASE="$1/opt" sh "$2"', "sh", str(tmp_path), str(header)],
         capture_output=True, text=True,
     )
     assert nested.returncode == 0, "a base whose app dir is not below the default root is fine"

@@ -1164,13 +1164,9 @@ def _get_flocks_root() -> Path:
 
     Returns the root without /config suffix.
     """
-    # Priority 1: Explicit override
-    root = os.getenv("FLOCKS_ROOT")
-    if root:
-        return Path(root)
-    
-    # Default: ~/.flocks
-    return Path.home() / ".flocks"
+    from flocks.db_backend import runtime_root
+
+    return runtime_root()
 
 
 def get_flocks_root() -> Path:
@@ -1196,10 +1192,9 @@ def _get_config_dir() -> Path:
     1. FLOCKS_CONFIG_DIR environment variable
     2. Use flocks root/config
     """
-    config_dir = os.getenv("FLOCKS_CONFIG_DIR")
-    if config_dir:
-        return Path(config_dir)
-    return _get_flocks_root() / "config"
+    from flocks.db_backend import config_dir
+
+    return config_dir()
 
 
 def _get_data_dir() -> Path:
@@ -1213,16 +1208,9 @@ def _get_data_dir() -> Path:
     
     Can be overridden by FLOCKS_DATA_DIR environment variable.
     """
-    data_dir = os.getenv("FLOCKS_DATA_DIR")
-    if data_dir:
-        return Path(data_dir)
-    
-    # Check XDG_DATA_HOME for data directory
-    xdg_data = os.getenv("XDG_DATA_HOME")
-    if xdg_data:
-        return Path(xdg_data) / "flocks"
-    
-    return _get_flocks_root() / "data"
+    from flocks.db_backend import data_dir
+
+    return data_dir()
 
 
 def _get_log_dir() -> Path:
@@ -1283,6 +1271,15 @@ class GlobalConfig(BaseSettings):
     # Development
     dev_mode: bool = False
     log_level: str = "INFO"
+
+    @field_validator("config_dir", "data_dir", mode="before")
+    @classmethod
+    def validate_runtime_directory(cls, value):
+        # BaseSettings supplies environment values directly, bypassing the
+        # default factories above. They must follow the same early guard.
+        from flocks.db_backend import directory_path
+
+        return directory_path(value, "runtime")
 
 
 # ==================== Configuration Manager ====================

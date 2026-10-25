@@ -1716,12 +1716,16 @@ async def get_session_context(
 
 async def _resolve_context_file(sessionID: str, resourceID: str, request: Request):
     from flocks.session.files import resolve_session_resource
+    from flocks.utils.http_file_read_guard import require_http_private_path_access
 
     session, _current_user = await _load_context_session(sessionID, request)
     try:
         resource = await resolve_session_resource(session, resourceID)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
+    require_http_private_path_access(resource.path)
     if not resource.path.exists() or not resource.path.is_file():
         raise HTTPException(status_code=404, detail="Session file no longer exists")
     return resource
@@ -1866,6 +1870,7 @@ async def _resolve_context_root_file(
     request: Request,
 ):
     from flocks.session.files import resolve_context_root_path
+    from flocks.utils.http_file_read_guard import require_http_private_path_access
 
     session, current_user = await _load_context_session(sessionID, request)
     _require_context_root_owner(session, current_user)
@@ -1875,6 +1880,7 @@ async def _resolve_context_root_file(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    require_http_private_path_access(target)
     if not target.exists():
         raise HTTPException(status_code=404, detail="Context path not found")
     return target
@@ -1901,6 +1907,8 @@ async def list_session_context_folder(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
     return {"rootID": rootID, "path": path, **page}
 
 

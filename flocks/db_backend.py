@@ -45,6 +45,8 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import secrets
+import stat
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +59,7 @@ BACKEND_ENV = "FLOCKS_DB_BACKEND"
 DSN_ENV = "FLOCKS_DB_DSN"
 DSN_FILE_ENV = "FLOCKS_DB_DSN_FILE"
 CHOICE_FILE_NAME = "database.json"
+COMMITMENT_FILE_NAME = "storage-backend.json"
 
 SQLITE = "sqlite"
 
@@ -148,18 +151,160 @@ def _normalise(name: str) -> str:
     return "postgres" if backend == "postgresql" else backend
 
 
+def directory_path(value: str | Path, name: str) -> Path:
+    """Never reinterpret an existing storage location during an upgrade.
+
+    Older runtimes treated tilde and boundary spaces literally. Expanding or
+    trimming them could silently select a different empty directory, so ask
+    for an unambiguous value before opening or creating any runtime storage.
+    """
+    text = str(value)
+    if not text or text != text.strip() or text.startswith("~"):
+        raise BackendConfigurationError(
+            f"The {name} directory is ambiguous; use its verified path without an unexpanded tilde "
+            "or surrounding whitespace. Existing data was not moved."
+        )
+    return Path(text)
+
+
+def _directory_override(source: Mapping[str, str], name: str) -> Optional[Path]:
+    value = source.get(name)
+    return directory_path(value, name) if value else None
+
+
+def runtime_root(environ: Optional[Mapping[str, str]] = None) -> Path:
+    source = os.environ if environ is None else environ
+    root = _directory_override(source, "FLOCKS_ROOT")
+    if root is not None:
+        return root
+    return Path.home() / ".flocks"
+
+
 def config_dir(environ: Optional[Mapping[str, str]] = None) -> Path:
     """``FLOCKS_CONFIG_DIR``, else ``<FLOCKS_ROOT or ~/.flocks>/config`` (as ``flocks.config``)."""
     source = os.environ if environ is None else environ
-    explicit = (source.get("FLOCKS_CONFIG_DIR") or "").strip()
-    if explicit:
-        return Path(explicit)
-    root = (source.get("FLOCKS_ROOT") or "").strip()
-    return (Path(root) if root else Path.home() / ".flocks") / "config"
+    explicit = _directory_override(source, "FLOCKS_CONFIG_DIR")
+    return explicit if explicit is not None else runtime_root(source) / "config"
 
 
 def choice_file(environ: Optional[Mapping[str, str]] = None) -> Path:
     return config_dir(environ) / CHOICE_FILE_NAME
+
+
+def data_dir(environ: Optional[Mapping[str, str]] = None) -> Path:
+    """The data directory, resolved without importing any database-backed configuration."""
+    source = os.environ if environ is None else environ
+    explicit = _directory_override(source, "FLOCKS_DATA_DIR")
+    if explicit is not None:
+        return explicit
+    xdg = _directory_override(source, "XDG_DATA_HOME")
+    return xdg / "flocks" if xdg is not None else runtime_root(source) / "data"
+
+
+def commitment_file(environ: Optional[Mapping[str, str]] = None) -> Path:
+    return data_dir(environ) / COMMITMENT_FILE_NAME
+
+
+def _committed_backend(environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
+    path = commitment_file(environ)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise BackendConfigurationError(f"Cannot read the storage backend record in {path}: {exc}") from None
+    try:
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
+            raise ValueError("record is not a bounded regular file")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            current = os.fstat(handle.fileno())
+            if not stat.S_ISREG(current.st_mode) or not os.path.samestat(info, current):
+                raise ValueError("record changed while opening")
+            raw = handle.read(65537)
+            if len(raw) > 65536:
+                raise ValueError("record is too large")
+        value = json.loads(raw)
+        if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
+            raise ValueError("unsupported record version")
+        backend = value.get("backend")
+        if not isinstance(backend, str) or not backend.strip():
+            raise ValueError("missing backend")
+    except (OSError, ValueError, UnicodeError, AttributeError):
+        raise BackendConfigurationError(f"The storage backend record in {path} is invalid; restore it before starting") from None
+    return _normalise(backend)
+
+
+def commit_backend(backend: str, environ: Optional[Mapping[str, str]] = None) -> Path:
+    """Record where this data directory now lives, after a verified migration.
+
+    The record survives a missing configuration file or backend package. A
+    different recorded backend requires the migration's explicit recovery
+    procedure; an ordinary start must never overwrite it.
+    """
+    backend = _normalise(backend)
+    if not backend:
+        raise BackendConfigurationError("A storage backend record needs a backend")
+    path = commitment_file(environ)
+    previous = _committed_backend(environ)
+    if previous == backend:
+        return path
+    if previous is not None:
+        raise BackendConfigurationError(f"The data in {path.parent} belongs to {previous!r}, not {backend!r}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp")
+    descriptor = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump({"version": 1, "backend": backend}, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Linking publishes a complete record without overwriting a record a
+        # concurrent process just committed.
+        try:
+            os.link(pending, path)
+        except FileExistsError:
+            if _committed_backend(environ) != backend:
+                raise BackendConfigurationError(f"The storage backend changed concurrently in {path}") from None
+    finally:
+        pending.unlink(missing_ok=True)
+    return path
+
+
+def _validate_commitment(choice: BackendChoice, environ: Optional[Mapping[str, str]] = None) -> None:
+    committed = _committed_backend(environ)
+    if committed is not None and choice.backend != committed:
+        raise BackendConfigurationError(
+            f"The data in {commitment_file(environ).parent} already uses {committed!r}; "
+            f"the record is {commitment_file(environ)} and this process selected {choice.backend!r}. "
+            f"Restore {choice_file(environ)} or correct {BACKEND_ENV}; "
+            "refusing to open an older database."
+        )
+
+
+def _validate_provider_choices(choice: BackendChoice, environ: Optional[Mapping[str, str]] = None) -> None:
+    """Let installed backends reject unsafe starts before any data module loads.
+
+    Providers are deliberately lightweight declarations. A validator must not
+    import runtime data modules or open a database. This also protects CLI
+    commands, which do not load the server's plugin bootstrap.
+    """
+    try:
+        entries = importlib.metadata.entry_points(group=ENTRY_POINT_GROUP)
+        for entry in entries:
+            try:
+                provider = entry.load()
+            except Exception as exc:
+                raise BackendConfigurationError(f"The {entry.name!r} database backend failed to load: {exc}") from exc
+            validate = getattr(provider, "validate_choice", None)
+            if callable(validate):
+                validate(choice, environ)
+    except BackendConfigurationError:
+        raise
+    except Exception as exc:
+        raise BackendConfigurationError(f"Cannot validate the selected database backend: {exc}") from exc
 
 
 def persisted_choice(environ: Optional[Mapping[str, str]] = None) -> Optional[BackendChoice]:
@@ -239,7 +384,15 @@ def _added_module(name: str) -> bool:
     if name in REPLACEABLE_MODULES or any(name.startswith(replaced + ".") for replaced in REPLACEABLE_MODULES):
         return False
     path = _PACKAGE_DIR.joinpath(*parts[1:])
-    return not (path.with_suffix(".py").exists() or path.is_dir())
+    if path.with_suffix(".py").exists() or path.with_suffix(".pyc").exists():
+        return False
+    # A source upgrade may leave only bytecode caches under a removed package.
+    # Those files are not importable modules and must not prevent its provider
+    # from supplying it. Preserve every file; never clean a checkout here.
+    return not (path.is_dir() and any(
+        item.is_file() and "__pycache__" not in item.relative_to(path).parts
+        for item in path.rglob("*")
+    ))
 
 
 def _replacements(backend: str, provider: Any) -> dict[str, str]:
@@ -347,6 +500,8 @@ def install(environ: Optional[Mapping[str, str]] = None) -> InstalledBackend:
     if _installed is not None:
         return _installed
     choice = backend_choice(environ)
+    _validate_commitment(choice, environ)
+    _validate_provider_choices(choice, environ)
     if choice.is_sqlite:
         _installed = InstalledBackend(choice=choice)
         return _installed
@@ -402,6 +557,7 @@ def describe() -> dict[str, Any]:
 __all__ = [
     "BACKEND_ENV",
     "CHOICE_FILE_NAME",
+    "COMMITMENT_FILE_NAME",
     "DSN_ENV",
     "DSN_FILE_ENV",
     "ENTRY_POINT_GROUP",
@@ -412,7 +568,10 @@ __all__ = [
     "InstalledBackend",
     "backend_choice",
     "choice_file",
+    "commit_backend",
+    "commitment_file",
     "config_dir",
+    "data_dir",
     "describe",
     "install",
     "installed",

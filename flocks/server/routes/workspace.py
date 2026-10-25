@@ -63,6 +63,7 @@ from flocks.server.auth import get_optional_user, require_user
 from flocks.workspace.manager import WorkspaceManager
 from flocks.workspace.models import WorkspaceNode, WorkspaceStats
 from flocks.utils.log import Log
+from flocks.utils.http_file_read_guard import http_private_path_is_blocked, require_http_private_path_access
 
 router = APIRouter()
 log = Log.create(service="workspace.routes")
@@ -192,7 +193,8 @@ def _visible_children(directory: Path, root: Path) -> list[Path]:
     Output directories are organized by date, so show their folders newest-first
     while retaining the normal name order for files.
     """
-    children = [child for child in directory.iterdir() if not child.name.startswith(".")]
+    children = [child for child in directory.iterdir()
+                if not child.name.startswith(".") and not http_private_path_is_blocked(child)]
     if not _is_outputs_directory(directory, root):
         return sorted(children)
 
@@ -238,17 +240,23 @@ def _dir_stats_sync(root: Path):
     file_count = 0
     dir_count = 0
     total_size = 0
-    for item in root.rglob("*"):
-        if item.is_file():
-            file_count += 1
-            total_size += item.stat().st_size
-        elif item.is_dir():
-            dir_count += 1
+    if http_private_path_is_blocked(root):
+        return file_count, dir_count, total_size
+    for parent, directories, filenames in os.walk(root, followlinks=False):
+        directory = Path(parent)
+        directories[:] = [name for name in directories if not http_private_path_is_blocked(directory / name)]
+        dir_count += len(directories)
+        for name in filenames:
+            item = directory / name
+            if not http_private_path_is_blocked(item) and item.is_file():
+                file_count += 1
+                total_size += item.stat().st_size
     return file_count, dir_count, total_size
 
 
 def _read_text_preview_sync(path: Path, max_bytes: int) -> tuple[str, bool]:
     """Read at most ``max_bytes`` from a text file for safe preview."""
+    require_http_private_path_access(path)
     with path.open("rb") as handle:
         data = handle.read(max_bytes + 1)
     truncated = len(data) > max_bytes
@@ -258,6 +266,7 @@ def _read_text_preview_sync(path: Path, max_bytes: int) -> tuple[str, bool]:
 
 
 def _inline_preview_response(target: Path) -> FileResponse:
+    require_http_private_path_access(target)
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     if media_type not in _ALLOWED_PREVIEW_MEDIA_TYPES:
         raise HTTPException(
@@ -282,6 +291,7 @@ def _inline_preview_response(target: Path) -> FileResponse:
 
 
 def _download_response(target: Path, *, filename: Optional[str] = None) -> FileResponse:
+    require_http_private_path_access(target)
     return FileResponse(
         path=str(target),
         filename=filename or target.name,
@@ -334,6 +344,7 @@ async def list_tree(
         base = mgr.resolve_workspace_path(path) if path else workspace_root
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    require_http_private_path_access(base)
     if not base.exists():
         raise HTTPException(status_code=404, detail=f"Path not found: {path}")
     if not base.is_dir():
@@ -351,6 +362,7 @@ async def list_dir(
         base = mgr.resolve_workspace_path(path) if path else workspace_root
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    require_http_private_path_access(base)
     if not base.exists():
         raise HTTPException(status_code=404, detail=f"Path not found: {path}")
     if not base.is_dir():
@@ -581,6 +593,7 @@ async def read_file(
         target = mgr.resolve_workspace_path(path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    require_http_private_path_access(target)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     if not target.is_file():
@@ -597,6 +610,8 @@ async def read_file(
             target,
             max_read_bytes,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {
@@ -658,6 +673,7 @@ async def preview_file(
         target = mgr.resolve_workspace_path(path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    require_http_private_path_access(target)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     if not target.is_file():
@@ -674,6 +690,7 @@ async def download_file(
         target = mgr.resolve_workspace_path(path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    require_http_private_path_access(target)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     if not target.is_file():
@@ -716,7 +733,7 @@ async def download_zip(body: ZipDownloadRequest):
         except ValueError:
             skipped.append(rel_path)
             continue
-        if target.is_file():
+        if target.is_file() and not http_private_path_is_blocked(target):
             targets.append((rel_path, target))
         else:
             skipped.append(rel_path)
@@ -840,7 +857,7 @@ def _build_memory_node_sync(
         children = (
             child
             for child in path.iterdir()
-            if not child.is_symlink()
+            if not child.is_symlink() and not http_private_path_is_blocked(child)
         )
         node.children = [
             _build_memory_node_sync(child, memory_dir, writable_project_ids)
@@ -857,7 +874,7 @@ def _list_memory_sync(
     children = (
         child
         for child in memory_dir.iterdir()
-        if not child.is_symlink()
+        if not child.is_symlink() and not http_private_path_is_blocked(child)
     )
     ordered = sorted(
         children,
@@ -876,6 +893,7 @@ async def _settle_memory_note(mgr: WorkspaceManager, target: Path) -> None:
     """The shared copy of a memory note, before this instance serves it."""
     from flocks.memory.sync.mirror import reconcile_note
 
+    require_http_private_path_access(target)
     if target.suffix.lower() != ".md":
         return
     try:
@@ -890,6 +908,7 @@ async def list_memory(request: Request):
 
     mgr = _get_manager()
     memory_dir = mgr.get_memory_dir()
+    require_http_private_path_access(memory_dir)
     # Notes written through other instances show up here too.
     await reconcile_quietly(memory_dir)
     if not memory_dir.exists():
@@ -925,6 +944,8 @@ async def read_memory_file(
             target,
             max_read_bytes,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {

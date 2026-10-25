@@ -333,7 +333,7 @@ if [[ -n "$CONFIGURED_ROOT" ]]; then
 fi
 # written when a component outside this package was installed into the venv (an earlier package
 # that carried it, or its own online upgrade); this package would leave it out
-COMPONENT_MARKER="run/pro-bundle-installed.json"
+COMPONENT_MARKER_PATTERN="run/*-bundle-installed.json"
 # the venv names the build root: anywhere else it is rewritten (after the last refusal, in staging)
 RELOCATE=0
 if [[ "$INSTALL_ROOT" != "$BUILD_ROOT" ]]; then
@@ -581,7 +581,10 @@ def read_env(path):
             line = line[len("export "):]
         key, sep, value = line.partition("=")
         if sep and key.strip() and not key.lstrip().startswith("#"):
-            values[key.strip()] = value.strip().strip("\"'").strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            values[key.strip()] = value
     return values
 
 if env_file:
@@ -617,12 +620,18 @@ if env_file:
                 environ[key] = value
     os.environ["HOME"] = environ["HOME"]  # ~ for a missing FLOCKS_ROOT
 else:
-    environ = {"FLOCKS_CONFIG_DIR": str(Path(root) / "config")}
+    # A migration source is judged in its own root, including a data/ symlink
+    # to another disk, never against the installer's or target service's HOME.
+    environ = {"FLOCKS_ROOT": root, "FLOCKS_CONFIG_DIR": str(Path(root) / "config")}
 try:
     if env_file:
         choice = db_backend.backend_choice(environ)
     else:
         choice = db_backend.persisted_choice(environ) or db_backend.BackendChoice(db_backend.SQLITE, "default")
+    # Persisted ownership outlives database.json and the backend package.
+    # Check it before any stop, data copy, or program replacement; malformed
+    # records are equally unable to authorize this SQLite-only installation.
+    db_backend._validate_commitment(choice, environ)
 except Exception as exc:
     print(f"的数据库设置读不出来（{type(exc).__name__}: {exc}）")
     raise SystemExit(0)
@@ -644,9 +653,11 @@ for root in "$DATA_ROOT" ${MIGRATE_FROM:+"$MIGRATE_FROM"}; do
   if [[ -n "$database_in" ]]; then
     fail "${root} 所属的安装${database_in}；本离线包只支持 SQLite，覆盖安装后服务会起不来。请按那套安装原来的方式升级，或先把数据迁回 SQLite 再用本安装包。本次未做任何改动"
   fi
-  if [[ -f "$root/$COMPONENT_MARKER" ]]; then
-    fail "${root} 所属的安装装过本安装包不带的组件（${root}/${COMPONENT_MARKER}），覆盖安装会让它失效；请按该组件提供的方式升级，或先在页面上把它卸掉再用本安装包升级。本次未做任何改动"
-  fi
+  for marker in "$root"/${COMPONENT_MARKER_PATTERN}; do
+    if [[ -e "$marker" || -L "$marker" ]]; then
+      fail "${root} 所属的安装装过本安装包不带的组件（${marker}），覆盖安装会让它失效；请按该组件提供的方式升级，或先在页面上把它卸掉再用本安装包升级。本次未做任何改动"
+    fi
+  done
 done
 
 if [[ "$DRY_RUN" == "1" ]]; then
@@ -803,7 +814,7 @@ fi
 # offline pins older packages wrote; none may stay: UV_OFFLINE / npm_config_offline break the online
 # dependency sync, the offline channel names a release that is not there, and FLOCKS_OFFLINE_INSTALL=1
 # turns the updater's refusal back on as soon as FLOCKS_DEPLOY_MODE goes missing from the file
-OFFLINE_ONLY_KEYS_RE='^(FLOCKS_OFFLINE_INSTALL|FLOCKS_UPDATE_CHANNEL|FLOCKS_PRO_BUNDLE_DIR|UV_OFFLINE|npm_config_offline)='
+OFFLINE_ONLY_KEYS_RE='^(FLOCKS_OFFLINE_INSTALL|FLOCKS_UPDATE_CHANNEL|UV_OFFLINE|npm_config_offline)='
 render_env_template() {
   sed \
     -e "s|@INSTALL_ROOT@|$INSTALL_ROOT|g" \

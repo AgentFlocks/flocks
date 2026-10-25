@@ -324,6 +324,24 @@ def register_public_path(pattern: Any) -> None:
     register_public_path_pattern(pattern)
 
 
+def register_http_private_path_provider(name: str, provider: Callable[[Path], bool]) -> None:
+    """Deny an extension's private files before HTTP allow-path checks.
+
+    A synchronous predicate receives a resolved absolute Path. Return True
+    to deny; errors or a non-boolean result also deny. This applies to direct
+    reads, downloads and search/list results, without changing internal tools.
+    """
+    from flocks.utils.http_file_read_guard import register_http_private_path_provider as _register
+
+    _register(name, provider)
+
+
+def unregister_http_private_path_provider(name: str) -> bool:
+    from flocks.utils.http_file_read_guard import unregister_http_private_path_provider as _unregister
+
+    return _unregister(name)
+
+
 _serving = False
 
 
@@ -567,6 +585,8 @@ __all__ = [
     "unregister_page_code_policy",
     "register_event_hook",
     "register_public_path",
+    "register_http_private_path_provider",
+    "unregister_http_private_path_provider",
     "register_shutdown_hook",
     "register_startup_hook",
     "mark_serving",

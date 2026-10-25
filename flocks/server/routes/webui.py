@@ -368,9 +368,11 @@ async def build_webui_page(page_id: str, _admin: object = Depends(require_admin)
 
 @router.get("/contracts/webui/pages/{page_id}/bundle.js")
 async def get_webui_page_bundle(page_id: str, v: Optional[str] = Query(None)):
+    from flocks.utils.http_file_read_guard import require_http_private_path_access
     await _require_page_access(_page_id_or_400(page_id))
     try:
         bundle_path = _store.bundle_path(page_id)
+        require_http_private_path_access(bundle_path)
         if not bundle_path.is_file():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="bundle not found")
         headers = {"Cache-Control": "no-cache"} if v else None
@@ -385,9 +387,11 @@ async def get_webui_page_bundle(page_id: str, v: Optional[str] = Query(None)):
 
 @router.get("/contracts/webui/pages/{page_id}/assets/{asset_path:path}")
 async def get_webui_page_asset(page_id: str, asset_path: str):
+    from flocks.utils.http_file_read_guard import require_http_private_path_access
     await _require_page_access(_page_id_or_400(page_id))
     try:
         path = _store.asset_path(page_id, asset_path)
+        require_http_private_path_access(path)
         if not path.is_file():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset not found")
         return FileResponse(path=path)
@@ -424,9 +428,11 @@ async def dispatch_webui_page_api(page_id: str, api_path: str, request: Request)
 
 @router.get("/contracts/webui/pages/{page_id}/export")
 async def export_webui_page(page_id: str, _admin: object = Depends(require_admin)):
+    from flocks.utils.http_file_read_guard import http_private_path_is_blocked, require_http_private_path_access
     page_id = _page_id_or_400(page_id)
     await _require_page_access(page_id)
     page_path = _store.page_dir(page_id)
+    require_http_private_path_access(page_path)
     if not page_path.is_dir():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"page not found: {page_id}")
 
@@ -436,6 +442,8 @@ async def export_webui_page(page_id: str, _admin: object = Depends(require_admin
         with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for file_path in page_path.rglob("*"):
                 if not file_path.is_file():
+                    continue
+                if http_private_path_is_blocked(file_path):
                     continue
                 rel_parts = file_path.relative_to(page_path).parts
                 # Bytecode caches are produced when the page API is loaded and

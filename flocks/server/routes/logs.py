@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from flocks.utils.log import get_log_dir
+from flocks.utils.http_file_read_guard import http_private_path_is_blocked, require_http_private_path_access
 
 router = APIRouter()
 
@@ -42,11 +43,12 @@ class LogContentResponse(BaseModel):
 async def list_logs():
     """List all log files sorted by modification time (newest first)."""
     log_dir = get_log_dir()
+    require_http_private_path_access(log_dir)
     if not log_dir.is_dir():
         return LogListResponse(files=[], log_dir=str(log_dir))
 
     # One stat per file: it feeds both the sort key and the response.
-    stats = [(p, p.stat()) for p in _iter_log_files(log_dir)]
+    stats = [(p, p.stat()) for p in _iter_log_files(log_dir) if not http_private_path_is_blocked(p)]
     stats.sort(key=lambda item: item[1].st_mtime, reverse=True)
     files = [
         LogFileInfo(name=p.relative_to(log_dir).as_posix(), size=st.st_size, modified=st.st_mtime)
@@ -69,15 +71,16 @@ async def read_latest_log(
         raise HTTPException(status_code=404, detail="Log directory not found")
 
     today_log = log_dir / date.today().isoformat() / "flocks.log"
-    if today_log.is_file():
+    if today_log.is_file() and not http_private_path_is_blocked(today_log):
         return _read_log_file(today_log, tail, filename=_relative_log_name(log_dir, today_log))
 
     for day_dir in sorted(_iter_date_dirs(log_dir), reverse=True):
         main_log = day_dir / "flocks.log"
-        if main_log.is_file():
+        if main_log.is_file() and not http_private_path_is_blocked(main_log):
             return _read_log_file(main_log, tail, filename=_relative_log_name(log_dir, main_log))
 
-    log_files = sorted(_iter_log_files(log_dir), key=lambda f: f.stat().st_mtime, reverse=True)
+    log_files = sorted((path for path in _iter_log_files(log_dir) if not http_private_path_is_blocked(path)),
+                       key=lambda f: f.stat().st_mtime, reverse=True)
     if not log_files:
         raise HTTPException(status_code=404, detail="No log files found")
 
@@ -199,6 +202,7 @@ def _tail_lines(path: Path, tail: int) -> list[str]:
 
 
 def _read_log_file(path: Path, tail: int, filename: str | None = None) -> LogContentResponse:
+    require_http_private_path_access(path)
     try:
         total = _count_lines(path)
         lines = _tail_lines(path, tail)

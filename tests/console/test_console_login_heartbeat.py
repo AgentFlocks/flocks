@@ -8,7 +8,7 @@ from flocks.console.login import ConsoleLoginService
 
 def test_heartbeat_payload_reports_oss_for_core_only_install(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
-    monkeypatch.setenv("FLOCKS_EDITION", "flockspro")
+    monkeypatch.setenv("FLOCKS_EDITION", "sample-extension")
     monkeypatch.setattr(ConsoleLoginService, "_runtime_version", staticmethod(lambda: "2026.7.3.3"))
 
     payload = ConsoleLoginService.heartbeat_payload(
@@ -23,7 +23,7 @@ def test_heartbeat_payload_reports_oss_for_core_only_install(tmp_path, monkeypat
     assert payload["core_version"] == "2026.7.3.3"
     assert "version" not in payload
     assert "bundle_version" not in payload
-    assert "flockspro_component_version" not in payload
+    assert "extension_component_version" not in payload
     assert "version_info" not in payload
 
 

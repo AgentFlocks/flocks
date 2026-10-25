@@ -192,6 +192,7 @@ async def get_current_project(request: Request, project_id: Optional[str] = Quer
 @router.get("/folders", response_model=FolderBrowserResponse, summary="Browse project folders")
 async def browse_project_folders(request: Request, path: Optional[str] = Query(None)):
     """List directories under configured roots without exposing file contents."""
+    from flocks.utils.http_file_read_guard import http_private_path_is_blocked, require_http_private_path_access
 
     require_user(request)
     roots = Project.allowed_roots()
@@ -218,6 +219,7 @@ async def browse_project_folders(request: Request, path: Optional[str] = Query(N
     )
     if containing_root is None:
         raise HTTPException(status_code=403, detail="Directory is outside the allowed roots")
+    require_http_private_path_access(current)
 
     entries: List[FolderEntry] = []
     try:
@@ -231,6 +233,8 @@ async def browse_project_folders(request: Request, path: Optional[str] = Query(N
             except (OSError, RuntimeError):
                 continue
             if not (resolved == containing_root or resolved.is_relative_to(containing_root)):
+                continue
+            if http_private_path_is_blocked(resolved, resolved=True):
                 continue
             if not os.access(resolved, os.R_OK | os.X_OK):
                 continue

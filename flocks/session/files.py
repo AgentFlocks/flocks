@@ -21,6 +21,7 @@ from typing import Any, Iterable
 from flocks.config.config import Config
 from flocks.session.utils.file_extractor import file_url_to_path
 from flocks.utils.log import Log
+from flocks.utils.http_file_read_guard import assert_http_private_path_access, http_private_path_is_blocked
 from flocks.workspace.manager import WorkspaceManager, WorkspaceOutputScope
 
 _log = Log.create(service="session.files")
@@ -955,6 +956,8 @@ def _assert_safe_context_root(target: Path) -> None:
     ]
     if target == target.parent or any(_is_within(root, target) for root in forbidden):
         raise ValueError("Folder cannot be added to Session Context")
+    if http_private_path_is_blocked(target, resolved=True):
+        raise ValueError("Private folders cannot be added to Session Context")
 
 
 def validate_context_folder(path: str) -> str:
@@ -1036,6 +1039,7 @@ def list_context_root(
 ) -> dict[str, Any]:
     root, _display_name, _kind = resolve_context_root(session, root_id)
     base = _resolve_context_relative_path(root, relative_path)
+    assert_http_private_path_access(base, resolved=True)
     if not base.is_dir():
         raise FileNotFoundError("Context directory not found")
     if offset < 0 or not 1 <= limit <= CONTEXT_MAX_PAGE_SIZE:
@@ -1056,6 +1060,8 @@ def list_context_root(
             if not _is_within(root, target) or any(
                 part.startswith(".") for part in target.relative_to(root).parts
             ):
+                continue
+            if http_private_path_is_blocked(target, resolved=True):
                 continue
             stat = target.stat()
         except (OSError, RuntimeError):
@@ -1192,6 +1198,8 @@ async def build_session_context(
     outputs = []
     context_files = []
     for resource in resources_by_path.values():
+        if http_private_path_is_blocked(resource.path):
+            continue
         descriptor = session_resource_metadata(resource)
         (outputs if resource.origin == "agent_output" else context_files).append(descriptor)
 
@@ -1281,6 +1289,7 @@ async def resolve_session_resource(session: Any, resource_id: str) -> ResolvedSe
 
     for resource in _message_resources(session, message):
         if parse_public_resource_id(resource.resource_id)[1] == part_id:
+            assert_http_private_path_access(resource.path)
             if resource.origin == "user_upload":
                 await restore_upload(resource.path)
             return resource

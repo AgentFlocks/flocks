@@ -624,7 +624,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   );
   const headerWorkspaces = useMemo<HeaderWorkspace[]>(() => {
     // Scene modules, SOC included, are shown only while their suite is installed, enabled
-    // and unlocked; SOC keeps its place right after the workbench.
+    // and unlocked; SOC defaults to the position after the workbench.
+    // WorkspaceModuleNav applies the browser's custom header order.
     const socWorkspaces = openSceneWorkspaces.filter((workspace) => workspace.id === SOC_WORKSPACE_ID);
     const otherSceneWorkspaces = openSceneWorkspaces.filter((workspace) => workspace.id !== SOC_WORKSPACE_ID);
     return [

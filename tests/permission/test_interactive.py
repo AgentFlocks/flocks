@@ -27,7 +27,7 @@ def test_a_managed_install_does_not_auto_approve(monkeypatch: pytest.MonkeyPatch
     else:
         monkeypatch.delenv("FLOCKS_DEPLOY_MODE", raising=False)
         (tmp_path / "config").mkdir()
-        (tmp_path / "config" / "deployment.json").write_text('{"mode": "managed", "managed_by": "flockspro-go"}')
+        (tmp_path / "config" / "deployment.json").write_text('{"mode": "managed", "managed_by": "sample-manager"}')
     assert auto_approve_enabled() is False
 
 

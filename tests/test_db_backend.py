@@ -360,6 +360,121 @@ def test_a_backend_nobody_provides_leaves_the_runtime_modules_in_place(tmp_path)
     assert seen["describe"]["provider"] is None
 
 
+@pytest.mark.parametrize("explicit_sqlite", [False, True])
+def test_a_committed_backend_refuses_an_older_sqlite_view_before_imports(tmp_path, explicit_sqlite):
+    site = tmp_path / "site"
+    site.mkdir()
+    data = tmp_path / "data-kept-separately"
+    data.mkdir()
+    marker = data / db_backend.COMMITMENT_FILE_NAME
+    marker.write_text(json.dumps({"backend": "postgres", "version": 1}))
+    old = data / "flocks.db"
+    old.write_bytes(b"old database must remain untouched")
+    env = {"FLOCKS_DATA_DIR": str(data)}
+    if explicit_sqlite:
+        env["FLOCKS_DB_BACKEND"] = "sqlite"
+
+    result = _run(tmp_path, site, env, "import flocks")
+
+    assert result.returncode != 0
+    assert "refusing to open an older database" in result.stderr
+    assert old.read_bytes() == b"old database must remain untouched"
+    assert json.loads(marker.read_text())["backend"] == "postgres"
+
+
+def test_a_backend_can_validate_even_when_sqlite_was_selected(tmp_path):
+    site = tmp_path / "site"
+    _install_backend(site, "standin")
+    module = site / "stand_in_backend" / "__init__.py"
+    module.write_text(module.read_text() + "\ndef validate(choice, environ=None):\n"
+                      "    if choice.backend == 'sqlite':\n"
+                      "        raise RuntimeError('the migrated data cannot use sqlite')\n"
+                      "BACKEND.validate_choice = validate\n")
+
+    result = _run(tmp_path, site, {"FLOCKS_DB_BACKEND": "sqlite"}, "import flocks")
+
+    assert result.returncode != 0
+    assert "the migrated data cannot use sqlite" in result.stderr
+
+
+def test_backend_commitment_is_private_idempotent_and_never_overwrites_another_choice(tmp_path):
+    env = {"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DATA_DIR": str(tmp_path / "actual-data")}
+    path = db_backend.commit_backend("PostgreSQL", env)
+    before = path.read_bytes()
+    assert path == tmp_path / "actual-data" / db_backend.COMMITMENT_FILE_NAME
+    assert path.stat().st_mode & 0o077 == 0
+    assert db_backend.commit_backend("postgres", env) == path
+    assert path.read_bytes() == before
+    with pytest.raises(db_backend.BackendConfigurationError, match="belongs to"):
+        db_backend.commit_backend("sqlite", env)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("contents", ["{broken", "null", "{}", '{"backend": 1}'])
+def test_corrupt_commitment_does_not_become_permission_to_open_sqlite(tmp_path, contents):
+    site = tmp_path / "site"
+    site.mkdir()
+    data = tmp_path / "root" / "data"
+    data.mkdir(parents=True)
+    (data / db_backend.COMMITMENT_FILE_NAME).write_text(contents)
+    result = _run(tmp_path, site, {}, "import flocks")
+    assert result.returncode != 0
+    assert "storage backend record" in result.stderr
+    assert not (data / "flocks.db").exists()
+
+
+@pytest.mark.parametrize("variable", ["FLOCKS_DATA_DIR", "XDG_DATA_HOME", "FLOCKS_ROOT"])
+@pytest.mark.parametrize("value", ["~/existing-data", " /existing-data", "/existing-data "])
+def test_ambiguous_storage_directory_is_refused_without_selecting_another_root(tmp_path, monkeypatch, variable, value):
+    from flocks.config.config import Config
+    for name in ("FLOCKS_DATA_DIR", "XDG_DATA_HOME", "FLOCKS_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, value)
+    monkeypatch.setattr(Config, "_global_config", None)
+    with pytest.raises(db_backend.BackendConfigurationError, match="directory"):
+        db_backend.data_dir()
+    with pytest.raises((db_backend.BackendConfigurationError, ValueError), match="directory"):
+        Config.get_data_path()
+
+
+@pytest.mark.parametrize("variable", ["FLOCKS_DATA_DIR", "XDG_DATA_HOME", "FLOCKS_ROOT"])
+def test_commitment_and_storage_share_the_exact_directory_rule(tmp_path, monkeypatch, variable):
+    from flocks.config.config import Config
+    for name in ("FLOCKS_DATA_DIR", "XDG_DATA_HOME", "FLOCKS_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, str(tmp_path / "existing data"))
+    monkeypatch.setattr(Config, "_global_config", None)
+    assert db_backend.data_dir() == Config.get_data_path()
+
+
+@pytest.mark.parametrize("contents", ['{"version":2,"backend":"sqlite"}', '{"backend":"sqlite"}', 'x' * 65537])
+def test_invalid_commitment_version_and_size_are_not_sqlite_permission(tmp_path, contents):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / db_backend.COMMITMENT_FILE_NAME).write_text(contents)
+    with pytest.raises(db_backend.BackendConfigurationError, match="storage backend record"):
+        db_backend._validate_commitment(db_backend.BackendChoice("sqlite", "test"), {"FLOCKS_DATA_DIR": str(data)})
+
+
+def test_dangling_commitment_is_not_treated_as_a_missing_record(tmp_path):
+    marker = tmp_path / db_backend.COMMITMENT_FILE_NAME
+    marker.symlink_to(tmp_path / "missing-retained-record")
+    with pytest.raises(db_backend.BackendConfigurationError, match="storage backend record"):
+        db_backend._validate_commitment(db_backend.BackendChoice("sqlite", "test"), {"FLOCKS_DATA_DIR": str(tmp_path)})
+
+
+def test_removed_package_bytecode_caches_are_not_a_runtime_module(tmp_path, monkeypatch):
+    package = tmp_path / "flocks"
+    cache = package / "db" / "backends" / "__pycache__" / "postgres.cpython-312.pyc"
+    cache.parent.mkdir(parents=True)
+    cache.write_bytes(b"retained cache")
+    monkeypatch.setattr(db_backend, "_PACKAGE_DIR", package)
+    assert db_backend._added_module("flocks.db")
+    assert cache.read_bytes() == b"retained cache"
+    (package / "db" / "__init__.py").write_text("")
+    assert not db_backend._added_module("flocks.db")
+
+
 def test_every_replaceable_module_is_a_runtime_module():
     import importlib.util
 

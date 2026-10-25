@@ -166,7 +166,7 @@ if [[ -n "$BASE_DIR" ]]; then
 fi
 # the package upgrades online like a source install; the offline pins older packages wrote must
 # never appear (OFFLINE_ONLY_KEYS_RE in install.sh)
-OFFLINE_PINS_RE='^(FLOCKS_OFFLINE_INSTALL|FLOCKS_UPDATE_CHANNEL|FLOCKS_PRO_BUNDLE_DIR|UV_OFFLINE|npm_config_offline)='
+OFFLINE_PINS_RE='^(FLOCKS_OFFLINE_INSTALL|FLOCKS_UPDATE_CHANNEL|UV_OFFLINE|npm_config_offline)='
 check "$EF written (source mode, no offline pins)" in_ctr_q "grep -q '^FLOCKS_HOST=0.0.0.0' $EF && grep -q '^FLOCKS_DEPLOY_MODE=source\$' $EF && ! grep -Eq '$OFFLINE_PINS_RE' $EF"
 check "no bundle/ in the install root" in_ctr_q "test ! -e $IR/bundle"
 check "$EF has UV_NO_SYNC=1 (the skills' uv run uses the shipped venv as it is)" in_ctr_q "grep -qx 'UV_NO_SYNC=1' $EF"
@@ -219,7 +219,7 @@ check "update check reports source deploy mode, upgrade allowed" in_ctr_q "out=\
 # ---------------------------------------------------------------- re-run the installer (upgrade / repair)
 # pretend the env file was left by an older offline package with its offline pins: the re-run must
 # switch it over to online upgrades, the plain merge would keep the pins
-in_ctr_q "sed -i 's/^FLOCKS_DEPLOY_MODE=.*/FLOCKS_DEPLOY_MODE=offline/' $EF && printf 'FLOCKS_OFFLINE_INSTALL=1\nFLOCKS_UPDATE_CHANNEL=offline-old\nFLOCKS_PRO_BUNDLE_DIR=$IR/bundle\nUV_OFFLINE=1\nnpm_config_offline=true\n' >> $EF"
+in_ctr_q "sed -i 's/^FLOCKS_DEPLOY_MODE=.*/FLOCKS_DEPLOY_MODE=offline/' $EF && printf 'FLOCKS_OFFLINE_INSTALL=1\nFLOCKS_UPDATE_CHANNEL=offline-old\nUV_OFFLINE=1\nnpm_config_offline=true\n' >> $EF"
 # (without FLOCKS_OFFLINE_BASE on purpose: an install below a base has to be found and upgraded where it is)
 if in_ctr "env $INSTALL_ENV bash /var/tmp/flocks-offline.run" > /tmp/smoke-install-2.log 2>&1; then
   record PASS "re-running the installer exits 0"
@@ -283,10 +283,10 @@ refused_takeover() {
   check "$label: refusal changed nothing" bash -c "grep -q '本次未做任何改动' $log"
   check "$label: instance still serving" in_ctr_q "curl -fsS http://127.0.0.1:$PORT/api/health && test -f $IR/flocks/pyproject.toml"
 }
-in_ctr_q "printf '{\"bundle_version\": \"v0\"}' > $DH/.flocks/run/pro-bundle-installed.json"
+in_ctr_q "printf '{\"bundle_version\": \"v0\"}' > $DH/.flocks/run/sample-bundle-installed.json"
 refused_takeover "package over an install carrying a component it does not ship" /tmp/smoke-component.log
-check "refusal names the marker" bash -c "grep -q 'pro-bundle-installed.json' /tmp/smoke-component.log"
-in_ctr_q "rm -f $DH/.flocks/run/pro-bundle-installed.json"
+check "refusal names the marker" bash -c "grep -q 'sample-bundle-installed.json' /tmp/smoke-component.log"
+in_ctr_q "rm -f $DH/.flocks/run/sample-bundle-installed.json"
 in_ctr_q "printf '{\"mode\": \"managed\", \"managed_by\": \"supervisor\"}' > $DH/.flocks/config/deployment.json"
 refused_takeover "package over a supervised install" /tmp/smoke-managed.log
 check "refusal names the descriptor" bash -c "grep -q 'deployment.json' /tmp/smoke-managed.log"

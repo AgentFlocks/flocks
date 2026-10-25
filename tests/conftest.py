@@ -22,7 +22,7 @@ _installed_entry_points = importlib.metadata.entry_points
 def _core_entry_points(**params):
     """``importlib.metadata.entry_points`` without other packages' ``flocks.*`` entries.
 
-    A development venv usually has a package such as Flocks Pro installed next to
+    A development venv may have an optional extension package installed next to
     Core. Its ``flocks.plugins`` / ``flocks.plugins.critical`` / ``flocks.cli``
     entry points would load while these tests build an app or import the CLI and
     replace Core behaviour (workspace layout, identity, licensing, commands), so

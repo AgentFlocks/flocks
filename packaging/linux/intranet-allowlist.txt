@@ -1,5 +1,5 @@
 # Outbound access of a Flocks server in a customer intranet, for intranet-sim.sh.
-# Source: the offline install manual (Flocks离线安装操作说明, network table under "需要 Pro 时"),
+# Source: the offline install manual (Flocks离线安装操作说明, optional component network table),
 # rows whose "哪台机器需要访问" includes the Flocks server. passport.threatbook.cn
 # (106.75.36.224, 106.75.36.226, 123.59.51.113, 123.59.72.253) is listed there for the
 # administrator's PC only (browser login), so the simulated server must not reach it.
