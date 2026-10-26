@@ -35,6 +35,7 @@ vi.mock('@/api/update', () => ({ checkUpdate, getCurrentRelease, DEFAULT_UPDATE_
 vi.mock('@/api/onboarding', () => ({ onboardingAPI }));
 vi.mock('@/api/session', () => ({ sessionApi }));
 vi.mock('@/api/notifications', () => ({ getActiveNotifications, ackNotification, getNotificationAckStatus }));
+vi.mock('@/components/common/InstallationResultBanner', () => ({ InstallationResultBanner: () => null }));
 vi.mock('@/contexts/AuthContext', () => ({ useAuth }));
 vi.mock('@/contexts/ProductNameContext', () => ({ useProductName: () => productNameContextValue }));
 vi.mock('@/components/common/ConfirmDialog', () => ({ useConfirm: () => confirmMock }));

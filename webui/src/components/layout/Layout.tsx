@@ -64,6 +64,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import { BackendStatusBanner } from '@/components/common/BackendStatusBanner';
+import { InstallationResultBanner } from '@/components/common/InstallationResultBanner';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
@@ -1160,6 +1161,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       <div className={`flex h-screen flex-col pt-14 max-md:h-[100dvh] lg:pl-[var(--sidebar-width)] ${sidebarResize.dragging ? '' : 'transition-[padding]'}`}>
         {/* In the flow under the fixed header: a fixed banner would either hide under it or cover it. */}
         <BackendStatusBanner inline />
+        <InstallationResultBanner />
         <main className="relative flex-1 overflow-hidden bg-ui-canvas">
           <KeepAlivePanes panes={keepAlivePanes} activeHref={activePaneHref} location={location} routes={contentRoutes} />
         </main>

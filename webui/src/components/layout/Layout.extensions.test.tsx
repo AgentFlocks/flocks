@@ -40,6 +40,7 @@ const { contractPages } = vi.hoisted(() => ({
 }));
 
 vi.mock('@ext/registry', () => ({ default: registryMock }));
+vi.mock('@/components/common/InstallationResultBanner', () => ({ InstallationResultBanner: () => null }));
 vi.mock('@/contexts/AuthContext', () => ({ useAuth }));
 vi.mock('@/contexts/ProductNameContext', () => ({
   useProductName: () => ({ productName: 'Flocks', configuredDisplayName: null, faviconUrl: '/favicon.svg', hasCustomFavicon: false, loading: false }),

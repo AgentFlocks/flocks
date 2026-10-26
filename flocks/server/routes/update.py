@@ -48,6 +48,14 @@ _TARGET_VERSION_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:[.+-][0-9A-Za-z][0-9A-Za-z.
 DEFAULT_CHANNEL = "flocks"
 
 
+@router.get("/installation-result", summary="Read the last installation failure and recovery result")
+async def installation_result(request: Request, locale: str = "zh-CN") -> dict:
+    require_admin(request)
+    from flocks.updater.installation_status import read_installation_result
+
+    return {"result": await asyncio.to_thread(read_installation_result, locale)}
+
+
 def _update_cache_key(locale: str | None, channel: str) -> tuple[str, str]:
     return (locale or "", channel)
 
