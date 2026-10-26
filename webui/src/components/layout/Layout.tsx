@@ -1105,8 +1105,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         <button
           type="button"
           onClick={toggleCollapsed}
-          // A tall, narrow handle sits flush with the sidebar edge in both states.
-          className="absolute -right-px top-1/2 z-20 hidden h-[92px] w-[14px] -translate-y-1/2 items-center justify-center rounded-l-[10px] border border-ui-control bg-ui-surface text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus lg:flex"
+          // Keep the tall hit target while showing only the arrow at the sidebar edge.
+          className="absolute -right-px top-1/2 z-20 hidden h-[92px] w-[14px] -translate-y-1/2 items-center justify-center border-0 bg-transparent text-ui-secondary transition-colors hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus lg:flex"
           aria-expanded={!collapsed}
           aria-label={collapsed ? t('expandNav') : t('collapseNav')}
           title={collapsed ? t('expandNav') : t('collapseNav')}
