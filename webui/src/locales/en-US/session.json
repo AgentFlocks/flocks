@@ -191,6 +191,9 @@
       "loading": "Loading messages…"
     },
     "cacheUsage": {
+      "sessionSummary": "Session cache hit rate {{rate}}",
+      "sessionScope": "Aggregates loaded assistant records in this session, weighted by input tokens. Includes compacted history, but excludes compaction summaries, child sessions, and internal retries without separate records.",
+      "empty": "No session cache records yet",
       "summary": "Reply cache hit rate {{rate}}",
       "coverage": "Reported {{reported}}/{{total}} records",
       "updating": "Updating",

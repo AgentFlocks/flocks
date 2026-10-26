@@ -35,6 +35,7 @@ interface PreviewState {
 
 export interface SessionContextPanelProps {
   sessionId: string;
+  cacheUsageContainerRef?: React.Ref<HTMLDivElement>;
   snapshot: SessionContextSnapshot | null;
   loading: boolean;
   loadingMore?: boolean;
@@ -111,6 +112,7 @@ function EmptySection({ children }: { children: React.ReactNode }) {
 
 export default function SessionContextPanel({
   sessionId,
+  cacheUsageContainerRef,
   snapshot,
   loading,
   loadingMore = false,
@@ -536,6 +538,7 @@ export default function SessionContextPanel({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
+        <div ref={cacheUsageContainerRef} data-session-id={sessionId} />
         {(actionError || error) && <div className="m-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">{actionError || error}</div>}
         {snapshot?.hasMore && snapshot?.nextBefore && onLoadMore && (
           <button type="button" disabled={loading} onClick={() => void onLoadMore()} className="mx-3 mt-3 rounded-lg border border-ui-control bg-ui-surface px-3 py-2 text-[13px] leading-5 text-ui-secondary disabled:opacity-50">

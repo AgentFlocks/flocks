@@ -16,6 +16,7 @@
  * - Support optional copy actions, timestamps, and related affordances
  */
 
+import { createPortal } from 'react-dom';
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, memo, type RefObject } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import {
@@ -321,6 +322,8 @@ export interface SessionChatProps {
   composerTextareaMaxHeight?: number;
   /** Extra content injected between left toolbar controls and right actions */
   centerToolbarSlot?: React.ReactNode;
+  /** Render live cache usage in the context panel. Null hides it while the panel is closed. */
+  cacheUsageContainer?: HTMLElement | null;
   /** Context window size for the current model; enables composer usage ring. */
   contextWindowTokens?: number | null;
   /**
@@ -1983,6 +1986,7 @@ export default function SessionChat({
   composerTextareaMaxHeight,
   centerToolbarSlot,
   contextWindowTokens,
+  cacheUsageContainer,
   mentionAgents = [],
 }: SessionChatProps) {
   const { t, i18n } = useTranslation('session');
@@ -2651,6 +2655,10 @@ export default function SessionChat({
   const sessionMessagesForContextUsage = useMemo(
     () => messages.filter((message) => !message.sessionID || message.sessionID === sessionId),
     [messages, sessionId],
+  );
+  const sessionCacheUsageCalls = useMemo(
+    () => !cacheUsageContainer ? [] : sessionMessagesForContextUsage.flatMap(getChatCacheUsageCalls),
+    [sessionMessagesForContextUsage, cacheUsageContainer],
   );
   const hasUserMessage = useMemo(
     () => sessionMessagesForContextUsage.some((message) => message.role === 'user'),
@@ -4797,6 +4805,16 @@ export default function SessionChat({
 
   return (
     <ReaChatContext.Provider value={reaChatContext}>
+    {cacheUsageContainer && createPortal(
+      <div className="border-b border-ui-border">
+        {loading && sessionCacheUsageCalls.length === 0 ? <LoadingSpinner className="py-3" /> : (
+          messagesError && sessionCacheUsageCalls.length === 0
+            ? <p role="alert" className="px-3 py-2 text-xs text-ui-muted">{t('chat.loadFailed')}</p>
+            : <SessionCacheUsage calls={sessionCacheUsageCalls} isActive={isStreaming} scope="session" />
+        )}
+      </div>,
+      cacheUsageContainer,
+    )}
     <div className={`flex flex-col min-h-0 ${className}`}>
       {/* Messages area */}
       <div
@@ -4864,6 +4882,7 @@ export default function SessionChat({
               onQuestionReject={handleQuestionReject}
               showActions={showActions}
               showTimestamp={showTimestamp}
+              showCacheUsage={cacheUsageContainer === undefined}
               collapseIntermediateSteps={collapseIntermediateSteps}
               processGroupsDefaultOpen={processGroupsDefaultOpen}
               processGroupsOpenWhileActive={processGroupsOpenWhileActive}
@@ -4892,6 +4911,7 @@ export default function SessionChat({
               onQuestionReject={handleQuestionReject}
               showActions={showActions}
               showTimestamp={showTimestamp}
+              showCacheUsage={cacheUsageContainer === undefined}
               collapseIntermediateSteps={collapseIntermediateSteps}
               processGroupsDefaultOpen={processGroupsDefaultOpen}
               processGroupsOpenWhileActive={processGroupsOpenWhileActive}
@@ -5715,6 +5735,7 @@ export interface ChatMessageBubbleProps {
   onQuestionReject?: (callID: string, requestId: string) => Promise<void>;
   showActions?: boolean;
   showTimestamp?: boolean;
+  showCacheUsage?: boolean;
   collapseIntermediateSteps?: boolean;
   processGroupsDefaultOpen?: boolean;
   processGroupsOpenWhileActive?: boolean;
@@ -5757,6 +5778,7 @@ function ChatMessageTimelineInner({
   onQuestionReject,
   showActions,
   showTimestamp,
+  showCacheUsage,
   collapseIntermediateSteps,
   processGroupsDefaultOpen,
   processGroupsOpenWhileActive,
@@ -5857,6 +5879,7 @@ function ChatMessageTimelineInner({
             onQuestionReject={onQuestionReject}
             showActions={showActions}
             showTimestamp={showTimestamp}
+            showCacheUsage={showCacheUsage}
             collapseIntermediateSteps={collapseIntermediateSteps}
             processGroupsDefaultOpen={processGroupsDefaultOpen}
             processGroupsOpenWhileActive={processGroupsOpenWhileActive}
@@ -5945,6 +5968,7 @@ function ChatMessageBubbleInner({
   onQuestionReject,
   showActions = false,
   showTimestamp = false,
+  showCacheUsage = true,
   collapseIntermediateSteps = false,
   processGroupsDefaultOpen = false,
   processGroupsOpenWhileActive = false,
@@ -6558,7 +6582,7 @@ function ChatMessageBubbleInner({
       })()}
 
 
-      {!isUser && !sender && <SessionCacheUsage calls={getChatCacheUsageCalls(message)} isActive={isActive} />}
+      {showCacheUsage && !isUser && !sender && <SessionCacheUsage calls={getChatCacheUsageCalls(message)} isActive={isActive} />}
 
       {/* Actions — rendered inside bubble only while editing */}
       {showActions && parts.length > 0 && isEditing && (
@@ -7518,6 +7542,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.isActive !== next.isActive) return false;
   if (prev.bare !== next.bare) return false;
   if (prev.showActions !== next.showActions) return false;
+  if (prev.showCacheUsage !== next.showCacheUsage) return false;
   if (prev.collapseIntermediateSteps !== next.collapseIntermediateSteps) return false;
   if (prev.processGroupsDefaultOpen !== next.processGroupsDefaultOpen) return false;
   if (prev.processGroupsOpenWhileActive !== next.processGroupsOpenWhileActive) return false;

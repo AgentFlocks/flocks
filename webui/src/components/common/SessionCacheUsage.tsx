@@ -2,13 +2,16 @@ import { ChevronDown, Database } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { summarizeCacheUsage, type CacheUsageCall } from '@/features/session-chat/cacheUsage';
 
-/** Cache visibility for the assistant records represented by one reply. */
-export default function SessionCacheUsage({ calls, isActive = false }: {
+/** Cache visibility for assistant records in a reply or the current session. */
+export default function SessionCacheUsage({ calls, isActive = false, scope = 'reply' }: {
   calls: readonly CacheUsageCall[];
   isActive?: boolean;
+  scope?: 'reply' | 'session';
 }) {
   const { t, i18n } = useTranslation('session');
-  if (calls.length === 0) return null;
+  if (calls.length === 0) return scope === 'session' ? (
+    <p className="border-t border-ui-border px-3 py-3 text-xs text-ui-muted">{t('chat.cacheUsage.empty')}</p>
+  ) : null;
   const summary = summarizeCacheUsage(calls);
   const formatCount = (value: number | null) => value === null
     ? t('chat.cacheUsage.unknownValue')
@@ -18,10 +21,10 @@ export default function SessionCacheUsage({ calls, isActive = false }: {
     : `${(value * 100).toFixed(1)}%`;
 
   return (
-    <details data-testid="session-cache-usage" className="group/cache mt-3 max-w-full text-xs text-slate-500 dark:text-zinc-400">
+    <details data-testid="session-cache-usage" className={`group/cache max-w-full text-xs text-slate-500 dark:text-zinc-400 ${scope === 'session' ? 'border-t border-ui-border px-3 py-3' : 'mt-3'}`}>
       <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-1 rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 [&::-webkit-details-marker]:hidden">
         <Database className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        <span>{t('chat.cacheUsage.summary', { rate: formatRate(summary.hitRate) })}</span>
+        <span>{t(scope === 'session' ? 'chat.cacheUsage.sessionSummary' : 'chat.cacheUsage.summary', { rate: formatRate(summary.hitRate) })}</span>
         <span>{t('chat.cacheUsage.coverage', { reported: summary.reportedCalls, total: summary.totalCalls })}</span>
         {isActive && <span>{t('chat.cacheUsage.updating')}</span>}
         <ChevronDown className="h-3 w-3 shrink-0 transition-transform group-open/cache:rotate-180" aria-hidden="true" />
@@ -64,7 +67,7 @@ export default function SessionCacheUsage({ calls, isActive = false }: {
             </li>
           ))}
         </ol>
-        <p>{t('chat.cacheUsage.scope')}</p>
+        <p>{t(scope === 'session' ? 'chat.cacheUsage.sessionScope' : 'chat.cacheUsage.scope')}</p>
       </div>
     </details>
   );
