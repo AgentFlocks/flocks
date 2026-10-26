@@ -524,6 +524,7 @@ export default function SessionPage() {
   const [pendingOptimisticMessage, setPendingOptimisticMessage] = useState<Message | null>(null);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [contextPanelOpen, setContextPanelOpen] = useState(false);
+  const [cacheUsageContainer, setCacheUsageContainer] = useState<HTMLDivElement | null>(null);
   const [contextPanelWidth, setContextPanelWidth] = useState(() => Math.min(340, getInitialSidePanelWidth()));
   const [contextSnapshot, setContextSnapshot] = useState<SessionContextSnapshot | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
@@ -2081,6 +2082,7 @@ export default function SessionPage() {
           allowAnyUpload={reaAcceptsSamples(reaStatus)}
           composerPrefill={reaComposerPrefill?.sessionId === (activeChatSessionId ?? null) ? reaComposerPrefill : null}
           onComposerPrefillApplied={handleReaComposerPrefillApplied}
+          cacheUsageContainer={cacheUsageContainer?.dataset.sessionId === activeChatSessionId ? cacheUsageContainer : null}
           contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
           model={selectedPromptModel}
           welcomeContent={(setInput, sendPrompt) => (
@@ -2696,6 +2698,7 @@ export default function SessionPage() {
               <SessionContextPanel
                 key={`${activeChatSessionId}:${contextResetVersion}`}
                 sessionId={activeChatSessionId}
+                cacheUsageContainerRef={setCacheUsageContainer}
                 snapshot={contextSnapshot?.sessionID === activeChatSessionId ? contextSnapshot : null}
                 loading={contextLoading}
                 loadingMore={contextLoadingMore}

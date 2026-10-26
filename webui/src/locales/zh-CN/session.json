@@ -186,6 +186,9 @@
   },
   "chat": {
     "cacheUsage": {
+      "sessionSummary": "会话缓存命中率 {{rate}}",
+      "sessionScope": "汇总当前会话已加载的助手消息记录（Tokens），按输入量加权。包含压缩前记录，不含压缩摘要、子会话或未单独保留的内部重试。",
+      "empty": "暂无会话缓存记录",
       "summary": "本次回复缓存命中率 {{rate}}",
       "coverage": "已报告 {{reported}}/{{total}} 条记录",
       "updating": "统计中",
