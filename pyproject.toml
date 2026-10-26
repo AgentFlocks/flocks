@@ -88,7 +88,10 @@ dependencies = [
     # browser
     "cdp-use>=1.4.5",
     "pillow>=12.2.0",
-    "datasketch>=1.10.0",
+    # stream_alert_denoise builds MinHash from shared permutations and keeps
+    # pickled LSH state between runs; 2.0 requires an explicit scheme there
+    # and refuses to mix sketches across schemes.
+    "datasketch>=1.10.0,<2",
     # Kafka ingest (workflow input/output)
     "aiokafka>=0.14.0",
     "ddddocr>=1.6.1",

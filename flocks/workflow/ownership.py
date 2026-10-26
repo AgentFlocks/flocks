@@ -32,7 +32,9 @@ log = Log.create(service="workflow.ownership")
 _ABANDONED_KEEP_SECONDS = 24 * 3600
 _ABANDONED_KEPT = 65536
 
-_lock = threading.Lock()
+# Reentrant: execution_cancelled can be entered again on its own thread from
+# a python node's cancel tracer (flocks.workflow.repl_runtime).
+_lock = threading.RLock()
 _live: dict[str, threading.Event] = {}
 _abandoned: OrderedDict[str, float] = OrderedDict()  # id -> when it was let go (monotonic)
 

@@ -284,11 +284,22 @@ class PythonExecRuntime(Runtime):
         g["inputs"] = inputs
         g["outputs"] = {}
 
+        checking = threading.local()
+
         def _cancel_requested() -> bool:
+            # The line tracer below traces the checker too: on a line inside a
+            # check the node itself started it would check again, re-entering
+            # whatever the checker holds (the ownership lock is not reentrant,
+            # and the whole server then waits on it). One check at a time.
+            if getattr(checking, "active", False):
+                return False
+            checking.active = True
             try:
                 return bool(self.cancel_checker and self.cancel_checker())
             except Exception:
                 return False
+            finally:
+                checking.active = False
 
         if _cancel_requested():
             raise RunCancelledError("<runtime>")

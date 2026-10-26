@@ -638,7 +638,7 @@ requires-dist = [
     { name = "claude", specifier = ">=0.4.11" },
     { name = "click", specifier = ">=8.1.7" },
     { name = "croniter", specifier = ">=6.0.0" },
-    { name = "datasketch", specifier = ">=1.10.0" },
+    { name = "datasketch", specifier = ">=1.10.0,<2" },
     { name = "ddddocr", specifier = ">=1.6.1" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "dingtalk-stream", specifier = ">=0.20" },
