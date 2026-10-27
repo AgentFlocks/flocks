@@ -381,16 +381,19 @@ class StreamProcessor:
         })
         if event.id in self.reasoning_parts:
             part = self.reasoning_parts[event.id]
+            previous_visible = self._sanitize_streaming_text_for_display(part.text)
             part.text += event.text
+            visible_text = self._sanitize_streaming_text_for_display(part.text)
+            visible_delta = self._appended_delta(previous_visible, visible_text)
             
             # Update metadata if provided
             if event.metadata:
                 self._merge_reasoning_metadata(part, event.metadata)
             
             # Call reasoning delta callback for CLI display
-            if self.reasoning_delta_callback and event.text:
+            if self.reasoning_delta_callback and visible_delta:
                 try:
-                    await self.reasoning_delta_callback(event.text)
+                    await self.reasoning_delta_callback(visible_delta)
                 except Exception as e:
                     log.error("stream.reasoning_delta_callback.error", {"error": str(e)})
             
@@ -420,10 +423,10 @@ class StreamProcessor:
                             "messageID": part.messageID,
                             "sessionID": part.sessionID,
                             "type": "reasoning",
-                            "text": part.text,
+                            "text": visible_text,
                             "time": {"start": part.time.start},
                         },
-                        "delta": event.text,
+                        "delta": visible_delta,
                     })
                     log.debug("stream.reasoning.delta.published", {
                         "part_id": part.id,
@@ -439,6 +442,16 @@ class StreamProcessor:
             if event.metadata:
                 self._merge_reasoning_metadata(part, event.metadata)
             
+            self._log_dsml_markers(part.text, "reasoning")
+            if self._contains_dsml_tool_markup(part.text):
+                # Reasoning may describe hypothetical calls. Do not execute it.
+                log.warn("stream.reasoning_tool_calls_detected", {
+                    "session_id": self.session_id,
+                    "reasoning_id": event.id,
+                    "action": "suppressed_not_executed",
+                })
+            part.text = self._sanitize_streaming_text_for_display(part.text, final=True)
+
             # Update time
             if part.time:
                 part.time.end = int(datetime.now().timestamp() * 1000)
@@ -1723,6 +1736,7 @@ class StreamProcessor:
             # Parse, execute, and strip them so the conversation loop continues
             # correctly and no raw markup/JSON appears in the UI.
             raw_text = self.current_text_part.text
+            self._log_dsml_markers(raw_text, "text")
             all_text_tool_calls: list[dict] = []
             cleaned = raw_text
 
@@ -1765,6 +1779,10 @@ class StreamProcessor:
                     "session_id": self.session_id,
                     "reason": "found XML tool-call markup but could not parse any valid tool calls",
                 })
+
+            self.current_text_part.text = self._sanitize_streaming_text_for_display(
+                self.current_text_part.text, final=True
+            )
 
             # Update time
             if self.current_text_part.time:
@@ -1968,15 +1986,15 @@ class StreamProcessor:
         """
         return current[len(os.path.commonprefix([previous, current])):]
 
-    _DSML_NAMESPACE_RE = r"(?:\|\s*\|\s*DSML\s*\|\s*\||\|\s*DSML\s*\||｜\s*DSML\s*｜)"
+    _DSML_NAMESPACE_RE = r"(?:(?:\|\s*){1,2}DSML(?:\s*\|){1,2}|(?:｜\s*){1,2}DSML(?:\s*｜){1,2})"
     _DSML_TAG_RE = re.compile(
         r"<\s*(/?)\s*" + _DSML_NAMESPACE_RE + r"\s*([A-Za-z_][\w]*)\b([^>]*)>",
         re.DOTALL | re.IGNORECASE,
     )
     _DSML_COMPLETE_BLOCK_RE = re.compile(
-        r"<\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|tool_result)\b[^>]*>"
+        r"<\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|calls|tool_call|function_calls|tool_result)\b[^>]*>"
         r".*?"
-        r"</\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|tool_result)\s*>",
+        r"</\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|calls|tool_call|function_calls|tool_result)\s*>",
         re.DOTALL | re.IGNORECASE,
     )
     _DSML_COMPLETE_INVOKE_RE = re.compile(
@@ -1986,9 +2004,22 @@ class StreamProcessor:
         re.DOTALL | re.IGNORECASE,
     )
     _DSML_OPEN_BLOCK_RE = re.compile(
-        r"<\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|tool_result|invoke)\b",
+        r"<\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|calls|tool_call|function_calls|tool_result|invoke)\b",
         re.IGNORECASE,
     )
+
+    def _log_dsml_markers(self, text: str, channel: str) -> None:
+        # Only structural spelling is useful for diagnosing new variants.
+        markers = list(dict.fromkeys(re.findall(
+            r"<\s*/?\s*[|｜\s]*DSML[|｜\s]*[A-Za-z_]+",
+            text, re.IGNORECASE,
+        )))[:8]
+        if markers:
+            log.warn("stream.dsml_markup_detected", {
+                "session_id": self.session_id,
+                "channel": channel,
+                "markers": [marker[:120] for marker in markers],
+            })
 
     @classmethod
     def _contains_dsml_tool_markup(cls, text: str) -> bool:
@@ -2010,7 +2041,7 @@ class StreamProcessor:
         return cls._DSML_COMPLETE_INVOKE_RE.sub("", text)
 
     @staticmethod
-    def _sanitize_streaming_text_for_display(text: str) -> str:
+    def _sanitize_streaming_text_for_display(text: str, *, final: bool = False) -> str:
         visible = text
 
         visible = StreamProcessor._strip_dsml_blocks(visible)
@@ -2044,6 +2075,15 @@ class StreamProcessor:
 
         if truncate_at is not None:
             visible = visible[:truncate_at]
+
+        # Unknown DSML tags must not leak through the display fallback.
+        visible = re.sub(r"<[^<>]*DSML[^<>]*>", "", visible, flags=re.IGNORECASE)
+        partial = re.search(r"<[^<>]*$", visible)
+        if partial:
+            suffix = partial.group()
+            candidate = re.sub(r"[\s/|｜]", "", suffix[1:]).upper()
+            if candidate.startswith("DSML") or (not final and (not candidate or "DSML".startswith(candidate))):
+                visible = visible[:partial.start()]
 
         visible = re.sub(r"\n{3,}", "\n\n", visible)
         return visible.rstrip()
@@ -2167,7 +2207,7 @@ class StreamProcessor:
         tool_calls: list[dict] = []
 
         for match in re.finditer(
-            r"<dsml:(?:tool_use|tool_calls)\b[^>]*>(.*?)</dsml:(?:tool_use|tool_calls)>",
+            r"<dsml:(?:tool_use|tool_calls|calls|tool_call|function_calls)\b[^>]*>(.*?)</dsml:(?:tool_use|tool_calls|calls|tool_call|function_calls)>",
             normalized,
             re.DOTALL | re.IGNORECASE,
         ):
