@@ -859,11 +859,32 @@ class SessionLoop:
         auto_failover: bool = False,
     ) -> LoopResult:
         """One live runner per session across every process sharing PostgreSQL."""
-        from flocks.session.ownership import SessionExecutionLease, SessionOwnershipLost
+        from flocks.session.ownership import SessionExecutionLease, SessionOwnershipLost, current_lease
 
         kwargs = dict(provider_id=provider_id, model_id=model_id, agent_name=agent_name,
                       callbacks=callbacks, working_directory=working_directory, auto_failover=auto_failover)
         from flocks.session import turn_receipt
+        from flocks.content.managed import task_scope
+
+        async def run_with_lease(lease: SessionExecutionLease) -> LoopResult:
+            lease.require_owned()
+            with task_scope(f"session:{session_id}#{lease.generation}"):
+                result = await cls._run_owned(session_id, **kwargs)
+            lease.require_owned()
+            if result.action == "queued":
+                turn_receipt.note_handed_off()
+            return result
+
+        # Callers that must atomically prepare input before execution may
+        # already own this session. Borrow only the current context's lease;
+        # its owner retains renewal/release responsibility. _run_owned still
+        # enforces lifecycle and the in-process single-runner boundary.
+        borrowed_lease = current_lease(session_id)
+        if borrowed_lease is not None:
+            try:
+                return await run_with_lease(borrowed_lease)
+            except SessionOwnershipLost as exc:
+                return LoopResult(action="error", error=str(exc))
 
         if cls.is_running(session_id):
             result = await cls._run_owned(session_id, **kwargs)
@@ -875,18 +896,11 @@ class SessionLoop:
             # Another worker's run takes the new message on its next step.
             turn_receipt.note_handed_off()
             return LoopResult(action="queued", error="Loop already running")
-        from flocks.content.managed import task_scope
-
         try:
             async with lease:
                 # One run is one task: managed definitions it reads keep the
                 # version they had when it first read them.
-                with task_scope(f"session:{session_id}#{lease.generation}"):
-                    result = await cls._run_owned(session_id, **kwargs)
-                lease.require_owned()
-                if result.action == "queued":
-                    turn_receipt.note_handed_off()
-                return result
+                return await run_with_lease(lease)
         except SessionOwnershipLost as exc:
             return LoopResult(action="error", error=str(exc))
         finally:

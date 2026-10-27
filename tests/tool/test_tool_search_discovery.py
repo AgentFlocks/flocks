@@ -7,6 +7,18 @@ from flocks.tool.registry import ToolCategory, ToolInfo
 from flocks.tool.system.tool_search import tool_search
 
 
+@pytest.fixture(autouse=True)
+def standard_discovery_agent(monkeypatch, tmp_path):
+    # These compatibility cases exercise Rex's unrestricted catalog. Isolated
+    # agent/projection boundaries are covered with real session state below
+    # tests/session/test_isolated_interaction.py.
+    monkeypatch.setattr(
+        "flocks.agent.registry.Agent.get",
+        AsyncMock(return_value=SimpleNamespace(name="rex", prompt_profile="standard")),
+    )
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks"))
+
+
 def _tool(name: str, category: ToolCategory, native: bool = True) -> ToolInfo:
     return ToolInfo(
         name=name,

@@ -2839,6 +2839,53 @@ class SessionRunner:
             f"{catalog_summary}"
         )
 
+    @staticmethod
+    def _with_isolated_tool_catalog(
+        messages: List[ChatMessage],
+        agent: AgentInfo,
+        tools: List[Dict[str, Any]],
+    ) -> List[ChatMessage]:
+        """Add awareness only from final, declared callable schemas.
+
+        Run after before-LLM hooks so narrowed tools cannot remain in an old
+        catalog. Do not change the cached conversation or persisted history.
+        """
+        if getattr(agent, "prompt_profile", "standard") != "isolated":
+            return messages
+        declared = set(getattr(agent, "tools", None) or [])
+        lines = ["## Current Callable Tools", ""]
+        names = set()
+        for tool in tools:
+            function = tool.get("function") or {}
+            name = function.get("name")
+            if not isinstance(name, str) or name not in declared or name in names:
+                continue
+            names.add(name)
+            description = " ".join(str(function.get("description") or "").split())[:160]
+            lines.append(f"- `{name}`: {description}")
+        if "tool_search" in names:
+            lines.extend([
+                "",
+                "Use `tool_search` to find a matching capability or inspect exact tool names. "
+                "Discovery is limited to this agent's declared and currently allowed tools; "
+                "it cannot grant new permissions or enable an unavailable tool.",
+            ])
+        if not names:
+            lines.append("No declared tools are currently callable. State the missing capability when needed.")
+        catalog = "\n".join(lines)
+        updated = list(messages)
+        for index, message in enumerate(updated):
+            if message.role != "system":
+                continue
+            system_message = copy.deepcopy(message)
+            if isinstance(system_message.content, list):
+                system_message.content.append({"type": "text", "text": catalog})
+            else:
+                system_message.content = f"{system_message.content or ''}\n\n{catalog}"
+            updated[index] = system_message
+            return updated
+        return [ChatMessage(role="system", content=catalog), *updated]
+
     def _should_use_text_tool_call_mode(self) -> bool:
         # MiniMax models exposed through ThreatBook-managed gateways do not
         # forward the OpenAI ``tool_calls`` field on their streaming chunks
@@ -4267,6 +4314,8 @@ class SessionRunner:
             except Exception as exc:
                 log.error("runner.hook.llm_before.error", {"error": str(exc)})
                 raise RuntimeError("LLM before-hook failed; request was not sent") from exc
+
+        messages = self._with_isolated_tool_catalog(messages, agent, tools)
 
         try:
             response_rewriter = await SessionResponseRewriter.create(

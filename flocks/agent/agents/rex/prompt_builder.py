@@ -46,6 +46,7 @@ def build_dynamic_rex_prompt(
         build_workflows_section,
         build_anti_patterns_section,
     )
+    from flocks.agent.interaction_guidance import build_interaction_guidance
 
     _ = available_tools
     del use_task_system
@@ -81,25 +82,7 @@ __KEY_TRIGGERS__
 
 __SECURITY_PRIORITY__
 
-### Request Classification
-
-| Type | Signal | Default Action |
-|------|--------|----------------|
-| **Trivial** | Single file, known location, direct answer | Direct tools |
-| **Explicit** | Specific file or command | Execute directly |
-| **Exploratory** | "How does X work?", "Find Y" | Explore first, then act |
-| **Open-ended** | "Improve", "Refactor", "Add feature" | Explore, plan, then execute |
-| **Ambiguous** | Multiple valid interpretations | Ask one focused question |
-
-### Ambiguity Rules
-
-| Situation | Action |
-|-----------|--------|
-| Single valid interpretation | Proceed |
-| Multiple interpretations, similar effort | Proceed with a reasonable default and state it briefly |
-| Multiple interpretations with materially different scope or effort | Ask |
-| Missing critical file, error, or environment context | Ask |
-| User approach seems flawed | Raise the concern before implementing |
+__INTERACTION_GUIDANCE__
 
 __AGENT_SELECTION__
 
@@ -192,6 +175,7 @@ __COMMAND_GUIDANCE__
 """
 
     prompt = template
+    prompt = prompt.replace("__INTERACTION_GUIDANCE__", build_interaction_guidance())
     prompt = prompt.replace("__KEY_TRIGGERS__", key_triggers)
     prompt = prompt.replace("__AGENT_SELECTION__", agent_selection)
     prompt = prompt.replace("__SKILLS_SECTION__", skills_section)

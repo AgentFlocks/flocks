@@ -201,6 +201,7 @@ def _select_tool_catalog(
     *,
     category: Optional[str],
     limit: int,
+    tool_infos: List[Any],
 ) -> Optional[Tuple[List[Dict[str, Any]], List[str]]]:
     lowered = (query or "").strip().lower()
     if not lowered.startswith("select:"):
@@ -216,7 +217,7 @@ def _select_tool_catalog(
 
     tools_by_canonical = {
         canonical_tool_token(tool_info.name): tool_info
-        for tool_info in list_tool_catalog_infos()
+        for tool_info in tool_infos
         if not category
         or getattr(tool_info.category, "value", str(tool_info.category)).lower() == category.lower()
     }
@@ -240,15 +241,22 @@ def search_tool_catalog(
     *,
     category: Optional[str] = None,
     limit: int = 8,
+    tool_infos: Optional[Iterable[Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
+    # An explicitly empty candidate set must stay empty. Filter before limits
+    # so denied matches cannot crowd permitted tools out of the results.
+    candidates = list_tool_catalog_infos() if tool_infos is None else [
+        tool for tool in tool_infos
+        if tool.name not in {"invalid", "_noop"} and getattr(tool, "enabled", True)
+    ]
     limit = max(1, min(8 if limit is None else limit, 20))
-    selected = _select_tool_catalog(query or "", category=category, limit=limit)
+    selected = _select_tool_catalog(query or "", category=category, limit=limit, tool_infos=candidates)
     if selected is not None:
         return selected
 
     ranked: List[Tuple[int, Any, List[str]]] = []
 
-    for tool_info in list_tool_catalog_infos():
+    for tool_info in candidates:
         if category:
             tool_category = getattr(tool_info.category, "value", str(tool_info.category))
             if tool_category.lower() != category.lower():

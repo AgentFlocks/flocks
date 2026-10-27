@@ -1322,12 +1322,15 @@ Do not repeat an identical tool call in the same response."""
             session_id=session_id,
         )
         if prompt_profile == "isolated":
+            from flocks.agent.interaction_guidance import build_interaction_guidance
+
             values = [
                 ("flocks_config_guard", "global", get_prompt_flocks_config_guard().strip()),
                 ("tool_protocol", "provider", cls._build_isolated_tool_guidance_prompt(
                     use_text_tool_call_mode=use_text_tool_call_mode,
                 )),
                 ("agent_identity", "agent", cls._normalize_prompt_text(agent_prompt)),
+                ("interaction_guidance", "global", build_interaction_guidance()),
                 ("agent_skills", "agent", agent_skills_prompt),
                 ("execution_mode", "runtime", cls._normalize_prompt_text(execution_mode_prompt)),
                 ("minimal_environment", "runtime_tail", cls._build_minimal_environment(session_directory)),
