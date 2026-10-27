@@ -95,6 +95,21 @@ async def test_list_projects_uses_json_registry_without_virtual_default(project_
 
 
 @pytest.mark.asyncio
+async def test_website_project_keeps_its_source_type_in_owned_registry(project_root):
+    metadata_dir = project_root / "website-metadata"
+    metadata_dir.mkdir()
+    created = await Project.create(
+        owner_id="website-owner", name="Website", worktree=str(metadata_dir),
+        source_kind="website", scope="code-security",
+    )
+    restored = await Project.get(created.id, owner_id="website-owner")
+    assert restored.source_kind == "website" and restored.scope == "code-security"
+    assert restored.model_dump(by_alias=True)["sourceKind"] == "website"
+    assert await Project.get(created.id, owner_id="other-owner") is None
+    assert list(metadata_dir.iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_create_rejects_duplicate_canonical_directory(project_root):
     labs = project_root / "labs"
     labs.mkdir()

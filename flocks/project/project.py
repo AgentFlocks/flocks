@@ -154,7 +154,7 @@ class ProjectInfo(BaseModel):
 
     id: str
     worktree: str
-    source_kind: Optional[Literal["local", "git", "zip", "url"]] = Field(None, alias="sourceKind")
+    source_kind: Optional[Literal["local", "git", "zip", "url", "website"]] = Field(None, alias="sourceKind")
     scope: Optional[ProjectScope] = None
     vcs: Optional[str] = None
     name: Optional[str] = None
@@ -183,7 +183,7 @@ class ProjectRegistryEntry(BaseModel):
     id: str
     name: str
     worktree: str
-    source_kind: Optional[Literal["local", "git", "zip", "url"]] = Field(None, alias="sourceKind")
+    source_kind: Optional[Literal["local", "git", "zip", "url", "website"]] = Field(None, alias="sourceKind")
     scope: Optional[ProjectScope] = None
     created_at: int = Field(alias="createdAt")
     updated_at: int = Field(alias="updatedAt")
@@ -546,7 +546,7 @@ class Project:
         owner_id: str,
         name: Optional[str],
         worktree: str,
-        source_kind: Literal["local", "git", "zip", "url"] = "local",
+        source_kind: Literal["local", "git", "zip", "url", "website"] = "local",
         scope: str = WORKBENCH_PROJECT_SCOPE,
     ) -> ProjectInfo:
         """Register an existing directory for a user."""
@@ -825,11 +825,22 @@ class Project:
             return await cls._delete_locked(project_id, owner_id=owner_id)
 
     @classmethod
+    async def require_deletion_allowed(cls, project_id: str, *, owner_id: str) -> None:
+        """Check extension-owned active work while the lifecycle guard is held."""
+        from flocks.project.lifecycle import require_project_deletion_allowed
+
+        project = await cls.get(project_id, owner_id=owner_id)
+        if project is None:
+            raise ValueError(f"Project {project_id} not found")
+        await require_project_deletion_allowed(project, owner_id)
+
+    @classmethod
     async def _delete_locked(cls, project_id: str, *, owner_id: str) -> bool:
         """Update the project registry while its lifecycle guard is held."""
 
         if project_id == DEFAULT_PROJECT_ID:
             raise ProjectDeletionError("The default project cannot be deleted")
+        await cls.require_deletion_allowed(project_id, owner_id=owner_id)
         async with cls._lock:
             with _registry_cross_process_lock(cls.registry_path(owner_id)):
                 registry = cls._read_registry(owner_id)

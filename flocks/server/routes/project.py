@@ -337,6 +337,9 @@ async def delete_project(
         async with Project.lifecycle_guard(project_id):
             if await Project.get(project_id, owner_id=user.id) is None:
                 raise ValueError(f"Project {project_id} not found")
+            # Check before archiving sessions as well as in Project.delete:
+            # extension-owned tasks can run without any Flocks session.
+            await Project.require_deletion_allowed(project_id, owner_id=user.id)
             if keep_sessions:
                 return await Project.delete(project_id, owner_id=user.id)
 

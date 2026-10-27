@@ -94,6 +94,12 @@ def register_audit_sink(sink: Any) -> None:
     register_sink(sink)
 
 
+def register_project_deletion_guard(name: str, guard: Any) -> None:
+    from flocks.project.lifecycle import register_project_deletion_guard as register
+
+    register(name, guard)
+
+
 def register_hub_root(name: str, root: Path) -> None:
     """Add an extension hub root whose entries join (and override) the catalog."""
     from flocks.hub.catalog import clear_catalog_caches
@@ -568,6 +574,7 @@ __all__ = [
     "normalize_fail_policy",
     "normalize_timeout",
     "register_audit_sink",
+    "register_project_deletion_guard",
     "register_auth_backend",
     "register_branding_provider",
     "register_content_source",
