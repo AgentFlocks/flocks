@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import uuid
 from collections import deque
@@ -44,6 +45,7 @@ _HOST_PROCESS_RPC_QUEUE_SIZE = 4
 _HOST_PROCESS_STDERR_MAX_BYTES = 1024 * 1024
 _WORKFLOW_SITE_PACKAGES = "/workspace/.flocks/workflow/site-packages"
 _TOOL_CANCEL_CHECKER_INSTALL_LOCK = threading.Lock()
+_CANCEL_TRACE_INTERVAL_SECONDS = 0.05
 
 
 class _RPCFrameTooLarge(ValueError):
@@ -359,10 +361,17 @@ class PythonExecRuntime(Runtime):
 
         buf = io.StringIO()
         previous_trace = None
+        next_cancel_check = time.monotonic() + _CANCEL_TRACE_INTERVAL_SECONDS
 
         def _cancel_trace(_frame: Any, event: str, _arg: Any) -> Any:
-            if event == "line" and _cancel_requested():
-                raise RunCancelledError("<runtime>")
+            nonlocal next_cancel_check
+            # Imports and computation can execute millions of Python lines.
+            # The checker may cross a process boundary to verify ownership;
+            # sample that I/O while keeping explicit tool/node checks immediate.
+            if event == "line" and time.monotonic() >= next_cancel_check:
+                if _cancel_requested():
+                    raise RunCancelledError("<runtime>")
+                next_cancel_check = time.monotonic() + _CANCEL_TRACE_INTERVAL_SECONDS
             return _cancel_trace
 
         try:

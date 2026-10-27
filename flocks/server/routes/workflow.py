@@ -755,11 +755,11 @@ def _list_workflows_from_fs() -> List[Dict[str, Any]]:
     return [data for data in by_id.values() if not is_hidden_workflow_data(data)]
 
 
-_INTERRUPTED_EXECUTION_MESSAGE = "Execution interrupted: server restarted before the run finished"
+_INTERRUPTED_EXECUTION_MESSAGE = "Execution interrupted: the worker stopped or lost execution ownership"
 
 
 async def mark_interrupted_executions() -> int:
-    """Finalize executions left running by a process that is gone."""
+    """Finalize runs without a live owner; a restart is only one possible cause."""
     return await WorkflowStore.recover_expired_executions(_INTERRUPTED_EXECUTION_MESSAGE)
 
 

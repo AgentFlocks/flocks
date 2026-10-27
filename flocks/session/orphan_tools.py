@@ -41,12 +41,22 @@ def _build_interrupted_message_error() -> Dict[str, Any]:
 
 
 def _is_unfinished_assistant(info: object) -> bool:
-    """An assistant message the runner never closed: no finish reason and no error."""
-    return (
+    """A reply with neither terminal status nor a persisted completion time."""
+    if not (
         getattr(info, "role", None) == "assistant"
         and getattr(info, "finish", None) is None
         and getattr(info, "error", None) is None
-    )
+    ):
+        return False
+    # Older writers recorded completion without a finish reason. Keep those
+    # replies intact; zero/invalid timestamps are not evidence of completion.
+    timestamps = getattr(info, "time", None)
+    if isinstance(timestamps, dict):
+        for key in ("completed", "end"):
+            value = timestamps.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return False
+    return True
 
 
 async def abort_orphan_running_parts_in_messages(

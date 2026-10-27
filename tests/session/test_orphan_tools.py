@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -18,6 +19,7 @@ from flocks.session.message import (
 from flocks.session.orphan_tools import (
     INTERRUPTED_MESSAGE_ERROR,
     INTERRUPTED_TOOL_ERROR,
+    _is_unfinished_assistant,
     abort_all_orphan_running_parts,
     abort_orphan_running_parts,
     abort_orphan_running_parts_in_messages,
@@ -25,6 +27,7 @@ from flocks.session.orphan_tools import (
 from flocks.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusQueued, SessionStatusRetry
 from flocks.session.runner import SessionRunner
 from flocks.session.session import Session
+from flocks.storage.storage import Storage
 
 
 @pytest.mark.asyncio
@@ -224,6 +227,81 @@ async def test_abort_orphan_running_parts_marks_unfinished_assistant_reply_inter
 
     # 再跑一次是幂等的
     assert await abort_orphan_running_parts(session.id) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completion_key", ["completed", "end"])
+@pytest.mark.parametrize("recovery", ["preloaded", "startup"])
+async def test_orphan_recovery_preserves_legacy_completed_reply(completion_key, recovery):
+    session = await Session.create(project_id="proj_legacy_completed", directory="/tmp")
+    stored_messages = [{
+        "id": "msg_legacy_completed",
+        "role": "assistant",
+        "time": {"created": 1000, completion_key: 2000},
+    }]
+    stored_parts = {"msg_legacy_completed": [{
+        "id": "part_legacy_completed",
+        "type": "text",
+        "text": "The completed historical answer.",
+    }]}
+    await Storage.set(f"message:{session.id}", stored_messages, "message")
+    await Storage.set(f"message_parts:{session.id}", stored_parts, "message_parts")
+    Message.invalidate_cache(session.id)
+
+    if recovery == "preloaded":
+        messages = await Message.list_with_parts(session.id)
+        repaired = await abort_orphan_running_parts_in_messages(session.id, messages)
+    else:
+        repaired = await abort_all_orphan_running_parts()
+
+    assert repaired == 0
+    Message.invalidate_cache(session.id)
+    recovered = await Message.get_with_parts(session.id, "msg_legacy_completed")
+    assert recovered.info.time["completed"] == 2000
+    assert recovered.info.finish is None
+    assert recovered.info.error is None
+    assert await Message.get_text_content(recovered.info, parts=recovered.parts) == stored_parts["msg_legacy_completed"][0]["text"]
+    # Recovery must not rewrite the old record just to populate a finish reason.
+    assert await Storage.get(f"message:{session.id}") == stored_messages
+    assert await Storage.get(f"message_parts:{session.id}") == stored_parts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completion_key", ["completed", "end"])
+@pytest.mark.parametrize("completion_time", [0, -1])
+async def test_orphan_recovery_still_closes_reply_with_unset_completion_time(
+    completion_key, completion_time,
+):
+    session = await Session.create(project_id="proj_unset_completed", directory="/tmp")
+    message = await Message.create(
+        session.id, MessageRole.ASSISTANT, "Partial answer.",
+        time={"created": 1000, completion_key: completion_time},
+    )
+    Message.invalidate_cache(session.id)
+
+    assert await abort_orphan_running_parts(session.id) == 1
+    Message.invalidate_cache(session.id)
+    recovered = await Message.get_with_parts(session.id, message.id)
+    assert recovered.info.finish == "error"
+    assert recovered.info.error["name"] == "MessageAbortedError"
+    assert await Message.get_text_content(recovered.info, parts=recovered.parts) == "Partial answer."
+
+
+@pytest.mark.parametrize("raw_time", [
+    None,
+    {},
+    {"completed": None},
+    {"completed": ""},
+    {"completed": "not-a-timestamp"},
+    {"completed": True},
+    {"completed": False},
+    {"completed": []},
+    {"completed": {}},
+    {"end": "not-a-timestamp"},
+])
+def test_invalid_completion_timestamp_does_not_hide_unfinished_reply(raw_time):
+    info = SimpleNamespace(role="assistant", finish=None, error=None, time=raw_time)
+    assert _is_unfinished_assistant(info)
 
 
 @pytest.mark.asyncio
