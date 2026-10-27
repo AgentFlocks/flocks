@@ -10,11 +10,11 @@ Differences from the syslog manager:
   a UDP/TCP socket bind.  "binding/listening" is replaced by
   "connecting/running"; a connection failure (broker unreachable, auth error)
   is surfaced the same way a bind failure is.
-* Backpressure uses a *blocking* ``queue.put`` instead of ``put_nowait``+drop:
-  this avoids local drops while the worker pool falls behind and lets the
-  consumer pause naturally. Because ``aiokafka`` auto-commits fetched offsets,
-  the current crash semantics are still best-effort / at-most-once rather than
-  fully durable at-least-once delivery.
+* Backpressure uses a *blocking* ``queue.put`` instead of ``put_nowait``+drop.
+  Offsets are committed explicitly after successful workflow completion and
+  persistence, never past an unfinished message in the same partition. A crash
+  between workflow effects and offset commit can replay a message; workflows
+  with external effects must use the stable Kafka delivery id for idempotency.
 """
 
 from __future__ import annotations
@@ -25,8 +25,9 @@ import json
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from flocks.hooks.execution import execute_with_hooks
 from flocks.hooks.pipeline import HookPipeline
@@ -82,6 +83,10 @@ _REQUEST_TIMEOUT_MS = 5000
 _FETCH_MAX_BYTES = 8 * 1024 * 1024
 _MAX_PARTITION_FETCH_BYTES = 4 * 1024 * 1024
 _MAX_POLL_RECORDS = 16
+_DELIVERY_MAX_ATTEMPTS = 3
+_DELIVERY_RETRY_DELAY_S = 0.25
+# aiokafka may retry retriable commit failures internally without a deadline.
+_OFFSET_OPERATION_TIMEOUT_S = _REQUEST_TIMEOUT_MS / 1000 + 1.0
 
 
 def _worker_count_for_trigger(trigger: TriggerDefinition) -> int:
@@ -110,6 +115,196 @@ class _QueuedKafkaMessage:
 
     raw_value: Optional[bytes]
     size_bytes: int
+    delivery: Optional[_KafkaDelivery] = None
+
+
+class _KafkaGenerationStopped(Exception):
+    """The consumer generation no longer owns its queued deliveries."""
+
+
+class _KafkaDeliveryError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class _KafkaDispatchOutcome:
+    acknowledged: bool
+    exec_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class _KafkaDelivery:
+    tracker: _KafkaOffsetTracker
+    partition: Any
+    offset: int
+    epoch: int
+    completed: bool = False
+
+    @property
+    def delivery_id(self) -> str:
+        return f"kafka:{self.partition.topic}:{self.partition.partition}:{self.offset}"
+
+    def diagnostics(self) -> Dict[str, Any]:
+        return {
+            "delivery_id": self.delivery_id,
+            "topic": self.partition.topic,
+            "partition": self.partition.partition,
+            "offset": self.offset,
+        }
+
+
+class _KafkaOffsetTracker:
+    """Commit only completed prefixes of records fetched in partition order.
+
+    Kafka offsets can have gaps (compaction/transactions), so track the actual
+    delivered records rather than assuming every integer offset is present.
+    All methods run on the consumer's event loop. Rebalance callbacks invalidate
+    ownership synchronously and must not await the commit lock.
+    """
+
+    def __init__(self, consumer: Any, abort: asyncio.Event, *, max_pending: int) -> None:
+        self.consumer = consumer
+        self.abort = abort
+        self.closed = False
+        self._epochs: Dict[Any, int] = {}
+        self._assigned: set[Any] = set()
+        self._anchored: set[Any] = set()
+        self._pending: Dict[Any, deque[_KafkaDelivery]] = {}
+        self._commit_lock = asyncio.Lock()
+        # A slow partition head can block commits even while later workers
+        # finish quickly. Bound that completed-but-uncommitted backlog too.
+        self._slots = asyncio.Semaphore(max(1, max_pending))
+
+    async def wait_for_slot(self) -> None:
+        await self._slots.acquire()
+
+    def assigned(self, partitions: Iterable[Any]) -> None:
+        for partition in partitions:
+            self._assigned.add(partition)
+            self._anchored.discard(partition)
+            self._epochs[partition] = self._epochs.get(partition, 0) + 1
+
+    def revoked(self, partitions: Iterable[Any]) -> bool:
+        pending = False
+        for partition in partitions:
+            self._assigned.discard(partition)
+            pending = bool(self._pending.pop(partition, ())) or pending
+            self._anchored.discard(partition)
+            self._epochs[partition] = self._epochs.get(partition, 0) + 1
+        return pending
+
+    def close(self) -> None:
+        self.closed = True
+
+    def epoch_for(self, partition: Any) -> int:
+        if partition not in self._assigned:
+            raise _KafkaDeliveryError("partition_not_owned", "Kafka delivered a record from a revoked partition")
+        return self._epochs[partition]
+
+    def register(self, partition: Any, offset: int, epoch: int) -> _KafkaDelivery:
+        if partition not in self._assigned or self._epochs.get(partition) != epoch:
+            raise _KafkaDeliveryError(
+                "partition_changed_before_dispatch",
+                "Kafka partition ownership changed while the fetched record waited for capacity",
+            )
+        delivery = _KafkaDelivery(self, partition, offset, epoch)
+        pending = self._pending.setdefault(partition, deque())
+        if pending and offset <= pending[-1].offset:
+            raise _KafkaDeliveryError("offset_order_invalid", "Kafka returned offsets out of partition order")
+        pending.append(delivery)
+        return delivery
+
+    def _check_partition_owner(self, partition: Any, epoch: int) -> None:
+        if (
+            self.closed
+            or self.abort.is_set()
+            or partition not in self._assigned
+            or epoch != self._epochs.get(partition, 0)
+        ):
+            raise _KafkaGenerationStopped()
+
+    async def anchor_partition(self, partition: Any, epoch: int) -> None:
+        """Pin an assignment's reset position before fetching any record.
+
+        With reset=latest and no committed position, restarting after the first
+        failed delivery would otherwise reset to a newer end offset. The same
+        applies when retention invalidated an old committed position. Anchor
+        all assigned partitions before getone, including ones that might later
+        wait for capacity behind a different partition's slow head message.
+        """
+        self._check_partition_owner(partition, epoch)
+        if partition in self._anchored:
+            return
+        async with self._commit_lock:
+            self._check_partition_owner(partition, epoch)
+            if partition in self._anchored:
+                return
+            position = await self.consumer.position(partition)
+            committed = await self.consumer.committed(partition)
+            self._check_partition_owner(partition, epoch)
+            if committed != position:
+                await self.consumer.commit({partition: position})
+                self._check_partition_owner(partition, epoch)
+                log.info(
+                    "kafka.offset_start_anchored",
+                    {"topic": partition.topic, "partition": partition.partition, "offset": position},
+                )
+            self._anchored.add(partition)
+
+    async def complete(self, delivery: _KafkaDelivery) -> None:
+        async with self._commit_lock:
+            self._check_partition_owner(delivery.partition, delivery.epoch)
+            delivery.completed = True
+            pending = self._pending.get(delivery.partition, ())
+            prefix = []
+            for item in pending:
+                if not item.completed:
+                    break
+                prefix.append(item)
+            if not prefix:
+                return
+            # Never use commit() without explicit offsets: the consumer's fetch
+            # position can already be far beyond the completed worker prefix.
+            await self.consumer.commit({delivery.partition: prefix[-1].offset + 1})
+            if not self.closed and not self.abort.is_set():
+                for _ in prefix:
+                    pending.popleft()
+                    self._slots.release()
+
+
+def _delivery_error_diagnostics(exc: BaseException) -> Dict[str, Any]:
+    facts: Dict[str, Any] = {"error": str(exc), "error_type": type(exc).__name__}
+    if isinstance(exc, _KafkaDeliveryError):
+        facts["error_code"] = exc.code
+    seen: set[int] = set()
+    cause: Optional[BaseException] = exc
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        for attr in ("sqlite_errorcode", "sqlite_errorname"):
+            value = getattr(cause, attr, None)
+            if value is not None:
+                facts[attr] = value
+        cause = cause.__cause__ or cause.__context__
+    return facts
+
+
+async def _until_aborted(operation: Awaitable[Any], abort: asyncio.Event) -> Any:
+    """Wake a blocked fetch/put promptly when a worker stops the generation."""
+    task = asyncio.ensure_future(operation)
+    stopped = asyncio.create_task(abort.wait())
+    try:
+        await asyncio.wait((task, stopped), return_when=asyncio.FIRST_COMPLETED)
+        if abort.is_set():
+            raise _KafkaGenerationStopped()
+        return task.result()
+    finally:
+        for pending in (task, stopped):
+            if not pending.done():
+                pending.cancel()
+        await asyncio.gather(task, stopped, return_exceptions=True)
 
 
 def _strip_execution_only_comments(value: Any) -> Any:
@@ -584,6 +779,73 @@ class KafkaManager:
         log.info("kafka.consumer_scheduled", {"workflow_id": workflow_id})
         return self.get_consumer_status(workflow_id)
 
+    def _fail_generation(
+        self,
+        workflow_id: str,
+        abort: asyncio.Event,
+        error: BaseException,
+        *,
+        delivery: Optional[_KafkaDelivery] = None,
+    ) -> None:
+        if delivery is not None:
+            delivery.tracker.close()
+        if self._abort_events.get(workflow_id, abort) is abort:
+            self._status[workflow_id] = {
+                **self._status.get(workflow_id, {}),
+                "state": "failed",
+                **_delivery_error_diagnostics(error),
+                **(delivery.diagnostics() if delivery is not None else {}),
+            }
+        abort.set()
+
+    async def _retry_delivery(
+        self,
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        workflow_id: str,
+        abort: asyncio.Event,
+        cancel: threading.Event,
+        phase: str,
+        delivery: Optional[_KafkaDelivery],
+    ) -> Any:
+        for attempt in range(1, _DELIVERY_MAX_ATTEMPTS + 1):
+            if abort.is_set() or cancel.is_set():
+                raise _KafkaGenerationStopped()
+            try:
+                if phase == "dispatch":
+                    return await operation()
+                try:
+                    return await asyncio.wait_for(operation(), timeout=_OFFSET_OPERATION_TIMEOUT_S)
+                except asyncio.TimeoutError as exc:
+                    raise _KafkaDeliveryError(
+                        f"{phase}_timeout",
+                        f"Kafka {phase} did not complete within {_OFFSET_OPERATION_TIMEOUT_S}s",
+                    ) from exc
+            except (asyncio.CancelledError, _KafkaGenerationStopped):
+                raise
+            except Exception as exc:
+                log.warning(
+                    "kafka.worker_dispatch_failed" if phase == "dispatch" else "kafka.offset_commit_failed",
+                    {
+                        "workflow_id": workflow_id,
+                        "phase": phase,
+                        "attempt": attempt,
+                        "max_attempts": _DELIVERY_MAX_ATTEMPTS,
+                        "error_code": getattr(exc, "code", f"{phase}_failed"),
+                        **(delivery.diagnostics() if delivery is not None else {}),
+                        **_delivery_error_diagnostics(exc),
+                    },
+                )
+                if attempt == _DELIVERY_MAX_ATTEMPTS:
+                    if isinstance(exc, _KafkaDeliveryError):
+                        raise
+                    raise _KafkaDeliveryError(f"{phase}_failed", str(exc)) from exc
+                try:
+                    await asyncio.wait_for(abort.wait(), timeout=_DELIVERY_RETRY_DELAY_S * attempt)
+                except asyncio.TimeoutError:
+                    pass
+        raise AssertionError("unreachable")
+
     async def _consumer_loop(
         self,
         workflow_id: str,
@@ -596,7 +858,7 @@ class KafkaManager:
         ready: asyncio.Event,
     ) -> None:
         try:
-            from aiokafka import AIOKafkaConsumer
+            from aiokafka import AIOKafkaConsumer, ConsumerRebalanceListener, TopicPartition
         except Exception as exc:
             self._status[workflow_id] = {
                 "state": "failed",
@@ -611,22 +873,71 @@ class KafkaManager:
             return
 
         consumer = AIOKafkaConsumer(
-            topic,
             bootstrap_servers=broker,
             group_id=group_id,
-            # Auto-commit advances based on fetched progress, not worker
-            # completion. Backpressure narrows the crash window but current
-            # semantics remain best-effort / at-most-once.
-            enable_auto_commit=True,
+            enable_auto_commit=False,
             auto_offset_reset=auto_offset_reset if auto_offset_reset in ("latest", "earliest") else "latest",
             request_timeout_ms=_REQUEST_TIMEOUT_MS,
             fetch_max_bytes=_FETCH_MAX_BYTES,
             max_partition_fetch_bytes=_MAX_PARTITION_FETCH_BYTES,
             max_poll_records=_MAX_POLL_RECORDS,
         )
+        tracker = _KafkaOffsetTracker(
+            consumer,
+            abort,
+            max_pending=queue.maxsize + max(1, len(self._worker_pools.get(workflow_id, ()))),
+        )
+        manager = self
+        cancel_event = self._generation_cancel_events.get(workflow_id) or threading.Event()
+
+        class _RebalanceListener(ConsumerRebalanceListener):
+            async def on_partitions_revoked(self, revoked: Any) -> None:
+                # Do not wait for workers (or the commit lock) from this callback:
+                # commit itself can be waiting for the coordinator/rebalance.
+                # Uncommitted records will be replayed by their next owner.
+                if tracker.revoked(revoked):
+                    tracker.close()
+                    manager._fail_generation(
+                        workflow_id,
+                        abort,
+                        _KafkaDeliveryError(
+                            "partition_revoked_with_pending_deliveries",
+                            "Kafka partition ownership changed with unfinished deliveries; restart to replay",
+                        ),
+                    )
+
+            async def on_partitions_assigned(self, assigned: Any) -> None:
+                tracker.assigned(assigned)
+                for partition in assigned:
+                    epoch = tracker.epoch_for(partition)
+                    try:
+                        await manager._retry_delivery(
+                            lambda: tracker.anchor_partition(partition, epoch),
+                            workflow_id=workflow_id,
+                            abort=abort,
+                            cancel=cancel_event,
+                            phase="anchor",
+                            delivery=None,
+                        )
+                    except _KafkaGenerationStopped:
+                        return
+                    except Exception as exc:
+                        # aiokafka logs and suppresses listener exceptions. Set
+                        # our failed state explicitly instead of allowing fetch.
+                        tracker.close()
+                        manager._fail_generation(workflow_id, abort, exc)
+                        return
 
         try:
+            consumer.subscribe(topics=[topic], listener=_RebalanceListener())
             await consumer.start()
+            if abort.is_set():
+                raise _KafkaGenerationStopped()
+        except _KafkaGenerationStopped:
+            ready.set()
+            await self._cleanup_runtime_resources(workflow_id)
+            await consumer.stop()
+            return
         except asyncio.CancelledError:
             try:
                 await consumer.stop()
@@ -663,30 +974,42 @@ class KafkaManager:
         ready.set()
         log.info("kafka.consumer_running", {"workflow_id": workflow_id, "topic": topic})
 
+        delivery = None
+
+        async def _fetch() -> Any:
+            message = await consumer.getone()
+            partition = TopicPartition(message.topic, message.partition)
+            # Capture ownership in the same task immediately after getone,
+            # before the message can wait for queue/acknowledgement capacity.
+            return message, partition, tracker.epoch_for(partition)
+
         try:
-            async for msg in consumer:
-                if abort.is_set():
-                    break
+            while not abort.is_set():
+                delivery = None
+                msg, partition, epoch = await _until_aborted(_fetch(), abort)
                 raw_value = msg.value
+                await _until_aborted(tracker.wait_for_slot(), abort)
+                delivery = tracker.register(partition, msg.offset, epoch)
                 queued = _QueuedKafkaMessage(
                     raw_value=raw_value,
                     size_bytes=len(raw_value) if raw_value is not None else 0,
+                    delivery=delivery,
                 )
                 # Blocking put applies backpressure instead of dropping messages.
-                await queue.put(queued)
+                await _until_aborted(queue.put(queued), abort)
+        except _KafkaGenerationStopped:
+            pass
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._status[workflow_id] = {
-                "state": "failed",
-                "error": str(exc),
-                "broker": broker,
-                "topic": topic,
-                "groupId": group_id,
-            }
-            log.error("kafka.consumer_error", {"workflow_id": workflow_id, "error": str(exc)})
-            await self._cleanup_runtime_resources(workflow_id)
+            self._fail_generation(workflow_id, abort, exc, delivery=delivery)
+            log.error(
+                "kafka.consumer_error",
+                {"workflow_id": workflow_id, **_delivery_error_diagnostics(exc)},
+            )
         finally:
+            tracker.close()
+            await self._cleanup_runtime_resources(workflow_id)
             try:
                 await consumer.stop()
             except Exception:
@@ -709,33 +1032,84 @@ class KafkaManager:
         run_cancel_event = (
             generation_cancel_event or self._generation_cancel_events.get(workflow_id) or threading.Event()
         )
+
+        def _unexpected_cancel(delivery: Optional[_KafkaDelivery] = None) -> None:
+            if abort.is_set() or run_cancel_event.is_set():
+                return
+            error = _KafkaDeliveryError("worker_cancelled", "Kafka worker cancelled without stopping its generation")
+            run_cancel_event.set()
+            self._fail_generation(workflow_id, abort, error, delivery=delivery)
+            log.error(
+                "kafka.worker_cancelled",
+                {
+                    "workflow_id": workflow_id,
+                    **(delivery.diagnostics() if delivery is not None else {}),
+                    **_delivery_error_diagnostics(error),
+                },
+            )
+
         while not abort.is_set():
             try:
                 msg = await asyncio.wait_for(queue.get(), timeout=0.5)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
+                _unexpected_cancel()
                 return
+            delivery = msg.delivery if isinstance(msg, _QueuedKafkaMessage) else None
             try:
                 if isinstance(msg, _QueuedKafkaMessage):
                     msg = _decode_message(msg.raw_value)
-                await self._trigger_workflow(
-                    workflow_id,
-                    workflow_plan,
-                    msg,
-                    next(iter(trigger.mapping or {}), "kafka_message"),
-                    configured_inputs,
-                    trigger=trigger,
-                    source=source,
-                    generation_cancel_event=run_cancel_event,
+
+                async def _dispatch() -> None:
+                    outcome = await self._trigger_workflow(
+                        workflow_id,
+                        workflow_plan,
+                        msg,
+                        next(iter(trigger.mapping or {}), "kafka_message"),
+                        configured_inputs,
+                        trigger=trigger,
+                        source=source,
+                        generation_cancel_event=run_cancel_event,
+                        delivery_id=delivery.delivery_id if delivery is not None else None,
+                        kafka_metadata=delivery.diagnostics() if delivery is not None else None,
+                    )
+                    if isinstance(outcome, _KafkaDispatchOutcome) and not outcome.acknowledged:
+                        raise _KafkaDeliveryError(
+                            "workflow_unsuccessful",
+                            f"Workflow execution {outcome.exec_id} did not succeed: {outcome.error}",
+                        )
+                    if delivery is not None and not isinstance(outcome, _KafkaDispatchOutcome):
+                        raise _KafkaDeliveryError("dispatch_not_acknowledged", "No durable workflow acknowledgement")
+
+                await self._retry_delivery(
+                    _dispatch,
+                    workflow_id=workflow_id,
+                    abort=abort,
+                    cancel=run_cancel_event,
+                    phase="dispatch",
+                    delivery=delivery,
                 )
+                if delivery is not None:
+                    await self._retry_delivery(
+                        lambda: delivery.tracker.complete(delivery),
+                        workflow_id=workflow_id,
+                        abort=abort,
+                        cancel=run_cancel_event,
+                        phase="commit",
+                        delivery=delivery,
+                    )
+            except _KafkaGenerationStopped:
+                return
             except asyncio.CancelledError:
+                _unexpected_cancel(delivery)
                 return
             except Exception as exc:
-                log.warning(
-                    "kafka.worker_dispatch_failed",
-                    {"workflow_id": workflow_id, "error": str(exc)},
-                )
+                run_cancel_event.set()
+                self._fail_generation(workflow_id, abort, exc, delivery=delivery)
+                return
+            finally:
+                queue.task_done()
 
     async def _trigger_workflow(
         self,
@@ -748,7 +1122,9 @@ class KafkaManager:
         trigger: Optional[TriggerDefinition] = None,
         source: Optional[str] = None,
         generation_cancel_event: Optional[threading.Event] = None,
-    ) -> None:
+        delivery_id: Optional[str] = None,
+        kafka_metadata: Optional[Dict[str, Any]] = None,
+    ) -> _KafkaDispatchOutcome:
         run_cancel_event = generation_cancel_event or threading.Event()
         trigger = trigger or TriggerDefinition.model_validate(
             {
@@ -774,7 +1150,8 @@ class KafkaManager:
             body=message,
             raw=message,
             source=source or str((trigger.source or {}).get("inputTopic") or "kafka"),
-            delivery_id=f"kafka-{uuid.uuid4().hex}",
+            delivery_id=delivery_id or f"kafka-{uuid.uuid4().hex}",
+            headers={"kafka": kafka_metadata} if kafka_metadata is not None else None,
         )
 
         async def _executor(mapped_inputs: Dict[str, Any]) -> Dict[str, Any]:
@@ -872,7 +1249,11 @@ class KafkaManager:
                         steps=steps,
                     )
                 except Exception as exc:
-                    log.warning("kafka.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
+                    log.warning(
+                        "kafka.exec_record_failed",
+                        {"workflow_id": workflow_id, "exec_id": exec_id, **_delivery_error_diagnostics(exc)},
+                    )
+                    raise _KafkaDeliveryError("execution_record_failed", str(exc)) from exc
             return exec_data
 
         try:
@@ -890,7 +1271,7 @@ class KafkaManager:
                     "trigger_type": "kafka",
                 },
             }
-            await execute_with_hooks(
+            dispatched = await execute_with_hooks(
                 action_payload,
                 lambda: self._dispatcher.dispatch(
                     trigger=trigger,
@@ -900,11 +1281,22 @@ class KafkaManager:
                 before=HookPipeline.run_ingress_before,
                 after=HookPipeline.run_ingress_after,
             )
+            if dispatched.get("matched") is False and dispatched.get("executed") is False:
+                # A valid filter deliberately discarded this message. Filter
+                # expression errors raise TriggerDispatchError instead.
+                return _KafkaDispatchOutcome(acknowledged=True)
+            result = dispatched.get("result") or {}
+            return _KafkaDispatchOutcome(
+                acknowledged=result.get("status") == "success" and not run_cancel_event.is_set(),
+                exec_id=result.get("id"),
+                error=result.get("errorMessage") or result.get("status"),
+            )
         except TriggerDispatchError as exc:
             log.warning(
                 "kafka.trigger_dispatch_failed",
                 {"workflow_id": workflow_id, "trigger_id": trigger.id, "error": str(exc)},
             )
+            raise
 
 
 default_manager = KafkaManager()
