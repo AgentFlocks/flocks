@@ -35,6 +35,7 @@ from flocks.hooks.execution import (
     execution_lifecycle_scope,
 )
 from flocks.server.auth import apply_auth_for_request, clear_auth_context
+from flocks.server.route_extensions import polling_paths
 from flocks.server.static_webui import maybe_serve_static_webui
 
 # The .env flocks loaded on import (flocks/startup_env.py).
@@ -784,9 +785,6 @@ async def _run_http_middleware_hooks(request: Request, context: dict[str, Any]) 
 _REQUEST_LOG_SKIP_EXACT = frozenset({
     "/health",
     "/api/health",
-    # An extension's load-balancer probe, asked every few seconds.
-    "/ready",
-    "/api/ready",
     "/docs",
     "/redoc",
     "/openapi.json",
@@ -819,7 +817,7 @@ def _security_headers_for_scope(scope: Scope) -> dict[str, str]:
 
 def _is_noisy_request_path(path: str) -> bool:
     """Return True for high-frequency polling endpoints that are noisy on success."""
-    if path in _REQUEST_LOG_SKIP_EXACT:
+    if path in _REQUEST_LOG_SKIP_EXACT or path in polling_paths():
         return True
     if (
         path.startswith(("/api/session/", "/session/"))

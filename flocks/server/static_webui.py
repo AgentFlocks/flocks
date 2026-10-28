@@ -11,6 +11,8 @@ from urllib.parse import unquote
 from fastapi import Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 
+from flocks.server.route_extensions import backend_paths
+
 _INDEX_CACHE_CONTROL = "no-store"
 _ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
 _STATIC_CACHE_CONTROL = "no-cache"
@@ -29,9 +31,6 @@ _PROTECTED_PREFIXES = (
     "/redoc",
     "/openapi.json",
     "/health",
-    # Kept out of the WebUI for an extension's readiness endpoint (a load
-    # balancer probe), which is registered after this list is read.
-    "/ready",
 )
 
 
@@ -182,7 +181,10 @@ def _cache_control_for_file(path: str, file_path: Path) -> str:
 
 
 def _is_protected_backend_path(path: str) -> bool:
-    return any(path == prefix or path.startswith(prefix + "/") for prefix in _PROTECTED_PREFIXES)
+    return any(
+        path == prefix or path.startswith(prefix + "/")
+        for prefix in (*_PROTECTED_PREFIXES, *backend_paths())
+    )
 
 
 def _accepts_html(request: Request) -> bool:

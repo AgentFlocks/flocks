@@ -3,9 +3,18 @@ from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
+from flocks.server.route_extensions import register_backend_path, reset_route_paths
 from flocks.server.static_webui import maybe_serve_static_webui
+
+
+@pytest.fixture(autouse=True)
+def _clean_route_paths():
+    reset_route_paths()
+    yield
+    reset_route_paths()
 
 
 def _write_dist(root: Path) -> Path:
@@ -121,6 +130,49 @@ async def test_static_webui_does_not_fallback_for_non_get(monkeypatch, tmp_path:
         response = await client.post("/session/abc", headers={"Accept": "text/html"})
 
     assert response.status_code == 404
+
+
+def _app_with_probe() -> FastAPI:
+    app = _app()
+
+    @app.get("/ready")
+    async def ready():
+        return JSONResponse({"ready": False}, status_code=503)
+
+    @app.get("/ready/details")
+    async def ready_details():
+        return {"detail": "probe"}
+
+    return app
+
+
+@pytest.mark.asyncio
+async def test_a_path_nothing_registered_falls_back_to_the_shell(monkeypatch, tmp_path: Path) -> None:
+    """As in dev: no extension named it, so a browser asking for it gets the page shell."""
+    monkeypatch.setenv("FLOCKS_WEBUI_DIST_DIR", str(_write_dist(tmp_path)))
+    async with AsyncClient(transport=ASGITransport(app=_app_with_probe()), base_url="http://test") as client:
+        response = await client.get("/ready", headers={"Accept": "text/html"})
+
+    assert response.status_code == 200
+    assert "Flocks WebUI" in response.text
+
+
+@pytest.mark.asyncio
+async def test_a_registered_backend_path_reaches_its_route_for_a_browser(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("FLOCKS_WEBUI_DIST_DIR", str(_write_dist(tmp_path)))
+    register_backend_path("/ready")
+    async with AsyncClient(transport=ASGITransport(app=_app_with_probe()), base_url="http://test") as client:
+        probe = await client.get("/ready", headers={"Accept": "text/html"})
+        nested = await client.get("/ready/details", headers={"Accept": "text/html"})
+        sibling = await client.get("/readyz", headers={"Accept": "text/html"})
+
+    # The route's own answer, not the shell's 200.
+    assert probe.status_code == 503
+    assert probe.json() == {"ready": False}
+    assert nested.json() == {"detail": "probe"}
+    # Only that path and the paths under it.
+    assert sibling.status_code == 200
+    assert "Flocks WebUI" in sibling.text
 
 
 # --- a deployment that pins its UI directory -------------------------------

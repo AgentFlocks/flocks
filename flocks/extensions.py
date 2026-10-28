@@ -279,6 +279,32 @@ def register_route_provider(
     _register(router, name=name, prefix=prefix, tags=list(tags) if tags else None)
 
 
+def register_backend_path(path: str) -> None:
+    """Keep the WebUI's page shell off a path an extension serves.
+
+    ``path`` and the paths under it reach the extension's routes even when a
+    browser asks for HTML.  Otherwise such a request is answered with the page
+    shell before any route sees it, which hides what the route would have
+    answered (a readiness probe's 503, say).
+    """
+
+    from flocks.server.route_extensions import register_backend_path as _register
+
+    _register(path)
+
+
+def register_polling_path(path: str) -> None:
+    """Leave successful requests to ``path`` (exactly) out of the request log.
+
+    For an endpoint something asks every few seconds, such as a load
+    balancer's readiness probe.  A failed request is still logged.
+    """
+
+    from flocks.server.route_extensions import register_polling_path as _register
+
+    _register(path)
+
+
 def register_branding_provider(provider: Any) -> None:
     """Register the source of the product name shown in the interface.
 
@@ -585,6 +611,8 @@ __all__ = [
     "register_license_checker",
     "register_response_transform",
     "register_route_provider",
+    "register_backend_path",
+    "register_polling_path",
     "register_hub_package_provider",
     "unregister_hub_package_provider",
     "register_lifecycle_hook",

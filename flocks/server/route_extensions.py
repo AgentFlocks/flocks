@@ -112,6 +112,56 @@ installed_route_providers = _RouteExtensionRegistry.installed_providers
 reset_route_providers = _RouteExtensionRegistry.reset
 
 
+class _RoutePathRegistry:
+    """How the server treats paths an extension serves, as opposed to which routes it adds.
+
+    Each set is replaced rather than changed in place, so a request reading
+    one never sees it change under it.
+    """
+
+    _backend: frozenset[str] = frozenset()
+    _polling: frozenset[str] = frozenset()
+
+    @staticmethod
+    def _normalize(path: str) -> str:
+        text = str(path or "").strip()
+        if not text.startswith("/") or not text.strip("/"):
+            raise ValueError(f"扩展路径必须以 / 开头且不能是根路径: {path!r}")
+        return text.rstrip("/")
+
+    @classmethod
+    def register_backend(cls, path: str) -> None:
+        normalized = cls._normalize(path)
+        cls._backend = cls._backend | {normalized}
+        log.info("server.routes.backend_path_registered", {"path": normalized})
+
+    @classmethod
+    def register_polling(cls, path: str) -> None:
+        normalized = cls._normalize(path)
+        cls._polling = cls._polling | {normalized}
+        log.info("server.routes.polling_path_registered", {"path": normalized})
+
+    @classmethod
+    def backend_paths(cls) -> frozenset[str]:
+        return cls._backend
+
+    @classmethod
+    def polling_paths(cls) -> frozenset[str]:
+        return cls._polling
+
+    @classmethod
+    def reset(cls) -> None:
+        cls._backend = frozenset()
+        cls._polling = frozenset()
+
+
+register_backend_path = _RoutePathRegistry.register_backend
+register_polling_path = _RoutePathRegistry.register_polling
+backend_paths = _RoutePathRegistry.backend_paths
+polling_paths = _RoutePathRegistry.polling_paths
+reset_route_paths = _RoutePathRegistry.reset
+
+
 def route_exists(app: Any, path: str, method: str) -> bool:
     """Whether the application already serves ``method path``.
 
@@ -130,10 +180,15 @@ def route_exists(app: Any, path: str, method: str) -> bool:
 
 __all__ = [
     "RouteProvider",
+    "backend_paths",
     "bind_route_app",
     "installed_route_providers",
+    "polling_paths",
+    "register_backend_path",
+    "register_polling_path",
     "register_route_provider",
     "registered_route_providers",
+    "reset_route_paths",
     "reset_route_providers",
     "route_exists",
 ]

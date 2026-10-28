@@ -10,10 +10,15 @@ from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
 from flocks.server.route_extensions import (
+    backend_paths,
     bind_route_app,
     installed_route_providers,
+    polling_paths,
+    register_backend_path,
+    register_polling_path,
     register_route_provider,
     registered_route_providers,
+    reset_route_paths,
     reset_route_providers,
     route_exists,
 )
@@ -21,8 +26,10 @@ from flocks.server.route_extensions import (
 @pytest.fixture(autouse=True)
 def _clean_registry():
     reset_route_providers()
+    reset_route_paths()
     yield
     reset_route_providers()
+    reset_route_paths()
 
 
 def _probe_router(path: str = "/probe", payload: str = "ok") -> APIRouter:
@@ -116,3 +123,42 @@ def test_generic_license_route_reports_the_registered_checker(monkeypatch):
 
     assert body["activated"] is True
     assert body["active"] is True
+
+
+# ---------------------------------------------------------------------------
+# How the server treats an extension's paths
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("/ready", "/ready"),
+    ("/ready/", "/ready"),
+    (" /api/ready ", "/api/ready"),
+])
+def test_registered_paths_are_normalized(raw: str, expected: str) -> None:
+    register_backend_path(raw)
+    register_polling_path(raw)
+
+    assert backend_paths() == {expected}
+    assert polling_paths() == {expected}
+
+
+@pytest.mark.parametrize("raw", ["", "ready", "/", "//"])
+def test_a_registration_that_names_no_path_is_refused(raw: str) -> None:
+    with pytest.raises(ValueError):
+        register_backend_path(raw)
+    with pytest.raises(ValueError):
+        register_polling_path(raw)
+
+    assert backend_paths() == frozenset()
+    assert polling_paths() == frozenset()
+
+
+def test_the_extension_facade_registers_paths() -> None:
+    from flocks import extensions
+
+    extensions.register_backend_path("/ready")
+    extensions.register_polling_path("/api/ready")
+
+    assert backend_paths() == {"/ready"}
+    assert polling_paths() == {"/api/ready"}
