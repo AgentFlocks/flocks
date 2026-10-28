@@ -167,6 +167,7 @@ def test_heartbeat_without_extensions_sends_the_plain_identity(tmp_path, monkeyp
             return False
 
         async def post(self, url, json=None, headers=None):
+            captured.setdefault("urls", []).append(url)
             captured["json"] = json
             return _Response()
 
@@ -178,3 +179,5 @@ def test_heartbeat_without_extensions_sends_the_plain_identity(tmp_path, monkeyp
     assert captured["json"]["status"] == "ok"
     assert captured["json"]["license_id"] is None
     assert captured["json"]["edition"] == "oss"
+    # The heartbeat and nothing else: reports are an extension's to send.
+    assert captured["urls"] == ["https://console.example.com/v1/heartbeats"]

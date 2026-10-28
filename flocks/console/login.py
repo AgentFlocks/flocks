@@ -2,9 +2,8 @@
 
 The console session, heartbeat and node profile are this module's.  An
 installed extension that reports more about the node -- its own edition and
-component versions, a licence it keeps in sync from the heartbeat --
-registers a :class:`ConsoleNodeExtension`.  Reports the node still owes the
-console wait in :mod:`flocks.console.outbox`; the heartbeat sends them.
+component versions, a licence it keeps in sync from the heartbeat, reports it
+still owes the console -- registers a :class:`ConsoleNodeExtension`.
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ from uuid import uuid4
 import httpx
 
 from flocks import __version__
-from flocks.console.outbox import deliver_reports
 from flocks.storage.storage import Storage
 
 
@@ -49,8 +47,8 @@ class ConsoleNodeExtension(Protocol):
         console_base: str,
         report_pending: bool,
     ) -> None:
-        """Act on the console's answer; ``report_pending`` is set on the heartbeats that also
-        send the reports waiting in :mod:`flocks.console.outbox`."""
+        """Act on the console's answer; ``report_pending`` is set on the heartbeats that should
+        also send what the extension still owes the console."""
 
 
 _node_extensions: list[ConsoleNodeExtension] = []
@@ -433,7 +431,7 @@ class ConsoleLoginService:
                 raise ValueError("console 会话已失效，请重新登录")
             resp.raise_for_status()
             data = resp.json()
-            console_base_for_session = cls.console_base_url_for_session(session)
+            console_base_for_session = cls._console_base_url_for_session(session)
             for extension in list(_node_extensions):
                 await extension.on_heartbeat_response(
                     data,
@@ -442,10 +440,6 @@ class ConsoleLoginService:
                     console_base=console_base_for_session,
                     report_pending=report_pending,
                 )
-            if report_pending:
-                # Whoever wrote them may be gone (an extension that took
-                # itself out); the core sends them all the same.
-                await deliver_reports(client=client, session=session, console_base=console_base_for_session)
             return data
 
     @classmethod
@@ -465,8 +459,7 @@ class ConsoleLoginService:
         )
 
     @classmethod
-    def console_base_url_for_session(cls, session: dict[str, Any]) -> str:
-        """The console a session belongs to: configured, else recorded with the session."""
+    def _console_base_url_for_session(cls, session: dict[str, Any]) -> str:
         console_base = cls.console_base_url() or str(session.get("console_base_url") or "").strip().rstrip("/")
         if console_base:
             return console_base
