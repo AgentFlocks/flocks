@@ -126,7 +126,7 @@ def _contract() -> Contract:
                 operation_type="query",
                 adapter_required_fields=DRIVER_FIELDS,
                 identity_fields=frozenset({"id"}),
-                public_fields=frozenset({"source", "summary", "tableColumns", "incidents"}),
+                public_fields=frozenset({"source", "summary", "tableColumns", "incidents", "filterOptions"}),
                 filter_fields=FILTER_FIELDS,
                 filter_param_fields={field: field for field in FILTER_FIELDS},
                 cursor_fields=frozenset({"time", "id"}),
@@ -159,6 +159,7 @@ class _BindingResolver:
                 "recordColumn": settings["record_column"],
                 "dateColumn": settings["date_column"],
                 "eventTimeColumn": settings["event_time_column"],
+                "facetFields": sorted(FILTER_FIELDS),
             },
             predicate_value_resolver=_filter_value,
             capabilities=frozenset({"query"}),
@@ -221,9 +222,11 @@ class _ResponsePipeline:
                 "benign": buckets.count("benign"),
                 "unknown": buckets.count("unknown"),
                 "representativeCount": driver_result.filtered_unique,
+                "availableCount": getattr(driver_result, "scope_total", driver_result.total_unique),
                 "filterStagesApplied": filter_stages_applied,
             },
             "tableColumns": list(TABLE_COLUMNS),
+            "filterOptions": getattr(driver_result, "filter_options", {}),
             "incidents": incidents,
         }
 
@@ -289,7 +292,7 @@ def _table_cells(record: dict[str, Any]) -> dict[str, dict[str, str]]:
     for key in DISPLAY_FIELDS:
         if key == "triage_report":
             continue
-        value = _display_value(record.get(key), key)
+        value = _display_value(_filter_value(record, key), key)
         if value:
             cells[key] = {"value": value}
     if "time" not in cells and (observed := _observed_at(record)):
@@ -476,6 +479,12 @@ def _triage_attack_verdict(record: dict[str, Any]) -> str:
 
 
 def _filter_value(record: dict[str, Any], field: str) -> Any:
+    if field == "net_type":
+        for key in ("net_type", "net_app_proto"):
+            value = _text(record.get(key)).lower()
+            if value and value != "unknown":
+                return value
+        return "unknown"
     if field == "triage_attack_verdict":
         return _triage_attack_verdict(record)
     if field == "triage_attack_success":

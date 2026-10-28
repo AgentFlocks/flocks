@@ -3,6 +3,13 @@ type Translate = (text: string) => string;
 const identityTr: Translate = (text) => text;
 
 const FILTER_VALUE_TEXT: Record<string, Record<string, string>> = {
+  _source_type: {
+    'sangfor-sip': '深信服 SIP',
+    tdp: 'TDP',
+    skyeye: '天眼',
+    unknown: '未知来源',
+  },
+  net_type: { unknown: '未知协议' },
   direction: {
     in: '入站',
     inbound: '入站',
@@ -71,7 +78,6 @@ function localizedValueText(key: string, value: string) {
 
 export function filterOptionText(key: string, value: string, tr: Translate = identityTr) {
   if (key === 'rsp_status_code') return value || tr('未知响应');
-  if (key === '_source_type' || key === 'net_type') return value || 'unknown';
   const localizedText = localizedValueText(key, value);
   return localizedText ? tr(localizedText) : value || tr('空值');
 }

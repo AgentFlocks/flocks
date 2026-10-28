@@ -712,7 +712,10 @@ class SessionRunner:
         messages: List[MessageInfo],
     ) -> Tuple[List[Any], Dict[str, Any]]:
         execution_mode = self._execution_mode_from_messages(messages)
-        isolated_profile = getattr(agent, "prompt_profile", "standard") == "isolated"
+        strict_declared_tools = (
+            agent.name != "rex"
+            or getattr(agent, "prompt_profile", "standard") == "isolated"
+        )
         from flocks.agent.tool_permissions import QUESTION_TOOL_NAME
         from flocks.permission.next import PermissionNext
 
@@ -723,7 +726,7 @@ class SessionRunner:
         result = await list_session_callable_tool_infos(
             session_id=self.session.id,
             declared_tool_names=declared_tool_names,
-            strict_declared_tools=isolated_profile,
+            strict_declared_tools=strict_declared_tools,
             agent=agent.name,
             step=self._step,
             event_publish_callback=self.callbacks.event_publish_callback,
@@ -749,6 +752,7 @@ class SessionRunner:
             tool_infos.append(tool_info)
         if (
             execution_mode == SessionExecutionMode.PLAN
+            and not strict_declared_tools
             and all(tool_info.name != "plan_exit" for tool_info in tool_infos)
         ):
             plan_exit = ToolRegistry.get("plan_exit")

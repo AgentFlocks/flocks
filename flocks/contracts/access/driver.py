@@ -6,6 +6,7 @@ import json
 import re
 import sqlite3
 import time
+from collections import Counter
 from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +48,8 @@ class DriverProxy:
             )
 
         missing = plan.driver_projection - plan.binding.driver_available_fields
+        facet_fields = set(plan.binding.driver_options.get("facetFields", ()))
+        missing |= facet_fields - (plan.binding.driver_available_fields & plan.operation.filter_fields)
         if missing:
             raise ContractRuntimeError(
                 "policy_filter_not_enforceable",
@@ -95,6 +98,7 @@ class SqliteJsonDriverExecutor:
         duplicates = 0
         filtered_unique = 0
         parse_errors = 0
+        facets = _FilterOptions(plan)
         try:
             connection = sqlite3.connect(db_path)
             try:
@@ -159,6 +163,7 @@ class SqliteJsonDriverExecutor:
             if record.get("is_duplicate") is True:
                 duplicates += 1
                 continue
+            facets.add(record)
             if not self._matches_predicates(
                 record,
                 plan.policy_plan.driver_predicates,
@@ -191,6 +196,8 @@ class SqliteJsonDriverExecutor:
             duplicates=duplicates,
             filtered_unique=filtered_unique,
             parse_errors=parse_errors,
+            filter_options=facets.options(),
+            scope_total=facets.total,
         )
 
     def _assert_allowed(self, path: Path, allowlist_roots: tuple[Path, ...]) -> None:
@@ -217,6 +224,7 @@ class JsonlDriverExecutor:
         duplicates = 0
         filtered_unique = 0
         parse_errors = 0
+        facets = _FilterOptions(plan)
         start_time, end_time = self._request_event_time_range(plan.params)
         for path in files:
             self._assert_allowed(path, plan.binding.driver_allowlist_roots)
@@ -233,6 +241,7 @@ class JsonlDriverExecutor:
                 if record.get("is_duplicate") is True:
                     duplicates += 1
                     continue
+                facets.add(record)
                 if not self._matches_predicates(
                     record,
                     plan.policy_plan.driver_predicates,
@@ -265,6 +274,8 @@ class JsonlDriverExecutor:
             duplicates=duplicates,
             filtered_unique=filtered_unique,
             parse_errors=parse_errors,
+            filter_options=facets.options(),
+            scope_total=facets.total,
         )
 
     def _resolve_source_files(self, plan: QueryPlan) -> Iterable[Path]:
@@ -387,6 +398,48 @@ class JsonlDriverExecutor:
         if record_time is None:
             return False
         return start_time <= record_time <= end_time
+
+
+class _FilterOptions:
+    """Time- and policy-scoped facets, independent of UI filters and row limits.
+
+    Fields are opted in by the server-side binding and validated by DriverProxy.
+    Never use request-supplied field names or broaden the caller's policy scope.
+    """
+
+    def __init__(self, plan: QueryPlan) -> None:
+        self.plan = plan
+        self.counts: dict[str, Counter[str]] = {
+            name: Counter() for name in plan.binding.driver_options.get("facetFields", ())
+        }
+        self.seen: set[str] = set()
+        self.total = 0
+
+    def add(self, record: dict[str, Any]) -> None:
+        if not self.counts:
+            return
+        resolver = self.plan.binding.predicate_value_resolver
+        if not JsonlDriverExecutor()._matches_predicates(record, self.plan.policy_plan.policy_predicates, resolver):
+            return
+        record_id = _read_string(record.get("id"), "")
+        if record_id:
+            if record_id in self.seen:
+                return
+            self.seen.add(record_id)
+        self.total += 1
+        for name, counts in self.counts.items():
+            value = resolver(record, name) if resolver else record.get(name)
+            if value is None or isinstance(value, (dict, list)):
+                continue
+            text = str(value).strip()
+            if text and text.lower() != "none":
+                counts[text] += 1
+
+    def options(self) -> dict[str, list[str]]:
+        return {
+            name: [value for value, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:80]]
+            for name, counts in self.counts.items()
+        }
 
 
 def _data_file_date(root: Path, path: Path) -> str:
