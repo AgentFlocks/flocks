@@ -3644,13 +3644,13 @@ def _webhook_delivery_key(workflow_id: str, trigger_id: str, client_delivery_id:
 
 
 async def _register_webhook_delivery(key: str, delivery_id: str, claim_token: str) -> Optional[str]:
-    """Remember a delivery; return the first deliveryId when *key* is a replay.
+    """Claim a delivery; return the first deliveryId when *key* is a replay.
 
-    Replays are detected per (workflow, trigger) either by a client-supplied
-    delivery id or by the body digest, within ``FLOCKS_WEBHOOK_REPLAY_WINDOW_S``
-    seconds (default 300; ``0`` disables).  Recorded in the database, so a
-    replay is recognised whichever instance it reaches.  *claim_token* names
-    this request's claim, so only this request can release it.
+    Replays are keyed per (workflow, trigger) by a client-supplied delivery id,
+    else by the body digest, within ``FLOCKS_WEBHOOK_REPLAY_WINDOW_S`` seconds
+    (default 300; ``0`` disables).  Whether one is recorded is up to the store
+    (WorkflowStore.claim_webhook_delivery).  *claim_token* names this
+    request's claim, so only this request can release it.
     """
     window = _webhook_replay_window_s()
     if window <= 0:
@@ -3796,10 +3796,7 @@ async def invoke_workflow_webhook_trigger(
 
     try:
         if _webhook_replay_window_s() > 0:
-            # The run this delivery starts is bound to its claim when it is
-            # recorded, in the same transaction: a delivery whose process dies
-            # before the run starts is taken over by a retry, not lost as a
-            # duplicate (WorkflowStore.claim_webhook_delivery).
+            # The run this delivery starts belongs to its claim.
             with for_webhook_delivery(delivery_key, claim_token):
                 result = await _dispatch_trigger_event(
                     workflow_id=workflow_id,

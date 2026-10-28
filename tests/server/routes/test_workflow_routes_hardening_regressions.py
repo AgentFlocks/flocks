@@ -307,7 +307,22 @@ async def test_trigger_api_key_is_write_only_and_survives_round_trip(client: Asy
 
 
 @pytest.mark.asyncio
-async def test_webhook_duplicate_delivery_is_not_executed_twice(client: AsyncClient, quiet_trigger_runtime: None, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_webhook_replays_run_again_when_the_store_records_no_deliveries(client: AsyncClient, quiet_trigger_runtime: None) -> None:
+    _write_workflow("wf-replay", _wf_json())
+    assert (await client.post("/api/workflow/wf-replay/triggers", json=WEBHOOK)).status_code == 200
+    headers = {"x-api-key": "K123", "X-Flocks-Delivery-Id": "d-1"}
+
+    first = await client.post("/webhook/workflows/wf-replay/tw1", json={"x": 1}, headers=headers)
+    second = await client.post("/webhook/workflows/wf-replay/tw1", json={"x": 1}, headers=headers)
+    assert [r.json()["duplicate"] for r in (first, second)] == [False, False]
+    assert [r.json()["deliveryId"] for r in (first, second)] == ["d-1", "d-1"]
+    assert workflow_module.default_trigger_runtime.dispatch_event.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_webhook_duplicate_delivery_is_not_executed_twice(
+    client: AsyncClient, quiet_trigger_runtime: None, recording_webhook_store: dict[str, tuple[str, str]],
+) -> None:
     _write_workflow("wf-replay", _wf_json())
     assert (await client.post("/api/workflow/wf-replay/triggers", json=WEBHOOK)).status_code == 200
     headers = {"x-api-key": "K123"}

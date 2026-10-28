@@ -617,9 +617,8 @@ def build_initial_execution_record(
 def for_webhook_delivery(key: str, claim_token: str) -> Iterator[None]:
     """Runs started inside are for this webhook delivery.
 
-    The delivery was recorded when it was claimed
-    (WorkflowStore.claim_webhook_delivery), in this process, and is released
-    if the run cannot start; there is nothing more to bind it to here.
+    Nothing is recorded for a delivery here (WorkflowStore.claim_webhook_delivery),
+    so there is nothing to bind a run to.
     """
     yield
 

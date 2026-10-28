@@ -6,8 +6,6 @@ import asyncio
 import json
 import os
 import sqlite3
-import threading
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -81,10 +79,6 @@ class WorkflowStore:
     _completion_lock: Optional[asyncio.Lock] = None
     _lifecycle_lock: Optional[asyncio.Lock] = None
     _lifecycle_loop: Optional[asyncio.AbstractEventLoop] = None
-    #: Webhook deliveries recorded within their replay window: key ->
-    #: (delivery id, claim token, when the window ends on the monotonic clock).
-    _webhook_deliveries: Dict[str, Tuple[str, str, float]] = {}
-    _webhook_lock = threading.Lock()
 
     @classmethod
     def _lock(cls) -> asyncio.Lock:
@@ -131,7 +125,6 @@ class WorkflowStore:
             cls._initialized = False
             cls._init_pid = None
             cls._completion_lock = None
-            cls._forget_process_state()
 
         await Storage._ensure_init()
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,13 +189,6 @@ class WorkflowStore:
             cls._init_pid = None
             cls._db_path = None
             cls._completion_lock = None
-            cls._forget_process_state()
-
-    @classmethod
-    def _forget_process_state(cls) -> None:
-        """What this process kept about the deliveries of the database it leaves."""
-        with cls._webhook_lock:
-            cls._webhook_deliveries.clear()
 
     @classmethod
     async def _db(cls) -> aiosqlite.Connection:
@@ -884,30 +870,16 @@ class WorkflowStore:
         await db.commit()
         return cur.rowcount
 
-    #: A recorded delivery's window ends here at the latest, whatever it asked for.
-    _WEBHOOK_WINDOW_MAX_S = 7 * 24 * 3600.0
-
     @classmethod
     async def claim_webhook_delivery(
         cls, key: str, delivery_id: str, window_s: float, claim_token: str = "",
     ) -> Optional[str]:
         """Record a webhook delivery unless the same one is still within its window.
 
-        Returns ``None`` when this call recorded it -- go ahead and run -- or
-        the first delivery's id when *key* is a replay.  The deliveries are
-        recorded in this process, the one that runs what they start; one that
-        restarts runs a delivery sent again.  *claim_token* identifies this
-        claim to :meth:`release_webhook_delivery`.
+        Returns ``None`` -- go ahead and run -- or the first delivery's id when
+        *key* is a replay.  Nothing is recorded here, so every delivery runs.
+        *claim_token* identifies this claim to :meth:`release_webhook_delivery`.
         """
-        now = time.monotonic()
-        window = min(max(float(window_s), 0.0), cls._WEBHOOK_WINDOW_MAX_S)
-        with cls._webhook_lock:
-            for stale in [k for k, (_, _, ends) in cls._webhook_deliveries.items() if ends <= now]:
-                del cls._webhook_deliveries[stale]
-            recorded = cls._webhook_deliveries.get(key)
-            if recorded is not None:
-                return recorded[0]
-            cls._webhook_deliveries[key] = (delivery_id, claim_token, now + window)
         return None
 
     @classmethod
@@ -916,12 +888,6 @@ class WorkflowStore:
 
         Only that claim: a later claim of the same key carries another token and stays.
         """
-        if not claim_token:
-            return
-        with cls._webhook_lock:
-            recorded = cls._webhook_deliveries.get(key)
-            if recorded is not None and recorded[1] == claim_token:
-                del cls._webhook_deliveries[key]
 
     @classmethod
     async def kv_put(cls, key: str, value: Any, value_type: str = _JSON_TYPE) -> None:

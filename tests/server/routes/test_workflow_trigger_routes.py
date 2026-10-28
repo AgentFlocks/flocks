@@ -916,6 +916,7 @@ async def test_trigger_routes_answer_extension_stop_with_403_and_reason(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
     _stop_workflow_trigger_ingress,
+    recording_webhook_store: dict[str, tuple[str, str]],
     path: str,
     request_kwargs: dict[str, Any],
 ) -> None:
@@ -951,8 +952,6 @@ async def test_trigger_routes_answer_extension_stop_with_403_and_reason(
         "_execute_workflow_effect",
         _must_not_run,
     )
-    # Webhook replays are remembered per process; start from a clean window.
-
     response = await client.post(path, **request_kwargs)
 
     assert response.status_code == 403, response.text
@@ -963,6 +962,7 @@ async def test_trigger_routes_answer_extension_stop_with_403_and_reason(
 
     # A refused delivery is not remembered: the same request is refused
     # again instead of being answered as a duplicate.
+    assert recording_webhook_store == {}
     retry = await client.post(path, **request_kwargs)
     assert retry.status_code == 403, retry.text
 
@@ -971,8 +971,9 @@ async def test_trigger_routes_answer_extension_stop_with_403_and_reason(
 async def test_webhook_stopped_after_the_run_is_not_run_again_on_retry(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
+    recording_webhook_store: dict[str, tuple[str, str]],
 ) -> None:
-    """A stop in ingress.after comes once the workflow ran: a retry is a duplicate (arch_v2)."""
+    """A stop in ingress.after comes once the workflow ran: the delivery stays claimed, a retry is a duplicate."""
 
     class _StopAfterRun(HookBase):
         async def ingress_after(self, ctx):
