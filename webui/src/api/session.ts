@@ -106,6 +106,9 @@ export interface SessionListGroupRequest {
 export interface SessionListGroup {
   projectID: string;
   items: Session[];
+  /** Every session of the group (after the search filter), not only this page. */
+  total?: number;
+  lastActivityAt?: number | null;
 }
 
 export interface SessionMessagePage {

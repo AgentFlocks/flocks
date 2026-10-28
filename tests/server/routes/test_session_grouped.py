@@ -80,6 +80,45 @@ async def test_grouped_matches_single_project_pages_and_reads_sessions_once(
 
 
 @pytest.mark.asyncio
+async def test_grouped_carries_the_project_statistics(client: AsyncClient, tmp_path):
+    project_a = await _create_project(client, tmp_path, "stats-a")
+    project_b = await _create_project(client, tmp_path, "stats-b")
+    for i in range(3):
+        await _create_session(client, f"Alpha {i}", projectID=project_a)
+    await _create_session(client, "Beta report", projectID=project_b)
+    loose = await _create_session(client, "Loose")
+    await _create_session(client, "Task", category="task")
+
+    stats = {row["id"]: row for row in (await client.get("/api/project")).json()}
+    response = await client.post("/api/session/list-grouped", json={"projects": [
+        {"projectID": project_a, "limit": 1},
+        {"projectID": project_b, "limit": 5},
+        {"projectID": "tasks", "limit": 5},
+        {"projectID": "not-a-project", "limit": 5},
+    ]})
+    assert response.status_code == 200, response.text
+    groups = {group["projectID"]: group for group in response.json()["groups"]}
+    # The same numbers the session statistics of /api/project report.
+    for project in (project_a, project_b):
+        assert groups[project]["total"] == stats[project]["sessionCount"]
+        assert groups[project]["lastActivityAt"] == stats[project]["lastActivityAt"]
+    assert len(groups[project_a]["items"]) == 1 and groups[project_a]["total"] == 3
+    # Only manager rows count: the task-category session is not one.
+    assert [row["id"] for row in groups["tasks"]["items"]] == [loose]
+    assert groups["tasks"]["total"] == 1
+    assert groups["tasks"]["lastActivityAt"] == groups["tasks"]["items"][0]["time"]["updated"]
+    assert groups["not-a-project"] == {
+        "projectID": "not-a-project", "items": [], "total": 0, "lastActivityAt": None,
+    }
+
+    searched = await client.post("/api/session/list-grouped", json={
+        "projects": [{"projectID": project_a, "limit": 5}], "search": "alpha 1",
+    })
+    assert searched.status_code == 200, searched.text
+    assert searched.json()["groups"][0]["total"] == 1
+
+
+@pytest.mark.asyncio
 async def test_grouped_list_filters_access_hidden_children_and_status(client, monkeypatch):
     viewer = AuthUser(id="usr_viewer", username="viewer", role="member", status="active")
     monkeypatch.setattr(session_routes, "require_user", lambda request: viewer)

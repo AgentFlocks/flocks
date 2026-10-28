@@ -1,6 +1,8 @@
+import { createElement, type ReactNode } from 'react';
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { applyMessagePartUpdate, useSessionMessages, useSessions } from './useSessions';
+import { applyMessagePartUpdate, noteSessionListChange, useSessionMessages, useSessions } from './useSessions';
+import { AuthContext, type AuthContextValue } from '@/contexts/authState';
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import type { Message } from '@/types';
@@ -1217,45 +1219,6 @@ describe('useSessions list loading', () => {
     expect(result.current.sessions).toEqual([]);
   });
 
-  it('reports the current project query as settled only after it succeeds or fails', async () => {
-    const first = deferred<any>();
-    const second = deferred<any>();
-    vi.mocked(sessionApi.listGrouped).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
-    const { result, rerender } = renderHook(({ projectIds }) => useSessions('', { projectIds }), {
-      initialProps: { projectIds: ['tasks', 'first'] },
-    });
-    expect(result.current.settled).toBe(false);
-    await act(async () => first.resolve([
-      { projectID: 'first', items: [] },
-      { projectID: 'tasks', items: [] },
-    ]));
-    expect(result.current.settled).toBe(true);
-    rerender({ projectIds: ['tasks', 'second'] });
-    expect(result.current.settled).toBe(false);
-    await act(async () => second.reject(new Error('session list unavailable')));
-    expect(result.current.settled).toBe(true);
-    expect(result.current.error).toBe('session list unavailable');
-  });
-
-  it('settles a rapidly completed project query even when refresh state is batched', async () => {
-    vi.mocked(sessionApi.listGrouped)
-      .mockResolvedValueOnce([{ projectID: 'first', items: [] }, { projectID: 'tasks', items: [] }])
-      .mockResolvedValueOnce([{ projectID: 'second', items: [] }, { projectID: 'tasks', items: [] }])
-      .mockRejectedValueOnce(new Error('failed'));
-    const { result, rerender } = renderHook(({ projectIds }) => useSessions('', { projectIds }), {
-      initialProps: { projectIds: ['tasks', 'first'] },
-    });
-    await act(async () => {});
-    expect(result.current.settled).toBe(true);
-    rerender({ projectIds: ['tasks', 'second'] });
-    await act(async () => {});
-    expect(result.current.settled).toBe(true);
-    rerender({ projectIds: ['tasks', 'third'] });
-    await act(async () => {});
-    expect(result.current.settled).toBe(true);
-    expect(result.current.error).toBe('failed');
-  });
-
   it('loads each project page in one grouped request and keeps separate page state', async () => {
     vi.mocked(sessionApi.listGrouped).mockResolvedValueOnce([
       { projectID: 'default', items: [sessionListItem('default-1', 'default'), sessionListItem('default-2', 'default')] },
@@ -1283,9 +1246,9 @@ describe('useSessions list loading', () => {
       initialProps: { projectIds: Array.from({ length: 513 }, (_, index) => `project-${index}`), pageSize: 1 },
     });
     await act(async () => {});
-    expect(sessionApi.listGrouped).toHaveBeenCalledOnce();
-    expect(vi.mocked(sessionApi.listGrouped).mock.calls[0][0]).toHaveLength(512);
-    expect(sessionApi.list).toHaveBeenCalledOnce();
+    expect(sessionApi.listGrouped).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(sessionApi.listGrouped).mock.calls.map(([projects]) => projects.length)).toEqual([512, 1]);
+    expect(sessionApi.list).not.toHaveBeenCalled();
 
     vi.clearAllMocks();
     rerender({ projectIds: Array.from({ length: 300 }, (_, index) => `project-${index}`), pageSize: 50 });
@@ -1295,6 +1258,267 @@ describe('useSessions list loading', () => {
       expect(projects.reduce((total, project) => total + project.limit, 0)).toBeLessThanOrEqual(10000);
     }
     expect(sessionApi.list).not.toHaveBeenCalled();
+
+    // A page deeper than one grouped request may carry keeps the plain GET.
+    vi.clearAllMocks();
+    rerender({ projectIds: ['tasks', 'deep'], pageSize: 10001 });
+    await act(async () => {});
+    expect(sessionApi.listGrouped).not.toHaveBeenCalled();
+    expect(vi.mocked(sessionApi.list).mock.calls.map(([params]) => params?.projectID).sort()).toEqual(['deep', 'tasks']);
+  });
+
+  it('reads one project through the grouped request too', async () => {
+    vi.mocked(sessionApi.listGrouped).mockResolvedValueOnce([
+      { projectID: 'tasks', items: [sessionListItem('loose', 'tasks')], total: 1, lastActivityAt: 1 },
+    ] as any);
+    const { result } = renderHook(() => useSessions('', { projectIds: ['tasks'], pageSize: 20 }));
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledWith([{ projectID: 'tasks', limit: 20, offset: 0 }], undefined);
+    expect(sessionApi.list).not.toHaveBeenCalled();
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['loose']);
+  });
+
+  it('reports each project\'s total and recent activity with its first page', async () => {
+    vi.mocked(sessionApi.listGrouped).mockResolvedValueOnce([
+      { projectID: 'full', items: [sessionListItem('full-1', 'full', 9), sessionListItem('full-2', 'full', 8)], total: 2, lastActivityAt: 9 },
+      { projectID: 'more', items: [sessionListItem('more-1', 'more', 7)], total: 5, lastActivityAt: 7 },
+      { projectID: 'tasks', items: [], total: 0, lastActivityAt: null },
+    ] as any);
+    vi.mocked(sessionApi.list).mockResolvedValueOnce([sessionListItem('more-2', 'more', 6)] as any);
+    const { result } = renderHook(() => useSessions('', { projectIds: ['tasks', 'more', 'full'], pageSize: 2 }));
+    await act(async () => {});
+    expect(result.current.statsByProject).toEqual({
+      full: { total: 2, lastActivityAt: 9 },
+      more: { total: 5, lastActivityAt: 7 },
+      tasks: { total: 0, lastActivityAt: null },
+    });
+    // A page as long as the limit is complete when the total says so.
+    expect(result.current.hasMoreByProject).toEqual({ full: false, more: true, tasks: false });
+
+    await act(async () => { await result.current.loadMore('more'); });
+    expect(result.current.statsByProject.more).toEqual({ total: 5, lastActivityAt: 7 });
+    expect(result.current.sessions.map((session) => session.id)).toContain('more-2');
+  });
+
+  it('keeps the last statistics when an older service answers without them', async () => {
+    vi.mocked(sessionApi.listGrouped)
+      .mockResolvedValueOnce([
+        { projectID: 'prj_labs', items: [], total: 3, lastActivityAt: 30 },
+        { projectID: 'tasks', items: [], total: 0, lastActivityAt: null },
+      ] as any)
+      .mockResolvedValueOnce([
+        { projectID: 'prj_labs', items: [] },
+        { projectID: 'tasks', items: [] },
+      ] as any);
+    const { result } = renderHook(() => useSessions('', { projectIds: ['tasks', 'prj_labs'] }));
+    await act(async () => {});
+    await act(async () => { await result.current.refetch(); });
+    expect(result.current.statsByProject.prj_labs).toEqual({ total: 3, lastActivityAt: 30 });
+  });
+
+  it('shares one grouped request between lists that load the same pages together', async () => {
+    const response = deferred<any>();
+    vi.mocked(sessionApi.listGrouped).mockReturnValueOnce(response.promise);
+    const options = { projectIds: ['tasks', 'prj_labs'], pageSize: 20 };
+    const sidebar = renderHook(() => useSessions('', options));
+    const page = renderHook(() => useSessions('', options));
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledOnce();
+    await act(async () => response.resolve([
+      { projectID: 'prj_labs', items: [sessionListItem('labs-1', 'prj_labs')], total: 1, lastActivityAt: 1 },
+      { projectID: 'tasks', items: [], total: 0, lastActivityAt: null },
+    ]));
+    for (const view of [sidebar, page]) {
+      expect(view.result.current.sessions.map((session) => session.id)).toEqual(['labs-1']);
+    }
+
+    // Different pages are different questions.
+    renderHook(() => useSessions('', { ...options, pageSize: 6 }));
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledTimes(2);
+  });
+
+  it('opens a second list from the first one\'s recent answer, and reads again later', async () => {
+    let now = 1000;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const options = { projectIds: ['tasks', 'prj_labs'] };
+    vi.mocked(sessionApi.listGrouped).mockImplementation(async () => [
+      { projectID: 'prj_labs', items: [sessionListItem('labs-1', 'prj_labs')], total: 1, lastActivityAt: 1 },
+      { projectID: 'tasks', items: [], total: 0, lastActivityAt: null },
+    ] as any);
+    renderHook(() => useSessions('', options));
+    await act(async () => {});
+    // The session page mounts a moment after the sidebar has its answer.
+    now = 3500;
+    const page = renderHook(() => useSessions('', options));
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledOnce();
+    expect(page.result.current.sessions.map((session) => session.id)).toEqual(['labs-1']);
+    expect(page.result.current.statsByProject.prj_labs).toEqual({ total: 1, lastActivityAt: 1 });
+    // An answer older than a few seconds is not reused for a list that opens now.
+    now = 4500;
+    renderHook(() => useSessions('', options));
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledTimes(2);
+    clock.mockRestore();
+  });
+
+  it('never hands one account\'s list to another', async () => {
+    const groups = (id?: string) => [
+      { projectID: 'prj_labs', items: id ? [sessionListItem(id, 'prj_labs')] : [], total: id ? 1 : 0, lastActivityAt: 1 },
+      { projectID: 'tasks', items: [], total: 0, lastActivityAt: null },
+    ];
+    vi.mocked(sessionApi.listGrouped)
+      .mockResolvedValueOnce(groups('private-a') as any)
+      .mockResolvedValueOnce(groups() as any);
+    const signedIn = (id: string) => ({ children }: { children: ReactNode }) => createElement(
+      AuthContext.Provider,
+      { value: { user: { id, username: id, role: 'member' } } as unknown as AuthContextValue },
+      children,
+    );
+    const options = { projectIds: ['tasks', 'prj_labs'] };
+    renderHook(() => useSessions('', options), { wrapper: signedIn('usr-a') });
+    await act(async () => {});
+    // Signed out and in as another account a moment later: same query, own read.
+    const other = renderHook(() => useSessions('', options), { wrapper: signedIn('usr-b') });
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledTimes(2);
+    expect(other.result.current.sessions).toEqual([]);
+  });
+
+  it('reads again when refreshed before its first load has answered', async () => {
+    let now = 100;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const groups = (id: string) => [
+      { projectID: 'prj_labs', items: [sessionListItem(id, 'prj_labs')], total: 1, lastActivityAt: 1 },
+      { projectID: 'tasks', items: [], total: 0, lastActivityAt: null },
+    ];
+    const firstLoad = deferred<any>();
+    vi.mocked(sessionApi.listGrouped)
+      .mockReturnValueOnce(firstLoad.promise)
+      .mockResolvedValueOnce(groups('after-event') as any)
+      .mockResolvedValueOnce(groups('after-own-change') as any);
+    const { result } = renderHook(() => useSessions('', { projectIds: ['tasks', 'prj_labs'] }));
+    await act(async () => {});
+    now = 200;
+    await act(async () => { await result.current.refetch({ freshAfter: 150 }); });
+    expect(sessionApi.listGrouped).toHaveBeenCalledTimes(2);
+    await act(async () => { await result.current.refetch(); });
+    expect(sessionApi.listGrouped).toHaveBeenCalledTimes(3);
+    await act(async () => firstLoad.resolve(groups('before-change')));
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['after-own-change']);
+    clock.mockRestore();
+  });
+
+  it('opens no list on an answer read before a change it did not hear of', async () => {
+    let now = 1000;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const options = { projectIds: ['tasks', 'prj_labs'] };
+    vi.mocked(sessionApi.listGrouped)
+      .mockResolvedValueOnce([
+        { projectID: 'prj_labs', items: [sessionListItem('labs-1', 'prj_labs')], total: 1, lastActivityAt: 1 },
+        { projectID: 'tasks', items: [], total: 0, lastActivityAt: null },
+      ] as any)
+      .mockResolvedValueOnce([
+        { projectID: 'prj_labs', items: [{ ...sessionListItem('labs-1', 'prj_labs'), title: 'Renamed' }], total: 1, lastActivityAt: 2 },
+        { projectID: 'tasks', items: [], total: 0, lastActivityAt: null },
+      ] as any);
+    renderHook(() => useSessions('', options));
+    await act(async () => {});
+    // The sidebar hears of a rename; the session page opens before its refresh.
+    now = 1200;
+    noteSessionListChange(1200);
+    now = 1300;
+    const page = renderHook(() => useSessions('', options));
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledTimes(2);
+    expect(page.result.current.sessions[0].title).toBe('Renamed');
+    clock.mockRestore();
+  });
+
+  it.each([
+    ['renames a session', (list: any) => list.updateSessionTitle('labs-1', 'Renamed')],
+    ['removes a session', (list: any) => list.removeSession('labs-1')],
+    ['removes sessions', (list: any) => list.removeSessions(['labs-1'])],
+    ['adds a session', (list: any) => list.addSession(sessionListItem('new-1', 'prj_labs', 9))],
+  ])('opens no list on an answer read before this view %s itself', async (_label, change) => {
+    let now = 1000;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const options = { projectIds: ['tasks', 'prj_labs'] };
+    vi.mocked(sessionApi.listGrouped).mockImplementation(async () => [
+      { projectID: 'prj_labs', items: [sessionListItem('labs-1', 'prj_labs')], total: 1, lastActivityAt: 1 },
+      { projectID: 'tasks', items: [], total: 0, lastActivityAt: null },
+    ] as any);
+    const sidebar = renderHook(() => useSessions('', options));
+    await act(async () => {});
+    // The change is on screen before its event arrives; a view opening now reads again.
+    now = 1200;
+    act(() => change(sidebar.result.current));
+    now = 1300;
+    renderHook(() => useSessions('', options));
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledTimes(2);
+    clock.mockRestore();
+  });
+
+  it('keeps other views off lists older than a refresh of the caller\'s own making', async () => {
+    let now = 1000;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const projectIds = ['tasks', 'prj_labs'];
+    const groups = (id: string) => [
+      { projectID: 'prj_labs', items: [sessionListItem(id, 'prj_labs')], total: 1, lastActivityAt: 1 },
+      { projectID: 'tasks', items: [], total: 0, lastActivityAt: null },
+    ];
+    vi.mocked(sessionApi.listGrouped)
+      .mockResolvedValueOnce(groups('before-change') as any)
+      .mockResolvedValueOnce(groups('other-pages') as any)
+      .mockResolvedValueOnce(groups('after-change') as any);
+    renderHook(() => useSessions('', { projectIds, pageSize: 20 }));
+    const changer = renderHook(() => useSessions('', { projectIds, pageSize: 6 }));
+    await act(async () => {});
+    // Another view changed a session and refreshes its own, different pages.
+    now = 1500;
+    await act(async () => { await changer.result.current.refetch(); });
+    expect(sessionApi.listGrouped).toHaveBeenCalledTimes(3);
+    // A view opening now must not take the answer read before that change.
+    now = 1600;
+    const opened = renderHook(() => useSessions('', { projectIds, pageSize: 20 }));
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledTimes(4);
+    expect(opened.result.current.sessions.map((session) => session.id)).not.toContain('before-change');
+    clock.mockRestore();
+  });
+
+  it('lets a refresh share only a request that started after the change it must show', async () => {
+    let now = 100;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const options = { projectIds: ['tasks', 'prj_labs'] };
+    const groups = (id: string) => [
+      { projectID: 'prj_labs', items: [sessionListItem(id, 'prj_labs')], total: 1, lastActivityAt: 1 },
+      { projectID: 'tasks', items: [], total: 0, lastActivityAt: null },
+    ];
+    vi.mocked(sessionApi.listGrouped).mockImplementation(async () => groups('loaded') as any);
+    const sidebar = renderHook(() => useSessions('', options));
+    const page = renderHook(() => useSessions('', options));
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledOnce();
+
+    const running = deferred<any>();
+    vi.mocked(sessionApi.listGrouped).mockReturnValueOnce(running.promise);
+    const eventAt = 150;
+    now = 200;
+    act(() => { void sidebar.result.current.refetch({ freshAfter: eventAt }); });
+    // The event both views heard came before the running request started.
+    act(() => { void page.result.current.refetch({ freshAfter: eventAt }); });
+    expect(sessionApi.listGrouped).toHaveBeenCalledTimes(2);
+    // A change after it started, or a caller's own change, needs a new read.
+    now = 300;
+    act(() => { void page.result.current.refetch({ freshAfter: 250 }); });
+    act(() => { void page.result.current.refetch(); });
+    expect(sessionApi.listGrouped).toHaveBeenCalledTimes(4);
+    await act(async () => running.resolve(groups('refreshed')));
+    expect(sidebar.result.current.sessions.map((session) => session.id)).toEqual(['refreshed']);
+    clock.mockRestore();
   });
 
   it.each([404, 405])('falls back to individual project requests for old services returning %s', async (status) => {

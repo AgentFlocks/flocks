@@ -9,6 +9,7 @@ import { __resetChatModelResourcesForTesting } from '@/hooks/useChatModelResourc
 import { __resetReaStateForTesting } from '@/features/rea/useRea';
 import { formatRelativeTime } from '@/utils/time';
 import SessionPage from './index';
+import { noteSessionListChange } from '@/hooks/useSessions';
 import type { SessionContextFile, SessionContextSnapshot } from '@/api/session';
 import type { SessionContextPanelProps } from './SessionContextPanel';
 import type { SSEChatEvent } from '@/features/session-chat/sseRouting';
@@ -157,6 +158,8 @@ vi.mock('@/api/skill', () => ({
 }));
 
 vi.mock('@/hooks/useSessions', () => ({
+  SESSION_HISTORY_PAGE_SIZE: 20,
+  noteSessionListChange: vi.fn(),
   useSessions,
 }));
 
@@ -674,48 +677,38 @@ describe('SessionPage session actions menu', () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
   });
 
-  it('waits for the real current project query before fetching statistics', async () => {
-    const actual = await vi.importActual<typeof import('@/hooks/useSessions')>('@/hooks/useSessions');
-    useSessions.mockImplementation(actual.useSessions);
-    const groupedFlights: Array<{
-      projects: Array<{ projectID: string }>;
-      response: ReturnType<typeof deferred<any>>;
-    }> = [];
-    const statsFlights: Array<ReturnType<typeof deferred<any>>> = [];
-    const folderA = { id: 'prj_a', name: '项目 A', worktree: '/tmp/a', sessionCount: 0 };
-    const folderB = { id: 'prj_b', name: '项目 B', worktree: '/tmp/b', sessionCount: 0 };
-    let lightRequests = 0;
-    client.get.mockImplementation((url: string, options?: { params?: { includeSessionStats?: boolean } }) => {
-      if (url !== '/api/project') return Promise.resolve({ data: [] });
-      if (options?.params?.includeSessionStats === false) {
-        lightRequests += 1;
-        return Promise.resolve({ data: lightRequests === 1 ? [folderA] : [folderA, folderB] });
-      }
-      const response = deferred<any>();
-      statsFlights.push(response);
-      return response.promise;
+  it('orders the project picker by the activity that comes with the session pages', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      // The light project list carries schema defaults, not counts.
+      data: [
+        { id: 'prj_old', worktree: '/tmp/old', name: 'Old', canWrite: true, sessionCount: 0, lastActivityAt: null },
+        { id: 'prj_new', worktree: '/tmp/new', name: 'New', canWrite: true, sessionCount: 0, lastActivityAt: null },
+      ],
     });
-    sessionApi.listGrouped.mockImplementation((projects: Array<{ projectID: string }>) => {
-      const response = deferred<any>();
-      groupedFlights.push({ projects, response });
-      return response.promise;
+    useSessions.mockReturnValue({
+      ...useSessions(),
+      sessions: [session],
+      statsByProject: {
+        prj_old: { total: 4, lastActivityAt: 10 },
+        prj_new: { total: 1, lastActivityAt: 90 },
+      },
     });
-    const view = renderSessionPage();
-    await waitFor(() => expect(groupedFlights).toHaveLength(1));
-    expect(statsFlights).toHaveLength(0);
-    await act(async () => groupedFlights[0].response.resolve(groupedFlights[0].projects.map(({ projectID }) => ({ projectID, items: [] }))));
-    await waitFor(() => expect(statsFlights).toHaveLength(1));
-    await act(async () => statsFlights[0].resolve({ data: [{ ...folderA, sessionCount: 0 }] }));
-
-    act(() => window.dispatchEvent(new CustomEvent('flocks:projects-changed', { detail: { source: 'sidebar' } })));
-    await waitFor(() => expect(groupedFlights).toHaveLength(2));
-    expect(statsFlights).toHaveLength(1);
-    await act(async () => groupedFlights[1].response.reject({ message: 'unavailable', response: { status: 500 } }));
-    await waitFor(() => expect(statsFlights).toHaveLength(2));
-    await act(async () => statsFlights[1].resolve({ data: [folderA, folderB] }));
-    view.rerender(<MemoryRouter initialEntries={['/sessions']}><NavigationProbe /><SessionRoutes /></MemoryRouter>);
-    await act(async () => {});
-    expect(statsFlights).toHaveLength(2);
+    renderSessionPage('/sessions/session-1');
+    await waitFor(() => expect(client.get).toHaveBeenCalledWith('/api/project', expect.anything()));
+    await user.click(screen.getByText('start-new-session'));
+    await user.click(screen.getByRole('button', { name: 'projectPicker.title' }));
+    const menu = screen.getByRole('menu', { name: 'projectPicker.title' });
+    await waitFor(() => expect(within(menu).getAllByRole('menuitemradio').map((item) => item.textContent)).toEqual(
+      expect.arrayContaining(['New', 'Old']),
+    ));
+    const names = within(menu).getAllByRole('menuitemradio').map((item) => item.textContent);
+    expect(names.indexOf('New')).toBeLessThan(names.indexOf('Old'));
+    // Counts come with the sessions: the project list is never asked for them.
+    const projectRequests = client.get.mock.calls.filter(([url]: [string]) => url === '/api/project');
+    expect(projectRequests.every(([, options]: [string, any]) => options?.params?.includeSessionStats === false)).toBe(true);
+    // The page asks for the sidebar's pages, so both share one request.
+    expect(useSessions).toHaveBeenLastCalledWith('', expect.objectContaining({ pageSize: 20 }));
   });
 
   it('consumes a legacy action once across StrictMode, back and remount', async () => {
@@ -1977,6 +1970,7 @@ describe('SessionPage session actions menu', () => {
 
   it('coalesces bursty session.updated events into one sidebar refetch', () => {
     vi.useFakeTimers();
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(4242);
     try {
       renderSessionPage();
 
@@ -1985,6 +1979,7 @@ describe('SessionPage session actions menu', () => {
         emitSessionUpdated.click();
         emitSessionUpdated.click();
       });
+      clock.mockReturnValue(4742);
 
       expect(updateSessionTitle).toHaveBeenCalledTimes(2);
       expect(refetchSessions).not.toHaveBeenCalled();
@@ -1998,7 +1993,12 @@ describe('SessionPage session actions menu', () => {
         vi.advanceTimersByTime(1);
       });
       expect(refetchSessions).toHaveBeenCalledTimes(1);
+      // As fresh as the events: the sidebar's refresh for them can serve this one,
+      // and no view opening after them reuses a list read before.
+      expect(refetchSessions).toHaveBeenCalledWith({ freshAfter: 4242 });
+      expect(vi.mocked(noteSessionListChange)).toHaveBeenCalledWith(4242);
     } finally {
+      clock.mockRestore();
       vi.useRealTimers();
     }
   });
