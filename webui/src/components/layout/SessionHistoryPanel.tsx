@@ -171,6 +171,11 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   const pinnedKey = `flocks:history:pinned-folders:${user?.id ?? 'anonymous'}`;
 
   const [folders, setFolders] = useState<FolderInfo[]>([]);
+  const [foldersReady, setFoldersReady] = useState(false);
+  const [refreshingFolders, setRefreshingFolders] = useState(false);
+  const [folderStatsVersion, setFolderStatsVersion] = useState(0);
+  const folderRequestSeqRef = useRef(0);
+  const folderStatsStartedVersionRef = useRef(0);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => readIdSet(collapsedKey));
   const [pinnedFolders, setPinnedFolders] = useState<Set<string>>(() => readIdSet(pinnedKey));
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
@@ -210,6 +215,8 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   const {
     sessions,
     loading,
+    refreshing,
+    settled: sessionsSettled = !refreshing,
     refetch,
     updateSessionTitle,
     removeSession,
@@ -220,6 +227,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
     projectIds: folderIds,
     pageSize: HISTORY_PAGE_SIZE,
     loadMorePageSize: HISTORY_LOAD_MORE_SIZE,
+    enabled: foldersReady,
   });
   const compactCount = HISTORY_PAGE_SIZE;
 
@@ -257,14 +265,50 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   listedSessionsRef.current = listedSessions;
 
   const fetchFolders = useCallback(async () => {
+    const requestSeq = ++folderRequestSeqRef.current;
+    setRefreshingFolders(true);
     try {
-      const response = await apiClient.get('/api/project');
+      const response = await apiClient.get('/api/project', { params: { includeSessionStats: false } });
+      if (requestSeq !== folderRequestSeqRef.current) return;
       const list = Array.isArray(response.data) ? (response.data as FolderInfo[]) : [];
-      setFolders(list.filter((folder) => folder.id !== UNGROUPED_ID && !folder.isDefault));
+      setFolders((current) => {
+        const previous = new Map(current.map((folder) => [folder.id, folder]));
+        return list.filter((folder) => folder.id !== UNGROUPED_ID && !folder.isDefault).map((folder) => ({
+          ...folder,
+          // The lightweight response contains model defaults, not real counts.
+          sessionCount: previous.get(folder.id)?.sessionCount,
+          lastActivityAt: previous.get(folder.id)?.lastActivityAt,
+        }));
+      });
+      setFolderStatsVersion((version) => version + 1);
     } catch {
       // Keep the last known folders; the next refresh tries again.
+    } finally {
+      if (requestSeq === folderRequestSeqRef.current) {
+        setFoldersReady(true);
+        setRefreshingFolders(false);
+      }
     }
   }, []);
+
+  // Statistics require a full session scan. Load them after the visible
+  // session page so they cannot compete with the first history render.
+  useEffect(() => {
+    if (!foldersReady || refreshingFolders || !sessionsSettled || folderStatsVersion === 0
+      || folderStatsStartedVersionRef.current === folderStatsVersion) return;
+    folderStatsStartedVersionRef.current = folderStatsVersion;
+    const requestSeq = folderRequestSeqRef.current;
+    void apiClient.get('/api/project').then((response) => {
+      if (!mountedRef.current || requestSeq !== folderRequestSeqRef.current || !Array.isArray(response.data)) return;
+      const stats = new Map<string, FolderInfo>(response.data.map((folder: FolderInfo) => [folder.id, folder]));
+      setFolders((current) => current.map((folder) => {
+        const latest = stats.get(folder.id);
+        return latest ? { ...folder, sessionCount: latest.sessionCount, lastActivityAt: latest.lastActivityAt } : folder;
+      }));
+    }).catch(() => {
+      // Counts are a hint; keep the previously known values when unavailable.
+    });
+  }, [folderStatsVersion, foldersReady, refreshingFolders, sessionsSettled]);
 
   useEffect(() => {
     void fetchFolders();

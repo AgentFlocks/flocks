@@ -219,6 +219,7 @@ type UseSessionsOptions = {
   projectIds?: string[];
   pageSize?: number;
   loadMorePageSize?: number;
+  enabled?: boolean;
 };
 
 function sessionEffectiveProjectId(session: Session): string {
@@ -243,17 +244,20 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
   const activeAppendProjectsRef = useRef<Set<string>>(new Set());
   const optimisticSessionsRef = useRef<Map<string, Session>>(new Map());
   const loadedQueryKeyRef = useRef<string | null>(null);
+  const [settledQueryKey, setSettledQueryKey] = useState<string | null>(null);
   const projectIdsKey = options?.projectIds === undefined
     ? null
     : [...options.projectIds].sort().join('\u0000');
   const pageSize = options?.pageSize ?? SESSION_LIST_PAGE_SIZE;
   const loadMorePageSize = options?.loadMorePageSize ?? pageSize;
+  const enabled = options?.enabled ?? true;
   const queryKey = `${projectIdsKey ?? '*'}\u0001${pageSize}\u0001${search.trim()}`;
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
 
   const fetchSessions = useCallback(async (fetchOptions?: { append?: boolean; projectId?: string }) => {
+    if (!enabled) return;
     const append = Boolean(fetchOptions?.append);
     const appendProjectKey = fetchOptions?.projectId ?? '*';
     const replaceRequestSeq = append
@@ -313,7 +317,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
       if (typeof performance !== 'undefined') performance.mark(startMark);
       const projectTargets = targetProjectIds ?? [undefined];
       const preserveLoadedDepth = !append && loadedQueryKeyRef.current === queryKey;
-      const responses = await Promise.all(projectTargets.map(async (projectId) => {
+      const requests = projectTargets.map((projectId) => {
         const loadedCount = sessionsRef.current.filter((session) => (
           !optimisticSessionsRef.current.has(session.id)
           && (projectId === undefined || sessionEffectiveProjectId(session) === projectId)
@@ -324,6 +328,9 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
             ? Math.max(pageSize, loadedCount)
             : pageSize;
         const offset = append ? loadedCount : 0;
+        return { projectId, requestLimit, offset };
+      });
+      const fetchIndividually = (batch: typeof requests) => Promise.all(batch.map(async ({ projectId, requestLimit, offset }) => {
         const response = await sessionApi.list({
           view: 'list',
           manager: true,
@@ -335,6 +342,54 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         });
         return { projectId, requestLimit, response };
       }));
+      const fetchBatch = async (batch: typeof requests) => {
+        if (targetProjectIds === null || batch.length === 1) return fetchIndividually(batch);
+        try {
+          const groups = await sessionApi.listGrouped(batch.map(({ projectId, requestLimit, offset }) => ({
+            projectID: projectId as string,
+            limit: requestLimit,
+            offset,
+          })), search.trim() || undefined);
+          if (!Array.isArray(groups) || groups.length !== batch.length || groups.some((group, index) => (
+            group.projectID !== batch[index].projectId || !Array.isArray(group.items)
+          ))) {
+            throw new Error('Invalid grouped session list response');
+          }
+          return batch.map(({ projectId, requestLimit }, index) => ({
+            projectId,
+            requestLimit,
+            response: groups[index].items,
+          }));
+        } catch (groupedError: any) {
+          if (!isCurrentRequest()) return [];
+          // A frontend can temporarily be served by an older backend during upgrades.
+          // Only a missing endpoint should trigger the more expensive legacy requests.
+          if (groupedError?.response?.status !== 404 && groupedError?.response?.status !== 405) {
+            throw groupedError;
+          }
+          return fetchIndividually(batch);
+        }
+      };
+      // Bound each batch to the server's request limits. A single project
+      // deeper than that limit keeps the old, unrestricted GET behavior.
+      const batches: Array<typeof requests> = [];
+      let batch: typeof requests = [];
+      let batchLimit = 0;
+      for (const request of requests) {
+        if (batch.length && (batch.length >= 512 || batchLimit + request.requestLimit > 10000)) {
+          batches.push(batch);
+          batch = [];
+          batchLimit = 0;
+        }
+        if (request.requestLimit > 10000) {
+          batches.push([request]);
+        } else {
+          batch.push(request);
+          batchLimit += request.requestLimit;
+        }
+      }
+      if (batch.length) batches.push(batch);
+      const responses = (await Promise.all(batches.map(fetchBatch))).flat();
       if (!isCurrentRequest()) return;
       markMeasure(append ? 'sessions:list:older-page' : 'sessions:list:first-render', startMark);
       const nextSessions = responses.flatMap(({ response }) => (
@@ -391,12 +446,15 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
           }
         }
       } else if (isCurrentRequest()) {
+        // A failed request is settled too: callers can proceed with
+        // independent work without waiting forever for a successful result.
+        setSettledQueryKey(queryKey);
         setLoading(false);
         setRefreshing(false);
         initializedRef.current = true;
       }
     }
-  }, [pageSize, loadMorePageSize, projectIdsKey, queryKey, search]);
+  }, [enabled, pageSize, loadMorePageSize, projectIdsKey, queryKey, search]);
 
   const updateSessionTitle = useCallback((sessionId: string, title: string) => {
     const optimistic = optimisticSessionsRef.current.get(sessionId);
@@ -411,11 +469,16 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
   }, []);
 
   useEffect(() => {
+    if (!enabled) {
+      // Do not let an earlier request populate a disabled list.
+      replaceRequestSeqRef.current += 1;
+      return;
+    }
     if (!hasLoadedOnceRef.current) {
       initializedRef.current = false;
     }
     fetchSessions();
-  }, [fetchSessions]);
+  }, [enabled, fetchSessions]);
 
   const removeSession = useCallback((sessionId: string) => {
     optimisticSessionsRef.current.delete(sessionId);
@@ -441,6 +504,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
     sessions,
     loading,
     refreshing,
+    settled: enabled && !refreshing && settledQueryKey === queryKey,
     error,
     refetch: fetchSessions,
     updateSessionTitle,

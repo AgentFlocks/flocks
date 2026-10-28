@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Link, MemoryRouter } from 'react-router-dom';
 import SessionHistoryPanel, { sessionIdFromLocation } from './SessionHistoryPanel';
+import { useSSE } from '@/hooks/useSSE';
 
 const {
   apiGet, apiDelete, apiPost, sessionApi, useSessionsMock, navigateMock,
@@ -12,7 +13,7 @@ const {
   apiDelete: vi.fn(),
   apiPost: vi.fn(),
   sessionApi: {
-    list: vi.fn(), create: vi.fn(), update: vi.fn(), archive: vi.fn(),
+    list: vi.fn(), listGrouped: vi.fn(), create: vi.fn(), update: vi.fn(), archive: vi.fn(),
     moveToProject: vi.fn(), shareLocal: vi.fn(), unshareLocal: vi.fn(),
     get: vi.fn(), getMessages: vi.fn(),
   },
@@ -97,6 +98,119 @@ describe('SessionHistoryPanel', () => {
     expect(screen.getByText('会话一')).toBeInTheDocument();
     expect(screen.getByText('history.ungrouped')).toBeInTheDocument();
     expect(screen.getByText('s2')).toBeInTheDocument();
+  });
+
+  it('loads project statistics only after the session list is ready', async () => {
+    const sessions = [session('s1', 'prj_a', '会话一')];
+    setSessions(sessions, { refreshing: true });
+    apiGet.mockImplementation((url: string, options?: { params?: { includeSessionStats?: boolean } }) => {
+      if (url === '/api/project' && options?.params?.includeSessionStats === false) {
+        return Promise.resolve({ data: [{ id: 'prj_a', name: '产品设计', worktree: '/root/a', sessionCount: 0 }] });
+      }
+      if (url === '/api/project') {
+        return Promise.resolve({ data: [{ id: 'prj_a', name: '产品设计', worktree: '/root/a', sessionCount: 21 }] });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    const view = renderPanel();
+    await waitFor(() => expect(screen.getByText('产品设计')).toBeInTheDocument());
+    expect(apiGet.mock.calls.filter(([url, options]) => url === '/api/project' && !options?.params)).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: 'history.loadMore' })).not.toBeInTheDocument();
+
+    setSessions(sessions, { refreshing: false });
+    view.rerender(<MemoryRouter initialEntries={['/sessions/s1']}><SessionHistoryPanel collapsed={false} onExpandSidebar={vi.fn()} onNavigate={vi.fn()} /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'history.loadMore' })).toBeInTheDocument());
+    expect(apiGet.mock.calls.filter(([url, options]) => url === '/api/project' && !options?.params)).toHaveLength(1);
+  });
+
+  it('ignores project statistics from an older refresh', async () => {
+    setSessions([session('s1', 'prj_a', '会话一')], { refreshing: false });
+    let resolveOldStats: (value: unknown) => void = () => {};
+    let statsRequests = 0;
+    apiGet.mockImplementation((url: string, options?: { params?: { includeSessionStats?: boolean } }) => {
+      if (url === '/api/project' && options?.params?.includeSessionStats === false) {
+        return Promise.resolve({ data: [{ id: 'prj_a', name: '产品设计', worktree: '/root/a', sessionCount: 0 }] });
+      }
+      if (url === '/api/project') {
+        statsRequests += 1;
+        if (statsRequests === 1) return new Promise((resolve) => { resolveOldStats = resolve; });
+        return Promise.resolve({ data: [{ id: 'prj_a', name: '产品设计', worktree: '/root/a', sessionCount: 1 }] });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    renderPanel();
+    await waitFor(() => expect(statsRequests).toBe(1));
+    act(() => window.dispatchEvent(new CustomEvent('flocks:projects-changed', { detail: { source: 'composer' } })));
+    await waitFor(() => expect(statsRequests).toBe(2));
+    await act(async () => resolveOldStats({ data: [{ id: 'prj_a', sessionCount: 99 }] }));
+    expect(screen.queryByRole('button', { name: 'history.loadMore' })).not.toBeInTheDocument();
+  });
+
+  it('waits for real session queries before issuing one stats request per project refresh', async () => {
+    const actual = await vi.importActual<typeof import('@/hooks/useSessions')>('@/hooks/useSessions');
+    useSessionsMock.mockImplementation(actual.useSessions);
+    const lightFlights: Array<(value: unknown) => void> = [];
+    const statsFlights: Array<(value: unknown) => void> = [];
+    const groupedFlights: Array<{
+      projects: Array<{ projectID: string }>;
+      resolve: (value: unknown) => void;
+      reject: (reason: unknown) => void;
+    }> = [];
+    const folderA = { id: 'prj_a', name: '产品设计', worktree: '/root/a', sessionCount: 0 };
+    const folderB = { id: 'prj_b', name: '新项目', worktree: '/root/b', sessionCount: 0 };
+    let lightRequests = 0;
+    apiGet.mockImplementation((url: string, options?: { params?: { includeSessionStats?: boolean } }) => {
+      if (url !== '/api/project') return Promise.resolve({ data: {} });
+      if (options?.params?.includeSessionStats === false) {
+        lightRequests += 1;
+        if (lightRequests === 1) return Promise.resolve({ data: [folderA] });
+        return new Promise((resolve) => { lightFlights.push(resolve); });
+      }
+      return new Promise((resolve) => { statsFlights.push(resolve); });
+    });
+    sessionApi.listGrouped.mockImplementation((projects: Array<{ projectID: string }>) => new Promise((resolve, reject) => {
+      groupedFlights.push({ projects, resolve, reject });
+    }));
+    const completeGrouped = (index: number) => {
+      const flight = groupedFlights[index];
+      flight.resolve(flight.projects.map(({ projectID }) => ({
+        projectID,
+        items: projectID === 'prj_a' ? [session('s1', 'prj_a', '会话一')] : [],
+      })));
+    };
+
+    const view = renderPanel();
+    await waitFor(() => expect(groupedFlights).toHaveLength(1));
+    expect(statsFlights).toHaveLength(0);
+    await act(async () => completeGrouped(0));
+    await waitFor(() => expect(statsFlights).toHaveLength(1));
+
+    // On reconnect, the session request finishes before the lightweight
+    // project request. Statistics must still wait for both.
+    act(() => vi.mocked(useSSE).mock.calls.at(-1)?.[0].onReconnect?.());
+    await waitFor(() => expect(groupedFlights).toHaveLength(2));
+    expect(lightFlights).toHaveLength(1);
+    await act(async () => completeGrouped(1));
+    expect(statsFlights).toHaveLength(1);
+    await act(async () => lightFlights[0]({ data: [folderA] }));
+    await waitFor(() => expect(statsFlights).toHaveLength(2));
+    await act(async () => statsFlights[1]({ data: [{ ...folderA, sessionCount: 1 }] }));
+    await act(async () => statsFlights[0]({ data: [{ ...folderA, sessionCount: 99 }] }));
+    expect(screen.queryByRole('button', { name: 'history.loadMore' })).not.toBeInTheDocument();
+
+    // A new project changes the query before useSessions' effect can mark
+    // itself refreshing. A failed list request must also release statistics.
+    act(() => window.dispatchEvent(new CustomEvent('flocks:projects-changed', { detail: { source: 'composer' } })));
+    await waitFor(() => expect(lightFlights).toHaveLength(2));
+    await act(async () => lightFlights[1]({ data: [folderA, folderB] }));
+    await waitFor(() => expect(groupedFlights).toHaveLength(3));
+    expect(statsFlights).toHaveLength(2);
+    await act(async () => groupedFlights[2].reject({ message: 'unavailable', response: { status: 500 } }));
+    await waitFor(() => expect(statsFlights).toHaveLength(3));
+    await act(async () => statsFlights[2]({ data: [{ ...folderA, sessionCount: 1 }, folderB] }));
+    view.rerender(<MemoryRouter initialEntries={['/sessions/s1']}><SessionHistoryPanel collapsed={false} onExpandSidebar={vi.fn()} onNavigate={vi.fn()} /></MemoryRouter>);
+    await act(async () => {});
+    expect(statsFlights).toHaveLength(3);
   });
 
   it('creates a session inside a folder', async () => {
@@ -252,7 +366,7 @@ describe('SessionHistoryPanel', () => {
     render(<MemoryRouter initialEntries={['/sessions/u130']}><SessionHistoryPanel collapsed={false} onExpandSidebar={vi.fn()} onNavigate={vi.fn()} /></MemoryRouter>);
     // Every list starts with 20 sessions, including when project folders exist.
     await waitFor(() => expect(screen.getByText('产品设计')).toBeInTheDocument());
-    expect(useSessionsMock).toHaveBeenLastCalledWith('', { projectIds: ['tasks', 'prj_a'], pageSize: 20, loadMorePageSize: 50 });
+    expect(useSessionsMock).toHaveBeenLastCalledWith('', { projectIds: ['tasks', 'prj_a'], pageSize: 20, loadMorePageSize: 50, enabled: true });
     expect(screen.getByText('会话 20')).toBeInTheDocument();
     expect(screen.queryByText('会话 21')).not.toBeInTheDocument();
     expect(screen.getByText('会话 130')).toBeInTheDocument(); // the open session stays visible

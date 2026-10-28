@@ -87,6 +87,8 @@ const {
     getContext: vi.fn(),
     getContextFile: vi.fn(),
     getMessages: vi.fn(),
+    list: vi.fn(),
+    listGrouped: vi.fn(),
     moveToProject: vi.fn(),
     readContextFile: vi.fn(),
     contextFilePreviewUrl: vi.fn((sessionId: string, resourceId: string) => `/api/session/${sessionId}/context/files/${resourceId}/preview`),
@@ -670,6 +672,50 @@ describe('SessionPage session actions menu', () => {
     sessionApi.delete.mockResolvedValue(true);
 
     vi.stubGlobal('confirm', vi.fn(() => true));
+  });
+
+  it('waits for the real current project query before fetching statistics', async () => {
+    const actual = await vi.importActual<typeof import('@/hooks/useSessions')>('@/hooks/useSessions');
+    useSessions.mockImplementation(actual.useSessions);
+    const groupedFlights: Array<{
+      projects: Array<{ projectID: string }>;
+      response: ReturnType<typeof deferred<any>>;
+    }> = [];
+    const statsFlights: Array<ReturnType<typeof deferred<any>>> = [];
+    const folderA = { id: 'prj_a', name: '项目 A', worktree: '/tmp/a', sessionCount: 0 };
+    const folderB = { id: 'prj_b', name: '项目 B', worktree: '/tmp/b', sessionCount: 0 };
+    let lightRequests = 0;
+    client.get.mockImplementation((url: string, options?: { params?: { includeSessionStats?: boolean } }) => {
+      if (url !== '/api/project') return Promise.resolve({ data: [] });
+      if (options?.params?.includeSessionStats === false) {
+        lightRequests += 1;
+        return Promise.resolve({ data: lightRequests === 1 ? [folderA] : [folderA, folderB] });
+      }
+      const response = deferred<any>();
+      statsFlights.push(response);
+      return response.promise;
+    });
+    sessionApi.listGrouped.mockImplementation((projects: Array<{ projectID: string }>) => {
+      const response = deferred<any>();
+      groupedFlights.push({ projects, response });
+      return response.promise;
+    });
+    const view = renderSessionPage();
+    await waitFor(() => expect(groupedFlights).toHaveLength(1));
+    expect(statsFlights).toHaveLength(0);
+    await act(async () => groupedFlights[0].response.resolve(groupedFlights[0].projects.map(({ projectID }) => ({ projectID, items: [] }))));
+    await waitFor(() => expect(statsFlights).toHaveLength(1));
+    await act(async () => statsFlights[0].resolve({ data: [{ ...folderA, sessionCount: 0 }] }));
+
+    act(() => window.dispatchEvent(new CustomEvent('flocks:projects-changed', { detail: { source: 'sidebar' } })));
+    await waitFor(() => expect(groupedFlights).toHaveLength(2));
+    expect(statsFlights).toHaveLength(1);
+    await act(async () => groupedFlights[1].response.reject({ message: 'unavailable', response: { status: 500 } }));
+    await waitFor(() => expect(statsFlights).toHaveLength(2));
+    await act(async () => statsFlights[1].resolve({ data: [folderA, folderB] }));
+    view.rerender(<MemoryRouter initialEntries={['/sessions']}><NavigationProbe /><SessionRoutes /></MemoryRouter>);
+    await act(async () => {});
+    expect(statsFlights).toHaveLength(2);
   });
 
   it('consumes a legacy action once across StrictMode, back and remount', async () => {

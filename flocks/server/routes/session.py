@@ -17,7 +17,7 @@ from urllib.parse import quote
 from typing import List, Optional, Any, Dict, Literal, Union, Tuple, cast
 from fastapi import APIRouter, HTTPException, status, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 from flocks.auth.context import AuthUser, get_current_auth_user, reset_current_auth_user, set_current_auth_user
 from flocks.channel.base import ChatType
@@ -316,6 +316,32 @@ class SessionListItem(BaseModel):
     canWrite: bool = False
     canDelete: bool = False
     isShared: bool = False
+
+
+class SessionListGroupRequest(BaseModel):
+    projectID: str = Field(..., min_length=1)
+    limit: int = Field(..., ge=1, le=10000)
+    offset: int = Field(0, ge=0)
+
+
+class SessionGroupedListRequest(BaseModel):
+    projects: List[SessionListGroupRequest] = Field(..., max_length=512)
+    search: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_total_limit(self) -> "SessionGroupedListRequest":
+        if sum(group.limit for group in self.projects) > 10000:
+            raise ValueError("combined project limit must not exceed 10000")
+        return self
+
+
+class SessionListGroup(BaseModel):
+    projectID: str
+    items: List[SessionListItem]
+
+
+class SessionGroupedListResponse(BaseModel):
+    groups: List[SessionListGroup]
 
 
 class SessionRuntimeStatusResponse(BaseModel):
@@ -956,6 +982,61 @@ async def get_session_turn(sessionID: str, turnID: str, request: Request, respon
     return {"turnID": turnID, "sessionID": sessionID, **receipt}
 
 
+def _eligible_session_list(
+    sessions: List[SessionModel],
+    current_user: AuthUser,
+    visible_project_ids: set[str],
+    shared_project_ids: set[str],
+    *,
+    session_status: str,
+    directory: Optional[str] = None,
+    project_id: Optional[str] = None,
+    roots: Optional[bool] = None,
+    start: Optional[int] = None,
+    manager: Optional[bool] = None,
+    category: Optional[str] = None,
+) -> tuple[List[SessionModel], Dict[str, str]]:
+    """Apply the common visibility and grouping rules before pagination."""
+    from flocks.project.project import DEFAULT_PROJECT_ID, TASK_SESSION_GROUP_ID
+
+    requested_group_id = TASK_SESSION_GROUP_ID if project_id == DEFAULT_PROJECT_ID else project_id
+    manager_categories = {"user", "workflow", "entity-config"}
+    eligible: List[SessionModel] = []
+    effective_project_ids: Dict[str, str] = {}
+    for session in sessions:
+        if session.status == "archived":
+            if current_user.role != "admin" and not SessionPolicy.is_owner(session, current_user):
+                continue
+        elif not SessionPolicy.can_read(session, current_user, shared_project_ids=shared_project_ids):
+            continue
+        if _is_hidden_from_session_manager(session):
+            continue
+        if session_status != "all" and session.status != session_status:
+            continue
+        if directory is not None and session.directory != directory:
+            continue
+        effective_project_id = (
+            session.project_id if session.project_id in visible_project_ids else TASK_SESSION_GROUP_ID
+        )
+        if requested_group_id is not None and effective_project_id != requested_group_id:
+            continue
+        if (roots or manager) and session.parent_id:
+            continue
+        if start is not None and session.time.updated < start:
+            continue
+        if manager:
+            if session.category not in manager_categories:
+                continue
+        elif category is not None:
+            if session.category != category:
+                continue
+        elif session.category == "test":
+            continue
+        eligible.append(session)
+        effective_project_ids[session.id] = effective_project_id
+    return eligible, effective_project_ids
+
+
 @router.get(
     "",
     response_model=List[Union[SessionResponse, SessionListItem]],
@@ -983,11 +1064,7 @@ async def list_sessions(
     """List all sessions with optional filters"""
     started_at = time.perf_counter()
     current_user = require_user(request)
-    from flocks.project.project import (
-        DEFAULT_PROJECT_ID,
-        Project,
-        TASK_SESSION_GROUP_ID,
-    )
+    from flocks.project.project import Project
     list_started_at = time.perf_counter()
     all_sessions = await Session.list_all_unfiltered()
     if session_status == "archived":
@@ -999,56 +1076,21 @@ async def list_sessions(
     visible_project_ids = Project.visible_project_ids(current_user.id)
     shared_project_ids = Project.shared_project_ids()
     
-    eligible = []
-    eligible_project_ids: Dict[str, str] = {}
+    eligible, eligible_project_ids = _eligible_session_list(
+        all_sessions,
+        current_user,
+        visible_project_ids,
+        shared_project_ids,
+        session_status=session_status,
+        directory=directory,
+        project_id=projectID,
+        roots=roots,
+        start=start,
+        manager=manager,
+        category=category,
+    )
     term = search.casefold() if search else None
-    manager_categories = {"user", "workflow", "entity-config"}
     project_names = Project.registered_project_names() if view == "list" else {}
-
-    for session in all_sessions:
-        if session.status == "archived":
-            if current_user.role != "admin" and not SessionPolicy.is_owner(session, current_user):
-                continue
-        elif not SessionPolicy.can_read(
-            session,
-            current_user,
-            shared_project_ids=shared_project_ids,
-        ):
-            continue
-        if _is_hidden_from_session_manager(session):
-            continue
-        if session_status != "all" and session.status != session_status:
-            continue
-        if directory is not None and session.directory != directory:
-            continue
-        effective_project_id = (
-            session.project_id
-            if session.project_id in visible_project_ids
-            else TASK_SESSION_GROUP_ID
-        )
-        requested_group_id = (
-            TASK_SESSION_GROUP_ID
-            if projectID == DEFAULT_PROJECT_ID
-            else projectID
-        )
-        if requested_group_id is not None and effective_project_id != requested_group_id:
-            continue
-        if (roots or manager) and session.parent_id:
-            continue
-        if start is not None and session.time.updated < start:
-            continue
-        if manager:
-            if session.category not in manager_categories:
-                continue
-        elif category is not None:
-            if session.category != category:
-                continue
-        elif session.category == "test":
-            # exclude test sessions from the default listing
-            continue
-
-        eligible.append(session)
-        eligible_project_ids[session.id] = effective_project_id
 
     channel_bindings: Dict[str, _ChannelSessionBinding] = {}
     channel_title_overrides: Dict[str, str] = {}
@@ -1131,6 +1173,96 @@ async def list_sessions(
         "list_ms": round(list_elapsed_ms, 2),
     })
     return response
+
+
+@router.post(
+    "/list-grouped",
+    response_model=SessionGroupedListResponse,
+    summary="List session manager rows for multiple projects",
+)
+async def list_sessions_grouped(
+    request: Request,
+    payload: SessionGroupedListRequest,
+) -> SessionGroupedListResponse:
+    """Read once, then apply the manager list's pagination to each project."""
+    current_user = require_user(request)
+    if not payload.projects:
+        return SessionGroupedListResponse(groups=[])
+
+    from flocks.project.project import DEFAULT_PROJECT_ID, Project, TASK_SESSION_GROUP_ID
+
+    started_at = time.perf_counter()
+    list_started_at = time.perf_counter()
+    all_sessions = await Session.list_all_unfiltered()
+    list_elapsed_ms = (time.perf_counter() - list_started_at) * 1000
+    visible_project_ids = Project.visible_project_ids(current_user.id)
+    shared_project_ids = Project.shared_project_ids()
+    project_names = Project.registered_project_names()
+    eligible, effective_project_ids = _eligible_session_list(
+        all_sessions,
+        current_user,
+        visible_project_ids,
+        shared_project_ids,
+        session_status="active",
+        roots=True,
+        manager=True,
+    )
+
+    def group_id(project_id: str) -> str:
+        return TASK_SESSION_GROUP_ID if project_id == DEFAULT_PROJECT_ID else project_id
+
+    requested_groups = {group_id(group.projectID) for group in payload.projects}
+    candidates = [s for s in eligible if effective_project_ids[s.id] in requested_groups]
+    term = payload.search.casefold() if payload.search else None
+    channel_bindings: Dict[str, _ChannelSessionBinding] = {}
+    title_overrides: Dict[str, str] = {}
+    if term is not None:
+        # Search the rendered title, including titles derived for old channel
+        # sessions, exactly as the existing single-project list does.
+        channel_bindings = await _latest_channel_bindings([s.id for s in candidates])
+        title_overrides = await _legacy_channel_title_overrides(candidates, channel_bindings)
+
+    by_project: Dict[str, List[SessionModel]] = {key: [] for key in requested_groups}
+    for session in candidates:
+        if term is not None and term not in title_overrides.get(session.id, session.title).casefold():
+            continue
+        by_project[effective_project_ids[session.id]].append(session)
+
+    # Multiple requests may name the same group (including the default/tasks
+    # alias) with different pagination; preserve the order and offsets.
+    pages = [
+        by_project[group_id(group.projectID)][group.offset:group.offset + group.limit]
+        for group in payload.projects
+    ]
+    selected = {session.id: session for page in pages for session in page}
+    if term is None:
+        selected_sessions = list(selected.values())
+        channel_bindings = await _latest_channel_bindings(list(selected))
+        title_overrides = await _legacy_channel_title_overrides(selected_sessions, channel_bindings)
+
+    rows = {
+        session_id: _session_to_list_item(
+            session,
+            effective_project_id=effective_project_ids[session_id],
+            shared_project_ids=shared_project_ids,
+            project_name=project_names.get(session.project_id),
+            channel_binding=channel_bindings.get(session_id),
+            title_override=title_overrides.get(session_id),
+        )
+        for session_id, session in selected.items()
+    }
+    result = SessionGroupedListResponse(groups=[
+        SessionListGroup(projectID=group.projectID, items=[rows[s.id] for s in page])
+        for group, page in zip(payload.projects, pages)
+    ])
+    log_route_timing(log, "session.list.grouped.complete", started_at=started_at, extra={
+        "total": len(all_sessions),
+        "count": len(selected),
+        "groups": len(payload.projects),
+        "search": bool(payload.search),
+        "list_ms": round(list_elapsed_ms, 2),
+    })
+    return result
 
 
 async def _require_session_create_licence() -> None:

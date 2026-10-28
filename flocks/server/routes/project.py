@@ -131,6 +131,10 @@ async def list_projects(
     request: Request,
     search: Optional[str] = Query(None),
     scope: str = Query(WORKBENCH_PROJECT_SCOPE, pattern=PROJECT_SCOPE_PATTERN),
+    includeSessionStats: bool = Query(
+        True,
+        description="Include session counts and recent activity; false avoids loading sessions",
+    ),
 ):
     """List user-registered project folders.
 
@@ -140,7 +144,11 @@ async def list_projects(
 
     user = require_user(request)
     try:
-        projects = await _list_project_summaries(user, search)
+        projects = (
+            await _list_project_summaries(user, search)
+            if includeSessionStats
+            else await Project.list_visible(owner_id=user.id)
+        )
         return [project for project in projects if (project.scope or WORKBENCH_PROJECT_SCOPE) == scope]
     except Exception as exc:
         log.error("project.list.error", {"error": str(exc)})

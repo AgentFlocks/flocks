@@ -573,6 +573,10 @@ export default function SessionPage() {
   const [requestedContextResource, setRequestedContextResource] = useState<{ sessionId: string | null; resourceID: string } | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [refreshingProjects, setRefreshingProjects] = useState(true);
+  const [projectsReady, setProjectsReady] = useState(false);
+  const [projectStatsRequest, setProjectStatsRequest] = useState<{ seq: number; query: string } | null>(null);
+  const projectStatsQueryRef = useRef<string | null>(null);
+  const projectStatsStartedSeqRef = useRef(0);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const supportsVision = useDefaultModelVision();
   const [searchQuery] = useState('');
@@ -599,12 +603,14 @@ export default function SessionPage() {
     sessions,
     loading: loadingSessions,
     refreshing: refreshingSessions = loadingSessions,
+    settled: sessionsSettled = !refreshingSessions,
     refetch: refetchSessions,
     updateSessionTitle,
     addSession,
   } = useSessions(searchQuery, {
     projectIds: sessionProjectIds,
     pageSize: sessionListPageSize,
+    enabled: projectsReady,
   });
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
@@ -871,7 +877,7 @@ export default function SessionPage() {
     setRefreshingProjects(true);
     try {
       const listResult = await client.get('/api/project', {
-        params: { search: query.trim() || undefined },
+        params: { search: query.trim() || undefined, includeSessionStats: false },
       });
       if (requestSeq !== projectListRequestSeqRef.current) return;
       const nextProjects = Array.isArray(listResult.data)
@@ -880,18 +886,52 @@ export default function SessionPage() {
         ))
         : [];
       setProjects((currentProjects) => {
-        if (!ensureProject?.id || nextProjects.some((project) => project.id === ensureProject.id)) {
-          return nextProjects;
+        const previous = new Map(currentProjects.map((project) => [project.id, project]));
+        const projectsWithoutDefaultStats = nextProjects.map((project: ProjectSummary) => ({
+          ...project,
+          // Counts in the lightweight response are schema defaults, not data.
+          sessionCount: previous.get(project.id)?.sessionCount,
+          matchedSessionCount: projectStatsQueryRef.current === query ? previous.get(project.id)?.matchedSessionCount : undefined,
+          lastActivityAt: previous.get(project.id)?.lastActivityAt,
+        }));
+        if (!ensureProject?.id || projectsWithoutDefaultStats.some((project: ProjectSummary) => project.id === ensureProject.id)) {
+          return projectsWithoutDefaultStats;
         }
         const currentProject = currentProjects.find((project) => project.id === ensureProject.id);
-        return [{ ...currentProject, ...ensureProject }, ...nextProjects];
+        return [{ ...currentProject, ...ensureProject }, ...projectsWithoutDefaultStats];
       });
+      setProjectStatsRequest({ seq: requestSeq, query });
     } finally {
       if (requestSeq === projectListRequestSeqRef.current) {
         setRefreshingProjects(false);
+        setProjectsReady(true);
       }
     }
   }, []);
+
+  // Load counts and activity after the first session page has rendered.
+  useEffect(() => {
+    if (!projectsReady || refreshingProjects || !sessionsSettled || !projectStatsRequest
+      || projectStatsStartedSeqRef.current === projectStatsRequest.seq) return;
+    const { seq, query } = projectStatsRequest;
+    projectStatsStartedSeqRef.current = seq;
+    void client.get('/api/project', { params: { search: query.trim() || undefined } }).then((response) => {
+      if (!mountedRef.current || seq !== projectListRequestSeqRef.current || !Array.isArray(response.data)) return;
+      const stats = new Map<string, ProjectSummary>(response.data.map((project: ProjectSummary) => [project.id, project]));
+      projectStatsQueryRef.current = query;
+      setProjects((current) => current.map((project) => {
+        const latest = stats.get(project.id);
+        return latest ? {
+          ...project,
+          sessionCount: latest.sessionCount,
+          matchedSessionCount: latest.matchedSessionCount,
+          lastActivityAt: latest.lastActivityAt,
+        } : project;
+      }));
+    }).catch(() => {
+      // Counts are a hint; keep the previously known values when unavailable.
+    });
+  }, [projectStatsRequest, projectsReady, refreshingProjects, sessionsSettled]);
 
   useEffect(() => onProjectsChanged('composer', () => {
     void fetchProjects(undefined, searchQuery);

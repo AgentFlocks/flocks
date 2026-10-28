@@ -29,7 +29,10 @@ function sessionListItem(id: string, projectID: string, updated = 1) {
 // ---------------------------------------------------------------------------
 // Mocks — keep API calls from running in unit tests
 // ---------------------------------------------------------------------------
-vi.mock('@/api/session', () => ({ sessionApi: { list: vi.fn().mockResolvedValue([]) } }));
+vi.mock('@/api/session', () => ({ sessionApi: {
+  list: vi.fn().mockResolvedValue([]),
+  listGrouped: vi.fn().mockRejectedValue({ response: { status: 404 } }),
+} }));
 vi.mock('@/api/client', () => ({
   default: { get: vi.fn().mockResolvedValue({ data: [] }) },
 }));
@@ -1182,7 +1185,153 @@ describe('message page refresh and deletion races', () => {
 
 describe('useSessions list loading', () => {
   afterEach(() => {
+    vi.mocked(sessionApi.list).mockReset().mockResolvedValue([]);
+    vi.mocked(sessionApi.listGrouped).mockReset().mockRejectedValue({ response: { status: 404 } });
     vi.clearAllMocks();
+  });
+
+  it('waits until project IDs are available before requesting sessions', async () => {
+    const { rerender } = renderHook(({ enabled }) => useSessions('', {
+      projectIds: ['tasks', 'prj_labs'],
+      enabled,
+    }), { initialProps: { enabled: false } });
+    await act(async () => {});
+    expect(sessionApi.list).not.toHaveBeenCalled();
+    expect(sessionApi.listGrouped).not.toHaveBeenCalled();
+    rerender({ enabled: true });
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledOnce();
+  });
+
+  it('does not apply a request that finishes after the list is disabled', async () => {
+    const response = deferred<any>();
+    vi.mocked(sessionApi.listGrouped).mockReturnValueOnce(response.promise);
+    const { result, rerender } = renderHook(({ enabled }) => useSessions('', {
+      projectIds: ['tasks', 'prj_labs'], enabled,
+    }), { initialProps: { enabled: true } });
+    rerender({ enabled: false });
+    await act(async () => response.resolve([
+      { projectID: 'prj_labs', items: [sessionListItem('stale', 'prj_labs')] },
+      { projectID: 'tasks', items: [] },
+    ]));
+    expect(result.current.sessions).toEqual([]);
+  });
+
+  it('reports the current project query as settled only after it succeeds or fails', async () => {
+    const first = deferred<any>();
+    const second = deferred<any>();
+    vi.mocked(sessionApi.listGrouped).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const { result, rerender } = renderHook(({ projectIds }) => useSessions('', { projectIds }), {
+      initialProps: { projectIds: ['tasks', 'first'] },
+    });
+    expect(result.current.settled).toBe(false);
+    await act(async () => first.resolve([
+      { projectID: 'first', items: [] },
+      { projectID: 'tasks', items: [] },
+    ]));
+    expect(result.current.settled).toBe(true);
+    rerender({ projectIds: ['tasks', 'second'] });
+    expect(result.current.settled).toBe(false);
+    await act(async () => second.reject(new Error('session list unavailable')));
+    expect(result.current.settled).toBe(true);
+    expect(result.current.error).toBe('session list unavailable');
+  });
+
+  it('settles a rapidly completed project query even when refresh state is batched', async () => {
+    vi.mocked(sessionApi.listGrouped)
+      .mockResolvedValueOnce([{ projectID: 'first', items: [] }, { projectID: 'tasks', items: [] }])
+      .mockResolvedValueOnce([{ projectID: 'second', items: [] }, { projectID: 'tasks', items: [] }])
+      .mockRejectedValueOnce(new Error('failed'));
+    const { result, rerender } = renderHook(({ projectIds }) => useSessions('', { projectIds }), {
+      initialProps: { projectIds: ['tasks', 'first'] },
+    });
+    await act(async () => {});
+    expect(result.current.settled).toBe(true);
+    rerender({ projectIds: ['tasks', 'second'] });
+    await act(async () => {});
+    expect(result.current.settled).toBe(true);
+    rerender({ projectIds: ['tasks', 'third'] });
+    await act(async () => {});
+    expect(result.current.settled).toBe(true);
+    expect(result.current.error).toBe('failed');
+  });
+
+  it('loads each project page in one grouped request and keeps separate page state', async () => {
+    vi.mocked(sessionApi.listGrouped).mockResolvedValueOnce([
+      { projectID: 'default', items: [sessionListItem('default-1', 'default'), sessionListItem('default-2', 'default')] },
+      { projectID: 'prj_labs', items: [sessionListItem('labs-1', 'prj_labs')] },
+    ] as any);
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['prj_labs', 'default'],
+      pageSize: 2,
+    }));
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledWith([
+      { projectID: 'default', limit: 2, offset: 0 },
+      { projectID: 'prj_labs', limit: 2, offset: 0 },
+    ], undefined);
+    expect(sessionApi.list).not.toHaveBeenCalled();
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['default-1', 'default-2', 'labs-1']);
+    expect(result.current.hasMoreByProject).toEqual({ default: true, prj_labs: false });
+  });
+
+  it('splits grouped requests at the server project and total row limits', async () => {
+    vi.mocked(sessionApi.listGrouped).mockImplementation(async (projects) => (
+      projects.map(({ projectID }) => ({ projectID, items: [] }))
+    ));
+    const { rerender } = renderHook(({ projectIds, pageSize }) => useSessions('', { projectIds, pageSize }), {
+      initialProps: { projectIds: Array.from({ length: 513 }, (_, index) => `project-${index}`), pageSize: 1 },
+    });
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledOnce();
+    expect(vi.mocked(sessionApi.listGrouped).mock.calls[0][0]).toHaveLength(512);
+    expect(sessionApi.list).toHaveBeenCalledOnce();
+
+    vi.clearAllMocks();
+    rerender({ projectIds: Array.from({ length: 300 }, (_, index) => `project-${index}`), pageSize: 50 });
+    await act(async () => {});
+    expect(sessionApi.listGrouped).toHaveBeenCalledTimes(2);
+    for (const [projects] of vi.mocked(sessionApi.listGrouped).mock.calls) {
+      expect(projects.reduce((total, project) => total + project.limit, 0)).toBeLessThanOrEqual(10000);
+    }
+    expect(sessionApi.list).not.toHaveBeenCalled();
+  });
+
+  it.each([404, 405])('falls back to individual project requests for old services returning %s', async (status) => {
+    vi.mocked(sessionApi.listGrouped).mockRejectedValueOnce({ response: { status } });
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => [sessionListItem(params.projectID, params.projectID)] as any);
+    const { result } = renderHook(() => useSessions('', { projectIds: ['default', 'prj_labs'] }));
+    await act(async () => {});
+    expect(sessionApi.list).toHaveBeenCalledTimes(2);
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['default', 'prj_labs']);
+  });
+
+  it('does not retry grouped requests individually after an authorization failure', async () => {
+    vi.mocked(sessionApi.listGrouped).mockRejectedValueOnce({ message: 'forbidden', response: { status: 403 } });
+    const { result } = renderHook(() => useSessions('', { projectIds: ['default', 'prj_labs'] }));
+    await act(async () => {});
+    expect(result.current.error).toBe('forbidden');
+    expect(sessionApi.list).not.toHaveBeenCalled();
+  });
+
+  it('ignores a grouped response for an older project selection', async () => {
+    const oldResponse = deferred<any>();
+    vi.mocked(sessionApi.listGrouped)
+      .mockReturnValueOnce(oldResponse.promise)
+      .mockResolvedValueOnce([
+        { projectID: 'default', items: [sessionListItem('current', 'default')] },
+        { projectID: 'new', items: [] },
+      ] as any);
+    const { result, rerender } = renderHook(({ projectIds }) => useSessions('', { projectIds }), {
+      initialProps: { projectIds: ['default', 'old'] },
+    });
+    rerender({ projectIds: ['default', 'new'] });
+    await act(async () => {});
+    await act(async () => oldResponse.resolve([
+      { projectID: 'default', items: [sessionListItem('stale', 'default')] },
+      { projectID: 'old', items: [] },
+    ]));
+    expect(result.current.sessions.map((session) => session.id)).toEqual(['current']);
   });
 
   it('uses the lightweight session manager list endpoint', async () => {
