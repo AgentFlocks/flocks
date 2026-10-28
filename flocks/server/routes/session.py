@@ -2684,7 +2684,7 @@ async def abort_session(sessionID: str, http_request: Request = None) -> AbortSe
     from flocks.session import ownership
 
     ran_here = await _abort_session_processing(sessionID)
-    # The run may be on another node; whoever holds its lease aborts it there.
+    # The run may be held outside this process; whoever holds its lease aborts it.
     try:
         target = await ownership.request_abort_of_run(sessionID)
     except Exception as exc:
@@ -2702,7 +2702,7 @@ async def abort_session(sessionID: str, http_request: Request = None) -> AbortSe
 
 
 def install_remote_abort_handler() -> None:
-    """Abort sessions this process runs when another node asks (flocks.session.ownership).
+    """Abort sessions this process runs when flocks.session.ownership asks.
 
     Called by the server as it starts (flocks.server.app), not on import.
     """

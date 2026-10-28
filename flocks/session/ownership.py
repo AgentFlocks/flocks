@@ -4,7 +4,7 @@ A runner (and a manual compaction, and orphan repair) holds a session's
 execution lease for as long as it works on the session, so a second one does
 not start meanwhile and data retention leaves the session alone.  One process
 runs an installation's sessions, so the leases live in this process: a lease
-cannot be lost to another runner, and there is no other node to ask to abort.
+cannot be lost to another runner, and an abort never has to be passed on.
 
 A database backend whose processes share sessions replaces this module
 (``flocks.db_backend``) with leases kept in the database, renewed while the run
@@ -22,14 +22,14 @@ from typing import Any, Iterator
 
 from flocks.task.node import process_owner_id
 
-#: How often a running session looks for an abort asked for on another node.
+#: How often a running session checks whether an abort was requested for it.
 ABORT_POLL_INTERVAL_S = 1.0
 
 _abort_handler: Any = None
 
 
 def set_abort_handler(handler: Any) -> None:
-    """Install what runs when another node asks this one to abort a session (none can, here)."""
+    """Install what aborts a session this process runs when an abort is requested (never, here)."""
     global _abort_handler
     _abort_handler = handler
 
@@ -44,7 +44,7 @@ class AbortTarget:
 
 
 async def request_abort_of_run(session_id: str) -> AbortTarget | None:
-    """Record an abort for a run of *session_id* on another node: there is none."""
+    """Record an abort for a run of *session_id* held outside this process: there is none."""
     return None
 
 
@@ -54,8 +54,8 @@ async def request_abort(session_id: str) -> bool:
 
 #: What an abort came to, as the caller is told it.
 ABORT_STOPPED = "stopped"  # the run it named has ended
-ABORT_REQUESTED = "requested"  # its node took the request and is stopping it
-ABORT_UNCONFIRMED = "unconfirmed"  # recorded, but its node has not answered: lost, or stuck
+ABORT_REQUESTED = "requested"  # its holder took the request and is stopping it
+ABORT_UNCONFIRMED = "unconfirmed"  # recorded, but its holder has not answered: lost, or stuck
 ABORT_NOT_RUNNING = "not_running"  # no run of the session was executing
 
 

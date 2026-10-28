@@ -209,7 +209,7 @@ async def _serving_lifespan(app: FastAPI):
     
     # Initialize storage
     await _run_startup_phase(log, "storage.init", Storage.init)
-    # Abort requests another node leaves for a session this process runs.
+    # Let flocks.session.ownership abort the sessions this process runs.
     from flocks.server.routes.session import install_remote_abort_handler
 
     install_remote_abort_handler()

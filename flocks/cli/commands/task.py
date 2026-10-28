@@ -33,8 +33,8 @@ async def _with_store_cleanup(coro):
     """Run a task command and release the stores it opened.
 
     Release the task handle, then the other invocation-owned stores (workflow
-    store, channel bindings) and the shared PostgreSQL pools before asyncio
-    closes the command's event loop.
+    store, channel bindings) and storage before asyncio closes the command's
+    event loop.
     """
     try:
         return await coro

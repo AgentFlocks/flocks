@@ -858,7 +858,7 @@ class SessionLoop:
         working_directory: Optional[str] = None,
         auto_failover: bool = False,
     ) -> LoopResult:
-        """One live runner per session across every process sharing PostgreSQL."""
+        """One live runner per session: the run holds the session's execution lease (flocks.session.ownership)."""
         from flocks.session.ownership import SessionExecutionLease, SessionOwnershipLost, current_lease
 
         kwargs = dict(provider_id=provider_id, model_id=model_id, agent_name=agent_name,

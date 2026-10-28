@@ -187,12 +187,12 @@ class TaskExecution(BaseModel):
     )
     agent_name: str = Field("rex", alias="agentName")
     workflow_id: Optional[str] = Field(None, alias="workflowID")
-    # Ownership. With two instances on one database, "running" alone does not
-    # say whether anybody is still working on this, so the row records which
-    # node claimed it and until when that claim holds.
+    # Ownership. "running" alone does not say whether anybody is still working
+    # on this, so the row records which owner claimed it and until when that
+    # claim holds.
     owner_node_id: Optional[str] = Field(None, alias="ownerNodeID")
     lease_expires_at: Optional[datetime] = Field(None, alias="leaseExpiresAt")
-    # Bumped on every claim. A node that lost its lease and comes back still
+    # Bumped on every claim. An owner that lost its lease and comes back still
     # holds the old number, so its late writes are recognised as stale and
     # dropped rather than overwriting the new owner's progress.
     owner_generation: int = Field(0, alias="ownerGeneration")
@@ -204,7 +204,7 @@ class TaskExecution(BaseModel):
     )
 
     def lease_is_live(self, *, now: Optional[datetime] = None) -> bool:
-        """Whether some node still holds a valid claim on this execution."""
+        """Whether some owner still holds a valid claim on this execution."""
 
         if self.owner_node_id is None or self.lease_expires_at is None:
             return False
