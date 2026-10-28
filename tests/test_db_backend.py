@@ -133,6 +133,31 @@ def test_a_backend_answers_to_its_aliases_under_its_installed_name(tmp_path, mon
     db_backend.commit_backend("externaldb", {"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DATA_DIR": str(older)})
 
 
+@pytest.mark.parametrize("order", ["first", "second"])
+def test_an_alias_two_backends_answer_to_chooses_neither(tmp_path, monkeypatch, order):
+    """Whichever entry point comes first must not decide which database a deployment runs on."""
+    shared = {"modules": {}, "aliases": ("shared",)}
+    backends = {"backend_a": SimpleNamespace(**shared), "backend_b": SimpleNamespace(**shared)}
+    if order == "second":
+        backends = dict(reversed(list(backends.items())))
+    _installed_backends(monkeypatch, **backends)
+    config = tmp_path / "config"
+    config.mkdir()
+    env = {"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DATA_DIR": str(tmp_path / "data")}
+
+    with pytest.raises(db_backend.BackendConfigurationError, match="More than one installed backend answers to 'shared'"):
+        db_backend.backend_choice({**env, "FLOCKS_DB_BACKEND": "Shared"})
+    (config / "database.json").write_text(json.dumps({"backend": "shared"}), encoding="utf-8")
+    with pytest.raises(db_backend.BackendConfigurationError, match="answers to 'shared'"):
+        db_backend.backend_choice(env)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / db_backend.COMMITMENT_FILE_NAME).write_text(json.dumps({"version": 1, "backend": "shared"}))
+    with pytest.raises(db_backend.BackendConfigurationError, match="answers to 'shared'"):
+        db_backend.commit_backend("backend_a", env)
+    # A backend's own name still names it, whatever the others answer to.
+    assert db_backend.backend_choice({**env, "FLOCKS_DB_BACKEND": "backend_b"}).backend == "backend_b"
+
+
 @pytest.mark.parametrize(
     "content",
     ["{not json", json.dumps(["postgres"]), json.dumps({"backend": ""}), json.dumps({"backend": "postgres", "dsn_file": 3})],

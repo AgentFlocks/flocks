@@ -159,18 +159,27 @@ UNPROVIDED_BACKEND = "external"
 
 
 def _normalise(name: str) -> str:
-    """*name* as the installed backend answering to it (``aliases``) is named."""
+    """*name* as the installed backend answering to it (``aliases``) is named.
+
+    An installed name wins over an alias; an alias two backends answer to names neither.
+    """
     backend = name.strip().lower()
     if not backend or backend == SQLITE:
         return backend
     entries = _backend_entries()
     if any(entry.name == backend for entry in entries):
         return backend
-    for entry in entries:
-        aliases = getattr(_load_provider(entry), "aliases", ()) or ()
-        if backend in {str(alias).strip().lower() for alias in aliases}:
-            return entry.name
-    return backend
+    answering = sorted({
+        entry.name
+        for entry in entries
+        if backend in {str(alias).strip().lower() for alias in getattr(_load_provider(entry), "aliases", ()) or ()}
+    })
+    if len(answering) > 1:
+        raise BackendConfigurationError(
+            f"More than one installed backend answers to {backend!r} ({', '.join(answering)}); "
+            "name one of them by its own name"
+        )
+    return answering[0] if answering else backend
 
 
 def _backend_entries() -> list:
