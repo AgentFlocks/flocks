@@ -578,7 +578,7 @@ class MemoryManager:
         if file_path.suffix.lower() == ".md":
             from flocks.memory.sync.mirror import reconcile_note
 
-            # The shared copy, in case another instance wrote it last.
+            # The note as stored, in case it changed since it was last read here.
             await reconcile_note(memory_root, file_path)
         
         if not file_path.exists():
@@ -632,10 +632,10 @@ class MemoryManager:
         async with coordinator.write_lock:
             from flocks.memory.sync.mirror import MemoryNotShared, reconcile_note
 
-            # The note as stored (another instance may have written it last),
-            # then this write, then the stored copy brought up to date.  A
-            # write on a copy that could not be brought up to date would end
-            # up beside the note as a conflict copy: nothing is written then.
+            # The note as stored, then this write, then the stored copy
+            # brought up to date.  A write on a copy that could not be brought
+            # up to date would end up beside the note as a conflict copy:
+            # nothing is written then.
             if not await reconcile_note(memory_root, file_path, attempts=3):
                 raise MemoryNotShared(f"{path}: the shared memory store is unavailable; nothing was written")
             if append:
@@ -648,8 +648,8 @@ class MemoryManager:
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
             if not await reconcile_note(memory_root, file_path, attempts=3):
-                # Kept here, and shared once the store takes it -- unless this
-                # instance goes first: not reported as a write that worked.
+                # Kept, and stored once the store takes it: not reported as a
+                # write that worked.
                 raise MemoryNotShared(f"{path} was saved on this instance only; the shared memory store did not take it")
         log.info("manager.write", {"path": path, "append": append, "length": len(content)})
         

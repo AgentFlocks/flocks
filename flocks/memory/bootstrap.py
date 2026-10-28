@@ -459,8 +459,8 @@ class MemoryBootstrap:
         """
         from flocks.memory.sync.mirror import reconcile_quietly
 
-        # The shared notes first: another instance may have written them, and
-        # a template created below must not stand in for a note that exists.
+        # The stored notes first: a template created below must not stand in
+        # for a note that already exists.
         await reconcile_quietly(self.memory_dir)
         await self.create_memory_structure()
         await reconcile_quietly(self.memory_dir)

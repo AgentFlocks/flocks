@@ -890,7 +890,7 @@ def _list_memory_sync(
 
 
 async def _settle_memory_note(mgr: WorkspaceManager, target: Path) -> None:
-    """The shared copy of a memory note, before this instance serves it."""
+    """The stored copy of a memory note, before it is served."""
     from flocks.memory.sync.mirror import reconcile_note
 
     require_http_private_path_access(target)
@@ -909,7 +909,7 @@ async def list_memory(request: Request):
     mgr = _get_manager()
     memory_dir = mgr.get_memory_dir()
     require_http_private_path_access(memory_dir)
-    # Notes written through other instances show up here too.
+    # The stored notes, so the listing has every one of them.
     await reconcile_quietly(memory_dir)
     if not memory_dir.exists():
         return []
@@ -977,8 +977,8 @@ async def write_memory_file(request: Request, body: FileWriteRequest):
 
     mirrored = target.suffix.lower() == ".md"
     if mirrored:
-        # The stored note first (another instance may have changed it), then
-        # this edit, then the stored copy brought up to date.
+        # The stored note first, then this edit, then the stored copy brought
+        # up to date.
         await reconcile_note(mgr.get_memory_dir(), target)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -986,8 +986,8 @@ async def write_memory_file(request: Request, body: FileWriteRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     if mirrored and not await reconcile_note(mgr.get_memory_dir(), target):
-        # Saved here, but not in the shared store: say so rather than report
-        # a write the other instances will not see.
+        # Saved, but the store did not take it: say so rather than report a
+        # write that worked.
         raise HTTPException(
             status_code=503,
             detail="Saved on this server only; the shared memory store is unavailable. It is stored once it is back.",

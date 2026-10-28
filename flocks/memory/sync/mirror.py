@@ -1,13 +1,13 @@
-"""Memory notes on this instance's disk.
+"""Memory notes on the local disk.
 
 Memory code settles a note after writing it (``reconcile_note``) and every
-note around a dream or a bootstrap (``reconcile_quietly``).  With one
-instance on one disk the notes under the memory root are the only copy, so
-every note is always settled and there is nothing to bring over.
+note around a dream or a bootstrap (``reconcile_quietly``).  In one process on
+one disk the notes under the memory root are the only copy, so every note is
+always settled and there is nothing to bring over.
 
-A database backend whose instances share one database replaces this module
-(``flocks.db_backend``) with one that keeps the notes in the database too and
-reconciles each instance's copy with it.  The names and return values here
+A database backend that lets several processes share the data replaces this
+module (``flocks.db_backend``) with one that keeps the notes in the database
+too and reconciles the local copy with it.  The names and return values here
 are the ones that module keeps.
 """
 
@@ -39,7 +39,7 @@ def manifest_path(root: Path) -> Path:
 
 
 class MemoryNotShared(RuntimeError):
-    """A memory note could not be settled with the stored notes: the other instances do not have it."""
+    """A memory note could not be settled with the stored notes."""
 
 
 async def reconcile(root: Path, *, only: Optional[Iterable[str]] = None) -> ReconcileStats:
