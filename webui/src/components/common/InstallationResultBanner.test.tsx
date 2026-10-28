@@ -9,8 +9,8 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'zh
 
 const restored = {
   id: 'attempt-1', phase: 'failed', recovery: 'restored', updated_at: '',
-  title: '企业版升级未完成', message: '已恢复原来的 SQLite 安装，原数据已保留，可以继续使用。',
-  retry_hint: '处理原因后重新运行原升级命令。', detail: 'PostgreSQL 安装包校验失败',
+  title: '升级未完成', message: '已恢复原来的 SQLite 安装，原数据已保留，可以继续使用。',
+  retry_hint: '处理原因后重新运行原升级命令。', detail: '外部数据库安装包校验失败',
 };
 beforeEach(() => { vi.clearAllMocks(); auth.user.role = 'admin'; getResult.mockResolvedValue(null); });
 
@@ -42,8 +42,8 @@ describe('installation recovery notice', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
-  it('does not describe a retained PostgreSQL installation as restored SQLite', async () => {
-    getResult.mockResolvedValue({ ...restored, recovery: 'retained', message: '现有 PostgreSQL 数据已保留，没有切回旧 SQLite。' });
+  it('does not describe a retained external database installation as restored SQLite', async () => {
+    getResult.mockResolvedValue({ ...restored, recovery: 'retained', message: '现有外部数据库的数据已保留，没有切回旧 SQLite。' });
     render(<InstallationResultBanner />);
     expect(await screen.findByRole('alert')).toHaveTextContent('没有切回旧 SQLite');
     expect(screen.queryByText(restored.message)).toBeNull();

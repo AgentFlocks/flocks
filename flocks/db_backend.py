@@ -26,11 +26,17 @@ first of:
 2. the choice persisted in ``<config dir>/database.json`` -- what switching an
    installation to another backend writes::
 
-       {"backend": "postgres", "dsn_file": "/path/to/a/file/holding/the/dsn"}
+       {"backend": "<name>", "dsn_file": "/path/to/a/file/holding/the/dsn"}
 
-3. ``postgres`` when ``FLOCKS_DB_DSN`` or ``FLOCKS_DB_DSN_FILE`` is set, for
-   deployments configured before there was a choice to make;
+3. when ``FLOCKS_DB_DSN`` or ``FLOCKS_DB_DSN_FILE`` is set (deployments
+   configured before there was a choice to make), the installed backend that
+   takes a connection string: the only one installed, or the one that claims
+   it (``claims_dsn``).  With none installed the choice is a backend nothing
+   provides, so the start is refused rather than run on a new SQLite database;
 4. ``sqlite``.
+
+A backend may answer to other names as well (``aliases``); the choice takes
+the name it is installed under.
 
 ``flocks`` loads the process's ``.env`` (``flocks.startup_env``) before it
 decides, so a variable set there counts as well.
@@ -148,9 +154,53 @@ class InstalledBackend:
     replacements: Mapping[str, str] = field(default_factory=dict)
 
 
+#: The backend a connection string alone selects when no installed backend takes one.
+UNPROVIDED_BACKEND = "external"
+
+
 def _normalise(name: str) -> str:
+    """*name* as the installed backend answering to it (``aliases``) is named."""
     backend = name.strip().lower()
-    return "postgres" if backend == "postgresql" else backend
+    if not backend or backend == SQLITE:
+        return backend
+    entries = _backend_entries()
+    if any(entry.name == backend for entry in entries):
+        return backend
+    for entry in entries:
+        aliases = getattr(_load_provider(entry), "aliases", ()) or ()
+        if backend in {str(alias).strip().lower() for alias in aliases}:
+            return entry.name
+    return backend
+
+
+def _backend_entries() -> list:
+    try:
+        return list(importlib.metadata.entry_points(group=ENTRY_POINT_GROUP))
+    except Exception as exc:  # unreadable metadata: say so instead of running half-configured
+        raise BackendConfigurationError(f"Cannot read the installed database backends: {exc}") from exc
+
+
+def _load_provider(entry: Any) -> Any:
+    try:
+        return entry.load()
+    except Exception as exc:
+        raise BackendConfigurationError(f"The {entry.name!r} database backend failed to load: {exc}") from exc
+
+
+def _connection_string_backend() -> str:
+    """The installed backend a connection string alone selects (see the module docstring)."""
+    entries = [entry for entry in _backend_entries() if entry.name != SQLITE]
+    if len(entries) == 1:
+        return entries[0].name
+    claiming = [entry.name for entry in entries if getattr(_load_provider(entry), "claims_dsn", False)]
+    if len(claiming) == 1:
+        return claiming[0]
+    if not entries:
+        return UNPROVIDED_BACKEND
+    raise BackendConfigurationError(
+        f"{DSN_ENV} or {DSN_FILE_ENV} is set, and more than one installed backend could take it "
+        f"({', '.join(sorted(entry.name for entry in entries))}): set {BACKEND_ENV} to choose one"
+    )
 
 
 def directory_path(value: str | Path, name: str) -> Path:
@@ -296,11 +346,7 @@ def _validate_provider_choices(choice: BackendChoice, environ: Optional[Mapping[
     try:
         entries = importlib.metadata.entry_points(group=ENTRY_POINT_GROUP)
         for entry in entries:
-            try:
-                provider = entry.load()
-            except Exception as exc:
-                raise BackendConfigurationError(f"The {entry.name!r} database backend failed to load: {exc}") from exc
-            validate = getattr(provider, "validate_choice", None)
+            validate = getattr(_load_provider(entry), "validate_choice", None)
             if callable(validate):
                 validate(choice, environ)
     except BackendConfigurationError:
@@ -345,15 +391,12 @@ def backend_choice(environ: Optional[Mapping[str, str]] = None) -> BackendChoice
         return persisted
     for name in (DSN_ENV, DSN_FILE_ENV):
         if (source.get(name) or "").strip():
-            return BackendChoice(backend="postgres", source=name)
+            return BackendChoice(backend=_connection_string_backend(), source=name)
     return BackendChoice(backend=SQLITE, source="default")
 
 
 def _provider_for(backend: str) -> tuple[Optional[str], Any]:
-    try:
-        entries = [entry for entry in importlib.metadata.entry_points(group=ENTRY_POINT_GROUP) if entry.name == backend]
-    except Exception as exc:  # unreadable metadata: say so instead of running half-configured
-        raise BackendConfigurationError(f"Cannot read the installed database backends: {exc}") from exc
+    entries = [entry for entry in _backend_entries() if entry.name == backend]
     if not entries:
         return None, None
     if len(entries) > 1:

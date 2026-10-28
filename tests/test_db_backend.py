@@ -8,12 +8,14 @@ backend distribution on its path -- entry point metadata and all -- and import
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,38 +39,98 @@ def test_the_environment_variable_comes_first(tmp_path):
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "database.json").write_text(json.dumps({"backend": "sqlite"}), encoding="utf-8")
 
-    choice = db_backend.backend_choice({"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DB_BACKEND": "PostgreSQL"})
+    choice = db_backend.backend_choice({"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DB_BACKEND": "ExternalDB"})
 
-    assert (choice.backend, choice.source) == ("postgres", "FLOCKS_DB_BACKEND")
+    assert (choice.backend, choice.source) == ("externaldb", "FLOCKS_DB_BACKEND")
 
 
 def test_a_persisted_choice_comes_before_the_connection_variables(tmp_path):
     config = tmp_path / "config"
     config.mkdir()
     (config / "database.json").write_text(
-        json.dumps({"backend": "postgres", "dsn_file": "/srv/flocks/dsn"}), encoding="utf-8",
+        json.dumps({"backend": "externaldb", "dsn_file": "/srv/flocks/dsn"}), encoding="utf-8",
     )
 
-    choice = db_backend.backend_choice({"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DB_DSN": "postgresql://other/db"})
+    choice = db_backend.backend_choice({"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DB_DSN": "externaldb://other/db"})
 
-    assert (choice.backend, choice.source, choice.dsn_file) == ("postgres", str(config / "database.json"), "/srv/flocks/dsn")
+    assert (choice.backend, choice.source, choice.dsn_file) == ("externaldb", str(config / "database.json"), "/srv/flocks/dsn")
 
 
 def test_flocks_config_dir_moves_the_persisted_choice(tmp_path):
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
-    (elsewhere / "database.json").write_text(json.dumps({"backend": "postgres"}), encoding="utf-8")
+    (elsewhere / "database.json").write_text(json.dumps({"backend": "externaldb"}), encoding="utf-8")
 
     choice = db_backend.backend_choice({"FLOCKS_ROOT": str(tmp_path / "root"), "FLOCKS_CONFIG_DIR": str(elsewhere)})
 
     assert choice.source == str(elsewhere / "database.json")
 
 
-@pytest.mark.parametrize("variable", ["FLOCKS_DB_DSN", "FLOCKS_DB_DSN_FILE"])
-def test_a_deployment_configured_before_the_choice_existed_stays_on_postgres(tmp_path, variable):
-    choice = db_backend.backend_choice({"FLOCKS_ROOT": str(tmp_path), variable: "postgresql://flocks@db/flocks"})
+class _Entry:
+    """An installed ``flocks.db_backends`` entry point, without a distribution."""
 
-    assert (choice.backend, choice.source) == ("postgres", variable)
+    def __init__(self, name: str, provider: object) -> None:
+        self.name, self.value, self.dist, self._provider = name, f"stand_in:{name}", None, provider
+
+    def load(self) -> object:
+        return self._provider
+
+
+def _installed_backends(monkeypatch, **providers) -> None:
+    entries = [_Entry(name, provider) for name, provider in providers.items()]
+    real = importlib.metadata.entry_points
+
+    def _entry_points(**params):
+        if params.get("group") == db_backend.ENTRY_POINT_GROUP:
+            return entries
+        return real(**params)
+
+    monkeypatch.setattr(db_backend.importlib.metadata, "entry_points", _entry_points)
+
+
+@pytest.mark.parametrize("variable", ["FLOCKS_DB_DSN", "FLOCKS_DB_DSN_FILE"])
+def test_a_connection_string_alone_selects_the_installed_backend(tmp_path, monkeypatch, variable):
+    """Deployments configured before there was a choice keep the backend they run on."""
+    _installed_backends(monkeypatch, externaldb=SimpleNamespace(modules={}))
+
+    choice = db_backend.backend_choice({"FLOCKS_ROOT": str(tmp_path), variable: "externaldb://flocks@db/flocks"})
+
+    assert (choice.backend, choice.source) == ("externaldb", variable)
+
+
+def test_a_connection_string_with_no_backend_installed_is_not_sqlite(tmp_path, monkeypatch):
+    _installed_backends(monkeypatch)
+
+    choice = db_backend.backend_choice({"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DB_DSN": "externaldb://flocks@db/flocks"})
+
+    assert (choice.backend, choice.is_sqlite) == (db_backend.UNPROVIDED_BACKEND, False)
+
+
+def test_of_several_backends_the_one_that_claims_a_connection_string_takes_it(tmp_path, monkeypatch):
+    env = {"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DB_DSN": "externaldb://flocks@db/flocks"}
+    _installed_backends(monkeypatch, other=SimpleNamespace(modules={}), externaldb=SimpleNamespace(modules={}, claims_dsn=True))
+    assert db_backend.backend_choice(env).backend == "externaldb"
+
+    _installed_backends(monkeypatch, other=SimpleNamespace(modules={}), externaldb=SimpleNamespace(modules={}))
+    with pytest.raises(db_backend.BackendConfigurationError, match="more than one installed backend"):
+        db_backend.backend_choice(env)
+
+
+def test_a_backend_answers_to_its_aliases_under_its_installed_name(tmp_path, monkeypatch):
+    _installed_backends(monkeypatch, externaldb=SimpleNamespace(modules={}, aliases=("ExternalDatabase",)))
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "database.json").write_text(json.dumps({"backend": "externaldatabase"}), encoding="utf-8")
+
+    assert db_backend.backend_choice({"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DB_BACKEND": "ExternalDatabase"}).backend == "externaldb"
+    assert db_backend.backend_choice({"FLOCKS_ROOT": str(tmp_path)}).backend == "externaldb"
+    env = {"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DATA_DIR": str(tmp_path / "data")}
+    assert db_backend.commit_backend("externaldatabase", env) == db_backend.commit_backend("externaldb", env)
+    # A record that names the backend by an alias belongs to it as well.
+    older = tmp_path / "older"
+    older.mkdir()
+    (older / db_backend.COMMITMENT_FILE_NAME).write_text(json.dumps({"version": 1, "backend": "ExternalDatabase"}))
+    db_backend.commit_backend("externaldb", {"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DATA_DIR": str(older)})
 
 
 @pytest.mark.parametrize(
@@ -399,11 +461,11 @@ def test_a_backend_can_validate_even_when_sqlite_was_selected(tmp_path):
 
 def test_backend_commitment_is_private_idempotent_and_never_overwrites_another_choice(tmp_path):
     env = {"FLOCKS_ROOT": str(tmp_path), "FLOCKS_DATA_DIR": str(tmp_path / "actual-data")}
-    path = db_backend.commit_backend("PostgreSQL", env)
+    path = db_backend.commit_backend("ExternalDB", env)
     before = path.read_bytes()
     assert path == tmp_path / "actual-data" / db_backend.COMMITMENT_FILE_NAME
     assert path.stat().st_mode & 0o077 == 0
-    assert db_backend.commit_backend("postgres", env) == path
+    assert db_backend.commit_backend("externaldb", env) == path
     assert path.read_bytes() == before
     with pytest.raises(db_backend.BackendConfigurationError, match="belongs to"):
         db_backend.commit_backend("sqlite", env)
@@ -514,24 +576,28 @@ REFUSE_TO_OPEN_SQLITE = """
 """
 
 
-@pytest.mark.parametrize("configured", ["environment", "persisted"])
-def test_storage_refuses_sqlite_when_postgres_was_chosen_but_nothing_provides_it(tmp_path, configured):
-    """A deployment set to PostgreSQL must not start on a new, empty SQLite database."""
+@pytest.mark.parametrize("configured", ["environment", "persisted", "connection string"])
+def test_storage_refuses_sqlite_when_another_backend_was_chosen_but_nothing_provides_it(tmp_path, configured):
+    """A deployment set to another database must not start on a new, empty SQLite database."""
     site = tmp_path / "site"
     site.mkdir()
-    env = {"FLOCKS_DB_BACKEND": "postgres"}
+    env = {"FLOCKS_DB_BACKEND": "externaldb"}
+    expected = "'externaldb'"
     if configured == "persisted":
         env = {}
         (tmp_path / "root" / "config").mkdir(parents=True)
         (tmp_path / "root" / "config" / "database.json").write_text(
-            json.dumps({"backend": "postgres", "dsn_file": str(tmp_path / "dsn")}), encoding="utf-8",
+            json.dumps({"backend": "externaldb", "dsn_file": str(tmp_path / "dsn")}), encoding="utf-8",
         )
+    if configured == "connection string":
+        env = {"FLOCKS_DB_DSN": "externaldb://flocks@db/flocks"}
+        expected = f"'{db_backend.UNPROVIDED_BACKEND}'"
 
     result = _run(tmp_path, site, env, REFUSE_TO_OPEN_SQLITE)
 
     assert result.returncode == 0, result.stderr
     seen = json.loads(result.stdout.strip().splitlines()[-1])
-    assert seen["refused"] and "'postgres'" in seen["refused"] and "FLOCKS_DB_BACKEND=sqlite" in seen["refused"]
+    assert seen["refused"] and expected in seen["refused"] and "FLOCKS_DB_BACKEND=sqlite" in seen["refused"]
     assert seen["sqlite_file"] is False
 
 
