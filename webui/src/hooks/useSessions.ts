@@ -2,10 +2,38 @@ import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import type { Session, Message } from '@/types';
+import { useOptionalAuth } from '@/contexts/authState';
+import { noteChange, requestClock, shareRequest } from '@/utils/sharedRequest';
 
 const VISIBLE_CATEGORIES = new Set(['user', 'workflow', 'entity-config']);
 const ABORTED_TOOL_ERROR = 'Tool execution was interrupted';
 const SESSION_LIST_PAGE_SIZE = 100;
+// The server's bounds for one grouped request.
+const GROUPED_MAX_PROJECTS = 512;
+const GROUPED_MAX_LIMIT = 10000;
+// The session page mounts a moment after the sidebar and asks the same question.
+const FIRST_LOAD_SHARE_MS = 3000;
+const SESSION_LIST_TOPIC = 'session-list';
+
+/**
+ * A session list may have changed (an event arrived, or this tab changed one):
+ * no list request started before `at` is shared from then on.
+ */
+export function noteSessionListChange(at?: number): void {
+  noteChange(SESSION_LIST_TOPIC, at);
+}
+
+/**
+ * First page per project in the history sidebar. The session page asks for
+ * the same page, so the two share one request instead of reading twice.
+ */
+export const SESSION_HISTORY_PAGE_SIZE = 20;
+
+/** A project's sessions as a whole, reported with its first page. */
+export interface SessionGroupStats {
+  total: number;
+  lastActivityAt: number | null;
+}
 
 function finalizeStoppedMessageParts(parts: Message['parts'], stoppedAt = Date.now()): Message['parts'] {
   return parts.map((part) => {
@@ -233,6 +261,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [hasMoreByProject, setHasMoreByProject] = useState<Record<string, boolean>>({});
+  const [statsByProject, setStatsByProject] = useState<Record<string, SessionGroupStats>>({});
   const [loadingMoreProjectIds, setLoadingMoreProjectIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   // Track whether the initial fetch has completed — refetches should be silent
@@ -244,21 +273,37 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
   const activeAppendProjectsRef = useRef<Set<string>>(new Set());
   const optimisticSessionsRef = useRef<Map<string, Session>>(new Map());
   const loadedQueryKeyRef = useRef<string | null>(null);
-  const [settledQueryKey, setSettledQueryKey] = useState<string | null>(null);
   const projectIdsKey = options?.projectIds === undefined
     ? null
     : [...options.projectIds].sort().join('\u0000');
   const pageSize = options?.pageSize ?? SESSION_LIST_PAGE_SIZE;
   const loadMorePageSize = options?.loadMorePageSize ?? pageSize;
   const enabled = options?.enabled ?? true;
+  // Shared answers are per account: another account's list never reaches this one.
+  const shareScope = useOptionalAuth()?.user?.id ?? '';
   const queryKey = `${projectIdsKey ?? '*'}\u0001${pageSize}\u0001${search.trim()}`;
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
 
-  const fetchSessions = useCallback(async (fetchOptions?: { append?: boolean; projectId?: string }) => {
+  /**
+   * `firstLoad` is this list's own load of a new query. `freshAfter` (a
+   * `requestClock()` time) lets a refresh use an identical list request another
+   * view started after it, running or answered; without it a refresh always
+   * sends its own, which cannot predate a change the caller just made.
+   */
+  const fetchSessions = useCallback(async (fetchOptions?: {
+    append?: boolean;
+    projectId?: string;
+    freshAfter?: number;
+    firstLoad?: boolean;
+  }) => {
     if (!enabled) return;
     const append = Boolean(fetchOptions?.append);
+    if (!append && !fetchOptions?.firstLoad && fetchOptions?.freshAfter === undefined) {
+      // A refresh of the caller's own making: other views must not reuse what came before it.
+      noteSessionListChange();
+    }
     const appendProjectKey = fetchOptions?.projectId ?? '*';
     const replaceRequestSeq = append
       ? replaceRequestSeqRef.current
@@ -307,6 +352,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         setSessions([]);
         setHasMore(false);
         setHasMoreByProject({});
+        setStatsByProject({});
         hasLoadedOnceRef.current = true;
         loadedQueryKeyRef.current = queryKey;
         return;
@@ -330,7 +376,19 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         const offset = append ? loadedCount : 0;
         return { projectId, requestLimit, offset };
       });
-      const fetchIndividually = (batch: typeof requests) => Promise.all(batch.map(async ({ projectId, requestLimit, offset }) => {
+      // A first load may take another view's identical request from the last
+      // moments (it shows what that view shows); a refresh only one started
+      // after what it must show. Neither takes one from before a noted change.
+      const joinAfter = fetchOptions?.firstLoad
+        ? requestClock() - FIRST_LOAD_SHARE_MS
+        : fetchOptions?.freshAfter ?? Number.POSITIVE_INFINITY;
+      type ListResult = {
+        projectId: string | undefined;
+        requestLimit: number;
+        response: Session[];
+        stats?: SessionGroupStats;
+      };
+      const fetchIndividually = (batch: typeof requests) => Promise.all(batch.map(async ({ projectId, requestLimit, offset }): Promise<ListResult> => {
         const response = await sessionApi.list({
           view: 'list',
           manager: true,
@@ -342,24 +400,40 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         });
         return { projectId, requestLimit, response };
       }));
-      const fetchBatch = async (batch: typeof requests) => {
-        if (targetProjectIds === null || batch.length === 1) return fetchIndividually(batch);
+      const fetchBatch = async (batch: typeof requests): Promise<ListResult[]> => {
+        // "Load more" reads one project's next page; a page deeper than the
+        // grouped limits keeps the old, unrestricted GET.
+        if (targetProjectIds === null || append || batch.some(({ requestLimit }) => requestLimit > GROUPED_MAX_LIMIT)) {
+          return fetchIndividually(batch);
+        }
         try {
-          const groups = await sessionApi.listGrouped(batch.map(({ projectId, requestLimit, offset }) => ({
+          const projects = batch.map(({ projectId, requestLimit, offset }) => ({
             projectID: projectId as string,
             limit: requestLimit,
             offset,
-          })), search.trim() || undefined);
+          }));
+          const searchTerm = search.trim() || undefined;
+          const groups = await shareRequest(
+            SESSION_LIST_TOPIC,
+            `list-grouped\u0000${shareScope}\u0000${JSON.stringify([projects, searchTerm ?? null])}`,
+            joinAfter,
+            () => sessionApi.listGrouped(projects, searchTerm),
+          );
           if (!Array.isArray(groups) || groups.length !== batch.length || groups.some((group, index) => (
             group.projectID !== batch[index].projectId || !Array.isArray(group.items)
           ))) {
             throw new Error('Invalid grouped session list response');
           }
-          return batch.map(({ projectId, requestLimit }, index) => ({
-            projectId,
-            requestLimit,
-            response: groups[index].items,
-          }));
+          return batch.map(({ projectId, requestLimit }, index) => {
+            const { items, total, lastActivityAt } = groups[index];
+            return {
+              projectId,
+              requestLimit,
+              response: items,
+              // Older servers send pages without statistics.
+              stats: typeof total === 'number' ? { total, lastActivityAt: lastActivityAt ?? null } : undefined,
+            };
+          });
         } catch (groupedError: any) {
           if (!isCurrentRequest()) return [];
           // A frontend can temporarily be served by an older backend during upgrades.
@@ -376,12 +450,12 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
       let batch: typeof requests = [];
       let batchLimit = 0;
       for (const request of requests) {
-        if (batch.length && (batch.length >= 512 || batchLimit + request.requestLimit > 10000)) {
+        if (batch.length && (batch.length >= GROUPED_MAX_PROJECTS || batchLimit + request.requestLimit > GROUPED_MAX_LIMIT)) {
           batches.push(batch);
           batch = [];
           batchLimit = 0;
         }
-        if (request.requestLimit > 10000) {
+        if (request.requestLimit > GROUPED_MAX_LIMIT) {
           batches.push([request]);
         } else {
           batch.push(request);
@@ -401,14 +475,22 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
       const nextHasMoreByProject = Object.fromEntries(
         responses
           .filter(({ projectId }) => projectId !== undefined)
-          .map(({ projectId, requestLimit, response }) => [
+          .map(({ projectId, requestLimit, response, stats }) => [
             projectId as string,
-            Array.isArray(response) && response.length >= requestLimit,
+            Array.isArray(response) && (stats ? response.length < stats.total : response.length >= requestLimit),
           ]),
       );
       setHasMoreByProject((current) => append
         ? { ...current, ...nextHasMoreByProject }
         : nextHasMoreByProject);
+      if (!append && targetProjectIds !== null) {
+        const freshStats = new Map(responses.map(({ projectId, stats }) => [projectId, stats]));
+        // A project read without statistics keeps the last known ones.
+        setStatsByProject((current) => Object.fromEntries(targetProjectIds.flatMap((projectId) => {
+          const stats = freshStats.get(projectId) ?? current[projectId];
+          return stats ? [[projectId, stats]] : [];
+        })));
+      }
       setSessions((previous) => {
         if (append) return appendSessionList(previous, nextSessions);
         if (targetProjectIds === null) {
@@ -446,17 +528,15 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
           }
         }
       } else if (isCurrentRequest()) {
-        // A failed request is settled too: callers can proceed with
-        // independent work without waiting forever for a successful result.
-        setSettledQueryKey(queryKey);
         setLoading(false);
         setRefreshing(false);
         initializedRef.current = true;
       }
     }
-  }, [enabled, pageSize, loadMorePageSize, projectIdsKey, queryKey, search]);
+  }, [enabled, pageSize, loadMorePageSize, projectIdsKey, queryKey, search, shareScope]);
 
   const updateSessionTitle = useCallback((sessionId: string, title: string) => {
+    noteSessionListChange();
     const optimistic = optimisticSessionsRef.current.get(sessionId);
     if (optimistic) {
       optimisticSessionsRef.current.set(sessionId, { ...optimistic, title });
@@ -477,22 +557,30 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
     if (!hasLoadedOnceRef.current) {
       initializedRef.current = false;
     }
-    fetchSessions();
+    void fetchSessions({ firstLoad: true });
   }, [enabled, fetchSessions]);
 
   const removeSession = useCallback((sessionId: string) => {
+    noteSessionListChange();
     optimisticSessionsRef.current.delete(sessionId);
     setSessions(prev => prev.filter(s => s.id !== sessionId));
   }, []);
 
   const removeSessions = useCallback((sessionIds: string[]) => {
+    noteSessionListChange();
     const idSet = new Set(sessionIds);
     sessionIds.forEach(sessionId => optimisticSessionsRef.current.delete(sessionId));
     setSessions(prev => prev.filter(s => !idSet.has(s.id)));
   }, []);
 
+  const refetch = useCallback(
+    (refetchOptions?: { freshAfter?: number }) => fetchSessions({ freshAfter: refetchOptions?.freshAfter }),
+    [fetchSessions],
+  );
+
   /** Optimistically prepend a newly created session without a full refetch. */
   const addSession = useCallback((session: Session) => {
+    noteSessionListChange();
     optimisticSessionsRef.current.set(session.id, session);
     setSessions(prev => {
       if (prev.some(s => s.id === session.id)) return prev;
@@ -504,15 +592,15 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
     sessions,
     loading,
     refreshing,
-    settled: enabled && !refreshing && settledQueryKey === queryKey,
     error,
-    refetch: fetchSessions,
+    refetch,
     updateSessionTitle,
     removeSession,
     removeSessions,
     addSession,
     hasMore,
     hasMoreByProject,
+    statsByProject,
     loadingMore,
     loadingMoreProjectIds,
     loadMore: (projectId?: string) => fetchSessions({ append: true, projectId }),

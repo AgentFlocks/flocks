@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { Link, MemoryRouter } from 'react-router-dom';
 import SessionHistoryPanel, { sessionIdFromLocation } from './SessionHistoryPanel';
 import { useSSE } from '@/hooks/useSSE';
+import { noteSessionListChange } from '@/hooks/useSessions';
 
 const {
   apiGet, apiDelete, apiPost, sessionApi, useSessionsMock, navigateMock,
@@ -26,7 +27,9 @@ const {
 
 vi.mock('@/api/client', () => ({ default: { get: apiGet, delete: apiDelete, post: apiPost } }));
 vi.mock('@/api/session', () => ({ sessionApi }));
-vi.mock('@/hooks/useSessions', () => ({ useSessions: useSessionsMock }));
+vi.mock('@/hooks/useSessions', () => ({
+  SESSION_HISTORY_PAGE_SIZE: 20, noteSessionListChange: vi.fn(), useSessions: useSessionsMock,
+}));
 vi.mock('@/hooks/useSSE', () => ({ useSSE: vi.fn() }));
 vi.mock('@/contexts/AuthContext', () => ({ useAuth }));
 vi.mock('@/components/common/Toast', () => ({ useToast: () => toastMock }));
@@ -100,117 +103,84 @@ describe('SessionHistoryPanel', () => {
     expect(screen.getByText('s2')).toBeInTheDocument();
   });
 
-  it('loads project statistics only after the session list is ready', async () => {
-    const sessions = [session('s1', 'prj_a', '会话一')];
-    setSessions(sessions, { refreshing: true });
-    apiGet.mockImplementation((url: string, options?: { params?: { includeSessionStats?: boolean } }) => {
-      if (url === '/api/project' && options?.params?.includeSessionStats === false) {
-        return Promise.resolve({ data: [{ id: 'prj_a', name: '产品设计', worktree: '/root/a', sessionCount: 0 }] });
-      }
+  it('orders folders and offers more from the statistics that come with the session pages', async () => {
+    apiGet.mockImplementation((url: string) => {
       if (url === '/api/project') {
-        return Promise.resolve({ data: [{ id: 'prj_a', name: '产品设计', worktree: '/root/a', sessionCount: 21 }] });
+        // The light folder list carries schema defaults, not counts.
+        return Promise.resolve({ data: [
+          { id: 'prj_a', name: '产品设计', worktree: '/root/a', sessionCount: 0, lastActivityAt: null },
+          { id: 'prj_b', name: '安全运营', worktree: '/root/b', sessionCount: 0, lastActivityAt: null },
+        ] });
       }
       return Promise.resolve({ data: {} });
     });
-    const view = renderPanel();
-    await waitFor(() => expect(screen.getByText('产品设计')).toBeInTheDocument());
-    expect(apiGet.mock.calls.filter(([url, options]) => url === '/api/project' && !options?.params)).toHaveLength(0);
-    expect(screen.queryByRole('button', { name: 'history.loadMore' })).not.toBeInTheDocument();
-
-    setSessions(sessions, { refreshing: false });
-    view.rerender(<MemoryRouter initialEntries={['/sessions/s1']}><SessionHistoryPanel collapsed={false} onExpandSidebar={vi.fn()} onNavigate={vi.fn()} /></MemoryRouter>);
-    await waitFor(() => expect(screen.getByRole('button', { name: 'history.loadMore' })).toBeInTheDocument());
-    expect(apiGet.mock.calls.filter(([url, options]) => url === '/api/project' && !options?.params)).toHaveLength(1);
-  });
-
-  it('ignores project statistics from an older refresh', async () => {
-    setSessions([session('s1', 'prj_a', '会话一')], { refreshing: false });
-    let resolveOldStats: (value: unknown) => void = () => {};
-    let statsRequests = 0;
-    apiGet.mockImplementation((url: string, options?: { params?: { includeSessionStats?: boolean } }) => {
-      if (url === '/api/project' && options?.params?.includeSessionStats === false) {
-        return Promise.resolve({ data: [{ id: 'prj_a', name: '产品设计', worktree: '/root/a', sessionCount: 0 }] });
-      }
-      if (url === '/api/project') {
-        statsRequests += 1;
-        if (statsRequests === 1) return new Promise((resolve) => { resolveOldStats = resolve; });
-        return Promise.resolve({ data: [{ id: 'prj_a', name: '产品设计', worktree: '/root/a', sessionCount: 1 }] });
-      }
-      return Promise.resolve({ data: {} });
+    setSessions([session('s1', 'prj_a', '会话一'), session('s3', 'prj_b', '会话三')], {
+      statsByProject: { prj_a: { total: 21, lastActivityAt: 10 }, prj_b: { total: 1, lastActivityAt: 50 } },
     });
     renderPanel();
-    await waitFor(() => expect(statsRequests).toBe(1));
-    act(() => window.dispatchEvent(new CustomEvent('flocks:projects-changed', { detail: { source: 'composer' } })));
-    await waitFor(() => expect(statsRequests).toBe(2));
-    await act(async () => resolveOldStats({ data: [{ id: 'prj_a', sessionCount: 99 }] }));
-    expect(screen.queryByRole('button', { name: 'history.loadMore' })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('安全运营')).toBeInTheDocument());
+    const folderHeaders = screen.getAllByRole('button', { expanded: true }).map((button) => button.textContent);
+    expect(folderHeaders).toEqual(['安全运营', '产品设计']);
+    // Only 产品设计 holds more sessions than it shows.
+    expect(screen.getAllByRole('button', { name: 'history.loadMore' })).toHaveLength(1);
+    const projectRequests = apiGet.mock.calls.filter(([url]) => url === '/api/project');
+    expect(projectRequests.length).toBeGreaterThan(0);
+    expect(projectRequests.every(([, options]) => options?.params?.includeSessionStats === false)).toBe(true);
   });
 
-  it('waits for real session queries before issuing one stats request per project refresh', async () => {
+  it('refreshes after list events with the event time, and after its own changes without it', async () => {
+    let now = 1000;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const refetch = vi.fn().mockResolvedValue(undefined);
+      setSessions([session('s1', 'prj_a', '会话一')], { refetch });
+      renderPanel();
+      await act(async () => {});
+      const sse = vi.mocked(useSSE).mock.calls.at(-1)?.[0];
+      act(() => sse?.onEvent({ type: 'session.updated', properties: { id: 's1' } }));
+      now = 1200;
+      act(() => sse?.onEvent({ type: 'session.created', properties: { id: 's9' } }));
+      // Views opening from now on must not reuse a list read before these events.
+      expect(vi.mocked(noteSessionListChange).mock.calls).toEqual([[1000], [1200]]);
+      now = 1600;
+      await act(async () => { vi.advanceTimersByTime(500); });
+      // One refresh for the burst, as fresh as its latest event.
+      expect(refetch).toHaveBeenCalledTimes(1);
+      expect(refetch).toHaveBeenCalledWith({ freshAfter: 1200 });
+
+      act(() => sse?.onReconnect?.());
+      expect(refetch).toHaveBeenLastCalledWith(undefined);
+    } finally {
+      vi.useRealTimers();
+      clock.mockRestore();
+    }
+  });
+
+  it('reads the folder list and every first page once per refresh', async () => {
     const actual = await vi.importActual<typeof import('@/hooks/useSessions')>('@/hooks/useSessions');
     useSessionsMock.mockImplementation(actual.useSessions);
-    const lightFlights: Array<(value: unknown) => void> = [];
-    const statsFlights: Array<(value: unknown) => void> = [];
-    const groupedFlights: Array<{
-      projects: Array<{ projectID: string }>;
-      resolve: (value: unknown) => void;
-      reject: (reason: unknown) => void;
-    }> = [];
-    const folderA = { id: 'prj_a', name: '产品设计', worktree: '/root/a', sessionCount: 0 };
-    const folderB = { id: 'prj_b', name: '新项目', worktree: '/root/b', sessionCount: 0 };
-    let lightRequests = 0;
-    apiGet.mockImplementation((url: string, options?: { params?: { includeSessionStats?: boolean } }) => {
-      if (url !== '/api/project') return Promise.resolve({ data: {} });
-      if (options?.params?.includeSessionStats === false) {
-        lightRequests += 1;
-        if (lightRequests === 1) return Promise.resolve({ data: [folderA] });
-        return new Promise((resolve) => { lightFlights.push(resolve); });
-      }
-      return new Promise((resolve) => { statsFlights.push(resolve); });
-    });
-    sessionApi.listGrouped.mockImplementation((projects: Array<{ projectID: string }>) => new Promise((resolve, reject) => {
-      groupedFlights.push({ projects, resolve, reject });
-    }));
-    const completeGrouped = (index: number) => {
-      const flight = groupedFlights[index];
-      flight.resolve(flight.projects.map(({ projectID }) => ({
-        projectID,
-        items: projectID === 'prj_a' ? [session('s1', 'prj_a', '会话一')] : [],
-      })));
-    };
+    sessionApi.listGrouped.mockImplementation(async (projects: Array<{ projectID: string }>) => projects.map(({ projectID }) => ({
+      projectID,
+      items: projectID === 'prj_a' ? [session('s1', 'prj_a', '会话一')] : [],
+      total: projectID === 'prj_a' ? 21 : 0,
+      lastActivityAt: projectID === 'prj_a' ? 10 : null,
+    })));
+    renderPanel();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'history.loadMore' })).toBeInTheDocument());
+    expect(sessionApi.listGrouped).toHaveBeenCalledOnce();
+    expect(sessionApi.listGrouped).toHaveBeenCalledWith([
+      { projectID: 'prj_a', limit: 20, offset: 0 },
+      { projectID: 'tasks', limit: 20, offset: 0 },
+    ], undefined);
 
-    const view = renderPanel();
-    await waitFor(() => expect(groupedFlights).toHaveLength(1));
-    expect(statsFlights).toHaveLength(0);
-    await act(async () => completeGrouped(0));
-    await waitFor(() => expect(statsFlights).toHaveLength(1));
-
-    // On reconnect, the session request finishes before the lightweight
-    // project request. Statistics must still wait for both.
     act(() => vi.mocked(useSSE).mock.calls.at(-1)?.[0].onReconnect?.());
-    await waitFor(() => expect(groupedFlights).toHaveLength(2));
-    expect(lightFlights).toHaveLength(1);
-    await act(async () => completeGrouped(1));
-    expect(statsFlights).toHaveLength(1);
-    await act(async () => lightFlights[0]({ data: [folderA] }));
-    await waitFor(() => expect(statsFlights).toHaveLength(2));
-    await act(async () => statsFlights[1]({ data: [{ ...folderA, sessionCount: 1 }] }));
-    await act(async () => statsFlights[0]({ data: [{ ...folderA, sessionCount: 99 }] }));
-    expect(screen.queryByRole('button', { name: 'history.loadMore' })).not.toBeInTheDocument();
-
-    // A new project changes the query before useSessions' effect can mark
-    // itself refreshing. A failed list request must also release statistics.
-    act(() => window.dispatchEvent(new CustomEvent('flocks:projects-changed', { detail: { source: 'composer' } })));
-    await waitFor(() => expect(lightFlights).toHaveLength(2));
-    await act(async () => lightFlights[1]({ data: [folderA, folderB] }));
-    await waitFor(() => expect(groupedFlights).toHaveLength(3));
-    expect(statsFlights).toHaveLength(2);
-    await act(async () => groupedFlights[2].reject({ message: 'unavailable', response: { status: 500 } }));
-    await waitFor(() => expect(statsFlights).toHaveLength(3));
-    await act(async () => statsFlights[2]({ data: [{ ...folderA, sessionCount: 1 }, folderB] }));
-    view.rerender(<MemoryRouter initialEntries={['/sessions/s1']}><SessionHistoryPanel collapsed={false} onExpandSidebar={vi.fn()} onNavigate={vi.fn()} /></MemoryRouter>);
+    await waitFor(() => expect(sessionApi.listGrouped).toHaveBeenCalledTimes(2));
     await act(async () => {});
-    expect(statsFlights).toHaveLength(3);
+    expect(sessionApi.list).not.toHaveBeenCalled();
+    const projectRequests = apiGet.mock.calls.filter(([url]) => url === '/api/project');
+    expect(projectRequests).toHaveLength(2);
+    expect(projectRequests.every(([, options]) => options?.params?.includeSessionStats === false)).toBe(true);
   });
 
   it('creates a session inside a folder', async () => {

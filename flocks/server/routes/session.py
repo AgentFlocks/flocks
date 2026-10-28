@@ -338,6 +338,10 @@ class SessionGroupedListRequest(BaseModel):
 class SessionListGroup(BaseModel):
     projectID: str
     items: List[SessionListItem]
+    # The whole group (after the search filter), so a client listing every
+    # project needs no second full read for counts and recent activity.
+    total: int = 0
+    lastActivityAt: Optional[int] = None
 
 
 class SessionGroupedListResponse(BaseModel):
@@ -1251,8 +1255,17 @@ async def list_sessions_grouped(
         )
         for session_id, session in selected.items()
     }
+    last_activity = {
+        key: max((session.time.updated for session in sessions), default=None)
+        for key, sessions in by_project.items()
+    }
     result = SessionGroupedListResponse(groups=[
-        SessionListGroup(projectID=group.projectID, items=[rows[s.id] for s in page])
+        SessionListGroup(
+            projectID=group.projectID,
+            items=[rows[s.id] for s in page],
+            total=len(by_project[group_id(group.projectID)]),
+            lastActivityAt=last_activity[group_id(group.projectID)],
+        )
         for group, page in zip(payload.projects, pages)
     ])
     log_route_timing(log, "session.list.grouped.complete", started_at=started_at, extra={

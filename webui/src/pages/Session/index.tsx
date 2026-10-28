@@ -53,7 +53,7 @@ import { writeChatDraft } from '@/utils/chatDraft';
 import { skillAPI, type Skill } from '@/api/skill';
 import { workflowAPI, type WorkflowSummary } from '@/api/workflow';
 import type { Agent } from '@/api/agent';
-import { useSessions } from '@/hooks/useSessions';
+import { SESSION_HISTORY_PAGE_SIZE, noteSessionListChange, useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
 import { useProviders } from '@/hooks/useProviders';
 import {
@@ -63,6 +63,7 @@ import {
 import client from '@/api/client';
 import ProjectFolderDialog from '@/components/layout/ProjectFolderDialog';
 import { announceProjectsChanged, onProjectsChanged } from '@/utils/projectEvents';
+import { requestClock } from '@/utils/sharedRequest';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type FilePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
@@ -110,9 +111,6 @@ type ProjectSummary = {
   name?: string | null;
   isDefault?: boolean;
   pathStatus?: 'available' | 'missing' | 'unreadable';
-  sessionCount?: number;
-  matchedSessionCount?: number;
-  lastActivityAt?: number | null;
   ownerUserID?: string | null;
   canWrite?: boolean;
   canDelete?: boolean;
@@ -247,8 +245,6 @@ function ComposerResourcePicker({
     </div>
   );
 }
-const MULTI_PROJECT_SESSION_PAGE_SIZE = 6;
-const SINGLE_PROJECT_SESSION_PAGE_SIZE = 20;
 type ChatModelOption = {
   key: string;
   providerID: string;
@@ -574,9 +570,6 @@ export default function SessionPage() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [refreshingProjects, setRefreshingProjects] = useState(true);
   const [projectsReady, setProjectsReady] = useState(false);
-  const [projectStatsRequest, setProjectStatsRequest] = useState<{ seq: number; query: string } | null>(null);
-  const projectStatsQueryRef = useRef<string | null>(null);
-  const projectStatsStartedSeqRef = useRef(0);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const supportsVision = useDefaultModelVision();
   const [searchQuery] = useState('');
@@ -584,6 +577,8 @@ export default function SessionPage() {
   const [selectedSessionFallback, setSelectedSessionFallback] = useState<Session | null>(null);
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
+  // When the latest session.updated arrived: the list refresh it schedules must start later.
+  const sessionUpdateEventAtRef = useRef(0);
   const contextRefetchTimerRef = useRef<number | null>(null);
   const selectedSessionIdRef = useRef(selectedSessionId);
   selectedSessionIdRef.current = selectedSessionId;
@@ -596,20 +591,19 @@ export default function SessionPage() {
     () => [TASK_SESSION_GROUP_ID, ...projects.map((project) => project.id)],
     [projects],
   );
-  const sessionListPageSize = projects.length >= 1
-    ? MULTI_PROJECT_SESSION_PAGE_SIZE
-    : SINGLE_PROJECT_SESSION_PAGE_SIZE;
+  // The same lists the history sidebar shows, so both share one request;
+  // project counts and recent activity come with them.
   const {
     sessions,
     loading: loadingSessions,
     refreshing: refreshingSessions = loadingSessions,
-    settled: sessionsSettled = !refreshingSessions,
     refetch: refetchSessions,
     updateSessionTitle,
     addSession,
+    statsByProject = {},
   } = useSessions(searchQuery, {
     projectIds: sessionProjectIds,
-    pageSize: sessionListPageSize,
+    pageSize: SESSION_HISTORY_PAGE_SIZE,
     enabled: projectsReady,
   });
   const { agents, loading: loadingAgents } = useAgents();
@@ -803,9 +797,8 @@ export default function SessionPage() {
         label: getProjectLabel(project),
         worktree: project.worktree,
         sessions: projectSessions,
-        sessionCount: searchQuery.trim()
-          ? project.matchedSessionCount ?? projectSessions.length
-          : project.sessionCount ?? projectSessions.length,
+        // With a search the total counts the matching sessions only.
+        sessionCount: statsByProject[project.id]?.total ?? projectSessions.length,
         pathStatus: project.pathStatus ?? 'available',
         canWrite: project.canWrite ?? true,
         canDelete: project.canDelete ?? true,
@@ -814,16 +807,15 @@ export default function SessionPage() {
     })
       .filter((group) => {
         if (!searchQuery.trim()) return true;
-        const project = projects.find((item) => item.id === group.id);
-        return (project?.matchedSessionCount ?? group.sessions.length) > 0 || group.id === selectedProjectId;
+        return group.sessionCount > 0 || group.id === selectedProjectId;
       })
       .sort((a, b) => {
-        const aLatest = projects.find((project) => project.id === a.id)?.lastActivityAt ?? a.sessions[0]?.time?.updated ?? 0;
-        const bLatest = projects.find((project) => project.id === b.id)?.lastActivityAt ?? b.sessions[0]?.time?.updated ?? 0;
+        const aLatest = statsByProject[a.id]?.lastActivityAt ?? a.sessions[0]?.time?.updated ?? 0;
+        const bLatest = statsByProject[b.id]?.lastActivityAt ?? b.sessions[0]?.time?.updated ?? 0;
         if (aLatest !== bLatest) return bLatest - aLatest;
         return a.label.localeCompare(b.label);
       });
-  }, [projects, searchQuery, selectedProjectId, sessions]);
+  }, [projects, searchQuery, selectedProjectId, sessions, statsByProject]);
 
   const selectedProjectIDForCreate = selectedProjectId && selectedProjectId !== TASK_SESSION_GROUP_ID
     ? selectedProjectId
@@ -886,21 +878,12 @@ export default function SessionPage() {
         ))
         : [];
       setProjects((currentProjects) => {
-        const previous = new Map(currentProjects.map((project) => [project.id, project]));
-        const projectsWithoutDefaultStats = nextProjects.map((project: ProjectSummary) => ({
-          ...project,
-          // Counts in the lightweight response are schema defaults, not data.
-          sessionCount: previous.get(project.id)?.sessionCount,
-          matchedSessionCount: projectStatsQueryRef.current === query ? previous.get(project.id)?.matchedSessionCount : undefined,
-          lastActivityAt: previous.get(project.id)?.lastActivityAt,
-        }));
-        if (!ensureProject?.id || projectsWithoutDefaultStats.some((project: ProjectSummary) => project.id === ensureProject.id)) {
-          return projectsWithoutDefaultStats;
+        if (!ensureProject?.id || nextProjects.some((project: ProjectSummary) => project.id === ensureProject.id)) {
+          return nextProjects;
         }
         const currentProject = currentProjects.find((project) => project.id === ensureProject.id);
-        return [{ ...currentProject, ...ensureProject }, ...projectsWithoutDefaultStats];
+        return [{ ...currentProject, ...ensureProject }, ...nextProjects];
       });
-      setProjectStatsRequest({ seq: requestSeq, query });
     } finally {
       if (requestSeq === projectListRequestSeqRef.current) {
         setRefreshingProjects(false);
@@ -908,30 +891,6 @@ export default function SessionPage() {
       }
     }
   }, []);
-
-  // Load counts and activity after the first session page has rendered.
-  useEffect(() => {
-    if (!projectsReady || refreshingProjects || !sessionsSettled || !projectStatsRequest
-      || projectStatsStartedSeqRef.current === projectStatsRequest.seq) return;
-    const { seq, query } = projectStatsRequest;
-    projectStatsStartedSeqRef.current = seq;
-    void client.get('/api/project', { params: { search: query.trim() || undefined } }).then((response) => {
-      if (!mountedRef.current || seq !== projectListRequestSeqRef.current || !Array.isArray(response.data)) return;
-      const stats = new Map<string, ProjectSummary>(response.data.map((project: ProjectSummary) => [project.id, project]));
-      projectStatsQueryRef.current = query;
-      setProjects((current) => current.map((project) => {
-        const latest = stats.get(project.id);
-        return latest ? {
-          ...project,
-          sessionCount: latest.sessionCount,
-          matchedSessionCount: latest.matchedSessionCount,
-          lastActivityAt: latest.lastActivityAt,
-        } : project;
-      }));
-    }).catch(() => {
-      // Counts are a hint; keep the previously known values when unavailable.
-    });
-  }, [projectStatsRequest, projectsReady, refreshingProjects, sessionsSettled]);
 
   useEffect(() => onProjectsChanged('composer', () => {
     void fetchProjects(undefined, searchQuery);
@@ -1012,7 +971,8 @@ export default function SessionPage() {
     sessionUpdateRefetchTimerRef.current = window.setTimeout(() => {
       sessionUpdateRefetchTimerRef.current = null;
       void Promise.all([
-        refetchSessions(),
+        // The history sidebar refreshes on the same events; one request serves both.
+        refetchSessions({ freshAfter: sessionUpdateEventAtRef.current }),
         fetchProjects(undefined, searchQuery),
       ]);
     }, SESSION_UPDATE_REFETCH_DEBOUNCE_MS);
@@ -1124,6 +1084,8 @@ export default function SessionPage() {
       // Session/title updates can arrive in bursts when several sessions or
       // background tasks finish together. Coalesce the full sidebar refresh so
       // those bursts don't turn into a request/re-render storm.
+      sessionUpdateEventAtRef.current = requestClock();
+      noteSessionListChange(sessionUpdateEventAtRef.current);
       scheduleSessionListRefetch();
     }
   }, [
