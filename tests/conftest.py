@@ -215,14 +215,13 @@ def _restore_log_output():
 def _default_source_deploy_mode(monkeypatch):
     """Run the updater as a plain source install unless a test opts into another mode.
 
-    ``flocks.updater.deploy.detect_deploy_mode`` treats a process in which a
-    license-enforcement extension replaced the OSS default (or a runtime root
-    carrying a ``config/deployment.json`` descriptor) as a *managed* release
-    package and refuses in-place upgrades. Developer machines and CI runners that
-    carry such an extension would otherwise flip every updater test into that
-    refusal path, so pin the default to ``source`` here; tests covering
-    docker/managed behaviour set ``FLOCKS_DEPLOY_MODE`` themselves (after this
-    fixture) and clear the detection cache.
+    ``flocks.updater.deploy.detect_deploy_mode`` takes a runtime root carrying a
+    ``config/deployment.json`` descriptor at its word (a *managed* release
+    package refuses in-place upgrades) and treats a container as ``docker``.
+    Developer machines and CI runners in either situation would otherwise flip
+    every updater test into a refusal path, so pin the default to ``source``
+    here; tests covering docker/managed behaviour set ``FLOCKS_DEPLOY_MODE``
+    themselves (after this fixture) and clear the detection cache.
     """
     from flocks.updater.deploy import detect_deploy_mode
 

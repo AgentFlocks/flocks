@@ -39,29 +39,24 @@ class _ExtensionLicenseChecker:
 
 @pytest.fixture
 def source_layout(monkeypatch, tmp_path: Path) -> Path:
-    from flocks import license as license_mod
-
     root = tmp_path / "flocks-root"
     root.mkdir()
     monkeypatch.setenv("FLOCKS_ROOT", str(root))
     monkeypatch.delenv("FLOCKS_DEPLOY_MODE", raising=False)
     monkeypatch.setattr(deploy.Path, "exists", lambda self: False)  # no /.dockerenv
-    monkeypatch.setattr(license_mod._LicenseService, "_checker", license_mod.AlwaysOkLicenseChecker)
     deploy.detect_deploy_mode.cache_clear()
     yield root
     deploy.detect_deploy_mode.cache_clear()
 
 
 def _managed_by_core(monkeypatch) -> None:
-    """Simulate the managed runtime: its license-enforcement extension is registered."""
-    from flocks import license as license_mod
-
-    monkeypatch.setattr(license_mod._LicenseService, "_checker", _ExtensionLicenseChecker)
+    """Simulate the managed runtime: the core starts it with ``FLOCKS_DEPLOY_MODE=managed``."""
+    monkeypatch.setenv("FLOCKS_DEPLOY_MODE", "managed")
     deploy.detect_deploy_mode.cache_clear()
 
 
 # --------------------------------------------------------------------------- detection
-def test_license_extension_marks_deployment_managed(monkeypatch, source_layout) -> None:
+def test_core_declaration_marks_deployment_managed(monkeypatch, source_layout) -> None:
     _managed_by_core(monkeypatch)
 
     assert deploy.detect_deploy_mode() == "managed"
@@ -70,18 +65,20 @@ def test_license_extension_marks_deployment_managed(monkeypatch, source_layout) 
     assert deploy.update_refusal_reason() == deploy.MANAGED_UPGRADE_REFUSAL
 
 
-def test_license_extension_is_evaluated_live_after_import(monkeypatch, source_layout) -> None:
-    assert deploy.detect_deploy_mode() == "source"
-    _managed_by_core(monkeypatch)  # registers after the first (cached) evaluation
-    assert deploy.detect_deploy_mode() == "managed"
+def test_license_extension_alone_does_not_mark_deployment_managed(monkeypatch, source_layout) -> None:
+    """Managed is declared by whoever runs the installation, never inferred.
 
+    An unsupervised install that carries a license-enforcement extension stays
+    a source install: its upgrades are not refused on the extension's account.
+    """
+    from flocks import license as license_mod
 
-def test_explicit_env_wins_over_extension_signal(monkeypatch, source_layout) -> None:
-    _managed_by_core(monkeypatch)
-    monkeypatch.setenv("FLOCKS_DEPLOY_MODE", "source")
+    monkeypatch.setattr(license_mod._LicenseService, "_checker", _ExtensionLicenseChecker)
     deploy.detect_deploy_mode.cache_clear()
 
     assert deploy.detect_deploy_mode() == "source"
+    assert deploy.is_managed_deployment() is False
+    assert deploy.update_refusal_reason() is None
 
 
 def test_explicit_managed_env_value_is_honoured(monkeypatch, source_layout) -> None:

@@ -42,11 +42,11 @@ def test_declared_managed_reads_only_explicit_signals(monkeypatch, runtime_root)
         async def is_active(cls, feature=None):
             return True
 
-    # A license extension makes detect_deploy_mode() say managed, but nobody
-    # declared it: a console-installed commercial component is not supervised.
+    # A license extension declares nothing: a console-installed commercial
+    # component is not supervised, and its upgrades are not refused either.
     monkeypatch.setattr(license_mod._LicenseService, "_checker", _Extension)
     monkeypatch.setattr(deploy.Path, "exists", lambda self: False)
-    assert deploy.detect_deploy_mode() == "managed"
+    assert deploy.detect_deploy_mode() == "source"
     assert deploy.declared_managed() is False
 
 

@@ -55,22 +55,26 @@ def _descriptor_mode() -> DeployMode | None:
     return None
 
 
-def _license_enforcement_extension_active() -> bool:
-    """A distribution that gates features by license ships its own upgrade channel.
-
-    Evaluated live (not cached): extensions register during startup, after this
-    module may already have been imported.
-    """
-    try:
-        from flocks.license import AlwaysOkLicenseChecker, get_checker
-    except Exception:  # pragma: no cover - defensive
-        return False
-    return get_checker() is not AlwaysOkLicenseChecker
-
-
 @lru_cache(maxsize=1)
-def _static_deploy_mode() -> DeployMode | None:
-    """Environment/filesystem signals that do not change while the process runs."""
+def detect_deploy_mode() -> DeployMode:
+    """
+    Return ``"managed"`` when an external manager owns this installation's
+    upgrades, ``"offline"`` for an offline-package installation (no network
+    upgrades), ``"docker"`` when the process is running inside a container,
+    ``"source"`` otherwise.
+
+    Detection priority:
+      1. Explicit ``FLOCKS_DEPLOY_MODE`` environment variable (always wins).
+      2. ``FLOCKS_OFFLINE_INSTALL`` set by the offline installer.
+      3. ``<FLOCKS_ROOT>/config/deployment.json`` declaring ``{"mode": ...}``.
+      4. Presence of ``/.dockerenv`` (created by Docker automatically).
+      5. ``/proc/1/cgroup`` containing ``docker`` or ``containerd``.
+
+    ``managed`` is only ever declared (1 or 3), never inferred from what is
+    installed. ``offline`` behaves like ``source`` everywhere except that
+    network-based upgrades are refused: a component the package ships comes
+    from its local copy and core upgrades come from a newer ``flocks-offline.run``.
+    """
     env_val = os.environ.get("FLOCKS_DEPLOY_MODE", "").strip().lower()
     if env_val in _VALID_MODES:
         return env_val  # type: ignore[return-value]
@@ -95,38 +99,7 @@ def _static_deploy_mode() -> DeployMode | None:
     except Exception:
         pass
 
-    return None
-
-
-def detect_deploy_mode() -> DeployMode:
-    """
-    Return ``"managed"`` when an external manager owns this installation's
-    upgrades, ``"offline"`` for an offline-package installation (no network
-    upgrades), ``"docker"`` when the process is running inside a container,
-    ``"source"`` otherwise.
-
-    Detection priority:
-      1. Explicit ``FLOCKS_DEPLOY_MODE`` environment variable (always wins).
-      2. ``FLOCKS_OFFLINE_INSTALL`` set by the offline installer.
-      3. ``<FLOCKS_ROOT>/config/deployment.json`` declaring ``{"mode": ...}``.
-      4. Presence of ``/.dockerenv`` or a docker/containerd cgroup.
-      5. A license-enforcement extension replaced the OSS default in this
-         process (managed distribution; evaluated live).
-
-    ``offline`` behaves like ``source`` everywhere except that network-based
-    upgrades are refused: a component the package ships comes from its local
-    copy and core upgrades come from a newer ``flocks-offline.run``.
-    """
-    static = _static_deploy_mode()
-    if static is not None:
-        return static
-    if _license_enforcement_extension_active():
-        return "managed"
     return "source"
-
-
-# Keep the historical ``detect_deploy_mode.cache_clear()`` hook for tests.
-detect_deploy_mode.cache_clear = _static_deploy_mode.cache_clear  # type: ignore[attr-defined]
 
 
 def is_managed_deployment() -> bool:
@@ -137,9 +110,8 @@ def declared_managed() -> bool:
     """Either explicit signal says a supervisor owns this installation.
 
     ``FLOCKS_DEPLOY_MODE=managed`` in the environment, or a descriptor in the
-    runtime root saying ``managed``.  Not the license-extension inference
-    :func:`detect_deploy_mode` falls back to, and -- unlike that function --
-    not cancelled by a later override: ``FLOCKS_DEPLOY_MODE=source`` or
+    runtime root saying ``managed``.  Unlike :func:`detect_deploy_mode`, not
+    cancelled by a later override: ``FLOCKS_DEPLOY_MODE=source`` or
     ``FLOCKS_OFFLINE_INSTALL`` set in a shell does not talk a managed install
     out of its supervisor.  This is the question a security check asks before
     letting a command run its own copy of the runtime beside the supervised
