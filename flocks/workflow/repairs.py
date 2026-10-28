@@ -31,6 +31,13 @@ _LEGACY_HASHES = {
 _TRIAGE_HASHES = {
     "9c3134afac69cd4209e469db39962cc983e01e01c5414b807a74fec197fed099",
 }
+_TRIAGE_REPLAY_LOAD_HASHES = {
+    "44ff3af1eff104920766d90dbab7b8663286bc2ff728710a56e650f5d2a266e3",
+    "1906c6ef1ccc6a92749be2cc76fd8fcb4e15d9e8811082ab7f688e30f4ae25ab",
+}
+_TRIAGE_V1_ANALYSIS_HASHES = {
+    "68d0321a34fc8533e52dccb8278448d35a633a778f9807cad3d003e830913dfc",
+}
 _LOCK_ACQUIRE_HASHES = {
     "2dbce359023b12b81d10e90e3787fc5a65915e49f847f9982c240335a2c7f1dd",
     "70c3d332d8ec8f7b3a8a30321ab997b7851ebf6218525fe075dca452f68bd40a",
@@ -114,7 +121,12 @@ def preview_workflow_repairs(workflow: Mapping[str, Any]) -> RepairPlan:
         original = str(node.get("code", ""))
         code = original
         repairs: list[tuple[str, str]] = []
-        if name == "backlog_monitor_gt" and _legacy(name, node):
+        if name == "stream_alert_triage_gt" and node_id == "load_dedup_incremental" and _sha(code.encode()) in _TRIAGE_REPLAY_LOAD_HASHES:
+            code = (f"{_MARKER}\n# flocks-gt-repair-v2\n"
+                    "from flocks.workflow.repairs import load_gt_dedup_incremental\n"
+                    "outputs.update(load_gt_dedup_incremental(inputs))\n")
+            repairs.append(("triage-backfill", "Read bounded uncommitted input across dates; retain checkpoints until analysis succeeds."))
+        elif name == "backlog_monitor_gt" and _legacy(name, node):
             if node_id == "check_backlog":
                 code = (f"{_MARKER}\nfrom flocks.workflow.repairs import check_backlog_progress\n"
                         "outputs.update(check_backlog_progress(inputs))\n")
@@ -180,11 +192,18 @@ def preview_workflow_repairs(workflow: Mapping[str, Any]) -> RepairPlan:
             if locked != code:
                 code = locked
                 repairs.append(("file-lock", "Use a bounded platform file lock without truncating/writing before acquisition."))
+        if name == "stream_alert_triage_gt" and node_id == "attack_analysis_single_structured" and _sha(code.encode()) in _TRIAGE_V1_ANALYSIS_HASHES:
+            old_status = "'ok' if source in ('triaged', 'no_dedup_key_triaged') else 'failed'"
+            if code.count(old_status) != 1:
+                raise ValueError("Unsupported triage outcome mapping")
+            code = code.replace(old_status, "'ok' if source in ('triaged', 'no_dedup_key_triaged', 'whitelist') else 'failed'", 1)
+            code += "\n# flocks-gt-repair-v2: whitelist is a successful skip, never an analysis failure.\n"
+            repairs.append(("triage-whitelist-status", "Treat whitelist results as successful while retaining genuine failure guards."))
         if code != original:
             ast.parse(code)
             node["code"] = code
             plan.changes.extend(RepairChange(node_id, repair, description) for repair, description in repairs)
-        elif node_id in {"check_backlog", "send_feishu_notify", "attack_analysis_single_structured", "join_evidence", "notify_dispose"} and _MARKER not in code:
+        elif node_id in {"load_dedup_incremental", "check_backlog", "send_feishu_notify", "attack_analysis_single_structured", "join_evidence", "notify_dispose"} and _MARKER not in code:
             plan.warnings.append(f"{node_id}: unrecognized custom code; left unchanged")
     return plan
 
@@ -606,4 +625,131 @@ def notify_backlog_progress(tool: Any, inputs: Mapping[str, Any], *, outbox_dir:
         except Exception as exc:
             status, error = "exception", str(exc)[:500]
     result.update(feishu_notify_status=status, feishu_notify_count=count, feishu_notify_error=error)
+    return result
+
+
+def load_gt_dedup_incremental(inputs: Mapping[str, Any], *, root: Path | None = None,
+                              today: str | None = None) -> dict[str, Any]:
+    """Select bounded complete records, oldest first, without committing offsets.
+
+    Scheduled runs look back seven days by default. Explicit paths take
+    precedence; a manual historical input_date retains single-day semantics.
+    Longer recovery windows are opt-in via backfill_days (maximum 366).
+    Default batches read at most ten records to leave room for downstream LLM
+    work within the workflow's existing node deadlines.
+    """
+    from filelock import FileLock
+
+    if root is None:
+        from flocks.config import Config
+        root = Config().get_global().data_dir.parent / "workspace" / "workflows"
+    root = Path(root)
+    today = today or datetime.now().strftime("%Y-%m-%d")
+    day = str(inputs.get("input_date") or today).strip()
+    anchor = datetime.strptime(day, "%Y-%m-%d").date()
+    source = str(inputs.get("dedup_source_workflow_name") or "stream_alert_dedup_gt")
+    state_name = str(inputs.get("triage_state_workflow_name") or "stream_alert_triage_gt")
+    state_dir = root / state_name
+    state_dir.mkdir(parents=True, exist_ok=True)
+    offset_path, lock_path = state_dir / "processed_offset.json", state_dir / "processed_offset.lock"
+    with FileLock(lock_path, timeout=30):
+        offsets = json.loads(offset_path.read_text(encoding="utf-8-sig")).get("offsets", {}) if offset_path.exists() else {}
+    known = {os.path.normcase(os.path.abspath(k)): int(v) for k, v in offsets.items()}
+    default_days = 7 if inputs.get("_trigger") == "poller" or not inputs.get("input_date") else 1
+    days = max(1, min(366, int(inputs.get("backfill_days") or default_days)))
+    max_files = max(1, min(256, int(inputs.get("incremental_max_files") or 64)))
+    max_bytes = max(1, min(64 * 1024 * 1024, int(inputs.get("incremental_max_bytes") or 4 * 1024 * 1024)))
+    max_records = max(1, min(10000, int(inputs.get("incremental_max_records") or 10)))
+    explicit = inputs.get("input_paths") or []
+    paths = [explicit] if isinstance(explicit, str) else list(explicit)
+    if inputs.get("input_path"):
+        paths.append(inputs["input_path"])
+    if paths:
+        paths = [Path(os.path.expanduser(str(p))).resolve() for p in paths if p]
+        for path in paths:
+            if not path.is_file():
+                raise FileNotFoundError(f"Configured dedup input not found: {path}")
+    else:
+        paths = []
+        for age in range(days - 1, -1, -1):
+            folder = root / source / (anchor - timedelta(days=age)).isoformat()
+            paths.extend(sorted(folder.glob("dedup_result*.jsonl")))
+    paths = list(dict.fromkeys(p.resolve() for p in paths))
+    # Processed shards must not consume the file budget forever and starve
+    # later unread shards. Stable sorting retains date order within each set.
+    paths.sort(key=lambda p: known.get(os.path.normcase(str(p)), 0) >= p.stat().st_size)
+    selected, skipped_alerts, file_stats, checkpoints = [], [], [], {}
+    seen_ids: set[str] = set()
+    used = read_records = skipped = duplicate_ids = 0
+    limited = len(paths) > max_files
+
+    def truth(value: Any) -> bool:
+        return value is True or str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+    for path in paths[:max_files]:
+        if used >= max_bytes or read_records >= max_records:
+            limited = True
+            break
+        size = path.stat().st_size
+        start = known.get(os.path.normcase(str(path)), 0)
+        if start < 0 or start > size:
+            raise ValueError(f"Dedup input changed size below saved offset; inspect before replay: {path}")
+        end, records, picked = start, 0, 0
+        with path.open("rb") as stream:
+            stream.seek(start)
+            while stream.tell() < size and used < max_bytes and read_records < max_records:
+                position = stream.tell()
+                raw = stream.readline(min(size - position, max_bytes - used))
+                used += len(raw)
+                if not raw.endswith(b"\n"):
+                    # Neither partial writes nor byte-budget cuts are checkpoints.
+                    if position == start and used >= max_bytes and read_records == 0:
+                        raise ValueError("First dedup record exceeds incremental_max_bytes; increase the byte budget")
+                    break
+                try:
+                    record = json.loads(raw.decode("utf-8")) if raw.strip() else None
+                except (ValueError, UnicodeError) as exc:
+                    raise ValueError(f"Invalid dedup JSONL at byte {position}: {path}") from exc
+                end = stream.tell()
+                if not raw.strip() or (isinstance(record, dict) and record.get("_type") == "file_header"):
+                    continue
+                read_records += 1
+                records += 1
+                if not isinstance(record, dict):
+                    raise ValueError(f"Dedup record must be an object at byte {position}: {path}")
+                if truth(record.get("is_duplicate")) and not truth(record.get("_triage_leader")):
+                    skipped += 1
+                    skipped_alerts.append({**record, "_triage_skip_reason": "duplicate_follower",
+                                           "triage_result": "重复告警-无需处理",
+                                           "triage_reason": "重复告警 follower，已由聚合 leader 代表研判",
+                                           "triage_source": "triage_skipped", "triage_status": "skipped_duplicate_follower"})
+                    continue
+                raw_id = next((str(record.get(k)).strip() for k in
+                               ("_wrapper_raw_log_id", "raw_log_id", "id", "log_id")
+                               if record.get(k) is not None and str(record[k]).strip().lower() not in {"", "none", "null", "nan"}), "")
+                if raw_id and raw_id in seen_ids:
+                    duplicate_ids += 1
+                    continue
+                if raw_id:
+                    seen_ids.add(raw_id)
+                selected.append(record)
+                picked += 1
+        checkpoints[str(path)] = end
+        file_stats.append({"path": str(path), "snapshot_size": size, "start_offset": start,
+                           "end_offset": end, "records": records, "selected": picked})
+        print(f"[load_slow] {path}: start_offset={start} end_offset={end} records={records} selected={picked}")
+    limited = limited or used >= max_bytes or read_records >= max_records
+    stats = {"source_workflow": source, "file_count": len(file_stats), "record_count": len(selected),
+             "bad_lines": 0, "skipped_duplicate_raw_log_id": duplicate_ids, "skipped_policy": skipped,
+             "files": file_stats, "backfill_days": days, "scan_bytes": used, "scan_limit_reached": limited,
+             "source_health": "files_found" if paths else "no_files"}
+    print(f"[load_slow] source={source} through={day} backfill_days={days} files={len(file_stats)} selected={len(selected)} limited={limited}")
+    result = dict(inputs)
+    result.update(enriched_alerts=selected, skipped_alerts_for_output=skipped_alerts, loaded_files=[s["path"] for s in file_stats],
+                  load_stats=stats, input_date=day, file_offsets=checkpoints,
+                  processed_offset_path=str(offset_path), processed_lock_path=str(lock_path),
+                  dedup_source_workflow_name=source, triage_state_workflow_name=state_name,
+                  concurrency=max(1, int(inputs.get("concurrency") or 1)),
+                  max_triage_cache_size=int(inputs.get("max_triage_cache_size") or 100000),
+                  persist_triage_output=str(inputs.get("persist_triage_output", True)).lower() not in {"false", "0", "no", "off"})
     return result

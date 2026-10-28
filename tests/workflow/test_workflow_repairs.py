@@ -476,3 +476,141 @@ def test_backlog_repair_preserves_all_trigger_inputs(monkeypatch):
     plan = repairs.preview_workflow_repairs(workflow)
     assert plan.workflow["triggers"] == workflow["triggers"]
     assert "check_backlog_progress(inputs)" in plan.workflow["nodes"][0]["code"]
+
+
+def test_v1_upgrade_accepts_whitelist_but_still_rejects_failed_analysis(monkeypatch):
+    code = '''source = inputs['source']
+status = 'cached' if source == 'cache' else (
+    'ok' if source in ('triaged', 'no_dedup_key_triaged') else 'failed'
+)
+if status == 'failed':
+    raise RuntimeError('GT triage incomplete; input offsets were not committed')
+outputs['triage_status'] = status
+'''
+    monkeypatch.setattr(repairs, "_TRIAGE_V1_ANALYSIS_HASHES", {hashlib.sha256(code.encode()).hexdigest()})
+    original = _workflow("stream_alert_triage_gt", "attack_analysis_single_structured", code)
+    plan = repairs.preview_workflow_repairs(original)
+    assert [c.repair for c in plan.changes] == ["triage-whitelist-status"]
+    fixed = plan.workflow['nodes'][0]['code']
+    for source in ("whitelist", "triaged", "no_dedup_key_triaged", "cache"):
+        namespace = {"inputs": {"source": source}, "outputs": {}}
+        exec(fixed, namespace)
+        assert namespace["outputs"]["triage_status"] in {"ok", "cached"}
+    with pytest.raises(RuntimeError, match="triage incomplete"):
+        exec(fixed, {"inputs": {"source": "failed"}, "outputs": {}})
+    assert not repairs.preview_workflow_repairs(plan.workflow).changed
+    custom = _workflow("stream_alert_triage_gt", "attack_analysis_single_structured", code + "\n# custom")
+    assert not repairs.preview_workflow_repairs(custom).changed
+
+
+def test_fingerprinted_loader_upgrade_is_idempotent_and_preserves_inputs(monkeypatch):
+    code = "outputs['legacy'] = True"
+    monkeypatch.setattr(repairs, "_TRIAGE_REPLAY_LOAD_HASHES", {hashlib.sha256(code.encode()).hexdigest()})
+    original = _workflow("stream_alert_triage_gt", "load_dedup_incremental", code)
+    plan = repairs.preview_workflow_repairs(original)
+    assert plan.workflow["triggers"] == original["triggers"]
+    assert "load_gt_dedup_incremental(inputs)" in plan.workflow["nodes"][0]["code"]
+    assert not repairs.preview_workflow_repairs(plan.workflow).changed
+
+
+def _dedup_fixture(root, day, records, *, suffix=""):
+    path = root / "stream_alert_dedup_gt" / day / f"dedup_result{suffix}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    return path.resolve()
+
+
+def _save_test_offsets(root, offsets):
+    path = root / "stream_alert_triage_gt" / "processed_offset.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"offsets": offsets}), encoding="utf-8")
+    return path
+
+
+def test_scheduled_loader_backfills_uncommitted_dates_without_writing_progress(tmp_path):
+    old = _dedup_fixture(tmp_path, "2026-10-26", [{"id": "done"}, {"id": "old"}])
+    recent = _dedup_fixture(tmp_path, "2026-10-27", [{"id": "yesterday"}])
+    start = len((json.dumps({"id": "done"}) + "\n").encode())
+    state = _save_test_offsets(tmp_path, {str(old): start})
+    before = state.read_bytes()
+    result = repairs.load_gt_dedup_incremental({"input_date": "2026-10-28", "_trigger": "poller"}, root=tmp_path)
+    assert [a["id"] for a in result["enriched_alerts"]] == ["old", "yesterday"]
+    assert result["file_offsets"] == {str(old): old.stat().st_size, str(recent): recent.stat().st_size}
+    assert result["load_stats"]["backfill_days"] == 7
+    assert state.read_bytes() == before
+
+
+def test_manual_date_and_explicit_path_keep_targeted_replay_semantics(tmp_path):
+    old = _dedup_fixture(tmp_path, "2026-10-26", [{"id": "older"}])
+    _dedup_fixture(tmp_path, "2026-10-27", [{"id": "target"}])
+    manual = repairs.load_gt_dedup_incremental({"input_date": "2026-10-27"}, root=tmp_path)
+    assert [a["id"] for a in manual["enriched_alerts"]] == ["target"]
+    explicit = repairs.load_gt_dedup_incremental({"input_paths": [str(old)], "input_date": "2026-10-28"}, root=tmp_path)
+    assert [a["id"] for a in explicit["enriched_alerts"]] == ["older"]
+    with pytest.raises(FileNotFoundError):
+        repairs.load_gt_dedup_incremental({"input_path": str(tmp_path / "missing")}, root=tmp_path)
+
+
+def test_record_budget_resumes_at_complete_line_and_never_skips_partial_tail(tmp_path):
+    path = _dedup_fixture(tmp_path, "2026-10-28", [{"id": "one"}, {"id": "two"}])
+    with path.open("ab") as stream:
+        stream.write(b'{"id": "partial"')
+    inputs = {"input_date": "2026-10-28", "incremental_max_records": 1}
+    first = repairs.load_gt_dedup_incremental(inputs, root=tmp_path)
+    assert [a["id"] for a in first["enriched_alerts"]] == ["one"]
+    assert first["load_stats"]["scan_limit_reached"]
+    _save_test_offsets(tmp_path, first["file_offsets"])
+    second = repairs.load_gt_dedup_incremental(inputs, root=tmp_path)
+    assert [a["id"] for a in second["enriched_alerts"]] == ["two"]
+    _save_test_offsets(tmp_path, second["file_offsets"])
+    third = repairs.load_gt_dedup_incremental(inputs, root=tmp_path)
+    assert third["enriched_alerts"] == []
+    assert third["file_offsets"] == second["file_offsets"]
+    with path.open("ab") as stream:
+        stream.write(b'}\n')
+    last = repairs.load_gt_dedup_incremental(inputs, root=tmp_path)
+    assert [a["id"] for a in last["enriched_alerts"]] == ["partial"]
+
+
+def test_processed_shards_cannot_starve_unread_shards_at_file_budget(tmp_path):
+    done = _dedup_fixture(tmp_path, "2026-10-27", [{"id": "done"}])
+    needed = _dedup_fixture(tmp_path, "2026-10-28", [{"id": "needed"}])
+    _save_test_offsets(tmp_path, {str(done): done.stat().st_size})
+    result = repairs.load_gt_dedup_incremental({"_trigger": "poller", "input_date": "2026-10-28", "incremental_max_files": 1}, root=tmp_path)
+    assert result["loaded_files"] == [str(needed)]
+    assert [a["id"] for a in result["enriched_alerts"]] == ["needed"]
+
+
+def test_byte_budget_and_corrupt_or_truncated_data_cannot_advance_checkpoint(tmp_path):
+    path = _dedup_fixture(tmp_path, "2026-10-28", [{"id": "too-large-for-budget"}])
+    with pytest.raises(ValueError, match="exceeds incremental_max_bytes"):
+        repairs.load_gt_dedup_incremental({"input_date": "2026-10-28", "incremental_max_bytes": 4}, root=tmp_path)
+    assert not (tmp_path / "stream_alert_triage_gt" / "processed_offset.json").exists()
+    _save_test_offsets(tmp_path, {str(path): path.stat().st_size + 1})
+    with pytest.raises(ValueError, match="below saved offset"):
+        repairs.load_gt_dedup_incremental({"input_path": str(path)}, root=tmp_path)
+    _save_test_offsets(tmp_path, {})
+    path.write_bytes(b'{bad json}\n')
+    with pytest.raises(ValueError, match="Invalid dedup JSONL"):
+        repairs.load_gt_dedup_incremental({"input_path": str(path)}, root=tmp_path)
+
+
+def test_replay_preserves_selection_policy_and_reports_missing_source(tmp_path):
+    _dedup_fixture(tmp_path, "2026-10-28", [
+        {"id": "follower", "is_duplicate": "true"},
+        {"id": "leader", "is_duplicate": True, "_triage_leader": "true"},
+        {"id": "leader"}, {"id": "new", "is_duplicate": False},
+    ])
+    result = repairs.load_gt_dedup_incremental({"input_date": "2026-10-28"}, root=tmp_path)
+    assert [a["id"] for a in result["enriched_alerts"]] == ["leader", "new"]
+    assert result["load_stats"]["skipped_policy"] == 1
+    assert result["load_stats"]["skipped_duplicate_raw_log_id"] == 1
+    missing = repairs.load_gt_dedup_incremental({"input_date": "2026-10-29"}, root=tmp_path)
+    assert missing["load_stats"]["source_health"] == "no_files"
+
+
+def test_default_replay_batch_is_small_enough_for_downstream_work(tmp_path):
+    _dedup_fixture(tmp_path, "2026-10-28", [{"id": str(i)} for i in range(11)])
+    result = repairs.load_gt_dedup_incremental({"input_date": "2026-10-28"}, root=tmp_path)
+    assert len(result["enriched_alerts"]) == 10
+    assert result["load_stats"]["scan_limit_reached"]

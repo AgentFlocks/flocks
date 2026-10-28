@@ -87,6 +87,12 @@ _DELIVERY_MAX_ATTEMPTS = 3
 _DELIVERY_RETRY_DELAY_S = 0.25
 # aiokafka may retry retriable commit failures internally without a deadline.
 _OFFSET_OPERATION_TIMEOUT_S = _REQUEST_TIMEOUT_MS / 1000 + 1.0
+_WORKER_DRAIN_TIMEOUT_S = 5.0
+_REBALANCE_RECOVERY_DELAY_S = 1.0
+_REBALANCE_RECOVERY_MAX_DELAY_S = 30.0
+_RECOVERABLE_OWNERSHIP_ERRORS = frozenset({
+    "partition_revoked_with_pending_deliveries", "partition_changed_before_dispatch", "partition_not_owned",
+})
 
 
 def _worker_count_for_trigger(trigger: TriggerDefinition) -> int:
@@ -550,7 +556,7 @@ class KafkaManager:
         # cooperative cancellation signal. Pending workers stay tracked.
         pool = self._worker_pools.pop(workflow_id, None)
         if pool:
-            _, pending = await asyncio.wait(pool, timeout=5.0)
+            _, pending = await asyncio.wait(pool, timeout=_WORKER_DRAIN_TIMEOUT_S)
             self._track_draining_workers(workflow_id, pending)
 
         self._queues.pop(workflow_id, None)
@@ -694,59 +700,19 @@ class KafkaManager:
         group_id = str(data.get("inputGroupId") or "").strip() or f"flocks-consumer-{workflow_id}"
         configured_inputs = _strip_execution_only_comments(trigger.inputs if isinstance(trigger.inputs, dict) else {})
 
-        queue_capacity = _queue_size_for_trigger(trigger)
-        worker_count = _worker_count_for_trigger(trigger)
-        queue: asyncio.Queue = asyncio.Queue(maxsize=queue_capacity)
-        self._queues[workflow_id] = queue
-
-        abort = asyncio.Event()
-        self._abort_events[workflow_id] = abort
-        generation_cancel_event = threading.Event()
-        self._generation_cancel_events[workflow_id] = generation_cancel_event
-
+        queue, abort = self._create_generation(workflow_id, workflow_plan, trigger, configured_inputs, input_topic)
         ready = asyncio.Event()
         self._ready[workflow_id] = ready
-
         self._status[workflow_id] = {
-            "state": "connecting",
-            "error": None,
-            "broker": input_broker,
-            "topic": input_topic,
-            "groupId": group_id,
+            "state": "connecting", "error": None, "broker": input_broker,
+            "topic": input_topic, "groupId": group_id,
         }
-
-        # Trigger-configured worker pool, bounded by service safety caps.
-        workers: List[asyncio.Task] = []
-        for i in range(worker_count):
-            workers.append(
-                asyncio.create_task(
-                    self._worker_loop(
-                        workflow_id,
-                        workflow_plan,
-                        trigger,
-                        configured_inputs,
-                        queue,
-                        abort,
-                        input_topic,
-                        generation_cancel_event,
-                    ),
-                    name=f"kafka-worker-{workflow_id}-{i}",
-                )
-            )
-        self._worker_pools[workflow_id] = workers
-
         task = asyncio.create_task(
-            self._consumer_loop(
-                workflow_id,
-                input_broker,
-                input_topic,
-                group_id,
-                str(data.get("autoOffsetReset") or "latest"),
-                queue,
-                abort,
-                ready,
-            ),
-            name=f"kafka-{workflow_id}",
+            self._supervise_consumer(
+                workflow_id, input_broker, input_topic, group_id,
+                str(data.get("autoOffsetReset") or "latest"), queue, abort, ready,
+                workflow_plan, trigger, configured_inputs,
+            ), name=f"kafka-{workflow_id}",
         )
         self._tasks[workflow_id] = task
 
@@ -779,6 +745,60 @@ class KafkaManager:
         log.info("kafka.consumer_scheduled", {"workflow_id": workflow_id})
         return self.get_consumer_status(workflow_id)
 
+    def _create_generation(
+        self, workflow_id: str, workflow_plan: Any, trigger: TriggerDefinition,
+        configured_inputs: Dict[str, Any], topic: str,
+    ) -> tuple[asyncio.Queue, asyncio.Event]:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_queue_size_for_trigger(trigger))
+        abort = asyncio.Event()
+        cancel = threading.Event()
+        self._queues[workflow_id] = queue
+        self._abort_events[workflow_id] = abort
+        self._generation_cancel_events[workflow_id] = cancel
+        self._worker_pools[workflow_id] = [asyncio.create_task(
+            self._worker_loop(workflow_id, workflow_plan, trigger, configured_inputs, queue, abort, topic, cancel),
+            name=f"kafka-worker-{workflow_id}-{index}",
+        ) for index in range(_worker_count_for_trigger(trigger))]
+        return queue, abort
+
+    async def _supervise_consumer(
+        self, workflow_id: str, broker: str, topic: str, group_id: str, reset: str,
+        queue: asyncio.Queue, abort: asyncio.Event, ready: asyncio.Event,
+        workflow_plan: Any, trigger: TriggerDefinition, configured_inputs: Dict[str, Any],
+    ) -> None:
+        """Rejoin after ownership loss, only after the old generation has drained.
+
+        The stable supervisor is also the stop/restart cancellation boundary.
+        Workflow/commit failures remain visible and do not restart endlessly.
+        """
+        attempt = 0
+        try:
+            while True:
+                await self._consumer_loop(workflow_id, broker, topic, group_id, reset, queue, abort, ready)
+                status = self._status.get(workflow_id, {})
+                if status.get("error_code") not in _RECOVERABLE_OWNERSHIP_ERRORS:
+                    return
+                attempt += 1
+                self._status[workflow_id] = {**status, "state": "connecting", "recoveryAttempt": attempt,
+                                             "recoveryPhase": "waiting_for_workers"}
+                while pending := self._active_draining_workers(workflow_id):
+                    await asyncio.wait(pending, timeout=1.0)
+                delay = min(_REBALANCE_RECOVERY_MAX_DELAY_S,
+                            _REBALANCE_RECOVERY_DELAY_S * 2 ** min(attempt - 1, 10))
+                self._status[workflow_id].update(recoveryPhase="backoff", retryAt=time.time() + delay)
+                log.warning("kafka.recovery_scheduled", {"workflow_id": workflow_id,
+                            "attempt": attempt, "delay_s": delay, "error_code": status.get("error_code")})
+                await asyncio.sleep(delay)
+                # Keep the same group and committed positions. Never seek to
+                # latest or reuse an old epoch/queue to hide unfinished work.
+                queue, abort = self._create_generation(workflow_id, workflow_plan, trigger, configured_inputs, topic)
+                ready = asyncio.Event()
+                self._ready[workflow_id] = ready
+        finally:
+            await self._cleanup_runtime_resources(workflow_id)
+            if self._tasks.get(workflow_id) is asyncio.current_task():
+                self._tasks.pop(workflow_id, None)
+
     def _fail_generation(
         self,
         workflow_id: str,
@@ -792,10 +812,12 @@ class KafkaManager:
         if self._abort_events.get(workflow_id, abort) is abort:
             self._status[workflow_id] = {
                 **self._status.get(workflow_id, {}),
-                "state": "failed",
+                "state": "connecting" if getattr(error, "code", None) in _RECOVERABLE_OWNERSHIP_ERRORS else "failed",
                 **_delivery_error_diagnostics(error),
                 **(delivery.diagnostics() if delivery is not None else {}),
             }
+        log.warning("kafka.generation_failed", {"workflow_id": workflow_id,
+                    **_delivery_error_diagnostics(error)})
         abort.set()
 
     async def _retry_delivery(
@@ -902,7 +924,7 @@ class KafkaManager:
                         abort,
                         _KafkaDeliveryError(
                             "partition_revoked_with_pending_deliveries",
-                            "Kafka partition ownership changed with unfinished deliveries; restart to replay",
+                            "Kafka partition ownership changed with unfinished deliveries; rejoining to replay",
                         ),
                     )
 
@@ -1014,9 +1036,6 @@ class KafkaManager:
                 await consumer.stop()
             except Exception:
                 pass
-            current = asyncio.current_task()
-            if self._tasks.get(workflow_id) is current:
-                self._tasks.pop(workflow_id, None)
 
     async def _worker_loop(
         self,

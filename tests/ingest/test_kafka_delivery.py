@@ -132,6 +132,7 @@ class Broker:
 async def pipeline(monkeypatch):  # noqa: ANN001
     manager = kafka_manager.KafkaManager()
     monkeypatch.setattr(kafka_manager, "_DELIVERY_RETRY_DELAY_S", 0.001)
+    monkeypatch.setattr(kafka_manager, "_REBALANCE_RECOVERY_DELAY_S", 0.01)
 
     async def start(  # noqa: ANN202
         broker, *, workers=3, filter_spec=None, reset_policy="earliest", expected_state="running",
@@ -630,8 +631,11 @@ async def test_rebalance_invalidates_queued_delivery_before_late_worker_completi
     await eventually(lambda: consumer.closed)
     assert broker.commit_attempts == []
     status = manager.get_consumer_status("delivery-test")
-    assert status["state"] == "failed"
+    assert status["state"] == "connecting"
     assert status["error_code"] == "partition_revoked_with_pending_deliveries"
+    await eventually(lambda: len(broker.consumers) == 2 and broker.committed.get(Partition("alerts", 0)) == 1)
+    assert manager.get_consumer_status("delivery-test")["state"] == "running"
+    assert broker.consumers[1].config["group_id"] == "delivery-test"
 
 
 @pytest.mark.asyncio
@@ -643,6 +647,7 @@ async def test_rebalance_between_fetch_and_queue_cannot_adopt_old_record_into_ne
     executions, _ = mock_execution(monkeypatch)
 
     def after_fetch(consumer, item):  # noqa: ANN001, ANN202
+        broker.fetched_hook = None
         async def rebalance():  # noqa: ANN202
             partition = Partition(item.topic, item.partition)
             await consumer.listener.on_partitions_revoked({partition})
@@ -657,3 +662,97 @@ async def test_rebalance_between_fetch_and_queue_cannot_adopt_old_record_into_ne
     assert broker.commit_attempts == []
     assert executions == []
     assert manager.get_consumer_status("delivery-test")["error_code"] == "partition_changed_before_dispatch"
+    await eventually(lambda: len(broker.consumers) == 2 and broker.committed.get(Partition("alerts", 0)) == 1)
+    assert len(executions) == 1
+
+
+@pytest.mark.asyncio
+async def test_rebalance_waits_for_old_workers_before_replay(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, 0)])
+    monkeypatch.setattr(kafka_manager, "_WORKER_DRAIN_TIMEOUT_S", 0.01)
+    release, started = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def dispatch(*args, **kwargs):
+        calls.append(kwargs["delivery_id"])
+        started.set()
+        if len(calls) == 1:
+            await release.wait()
+        return acknowledge()
+
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    await start(broker, workers=1)
+    await started.wait()
+    await broker.consumers[0].listener.on_partitions_revoked({Partition("alerts", 0)})
+    try:
+        await eventually(lambda: manager.get_consumer_status("delivery-test").get("recoveryPhase") == "waiting_for_workers")
+        assert len(broker.consumers) == 1
+        assert broker.committed == {}
+    finally:
+        release.set()
+    await eventually(lambda: broker.committed.get(Partition("alerts", 0)) == 1)
+    assert len(broker.consumers) == 2
+    assert calls == ["kafka:alerts:0:0", "kafka:alerts:0:0"]
+
+
+@pytest.mark.asyncio
+async def test_stop_during_rebalance_backoff_never_revives_consumer(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, 0)])
+    monkeypatch.setattr(kafka_manager, "_REBALANCE_RECOVERY_DELAY_S", 60)
+    release, started = asyncio.Event(), asyncio.Event()
+
+    async def dispatch(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return acknowledge()
+
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    await start(broker, workers=1)
+    await started.wait()
+    await broker.consumers[0].listener.on_partitions_revoked({Partition("alerts", 0)})
+    release.set()
+    await eventually(lambda: manager.get_consumer_status("delivery-test").get("recoveryPhase") == "backoff")
+    await manager.stop_workflow("delivery-test")
+    await asyncio.sleep(0.02)
+    assert len(broker.consumers) == 1
+    assert manager.get_consumer_status("delivery-test")["state"] == "stopped"
+    assert "delivery-test" not in manager._tasks
+
+
+@pytest.mark.asyncio
+async def test_repeated_rebalances_replay_fresh_latest_group_from_anchored_offset(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, 0)])
+    partition = Partition("alerts", 0)
+    broker.initial_positions[partition] = None
+    gates = [asyncio.Event() for _ in range(3)]
+    started = [asyncio.Event() for _ in range(3)]
+    deliveries = []
+
+    async def dispatch(*args, **kwargs):
+        index = len(deliveries)
+        deliveries.append(kwargs["delivery_id"])
+        started[index].set()
+        await gates[index].wait()
+        return acknowledge()
+
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    await start(broker, workers=1, reset_policy="latest")
+    try:
+        for index in range(2):
+            await started[index].wait()
+            assert broker.committed[partition] == 0
+            await broker.consumers[index].listener.on_partitions_revoked({partition})
+            gates[index].set()
+            await eventually(lambda: len(broker.consumers) == index + 2)
+        await started[2].wait()
+        assert broker.committed[partition] == 0
+        gates[2].set()
+        await eventually(lambda: broker.committed[partition] == 1)
+        assert deliveries == ["kafka:alerts:0:0"] * 3
+        assert manager.get_consumer_status("delivery-test")["state"] == "running"
+    finally:
+        for gate in gates:
+            gate.set()
