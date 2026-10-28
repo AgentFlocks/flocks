@@ -756,3 +756,66 @@ async def test_repeated_rebalances_replay_fresh_latest_group_from_anchored_offse
     finally:
         for gate in gates:
             gate.set()
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_for_in_progress_restart_then_leaves_consumer_stopped(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, 0)])
+    await start(broker, filter_spec={"expr": "False"})
+    real_get = kafka_manager.WorkflowStore.get_config
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_get(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await real_get(*args, **kwargs)
+
+    monkeypatch.setattr(kafka_manager.WorkflowStore, "get_config", blocked_get)
+    restarting = asyncio.create_task(manager.restart_workflow("delivery-test"))
+    await entered.wait()
+    stopping = asyncio.create_task(manager.stop_workflow("delivery-test"))
+    try:
+        await asyncio.sleep(0.02)
+        assert not stopping.done(), "stop must not finish before an in-progress restart creates its consumer"
+    finally:
+        release.set()
+        await asyncio.gather(restarting, stopping, return_exceptions=True)
+    assert manager.get_consumer_status("delivery-test")["state"] == "stopped"
+    assert all(consumer.closed for consumer in broker.consumers)
+
+
+@pytest.mark.asyncio
+async def test_stop_all_covers_restart_not_yet_registered_as_consumer(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, 0)])
+    await start(broker, filter_spec={"expr": "False"})
+    original_get = kafka_manager.WorkflowStore.get_config
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_get(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original_get(*args, **kwargs)
+
+    monkeypatch.setattr(kafka_manager.WorkflowStore, "get_config", blocked_get)
+    restarting = asyncio.create_task(manager.restart_workflow("delivery-test"))
+    await entered.wait()
+    stopping = asyncio.create_task(manager.stop_all())
+    try:
+        await asyncio.sleep(0.02)
+        assert not stopping.done()
+    finally:
+        release.set()
+        await asyncio.gather(restarting, stopping, return_exceptions=True)
+    assert len(broker.consumers) == 1
+    assert manager.get_consumer_status("delivery-test")["state"] == "stopped"
+    assert not manager._tasks
+
+
+def test_late_old_worker_failure_cannot_overwrite_stopped_status():
+    manager = kafka_manager.KafkaManager()
+    manager._status["stopped-workflow"] = {"state": "stopped", "error": None}
+    old_abort = asyncio.Event()
+    manager._fail_generation("stopped-workflow", old_abort, RuntimeError("late failure"))
+    assert manager.get_consumer_status("stopped-workflow") == {"state": "stopped", "error": None}

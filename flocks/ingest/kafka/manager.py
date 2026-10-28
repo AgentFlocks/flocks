@@ -465,6 +465,11 @@ class KafkaManager:
 
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task] = {}
+        # Serialize lifecycle requests across awaits (e.g. a save/restart and
+        # a simultaneous disable). Otherwise the earlier restart can revive
+        # a consumer after the later stop has already returned.
+        self._lifecycle_locks: dict[str, asyncio.Lock] = {}
+        self._stopping_all = False
         self._abort_events: dict[str, asyncio.Event] = {}
         # Per-workflow bounded message queue for backpressure
         self._queues: dict[str, asyncio.Queue] = {}
@@ -521,6 +526,7 @@ class KafkaManager:
         return self._default_trigger_from_config(data)
 
     async def start_all(self) -> None:
+        self._stopping_all = False
         try:
             configs = await WorkflowStore.list_configs(kind="workflow_kafka_config")
         except Exception as exc:
@@ -541,7 +547,10 @@ class KafkaManager:
                     )
 
     async def stop_all(self) -> None:
-        for workflow_id in list(self._tasks.keys()):
+        self._stopping_all = True
+        # An in-progress restart can be waiting for config before it registers
+        # a task. Include lifecycle owners so shutdown cannot miss that work.
+        for workflow_id in list(self._tasks.keys() | self._lifecycle_locks.keys()):
             await self.stop_workflow(workflow_id)
 
     async def _cleanup_runtime_resources(self, workflow_id: str) -> None:
@@ -614,6 +623,10 @@ class KafkaManager:
         return status
 
     async def stop_workflow(self, workflow_id: str) -> None:
+        async with self._lifecycle_locks.setdefault(workflow_id, asyncio.Lock()):
+            await self._stop_workflow_unlocked(workflow_id)
+
+    async def _stop_workflow_unlocked(self, workflow_id: str) -> None:
         ev = self._abort_events.get(workflow_id)
         if ev is not None:
             ev.set()
@@ -631,6 +644,14 @@ class KafkaManager:
             self._status[workflow_id] = {"state": "stopped", "error": None}
 
     async def restart_workflow(
+        self, workflow_id: str, *, startup: bool = False,
+    ) -> Dict[str, Any]:
+        async with self._lifecycle_locks.setdefault(workflow_id, asyncio.Lock()):
+            if self._stopping_all:
+                return {"state": "stopped", "error": None}
+            return await self._restart_workflow_unlocked(workflow_id, startup=startup)
+
+    async def _restart_workflow_unlocked(
         self,
         workflow_id: str,
         *,
@@ -642,7 +663,7 @@ class KafkaManager:
         ``_CONNECT_WAIT_TIMEOUT_S`` elapses, so the HTTP save endpoint can
         surface connection errors to the user.
         """
-        await self.stop_workflow(workflow_id)
+        await self._stop_workflow_unlocked(workflow_id)
         if self._active_draining_workers(workflow_id):
             error = "previous_workers_still_draining"
             self._status[workflow_id] = {"state": "failed", "error": error}
@@ -652,7 +673,7 @@ class KafkaManager:
         except Exception as exc:
             log.warning("kafka.restart_read_failed", {"workflow_id": workflow_id, "error": str(exc)})
             return {"state": "failed", "error": str(exc)}
-        if not isinstance(data, dict) or not data.get("enabled"):
+        if self._stopping_all or not isinstance(data, dict) or not data.get("enabled"):
             self._status[workflow_id] = {"state": "stopped", "error": None}
             return {"state": "stopped", "error": None}
 
@@ -809,7 +830,7 @@ class KafkaManager:
     ) -> None:
         if delivery is not None:
             delivery.tracker.close()
-        if self._abort_events.get(workflow_id, abort) is abort:
+        if self._abort_events.get(workflow_id) is abort:
             self._status[workflow_id] = {
                 **self._status.get(workflow_id, {}),
                 "state": "connecting" if getattr(error, "code", None) in _RECOVERABLE_OWNERSHIP_ERRORS else "failed",

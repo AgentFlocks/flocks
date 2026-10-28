@@ -38,6 +38,10 @@ _TRIAGE_REPLAY_LOAD_HASHES = {
 _TRIAGE_V1_ANALYSIS_HASHES = {
     "68d0321a34fc8533e52dccb8278448d35a633a778f9807cad3d003e830913dfc",
 }
+_TRIAGE_MARK_HASHES = {
+    "4ae5005ba72f32b0761e91d28c0e4b5538ec43ac2c271f083398432d76047959",
+    "d74d1b3bd15b7391b8f8345d1341ccce0d3eb9d8c493826c69f8fe906ae76896",
+}
 _LOCK_ACQUIRE_HASHES = {
     "2dbce359023b12b81d10e90e3787fc5a65915e49f847f9982c240335a2c7f1dd",
     "70c3d332d8ec8f7b3a8a30321ab997b7851ebf6218525fe075dca452f68bd40a",
@@ -126,6 +130,11 @@ def preview_workflow_repairs(workflow: Mapping[str, Any]) -> RepairPlan:
                     "from flocks.workflow.repairs import load_gt_dedup_incremental\n"
                     "outputs.update(load_gt_dedup_incremental(inputs))\n")
             repairs.append(("triage-backfill", "Read bounded uncommitted input across dates; retain checkpoints until analysis succeeds."))
+        elif name == "stream_alert_triage_gt" and node_id == "mark_processed_dedup_keys" and _sha(code.encode()) in _TRIAGE_MARK_HASHES:
+            code = (f"{_MARKER}\n# flocks-gt-repair-v3\n"
+                    "from flocks.workflow.repairs import commit_gt_dedup_offsets\n"
+                    "outputs.update(commit_gt_dedup_offsets(inputs))\n")
+            repairs.append(("triage-checkpoint-write", "Fail on corrupt or unwritable checkpoints; atomically preserve all saved offsets."))
         elif name == "backlog_monitor_gt" and _legacy(name, node):
             if node_id == "check_backlog":
                 code = (f"{_MARKER}\nfrom flocks.workflow.repairs import check_backlog_progress\n"
@@ -628,6 +637,45 @@ def notify_backlog_progress(tool: Any, inputs: Mapping[str, Any], *, outbox_dir:
     return result
 
 
+def _validated_offsets(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str) or type(offset) is not int or offset < 0
+        for key, offset in value.items()
+    ):
+        raise ValueError("Dedup checkpoints must map file paths to nonnegative integer byte offsets")
+    return dict(value)
+
+
+def commit_gt_dedup_offsets(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    """Publish progress only after the downstream chain succeeds.
+
+    Corrupt state is evidence to inspect, never an empty checkpoint to overwrite.
+    Any lock/read/write failure propagates to the workflow execution status.
+    """
+    from filelock import FileLock
+
+    result = dict(inputs)
+    incoming = _validated_offsets(inputs.get("file_offsets") or {})
+    if not incoming:
+        result.update(processed_mark_status="skipped_no_offsets", processed_mark_error="",
+                      processed_mark_count=0, processed_cache_size_after=0)
+        return result
+    if not inputs.get("processed_offset_path") or not inputs.get("processed_lock_path"):
+        raise ValueError("Missing dedup checkpoint or lock path")
+    path = Path(inputs["processed_offset_path"])
+    with FileLock(inputs["processed_lock_path"], timeout=30):
+        current = _validated_offsets(
+            json.loads(path.read_text(encoding="utf-8-sig"))["offsets"] if path.exists() else {}
+        )
+        for key, offset in incoming.items():
+            current[key] = max(current.get(key, 0), offset)
+        payload = json.dumps({"updated_at": time.time(), "offsets": current}, ensure_ascii=False).encode("utf-8")
+        _atomic_bytes(path, payload)
+    result.update(processed_mark_status="ok", processed_mark_error="",
+                  processed_mark_count=len(incoming), processed_cache_size_after=len(current))
+    return result
+
+
 def load_gt_dedup_incremental(inputs: Mapping[str, Any], *, root: Path | None = None,
                               today: str | None = None) -> dict[str, Any]:
     """Select bounded complete records, oldest first, without committing offsets.
@@ -653,7 +701,7 @@ def load_gt_dedup_incremental(inputs: Mapping[str, Any], *, root: Path | None = 
     state_dir.mkdir(parents=True, exist_ok=True)
     offset_path, lock_path = state_dir / "processed_offset.json", state_dir / "processed_offset.lock"
     with FileLock(lock_path, timeout=30):
-        offsets = json.loads(offset_path.read_text(encoding="utf-8-sig")).get("offsets", {}) if offset_path.exists() else {}
+        offsets = _validated_offsets(json.loads(offset_path.read_text(encoding="utf-8-sig"))["offsets"] if offset_path.exists() else {})
     known = {os.path.normcase(os.path.abspath(k)): int(v) for k, v in offsets.items()}
     default_days = 7 if inputs.get("_trigger") == "poller" or not inputs.get("input_date") else 1
     days = max(1, min(366, int(inputs.get("backfill_days") or default_days)))

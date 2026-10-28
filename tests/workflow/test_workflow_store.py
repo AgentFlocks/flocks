@@ -678,3 +678,92 @@ async def test_close_waits_for_writer_reopen_without_lock_cycle(monkeypatch) -> 
     assert not WorkflowStore._initialized
     with pytest.raises(ValueError, match="no active connection"):
         _ = reopened.in_transaction
+
+
+@pytest.mark.asyncio
+async def test_close_waits_for_active_write_transaction_before_closing_connections():
+    await WorkflowStore.init()
+    db = await WorkflowStore.raw_completion_db()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def operation():
+        await db.execute("INSERT INTO workflow_kv(key,value,type,created_at,updated_at) VALUES ('audit-active','1','json','now','now')")
+        started.set()
+        await release.wait()
+
+    writer = asyncio.create_task(WorkflowStore._run_write_transaction(operation, action="audit-close"))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    closer = asyncio.create_task(WorkflowStore.close())
+    try:
+        await asyncio.sleep(0.02)
+        assert not closer.done(), "close must not close a connection under an active transaction"
+    finally:
+        release.set()
+        await asyncio.gather(writer, closer, return_exceptions=True)
+    assert writer.exception() is None
+    with sqlite3.connect(WorkflowStore.get_db_path()) as conn:
+        assert conn.execute("SELECT value FROM workflow_kv WHERE key='audit-active'").fetchone() == ('1',)
+
+
+@pytest.mark.asyncio
+async def test_queued_writer_after_close_joins_reinitialized_transaction_gate():
+    await WorkflowStore.init()
+    first_started, first_release = asyncio.Event(), asyncio.Event()
+    second_started, second_release = asyncio.Event(), asyncio.Event()
+
+    async def first_operation():
+        first_started.set()
+        await first_release.wait()
+
+    async def second_operation():
+        db = await WorkflowStore._completion_db()
+        await db.execute("INSERT INTO workflow_kv(key,value,type,created_at,updated_at) VALUES ('audit-second','2','json','now','now')")
+        second_started.set()
+        await second_release.wait()
+
+    first = asyncio.create_task(WorkflowStore._run_write_transaction(first_operation, action="first"))
+    await asyncio.wait_for(first_started.wait(), timeout=5)
+    closer = asyncio.create_task(WorkflowStore.close())
+    await asyncio.sleep(0.01)
+    second = asyncio.create_task(WorkflowStore._run_write_transaction(second_operation, action="second"))
+    first_release.set()
+    await asyncio.wait_for(second_started.wait(), timeout=5)
+    third = asyncio.create_task(WorkflowStore.kv_put('audit-third', 3))
+    try:
+        await asyncio.sleep(0.02)
+        assert not third.done(), 'queued writers must share the new gate after close/reinitialize'
+    finally:
+        second_release.set()
+        await asyncio.gather(first, closer, second, third)
+    assert await WorkflowStore.kv_get('audit-second') == 2
+    assert await WorkflowStore.kv_get('audit-third') == 3
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_finishes_both_connections_and_allows_reinitialization(monkeypatch):
+    await WorkflowStore.init()
+    db = await WorkflowStore._db()
+    original_close = db.close
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_close():
+        entered.set()
+        await release.wait()
+        await original_close()
+
+    monkeypatch.setattr(db, 'close', delayed_close)
+    closer = asyncio.create_task(WorkflowStore.close())
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    closer.cancel()
+    await asyncio.sleep(0)
+    closer.cancel()
+    try:
+        await asyncio.sleep(0.01)
+        assert not closer.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await closer
+    assert WorkflowStore._conn is None and WorkflowStore._completion_conn is None
+    await WorkflowStore.kv_put('after-cancel-close', 'ready')
+    assert await WorkflowStore.kv_get('after-cancel-close') == 'ready'

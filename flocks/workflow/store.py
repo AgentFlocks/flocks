@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
@@ -183,28 +184,40 @@ class WorkflowStore:
     @classmethod
     async def close(cls) -> None:
         async with cls._lock():
-            # Reopening never takes the lifecycle lock. Closing takes the open
-            # gate after it, so a migration can recover its writer without
-            # recursively acquiring init's lifecycle lock, and close cannot
-            # miss a connection still being configured by a reopen operation.
+            # Lock order: lifecycle -> active transaction -> writer reopen.
+            # A transaction may reopen a discarded writer while it owns the
+            # transaction gate, so close must not acquire the open gate first.
+            write_lock = cls._completion_lock
+            if write_lock is not None:
+                await write_lock.acquire()
             open_lock = cls._writer_open_lock
-            if open_lock is not None:
-                await open_lock.acquire()
+            open_acquired = False
             try:
-                if cls._conn:
-                    await cls._conn.close()
-                if cls._completion_conn:
-                    await cls._completion_conn.close()
-                cls._conn = None
-                cls._completion_conn = None
-                cls._initialized = False
-                cls._init_pid = None
-                cls._db_path = None
-                cls._completion_lock = None
-                cls._writer_open_lock = None
-            finally:
                 if open_lock is not None:
+                    await open_lock.acquire()
+                    open_acquired = True
+                async def finish_close() -> None:
+                    connections = [conn for conn in (cls._conn, cls._completion_conn) if conn is not None]
+                    results = await asyncio.gather(*(conn.close() for conn in connections), return_exceptions=True)
+                    cls._conn = None
+                    cls._completion_conn = None
+                    cls._initialized = False
+                    cls._init_pid = None
+                    cls._db_path = None
+                    cls._completion_lock = None
+                    cls._writer_open_lock = None
+                    for result in results:
+                        if isinstance(result, BaseException):
+                            raise result
+
+                cancelled = await cls._finish_cleanup(finish_close())
+                if cancelled:
+                    raise asyncio.CancelledError
+            finally:
+                if open_acquired:
                     open_lock.release()
+                if write_lock is not None:
+                    write_lock.release()
 
     @classmethod
     async def _db(cls) -> aiosqlite.Connection:
@@ -225,13 +238,16 @@ class WorkflowStore:
 
     @classmethod
     async def _completion_db(cls) -> aiosqlite.Connection:
-        await cls._db()
-        if cls._completion_conn is None:
-            # A failed rollback discards the writer rather than recycling an
-            # unknown transaction. The read connection remains usable.
+        while True:
+            await cls._db()
+            if cls._completion_conn is not None:
+                return cls._completion_conn
+            # A close may replace this gate while a diagnostic caller waits.
             open_lock = cls._writer_open_lock
             assert open_lock is not None
             async with open_lock:
+                if not cls._initialized or open_lock is not cls._writer_open_lock:
+                    continue
                 if cls._completion_conn is None:
                     conn = await aiosqlite.connect(
                         cls.get_db_path(), timeout=Storage._sqlite_timeout_s, isolation_level=None
@@ -243,7 +259,7 @@ class WorkflowStore:
                         await conn.close()
                         raise
                     cls._completion_conn = conn
-        return cls._completion_conn  # type: ignore[return-value]
+                return cls._completion_conn
 
     @classmethod
     async def raw_completion_db(cls) -> aiosqlite.Connection:
@@ -264,13 +280,28 @@ class WorkflowStore:
         return cancelled
 
     @classmethod
+    @asynccontextmanager
+    async def _write_gate(cls):
+        while True:
+            await cls._db()
+            lock = cls._completion_lock
+            assert lock is not None
+            await lock.acquire()
+            if cls._initialized and lock is cls._completion_lock:
+                break
+            # close/reinitialize may run before this queued waiter. It must
+            # join the new writer gate rather than write under a stale lock.
+            lock.release()
+        try:
+            yield
+        finally:
+            lock.release()
+
+    @classmethod
     async def _run_write_transaction(
         cls, operation: Callable[[], Awaitable[Any]], *, action: str
     ) -> Any:
-        await cls._completion_db()
-        lock = cls._completion_lock
-        assert lock is not None
-        async with lock:
+        async with cls._write_gate():
             # Resolve again after acquiring the gate: a preceding transaction
             # may have discarded its connection after a rollback failure.
             db = await cls._completion_db()

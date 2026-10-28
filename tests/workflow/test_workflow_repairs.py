@@ -527,6 +527,81 @@ def _save_test_offsets(root, offsets):
     return path
 
 
+def test_checkpoint_upgrade_is_fingerprinted_and_idempotent(monkeypatch):
+    code = "outputs.update(inputs)"
+    monkeypatch.setattr(repairs, "_TRIAGE_MARK_HASHES", {hashlib.sha256(code.encode()).hexdigest()})
+    original = _workflow("stream_alert_triage_gt", "mark_processed_dedup_keys", code)
+    plan = repairs.preview_workflow_repairs(original)
+    assert plan.changed
+    assert "commit_gt_dedup_offsets(inputs)" in plan.workflow["nodes"][0]["code"]
+    assert not repairs.preview_workflow_repairs(plan.workflow).changed
+    original["nodes"][0]["code"] += "\n# custom"
+    assert not repairs.preview_workflow_repairs(original).changed
+
+
+@pytest.mark.parametrize("invalid", ["{broken", '{}', '{"offsets": {"old": -1}}', '{"offsets": {"old": true}}'])
+def test_checkpoint_corruption_is_never_replaced(tmp_path, invalid):
+    path = tmp_path / "processed_offset.json"
+    path.write_text(invalid, encoding="utf-8")
+    with pytest.raises((ValueError, KeyError)):
+        repairs.commit_gt_dedup_offsets({"file_offsets": {"new": 30},
+            "processed_offset_path": str(path), "processed_lock_path": str(tmp_path / "offset.lock")})
+    assert path.read_text(encoding="utf-8") == invalid
+
+
+@pytest.mark.parametrize("dataflow_mode", ["legacy", "vertex_cache"])
+def test_incremental_pipeline_commits_only_after_persistence_and_retries(tmp_path, monkeypatch, dataflow_mode):
+    from flocks.workflow import NodeExecutionError, Workflow, WorkflowEngine
+    from flocks.workflow.repl_runtime import PythonExecRuntime
+
+    path = _dedup_fixture(tmp_path, "2026-10-27", [{"id": "old"}, {"id": "next"}])
+    state = _save_test_offsets(tmp_path, {"unrelated-file": 42})
+    initial = {"input_date": "2026-10-28", "_trigger": "poller", "incremental_max_records": 1}
+    nodes = [
+        {"id": "load", "type": "python", "code": "outputs.update(load(inputs))"},
+        {"id": "pass_context", "type": "python", "code": "pass"},
+        {"id": "persist", "type": "python", "code": "persist(inputs)"},
+        {"id": "mark", "type": "python", "code": "outputs.update(commit(inputs))\noutputs['batch_ids'] = ','.join(a['id'] for a in inputs['enriched_alerts'])"},
+    ]
+    workflow = Workflow.from_dict({"name": "synthetic_checkpoint_pipeline", "start": "load", "nodes": nodes,
+        "edges": [{"from": a, "to": b} for a, b in [("load", "pass_context"), ("pass_context", "persist"), ("persist", "mark")]]})
+    persisted = []
+    fail = {"persist": True}
+    def persist(inputs):
+        if fail["persist"]:
+            raise OSError("result disk full")
+        persisted.extend(a["id"] for a in inputs["enriched_alerts"])
+    def run():
+        runtime = PythonExecRuntime(tool_registry=SimpleNamespace(), globals={
+            "load": lambda values: repairs.load_gt_dedup_incremental(values, root=tmp_path),
+            "persist": persist, "commit": repairs.commit_gt_dedup_offsets})
+        return WorkflowEngine(workflow, runtime=runtime, dataflow_mode=dataflow_mode).run(initial_inputs=initial)
+
+    original = state.read_bytes()
+    with pytest.raises(NodeExecutionError, match="disk full"):
+        run()
+    assert state.read_bytes() == original
+    assert persisted == []
+    fail["persist"] = False
+    real_atomic = repairs._atomic_bytes
+    def fail_replace(*args, **kwargs):
+        raise PermissionError("checkpoint is read-only")
+    monkeypatch.setattr(repairs, "_atomic_bytes", fail_replace)
+    with pytest.raises(NodeExecutionError, match="read-only"):
+        run()
+    assert state.read_bytes() == original
+    monkeypatch.setattr(repairs, "_atomic_bytes", real_atomic)
+    first = run()
+    assert first.outputs["processed_mark_status"] == "ok"
+    assert json.loads(state.read_bytes())["offsets"]["unrelated-file"] == 42
+    second = run()
+    assert second.outputs["batch_ids"] == "next"
+    assert json.loads(state.read_bytes())["offsets"][str(path)] == path.stat().st_size
+    # A storage failure after writing results replays that batch (at least once).
+    assert persisted == ["old", "old", "next"]
+    assert run().outputs["batch_ids"] == ""
+
+
 def test_scheduled_loader_backfills_uncommitted_dates_without_writing_progress(tmp_path):
     old = _dedup_fixture(tmp_path, "2026-10-26", [{"id": "done"}, {"id": "old"}])
     recent = _dedup_fixture(tmp_path, "2026-10-27", [{"id": "yesterday"}])
