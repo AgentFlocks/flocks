@@ -1,15 +1,16 @@
-"""Session uploads, channel media and memory notes kept on this instance's disk.
+"""Session uploads, channel media and memory notes kept on the local disk.
 
 Callers keep these files through a :class:`FileMirror` per *area*
 (``uploads``, ``channel_media``, ``memory``): they store a file after writing
-it, and ask for it back before reading one that is missing.  With one
-instance on one disk the local file is the only copy, so storing keeps
-nothing more and there is never another copy to bring back.
+it, and ask for it back before reading one that is missing.  In one process
+on one disk the local file is the only copy, so storing keeps nothing more
+and there is never another copy to bring back.  A file a message records is
+read where its URL says (:func:`readable_url`).
 
-A database backend whose instances share one database replaces this module
-(``flocks.db_backend``) with one that keeps each file in the database as
-well, so every instance can read what another one wrote.  The paths, names
-and return values here are the ones that module keeps.
+A database backend that lets several processes share the data replaces this
+module (``flocks.db_backend``) with one that keeps each file in the database
+as well.  The paths, names and return values here are the ones that module
+keeps.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ def max_bytes() -> int:
 
 
 class FileTooLargeToShare(ValueError):
-    """The file is over the size a sharing backend keeps: it stays on this instance only."""
+    """The file is over the size a sharing backend keeps: it is kept on the local disk only."""
 
 
 def sha256_of(data: bytes) -> str:
@@ -169,4 +170,13 @@ class FileMirror:
         return False
 
 
-__all__ = ["ABSENT", "FileMirror", "StoredFile", "sha256_of"]
+def readable_url(url: str, *, session_id: Optional[str] = None) -> str:
+    """The file URL a message part (of *session_id*) records, as this process reads it.
+
+    Here the URL itself: the file is where the URL says.  A backend that
+    shares the files reads them from its own data directory instead.
+    """
+    return url
+
+
+__all__ = ["ABSENT", "FileMirror", "StoredFile", "readable_url", "sha256_of"]

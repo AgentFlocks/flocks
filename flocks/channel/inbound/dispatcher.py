@@ -1721,9 +1721,9 @@ except Exception:  # pragma: no cover
 
 
 async def _share_channel_media(url: str) -> None:
-    """Keep channel media in the database too, so every instance can read it.
+    """Keep channel media through the file store as well.
 
-    Failing to share is not failing the message: the file is still here.
+    Failing to keep it is not failing the message: the file is still on disk.
     """
     if not str(url or "").startswith("file:"):
         return

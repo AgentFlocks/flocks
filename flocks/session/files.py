@@ -249,9 +249,9 @@ def remove_session_uploads(session_id: str) -> bool:
     return True
 
 
-# Uploads are kept in PostgreSQL as well (``file_mirror``, area ``uploads``),
-# so any instance can serve and read them; the directories above are this
-# instance's cache.  Uploads are written once and never changed in place, so
+# Uploads are kept through ``file_mirror`` (area ``uploads``) as well: stored
+# after they are written, brought back before they are read when they are not
+# on the local disk.  Uploads are written once and never changed in place, so
 # a local file of the stored size is taken to be the stored file.
 
 def uploads_mirror():
@@ -271,10 +271,10 @@ def _uploads_relative(path: Path) -> str:
 
 
 async def store_upload(path: Path) -> bool:
-    """Keep an upload that just landed on this instance's disk.
+    """Keep an upload that was just written.
 
-    Returns whether it is shared; one over the size the database keeps
-    (flocks.storage.file_mirror.max_bytes) stays on this instance only.
+    Returns whether it was kept; one over the size the store keeps
+    (flocks.storage.file_mirror.max_bytes) stays on the local disk only.
     """
     from flocks.storage.file_mirror import FileTooLargeToShare
     from flocks.storage.storage import Storage
@@ -291,8 +291,8 @@ async def store_upload(path: Path) -> bool:
 
 # Channel media (images and files an IM channel delivered) lives under the data
 # directory's ``channel_media`` tree and is served through the guarded file
-# download route; it is kept in the database as well (area ``channel_media``)
-# so another instance can read and serve it too.
+# download route; it is kept through ``file_mirror`` as well (area
+# ``channel_media``).
 
 def channel_media_mirror():
     from flocks.storage.file_mirror import FileMirror
@@ -308,30 +308,8 @@ def _within_channel_media(path: Path) -> bool:
     return True
 
 
-def local_channel_media_path(target: Path) -> Path | None:
-    """Channel media named by any instance's path, as this instance's.
-
-    A file part's URL holds the path on the instance that received the media
-    (``<data>/channel_media/<channel>/<account>/<file>``).  Another instance --
-    or this one after its data directory moved -- finds the same file by its
-    place under its own ``channel_media`` directory.  None for anything else.
-    """
-    root = channel_media_mirror().root.resolve(strict=False)
-    target = Path(target)
-    if _is_within(root, target):
-        return target if target != root else None
-    parts = target.parts
-    if "channel_media" not in parts:
-        return None
-    rest = parts[parts.index("channel_media") + 1:]
-    if not rest or any(part in {"", ".", ".."} for part in rest):
-        return None
-    local = root.joinpath(*rest).resolve(strict=False)
-    return local if local != root and _is_within(root, local) else None
-
-
 async def store_channel_media(path: Path) -> bool:
-    """Keep channel media that just landed on this instance's disk; whether it is shared."""
+    """Keep channel media that was just written; whether it was kept."""
     from flocks.storage.file_mirror import FileTooLargeToShare
 
     if not _within_channel_media(path):
@@ -345,9 +323,9 @@ async def store_channel_media(path: Path) -> bool:
 
 
 async def restore_channel_media(paths: Iterable[Path]) -> int:
-    """Bring channel media this instance does not have from the database.
+    """Bring back the channel media missing from the local disk.
 
-    Only files missing here are looked up: channel media is written once.
+    Only missing files are looked up: channel media is written once.
     """
     restored = 0
     mirror = channel_media_mirror()
@@ -360,19 +338,6 @@ async def restore_channel_media(paths: Iterable[Path]) -> int:
         except ValueError:
             continue
     return restored
-
-
-def channel_media_paths(parts: Iterable[Any]) -> list[Path]:
-    """The channel media file parts point at, as this instance's paths."""
-    found: list[Path] = []
-    for part in parts:
-        if getattr(part, "type", None) != "file":
-            continue
-        target = _file_uri_path(str(getattr(part, "url", "") or ""))
-        local = local_channel_media_path(target) if target is not None else None
-        if local is not None:
-            found.append(local)
-    return found
 
 
 def upload_session_of(url: str) -> str | None:
@@ -391,7 +356,7 @@ def upload_session_of(url: str) -> str | None:
 
 
 def upload_relative_of(url: Any) -> str | None:
-    """The stored path (``<session>/<name>``) of the session upload *url* names, on this instance."""
+    """The stored path (``<session>/<name>``) of the session upload *url* names."""
     from types import SimpleNamespace
 
     session_id = upload_session_of(str(url or ""))
@@ -444,7 +409,7 @@ async def adopt_session_upload(owner_session_id: str, url: str) -> str:
 
 
 async def restore_upload(path: Path) -> bool:
-    """Make sure the upload at *path* is on this instance's disk."""
+    """Make sure the upload at *path* is on the local disk."""
 
     try:
         return await uploads_mirror().restore(path, trust_size=True)
@@ -453,17 +418,17 @@ async def restore_upload(path: Path) -> bool:
 
 
 async def restore_session_uploads(session_id: str) -> int:
-    """Bring every stored upload of a session to this instance's disk."""
+    """Bring every stored upload of a session to the local disk."""
 
     mirror = uploads_mirror()
     return await mirror.restore_tree(f"{_uploads_relative(session_uploads_dir(session_id))}/", trust_size=True)
 
 
 async def restore_chat_upload_source(session_id: str, owner_id: str, upload_id: str) -> None:
-    """Fetch a chat upload that another instance staged or bound.
+    """Bring back a staged or bound chat upload missing from the local disk.
 
-    An upload discarded through another instance is refused, even while
-    this instance's cache still holds its file.
+    An upload the store says was discarded is refused, even while a local
+    copy of its file is left.
     """
 
     safe_id = _safe_upload_id(upload_id)
@@ -482,12 +447,8 @@ async def move_stored_upload(source: Path, destination: Path) -> None:
     await uploads_mirror().move(source, destination)
 
 
-async def forget_session_uploads(session_id: str) -> int:
-    return await uploads_mirror().forget_tree(f"{_uploads_relative(session_uploads_dir(session_id))}/")
-
-
 async def session_upload_candidates(session_ids: Iterable[str]) -> dict[str, list[str]]:
-    """Every upload of these sessions (stored or only on this disk), by session.
+    """Every upload of these sessions (stored, or only on the local disk), by session.
 
     Read before the sessions are deleted: the delete records them as
     candidates in its own transaction (flocks.session.message.UploadSweep), so
@@ -540,8 +501,8 @@ async def discard_staged_chat_upload(owner_id: str, upload_id: str) -> bool:
     safe_id = _safe_upload_id(upload_id)
     staged = chat_upload_staging_root(owner_id) / safe_id
     mirror = uploads_mirror()
-    # Staged on another instance: bring it here first, so the queue check and
-    # the removal below see the same upload this instance would bind.
+    # Brought back first when it is missing locally, so the queue check and
+    # the removal below see the same upload a bind would.
     await mirror.restore_tree(f"{_uploads_relative(staged)}/", trust_size=True)
     if not remove_staged_chat_upload(owner_id, safe_id):
         return False
@@ -675,42 +636,17 @@ def session_upload_part_path(session_id: str, part: Any) -> Path | None:
     resources. Channel media (WeCom / Feishu / DingTalk ... inbound images) is
     saved under the data directory's ``channel_media`` tree and is served
     through the guarded ``/api/file/download`` path instead, so it yields None.
-
-    The URL holds the absolute path on the instance that stored the upload.
-    Another instance -- or this one after its data directory moved -- finds
-    the same file by its place in this Session's uploads directory
-    (``.../uploads/<session>/<name>``); only a file of this Session qualifies.
     """
-    target = _file_uri_path(str(getattr(part, "url", "") or ""))
+    from flocks.storage.file_mirror import readable_url
+
+    target = _file_uri_path(readable_url(str(getattr(part, "url", "") or ""), session_id=session_id))
     if target is None:
         return None
     try:
         upload_root = session_uploads_dir(session_id).resolve(strict=False)
     except ValueError:
         return None
-    if _is_within(upload_root, target):
-        return target
-    if target.parent.name == session_id and target.parent.parent.name == "uploads":
-        local = (upload_root / target.name).resolve(strict=False)
-        if local != upload_root and _is_within(upload_root, local):
-            return local
-    return None
-
-
-def local_file_part_url(session_id: str, part: Any) -> str:
-    """The part's file URL as this instance reads it.
-
-    The session's own uploads (``session_upload_part_path``) and channel
-    media (``local_channel_media_path``) are found under this instance's data
-    directory, wherever the URL says they were written.
-    """
-
-    url = str(getattr(part, "url", "") or "")
-    local = session_upload_part_path(session_id, part)
-    if local is None:
-        target = _file_uri_path(url)
-        local = local_channel_media_path(target) if target is not None else None
-    return local.as_uri() if local is not None else url
+    return target if _is_within(upload_root, target) else None
 
 
 def _attachment_source_path(
@@ -1184,7 +1120,7 @@ async def build_session_context(
     messages, has_more, next_before = await _messages_with_parts(
         str(session.id), before=before, limit=limit,
     )
-    # Uploads stored through another instance, so their state below is real.
+    # Stored uploads missing locally are brought back, so their state below is real.
     try:
         await restore_session_uploads(str(session.id))
     except Exception as exc:

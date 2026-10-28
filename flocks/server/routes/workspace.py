@@ -481,8 +481,7 @@ async def upload_files(
                 if total > max_bytes:
                     results.append({"name": filename, "error": f"File too large (max {max_mb} MB)"})
                     continue
-                # Kept in the database too: the message that uses it may
-                # reach another instance.
+                # Kept through the file store as well, like every upload.
                 await store_upload(target)
                 completed = True
             except Exception as exc:

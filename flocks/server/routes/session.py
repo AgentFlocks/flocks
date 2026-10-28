@@ -4554,7 +4554,7 @@ async def _validate_chat_upload_parts(session_id: str, owner_id: Optional[str], 
         if part.get("type") != "file" or not isinstance(part.get("mime"), str) or not part["mime"]:
             raise HTTPException(status_code=400, detail="Chat upload requires a file part and MIME type")
         try:
-            # The upload may have been staged through another instance.
+            # Brought back first when the staged upload is missing locally.
             await restore_chat_upload_source(session_id, owner_id, upload_id)
             resolve_chat_upload(session_id, owner_id, upload_id)
         except (FileNotFoundError, OSError, ValueError) as exc:

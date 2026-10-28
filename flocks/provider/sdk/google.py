@@ -148,11 +148,11 @@ class GoogleProvider(BaseProvider):
                         elif p.type == "file":
                             mime = getattr(p, "mime", "")
                             if mime.startswith("image/"):
-                                from flocks.session.files import local_file_part_url
                                 from flocks.session.utils.file_extractor import read_file_part_bytes
+                                from flocks.storage.file_mirror import readable_url
 
                                 data = read_file_part_bytes(
-                                    local_file_part_url(str(getattr(p, "sessionID", "") or ""), p)
+                                    readable_url(getattr(p, "url", ""), session_id=getattr(p, "sessionID", None))
                                 )
                                 if data:
                                     parts.append({

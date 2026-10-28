@@ -106,7 +106,7 @@ from flocks.utils.langfuse import (
     resolve_session_trace_context,
     trace_scope,
 )
-from flocks.session.files import local_file_part_url
+from flocks.storage.file_mirror import readable_url
 from flocks.session.utils.file_extractor import (
     read_file_part_bytes,
     is_text_extractable_mime,
@@ -3499,11 +3499,10 @@ class SessionRunner:
         return blocks
 
     async def _restore_session_uploads(self) -> None:
-        """Bring this session's uploads to this instance's disk before reading them.
+        """Bring back this session's stored uploads missing from the local disk before reading them.
 
-        A message's files may have been uploaded through another instance;
-        they are read from local paths below.  Costs one listing query and a
-        size check per upload; only files missing here are fetched.
+        Costs one listing query and a size check per upload; only missing
+        files are fetched.
         """
         from flocks.session.files import restore_session_uploads
 
@@ -3516,16 +3515,16 @@ class SessionRunner:
             })
 
     async def _restore_channel_media(self, parts_by_message: Dict[str, List[Any]]) -> None:
-        """Bring channel media these messages carry to this instance's disk.
-
-        A channel message may have been received by another instance; its
-        media are read from local paths below.  Only files missing here are
-        looked up.
-        """
-        from flocks.session.files import channel_media_paths, restore_channel_media
+        """Bring back the channel media these messages carry when it is missing from the local disk."""
+        from flocks.session.files import restore_channel_media
+        from flocks.session.utils.file_extractor import file_url_to_path
 
         try:
-            paths = channel_media_paths(part for parts in parts_by_message.values() for part in parts)
+            paths = [
+                Path(file_url_to_path(readable_url(part.url, session_id=self.session.id))).resolve(strict=False)
+                for parts in parts_by_message.values() for part in parts
+                if getattr(part, "type", None) == "file" and str(getattr(part, "url", "") or "").startswith("file:")
+            ]
             if paths:
                 await restore_channel_media(paths)
         except Exception as exc:
@@ -3667,7 +3666,7 @@ class SessionRunner:
                             mime = getattr(part, 'mime', '')
                             if mime != 'application/x-directory':
                                 filename = getattr(part, 'filename', 'file')
-                                url = local_file_part_url(self.session.id, part)
+                                url = readable_url(getattr(part, 'url', ''), session_id=self.session.id)
                                 # Image bytes only ride on the latest user
                                 # turn — older turns are reduced to a short,
                                 # opaque placeholder. Crucially the placeholder
