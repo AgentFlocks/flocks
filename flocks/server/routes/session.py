@@ -2680,7 +2680,7 @@ class AbortSessionResult(BaseModel):
 @router.post(
     "/{sessionID}/abort",
     summary="Abort session",
-    description="Abort an active session and stop any ongoing processing, on whichever node runs it",
+    description="Abort an active session and stop any ongoing processing",
     response_model=AbortSessionResult,
 )
 async def abort_session(sessionID: str, http_request: Request = None) -> AbortSessionResult:
