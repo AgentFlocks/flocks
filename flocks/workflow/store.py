@@ -6,9 +6,11 @@ import asyncio
 import json
 import os
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 import aiosqlite
 
@@ -46,6 +48,18 @@ _EXECUTION_UPSERT_SQL = """
 """
 
 
+def _write_operation(operation: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+    """Serialize and retry the complete mutation, never an individual SQL statement."""
+
+    @wraps(operation)
+    async def wrapped(cls, *args, **kwargs):
+        return await cls._run_write_transaction(
+            lambda: operation(cls, *args, **kwargs), action=operation.__name__
+        )
+
+    return wrapped
+
+
 class WorkflowStore:
     """Workflow-domain store backed by ``workflow.db`` tables."""
 
@@ -55,8 +69,11 @@ class WorkflowStore:
     _init_pid: Optional[int] = None
     _db_path: Optional[Path] = None
     _completion_lock: Optional[asyncio.Lock] = None
+    _writer_open_lock: Optional[asyncio.Lock] = None
     _lifecycle_lock: Optional[asyncio.Lock] = None
     _lifecycle_loop: Optional[asyncio.AbstractEventLoop] = None
+    _write_retry_attempts = 3
+    _write_retry_base_delay_s = 0.05
 
     @classmethod
     def _lock(cls) -> asyncio.Lock:
@@ -103,6 +120,7 @@ class WorkflowStore:
             cls._initialized = False
             cls._init_pid = None
             cls._completion_lock = None
+            cls._writer_open_lock = None
 
         await Storage._ensure_init()
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,6 +129,7 @@ class WorkflowStore:
             cls._conn = await aiosqlite.connect(
                 db_path,
                 timeout=Storage._sqlite_timeout_s,
+                isolation_level=None,
             )
             cls._conn.row_factory = aiosqlite.Row
             await Storage.configure_connection(cls._conn)
@@ -118,9 +137,14 @@ class WorkflowStore:
             for stmt in _INDEX_STMTS:
                 await cls._conn.execute(stmt)
             await cls._conn.commit()
+            # A SELECT may retain a WAL snapshot across awaits. Never promote
+            # this connection to a writer: an intervening completion commit
+            # would make that snapshot fail with SQLITE_BUSY_SNAPSHOT.
+            await cls._conn.execute("PRAGMA query_only=ON")
             cls._completion_conn = await aiosqlite.connect(
                 db_path,
                 timeout=Storage._sqlite_timeout_s,
+                isolation_level=None,
             )
             cls._completion_conn.row_factory = aiosqlite.Row
             await Storage.configure_connection(cls._completion_conn)
@@ -128,6 +152,7 @@ class WorkflowStore:
             cls._init_pid = current_pid
             cls._db_path = db_path
             cls._completion_lock = asyncio.Lock()
+            cls._writer_open_lock = asyncio.Lock()
             await cls._migrate_legacy_kv()
 
         try:
@@ -143,6 +168,8 @@ class WorkflowStore:
             cls._initialized = False
             cls._init_pid = None
             cls._db_path = None
+            cls._completion_lock = None
+            cls._writer_open_lock = None
             if isinstance(exc, Exception) and Storage._is_db_corruption_error(exc):
                 await Storage.recover_corrupt_db(
                     db_path,
@@ -157,16 +184,40 @@ class WorkflowStore:
     @classmethod
     async def close(cls) -> None:
         async with cls._lock():
-            if cls._conn:
-                await cls._conn.close()
-            if cls._completion_conn:
-                await cls._completion_conn.close()
-            cls._conn = None
-            cls._completion_conn = None
-            cls._initialized = False
-            cls._init_pid = None
-            cls._db_path = None
-            cls._completion_lock = None
+            # Lock order: lifecycle -> active transaction -> writer reopen.
+            # A transaction may reopen a discarded writer while it owns the
+            # transaction gate, so close must not acquire the open gate first.
+            write_lock = cls._completion_lock
+            if write_lock is not None:
+                await write_lock.acquire()
+            open_lock = cls._writer_open_lock
+            open_acquired = False
+            try:
+                if open_lock is not None:
+                    await open_lock.acquire()
+                    open_acquired = True
+                async def finish_close() -> None:
+                    connections = [conn for conn in (cls._conn, cls._completion_conn) if conn is not None]
+                    results = await asyncio.gather(*(conn.close() for conn in connections), return_exceptions=True)
+                    cls._conn = None
+                    cls._completion_conn = None
+                    cls._initialized = False
+                    cls._init_pid = None
+                    cls._db_path = None
+                    cls._completion_lock = None
+                    cls._writer_open_lock = None
+                    for result in results:
+                        if isinstance(result, BaseException):
+                            raise result
+
+                cancelled = await cls._finish_cleanup(finish_close())
+                if cancelled:
+                    raise asyncio.CancelledError
+            finally:
+                if open_acquired:
+                    open_lock.release()
+                if write_lock is not None:
+                    write_lock.release()
 
     @classmethod
     async def _db(cls) -> aiosqlite.Connection:
@@ -178,20 +229,120 @@ class WorkflowStore:
 
     @classmethod
     async def raw_db(cls) -> aiosqlite.Connection:
-        return await cls._db()
+        """Writable diagnostic escape hatch; callers must not manage concurrent transactions.
+
+        Production mutations must use the store APIs and their transaction gate.
+        Keep raw writes off the internal read connection, even for diagnostics.
+        """
+        return await cls._completion_db()
 
     @classmethod
     async def _completion_db(cls) -> aiosqlite.Connection:
-        if cls._initialized and cls._init_pid is not None and cls._init_pid != os.getpid():
-            await cls.init()
-        if not cls._completion_conn or not cls._initialized:
-            await cls.init()
-        return cls._completion_conn  # type: ignore[return-value]
+        while True:
+            await cls._db()
+            if cls._completion_conn is not None:
+                return cls._completion_conn
+            # A close may replace this gate while a diagnostic caller waits.
+            open_lock = cls._writer_open_lock
+            assert open_lock is not None
+            async with open_lock:
+                if not cls._initialized or open_lock is not cls._writer_open_lock:
+                    continue
+                if cls._completion_conn is None:
+                    conn = await aiosqlite.connect(
+                        cls.get_db_path(), timeout=Storage._sqlite_timeout_s, isolation_level=None
+                    )
+                    try:
+                        conn.row_factory = aiosqlite.Row
+                        await Storage.configure_connection(conn)
+                    except BaseException:
+                        await conn.close()
+                        raise
+                    cls._completion_conn = conn
+                return cls._completion_conn
 
     @classmethod
     async def raw_completion_db(cls) -> aiosqlite.Connection:
         """Return the completion connection for transaction-level tests."""
         return await cls._completion_db()
+
+    @staticmethod
+    async def _finish_cleanup(operation: Awaitable[Any]) -> bool:
+        """Drain queued SQLite cleanup before releasing the gate, even on repeat cancellation."""
+        task = asyncio.create_task(operation)
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+        task.result()
+        return cancelled
+
+    @classmethod
+    @asynccontextmanager
+    async def _write_gate(cls):
+        while True:
+            await cls._db()
+            lock = cls._completion_lock
+            assert lock is not None
+            await lock.acquire()
+            if cls._initialized and lock is cls._completion_lock:
+                break
+            # close/reinitialize may run before this queued waiter. It must
+            # join the new writer gate rather than write under a stale lock.
+            lock.release()
+        try:
+            yield
+        finally:
+            lock.release()
+
+    @classmethod
+    async def _run_write_transaction(
+        cls, operation: Callable[[], Awaitable[Any]], *, action: str
+    ) -> Any:
+        async with cls._write_gate():
+            # Resolve again after acquiring the gate: a preceding transaction
+            # may have discarded its connection after a rollback failure.
+            db = await cls._completion_db()
+            attempts = max(1, cls._write_retry_attempts)
+            for attempt in range(1, attempts + 1):
+                phase = "begin"
+                try:
+                    await db.execute("BEGIN IMMEDIATE")
+                    phase = "execute"
+                    result = await operation()
+                    phase = "commit"
+                    await db.commit()
+                    return result
+                except BaseException as exc:
+                    fields = {
+                        "action": action, "phase": phase, "attempt": attempt,
+                        "max_attempts": attempts, "error": str(exc),
+                        "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None),
+                        "sqlite_errorname": getattr(exc, "sqlite_errorname", None),
+                        "in_transaction": db.in_transaction,
+                    }
+                    try:
+                        cancelled = await cls._finish_cleanup(db.rollback())
+                    except BaseException as rollback_exc:
+                        log.error("workflow.store.rollback_failed", {**fields, "error": str(rollback_exc)})
+                        cls._completion_conn = None
+                        await cls._finish_cleanup(db.close())
+                        raise
+                    if cancelled and not isinstance(exc, asyncio.CancelledError):
+                        raise asyncio.CancelledError from exc
+                    code = getattr(exc, "sqlite_errorcode", 0) or 0
+                    busy = isinstance(exc, Exception) and (
+                        (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                        or Storage._is_sqlite_busy_error(exc)
+                    )
+                    if not busy or attempt == attempts:
+                        if isinstance(exc, Exception):
+                            log.warning("workflow.store.transaction_failed", fields)
+                        raise
+                    log.warning("workflow.store.transaction_retry", fields)
+                    await asyncio.sleep(cls._write_retry_base_delay_s * 2 ** (attempt - 1))
 
     @staticmethod
     def _json_dumps(value: Any) -> str:
@@ -371,11 +522,11 @@ class WorkflowStore:
         )
 
     @classmethod
+    @_write_operation
     async def upsert_execution(cls, exec_data: Dict[str, Any]) -> None:
-        db = await cls._db()
+        db = await cls._completion_db()
         _, _, row = cls._execution_row(exec_data)
         await db.execute(_EXECUTION_UPSERT_SQL, row)
-        await db.commit()
 
     @classmethod
     async def get_execution(cls, exec_id: str) -> Optional[Dict[str, Any]]:
@@ -384,7 +535,8 @@ class WorkflowStore:
             "SELECT payload FROM workflow_executions WHERE id = ?",
             (exec_id,),
         ) as cur:
-            row = await cur.fetchone()
+            rows = await cur.fetchall()
+            row = rows[0] if rows else None
         if not row:
             return None
         value = cls._json_loads(row["payload"], None)
@@ -427,16 +579,17 @@ class WorkflowStore:
         return items
 
     @classmethod
+    @_write_operation
     async def delete_execution(cls, exec_id: str) -> bool:
-        db = await cls._db()
+        db = await cls._completion_db()
         await db.execute("DELETE FROM workflow_execution_steps WHERE exec_id = ?", (exec_id,))
         cur = await db.execute("DELETE FROM workflow_executions WHERE id = ?", (exec_id,))
-        await db.commit()
         return cur.rowcount > 0
 
     @classmethod
+    @_write_operation
     async def delete_executions_for_workflow(cls, workflow_id: str) -> int:
-        db = await cls._db()
+        db = await cls._completion_db()
         async with db.execute(
             "SELECT id FROM workflow_executions WHERE workflow_id = ?",
             (workflow_id,),
@@ -445,12 +598,12 @@ class WorkflowStore:
         for exec_id in exec_ids:
             await db.execute("DELETE FROM workflow_execution_steps WHERE exec_id = ?", (exec_id,))
         cur = await db.execute("DELETE FROM workflow_executions WHERE workflow_id = ?", (workflow_id,))
-        await db.commit()
         return cur.rowcount
 
     @classmethod
+    @_write_operation
     async def trim_executions(cls, workflow_id: str, *, keep: int) -> List[str]:
-        db = await cls._db()
+        db = await cls._completion_db()
         async with db.execute(
             """
             SELECT id FROM workflow_executions
@@ -464,7 +617,6 @@ class WorkflowStore:
         for exec_id in exec_ids:
             await db.execute("DELETE FROM workflow_execution_steps WHERE exec_id = ?", (exec_id,))
             await db.execute("DELETE FROM workflow_executions WHERE id = ?", (exec_id,))
-        await db.commit()
         return exec_ids
 
     @classmethod
@@ -505,16 +657,19 @@ class WorkflowStore:
         rows = cls._step_rows(exec_id, steps)
         if not rows:
             return
-        db = await cls._db()
-        await db.executemany(
-            """
-            INSERT OR REPLACE INTO workflow_execution_steps
-            (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-        await db.commit()
+
+        async def write_steps() -> None:
+            db = await cls._completion_db()
+            await db.executemany(
+                """
+                INSERT OR REPLACE INTO workflow_execution_steps
+                (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+        await cls._run_write_transaction(write_steps, action="record_steps")
 
     @classmethod
     async def complete_execution(
@@ -523,41 +678,23 @@ class WorkflowStore:
         steps: Iterable[Tuple[int, Dict[str, Any]]],
     ) -> None:
         """Atomically persist one final execution summary and its step batch."""
-        db = await cls._completion_db()
-        exec_id, workflow_id, execution_row = cls._execution_row(exec_data)
+        exec_id, _, execution_row = cls._execution_row(exec_data)
         step_rows = cls._step_rows(exec_id, steps)
-        lock = cls._completion_lock
-        if lock is None:
-            lock = asyncio.Lock()
-            cls._completion_lock = lock
 
-        async with lock:
-            try:
-                await db.execute("BEGIN IMMEDIATE")
-                if step_rows:
-                    await db.executemany(
-                        """
-                        INSERT OR REPLACE INTO workflow_execution_steps
-                        (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        step_rows,
-                    )
-                await db.execute(_EXECUTION_UPSERT_SQL, execution_row)
-                await db.commit()
-            except BaseException:
-                try:
-                    await db.rollback()
-                except BaseException as rollback_exc:
-                    log.error(
-                        "workflow.store.completion_rollback_failed",
-                        {
-                            "workflow_id": workflow_id,
-                            "exec_id": exec_id,
-                            "error": str(rollback_exc),
-                        },
-                    )
-                raise
+        async def write_result() -> None:
+            db = await cls._completion_db()
+            if step_rows:
+                await db.executemany(
+                    """
+                    INSERT OR REPLACE INTO workflow_execution_steps
+                    (exec_id, step_index, node_id, node_type, inputs, outputs, error, payload)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    step_rows,
+                )
+            await db.execute(_EXECUTION_UPSERT_SQL, execution_row)
+
+        await cls._run_write_transaction(write_result, action="complete_execution")
 
     @classmethod
     async def list_steps(
@@ -574,7 +711,8 @@ class WorkflowStore:
             "SELECT COUNT(*) AS total FROM workflow_execution_steps WHERE exec_id = ?",
             (exec_id,),
         ) as cur:
-            row = await cur.fetchone()
+            rows = await cur.fetchall()
+            row = rows[0] if rows else None
             total = int(row["total"]) if row else 0
         if safe_limit == 0:
             return [], total
@@ -596,10 +734,10 @@ class WorkflowStore:
         return steps, total
 
     @classmethod
+    @_write_operation
     async def clear_steps(cls, exec_id: str) -> int:
-        db = await cls._db()
+        db = await cls._completion_db()
         cur = await db.execute("DELETE FROM workflow_execution_steps WHERE exec_id = ?", (exec_id,))
-        await db.commit()
         return cur.rowcount
 
     @classmethod
@@ -609,7 +747,8 @@ class WorkflowStore:
             "SELECT * FROM workflow_stats WHERE workflow_id = ?",
             (workflow_id,),
         ) as cur:
-            row = await cur.fetchone()
+            rows = await cur.fetchall()
+            row = rows[0] if rows else None
         if not row:
             return None
         return {
@@ -623,8 +762,9 @@ class WorkflowStore:
         }
 
     @classmethod
+    @_write_operation
     async def put_stats(cls, workflow_id: str, stats: Dict[str, Any]) -> None:
-        db = await cls._db()
+        db = await cls._completion_db()
         await db.execute(
             """
             INSERT OR REPLACE INTO workflow_stats
@@ -644,18 +784,18 @@ class WorkflowStore:
                 cls._now_ms(),
             ),
         )
-        await db.commit()
 
     @classmethod
+    @_write_operation
     async def delete_stats(cls, workflow_id: str) -> bool:
-        db = await cls._db()
+        db = await cls._completion_db()
         cur = await db.execute("DELETE FROM workflow_stats WHERE workflow_id = ?", (workflow_id,))
-        await db.commit()
         return cur.rowcount > 0
 
     @classmethod
+    @_write_operation
     async def increment_stats(cls, workflow_id: str, *, success: bool, duration: float) -> None:
-        db = await cls._db()
+        db = await cls._completion_db()
         runtime = float(duration)
         success_delta = 1 if success else 0
         error_delta = 0 if success else 1
@@ -693,9 +833,9 @@ class WorkflowStore:
                 updated_at,
             ),
         )
-        await db.commit()
 
     @classmethod
+    @_write_operation
     async def put_config(
         cls,
         workflow_id: str,
@@ -703,7 +843,7 @@ class WorkflowStore:
         *,
         kind: Optional[str] = None,
     ) -> None:
-        db = await cls._db()
+        db = await cls._completion_db()
         config_kind = kind or str(config.get("kind") or "workflow.integration-config")
         version = cls._as_int(config.get("version"))
         await db.execute(
@@ -714,7 +854,6 @@ class WorkflowStore:
             """,
             (workflow_id, config_kind, version, cls._json_dumps(config), cls._now_ms()),
         )
-        await db.commit()
 
     @classmethod
     async def get_config(
@@ -728,7 +867,8 @@ class WorkflowStore:
             "SELECT config FROM workflow_configs WHERE workflow_id = ? AND kind = ?",
             (workflow_id, kind),
         ) as cur:
-            row = await cur.fetchone()
+            rows = await cur.fetchall()
+            row = rows[0] if rows else None
         if not row:
             return None
         value = cls._json_loads(row["config"], None)
@@ -750,8 +890,9 @@ class WorkflowStore:
         return items
 
     @classmethod
+    @_write_operation
     async def delete_config(cls, workflow_id: str, *, kind: Optional[str] = None) -> int:
-        db = await cls._db()
+        db = await cls._completion_db()
         if kind:
             cur = await db.execute(
                 "DELETE FROM workflow_configs WHERE workflow_id = ? AND kind = ?",
@@ -759,12 +900,12 @@ class WorkflowStore:
             )
         else:
             cur = await db.execute("DELETE FROM workflow_configs WHERE workflow_id = ?", (workflow_id,))
-        await db.commit()
         return cur.rowcount
 
     @classmethod
+    @_write_operation
     async def kv_put(cls, key: str, value: Any, value_type: str = _JSON_TYPE) -> None:
-        db = await cls._db()
+        db = await cls._completion_db()
         now = cls._now_iso()
         await db.execute(
             """
@@ -775,22 +916,22 @@ class WorkflowStore:
             """,
             (key, cls._json_dumps(value), value_type, key, now, now),
         )
-        await db.commit()
 
     @classmethod
     async def kv_get(cls, key: str) -> Optional[Any]:
         db = await cls._db()
         async with db.execute("SELECT value FROM workflow_kv WHERE key = ?", (key,)) as cur:
-            row = await cur.fetchone()
+            rows = await cur.fetchall()
+            row = rows[0] if rows else None
         if not row:
             return None
         return cls._json_loads(row["value"], None)
 
     @classmethod
+    @_write_operation
     async def kv_remove(cls, key: str) -> bool:
-        db = await cls._db()
+        db = await cls._completion_db()
         cur = await db.execute("DELETE FROM workflow_kv WHERE key = ?", (key,))
-        await db.commit()
         return cur.rowcount > 0
 
     @classmethod
@@ -821,13 +962,13 @@ class WorkflowStore:
         return entries
 
     @classmethod
+    @_write_operation
     async def kv_clear(cls, prefix: str) -> int:
-        db = await cls._db()
+        db = await cls._completion_db()
         cur = await db.execute(
             "DELETE FROM workflow_kv WHERE key LIKE ? ESCAPE '\\'",
             (Storage._like_prefix_pattern(prefix),),
         )
-        await db.commit()
         return cur.rowcount
 
 
