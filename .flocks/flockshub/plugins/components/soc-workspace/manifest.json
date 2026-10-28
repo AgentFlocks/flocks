@@ -6,7 +6,7 @@
   "nameCn": "告警运营套件",
   "description": "Installer for Flocks alert operations: pages, tools, denoise workflow, and triage workflow.",
   "descriptionCn": "Flocks 告警运营套件安装器：包含页面、工具、降噪工作流和研判工作流。",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "Flocks Team",
   "license": "MIT",
   "homepage": "",

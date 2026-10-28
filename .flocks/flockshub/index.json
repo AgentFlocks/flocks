@@ -14689,7 +14689,7 @@
       "name": "SOC Workspace WebUI",
       "description": "SOC workspace pages for posture, overview, and alert investigation.",
       "descriptionCn": "SOC 工作区页面，包含态势、SOC 总览和告警调查。",
-      "version": "1.1.11",
+      "version": "1.1.12",
       "category": "workflow-automation",
       "tags": [
         "siem",
@@ -14780,7 +14780,7 @@
       "nameCn": "告警运营套件",
       "description": "Installer for Flocks alert operations: pages, tools, denoise workflow, and triage workflow.",
       "descriptionCn": "Flocks 告警运营套件安装器：包含页面、工具、降噪工作流和研判工作流。",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "category": "workflow-automation",
       "tags": [
         "siem",
