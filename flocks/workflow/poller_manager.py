@@ -26,6 +26,7 @@ from flocks.workflow.execution_store import (
 from flocks.workflow.execution_plan import build_workflow_execution_plan
 from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
+from flocks.workflow.health_notifications import WorkflowHealthNotifier
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
 from flocks.workflow.store import WorkflowStore
 from flocks.workflow.tool_context import (
@@ -74,6 +75,7 @@ class WorkflowPollerManager:
         self._run_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._run_cancel_events: dict[str, set[threading.Event]] = {}
         self._status: dict[str, Dict[str, Any]] = {}
+        self._health_notifier = WorkflowHealthNotifier()
 
     @staticmethod
     def _config_key(workflow_id: str) -> str:
@@ -196,6 +198,9 @@ class WorkflowPollerManager:
         status = dict(self._base_status(workflow_id))
         status.update(self._status.get(workflow_id) or {})
         status["activeRuns"] = self._cleanup_done_runs(workflow_id)
+        notification = self._health_notifier.get_status(workflow_id)
+        if notification is not None:
+            status["healthNotification"] = notification
         if workflow_id not in self._tasks and status.get("state") == "running":
             status["state"] = "stopped"
             status["nextRunAt"] = None
@@ -466,13 +471,10 @@ class WorkflowPollerManager:
         cancel_event = threading.Event()
         cancel_events = self._run_cancel_events.setdefault(workflow_id, set())
         cancel_events.add(cancel_event)
-        inputs = self._build_inputs(config)
-        trigger_id = inputs["_flocks"]["trigger"]["id"]
-        exec_data = await create_execution_record(
-            workflow_id,
-            input_params=inputs,
-        )
-        exec_id = str(exec_data["id"])
+        inputs: Dict[str, Any] = {}
+        trigger_id = config.get("triggerId") or DEFAULT_SCHEDULE_TRIGGER_ID
+        exec_data: Dict[str, Any] = {}
+        exec_id = ""
         step_recorder = ExecutionStepRecorder()
         current = self._status.get(workflow_id) or self._base_status(workflow_id)
         current["lastRunAt"] = started_at_ms
@@ -480,11 +482,18 @@ class WorkflowPollerManager:
         self._status[workflow_id] = current
 
         tool_context = None
+        failure_stage = "execution_record_create"
         try:
+            inputs = self._build_inputs(config)
+            trigger_id = inputs["_flocks"]["trigger"]["id"]
+            exec_data = await create_execution_record(workflow_id, input_params=inputs)
+            exec_id = str(exec_data["id"])
+            failure_stage = "tool_context"
             tool_context = await build_workflow_tool_context(
                 workflow_id=workflow_id,
                 action_name="trigger:schedule",
             )
+            failure_stage = "execution"
             result = await asyncio.to_thread(
                 run_workflow,
                 workflow=workflow_json,
@@ -539,6 +548,14 @@ class WorkflowPollerManager:
                 current["state"] = "running"
                 current["error"] = None
             self._status[workflow_id] = current
+        except asyncio.CancelledError:
+            cancel_event.set()
+            exec_data.update(status="cancelled", currentPhase="cancelled", finishedAt=_now_ms(),
+                             errorMessage="Run cancelled", duration=max(0.0, time.time() - started_at_s))
+            current = self._status.get(workflow_id) or self._base_status(workflow_id)
+            current.update(lastStatus="cancelled", lastError="Run cancelled")
+            self._status[workflow_id] = current
+            raise
         except Exception as exc:
             duration_ms = _now_ms() - started_at_ms
             duration_s = max(0.0, time.time() - started_at_s)
@@ -565,6 +582,7 @@ class WorkflowPollerManager:
             current["lastDurationMs"] = duration_ms
             current["lastStatus"] = status_value
             current["lastError"] = str(exc)
+            current["lastFailureStage"] = failure_stage
             current["activeRuns"] = self._cleanup_done_runs(workflow_id)
             if workflow_id in self._tasks and current.get("state") != "failed":
                 current["state"] = "running"
@@ -573,28 +591,51 @@ class WorkflowPollerManager:
             log.warning("poller.run_failed", {"workflow_id": workflow_id, "error": str(exc)})
         finally:
             steps = step_recorder.take_steps()
-            await cleanup_workflow_tool_context(tool_context)
+            persistence_error = None
             try:
-                await record_execution_result(
-                    workflow_id,
-                    exec_id,
-                    exec_data,
-                    steps=steps,
-                )
-            except Exception as exc:
-                log.warning(
-                    "poller.exec_record_failed",
-                    {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
-                )
-            cancel_events.discard(cancel_event)
-            if not cancel_events:
-                self._run_cancel_events.pop(workflow_id, None)
-            current = self._status.get(workflow_id) or self._base_status(workflow_id)
-            current["activeRuns"] = self._cleanup_done_runs(workflow_id)
-            if workflow_id not in self._tasks and current.get("state") == "running":
-                current["state"] = "stopped"
-                current["nextRunAt"] = None
-            self._status[workflow_id] = current
+                if exec_id:
+                    try:
+                        await record_execution_result(workflow_id, exec_id, exec_data, steps=steps)
+                    except Exception as exc:
+                        persistence_error = str(exc)
+                        current = self._status.get(workflow_id) or self._base_status(workflow_id)
+                        current["lastPersistenceError"] = persistence_error
+                        self._status[workflow_id] = current
+                        log.warning("poller.exec_record_failed", {
+                            "workflow_id": workflow_id, "exec_id": exec_id, "error": persistence_error,
+                        })
+                current = self._status.get(workflow_id) or self._base_status(workflow_id)
+                if not cancel_event.is_set():
+                    original_error = str(exec_data.get("errorMessage") or "")
+                    notice_status = "persistence_error" if persistence_error else str(exec_data.get("status") or "error")
+                    notice_error = (original_error + ("; " if original_error else "")
+                                    + f"Execution record persistence failed: {persistence_error}") if persistence_error else original_error
+                    try:
+                        await self._health_notifier.notify(
+                            workflow_id, config, status=notice_status, error=notice_error,
+                            stage="execution_record_persist" if persistence_error else failure_stage,
+                            tool_context=tool_context, cancelled=cancel_event.is_set(),
+                        )
+                    except Exception as exc:
+                        # Preserve the original execution error and make any
+                        # secondary notification failure independently visible.
+                        current["healthNotification"] = {"status": "failed", "error": str(exc)}
+                        log.warning("poller.health_notification_failed", {"workflow_id": workflow_id, "error": str(exc)})
+            finally:
+                try:
+                    await cleanup_workflow_tool_context(tool_context)
+                except Exception as exc:
+                    log.warning("poller.tool_context_cleanup_failed", {"workflow_id": workflow_id, "error": str(exc)})
+                finally:
+                    cancel_events.discard(cancel_event)
+                    if not cancel_events:
+                        self._run_cancel_events.pop(workflow_id, None)
+                    current = self._status.get(workflow_id) or self._base_status(workflow_id)
+                    current["activeRuns"] = self._cleanup_done_runs(workflow_id)
+                    if workflow_id not in self._tasks and current.get("state") == "running":
+                        current["state"] = "stopped"
+                        current["nextRunAt"] = None
+                    self._status[workflow_id] = current
 
         return self.get_status(workflow_id)
 
