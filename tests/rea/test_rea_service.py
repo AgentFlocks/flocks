@@ -395,11 +395,11 @@ async def test_calls_of_reas_tools_first_follow_the_registration(monkeypatch):
         ctx = context(name)
         await guard.tool_before(ctx)
         assert "execution" not in ctx.output
-    assert calls == [True]  # only the service's own tools, jobs refreshed first
+    assert calls == [True]  # only the service's own tools
 
     # Not knowing whether REA is still there, or while it is being uninstalled: the call is stopped.
     async def unreadable(*, strict=False):
-        raise ConnectionError("database went away")
+        raise OSError("flocks.json could not be read")
 
     monkeypatch.setattr(service, "sync_with_host", unreadable)
     ctx = context("rea_open_binary")

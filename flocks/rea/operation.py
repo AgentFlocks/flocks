@@ -5,9 +5,7 @@ Both change what every process on the host shares: flocks.json, the skill,
 ``data/rea/operation.lock`` for its whole run, and the operating system lets
 go of it only when the job releases it or its process ends: no other job takes
 over while work this one started (a file step in a thread) still runs, and
-nothing expires under a slow job. Only the job holding the lock writes its
-state to PostgreSQL, for the status the other processes report; a running
-job there is alive while the lock names it.
+nothing expires under a slow job.
 """
 
 from __future__ import annotations
@@ -17,8 +15,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from flocks.rea import runtime
-from flocks.storage.storage import Storage
-from flocks.task.node import current_node_id
 
 try:
     import fcntl
@@ -31,10 +27,6 @@ _fallback_holder: Optional[str] = None
 
 def lock_path() -> Path:
     return runtime.state_dir() / "operation.lock"
-
-
-def _snapshot_key(kind: str) -> str:
-    return f"rea:job:{kind}:{current_node_id()}"
 
 
 class OperationLock:
@@ -106,21 +98,3 @@ def holder() -> Optional[str]:
             return handle.read().strip()
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return None
-
-
-async def publish(kind: str, job: dict[str, Any]) -> None:
-    """Keep the latest state of the job holding the lock, for the other processes."""
-
-    await Storage.set(_snapshot_key(kind), {"job": job}, "json")
-
-
-async def read(kind: str) -> Optional[tuple[dict[str, Any], bool]]:
-    """The latest ``kind`` job of this host, and whether it still holds the lock."""
-
-    value = await Storage.get(_snapshot_key(kind))
-    job = value.get("job") if isinstance(value, dict) else None
-    if not isinstance(job, dict) or not isinstance(job.get("id"), str):
-        return None
-    current = holder()
-    # "": held by a job that has not named itself yet (it publishes only after naming).
-    return job, current == job["id"] or current == ""

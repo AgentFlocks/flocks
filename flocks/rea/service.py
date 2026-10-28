@@ -290,19 +290,11 @@ async def reconcile_service() -> None:
 
 
 async def sync_with_host(*, strict: bool = False) -> None:
-    """Catch up with what other Flocks processes on this host did to REA: its jobs and its service.
+    """Catch up with what other Flocks processes on this host did to REA's service (flocks.json).
 
     ``strict`` raises when that cannot be read, for callers that must not go on without it.
     """
 
-    from flocks.rea.installer import refresh_jobs
-
-    try:
-        await refresh_jobs()
-    except Exception as exc:
-        if strict:
-            raise
-        log.warning("rea.sync.jobs_failed", {"error": str(exc)})
     try:
         await reconcile_service()
     except Exception as exc:

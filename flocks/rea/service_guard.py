@@ -4,8 +4,8 @@ An uninstall (or a new registration) writes flocks.json for the whole host but
 removes or reconnects the ``rea`` service only in the process that ran it. A
 conversation in another process would otherwise keep analysing with the old
 service; this brings that process in line first, so after an uninstall the
-call fails instead. A call is also stopped while an uninstall runs, or when
-the state cannot be read.
+call fails instead. A call is also stopped while an uninstall runs here, or
+when the registration cannot be read.
 """
 
 from __future__ import annotations
@@ -43,7 +43,6 @@ class ReaServiceGuard(HookBase):
         from flocks.rea.uninstaller import ReaUninstaller
 
         try:
-            # The jobs first: a cached "still running" would skip following the service.
             await service.sync_with_host(strict=True)
         except Exception as exc:
             log.warning("rea.service_guard.sync_failed", {"error": str(exc)})

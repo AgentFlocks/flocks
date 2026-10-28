@@ -37,7 +37,6 @@ log = Log.create(service="rea.installer")
 InstallStage = Literal["check", "components", "register", "validate", "done"]
 STAGE_PROGRESS: dict[str, int] = {"check": 0, "components": 10, "register": 55, "validate": 65, "done": 100}
 _ERROR_DETAIL_MAX_CHARS = 400
-_SHARED_POLL_SECONDS = 1.0
 
 
 class ReaInstallJob(BaseModel):
@@ -196,24 +195,12 @@ def _build_record(
     }
 
 
-async def refresh_jobs() -> None:
-    """Pick up the install and uninstall other Flocks processes on this host run or ran."""
-
-    from flocks.rea.uninstaller import ReaUninstaller
-
-    await ReaInstaller.refresh_shared()
-    await ReaUninstaller.refresh_shared()
-
-
 class ReaInstaller:
-    """The REA install job of this host: run here, or read from the process running it."""
+    """Process-wide owner of the single REA install job; it holds the host's operation lock while it runs."""
 
     _job: Optional[ReaInstallJob] = None
     _task: Optional[asyncio.Task] = None
     _lock: Optional[operation.OperationLock] = None
-    _publish_lock: Optional[asyncio.Lock] = None
-    # A newer job another process published (see refresh_shared).
-    _shared: Optional[ReaInstallJob] = None
 
     @classmethod
     def current_job(cls) -> Optional[ReaInstallJob]:
@@ -224,33 +211,7 @@ class ReaInstaller:
                 "status": "failed", "errorCode": "interrupted", "finishedAt": job.finishedAt or _now_ms(),
             })
             cls._job = job
-        shared = cls._shared
-        if shared is not None and (job is None or shared.startedAt > job.startedAt):
-            return shared
         return job
-
-    @classmethod
-    async def refresh_shared(cls) -> None:
-        """Read the install another process on this host published; one no longer holding the lock was interrupted."""
-
-        found = await operation.read("install")
-        if found is None:
-            cls._shared = None
-            return
-        data, alive = found
-        try:
-            job = ReaInstallJob.model_validate(data)
-        except ValueError:
-            cls._shared = None
-            return
-        if cls._job is not None and cls._job.id == job.id:
-            cls._shared = None  # this process runs it
-            return
-        if job.status == "running" and not alive:
-            job = job.model_copy(update={
-                "status": "failed", "errorCode": "interrupted", "finishedAt": job.finishedAt or _now_ms(),
-            })
-        cls._shared = job
 
     @classmethod
     def is_running(cls) -> bool:
@@ -265,7 +226,7 @@ class ReaInstaller:
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> ReaInstallJob:
-        """Start an install, or return the job that is already running (here or in another process).
+        """Start an install, or return the job that is already running.
 
         Raises :class:`ReaInstallError` (``uninstalling``) while an uninstall runs,
         ``busy`` while another job on this host holds the operation lock.
@@ -274,7 +235,6 @@ class ReaInstaller:
         from flocks.rea.uninstaller import ReaUninstaller
 
         refuse_when_managed()
-        await refresh_jobs()
         current = cls.current_job()
         if current is not None and current.status == "running":
             return current
@@ -283,13 +243,6 @@ class ReaInstaller:
         job_id = f"reainst_{uuid.uuid4().hex[:12]}"
         lock = operation.acquire(job_id)
         if lock is None:
-            # Another process on this host started a job meanwhile.
-            await refresh_jobs()
-            current = cls.current_job()
-            if current is not None and current.status == "running":
-                return current
-            if ReaUninstaller.is_running():
-                raise ReaInstallError("uninstalling", "REA is being uninstalled")
             raise ReaInstallError("busy", "another Flocks process on this host is changing REA")
         job = ReaInstallJob(
             id=job_id,
@@ -302,7 +255,6 @@ class ReaInstaller:
             sessionId=session_id,
         )
         cls._job = job
-        cls._shared = None
         cls._lock = lock
         cls._task = None
         try:
@@ -340,11 +292,6 @@ class ReaInstaller:
                 if current is not None and current.cancelling():
                     raise  # the waiter itself is being cancelled
                 # The job was stopped (e.g. by an uninstall); its state says so.
-        else:
-            # A job another process runs: follow what it publishes.
-            while (job := cls.current_job()) is not None and job.status == "running" and job is cls._shared:
-                await asyncio.sleep(_SHARED_POLL_SECONDS)
-                await cls.refresh_shared()
         return cls.current_job()
 
     @classmethod
@@ -364,8 +311,6 @@ class ReaInstaller:
         cls._job = None
         cls._task = None
         cls._lock = None
-        cls._publish_lock = None
-        cls._shared = None
 
     @classmethod
     async def _set(cls, job_id: str, **changes) -> None:
@@ -463,20 +408,9 @@ class ReaInstaller:
 
     @classmethod
     async def _publish(cls) -> None:
-        if cls._job is None:
+        job = cls._job
+        if job is None:
             return
-        if cls._publish_lock is None:
-            cls._publish_lock = asyncio.Lock()
-        # One at a time, each the latest state: an earlier write never lands last. Only
-        # while this job holds the lock, so a job that no longer does never writes over another.
-        async with cls._publish_lock:
-            job = cls._job
-            lock = cls._lock
-            if lock is not None and lock.held and lock.job_id == job.id:
-                try:
-                    await operation.publish("install", job.model_dump())
-                except Exception as exc:
-                    log.warning("rea.install.share_failed", {"error": str(exc)})
         try:
             from flocks.server.routes.event import publish_event
 

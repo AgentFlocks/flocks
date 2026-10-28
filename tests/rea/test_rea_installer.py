@@ -367,7 +367,6 @@ async def test_the_install_outlives_the_conversation_that_started_it(ready_host,
 @pytest.mark.asyncio
 async def test_one_rea_job_at_a_time_across_the_processes_of_a_host(ready_host):
     from flocks.rea import operation
-    from flocks.rea.installer import ReaInstallJob
 
     other = operation.acquire("reainst_other")  # another Flocks process on this host runs a job
     assert other is not None
@@ -376,19 +375,14 @@ async def test_one_rea_job_at_a_time_across_the_processes_of_a_host(ready_host):
             await ReaInstaller.start("light", user_id="admin-1", session_id="ses_x")
         assert refused.value.code == "busy"
         assert ready_host["mcp"].connects == []  # nothing of REA was touched
-
-        # Once it published its install, every process reports and follows that one.
-        running = ReaInstallJob(id="reainst_other", status="running", stage="components", progress=10, startedAt=1)
-        await operation.publish("install", running.model_dump())
-        assert (await ReaInstaller.start("light", user_id="admin-1", session_id="ses_x")).id == "reainst_other"
-        assert service.install_state() == "installing"
+        assert ReaInstaller.current_job() is None
     finally:
         other.release()
 
-    # Its process went away without finishing it: the job reads as interrupted.
-    await ReaInstaller.refresh_shared()
-    job = ReaInstaller.current_job()
-    assert (job.id, job.status, job.errorCode) == ("reainst_other", "failed", "interrupted")
+    # Once that job ended, an install starts here.
+    job = await ReaInstaller.start("light", user_id="admin-1", session_id="ses_x")
+    assert operation.holder() == job.id
+    assert (await ReaInstaller.wait()).status == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -432,15 +426,17 @@ async def test_the_install_holds_the_hosts_rea_lock_until_its_file_work_ended(re
 async def test_an_install_stopped_before_its_job_runs_lets_go_of_the_lock(ready_host, monkeypatch):
     from flocks.rea import operation
 
+    import flocks.server.routes.event as event_routes
+
     # Stopped while the job is being announced (the conversation was stopped).
     entered = asyncio.Event()
-    real_publish = operation.publish
+    real_publish = event_routes.publish_event
 
-    async def hang(kind, job):
+    async def hang(event, payload):
         entered.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(operation, "publish", hang)
+    monkeypatch.setattr(event_routes, "publish_event", hang)
     start = asyncio.create_task(ReaInstaller.start("light", user_id="admin-1", session_id="ses_x"))
     await entered.wait()
     assert operation.holder() is not None
@@ -448,7 +444,7 @@ async def test_an_install_stopped_before_its_job_runs_lets_go_of_the_lock(ready_
     with pytest.raises(asyncio.CancelledError):
         await start
     assert operation.holder() is None
-    monkeypatch.setattr(operation, "publish", real_publish)
+    monkeypatch.setattr(event_routes, "publish_event", real_publish)
 
     # Cancelled after the job task was created but before it ever ran.
     job = await ReaInstaller.start("light", user_id="admin-1", session_id="ses_x")

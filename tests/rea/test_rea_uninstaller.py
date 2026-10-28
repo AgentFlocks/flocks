@@ -490,28 +490,6 @@ async def test_an_uninstall_does_not_start_while_another_process_changes_rea(ins
 
 
 @pytest.mark.asyncio
-async def test_an_install_another_process_runs_is_not_taken_for_stopped(installed, monkeypatch):
-    from flocks.rea import operation
-    from flocks.rea.installer import ReaInstallJob
-
-    monkeypatch.setattr(uninstaller, "_STOP_WAIT_SECONDS", 0.3)
-    other = operation.acquire("reainst_other")
-    running = ReaInstallJob(id="reainst_other", status="running", stage="components", progress=10, startedAt=1)
-    await operation.publish("install", running.model_dump())
-    try:
-        tasks = await uninstaller.related_tasks()
-        assert [task["id"] for task in tasks] == ["reainst_other"]
-        # This process cannot stop it, even when the user agreed: refused at once.
-        with pytest.raises(uninstaller.OperationRunning):
-            await ReaUninstaller.start(stop_tasks=True)
-        assert (await operation.read("install"))[0]["id"] == "reainst_other"
-        assert await operation.read("uninstall") is None
-    finally:
-        other.release()
-    assert runtime.installed_skill_dir().exists() and installed["mcp"].removed == []
-
-
-@pytest.mark.asyncio
 async def test_the_uninstall_holds_the_hosts_rea_lock_while_it_removes(installed, no_tasks, monkeypatch):
     from flocks.mcp import MCP
     from flocks.rea import operation
@@ -524,13 +502,10 @@ async def test_the_uninstall_holds_the_hosts_rea_lock_while_it_removes(installed
         return await remove(name)
 
     monkeypatch.setattr(MCP, "remove", remove_and_check)
-    started = await ReaUninstaller.start(stop_tasks=False)
+    await ReaUninstaller.start(stop_tasks=False)
     job = await ReaUninstaller.wait()
     assert job.status == "succeeded" and held == [None]
     assert operation.holder() is None
-    # Published while it held the lock: other processes read how it ended.
-    assert (await operation.read("uninstall"))[0]["status"] == "succeeded"
-    assert (await operation.read("uninstall"))[0]["id"] == started.id
 
 
 @pytest.mark.asyncio
