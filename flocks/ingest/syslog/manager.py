@@ -160,6 +160,17 @@ class SyslogManager:
         # save endpoint can report bind failures synchronously.
         self._listener_ready: dict[str, asyncio.Event] = {}
         self._dispatcher = EventDispatcher()
+        # Restart and stop of one workflow happen one at a time: two of them
+        # interleaving (two saves of its config, say) would leave a listener
+        # that nothing tracks any more.
+        self._workflow_locks: dict[str, asyncio.Lock] = {}
+        self._stopped = False
+
+    def _lock_for(self, workflow_id: str) -> asyncio.Lock:
+        lock = self._workflow_locks.get(workflow_id)
+        if lock is None:
+            lock = self._workflow_locks[workflow_id] = asyncio.Lock()
+        return lock
 
     @staticmethod
     def _config_key(workflow_id: str) -> str:
@@ -197,6 +208,7 @@ class SyslogManager:
         return self._default_trigger_from_config(data)
 
     async def start_all(self) -> None:
+        self._stopped = False
         try:
             configs = await WorkflowStore.list_configs(kind="workflow_syslog_config")
         except Exception as exc:
@@ -220,7 +232,12 @@ class SyslogManager:
                     )
 
     async def stop_all(self) -> None:
-        for workflow_id in list(self._tasks.keys()):
+        # A restart still under way (reading its config, say) has registered
+        # nothing yet: every workflow that ever took its lock is visited, so
+        # stopping waits for that restart, which then sees ``_stopped`` and
+        # starts nothing (see _restart_locked).
+        self._stopped = True
+        for workflow_id in sorted(set(self._tasks) | set(self._workflow_locks)):
             await self.stop_workflow(workflow_id)
 
     def get_listener_status(self, workflow_id: str) -> Dict[str, Any]:
@@ -277,6 +294,10 @@ class SyslogManager:
         return active
 
     async def stop_workflow(self, workflow_id: str) -> None:
+        async with self._lock_for(workflow_id):
+            await self._stop_workflow_locked(workflow_id)
+
+    async def _stop_workflow_locked(self, workflow_id: str) -> None:
         cancel_event = self._generation_cancel_events.pop(workflow_id, None)
         if cancel_event is not None:
             cancel_event.set()
@@ -316,7 +337,11 @@ class SyslogManager:
         ``save_syslog_config`` route) can therefore surface bind errors to the
         user instead of silently leaving the listener in a failed state.
         """
-        await self.stop_workflow(workflow_id)
+        async with self._lock_for(workflow_id):
+            return await self._restart_locked(workflow_id, startup=startup)
+
+    async def _restart_locked(self, workflow_id: str, *, startup: bool = False) -> Dict[str, Any]:
+        await self._stop_workflow_locked(workflow_id)
         if self._active_draining_workers(workflow_id):
             error = "previous_workers_still_draining"
             self._listener_status[workflow_id] = {"state": "failed", "error": error}
@@ -326,6 +351,10 @@ class SyslogManager:
         except Exception as exc:
             log.warning("syslog.restart_read_failed", {"workflow_id": workflow_id, "error": str(exc)})
             return {"state": "failed", "error": str(exc)}
+        if self._stopped:
+            # The manager was stopped while the config was read.
+            self._listener_status[workflow_id] = {"state": "stopped", "error": None}
+            return {"state": "stopped", "error": None}
         if not isinstance(data, dict) or not data.get("enabled"):
             self._listener_status[workflow_id] = {"state": "stopped", "error": None}
             return {"state": "stopped", "error": None}
