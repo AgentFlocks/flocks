@@ -972,7 +972,7 @@ async def write_memory_file(request: Request, body: FileWriteRequest):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Memory file is read-only",
         )
-    from flocks.memory.sync.mirror import reconcile_note
+    from flocks.memory.sync.mirror import MemoryNotShared, reconcile_note
 
     mirrored = target.suffix.lower() == ".md"
     if mirrored:
@@ -987,10 +987,7 @@ async def write_memory_file(request: Request, body: FileWriteRequest):
     if mirrored and not await reconcile_note(mgr.get_memory_dir(), target):
         # Saved, but the store did not take it: say so rather than report a
         # write that worked.
-        raise HTTPException(
-            status_code=503,
-            detail="Saved on this server only; the shared memory store is unavailable. It is stored once it is back.",
-        )
+        raise HTTPException(status_code=503, detail=MemoryNotShared.SAVED_UNSETTLED)
     log.info("workspace.memory_file.written", {"path": body.path, "size": len(body.content)})
     return {"path": body.path, "written": True}
 

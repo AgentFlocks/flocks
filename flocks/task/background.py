@@ -825,17 +825,17 @@ def get_background_manager() -> BackgroundManager:
 
 
 def all_background_managers() -> List[BackgroundManager]:
-    """Managers of every instance.
+    """Managers of every project directory (``Instance``).
 
-    A task lives in the manager of the instance that launched it: scheduled
-    tasks run outside any request's instance, so a request only reaching its
-    own manager would not see them.
+    A task lives in the manager of the project directory that launched it:
+    scheduled tasks run outside any request's directory, so a request only
+    reaching its own manager would not see them.
     """
     return _manager_state.all_values()
 
 
 def cancel_background_runs_for_session(session_id: str) -> int:
-    """Cancel the background runs of a session, whichever instance started them."""
+    """Cancel the background runs of a session, whichever project directory started them."""
     return sum(manager.cancel_by_session_id(session_id) for manager in all_background_managers())
 
 

@@ -122,7 +122,7 @@ class SessionStatus:
             return found
         # A loop runs under its session's project directory while HTTP
         # callers read from the request context; session IDs are global, so
-        # fall back to every instance's state before reporting idle.
+        # fall back to every project directory's state before reporting idle.
         for _inst_id, statuses in list(cls._state.items()):
             if session_id in statuses:
                 return statuses[session_id]
@@ -168,11 +168,11 @@ class SessionStatus:
         recorded in several.
 
         Returns:
-            Dictionary mapping session IDs to their status (across instances)
+            Dictionary mapping session IDs to their status
         """
         merged: Dict[str, SessionStatusInfo] = {}
-        for _inst_id, statuses in list(cls._state.items()):
-            merged.update(statuses)
+        for state in list(cls._state.values()):
+            merged.update(state)
         merged.update(cls._get_state())
         return merged
     

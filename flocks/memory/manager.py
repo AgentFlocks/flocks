@@ -637,7 +637,7 @@ class MemoryManager:
             # up to date would end up beside the note as a conflict copy:
             # nothing is written then.
             if not await reconcile_note(memory_root, file_path, attempts=3):
-                raise MemoryNotShared(f"{path}: the shared memory store is unavailable; nothing was written")
+                raise MemoryNotShared(path, written=False)
             if append:
                 needs_separator = file_path.exists() and file_path.stat().st_size > 0
                 with open(file_path, "a", encoding="utf-8") as f:
@@ -650,7 +650,7 @@ class MemoryManager:
             if not await reconcile_note(memory_root, file_path, attempts=3):
                 # Kept, and stored once the store takes it: not reported as a
                 # write that worked.
-                raise MemoryNotShared(f"{path} was saved on this instance only; the shared memory store did not take it")
+                raise MemoryNotShared(path, written=True)
         log.info("manager.write", {"path": path, "append": append, "length": len(content)})
         
         return path

@@ -39,7 +39,21 @@ def manifest_path(root: Path) -> Path:
 
 
 class MemoryNotShared(RuntimeError):
-    """A memory note could not be settled with the stored notes."""
+    """A memory note could not be settled with the stored notes.
+
+    ``written`` says whether the note was written all the same (it is settled
+    later).  The backend that keeps the stored notes words the message.
+    """
+
+    #: What a save through the API is told when the note was written but not settled.
+    SAVED_UNSETTLED = "Saved; the stored notes did not take it yet."
+
+    def __init__(self, path: str, *, written: bool) -> None:
+        self.path, self.written = path, written
+        super().__init__(
+            f"{path} was saved; the stored notes did not take it yet" if written
+            else f"{path}: the stored notes could not be read; nothing was written"
+        )
 
 
 async def reconcile(root: Path, *, only: Optional[Iterable[str]] = None) -> ReconcileStats:

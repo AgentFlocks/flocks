@@ -113,7 +113,7 @@ class DailyMemory:
         # to date, the text would end up beside the note as a conflict copy:
         # nothing is written then.
         if not await reconcile_note(self.memory_dir, file_path, attempts=3):
-            raise MemoryNotShared(f"{rel_path}: the shared memory store is unavailable; nothing was written")
+            raise MemoryNotShared(rel_path, written=False)
         
         try:
             if append and file_path.exists():
@@ -134,7 +134,7 @@ class DailyMemory:
             if not await reconcile_note(self.memory_dir, file_path, attempts=3):
                 # Kept, and stored once the store takes it: not reported as a
                 # write that worked.
-                raise MemoryNotShared(f"{rel_path} was saved on this instance only; the shared memory store did not take it")
+                raise MemoryNotShared(rel_path, written=True)
             log.info("daily.write", {
                 "path": rel_path,
                 "length": len(content),

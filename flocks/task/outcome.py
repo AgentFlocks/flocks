@@ -137,8 +137,8 @@ async def run_outcome(execution) -> RunOutcome:
 
         started = TaskExecutor.workflow_started(execution)
         if started is None:
-            # Not run here (recovered from another node): one that started
-            # may have got as far as the workflow.
+            # Not run by this process (recovered after a restart): one that
+            # started may have got as far as the workflow.
             started = execution.started_at is not None
         if started:
             return RunOutcome(NEEDS_VERIFICATION, (f"workflow:{execution.workflow_id}",))

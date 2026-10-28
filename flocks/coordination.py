@@ -1,14 +1,14 @@
 """
-What processes sharing one database have to agree on, answered for one process.
+Questions whose answer depends on the database backend, answered here for the runtime's own.
 
 The runtime keeps its data in SQLite and runs in one process, so each question
-here has the single-process answer: no other process is running a session, a
-shared value is simply the stored one, and a WebUI page or a workflow gets no
-direct database handle.
+here has that answer: no other process is running a session, a shared value is
+simply the stored one, and a WebUI page or a workflow gets no direct database
+handle.
 
-A database backend that lets several processes share the data replaces this
-module as a whole (see ``flocks.db_backend``) with answers taken from that
-database.  Callers ask here instead of reaching into the database.
+Another database backend replaces this module as a whole (see
+``flocks.db_backend``) with its own answers.  Callers ask here instead of
+reaching into the database.
 """
 
 from __future__ import annotations
