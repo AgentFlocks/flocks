@@ -117,26 +117,27 @@ async def list_session_callable_tool_infos(
     step: int = 0,
     event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
 ) -> CallableSchemaResult:
-    callable_tool_names = await get_session_callable_tools(session_id)
     declared_names = set(declared_tool_names or [])
     always_load_names = set()
-    if not strict_declared_tools:
+    if strict_declared_tools:
+        # The executing agent owns this turn's scope. Session discovery state
+        # may belong to Rex or a different agent and must not limit or expand it.
+        callable_tool_names = set(declared_names)
+    else:
+        callable_tool_names = await get_session_callable_tools(session_id)
         always_load_names = (
             get_always_load_tool_names()
             | await _resolve_dynamic_always_load_tool_names()
         )
 
-    if not callable_tool_names:
-        base_tools = list(declared_names)
-        callable_tool_names = await initialize_session_callable_tools(
-            session_id,
-            base_tools,
-            always_load_tool_names=always_load_names,
-        )
+        if not callable_tool_names:
+            callable_tool_names = await initialize_session_callable_tools(
+                session_id,
+                list(declared_names),
+                always_load_tool_names=always_load_names,
+            )
 
     effective_callable_names = set(callable_tool_names) | always_load_names
-    if strict_declared_tools:
-        effective_callable_names.intersection_update(declared_names)
     tool_infos, enabled_count = resolve_callable_tool_infos(effective_callable_names)
 
     projection_payload: Dict[str, Any] = {

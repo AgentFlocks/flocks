@@ -682,7 +682,7 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_runner_hides_always_load_question_when_permission_denied(monkeypatch) -> None:
+async def test_runner_hides_declared_question_when_permission_denied(monkeypatch) -> None:
     from flocks.permission.helpers import from_config
     from flocks.session.runner import SessionRunner
 
@@ -691,7 +691,7 @@ async def test_runner_hides_always_load_question_when_permission_denied(monkeypa
     runner._step = 1
     runner.callbacks = SimpleNamespace(event_publish_callback=None)
     runner._turn_permission_ruleset = from_config({"question": "deny"})
-    agent = SimpleNamespace(name="custom-agent", tools=["request_ledger"])
+    agent = SimpleNamespace(name="custom-agent", tools=["question", "tool_search", "request_ledger"])
 
     result = SimpleNamespace(
         tool_infos=[
@@ -728,7 +728,7 @@ async def test_runner_hides_always_load_question_when_permission_denied(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_runner_keeps_always_load_question_without_permission_denial(monkeypatch) -> None:
+async def test_runner_keeps_declared_question_without_permission_denial(monkeypatch) -> None:
     from flocks.session.runner import SessionRunner
 
     runner = object.__new__(SessionRunner)
@@ -736,7 +736,7 @@ async def test_runner_keeps_always_load_question_without_permission_denial(monke
     runner._step = 1
     runner.callbacks = SimpleNamespace(event_publish_callback=None)
     runner._turn_permission_ruleset = []
-    agent = SimpleNamespace(name="custom-agent", tools=["question", "request_ledger"])
+    agent = SimpleNamespace(name="custom-agent", tools=["question", "tool_search", "request_ledger"])
 
     result = SimpleNamespace(
         tool_infos=[
@@ -776,7 +776,8 @@ async def test_runner_keeps_always_load_question_without_permission_denial(monke
 
 
 @pytest.mark.asyncio
-async def test_runner_keeps_question_visible_when_only_tool_list_omits_it(monkeypatch) -> None:
+@pytest.mark.parametrize("mode", ["primary", "all", "subagent"])
+async def test_runner_standard_custom_agent_uses_own_scope_in_every_mode(monkeypatch, mode) -> None:
     from flocks.session.runner import SessionRunner
 
     runner = object.__new__(SessionRunner)
@@ -784,23 +785,24 @@ async def test_runner_keeps_question_visible_when_only_tool_list_omits_it(monkey
     runner._step = 1
     runner.callbacks = SimpleNamespace(event_publish_callback=None)
     runner._turn_permission_ruleset = []
-    agent = SimpleNamespace(name="custom-agent", tools=["request_ledger"])
-
-    result = SimpleNamespace(
-        tool_infos=[
-            SimpleNamespace(name="question"),
-            SimpleNamespace(name="tool_search"),
-            SimpleNamespace(name="request_ledger"),
-        ],
-        metadata={},
+    agent = SimpleNamespace(
+        name="custom-agent",
+        mode=mode,
+        tools=["request_ledger"],
+        prompt_profile="standard",
     )
 
-    async def list_tools(**_kwargs):
-        return result
-
     monkeypatch.setattr(
-        "flocks.session.runner.list_session_callable_tool_infos",
-        list_tools,
+        "flocks.session.callable_schema.get_session_callable_tools",
+        AsyncMock(return_value={"question", "tool_search", "bash"}),
+    )
+    monkeypatch.setattr(
+        ToolRegistry,
+        "list_tools",
+        lambda: [
+            ToolInfo(name=name, description=name, category=ToolCategory.SYSTEM)
+            for name in ["question", "tool_search", "bash", "request_ledger"]
+        ],
     )
 
     messages = [
@@ -815,12 +817,11 @@ async def test_runner_keeps_question_visible_when_only_tool_list_omits_it(monkey
         messages,
     )
 
-    assert [tool.name for tool in tools] == [
-        "question",
-        "tool_search",
-        "request_ledger",
-    ]
+    assert [tool.name for tool in tools] == ["request_ledger"]
     assert metadata["permissionDeniedToolNames"] == []
+    assert metadata["callableToolNames"] == ["request_ledger"]
+    assert metadata["modeAllowedToolNames"] == ["request_ledger"]
+    assert agent.prompt_profile == "standard"
 
 
 @pytest.mark.asyncio
@@ -919,7 +920,15 @@ async def test_question_preflight_deny_permission_still_blocks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_isolated_agent_keeps_runtime_plan_exit(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("agent_name", "prompt_profile"),
+    [("custom-agent", "standard"), ("isolated-reviewer", "isolated"), ("rex", "isolated")],
+)
+async def test_scoped_agent_does_not_gain_undeclared_plan_exit(
+    monkeypatch,
+    agent_name,
+    prompt_profile,
+) -> None:
     from flocks.session.runner import SessionRunner
 
     runner = object.__new__(SessionRunner)
@@ -927,9 +936,9 @@ async def test_isolated_agent_keeps_runtime_plan_exit(monkeypatch) -> None:
     runner._step = 1
     runner.callbacks = SimpleNamespace(event_publish_callback=None)
     agent = SimpleNamespace(
-        name="isolated-reviewer",
+        name=agent_name,
         tools=["read"],
-        prompt_profile="isolated",
+        prompt_profile=prompt_profile,
     )
     list_tools = AsyncMock(return_value=SimpleNamespace(
         tool_infos=[SimpleNamespace(name="read")],
@@ -957,5 +966,56 @@ async def test_isolated_agent_keeps_runtime_plan_exit(monkeypatch) -> None:
 
     tools, _metadata = await runner._list_callable_tool_infos_for_turn(agent, messages)
 
-    assert [tool.name for tool in tools] == ["read", "plan_exit"]
+    assert [tool.name for tool in tools] == ["read"]
     assert list_tools.await_args.kwargs["strict_declared_tools"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("execution_mode", [SessionExecutionMode.BUILD, SessionExecutionMode.PLAN])
+@pytest.mark.parametrize("denied", [False, True])
+async def test_scoped_agent_declared_plan_exit_obeys_mode_and_runtime_controls(
+    monkeypatch,
+    execution_mode,
+    denied,
+) -> None:
+    from flocks.session.runner import SessionRunner
+    from flocks.session.runtime_controls import RuntimeControls, runtime_controls
+
+    runner = object.__new__(SessionRunner)
+    runner.session = SimpleNamespace(id="session-scoped-plan-exit")
+    runner._step = 1
+    runner.callbacks = SimpleNamespace(event_publish_callback=None)
+    runner._turn_permission_ruleset = []
+    agent = SimpleNamespace(
+        name="custom-agent",
+        tools=["read", "plan_exit"],
+        prompt_profile="standard",
+    )
+    monkeypatch.setattr(
+        "flocks.session.runner.list_session_callable_tool_infos",
+        AsyncMock(return_value=SimpleNamespace(
+            tool_infos=[SimpleNamespace(name="read"), SimpleNamespace(name="plan_exit")],
+            metadata={},
+        )),
+    )
+    monkeypatch.setattr(
+        ToolRegistry,
+        "get",
+        lambda name: SimpleNamespace(info=SimpleNamespace(name=name, enabled=True)),
+    )
+    controls = RuntimeControls(
+        allowed_tools=("*",),
+        disallowed_tools=("plan_exit",) if denied else (),
+    )
+    token = runtime_controls.set(controls)
+    try:
+        tools, metadata = await runner._list_callable_tool_infos_for_turn(
+            agent,
+            [SimpleNamespace(role="user", executionMode=execution_mode)],
+        )
+    finally:
+        runtime_controls.reset(token)
+
+    expected = ["read", "plan_exit"] if execution_mode == SessionExecutionMode.PLAN and not denied else ["read"]
+    assert [tool.name for tool in tools] == expected
+    assert metadata["modeAllowedToolNames"] == sorted(expected)
