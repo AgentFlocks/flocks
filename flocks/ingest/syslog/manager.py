@@ -8,7 +8,6 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from flocks.coordination import ClusterSingleton, wait_for_singleton
 from flocks.hooks.execution import execute_with_hooks
 from flocks.hooks.pipeline import HookPipeline
 from flocks.utils.log import Log
@@ -43,7 +42,7 @@ from flocks.workflow.triggers.models import (
 log = Log.create(service="syslog.manager")
 
 
-# Maximum concurrent workflow executions per workflow to avoid FD exhaustion and database contention
+# Maximum concurrent workflow executions per workflow to avoid FD exhaustion and SQLite write contention
 _MAX_CONCURRENT_EXECUTIONS = 8
 # Maximum number of buffered syslog messages per workflow; excess messages are dropped with a warning.
 # Increased from 200 to 1000 to absorb larger inbound bursts before the worker pool catches up.
@@ -53,9 +52,6 @@ _MAX_QUEUE_SIZE = 1000
 # under busy event-loops; anything >5s would make the HTTP save endpoint feel
 # hung when the user makes a typo.
 _BIND_WAIT_TIMEOUT_S = 3.0
-# How often a listener confirms it still holds its cluster lease, and how often
-# a standby instance asks for it.
-_LEASE_CHECK_INTERVAL_S = 5.0
 # Minimum interval between two ``syslog.queue_full_dropped`` warnings; a
 # sustained queue overflow is aggregated into a single warning per window.
 _DROP_LOG_WINDOW_S = 1.0
@@ -164,23 +160,6 @@ class SyslogManager:
         # save endpoint can report bind failures synchronously.
         self._listener_ready: dict[str, asyncio.Event] = {}
         self._dispatcher = EventDispatcher()
-        # One listener per workflow across every instance on the database:
-        # the holder of its cluster lease listens, the others stand by and
-        # take over when the holder goes away ("standby" state).
-        self._leases: dict[str, ClusterSingleton] = {}
-        self._lease_tasks: dict[str, asyncio.Task] = {}
-        self._lease_stops: dict[str, asyncio.Event] = {}
-        # Restart, stop and lease changes of one workflow happen one at a
-        # time: two of them interleaving would leave a lease, a watcher or a
-        # listener that nothing tracks any more.
-        self._workflow_locks: dict[str, asyncio.Lock] = {}
-        self._stopped = False
-
-    def _lock_for(self, workflow_id: str) -> asyncio.Lock:
-        lock = self._workflow_locks.get(workflow_id)
-        if lock is None:
-            lock = self._workflow_locks[workflow_id] = asyncio.Lock()
-        return lock
 
     @staticmethod
     def _config_key(workflow_id: str) -> str:
@@ -218,7 +197,6 @@ class SyslogManager:
         return self._default_trigger_from_config(data)
 
     async def start_all(self) -> None:
-        self._stopped = False
         try:
             configs = await WorkflowStore.list_configs(kind="workflow_syslog_config")
         except Exception as exc:
@@ -242,18 +220,7 @@ class SyslogManager:
                     )
 
     async def stop_all(self) -> None:
-        # Standing-by workflows have no listener task, only a lease watcher:
-        # they are stopped too, or they would take over after shutdown.  A
-        # restart still under way (reading its config, say) has registered
-        # nothing yet: every workflow that ever took its lock is visited, so
-        # stopping waits for that restart, which then sees ``_stopped`` and
-        # starts nothing (see _restart_locked).
-        self._stopped = True
-        workflows = (
-            set(self._tasks) | set(self._leases) | set(self._lease_tasks) | set(self._lease_stops)
-            | set(self._workflow_locks)
-        )
-        for workflow_id in sorted(workflows):
+        for workflow_id in list(self._tasks.keys()):
             await self.stop_workflow(workflow_id)
 
     def get_listener_status(self, workflow_id: str) -> Dict[str, Any]:
@@ -310,71 +277,6 @@ class SyslogManager:
         return active
 
     async def stop_workflow(self, workflow_id: str) -> None:
-        async with self._lock_for(workflow_id):
-            await self._stop_workflow_locked(workflow_id)
-
-    async def _stop_workflow_locked(self, workflow_id: str) -> None:
-        await self._stop_lease(workflow_id)
-        await self._stop_listener(workflow_id)
-
-    async def _stop_lease(self, workflow_id: str) -> None:
-        stop = self._lease_stops.pop(workflow_id, None)
-        if stop is not None:
-            stop.set()
-        task = self._lease_tasks.pop(workflow_id, None)
-        if task is not None and task is not asyncio.current_task() and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        lease = self._leases.pop(workflow_id, None)
-        if lease is not None:
-            await lease.release()
-
-    def _watch_lease(self, workflow_id: str, lease: ClusterSingleton, *, holding: bool) -> None:
-        """Keep checking a held lease, or wait to take one another instance holds."""
-        stop = asyncio.Event()
-        self._lease_stops[workflow_id] = stop
-
-        async def _hold() -> None:
-            while not stop.is_set():
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=_LEASE_CHECK_INTERVAL_S)
-                    return
-                except asyncio.TimeoutError:
-                    pass
-                if not await lease.check():
-                    # The lease went with its connection; another instance may
-                    # already be listening, so this one must stop at once.
-                    log.warning("syslog.lease_lost", {"workflow_id": workflow_id})
-                    async with self._lock_for(workflow_id):
-                        if stop.is_set() or self._leases.get(workflow_id) is not lease:
-                            return  # stopped or restarted meanwhile
-                        if self._lease_tasks.get(workflow_id) is asyncio.current_task():
-                            self._lease_tasks.pop(workflow_id, None)
-                        await self._stop_listener(workflow_id)
-                        self._listener_status[workflow_id] = {"state": "standby", "error": "lease_lost"}
-                        self._watch_lease(workflow_id, lease, holding=False)
-                    return
-
-        async def _await_turn() -> None:
-            if await wait_for_singleton(lease, retry_s=_LEASE_CHECK_INTERVAL_S, stop=stop):
-                # Ours now: start listening from a clean restart -- unless the
-                # workflow was stopped or restarted while this waited.
-                await lease.release()
-                async with self._lock_for(workflow_id):
-                    if stop.is_set() or self._stopped or self._leases.get(workflow_id) is not lease:
-                        return
-                    if self._lease_tasks.get(workflow_id) is asyncio.current_task():
-                        self._lease_tasks.pop(workflow_id, None)
-                    await self._restart_locked(workflow_id)
-
-        self._lease_tasks[workflow_id] = asyncio.create_task(
-            _hold() if holding else _await_turn(), name=f"syslog-lease-{workflow_id}",
-        )
-
-    async def _stop_listener(self, workflow_id: str) -> None:
         cancel_event = self._generation_cancel_events.pop(workflow_id, None)
         if cancel_event is not None:
             cancel_event.set()
@@ -414,11 +316,7 @@ class SyslogManager:
         ``save_syslog_config`` route) can therefore surface bind errors to the
         user instead of silently leaving the listener in a failed state.
         """
-        async with self._lock_for(workflow_id):
-            return await self._restart_locked(workflow_id, startup=startup)
-
-    async def _restart_locked(self, workflow_id: str, *, startup: bool = False) -> Dict[str, Any]:
-        await self._stop_workflow_locked(workflow_id)
+        await self.stop_workflow(workflow_id)
         if self._active_draining_workers(workflow_id):
             error = "previous_workers_still_draining"
             self._listener_status[workflow_id] = {"state": "failed", "error": error}
@@ -428,10 +326,6 @@ class SyslogManager:
         except Exception as exc:
             log.warning("syslog.restart_read_failed", {"workflow_id": workflow_id, "error": str(exc)})
             return {"state": "failed", "error": str(exc)}
-        if self._stopped:
-            # The manager was stopped while the config was read.
-            self._listener_status[workflow_id] = {"state": "stopped", "error": None}
-            return {"state": "stopped", "error": None}
         if not isinstance(data, dict) or not data.get("enabled"):
             self._listener_status[workflow_id] = {"state": "stopped", "error": None}
             return {"state": "stopped", "error": None}
@@ -472,32 +366,6 @@ class SyslogManager:
         host = str(data.get("host") or "0.0.0.0")
         port = int(data.get("port") or 5140)
         protocol = str(data.get("protocol") or "udp").lower()
-
-        lease = ClusterSingleton(f"syslog-listener:{workflow_id}")
-        try:
-            holding = await lease.try_acquire()
-        except Exception as exc:
-            err = f"lease_unavailable: {type(exc).__name__}"
-            self._listener_status[workflow_id] = {"state": "failed", "error": err}
-            log.warning("syslog.lease_unavailable", {"workflow_id": workflow_id, "error": str(exc)})
-            return self.get_listener_status(workflow_id)
-        if self._stopped:
-            # Stopped while the lease was being taken: hand it back, start nothing.
-            if holding:
-                await lease.release()
-            self._listener_status[workflow_id] = {"state": "stopped", "error": None}
-            return {"state": "stopped", "error": None}
-        self._leases[workflow_id] = lease
-        if not holding:
-            # Another instance listens for this workflow; stand by.
-            self._listener_status[workflow_id] = {
-                "state": "standby", "error": None, "host": host, "port": port, "protocol": protocol,
-            }
-            self._watch_lease(workflow_id, lease, holding=False)
-            log.info("syslog.listener_standby", {"workflow_id": workflow_id})
-            return self.get_listener_status(workflow_id)
-        self._watch_lease(workflow_id, lease, holding=True)
-
         queue_capacity = _queue_size_for_trigger(trigger)
         worker_count = _worker_count_for_trigger(trigger)
         queue: asyncio.Queue = asyncio.Queue(maxsize=queue_capacity)
@@ -542,7 +410,6 @@ class SyslogManager:
             name=f"syslog-{workflow_id}",
         )
         self._tasks[workflow_id] = task
-        task.add_done_callback(lambda done, wf=workflow_id: self._on_listener_exit(wf, done))
 
         # Wait briefly for the listener to bind (or fail) so the caller can
         # decide whether to surface a 502/Conflict instead of pretending the
@@ -562,33 +429,8 @@ class SyslogManager:
                 }
             log.warning("syslog.bind_pending_timeout", {"workflow_id": workflow_id})
 
-        status = self.get_listener_status(workflow_id)
-        if status.get("state") == "failed":
-            # Holding the lease without listening would keep every other
-            # instance standing by for nothing: let one of them try.
-            await self._stop_lease(workflow_id)
-            return status
         log.info("syslog.listener_scheduled", {"workflow_id": workflow_id})
-        return status
-
-    def _on_listener_exit(self, workflow_id: str, task: asyncio.Task) -> None:
-        """A listener that ended on its own -- a bind that failed late, a crash --
-        gives its lease back, so another instance can listen instead."""
-        if task.cancelled() or self._tasks.get(workflow_id) is not task:
-            return  # stopped on purpose, or already replaced
-        asyncio.ensure_future(self._release_after_exit(workflow_id, task))
-
-    async def _release_after_exit(self, workflow_id: str, task: asyncio.Task) -> None:
-        async with self._lock_for(workflow_id):
-            if self._tasks.get(workflow_id) is not task:
-                return
-            status = dict(self._listener_status.get(workflow_id) or {})
-            await self._stop_lease(workflow_id)
-            await self._stop_listener(workflow_id)
-            if status.get("state") != "failed":
-                status = {**status, "state": "failed", "error": status.get("error") or "listener_exited"}
-            self._listener_status[workflow_id] = status
-            log.warning("syslog.listener_exited", {"workflow_id": workflow_id, "error": status.get("error")})
+        return self.get_listener_status(workflow_id)
 
     async def _listener_loop(
         self,
@@ -864,13 +706,13 @@ class SyslogManager:
             action_payload = {
                 "operation": "workflow.trigger.syslog",
                 "transport": "headless",
+                # Internal adapter contract; never derive permission-carrier
+                # fields from the untrusted message body.
+                "legacy_compat": True,
                 "workflow_id": workflow_id,
                 "trigger": trigger,
                 "event": event,
-                # The listener itself is the authenticated ingress here; ingress
-                # policies read the legacy-compat carrier from the top level
-                # (the metadata copy feeds the action recheck), so keep both.
-                "legacy_compat": True,
+                # The listener itself is the authenticated ingress here.
                 "evidence": {
                     "auth_scheme": "syslog",
                     "trigger_id": trigger.id,

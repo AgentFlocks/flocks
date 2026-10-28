@@ -693,17 +693,7 @@ def test_coordination_answers_for_one_process():
 
     from flocks import coordination
 
-    async def scenario():
-        singleton = coordination.ClusterSingleton("syslog")
-        stop = asyncio.Event()
-        held = await coordination.wait_for_singleton(singleton, retry_s=0.1, stop=stop)
-        checked = await singleton.check()
-        await singleton.release()
-        stop.set()
-        after_stop = await coordination.wait_for_singleton(coordination.ClusterSingleton("x"), retry_s=0.1, stop=stop)
-        return held, checked, singleton.held, after_stop, await coordination.sessions_running_elsewhere()
-
-    assert asyncio.run(scenario()) == (True, True, False, None, [])
+    assert asyncio.run(coordination.sessions_running_elsewhere()) == []
     assert coordination.page_api_database() is None
     assert coordination.workflow_services(lambda: False) == {}
 
