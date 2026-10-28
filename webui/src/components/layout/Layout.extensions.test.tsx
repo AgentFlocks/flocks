@@ -4,27 +4,22 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Layout from './Layout';
 
-// A private-build style registry: a sidebar entry per section kind, an
-// admin-only entry, a highlighted account-menu entry, two default ids hidden,
-// and both layout slots filled.
+// A private-build style registry: two sidebar entries (one admin-only, one
+// without a placement) and a highlighted account-menu entry.
 const { registryMock, useAuth } = vi.hoisted(() => {
   const Icon = () => null;
   const registryMock = {
     routes: [],
     navItems: [
       { id: 'ext-agent-hub', href: '/ext/agent-hub', labelKey: 'extAgentHub', icon: Icon, placement: 'sidebar', order: 5 },
-      { id: 'ext-workbench', href: '/ext/workbench', labelKey: 'extWorkbench', icon: Icon, placement: 'sidebar', section: 'aiWorkbench' },
+      { id: 'ext-default', href: '/ext/default', labelKey: 'extDefault', icon: Icon, order: 8 },
       { id: 'ext-admin', href: '/ext/admin', labelKey: 'extAdminOnly', icon: Icon, placement: 'sidebar', adminOnly: true },
       { id: 'ext-menu', href: '/ext/menu', labelKey: 'extMenu', icon: Icon, placement: 'accountMenu', highlight: true, badge: 'NEW' },
     ],
     settingsSections: [],
-    slots: [
-      { id: 'v', slot: 'layout.version', component: ({ context }: { context: Record<string, unknown> }) => <span data-testid="ext-version">{`ext-version:${String(context.version)}`}</span> },
-      { id: 'n', slot: 'layout.notifications', component: () => <span data-testid="ext-notifications">ext-notifications</span> },
-    ],
+    slots: [],
     i18n: {},
     updateChannel: 'private-channel',
-    hideDefault: (id: string) => id === 'channels' || id === 'deviceIntegration',
   };
   return { registryMock, useAuth: vi.fn() };
 });
@@ -34,11 +29,6 @@ const { checkUpdate, updateModalProps } = vi.hoisted(() => ({
   updateModalProps: [] as Record<string, unknown>[],
 }));
 
-// Installed contract pages; a test may fill these before rendering.
-const { contractPages } = vi.hoisted(() => ({
-  contractPages: { pages: [] as unknown[], workspaces: [] as unknown[] },
-}));
-
 vi.mock('@ext/registry', () => ({ default: registryMock }));
 vi.mock('@/components/common/InstallationResultBanner', () => ({ InstallationResultBanner: () => null }));
 vi.mock('@/contexts/AuthContext', () => ({ useAuth }));
@@ -46,7 +36,7 @@ vi.mock('@/contexts/ProductNameContext', () => ({
   useProductName: () => ({ productName: 'Flocks', configuredDisplayName: null, faviconUrl: '/favicon.svg', hasCustomFavicon: false, loading: false }),
 }));
 vi.mock('@/hooks/useWebUIContractPages', () => ({
-  useWebUIContractPages: () => ({ pages: contractPages.pages, workspaces: contractPages.workspaces, loading: false, error: null, refetch: vi.fn() }),
+  useWebUIContractPages: () => ({ pages: [], workspaces: [], loading: false, error: null, refetch: vi.fn() }),
 }));
 vi.mock('@/hooks/useSceneSuiteUpdates', () => ({ useSceneSuiteUpdates: () => ({ hasUnseenSuites: false }) }));
 vi.mock('@/hooks/useTasks', () => ({ useTaskDashboard: () => ({ counts: null }) }));
@@ -127,28 +117,26 @@ describe('Layout extension registry integration', () => {
     });
   });
 
-  it('puts sidebar entries in the workbench menu or the workshop and honours hideDefault', async () => {
+  it('puts every sidebar entry in the workshop tools and models group, after the defaults', async () => {
     const { container } = renderLayout();
     await flush();
 
-    // Workbench-section entries extend the workbench's sidebar menu.
+    // The workbench menu keeps only its own entries.
     const sidebar = container.querySelector('aside nav') as HTMLElement;
-    expect(linkTargets(sidebar)).toContainEqual(['extWorkbench', '/ext/workbench']);
     expect(within(sidebar).getByRole('button', { name: 'newChat' })).toBeInTheDocument();
-    // The agent hub is the workshop's tools and models group now, so its entries join that group.
+    expect(linkTargets(sidebar).map(([, href]) => href).filter((href) => href?.startsWith('/ext/'))).toEqual([]);
+    // Sidebar entries, with or without an explicit placement, join the workshop's tools and models group in order.
     const workshop = await openWorkshop(container);
-    const targets = linkTargets(workshop);
-    expect(targets).toContainEqual(['extAgentHub', '/ext/agent-hub']);
-    expect(targets).toContainEqual(['extAdminOnly', '/ext/admin']);
     const toolsAndModels = within(workshop).getByRole('heading', { name: 'toolsAndModels' }).parentElement as HTMLElement;
-    expect(linkTargets(toolsAndModels).map(([, href]) => href)).toEqual(['/tools', '/models', '/hub', '/ext/admin', '/ext/agent-hub']);
-    // Hidden defaults are gone, untouched ones remain.
-    expect(targets.find(([, href]) => href === '/channels')).toBeUndefined();
-    expect(targets.find(([, href]) => href === '/devices')).toBeUndefined();
-    expect(targets.find(([, href]) => href === '/agents')).toBeDefined();
-    expect(targets.find(([, href]) => href === '/models')).toBeDefined();
+    expect(linkTargets(toolsAndModels).map(([, href]) => href)).toEqual([
+      '/tools', '/devices', '/models', '/channels', '/hub', '/ext/admin', '/ext/agent-hub', '/ext/default',
+    ]);
+    expect(linkTargets(workshop)).toContainEqual(['extAgentHub', '/ext/agent-hub']);
     // The account menu keeps only its own entries.
-    expect(linkTargets(openAccountMenu()).map(([, href]) => href)).not.toContain('/ext/agent-hub');
+    const accountHrefs = linkTargets(openAccountMenu()).map(([, href]) => href);
+    expect(accountHrefs).toContain('/ext/menu');
+    expect(accountHrefs).not.toContain('/ext/agent-hub');
+    expect(accountHrefs).not.toContain('/ext/default');
   });
 
   it('keeps the workshop on a page an extension lists in its menu', async () => {
@@ -182,53 +170,6 @@ describe('Layout extension registry integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'agentWorkshop' }));
     await flush();
     expect(screen.getAllByTestId('extension-path').some((probe) => probe.textContent === '/ext/agent-hub')).toBe(true);
-  });
-
-  it('hides a whole group when hideDefault names a sidebar group id of earlier releases', async () => {
-    const { hideDefault, navItems } = registryMock;
-    registryMock.navItems = [
-      ...navItems,
-      { id: 'ext-scene', href: '/ext/scene', labelKey: 'extScene', icon: navItems[0].icon, placement: 'sidebar', section: 'sceneWorkspaces' },
-    ];
-    // A workbench workspace page and a standalone custom page, both ready.
-    contractPages.workspaces = [{
-      id: 'bench', title: 'Bench', route: '/bench', placement: 'aiWorkbench', enabled: true,
-      pages: [{ id: 'bench-page', title: 'Bench page', order: 0, enabled: true, buildStatus: 'ready', icon: null }],
-    }];
-    contractPages.pages = [
-      { id: 'custom-page', title: 'Custom page', route: '/custom/page', placement: 'home.after', enabled: true, buildStatus: 'ready', icon: null },
-    ];
-    try {
-      const shown = renderLayout();
-      await flush();
-      const shownHrefs = linkTargets(shown.container.querySelector('aside nav') as HTMLElement).map(([, href]) => href);
-      expect(shownHrefs).toEqual(expect.arrayContaining(['/bench/bench-page', '/custom/page', '/ext/scene']));
-      shown.unmount();
-
-      registryMock.hideDefault = (id: string) => ['aiWorkbench', 'agentHub', 'customPages'].includes(id);
-      const { container } = renderLayout();
-      await flush();
-
-      const sidebar = container.querySelector('aside nav') as HTMLElement;
-      const sidebarHrefs = linkTargets(sidebar).map(([, href]) => href);
-      for (const href of ['/', '/tasks', '/workspace', '/bench/bench-page', '/custom/page', '/ext/workbench', '/ext/scene']) {
-        expect(sidebarHrefs).not.toContain(href);
-      }
-      expect(within(sidebar).queryByRole('button', { name: 'newChat' })).toBeNull();
-
-      // The workshop holds what both old groups held; every entry is hidden.
-      const workshopHrefs = linkTargets(await openWorkshop(container)).map(([, href]) => href);
-      for (const href of ['/agents', '/skills', '/workflows', '/workspace?tab=knowledge', '/workspace?tab=memory', '/tools', '/devices', '/hub', '/models', '/channels', '/ext/agent-hub', '/ext/admin']) {
-        expect(workshopHrefs).not.toContain(href);
-      }
-      // Account-menu entries never belonged to those groups.
-      expect(linkTargets(openAccountMenu()).map(([, href]) => href)).toContain('/ext/menu');
-    } finally {
-      registryMock.hideDefault = hideDefault;
-      registryMock.navItems = navItems;
-      contractPages.workspaces = [];
-      contractPages.pages = [];
-    }
   });
 
   it('renders account-menu entries with their highlight and badge', async () => {
@@ -268,15 +209,5 @@ describe('Layout extension registry integration', () => {
     expect(await screen.findByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
     // The dialog checks and applies on the channel the reminder checked, not the default one.
     expect(updateModalProps.at(-1)).toEqual(expect.objectContaining({ channel: 'private-channel', forceInitialCheck: true }));
-  });
-
-  it('mounts the layout.version and layout.notifications slots', async () => {
-    renderLayout();
-    await flush();
-
-    // The slot replaces the default version badge and receives the version once the update check resolved.
-    expect(screen.getByTestId('ext-version')).toBeInTheDocument();
-    expect(await screen.findByText('ext-version:v0.2.0')).toBeInTheDocument();
-    expect(screen.getByTestId('ext-notifications')).toBeInTheDocument();
   });
 });

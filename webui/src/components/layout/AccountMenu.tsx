@@ -1,7 +1,6 @@
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ChevronUp, Gauge, LogOut, RefreshCw, Settings, type LucideIcon } from 'lucide-react';
-import ExtensionSlot from '@/components/extensions/ExtensionSlot';
 import HeaderMenu, { MENU_ITEM_CLASS, MENU_SEPARATOR_CLASS } from './HeaderMenu';
 
 export const FLOCKS_LLM_USAGE_URL = 'https://portal.agentflocks.com';
@@ -25,11 +24,7 @@ interface AccountMenuProps {
   roleLabel: string;
   initial: string;
   version: string | null;
-  /** Handed to a `layout.version` extension slot, which replaces the version badge. */
-  versionContext?: Record<string, unknown>;
   update?: { title: string; onClick: () => void } | null;
-  /** Default entries a private build hid by id (registry `hideDefault`). */
-  isHidden?: (id: string) => boolean;
   /** Extension entries placed in the account menu itself. */
   extensionItems?: AccountMenuExtraItem[];
   onCheckUpdate: () => void;
@@ -39,7 +34,7 @@ interface AccountMenuProps {
 /** Account and version details share one footer entry and one menu. */
 export default function AccountMenu({
   collapsed = false, onNavigate, username, roleLabel, initial,
-  version, versionContext, update, isHidden = () => false, extensionItems = [], onCheckUpdate, onLogout,
+  version, update, extensionItems = [], onCheckUpdate, onLogout,
 }: AccountMenuProps) {
   const { t } = useTranslation('nav');
   return (
@@ -59,9 +54,7 @@ export default function AccountMenu({
               <span className="shrink-0 whitespace-nowrap text-xs text-ui-muted">{roleLabel}</span>
             </span>
             <span className="mt-1 flex items-center gap-1.5">
-              <ExtensionSlot name="layout.version" context={versionContext ?? { version }}>
-                {version && <span title={t('versionInfo')} className="inline-flex rounded border border-ui-border bg-ui-surface px-1.5 py-0.5 text-[10px] font-medium leading-none text-ui-secondary">{version}</span>}
-              </ExtensionSlot>
+              {version && <span title={t('versionInfo')} className="inline-flex rounded border border-ui-border bg-ui-surface px-1.5 py-0.5 text-[10px] font-medium leading-none text-ui-secondary">{version}</span>}
               {update && <span title={update.title} className="shrink-0 rounded bg-amber-50 px-1 py-0.5 text-[10px] font-semibold text-amber-600 dark:bg-amber-950 dark:text-amber-300">{t('newVersion')}</span>}
             </span>
           </span>}
@@ -78,21 +71,17 @@ export default function AccountMenu({
           </div>
           <div className={MENU_SEPARATOR_CLASS} role="separator" />
           {/* A plain link: no trailing chevron, which would promise a submenu. */}
-          {!isHidden('settings') && (
-            <Link to="/settings/preferences" role="menuitem" onClick={() => { close(); onNavigate?.(); }} className={MENU_ITEM_CLASS}>
-              <Settings aria-hidden="true" className="h-4 w-4 shrink-0 text-ui-secondary" />
-              {t('systemConfiguration')}
-            </Link>
-          )}
-          {!isHidden('modelUsage') && (
-            <a href={FLOCKS_LLM_USAGE_URL} target="_blank" rel="noopener noreferrer" role="menuitem" onClick={() => close()} className={MENU_ITEM_CLASS}>
-              <Gauge aria-hidden="true" className="h-4 w-4 shrink-0 text-ui-secondary" />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate">{t('modelUsage')}</span>
-                <span className="block text-[11px] text-ui-muted">{t('modelUsageHint')}</span>
-              </span>
-            </a>
-          )}
+          <Link to="/settings/preferences" role="menuitem" onClick={() => { close(); onNavigate?.(); }} className={MENU_ITEM_CLASS}>
+            <Settings aria-hidden="true" className="h-4 w-4 shrink-0 text-ui-secondary" />
+            {t('systemConfiguration')}
+          </Link>
+          <a href={FLOCKS_LLM_USAGE_URL} target="_blank" rel="noopener noreferrer" role="menuitem" onClick={() => close()} className={MENU_ITEM_CLASS}>
+            <Gauge aria-hidden="true" className="h-4 w-4 shrink-0 text-ui-secondary" />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate">{t('modelUsage')}</span>
+              <span className="block text-[11px] text-ui-muted">{t('modelUsageHint')}</span>
+            </span>
+          </a>
           {extensionItems.map((item) => (
             <Link
               key={item.id}

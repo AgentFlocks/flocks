@@ -14,7 +14,6 @@ describe('default WebUI extension registry', () => {
     expect(registry.slots).toEqual([]);
     expect(registry.i18n).toEqual({});
     expect(registry.updateChannel).toBeUndefined();
-    expect(registry.hideDefault).toBeUndefined();
   });
 
   it('resolves to src/extensions/registry.ts unless WEBUI_EXTENSION_REGISTRY is set', () => {

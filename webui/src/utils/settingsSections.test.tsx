@@ -30,7 +30,6 @@ vi.mock('@ext/registry', () => ({
     ],
     slots: [],
     updateChannel: undefined,
-    hideDefault: undefined,
   },
 }));
 vi.mock('react-i18next', () => ({

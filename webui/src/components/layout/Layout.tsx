@@ -59,7 +59,6 @@ import {
   type UserNotification,
 } from '@/api/notifications';
 import registry, { type ExtensionNavItem } from '@ext/registry';
-import ExtensionSlot from '@/components/extensions/ExtensionSlot';
 import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useConfirm } from '@/components/common/ConfirmDialog';
@@ -120,8 +119,6 @@ const UPDATE_CHECK_INITIAL_DELAY_MS = 250;
 const TRANSIENT_PANE_HREF = '__current__';
 
 interface NavItem {
-  /** Stable id so an extension registry can hide a default entry (`hideDefault`). */
-  id?: string;
   name: string;
   href: string;
   icon: LucideIcon;
@@ -218,35 +215,6 @@ function sceneHeaderIcon(workspace: WebUIContractWorkspaceListItem): LucideIcon 
   return Layers;
 }
 
-// Sidebar group each default entry sat in before the navigation was split into
-// modules. A private build's `hideDefault` may still name a whole group.
-const LEGACY_NAV_GROUPS = new Map<string, string>([
-  ['flocksHome', 'aiWorkbench'],
-  ['sessions', 'aiWorkbench'],
-  ['workspace', 'aiWorkbench'],
-  ['knowledgeBase', 'aiWorkbench'],
-  ['memory', 'aiWorkbench'],
-  ['tasks', 'aiWorkbench'],
-  ['workflows', 'aiWorkbench'],
-  ['agents', 'agentHub'],
-  ['skills', 'agentHub'],
-  ['tools', 'agentHub'],
-  ['deviceIntegration', 'agentHub'],
-  ['hub', 'agentHub'],
-  ['models', 'agentHub'],
-  ['channels', 'agentHub'],
-]);
-
-const hidesDefault = (id?: string) => Boolean(id) && registry.hideDefault?.(id as string) === true;
-const isHiddenDefault = (id?: string) => hidesDefault(id) || hidesDefault(id ? LEGACY_NAV_GROUPS.get(id) : undefined);
-
-/** Group an extension's sidebar entry joined in earlier releases. */
-function legacyExtensionGroup(item: ExtensionNavItem): string {
-  if (item.section === 'home' || item.section === 'aiWorkbench') return 'aiWorkbench';
-  if (item.section === 'sceneWorkspaces') return 'customPages';
-  return 'agentHub';
-}
-
 export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps = {}) {
   const location = useLocation();
   const navigate = useNavigate();
@@ -339,16 +307,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     });
     const visible = registry.navItems
       .filter((item) => !item.adminOnly || user?.role === 'admin')
-      .filter((item) => !isHiddenDefault(item.id))
-      .filter((item) => item.placement === 'accountMenu' || !hidesDefault(legacyExtensionGroup(item)))
       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-    const sidebar = visible.filter((item) => (item.placement ?? 'sidebar') === 'sidebar');
     return {
       accountMenu: visible.filter((item) => item.placement === 'accountMenu').map(toItem),
-      // The agent hub is the Agent workshop's tools and models group now; the
-      // other sections are part of the workbench menu.
-      agentHub: sidebar.filter((item) => (item.section ?? 'agentHub') === 'agentHub').map(toItem),
-      workbench: sidebar.filter((item) => (item.section ?? 'agentHub') !== 'agentHub').map(toItem),
+      // Sidebar entries join the Agent workshop's tools and models group.
+      workshop: visible.filter((item) => (item.placement ?? 'sidebar') === 'sidebar').map(toItem),
     };
   }, [i18n, productName, t, user?.role]);
 
@@ -646,7 +609,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   // Last path visited inside each workspace, so switching back lands there.
   // Extension pages listed in the workshop's menu belong to the workshop.
-  const workshopPaths = useMemo(() => extensionNavItems.agentHub.map((item) => item.href), [extensionNavItems]);
+  const workshopPaths = useMemo(() => extensionNavItems.workshop.map((item) => item.href), [extensionNavItems]);
   const workspacePathsRef = useRef<NavWorkspacePaths>(readWorkspacePaths(workshopPaths));
   // Validate remembered paths against the workspace's current placement.
   const pathNavigation = useCallback((path: string | undefined): NavWorkspaceId | null => {
@@ -703,44 +666,38 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         href: page.route,
         icon: resolveWebUIContractPageIcon(page.icon),
       }));
-    const items: NavItem[] = [
-      { id: 'flocksHome', name: t('flocksHome'), href: '/', icon: Home },
-      // Keeps the `sessions` id: it is the entry that leads to /sessions.
-      { id: 'sessions', name: t('newChat'), href: '/sessions', icon: MessageSquarePlus, action: 'new-chat', accent: true },
-      { id: 'tasks', name: t('tasks'), href: '/tasks', icon: ListTodo, count: taskCounts ? (taskCounts.running ?? 0) + (taskCounts.queued ?? 0) : undefined },
-      { id: 'workspace', name: t('workspace'), href: '/workspace', icon: FolderOpen },
-      // Workbench workspace pages sat in the aiWorkbench group too.
-      ...(hidesDefault('aiWorkbench') ? [] : workbenchItems),
-      ...(hidesDefault('customPages') ? [] : customItems),
-      ...extensionNavItems.workbench,
-    ];
     return {
       id: 'agent',
-      items: items.filter((item) => !isHiddenDefault(item.id)),
+      items: [
+        { name: t('flocksHome'), href: '/', icon: Home },
+        { name: t('newChat'), href: '/sessions', icon: MessageSquarePlus, action: 'new-chat', accent: true },
+        { name: t('tasks'), href: '/tasks', icon: ListTodo, count: taskCounts ? (taskCounts.running ?? 0) + (taskCounts.queued ?? 0) : undefined },
+        { name: t('workspace'), href: '/workspace', icon: FolderOpen },
+        ...workbenchItems,
+        ...customItems,
+      ],
     };
-  }, [extensionNavItems, i18n.language, taskCounts, t, webuiContractPages, webuiContractWorkspaces, workspacePageOrders]);
+  }, [i18n.language, taskCounts, t, webuiContractPages, webuiContractWorkspaces, workspacePageOrders]);
 
   const workshopSections = useMemo<NavSection[]>(() => [
     { id: 'orchestration', name: t('capabilityOrchestration'), items: [
-      { id: 'agents', name: t('agents'), href: '/agents', icon: Bot },
-      { id: 'skills', name: t('skills'), href: '/skills', icon: Sparkles },
-      { id: 'workflows', name: t('workflows'), href: '/workflows', icon: Workflow },
+      { name: t('agents'), href: '/agents', icon: Bot },
+      { name: t('skills'), href: '/skills', icon: Sparkles },
+      { name: t('workflows'), href: '/workflows', icon: Workflow },
     ] },
     { id: 'knowledge-memory', name: t('knowledgeAndMemory'), items: [
-      { id: 'knowledgeBase', name: t('knowledgeBase'), href: '/workspace?tab=knowledge', icon: Database },
-      { id: 'memory', name: t('memory'), href: '/workspace?tab=memory', icon: Brain },
+      { name: t('knowledgeBase'), href: '/workspace?tab=knowledge', icon: Database },
+      { name: t('memory'), href: '/workspace?tab=memory', icon: Brain },
     ] },
     { id: 'tools-models', name: t('toolsAndModels'), items: [
-      { id: 'tools', name: t('tools'), href: '/tools', icon: Wrench },
-      { id: 'deviceIntegration', name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
-      { id: 'models', name: t('models'), href: '/models', icon: Brain },
-      { id: 'channels', name: t('channels'), href: '/channels', icon: Radio },
-      { id: 'hub', name: t('hub', { productName }), href: '/hub', icon: Blocks },
-      ...extensionNavItems.agentHub,
+      { name: t('tools'), href: '/tools', icon: Wrench },
+      { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
+      { name: t('models'), href: '/models', icon: Brain },
+      { name: t('channels'), href: '/channels', icon: Radio },
+      { name: t('hub', { productName }), href: '/hub', icon: Blocks },
+      ...extensionNavItems.workshop,
     ] },
-  ]
-    .map((section) => ({ ...section, items: section.items.filter((item: NavItem) => !isHiddenDefault(item.id)) }))
-    .filter((section) => section.items.length > 0), [extensionNavItems, productName, t]);
+  ], [extensionNavItems, productName, t]);
 
   const sceneSections = useMemo(() => {
     const map = new Map<string, NavSection[]>();
@@ -1037,9 +994,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           roleLabel={accountRoleLabel}
           initial={accountInitial}
           version={displayVersion}
-          versionContext={{ version: displayVersion, currentVersion, latestVersion, hasUpdate: hasVisibleUpdate }}
           update={versionUpdate}
-          isHidden={isHiddenDefault}
           extensionItems={extensionNavItems.accountMenu}
           onCheckUpdate={openManualUpdateCheck}
           onNavigate={() => setSidebarOpen(false)}
@@ -1083,26 +1038,15 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           )}
         </Suspense>
         <Suspense fallback={null}>
-          <ExtensionSlot
-            name="layout.notifications"
-            context={{
-              notifications: visibleNotifications,
-              acknowledgingIds: acknowledgingNotificationIds,
-              onAcknowledge: closeVisibleNotification,
-              onClose: closeVisibleNotification,
-              onDismissForever: dismissVisibleNotificationForever,
-            }}
-          >
-            {visibleNotifications.length > 0 && (
-              <NotificationModal
-                notifications={visibleNotifications}
-                acknowledgingIds={acknowledgingNotificationIds}
-                onAcknowledge={closeVisibleNotification}
-                onClose={closeVisibleNotification}
-                onDismissForever={dismissVisibleNotificationForever}
-              />
-            )}
-          </ExtensionSlot>
+          {visibleNotifications.length > 0 && (
+            <NotificationModal
+              notifications={visibleNotifications}
+              acknowledgingIds={acknowledgingNotificationIds}
+              onAcknowledge={closeVisibleNotification}
+              onClose={closeVisibleNotification}
+              onDismissForever={dismissVisibleNotificationForever}
+            />
+          )}
         </Suspense>
       </LazyLoadErrorBoundary>
 

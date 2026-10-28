@@ -121,8 +121,7 @@ export function resetSettingsGatesForTests(): void {
  * settings page so both show exactly the same sections.
  *
  * The open product ships four sections; a private build registers more through
- * `@ext/registry` (each with its own group, page loader and optional gate), and
- * may hide a default one with `hideDefault`.
+ * `@ext/registry` (each with its own group, page loader and optional gate).
  */
 export function useSettingsSectionGroups(): { groups: SettingsGroup[]; ready: boolean } {
   const { t, i18n } = useTranslation('nav');
@@ -154,7 +153,6 @@ export function useSettingsSectionGroups(): { groups: SettingsGroup[]; ready: bo
       ],
     };
     for (const section of registry.settingsSections) {
-      if (registry.hideDefault?.(section.id)) continue;
       (byGroup[section.group as SettingsGroup['id']] ?? byGroup.system).push({
         id: section.id,
         name: i18n.exists(section.labelKey, { ns: section.ns || 'nav' })
@@ -186,7 +184,6 @@ export function useSettingsSectionGroups(): { groups: SettingsGroup[]; ready: bo
     .map((group) => ({
       ...group,
       items: group.items.filter((item) => {
-        if (registry.hideDefault?.(item.id)) return false;
         if (item.adminOnly && !isAdmin) return false;
         // A gated section stays hidden until its own check passes. Until the
         // check has answered it is shown, so a slow probe does not make the

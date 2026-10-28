@@ -22,11 +22,11 @@ describe('ExtensionSlot', () => {
 
   it('renders the default content when nothing is registered', () => {
     render(
-      <ExtensionSlot name="layout.version">
-        <span>default badge</span>
+      <ExtensionSlot name="settings.account">
+        <span>default account list</span>
       </ExtensionSlot>,
     );
-    expect(screen.getByText('default badge')).toBeInTheDocument();
+    expect(screen.getByText('default account list')).toBeInTheDocument();
   });
 
   it('renders nothing when nothing is registered and no default is given', () => {

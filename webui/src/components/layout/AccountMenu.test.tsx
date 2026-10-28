@@ -1,24 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { Crown } from 'lucide-react';
 import AccountMenu, { FLOCKS_LLM_USAGE_URL } from './AccountMenu';
-import { __resetExtensionSlotCacheForTesting } from '@/components/extensions/ExtensionSlot';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
-
-// Extensions reach the menu through the `layout.version` slot; tests register
-// slot components here and clear them again.
-const extensionRegistry = vi.hoisted(() => ({
-  routes: [],
-  navItems: [],
-  settingsSections: [],
-  slots: [] as Array<{ id: string; slot: string; component: (props: { context: Record<string, unknown> }) => JSX.Element }>,
-  i18n: {},
-}));
-vi.mock('@ext/registry', () => ({ __esModule: true, default: extensionRegistry }));
 
 function CurrentPath() {
   return <div data-testid="path">{useLocation().pathname}</div>;
@@ -29,11 +17,6 @@ const versionProps = {
 };
 
 describe('AccountMenu', () => {
-  beforeEach(() => {
-    extensionRegistry.slots = [];
-    __resetExtensionSlotCacheForTesting();
-  });
-
   it.each([false, true])('keeps the footer menu outside sidebar clipping (collapsed=%s)', (collapsed) => {
     const onNavigate = vi.fn();
     const { container } = render(
@@ -133,46 +116,5 @@ describe('AccountMenu', () => {
     fireEvent.click(upgrade);
     expect(screen.getByTestId('path')).toHaveTextContent('/settings/edition');
     expect(onNavigate).toHaveBeenCalledOnce();
-  });
-
-  it('leaves out the default entries a private build hides', () => {
-    render(
-      <MemoryRouter>
-        <AccountMenu {...versionProps} username="admin" roleLabel="管理员" initial="A" isHidden={(id) => id === 'modelUsage'} onLogout={vi.fn()} />
-      </MemoryRouter>,
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal' }));
-    const menu = screen.getByRole('menu');
-    expect(within(menu).getByRole('menuitem', { name: 'systemConfiguration' })).toBeInTheDocument();
-    expect(within(menu).queryByRole('menuitem', { name: /modelUsage/ })).not.toBeInTheDocument();
-  });
-
-  it('lets a layout.version extension replace the version badge', () => {
-    const seen: Array<Record<string, unknown>> = [];
-    extensionRegistry.slots = [{
-      id: 'test-version',
-      slot: 'layout.version',
-      component: ({ context }) => {
-        seen.push(context);
-        return <span>{`edition ${String(context.version)}`}</span>;
-      },
-    }];
-    __resetExtensionSlotCacheForTesting();
-    render(
-      <MemoryRouter>
-        <AccountMenu
-          {...versionProps}
-          username="admin"
-          roleLabel="管理员"
-          initial="A"
-          versionContext={{ version: 'v2026.10.13', hasUpdate: false }}
-          onLogout={vi.fn()}
-        />
-      </MemoryRouter>,
-    );
-    const trigger = screen.getByRole('button', { name: 'accountAndGlobal' });
-    expect(within(trigger).getByText('edition v2026.10.13')).toBeInTheDocument();
-    expect(within(trigger).queryByText('v2026.10.13')).not.toBeInTheDocument();
-    expect(seen[0]).toEqual({ version: 'v2026.10.13', hasUpdate: false });
   });
 });
