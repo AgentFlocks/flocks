@@ -72,8 +72,8 @@ MANAGED_LOCATION_PREFIX = "content://"
 DEFAULT_REFRESH_INTERVAL_S = 60.0
 
 #: Where reservations are kept across restarts: one row per id
-#: (``<prefix><kind>/<quoted id>``), so instances only ever add rows and none
-#: can write over another's.
+#: (``<prefix><kind>/<quoted id>``), so recording one only ever adds a row and
+#: never writes over another.
 RESERVATIONS_PREFIX = "content/managed/reserved/"
 
 ChangeListener = Callable[[FrozenSet[Tuple[str, str]]], Union[None, Awaitable[None]]]
@@ -234,11 +234,11 @@ class ManagedContent:
 
     @classmethod
     async def _load_reservations(cls) -> None:
-        """Merge in the reservations every instance has recorded.  Raises when it cannot.
+        """Merge in the recorded reservations.  Raises when it cannot.
 
-        Read on every refresh, not once: another instance may reserve an id
-        (and see it withdrawn) while this one runs, and this one must not
-        hand that name to a local copy in the meantime.
+        Read on every refresh, not once: a reservation may be recorded (or
+        withdrawn) in the store while this process runs, and it must not hand
+        that name to a local copy in the meantime.
         """
         from urllib.parse import unquote
 
