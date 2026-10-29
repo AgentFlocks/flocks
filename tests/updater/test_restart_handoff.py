@@ -1822,3 +1822,20 @@ def test_start_failure_masks_url_credentials_before_cutting_the_output(
     assert "s3cr3t-pass" not in error
     assert "***@registry.example.com" in error
     assert "s3cr3t-pass" not in fake_responder.instances[-1].progress.snapshot()["error"]
+
+
+def test_legacy_handover_only_picks_a_daemon_proven_to_serve_this_root(monkeypatch, tmp_path: Path) -> None:
+    """The picked pid may be force-stopped, so an unproven old daemon of another root is never it."""
+    calls: list[dict[str, object]] = []
+
+    def fake_trusted(**kwargs):
+        calls.append(kwargs)
+        # Windows lists another root's old daemon for detection, but cannot prove it is ours.
+        return [] if kwargs.get("confirmed_only") else [4321]
+
+    monkeypatch.setattr(service_manager, "trusted_daemon_process_pids", fake_trusted)
+    monkeypatch.setattr(service_manager, "_process_command_line", lambda _pid: "flocks service-daemon --server-port 5391")
+    args = SimpleNamespace(install_root=str(tmp_path), backend_port=5392)
+
+    assert restart_handoff._legacy_supervisor_pid(args) is None
+    assert calls == [{"root": tmp_path, "confirmed_only": True}]

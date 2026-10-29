@@ -716,7 +716,9 @@ def _cleanup_legacy_upgrade_handover(args: argparse.Namespace) -> bool:
 def _legacy_supervisor_pid(args: argparse.Namespace) -> int | None:
     """Capture the daemon PID associated with an older handoff request."""
     try:
-        candidates = service_manager.trusted_daemon_process_pids(root=Path(args.install_root))
+        # The pid may be force-stopped below; only a daemon proven to serve this runtime
+        # root qualifies, never an old daemon of another root sharing the install.
+        candidates = service_manager.trusted_daemon_process_pids(root=Path(args.install_root), confirmed_only=True)
     except Exception as exc:
         _record_handoff_log(f"legacy_daemon_scan_failed error={exc}")
         return None

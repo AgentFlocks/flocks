@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import datetime
+import hashlib
 import importlib.util
 import json
 import os
@@ -36,6 +37,7 @@ from flocks.cli.service_control import (
     stream_logs,
     supervisor_is_running,
     supervisor_log_path,
+    supervisor_port_path,
     supervisor_socket_path,
     supervisor_uses_tcp_control,
 )
@@ -47,6 +49,8 @@ except ImportError:  # pragma: no cover - unavailable on Windows
 
 MIN_NODE_MAJOR = 22
 FOLLOW_POLL_INTERVAL = 0.5
+# ``service-daemon`` argument carrying a digest of the runtime root the daemon serves.
+DAEMON_RUNTIME_ROOT_OPTION = "--runtime-root-id"
 MAX_SERVICE_LOG_BYTES = 1024 * 1024 * 1024
 LOG_TRIM_CHUNK_BYTES = 1024 * 1024
 WEBUI_DIRECT_BACKEND_URLS_ENV = "FLOCKS_WEBUI_DIRECT_BACKEND_URLS"
@@ -1074,26 +1078,38 @@ def _process_list_pids() -> list[int]:
     return sorted(dict.fromkeys(pids))
 
 
-def _windows_trusted_daemon_process_pids(*, root: Path) -> list[int]:
-    """Return trusted Windows daemon pids with a single process query."""
+def _windows_trusted_daemon_processes(*, root: Path, runtime_marker: str) -> dict[int, str]:
+    """Return this install's Windows daemons with a single process query, by pid.
+
+    Each is ``own`` (its root marker is *runtime_marker*), ``other`` (it names another
+    runtime root) or ``legacy`` (it predates the marker).
+    """
     if sys.platform != "win32":
-        return []
+        return {}
     root_text = str(root).lower()
     env = os.environ.copy()
     env["FLOCKS_DAEMON_ROOT_MATCH"] = root_text
     env["FLOCKS_DAEMON_CURRENT_PID"] = str(os.getpid())
+    env["FLOCKS_DAEMON_RUNTIME_MARKER"] = runtime_marker.lower()
     powershell = which("powershell") or which("powershell.exe")
     if not powershell:
-        return []
+        return {}
     script = (
         "$root = [Environment]::GetEnvironmentVariable('FLOCKS_DAEMON_ROOT_MATCH'); "
         "$currentPid = [int][Environment]::GetEnvironmentVariable('FLOCKS_DAEMON_CURRENT_PID'); "
+        "$marker = [Environment]::GetEnvironmentVariable('FLOCKS_DAEMON_RUNTIME_MARKER'); "
         "Get-CimInstance Win32_Process | Where-Object { "
         "$_.ProcessId -ne $currentPid -and $_.CommandLine -and "
         "$_.CommandLine.ToLowerInvariant().Contains('service-daemon') -and "
         "$_.CommandLine.ToLowerInvariant().Contains('flocks') -and "
         "$_.CommandLine.ToLowerInvariant().Contains($root) "
-        "} | ForEach-Object { $_.ProcessId }"
+        "} | ForEach-Object { "
+        "$commandLine = $_.CommandLine.ToLowerInvariant(); "
+        "$kind = 'legacy'; "
+        f"if ($commandLine.Contains('{DAEMON_RUNTIME_ROOT_OPTION}=')) {{ "
+        "$kind = 'other'; if ($commandLine.Contains($marker)) { $kind = 'own' } }; "
+        '"$($_.ProcessId) $kind" '
+        "}"
     )
     completed = subprocess.run(
         [powershell, "-NoProfile", "-Command", script],
@@ -1105,10 +1121,36 @@ def _windows_trusted_daemon_process_pids(*, root: Path) -> list[int]:
         env=env,
     )
     if completed.returncode != 0:
-        return []
-    return sorted(
-        dict.fromkeys(int(line.strip()) for line in completed.stdout.splitlines() if line.strip().isdigit())
-    )
+        return {}
+    processes: dict[int, str] = {}
+    for line in completed.stdout.splitlines():
+        fields = line.split()
+        if fields and fields[0].isdigit():
+            kind = fields[1] if len(fields) > 1 and fields[1] in {"own", "other", "legacy"} else "legacy"
+            processes.setdefault(int(fields[0]), kind)
+    return dict(sorted(processes.items()))
+
+
+def _legacy_control_port_daemon_pid(paths: RuntimePaths) -> int | None:
+    """Return the pid of the daemon on the shared legacy control port if it serves *paths*.
+
+    The only evidence Windows offers about which root a daemon from before the root marker
+    serves; unreachable or another root's daemon gives None.
+    """
+    from flocks.cli import service_control
+
+    port = service_control.configured_control_port() or service_control.SUPERVISOR_CONTROL_PORT
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=1.0, trust_env=False) as client:
+            response = client.get("/status")
+            response.raise_for_status()
+            payload = response.json()
+    except Exception:
+        return None
+    if not service_control.status_belongs_to_runtime(payload, paths):
+        return None
+    pid = payload["daemon"].get("pid")
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) else None
 
 
 def _trusted_flocks_daemon_owner(pid: int, *, root: Path) -> bool:
@@ -1180,41 +1222,87 @@ def _process_uses_runtime_root(pid: int, paths: RuntimePaths) -> bool:
     if env is None:
         return False
     override = env.get("FLOCKS_ROOT", "").strip()
+    # The default root is under the process's own HOME, which differs from this CLI's
+    # when instances are kept apart by HOME instead of FLOCKS_ROOT.
+    home = env.get("HOME", "").strip()
     try:
-        process_root = Path(override).expanduser().resolve() if override else (Path.home() / ".flocks").resolve()
+        if override:
+            if home and override.startswith("~"):
+                override = home + override[1:]
+            process_root = Path(override).expanduser().resolve()
+        else:
+            process_root = ((Path(home) if home else Path.home()) / ".flocks").resolve()
         return process_root == paths.root.resolve()
     except OSError:
         return False
 
 
-def trusted_daemon_process_pids(*, root: Path | None = None, paths: RuntimePaths | None = None) -> list[int]:
+def daemon_runtime_root_marker(paths: RuntimePaths) -> str:
+    """Return the ``service-daemon`` argument that names the runtime root a daemon serves.
+
+    The command line is the only thing about another process that Windows lets us read,
+    so the daemon carries a digest of its root there for ``trusted_daemon_process_pids``.
+    """
+    try:
+        root_text = str(paths.root.resolve())
+    except OSError:
+        root_text = str(paths.root)
+    digest = hashlib.sha256(os.path.normcase(root_text).encode("utf-8")).hexdigest()[:16]
+    return f"{DAEMON_RUNTIME_ROOT_OPTION}={digest}"
+
+
+def _unix_daemon_serves_runtime_root(pid: int, paths: RuntimePaths) -> bool:
+    command_line = _process_command_line(pid).lower()
+    if f"{DAEMON_RUNTIME_ROOT_OPTION}=" in command_line:
+        return daemon_runtime_root_marker(paths) in command_line
+    # A daemon from before the marker: attribute it by its environment.
+    return _process_uses_runtime_root(pid, paths)
+
+
+def trusted_daemon_process_pids(
+    *,
+    root: Path | None = None,
+    paths: RuntimePaths | None = None,
+    confirmed_only: bool = False,
+) -> list[int]:
     """Return trusted daemon pids for the current Flocks install *and* runtime root.
 
-    Several runtime roots (``FLOCKS_ROOT``) may share one install. When the
-    daemon of *this* root recorded its pid, only that daemon is a candidate;
-    without a record, only daemons whose environment names this root are
-    claimed (older daemons that predate the pid file). Another root's daemon
-    is never touched by ``flocks stop`` / ``flocks status``.
+    Several runtime roots (``FLOCKS_ROOT`` or separate HOMEs) may share one install.
+    When the daemon of *this* root recorded its pid, only that daemon is a candidate.
+    Without a record, a daemon is claimed when the root marker on its command line names
+    this root; a daemon from before the marker only when its environment does. Windows
+    cannot read another process's environment: such a daemon is still listed for
+    detection, but with *confirmed_only* (what cleanup kills) only when the shared legacy
+    control port answers for it and for this root. Another root's daemon is never touched
+    by ``flocks start`` / ``flocks stop`` / ``flocks status``.
     """
     current_root = root or ensure_install_layout()
     current_paths = paths or runtime_paths()
-    if sys.platform == "win32":
-        candidates = _windows_trusted_daemon_process_pids(root=current_root)
-    else:
-        candidates = [pid for pid in _process_list_pids() if _trusted_flocks_daemon_owner(pid, root=current_root)]
     recorded = _recorded_daemon_pid(current_paths)
+    if sys.platform == "win32":
+        processes = _windows_trusted_daemon_processes(
+            root=current_root,
+            runtime_marker=daemon_runtime_root_marker(current_paths),
+        )
+        if recorded is not None:
+            return [pid for pid in processes if pid == recorded]
+        legacy_owner: int | None = None
+        if confirmed_only and "legacy" in processes.values():
+            legacy_owner = _legacy_control_port_daemon_pid(current_paths)
+        return [
+            pid
+            for pid, kind in processes.items()
+            if kind == "own" or (kind == "legacy" and (not confirmed_only or pid == legacy_owner))
+        ]
+    candidates = [pid for pid in _process_list_pids() if _trusted_flocks_daemon_owner(pid, root=current_root)]
     if recorded is not None:
         return [pid for pid in candidates if pid == recorded]
-    if sys.platform == "win32":
-        # No process-environment attribution on Windows; daemons started by this
-        # code always leave a pid record, so this only affects legacy daemons.
-        return candidates
-    return [pid for pid in candidates if _process_uses_runtime_root(pid, current_paths)]
+    return [pid for pid in candidates if _unix_daemon_serves_runtime_root(pid, current_paths)]
 
 
 def cleanup_trusted_daemon_processes(*, console, root: Path | None = None, paths: RuntimePaths | None = None) -> list[int]:
     """Clean trusted Flocks daemon processes whose control API is unavailable."""
-    trusted = trusted_daemon_process_pids(root=root, paths=paths)
+    trusted = trusted_daemon_process_pids(root=root, paths=paths, confirmed_only=True)
     for pid in trusted:
         _terminate_orphan_pid(pid, "daemon", console)
     return trusted
@@ -1813,10 +1901,15 @@ def _start_supervisor_process(config: ServiceConfig, paths: RuntimePaths, consol
     root = ensure_install_layout()
     log_path = supervisor_log_path(paths)
     _ensure_control_socket_path_fits(paths)
-    if not supervisor_uses_tcp_control():
+    if supervisor_uses_tcp_control():
+        # A record left by a daemon that died points readiness checks at a stale port.
+        with contextlib.suppress(OSError):
+            supervisor_port_path(paths).unlink(missing_ok=True)
+    else:
         supervisor_socket_path(paths).unlink(missing_ok=True)
     command = resolve_flocks_cli_command(root) + [
         "service-daemon",
+        daemon_runtime_root_marker(paths),
         "--server-host",
         config.backend_host,
         "--server-port",

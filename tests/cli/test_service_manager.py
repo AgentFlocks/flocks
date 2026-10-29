@@ -2165,19 +2165,22 @@ def test_windows_cleanup_trusted_daemon_processes_uses_single_query(monkeypatch,
         commands.append(command)
         assert command[:2] == ["powershell.exe", "-NoProfile"]
         assert kwargs["env"]["FLOCKS_DAEMON_ROOT_MATCH"] == str(tmp_path).lower()
-        return SimpleNamespace(returncode=0, stdout="111\n222\n111\n")
+        # this root's daemon, another root's, and two from before the root marker
+        return SimpleNamespace(returncode=0, stdout="111 own\n222 other\n333 legacy\n444 legacy\n111 own\n")
 
     monkeypatch.setattr(service_manager.sys, "platform", "win32")
     monkeypatch.setattr(service_manager, "which", lambda name: "powershell.exe" if name == "powershell" else None)
     monkeypatch.setattr(service_manager, "_process_list_pids", lambda: [111, 222, 333])
     monkeypatch.setattr(service_manager, "_process_command_line", fail_per_pid_lookup)
     monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+    # Of the old daemons, only the one the shared legacy control port vouches for is this root's.
+    monkeypatch.setattr(service_manager, "_legacy_control_port_daemon_pid", lambda _paths: 333)
     monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: cleaned.append(pid))
 
     result = service_manager.cleanup_trusted_daemon_processes(console=DummyConsole(), root=tmp_path)
 
-    assert result == [111, 222]
-    assert cleaned == [111, 222]
+    assert result == [111, 333]
+    assert cleaned == [111, 333]
     assert len(commands) == 1
 
 

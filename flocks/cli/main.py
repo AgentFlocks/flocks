@@ -578,10 +578,18 @@ def service_daemon(
         help="Print server-port migration hint in parent CLI",
     ),
     skip_webui_build: bool = typer.Option(False, "--skip-webui-build", help="Skip WebUI static asset build"),
+    runtime_root_id: Optional[str] = typer.Option(
+        None,
+        "--runtime-root-id",
+        help="Digest of the runtime root this daemon serves; only read back from the process list",
+    ),
 ):
     """
     Run the Flocks service supervisor daemon.
     """
+    # On the command line so `flocks start/stop` of another runtime root sharing this
+    # install can tell this daemon apart (service_manager.trusted_daemon_process_pids).
+    del runtime_root_id
     run_service_daemon(
         ServiceConfig(
             backend_host=server_host,
