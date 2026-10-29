@@ -169,7 +169,14 @@ def test_python_node_runs_unchanged_without_a_gate(hook_pipeline) -> None:
     assert result.outputs["x"] == 7
 
 
-def test_http_request_outcome_reaches_the_after_stage(hook_pipeline) -> None:
+def test_http_request_outcome_reaches_the_after_stage(hook_pipeline, monkeypatch) -> None:
+    import httpx
+
+    def failed_request(client, method, url, **kwargs):
+        assert method == "GET" and url == "http://127.0.0.1:9/"
+        raise httpx.ConnectError("synthetic connection failure")
+
+    monkeypatch.setattr(httpx.Client, "request", failed_request)
     recorder = _Recorder()
     hook_pipeline.register("test-recorder", recorder, order=1)
     workflow = {
@@ -180,7 +187,7 @@ def test_http_request_outcome_reaches_the_after_stage(hook_pipeline) -> None:
 
     result = _run(workflow)
 
-    # Nothing listens on port 9: the gate allowed it, the request failed.
+    # The gate allowed it; transport fails without contacting a port or proxy.
     assert result.status == "FAILED"
     assert [entry["outcome"]["status"] for entry in recorder.after] == ["error"]
 

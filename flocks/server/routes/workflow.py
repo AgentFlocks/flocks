@@ -43,6 +43,7 @@ from flocks.workflow.center import (
 from flocks.session.recorder import Recorder
 from flocks.session.session import SessionAgentMismatchError
 from flocks.workflow.workflow_lint import lint_workflow
+from flocks.workflow.validation import validate_workflow_python
 from flocks.workflow.compiler import compile_workflow
 from flocks.workflow.fs_store import (
     find_workspace_root as _find_workspace_root,
@@ -1320,6 +1321,11 @@ async def _persist_workflow_triggers(
 ) -> Dict[str, Any]:
     workflow_json = workflow_data.get("workflowJson") or {}
     updated_json = set_workflow_json_triggers(workflow_json, triggers)
+    if any(trigger.enabled for trigger in triggers):
+        try:
+            validate_workflow_python(Workflow.from_dict(updated_json))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     data = dict(workflow_data)
     data["workflowJson"] = updated_json
     data["updatedAt"] = int(time.time() * 1000)
@@ -1693,6 +1699,7 @@ async def create_workflow(req: WorkflowCreateRequest):
             )
             workflow_json["metadata"].pop("group", None)
             workflow_model = Workflow.from_dict(workflow_json)
+            validate_workflow_python(workflow_model)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid workflow JSON: {str(e)}")
         strict_mapping_errors = _strict_edge_mapping_lint_errors(workflow_model)
@@ -1870,6 +1877,7 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
                 # Lint and save the merged definition, not the bare request body.
                 incoming_json = _inherit_saved_workflow_metadata(req.workflow_json, workflow_json)
                 workflow_model = Workflow.from_dict(incoming_json)
+                validate_workflow_python(workflow_model)
                 strict_mapping_errors = _strict_edge_mapping_lint_errors(workflow_model)
                 if strict_mapping_errors:
                     raise HTTPException(
@@ -1894,6 +1902,11 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
             markdown_content = req.markdown_content
         elif req.edit_markdown_content is not None:
             markdown_content = req.edit_markdown_content
+        if req.status == "active" and req.workflow_json is None:
+            try:
+                validate_workflow_python(Workflow.from_dict(workflow_json))
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         data["updatedAt"] = int(time.time() * 1000)
 
         if req.workflow_json is None and req.markdown_content is None and req.edit_markdown_content is None:
@@ -1989,6 +2002,10 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
         workflow_json = data["workflowJson"]
+        try:
+            validate_workflow_python(Workflow.from_dict(workflow_json))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         tool_context = await _build_workflow_tool_context(
             workflow_id=workflow_id,
             action_name="run",
@@ -3851,6 +3868,11 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
         if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
+        if req.enabled:
+            try:
+                validate_workflow_python(data.get("workflowJson") or {})
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         config = {
             "workflowId": workflow_id,
             "enabled": req.enabled,
@@ -3955,6 +3977,11 @@ async def save_workflow_poller_config(workflow_id: str, req: WorkflowPollerConfi
         if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
+        if req.enabled:
+            try:
+                validate_workflow_python(data.get("workflowJson") or {})
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         cron_expression = (req.cronExpression or "").strip()
         if cron_expression:
             # Validate before anything is persisted; a bad expression must not
@@ -4091,6 +4118,11 @@ async def save_syslog_config(workflow_id: str, req: SyslogConfigRequest):
         if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
+        if req.enabled:
+            try:
+                validate_workflow_python(data.get("workflowJson") or {})
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         config = {
             "workflowId": workflow_id,
             "enabled": req.enabled,

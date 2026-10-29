@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+_RELIABILITY_INHERITED_HOME = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+
 # The suite runs on the runtime's own SQLite backend: a backend chosen by the
 # developer's shell (or by a persisted choice under a real home directory)
 # must not switch it. Set before flocks is imported, which reads it once.
@@ -94,8 +96,17 @@ def _home_honors_env(monkeypatch):
     behavior-preserving when ``HOME`` already points at the real home (the
     default), so tests that never touch ``HOME`` see no change.
     """
-    def _home() -> Path:
+    def _home_text():
         candidate = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+        # The acceptance runner opts into a disposable fallback home. Preserve
+        # any more specific HOME override made by a test's own fixture.
+        fallback = os.environ.get("FLOCKS_RELIABILITY_TEST_HOME")
+        if fallback and candidate == _RELIABILITY_INHERITED_HOME:
+            return fallback
+        return candidate
+
+    def _home() -> Path:
+        candidate = _home_text()
         if candidate:
             return Path(candidate)
         return Path(os.path.expanduser("~"))
@@ -116,7 +127,7 @@ def _home_honors_env(monkeypatch):
         # forms to the real implementation so we never change its type
         # contract or raise on a bytes path.
         if isinstance(text, str):
-            home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+            home = _home_text()
             if home and (text == "~" or text.startswith("~/") or text.startswith("~\\")):
                 return home + text[1:]
         return _real_expanduser(path)

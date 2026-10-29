@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import socket
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -13,9 +14,19 @@ import httpx
 
 from flocks.cli.service_config import ServiceConfig, service_config_from_status_payload, service_config_payload
 
+# Fixed TCP control port daemons used before each runtime root recorded its own; clients
+# still try it when a runtime has no port record (a daemon started by an older version).
 SUPERVISOR_CONTROL_PORT = 48765
 SUPERVISOR_LOG_FILENAME = "daemon.log"
 SUPERVISOR_SOCKET_FILENAME = "service-daemon.sock"
+SUPERVISOR_PORT_FILENAME = "service-daemon.port"
+CONTROL_OWNER_PROBE_TIMEOUT_SECONDS = 2.0
+_PORT_RECORD_REPLACE_ATTEMPTS = 20
+_PORT_RECORD_REPLACE_RETRY_SECONDS = 0.05
+
+
+class ForeignSupervisorError(httpx.ConnectError):
+    """The TCP control port is answered by the daemon of another runtime root."""
 
 
 @dataclass(frozen=True)
@@ -67,14 +78,73 @@ def supervisor_socket_path(paths) -> Path:
     return paths.run_dir / SUPERVISOR_SOCKET_FILENAME
 
 
-def supervisor_control_port() -> int:
-    """Return the local TCP control port used on Windows."""
+def supervisor_port_path(paths) -> Path:
+    """Return the file where a TCP-control daemon records its port for this runtime root."""
+    return paths.run_dir / SUPERVISOR_PORT_FILENAME
+
+
+def configured_control_port() -> int | None:
+    """Return the TCP control port pinned by FLOCKS_CONTROL_PORT, if any."""
     raw = os.getenv("FLOCKS_CONTROL_PORT")
     if raw and raw.isdigit():
         value = int(raw)
         if 0 < value < 65536:
             return value
-    return SUPERVISOR_CONTROL_PORT
+    return None
+
+
+def read_recorded_control_port(paths) -> int | None:
+    """Return the TCP control port this runtime root's daemon recorded, if readable."""
+    try:
+        raw = supervisor_port_path(paths).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if raw.isdigit() and 0 < int(raw) < 65536:
+        return int(raw)
+    return None
+
+
+def record_control_port(paths, port: int) -> None:
+    """Record the daemon's TCP control port where this runtime root's clients look for it."""
+    path = supervisor_port_path(paths)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(f"{port}\n", encoding="utf-8")
+    for attempt in range(_PORT_RECORD_REPLACE_ATTEMPTS):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            # Windows will not replace a file another process has open; clients only read it briefly.
+            if attempt == _PORT_RECORD_REPLACE_ATTEMPTS - 1:
+                temporary.unlink(missing_ok=True)
+                raise
+            time.sleep(_PORT_RECORD_REPLACE_RETRY_SECONDS)
+
+
+def clear_recorded_control_port(paths, port: int) -> None:
+    """Remove the port record while it still names *port*; a newer daemon's record stays."""
+    if read_recorded_control_port(paths) != port:
+        return
+    try:
+        supervisor_port_path(paths).unlink(missing_ok=True)
+    except OSError:
+        # A client reading the record at this moment keeps it open on Windows; a stale
+        # record is harmless because clients check who answers the port.
+        pass
+
+
+def supervisor_control_port(paths=None) -> int:
+    """Return the local TCP control port used on Windows.
+
+    FLOCKS_CONTROL_PORT wins; otherwise the port this runtime root's daemon recorded, and
+    the legacy fixed port when nothing is recorded.
+    """
+    configured = configured_control_port()
+    if configured is not None:
+        return configured
+    recorded = read_recorded_control_port(paths or _default_runtime_paths())
+    return recorded if recorded is not None else SUPERVISOR_CONTROL_PORT
 
 
 def supervisor_uses_tcp_control() -> bool:
@@ -82,15 +152,53 @@ def supervisor_uses_tcp_control() -> bool:
     return sys.platform == "win32" or not hasattr(socket, "AF_UNIX")
 
 
-def supervisor_control_client(paths=None, timeout: float | None = 2.0) -> httpx.Client:
-    """Create a client for the local daemon control API."""
-    if supervisor_uses_tcp_control():
-        return httpx.Client(
-            base_url=f"http://127.0.0.1:{supervisor_control_port()}",
-            timeout=timeout,
-            trust_env=False,
+def _same_path(left: str, right: Path) -> bool:
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(str(right)))
+
+
+def status_belongs_to_runtime(payload: Any, paths) -> bool:
+    """Return True when a /status payload comes from the daemon of this runtime root.
+
+    Every daemon reports its own ``daemon.log_path``, which lives under its runtime root.
+    """
+    daemon = payload.get("daemon") if isinstance(payload, dict) else None
+    log_path = daemon.get("log_path") if isinstance(daemon, dict) else None
+    return isinstance(log_path, str) and bool(log_path) and _same_path(log_path, supervisor_log_path(paths))
+
+
+def _ensure_control_port_owner(port: int, paths, timeout: float | None) -> None:
+    """Refuse a TCP control port answered by another runtime root's daemon.
+
+    A localhost port is shared by every runtime on the host, unlike the Unix socket in each
+    runtime's run directory; without this check one instance's start/stop/restart acted on
+    whichever daemon held the port.
+    """
+    probe_timeout = CONTROL_OWNER_PROBE_TIMEOUT_SECONDS if timeout is None else min(timeout, CONTROL_OWNER_PROBE_TIMEOUT_SECONDS)
+    with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=probe_timeout, trust_env=False) as probe:
+        response = probe.get("/status")
+    try:
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPStatusError, ValueError):
+        payload = None
+    if not status_belongs_to_runtime(payload, paths):
+        raise ForeignSupervisorError(
+            f"control port {port} is not served by this runtime's Flocks daemon",
+            request=response.request,
         )
+
+
+def supervisor_control_client(paths=None, timeout: float | None = 2.0) -> httpx.Client:
+    """Create a client for the local daemon control API.
+
+    On TCP control the daemon behind the port is checked first; a port answered for another
+    runtime root raises ForeignSupervisorError, which callers treat like an unreachable daemon.
+    """
     current = paths or _default_runtime_paths()
+    if supervisor_uses_tcp_control():
+        port = supervisor_control_port(current)
+        _ensure_control_port_owner(port, current, timeout)
+        return httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=timeout, trust_env=False)
     transport = httpx.HTTPTransport(uds=str(supervisor_socket_path(current)))
     return httpx.Client(base_url="http://flocks.local", timeout=timeout, trust_env=False, transport=transport)
 

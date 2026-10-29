@@ -133,6 +133,20 @@ async def test_a_cancel_request_reaches_a_run_of_this_process():
     assert not await WorkflowStore.request_execution_cancel("not-a-run-of-this-process")
 
 
+async def test_abandonment_and_other_writes_share_the_transaction_gate():
+    records = [await create_execution_record("wf") for _ in range(24)]
+    await asyncio.wait_for(asyncio.gather(
+        *(ownership.abandon_execution(record["id"]) for record in records),
+        *(WorkflowStore.kv_put(f"parallel-{index}", index) for index in range(24)),
+    ), 10)
+    # A delayed progress update cannot reopen the abandoned run, even when it
+    # queued behind the terminal transaction on the same writer connection.
+    await asyncio.gather(*(WorkflowStore.upsert_execution(record) for record in records))
+    assert [await _status(record["id"]) for record in records] == ["cancelled"] * 24
+    assert [await WorkflowStore.kv_get(f"parallel-{index}") for index in range(24)] == list(range(24))
+    assert not (await WorkflowStore.raw_completion_db()).in_transaction
+
+
 def _two_node_workflow(started: Path, second: Path) -> dict:
     return {
         "id": "wf-stop",
@@ -215,6 +229,67 @@ async def test_a_poller_run_stops_when_its_history_entry_is_cancelled(tmp_path, 
 
     assert not second.exists()
     assert await _status(exec_id) == "cancelled"
+
+
+async def test_a_kafka_run_honors_history_cancellation_without_acknowledging(tmp_path):
+    from flocks.ingest.kafka.manager import KafkaManager
+    from flocks.workflow.models import Workflow
+
+    started, second = tmp_path / "kafka-started", tmp_path / "kafka-second"
+    workflow = Workflow.from_dict(_two_node_workflow(started, second))
+    run = asyncio.create_task(KafkaManager()._trigger_workflow(
+        "wf-stop", workflow, {"synthetic": True}, "kafka_message",
+        {"tool_context_required": False},
+    ))
+    try:
+        for _ in range(100):
+            if started.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert started.exists(), "the first Kafka node is running"
+        [exec_id] = list(ownership._live)
+        assert await WorkflowStore.request_execution_cancel(exec_id)
+        outcome = await asyncio.wait_for(run, 10)
+        assert not outcome.acknowledged
+        assert await _status(exec_id) == "cancelled"
+        assert not ownership.running_here(exec_id)
+        assert not second.exists()
+    finally:
+        if not run.done():
+            run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+
+
+async def test_kafka_cleanup_cancellation_abandons_the_execution(monkeypatch):
+    from flocks.ingest.kafka import manager as kafka
+    from flocks.workflow.runner import RunWorkflowResult
+
+    cleaning = asyncio.Event()
+
+    async def context(**kwargs):
+        return object()
+
+    async def cleanup(context):
+        cleaning.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(kafka, "build_workflow_tool_context", context)
+    monkeypatch.setattr(kafka, "cleanup_workflow_tool_context", cleanup)
+    monkeypatch.setattr(kafka, "run_workflow", lambda **_: RunWorkflowResult(status="SUCCEEDED"))
+    run = asyncio.create_task(kafka.KafkaManager()._trigger_workflow("wf", {}, {}, "kafka_message"))
+    try:
+        await asyncio.wait_for(cleaning.wait(), 5)
+        [exec_id] = list(ownership._live)
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+        assert await _status(exec_id) == "cancelled"
+        assert not ownership.running_here(exec_id)
+        assert ownership.execution_cancelled(exec_id)
+    finally:
+        if not run.done():
+            run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
 
 
 async def test_a_triggered_run_cancelled_while_its_context_is_cleaned_up_is_let_go(monkeypatch):
