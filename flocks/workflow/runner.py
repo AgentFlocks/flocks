@@ -19,6 +19,7 @@ from flocks.sandbox.context import resolve_sandbox_context
 from ._async_runtime import DEFAULT_LLM_MAX_CONCURRENCY, configure_llm_concurrency
 from .errors import FlocksWorkflowError, RunCancelledError, RunTimeoutError, WorkflowValidationError
 from .io import dump_workflow, load_workflow
+from .validation import validate_workflow_python
 from .compiler import default_exec_path, compile_workflow, workflow_has_logic_nodes
 from .execution_plan import (
     WorkflowExecutionPlan,
@@ -373,6 +374,12 @@ def _validate_lint_results(lint_results: tuple[Dict[str, Any], ...]) -> None:
     lint_warnings = [r for r in lint_results if r.get("severity") != "error"]
     if lint_errors:
         _logger.error(f"workflow lint 检查发现 {len(lint_errors)} 个错误: {lint_errors[:5]}")
+        syntax_errors = [item for item in lint_errors if item.get("kind") == "python_syntax_error"]
+        if syntax_errors:
+            raise WorkflowValidationError(
+                "Workflow Python syntax validation failed: "
+                + "; ".join(item["message"] for item in syntax_errors[:5])
+            )
         strict_mapping_errors = [item for item in lint_errors if item.get("kind") == "implicit_full_payload_edge"]
         if strict_mapping_errors:
             raise WorkflowValidationError(f"Workflow strict edge mapping failed: {strict_mapping_errors[:5]}")
@@ -460,6 +467,9 @@ def run_workflow(
         exec_path = default_exec_path(workflow_path)
         _logger.debug("检查编译缓存: %s", exec_path)
         wf = load_workflow(workflow_path)
+        # Reject broken Python before logic-node generation can call an LLM
+        # or write an executable cache, even when the broken node is later.
+        validate_workflow_python(wf)
         if effective_use_llm is None:
             # Auto-enable LLM codegen when the workflow contains logic nodes.
             # This keeps pure-python workflows offline-friendly while ensuring
@@ -480,10 +490,13 @@ def run_workflow(
                 try:
                     _logger.debug("使用编译缓存")
                     wf = load_workflow(exec_path)
+                    validate_workflow_python(wf)
                 except Exception:
                     # If exec is unreadable, fall back to source then recompile below if needed.
                     _logger.warning("编译缓存不可读，回退到源文件")
+                    exec_is_fresh = False
                     wf = load_workflow(workflow_path)
+                    validate_workflow_python(wf)
 
             # Only compile when the source contains logic nodes. Pure-python workflows don't need exec.
             # If exec exists but is stale/unreadable, recompile and overwrite it.
@@ -496,6 +509,7 @@ def run_workflow(
                     preserve_description=True,
                     workflow_path=str(workflow_path),
                 )
+                validate_workflow_python(compiled)
                 _logger.debug("编译完成，保存到 %s", exec_path)
                 dump_workflow(compiled, exec_path, indent=2)
                 wf = compiled

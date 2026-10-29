@@ -153,7 +153,14 @@ def test_http_request_node_is_gated_by_tool_before_hook(hook_pipeline) -> None:
     assert "http_request" in payload and "169.254.169.254" in payload
 
 
-def test_http_request_node_proceeds_when_hook_allows(hook_pipeline) -> None:
+def test_http_request_node_proceeds_when_hook_allows(hook_pipeline, monkeypatch) -> None:
+    import httpx
+
+    def failed_request(client, method, url, **kwargs):
+        assert method == "GET" and url == "http://127.0.0.1:9/"
+        raise httpx.ConnectError("synthetic connection failure")
+
+    monkeypatch.setattr(httpx.Client, "request", failed_request)
     class _Allow(HookBase):
         async def tool_before(self, ctx):
             ctx.output["decision"] = {"action": "allow"}
@@ -165,9 +172,10 @@ def test_http_request_node_proceeds_when_hook_allows(hook_pipeline) -> None:
         "edges": [],
     }
     result = _run(workflow)
-    # The request itself fails (nothing listens on port 9) but the policy let it through.
+    # A deterministic transport failure proves the policy let the request through.
     assert result.status == "FAILED"
     assert "blocked by policy" not in (result.error or "")
+    assert "synthetic connection failure" in (result.error or "")
 
 
 def test_llm_node_runs_before_and_after_hooks_and_restores_placeholders(hook_pipeline, fake_provider) -> None:

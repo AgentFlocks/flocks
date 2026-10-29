@@ -410,18 +410,12 @@ async def test_aggregate_stats_route_is_not_shadowed(client: AsyncClient) -> Non
 
 
 @pytest.mark.asyncio
-async def test_run_records_typed_error_message_for_invalid_definition(client: AsyncClient) -> None:
+async def test_run_rejects_invalid_definition_before_creating_execution(client: AsyncClient) -> None:
     _write_workflow("wf-bad-def", {"start": "a", "nodes": [{"id": "a", "type": "shell", "code": "ls"}], "edges": []})
     started = await client.post("/api/workflow/wf-bad-def/run", json={})
-    assert started.status_code == 200, started.text
-    exec_id = started.json()["id"]
-    for _ in range(50):
-        detail = await client.get(f"/api/workflow/wf-bad-def/history/{exec_id}", params={"stepLimit": 0})
-        if detail.json()["status"] != "running":
-            break
-        await asyncio.sleep(0.1)
-    assert detail.json()["status"] == "error"
-    assert detail.json()["errorMessage"].startswith("WorkflowValidationError:")
+    assert started.status_code == 400, started.text
+    assert "shell" in started.json()["message"]
+    assert await WorkflowStore.list_executions("wf-bad-def") == []
 
 
 @pytest.mark.asyncio
