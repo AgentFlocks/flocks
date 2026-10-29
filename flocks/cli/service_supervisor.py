@@ -20,7 +20,9 @@ from urllib.parse import parse_qs, urlparse
 from flocks.browser.admin import stop_all_daemons as stop_all_browser_daemons
 from flocks.cli.service_config import service_config_from_payload, service_config_payload
 from flocks.cli.service_control import (
-    supervisor_control_port,
+    clear_recorded_control_port,
+    configured_control_port,
+    record_control_port,
     supervisor_log_path,
     supervisor_socket_path,
     supervisor_uses_tcp_control,
@@ -116,6 +118,19 @@ else:  # pragma: no cover - exercised by importing on Windows
     _UnixControlServer = None
 
 
+class _TcpControlServer(ThreadingHTTPServer):
+    """Localhost control server where Unix domain sockets are unavailable (Windows)."""
+
+    # On Windows SO_REUSEADDR lets a second socket bind a port another one is listening on;
+    # take the port exclusively so two daemons never share it.
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self) -> None:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def supervisor_pid_path(paths) -> Path:
     """Return the pid file that identifies the daemon owning a runtime root."""
     return paths.run_dir / SUPERVISOR_PID_FILENAME
@@ -144,6 +159,7 @@ class SupervisorDaemon:
         self._shutdown_requested = threading.Event()
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
+        self._control_port: int | None = None
         self.backend = ManagedService(
             name="backend",
             label="后端",
@@ -214,7 +230,16 @@ class SupervisorDaemon:
     def _start_control_server(self) -> None:
         handler = self._handler_class()
         if supervisor_uses_tcp_control():
-            server: ThreadingHTTPServer = ThreadingHTTPServer(("127.0.0.1", supervisor_control_port()), handler)
+            # Unless FLOCKS_CONTROL_PORT pins one, the OS picks a free port, so daemons of
+            # different runtime roots never share it; clients read it from the port record.
+            server: ThreadingHTTPServer = _TcpControlServer(("127.0.0.1", configured_control_port() or 0), handler)
+            port = int(server.server_address[1])
+            try:
+                record_control_port(self.paths, port)
+            except BaseException:
+                server.server_close()
+                raise
+            self._control_port = port
         else:
             socket_path = supervisor_socket_path(self.paths)
             socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -226,7 +251,10 @@ class SupervisorDaemon:
         self._server = server
         self._server_thread = threading.Thread(target=server.serve_forever, name="flocks-supervisor-control", daemon=True)
         self._server_thread.start()
-        _daemon_log("control_started", {"platform": sys.platform})
+        details: dict[str, object] = {"platform": sys.platform}
+        if self._control_port is not None:
+            details["port"] = self._control_port
+        _daemon_log("control_started", details)
 
     def _stop_control_server(self) -> None:
         if self._server is not None:
@@ -234,7 +262,9 @@ class SupervisorDaemon:
             self._server.server_close()
         if self._server_thread is not None:
             self._server_thread.join(timeout=5.0)
-        if not supervisor_uses_tcp_control():
+        if self._control_port is not None:
+            clear_recorded_control_port(self.paths, self._control_port)
+        elif not supervisor_uses_tcp_control():
             supervisor_socket_path(self.paths).unlink(missing_ok=True)
 
     def _handler_class(self):
