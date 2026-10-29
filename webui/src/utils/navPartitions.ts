@@ -1,3 +1,4 @@
+import registry from '@ext/registry';
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
 
 /**
@@ -37,9 +38,13 @@ export function sceneWorkspaceIdOf(workspace: NavWorkspaceId): string | null {
 
 export function isSettingsPath(pathname: string): boolean {
   return pathname === '/settings' || pathname.startsWith('/settings/')
-    // Cloud login returns through the legacy upgrade route. Keep both the
-    // callback and redirect out of the workbench's remembered page.
-    || pathname === '/flockspro-upgrade' || pathname.startsWith('/flockspro-upgrade/');
+    // Extension routes that belong to settings (a sign-in callback, say) stay
+    // out of every module's remembered page.
+    || registry.routes.some((route) => {
+      if (route.area !== 'settings') return false;
+      const base = `/${route.path.replace(/^\/+|\/+$/g, '')}`;
+      return pathname === base || pathname.startsWith(`${base}/`);
+    });
 }
 
 export function isSceneSuitesPath(pathname: string): boolean {
@@ -65,16 +70,20 @@ export type NavRoute =
  * The owner of a route. `workspaces` is the loaded workspace list; leave it
  * out (or pass null) while it is unknown: a workspace route then counts as a
  * scene, which it is unless the workspace puts its pages in the Agent menu.
+ * `workshopPaths` are the pages extensions add to the workshop's menu.
  */
 export function resolveNavRoute(
   path: string,
   workspaces?: readonly WebUIContractWorkspaceListItem[] | null,
+  workshopPaths: readonly string[] = [],
 ): NavRoute {
   const [pathname, search = ''] = path.split('?');
   if (isSettingsPath(pathname)) return { kind: 'settings' };
   if (isSceneSuitesPath(pathname)) return { kind: 'scenes' };
   const workspaceTab = new URLSearchParams(search).get('tab');
-  if (WORKSHOP_PATHS.some((base) => pathname === base || pathname.startsWith(`${base}/`))
+  const under = (base: string) => pathname === base || pathname.startsWith(`${base}/`);
+  if (WORKSHOP_PATHS.some(under)
+    || workshopPaths.some((href) => under(href.split('?')[0]))
     || (pathname === '/workspace' && (workspaceTab === 'knowledge' || workspaceTab === 'memory'))) {
     return { kind: 'workspace', workspace: AGENT_WORKSHOP };
   }
@@ -95,8 +104,11 @@ function isInternalPath(value: unknown): value is string {
   return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//');
 }
 
-/** Last visited path per workspace, so switching back lands where it was left. */
-export function readWorkspacePaths(): NavWorkspacePaths {
+/**
+ * Last visited path per workspace, so switching back lands where it was left.
+ * `workshopPaths` are the pages extensions add to the workshop's menu (resolveNavRoute).
+ */
+export function readWorkspacePaths(workshopPaths: readonly string[] = []): NavWorkspacePaths {
   try {
     const raw = window.localStorage.getItem(WORKSPACE_PATHS_KEY);
     if (!raw) return {};
@@ -106,7 +118,7 @@ export function readWorkspacePaths(): NavWorkspacePaths {
     let legacyAuditPath: string | undefined;
     for (const [workspace, value] of Object.entries(parsed as Record<string, unknown>)) {
       if (!isInternalPath(value)) continue;
-      const route = resolveNavRoute(value);
+      const route = resolveNavRoute(value, null, workshopPaths);
       if (route.kind !== 'workspace') continue;
       const sceneId = sceneWorkspaceIdOf(workspace);
       if (sceneId !== null) {

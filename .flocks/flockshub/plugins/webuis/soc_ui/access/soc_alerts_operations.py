@@ -448,17 +448,22 @@ def _verdict_bucket(record: dict[str, Any]) -> str:
 
 
 def _triage_attack_success(record: dict[str, Any]) -> str:
-    raw_verdict = _text(record.get("triage_attack_verdict")).strip().lower()
+    # Same precedence as the dashboard's SQL projection: an explicit result
+    # string wins; older records carry the outcome in the verdict
+    # ("attack_success" / "attack_failed") or as a boolean result. A missing
+    # result is not an explicit "unknown".
     if _triage_attack_verdict(record) != "attack":
         return "unknown"
     value = _text(record.get("triage_attack_success")).strip().lower()
     if value in {"success", "failed", "unknown"}:
         return value
-    legacy_value = record.get("triage_attack_success")
-    if legacy_value is True:
+    raw_verdict = _text(record.get("triage_attack_verdict")).strip().lower()
+    if raw_verdict == "attack_success":
         return "success"
-    if legacy_value is False and raw_verdict == "attack_failed":
+    if raw_verdict == "attack_failed":
         return "failed"
+    if value in {"1", "true"}:
+        return "success"
     return "unknown"
 
 

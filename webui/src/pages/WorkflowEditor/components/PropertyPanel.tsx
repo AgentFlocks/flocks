@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, Code2, FileText, Key, Settings, Wrench, Sparkles, Globe, Workflow as WorkflowIcon, AlertCircle } from 'lucide-react';
 import { Node } from '@xyflow/react';
 import { useTranslation } from 'react-i18next';
@@ -26,10 +26,20 @@ function JsonTextarea({
   placeholder?: string;
   jsonErrorLabel?: string;
 }) {
-  const [raw, setRaw] = useState(() =>
-    value != null ? JSON.stringify(value, null, 2) : ''
-  );
+  const serialized = value != null ? JSON.stringify(value, null, 2) : '';
+  const [raw, setRaw] = useState(serialized);
   const [error, setError] = useState('');
+  // The panel fills its form in an effect after the first render, so the
+  // initial ``value`` here is always empty; follow later external updates
+  // (node selected / form reset) instead of keeping that first snapshot.
+  const lastExternal = useRef(serialized);
+  useEffect(() => {
+    if (serialized !== lastExternal.current) {
+      lastExternal.current = serialized;
+      setRaw(serialized);
+      setError('');
+    }
+  }, [serialized]);
 
   const handleBlur = () => {
     if (!raw.trim()) {
@@ -114,7 +124,7 @@ export default function PropertyPanel({
   const handleSave = () => onUpdate(selectedNode.id, formData);
 
   return (
-    <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-2xl border-l border-gray-200 z-50 flex flex-col">
+    <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-2xl border-l border-gray-200 z-50 flex flex-col max-md:w-full">
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-gray-200 bg-gray-50">
         <div>

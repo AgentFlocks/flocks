@@ -135,7 +135,7 @@ export function FileListRow({ selected = false, className = '', ...props }: Comp
 }
 
 export function FileListActions({ className = '', onClick, ...props }: ComponentPropsWithoutRef<'div'>) {
-  return <div {...props} className={`flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 ${className}`} onClick={event => {
+  return <div {...props} className={`flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100 ${className}`} onClick={event => {
     event.stopPropagation();
     onClick?.(event);
   }} />;

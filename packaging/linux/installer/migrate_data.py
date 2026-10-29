@@ -42,7 +42,7 @@ USER_DATA_MARKERS = ("config/flocks.json", "config/flocks.jsonc", "data/flocks.d
 # what a Flocks data dir may hold at its top level (plus lost+found: a fresh ext4 disk mounted on it);
 # anything else means it is not (only) Flocks data, which must never be renamed or chowned
 FLOCKS_TOP_LEVEL = frozenset({
-    "config", "data", "run", "logs", "plugins", "workspace", "workflow", "flockspro", "flockspro_audit.db",
+    "config", "data", "run", "logs", "plugins", "workspace", "workflow",
     "cache", "browser", "projects", "version", "mcp", "plans", "rules", "skills", "skill", "sandboxes",
     "truncated", "flockshub", "flocks.json", ".storage_migrated", "lost+found",
     "chrome-debug-profile", "chromium-debug-profile", "edge-debug-profile", "brave-debug-profile",

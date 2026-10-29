@@ -1,0 +1,165 @@
+/*
+ * 语义变量（浅色 / 深色）。
+ *
+ * 界面以 dev 分支的样式为准：dev 已有的页面直接写 Tailwind 色板类（bg-white、text-gray-500 …），
+ * 深色由 index.css 的 .dark 兼容表接管。这里的变量只给 v2 新增、dev 没有的界面
+ * （网络代理等）、扩展注册的页面以及 Hub 插件页面使用，取值对齐 dev 的配色：
+ * 浅色是 Tailwind gray + 品牌红，深色是 index.css 里的 --flocks-dark-* 那一套。
+ */
+
+:root {
+  /* 字体 */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --font-body: 14px;
+  --line-body: 20px;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* 几何（对应 dev 常用的 rounded-md / rounded-lg / rounded-xl） */
+  --radius-sm: 4px;
+  --radius-segment: 6px;
+  --radius-control: 8px;
+  --radius-card: 12px;
+  --radius-overlay: 12px;
+  --radius-pill: 999px;
+  --control-sm: 28px;
+  --control-md: 32px;
+  --control-lg: 36px;
+  --control-touch: 44px;
+  --border-width: 1px;
+  --focus-width: 2px;
+  --focus-offset: 2px;
+  --layout-sidebar: 208px;
+  --layout-topbar: 44px;
+  --overlay-modal: 560px;
+  --overlay-drawer: 480px;
+  --overlay-onboarding: 768px;
+
+  /* 动效 */
+  --motion-fast: 150ms;
+  --motion-normal: 150ms;
+  --motion-overlay: 200ms;
+  --motion-easing: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* 间距（4px 步长） */
+  --space-0: 0px;
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --space-48: 48px;
+  --space-64: 64px;
+
+  /* 背景层级：gray-50 页面、白色卡片、gray-100 次级底色 */
+  --bg-canvas: #f9fafb;
+  --bg-surface: #ffffff;
+  --bg-subtle: #f3f4f6;
+  --bg-hover: #f3f4f6;
+  --bg-selected: #f3f4f6;
+
+  /* 文字层级：gray-900 / 700 / 500 / 400 */
+  --text-primary: #111827;
+  --text-secondary: #374151;
+  --text-muted: #6b7280;
+  --text-placeholder: #9ca3af;
+  --text-link: #2563eb;
+
+  /* 边框：gray-200 分隔线、gray-300 控件 */
+  --border-subtle: #e5e7eb;
+  --border-control: #d1d5db;
+
+  /* 操作（red-600 / 700 / 800） */
+  --action-primary: #dc2626;
+  --action-hover: #b91c1c;
+  --action-pressed: #991b1b;
+  --action-onPrimary: #ffffff;
+  --action-danger: #dc2626;
+  --action-onDanger: #ffffff;
+  --focus-ring: #94a3b8;
+
+  /* 功能状态：文字与底色成对使用 */
+  --status-success: #15803d;
+  --status-successBg: #f0fdf4;
+  --status-warning: #b45309;
+  --status-warningBg: #fffbeb;
+  --status-danger: #dc2626;
+  --status-dangerBg: #fef2f2;
+  --status-info: #2563eb;
+  --status-infoBg: #eff6ff;
+
+  /* 分类强调 */
+  --accent-ai: #7c3aed;
+  --accent-aiBg: #f5f3ff;
+  --accent-data: #0e7490;
+  --accent-dataBg: #ecfeff;
+  --accent-brand: #dc2626;
+  --accent-brandBg: #fef2f2;
+
+  /* 交互状态 */
+  --disabled-bg: #f3f4f6;
+  --disabled-text: #9ca3af;
+  --switch-on: #64748b;
+  --switch-thumb: #ffffff;
+  --shadow-overlay: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+  /* 弹层遮罩（= bg-black/30），给 ::backdrop 这类没法加类名的地方用 */
+  --overlay-backdrop: rgb(0 0 0 / 30%);
+
+  color-scheme: light;
+}
+
+.dark {
+  --bg-canvas: #252c35;
+  --bg-surface: #303842;
+  --bg-subtle: #3a434e;
+  --bg-hover: #3a434e;
+  --bg-selected: #46515e;
+
+  --text-primary: #d7dee8;
+  --text-secondary: #b8c2cc;
+  --text-muted: #9aa7b4;
+  --text-placeholder: rgb(184 194 204 / 0.78);
+  --text-link: #539bf5;
+
+  --border-subtle: #4a5563;
+  --border-control: #5a6573;
+
+  --action-primary: #dc2626;
+  --action-hover: #b91c1c;
+  --action-pressed: #991b1b;
+  --action-onPrimary: #ffffff;
+  --action-danger: #dc2626;
+  --action-onDanger: #ffffff;
+  --focus-ring: #539bf5;
+
+  --status-success: #86efac;
+  --status-successBg: #14332a;
+  --status-warning: #fcd34d;
+  --status-warningBg: #392d13;
+  --status-danger: #fca5a5;
+  --status-dangerBg: #3b2028;
+  --status-info: #93c5fd;
+  --status-infoBg: #1e3a5f;
+
+  --accent-ai: #c4b5fd;
+  --accent-aiBg: #352b4b;
+  --accent-data: #67e8f9;
+  --accent-dataBg: #173c46;
+  --accent-brand: #fca5a5;
+  --accent-brandBg: #3b2028;
+
+  --disabled-bg: #303842;
+  --disabled-text: #9aa7b4;
+  --switch-on: #64748b;
+  --switch-thumb: #ffffff;
+  --shadow-overlay: 0 18px 48px rgb(28 33 40 / 0.38);
+  --overlay-backdrop: rgb(0 0 0 / 50%);
+
+  color-scheme: dark;
+}

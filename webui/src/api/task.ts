@@ -33,6 +33,10 @@ export interface RetryConfig {
   retryCount: number;
   retryDelaySeconds: number;
   retryAfter?: string;
+  /** Set when the run is not retried automatically: what it started may have taken effect. */
+  blockedReason?: string | null;
+  /** The calls whose effects were not confirmed, as "tool:callID". */
+  unverifiedEffects?: string[];
 }
 
 export interface TaskScheduler {
@@ -223,6 +227,10 @@ export const taskAPI = {
 
   rerunExecution: (executionId: string) =>
     client.post<TaskExecution>(`/api/task-executions/${executionId}/rerun`),
+
+  /** Go on with a run held for verification, in the session it ran in. */
+  continueExecution: (executionId: string) =>
+    client.post<TaskExecution>(`/api/task-executions/${executionId}/continue`),
 
   deleteExecution: (executionId: string) =>
     client.delete(`/api/task-executions/${executionId}`),

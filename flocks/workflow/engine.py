@@ -1,11 +1,15 @@
 """Workflow execution engine."""
 
 from collections import deque
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
+from contextvars import copy_context
+import copy
 from dataclasses import dataclass, field
 import hashlib
 from itertools import islice
 import logging
+import os
 import threading
 import time
 import traceback
@@ -19,7 +23,10 @@ from .errors import MaxStepsExceededError, NodeExecutionError, NodeTimeoutError,
 from .execution_plan import WorkflowExecutionPlan
 from .execution_state import ExecutionResult, StepResult, WorkflowExecutionState
 from .models import Edge, Workflow, Node
-from .repl_runtime import HostProcessPythonExecRuntime, PythonExecRuntime, Runtime
+from .repl_runtime import (
+    HostProcessPythonExecRuntime, PythonExecRuntime, Runtime,
+    SandboxPythonExecRuntime, _legacy_registry_cancel_scope,
+)
 
 
 _logger = logging.getLogger("flocks.workflow.engine")
@@ -41,6 +48,10 @@ class _ExecOutcome(NamedTuple):
     duration_ms: float
     is_timeout: bool = False
     is_cancelled: bool = False
+
+
+_OBSERVABILITY_DICT_KEY_LIMIT = 50
+DEFAULT_PREVIEW_ITEMS_FOR_DICT = 3
 
 
 class _NodeRunTracker:
@@ -126,7 +137,19 @@ def _summarize_for_observability(value: Any, *, depth: int = 0) -> Any:
             return {"_type": "string", "chars": len(value), "preview": value[:200]}
         return value
     if isinstance(value, dict):
-        return {key: _summarize_for_observability(item, depth=depth + 1) for key, item in islice(value.items(), 50)}
+        if len(value) > _OBSERVABILITY_DICT_KEY_LIMIT:
+            # Mark the truncation instead of silently returning a 50-key dict
+            # that reads like the whole payload.
+            return {
+                "_type": "dict",
+                "key_count": len(value),
+                "keys": list(islice(value.keys(), _OBSERVABILITY_DICT_KEY_LIMIT)),
+                "preview": {
+                    key: _summarize_for_observability(item, depth=depth + 1)
+                    for key, item in islice(value.items(), DEFAULT_PREVIEW_ITEMS_FOR_DICT)
+                },
+            }
+        return {key: _summarize_for_observability(item, depth=depth + 1) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
         if isinstance(value, (list, tuple)):
             preview_items = value[:3]
@@ -179,11 +202,13 @@ def _default_workflow_loader(workflow_id: str) -> "Workflow":
     import asyncio
 
     async def _load():
-        from flocks.workflow.fs_store import read_workflow_from_fs
+        from flocks.workflow.fs_store import is_managed_workflow, read_workflow_from_fs
         from flocks.storage.storage import Storage
 
         data = read_workflow_from_fs(workflow_id)
-        if data is None:
+        if data is None and not is_managed_workflow(workflow_id):
+            # Legacy records are for local workflows only: one must not stand
+            # in for a managed workflow whose definition is unusable.
             data = await Storage.read(f"workflow/{workflow_id}")
         if data is None:
             raise NodeExecutionError(
@@ -208,8 +233,60 @@ def _default_workflow_loader(workflow_id: str) -> "Workflow":
     if executor is None:
         executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="wf-subwf")
         setattr(_default_workflow_loader, "_executor", executor)
-    fut = executor.submit(lambda: asyncio.run(_load()))
+    # With the caller's context: the run's task scope decides which version of
+    # a managed sub-workflow it gets (flocks.content.managed.task_scope).
+    fut = executor.submit(copy_context().run, lambda: asyncio.run(_load()))
     return fut.result()
+
+
+_HTTP_REQUEST_TOOL_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "url": {"type": "string"},
+        "method": {"type": "string"},
+    },
+    "required": ["url", "method"],
+}
+
+#: Python and logic nodes run code the engine executes itself, outside the tool
+#: registry.  They go through the same gate as a tool under this name, with the
+#: code as the argument a policy can look at.
+WORKFLOW_CODE_TOOL_NAME = "workflow_python"
+
+_WORKFLOW_CODE_TOOL_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "code": {"type": "string"},
+        "code_sha256": {"type": "string"},
+        "node_type": {"type": "string"},
+    },
+    "required": ["code", "code_sha256", "node_type"],
+}
+
+
+def _workflow_code_input(code: str, node: Node) -> Dict[str, Any]:
+    """The gate input for a python or logic node's code."""
+    return {
+        "code": code,
+        "code_sha256": hashlib.sha256(code.encode("utf-8")).hexdigest(),
+        "node_type": str(node.type),
+    }
+
+
+def _with_validated_input(payload: Dict[str, Any], validated_input: Dict[str, Any]) -> Dict[str, Any]:
+    """``payload`` with the input that actually runs once a policy patched it.
+
+    ``raw_input`` keeps what was asked for; ``validated_input`` -- what the
+    outcome is reported against -- becomes what ran, as the tool registry
+    does for a patched tool call.
+    """
+    from flocks.hooks.contracts import redact_sensitive
+
+    execution = dict(payload.get("tool_execution") or {})
+    tool = dict(execution.get("tool") or {})
+    tool["validated_input"] = redact_sensitive(dict(validated_input))
+    execution["tool"] = tool
+    return {**payload, "tool_execution": execution}
 
 
 @dataclass
@@ -306,6 +383,14 @@ class WorkflowEngine:
         state = WorkflowExecutionState(run_id=rid, history_mode=self.history_mode, retain_history=retain_history)
         edge_resolver = EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace)
         run_t0 = time.perf_counter()
+        run_deadline_s = float(timeout_s) if timeout_s is not None and timeout_s > 0 else None
+
+        def _run_deadline_exceeded() -> bool:
+            # Also consulted by the runtime's cooperative ``cancelled()`` helper so
+            # a long-running node stops at the run timeout instead of only
+            # being checked between steps.
+            return run_deadline_s is not None and (time.perf_counter() - run_t0) > run_deadline_s
+
         # Dedup: track (node_id -> last_input_hash) to skip identical re-executions.
         _dedup_hashes: Dict[str, str] = {}
         step_timeout_s = self.node_timeout_s if (self.node_timeout_s is not None and self.node_timeout_s > 0) else None
@@ -319,26 +404,30 @@ class WorkflowEngine:
         timed_out_threads = self._timed_out_threads
         previous_cancel_checker = None
         previous_enable_cancel_trace = None
-        if isinstance(self.runtime, PythonExecRuntime):
+        if isinstance(self.runtime, (PythonExecRuntime, SandboxPythonExecRuntime)):
             previous_cancel_checker = self.runtime.cancel_checker
-            previous_enable_cancel_trace = self.runtime.enable_cancel_trace
+            previous_enable_cancel_trace = getattr(self.runtime, "enable_cancel_trace", None)
 
             def _runtime_cancel_requested() -> bool:
                 return (
                     timeout_cancel_event.is_set()
+                    or _run_deadline_exceeded()
                     or timed_out_threads.current_thread_marked()
                     or bool(cancel and cancel())
                 )
 
             self.runtime.cancel_checker = (
-                _runtime_cancel_requested if step_timeout_s is not None or cancel is not None else None
+                _runtime_cancel_requested
+                if step_timeout_s is not None or cancel is not None or run_deadline_s is not None
+                else None
             )
             # A timeout-only checker is consumed by isolated-process RPC calls
             # and by the cancel polls inside tool / llm.ask calls. Enabling
             # sys.settrace for every ordinary workflow line would add a large
             # steady-state cost, so plain Python code in a timed-out host-thread
             # node still runs until its next tool / LLM call or its end.
-            self.runtime.enable_cancel_trace = cancel is not None
+            if isinstance(self.runtime, PythonExecRuntime):
+                self.runtime.enable_cancel_trace = cancel is not None
         try:
 
             def _raise_cancelled() -> None:
@@ -346,14 +435,16 @@ class WorkflowEngine:
                 err.execution_context = state.build_context()
                 raise err
 
+            def _raise_timed_out() -> None:
+                err = RunTimeoutError(rid, float(run_deadline_s or 0.0))
+                err.execution_context = state.build_context()
+                raise err
+
             while q:
                 if cancel is not None and cancel():
                     _raise_cancelled()
-                if timeout_s is not None and timeout_s > 0:
-                    if (time.perf_counter() - run_t0) > float(timeout_s):
-                        err = RunTimeoutError(rid, float(timeout_s))
-                        err.execution_context = state.build_context()
-                        raise err
+                if _run_deadline_exceeded():
+                    _raise_timed_out()
                 if state.steps >= self.max_steps:
                     err = MaxStepsExceededError(self.max_steps)
                     err.execution_context = state.build_context()
@@ -521,8 +612,13 @@ class WorkflowEngine:
                     _node_runs: Dict[int, _NodeRun] = {a[0]: _NodeRun() for a in _exec_args}
                     _pool = ThreadPoolExecutor(max_workers=_pw, thread_name_prefix="wf-par")
                     try:
+                        # Each concurrent node needs its own Context: one
+                        # Context cannot be entered by two workers at once.
                         _fut_map = {
-                            _pool.submit(_run_node_tracked, timed_out_threads, _node_runs[a[0]], _par_exec, a): a[0]
+                            _pool.submit(
+                                copy_context().run, _run_node_tracked,
+                                timed_out_threads, _node_runs[a[0]], _par_exec, a,
+                            ): a[0]
                             for a in _exec_args
                         }
                         try:
@@ -558,7 +654,11 @@ class WorkflowEngine:
                         _serial_run = _NodeRun()
                         try:
                             if step_timeout_s is not None and timeout_executor is not None:
+                                # ThreadPoolExecutor does not copy ContextVars.
+                                # Preserve the authenticated caller and opaque
+                                # execution context on every reused worker hop.
                                 _sfut = timeout_executor.submit(
+                                    copy_context().run,
                                     _run_node_tracked,
                                     timed_out_threads,
                                     _serial_run,
@@ -603,6 +703,10 @@ class WorkflowEngine:
                                 thread_name_prefix="wf-node",
                             )
                         except RunCancelledError as _ce:
+                            if _run_deadline_exceeded() and not (cancel is not None and cancel()):
+                                # The cooperative interrupt came from the run
+                                # deadline, not from a caller cancellation.
+                                _raise_timed_out()
                             _ce.execution_context = state.build_context()
                             raise
                         except Exception as _e:
@@ -637,6 +741,7 @@ class WorkflowEngine:
                         if self.history_mode == "summary":
                             return StepResult(
                                 node_id=_nid,
+                                node_type=_nd.type,
                                 inputs=_summarize_for_observability(_inp),
                                 outputs=_summarize_for_observability(outputs),
                                 stdout=stdout,
@@ -646,6 +751,7 @@ class WorkflowEngine:
                             )
                         return StepResult(
                             node_id=_nid,
+                            node_type=_nd.type,
                             inputs=_inp,
                             outputs=outputs,
                             stdout=stdout,
@@ -876,6 +982,10 @@ class WorkflowEngine:
                     raise _stop_exc
                 if cancel is not None and cancel():
                     _raise_cancelled()
+                if _run_deadline_exceeded():
+                    # A node interrupted by the deadline returns partial output;
+                    # the run must not read as succeeded.
+                    _raise_timed_out()
 
             pending_joins = []
             for nid, buf in state.join_inputs.items():
@@ -896,7 +1006,7 @@ class WorkflowEngine:
                     timeout_executor.shutdown(wait=False, cancel_futures=True)
                 except TypeError:
                     timeout_executor.shutdown(wait=False)
-            if isinstance(self.runtime, PythonExecRuntime):
+            if isinstance(self.runtime, (PythonExecRuntime, SandboxPythonExecRuntime)):
                 if timed_out_threads.active():
                     # Serial nodes read the checker off the shared runtime; a
                     # timed-out one is still unwinding and must keep seeing its
@@ -904,7 +1014,8 @@ class WorkflowEngine:
                     self.runtime.cancel_checker = timed_out_threads.residual_checker(previous_cancel_checker)
                 else:
                     self.runtime.cancel_checker = previous_cancel_checker
-                self.runtime.enable_cancel_trace = bool(previous_enable_cancel_trace)
+                if isinstance(self.runtime, PythonExecRuntime):
+                    self.runtime.enable_cancel_trace = bool(previous_enable_cancel_trace)
 
     def run_node(self, node_id: str, inputs: Dict[str, Any]) -> "StepResult":
         """Public API: execute a single node by id and return a StepResult.
@@ -923,6 +1034,7 @@ class WorkflowEngine:
             outputs, stdout = self._execute_node(node, inputs)
             return StepResult(
                 node_id=node_id,
+                node_type=node.type,
                 inputs=inputs,
                 outputs=outputs,
                 stdout=stdout,
@@ -932,6 +1044,7 @@ class WorkflowEngine:
             tb = traceback.format_exc()
             return StepResult(
                 node_id=node_id,
+                node_type=node.type,
                 inputs=inputs,
                 outputs={},
                 error=str(e),
@@ -968,13 +1081,13 @@ class WorkflowEngine:
                     rpc_max_response_bytes=_rt.isolated_rpc_max_response_bytes,
                     rpc_max_workers=_rt.isolated_rpc_max_workers,
                 )
-            return _rt.execute(node.code, inputs)
+            return self._run_code_node(node, node.code, inputs, _rt)
         if node.type == "logic":
             assert self.code_gen is not None
             code = node.code
             if code is None or not str(code).strip():
                 try:
-                    code = self.code_gen.generate(node)
+                    code = self._generate_logic_code(node, _rt)
                 except Exception as gen_error:
                     raise NodeExecutionError(
                         node_id=node_id,
@@ -993,7 +1106,7 @@ class WorkflowEngine:
                     rpc_max_response_bytes=_rt.isolated_rpc_max_response_bytes,
                     rpc_max_workers=_rt.isolated_rpc_max_workers,
                 )
-            return _rt.execute(code, inputs)
+            return self._run_code_node(node, code, inputs, _rt)
         if node.type in {"branch", "loop"}:
             return {}, ""
         if node.type == "tool":
@@ -1018,21 +1131,19 @@ class WorkflowEngine:
         from .tools import ToolFacade, get_tool_registry
 
         _rt = _runtime or self.runtime
-        cancel_checker = None
-        if isinstance(_rt, PythonExecRuntime):
-            reg = _rt.tool_registry or get_tool_registry()
-            cancel_checker = _rt.cancel_checker
+        reg = getattr(_rt, "tool_registry", None) or get_tool_registry()
+        cancel_checker = getattr(_rt, "cancel_checker", None)
+        cancel_scope = nullcontext()
+        with_cancel_checker = getattr(reg, "with_cancel_checker", None)
+        if callable(with_cancel_checker):
+            reg = with_cancel_checker(cancel_checker)
         else:
-            reg = get_tool_registry()
-        if hasattr(reg, "cancel_checker"):
-            try:
-                reg.cancel_checker = cancel_checker
-            except Exception:
-                pass
+            cancel_scope = _legacy_registry_cancel_scope(reg, cancel_checker)
         facade = ToolFacade(reg)
         merged_args = {**(node.tool_args or {}), **inputs}
         try:
-            result = facade.run(node.tool_name, **merged_args)
+            with cancel_scope:
+                result = facade.run(node.tool_name, **merged_args)
         except RunCancelledError:
             raise
         except Exception as e:
@@ -1061,12 +1172,16 @@ class WorkflowEngine:
                 node_id=node.id,
                 message=f"Prompt template render failed: {type(e).__name__}: {e}",
             ) from e
-        from .llm import default_llm_node_max_retries, get_llm_client
+        from .llm import default_llm_node_max_retries, get_llm_client, llm_hook_context_from_registry
 
         _rt = _runtime or self.runtime
         cancel_checker = getattr(_rt, "cancel_checker", None)
         try:
-            client = get_llm_client(model=node.model, cancel_checker=cancel_checker)
+            client = get_llm_client(
+                model=node.model,
+                cancel_checker=cancel_checker,
+                hook_context=llm_hook_context_from_registry(getattr(_rt, "tool_registry", None)),
+            )
             # Transient provider failures (429 / 5xx / timeouts) are retried
             # with backoff instead of failing the node on the first hit.
             text = client.ask(rendered, max_retries=default_llm_node_max_retries())
@@ -1079,6 +1194,239 @@ class WorkflowEngine:
             ) from e
         output_k = node.output_key or "result"
         return {output_k: text}, ""
+
+    def _gate_engine_operation(
+        self,
+        node: Node,
+        *,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_schema: Dict[str, Any],
+        tool_category: str,
+        call_prefix: str,
+        blocked_label: str,
+        applicable_patch_keys: frozenset[str] = frozenset(),
+        runtime: Optional[Runtime] = None,
+    ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Pass work the engine does itself through the tool-execution gate.
+
+        The engine has no policy of its own; ``tool.execute.before`` handlers
+        decide.  Returns the payload the outcome is reported against and the
+        argument patch the handlers attached to their allow, or ``None`` when
+        no handler is registered (the work proceeds unchanged).  Anything but
+        an allow stops the node: a headless run has nobody to answer a
+        confirmation.  So does a patch naming an argument outside
+        ``applicable_patch_keys``: the handlers authorised the patched call,
+        and running the unpatched one instead would run something nobody
+        authorised.
+        """
+        from flocks.hooks.pipeline import HookPipeline, HookStage
+        from flocks.workflow._async_runtime import run_sync as _run_sync_on_shared_loop
+
+        registry = getattr(runtime or self.runtime, "tool_registry", None)
+
+        async def _gate():
+            from flocks.hooks.tool_gate import ToolGateVerdict, run_tool_gate
+            from flocks.session.tool_execution import build_session_tool_execution_payload
+            from flocks.tool import ToolContext
+
+            ctx = None
+            resolver = getattr(registry, "_tool_context", None)
+            if callable(resolver):
+                try:
+                    ctx = resolver()
+                except Exception:
+                    ctx = None
+            if ctx is None:
+                ctx = ToolContext(session_id="workflow", message_id="workflow")
+            # Which project's hooks apply: the same workspace and session the
+            # workflow's model calls name (see llm_hook_context_from_registry),
+            # on the probe and on both stage payloads alike.  Without them the
+            # pipeline falls back to the server's working directory and a
+            # project that registered its own gate would not be asked.
+            location: Dict[str, Any] = {"sessionID": ctx.session_id}
+            workspace = (ctx.extra or {}).get("workspace_dir") or os.getcwd()
+            if isinstance(workspace, str) and workspace.strip():
+                location["workspace"] = workspace
+            probe = {"tool": {"name": tool_name}, **location}
+            gates = await HookPipeline.has_stage_handlers(HookStage.TOOL_BEFORE, probe)
+            reports = await HookPipeline.has_stage_handlers(HookStage.TOOL_AFTER, probe)
+            if not gates and not reports:
+                return None
+            # Audit sinks record the attempt under the call id; give this
+            # operation one of its own like any tool invocation.
+            call_id = getattr(ctx, "call_id", None) or f"{call_prefix}-{uuid.uuid4().hex}"
+            payload = await build_session_tool_execution_payload(
+                session_id=ctx.session_id,
+                message_id=ctx.message_id,
+                agent=ctx.agent or "workflow",
+                tool_name=tool_name,
+                tool_input=tool_input,
+                tool_schema=tool_schema,
+                tool_context_extra={
+                    **dict(ctx.extra or {}),
+                    "tool_call_id": call_id,
+                    "tool_source": "workflow",
+                    "tool_category": tool_category,
+                    "workflow_node_id": node.id,
+                },
+                validated_input=tool_input,
+            )
+            payload = {**payload, **location}
+            if not gates:
+                # Only observers: nothing decides, the outcome is still reported.
+                from flocks.hooks.contracts import ToolDecision
+
+                return payload, ToolGateVerdict(decision=ToolDecision(), call_id=call_id)
+            return payload, await run_tool_gate(payload, call_id=call_id, tool_input=tool_input)
+
+        gated = _run_sync_on_shared_loop(_gate())
+        if gated is None:
+            return None
+        payload, verdict = gated
+        patch = dict(verdict.decision.validated_input_patch or {})
+        unapplicable = sorted(key for key in patch if key not in applicable_patch_keys)
+        if verdict.allowed and not unapplicable:
+            return payload, patch
+        if verdict.allowed:
+            reason = f"policy changed arguments the workflow engine cannot apply: {', '.join(unapplicable)}"
+        else:
+            reason = verdict.reason or ("tool-before hook failed" if verdict.stage_failed else "denied by policy")
+        if verdict.needs_confirmation:
+            reason = reason or "requires confirmation"
+            reason = f"requires confirmation, which a headless workflow cannot grant: {reason}"
+        # The refusal is an outcome too: whoever recorded the attempt gets told
+        # it never ran.
+        self._report_engine_operation(
+            payload,
+            status="confirm" if verdict.needs_confirmation else "deny",
+            started=time.perf_counter(),
+            error=None,
+        )
+        raise NodeExecutionError(
+            node_id=node.id,
+            message=f"{blocked_label} blocked by policy: {reason}",
+        )
+
+    def _report_engine_operation(
+        self,
+        payload: Dict[str, Any],
+        *,
+        status: str,
+        started: float,
+        error: Optional[BaseException],
+    ) -> None:
+        """Fire ``tool.execute.after`` for a gated engine operation.
+
+        Observational: a failing after-stage is logged, never allowed to
+        replace the node's own result.
+        """
+        from flocks.hooks.contracts import ToolExecutionOutcome
+        from flocks.hooks.pipeline import HookPipeline
+        from flocks.workflow._async_runtime import run_sync as _run_sync_on_shared_loop
+
+        outcome = ToolExecutionOutcome(
+            status=status,
+            duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
+            error_type=type(error).__name__ if error is not None else None,
+            error_message=str(error) if error is not None else None,
+        )
+        try:
+            _run_sync_on_shared_loop(
+                HookPipeline.run_tool_after({**payload, "outcome": outcome.model_dump(mode="json")})
+            )
+        except Exception as exc:
+            _logger.warning("workflow.engine.tool_after_failed status=%s error=%s", status, exc)
+
+    def _gate_http_request(
+        self, node: Node, *, url: str, method: str
+    ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Pass the outbound request through the tool-execution gate."""
+        return self._gate_engine_operation(
+            node,
+            tool_name="http_request",
+            tool_input={"url": url, "method": method},
+            tool_schema=_HTTP_REQUEST_TOOL_SCHEMA,
+            tool_category="network",
+            call_prefix="wf-http",
+            blocked_label="HTTP request",
+            applicable_patch_keys=frozenset({"url", "method"}),
+        )
+
+    def _generate_logic_code(self, node: Node, runtime: Runtime) -> str:
+        """Generate a logic node's code with a model call that names this run.
+
+        A shared generator would call the model under whatever context its
+        client was built with -- by default no session, the system caller --
+        whoever's run it is, and parallel branches would share one client.
+        Each generation gets a client of its own carrying the run's hook
+        context instead.  An explicit client keeps its model and settings: it
+        is copied and only the run-identifying context is replaced, so the
+        client the generator holds is never modified.
+        """
+        generator = self.code_gen
+        assert generator is not None
+        if isinstance(generator, LLMCodeGen):
+            from dataclasses import replace
+
+            from .llm import LLMClient, get_llm_client, llm_hook_context_from_registry
+
+            run_context = llm_hook_context_from_registry(getattr(runtime, "tool_registry", None))
+            client = generator.client
+            if client is None:
+                client = get_llm_client(hook_context=run_context)
+            elif isinstance(client, LLMClient):
+                client = copy.copy(client)
+                client.hook_context = {**(client.hook_context or {}), **run_context}
+            generator = replace(generator, client=client)
+        return generator.generate(node)
+
+    def _run_code_node(self, node: Node, code: str, inputs: Dict[str, Any], runtime: Runtime) -> Any:
+        """Run a python or logic node's code behind the tool-execution gate.
+
+        The code is arbitrary Python -- for a logic node possibly written by a
+        model -- so it is held to the same policy and audit as a tool that
+        would do the same thing, rather than assumed to pass through one.
+        """
+        gated = self._gate_engine_operation(
+            node,
+            tool_name=WORKFLOW_CODE_TOOL_NAME,
+            tool_input=_workflow_code_input(code, node),
+            tool_schema=_WORKFLOW_CODE_TOOL_SCHEMA,
+            tool_category="code",
+            call_prefix="wf-code",
+            blocked_label="Workflow code",
+            applicable_patch_keys=frozenset({"code"}),
+            runtime=runtime,
+        )
+        if gated is None:
+            return runtime.execute(code, inputs)
+        payload, patch = gated
+        if "code" in patch:
+            if not isinstance(patch["code"], str):
+                self._report_engine_operation(payload, status="deny", started=time.perf_counter(), error=None)
+                raise NodeExecutionError(
+                    node_id=node.id,
+                    message="Workflow code blocked by policy: the policy's replacement code is not text",
+                )
+            # Run what the handlers authorised: their patch, not the original.
+            code = patch["code"]
+            payload = _with_validated_input(payload, _workflow_code_input(code, node))
+        started = time.perf_counter()
+        status = "error"
+        error: Optional[BaseException] = None
+        try:
+            result = runtime.execute(code, inputs)
+            status = "success"
+            return result
+        except RunCancelledError as exc:
+            status, error = "cancelled", exc
+            raise
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            self._report_engine_operation(payload, status=status, started=started, error=error)
 
     def _execute_http_request_node(self, node: Node, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         """Execute an HTTP request node using httpx (synchronous)."""
@@ -1099,6 +1447,22 @@ class WorkflowEngine:
                 node_id=node.id,
                 message=f"HTTP request template render failed: {type(e).__name__}: {e}",
             ) from e
+        gated = self._gate_http_request(node, url=url, method=method)
+        gate_payload, patch = gated if gated is not None else (None, {})
+        if patch:
+            patched_url, patched_method = patch.get("url", url), patch.get("method", method)
+            if not isinstance(patched_url, str) or not isinstance(patched_method, str):
+                self._report_engine_operation(gate_payload, status="deny", started=time.perf_counter(), error=None)
+                raise NodeExecutionError(
+                    node_id=node.id,
+                    message="HTTP request blocked by policy: the policy's replacement arguments are not text",
+                )
+            # Send what the handlers authorised: their patch, not the original.
+            url, method = patched_url, patched_method.upper()
+            gate_payload = _with_validated_input(gate_payload, {"url": url, "method": method})
+        started = time.perf_counter()
+        status = "error"
+        failure: Optional[BaseException] = None
         try:
             import httpx
 
@@ -1113,11 +1477,16 @@ class WorkflowEngine:
                 resp_data: Any = resp.json()
             except Exception:
                 resp_data = resp.text
+            status = "success"
         except Exception as e:
+            failure = e
             raise NodeExecutionError(
                 node_id=node.id,
                 message=f"HTTP request failed: {type(e).__name__}: {e}",
             ) from e
+        finally:
+            if gate_payload is not None:
+                self._report_engine_operation(gate_payload, status=status, started=started, error=failure)
         response_k = node.response_key or "response"
         return {
             response_k: resp_data,

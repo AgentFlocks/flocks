@@ -100,3 +100,22 @@ async def test_prebuilt_dependency_sync_keeps_packages_the_user_installed(tmp_pa
 
     assert error is None
     assert _imports_demo(python)
+
+
+def test_an_environment_named_from_outside_is_never_synced(tmp_path: Path) -> None:
+    """A UV_PROJECT_ENVIRONMENT in the shell running the tests is not where these sync."""
+    elsewhere = tmp_path / "someone-elses-venv"
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+            f"{__file__}::test_dependency_sync_keeps_packages_the_user_installed",
+        ],
+        env={**os.environ, "UV_PROJECT_ENVIRONMENT": str(elsewhere)},
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not elsewhere.exists()

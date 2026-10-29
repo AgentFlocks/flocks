@@ -22,6 +22,9 @@ from flocks.storage.storage import Storage
 import_app = typer.Typer(
     name="import",
     help="Import session data",
+    # No subcommands: `flocks import file.json -p proj` must parse `-p` as an
+    # option of the callback rather than a command name.
+    context_settings={"allow_interspersed_args": True},
 )
 
 console = Console()
@@ -85,6 +88,36 @@ def _normalize_tool_state(
         normalized.setdefault("time", fallback_time)
 
     return normalized
+
+
+async def _adopt_part_upload(part: Any, session_id: str) -> Any:
+    """A normalized file part of an imported copy, pointing at the copy's own upload.
+
+    Any session upload on this machine counts, not only the exported
+    session's: an older fork points at its ancestor's.  A legacy part's
+    ``metadata.url`` names the same file and moves with it.
+    """
+    if not isinstance(part, dict) or part.get("type") != "file" or not part.get("url"):
+        return part
+    from flocks.session.files import adopt_session_upload
+
+    adopted = dict(part)
+    adopted["url"] = await adopt_session_upload(session_id, part["url"])
+    metadata = adopted.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("url") == part["url"]:
+        adopted["metadata"] = {**metadata, "url": adopted["url"]}
+    if "sessionID" in adopted:
+        adopted["sessionID"] = session_id
+    return adopted
+
+
+async def _imported_parts(parts: Any, *, message_time: Any, new_session_id: Optional[str]) -> list:
+    """The parts as stored: normalized first (a legacy part's URL is in its
+    metadata), then, for a copy on this machine, with uploads of its own."""
+    normalized = [_normalize_part_data(part, message_time=message_time) for part in parts]
+    if new_session_id is None:
+        return normalized
+    return [await _adopt_part_upload(part, new_session_id) for part in normalized]
 
 
 def _normalize_part_data(
@@ -163,6 +196,18 @@ def import_session(
         None, "-p", "--project",
         help="Project ID (uses current project if not specified)"
     ),
+    force: bool = typer.Option(
+        False, "-f", "--force",
+        help="Overwrite an existing session with the same ID instead of refusing",
+    ),
+    new_id: bool = typer.Option(
+        False, "--new-id",
+        help="Import as a new session with a freshly generated ID (never collides)",
+    ),
+    keep_directory: bool = typer.Option(
+        False, "--keep-directory",
+        help="Keep the exporting machine's session directory instead of relocating it to the current project directory",
+    ),
 ):
     """
     Import session data from JSON file or URL
@@ -170,17 +215,39 @@ def import_session(
     Supports:
     - Local JSON files exported with 'flocks export'
     - Share URLs (https://opncd.ai/share/<slug> or https://flocks.ai/share/<slug>)
+
+    An existing session with the same ID is not overwritten unless --force is
+    given; --new-id imports the data under a fresh session ID instead. The
+    session directory is relocated to the current project directory so the
+    imported session shows up in session lists here (--keep-directory opts out).
     """
-    asyncio.run(_import_session(file_or_url, project))
+    asyncio.run(_import_session(file_or_url, project, force=force, new_id=new_id, keep_directory=keep_directory))
 
 
-async def _import_session(file_or_url: str, project_id: Optional[str]):
+def _relocate_session_directory(session_info: dict, target_directory: str) -> Optional[str]:
+    """Point the imported session at *target_directory*; return the previous value when it changed."""
+    previous = session_info.get("directory")
+    if previous == target_directory:
+        return None
+    session_info["directory"] = target_directory
+    return previous
+
+
+async def _import_session(
+    file_or_url: str,
+    project_id: Optional[str],
+    *,
+    force: bool = False,
+    new_id: bool = False,
+    keep_directory: bool = False,
+):
     """Internal import implementation"""
     await Storage.init()
     
     # Get project
+    target_directory = os.getcwd()
     if not project_id:
-        result = await Project.from_directory(os.getcwd())
+        result = await Project.from_directory(target_directory)
         project_id = result["project"].id
     
     export_data = None
@@ -190,7 +257,7 @@ async def _import_session(file_or_url: str, project_id: Optional[str]):
     
     if is_url:
         # Handle share URL
-        match = SHARE_URL_PATTERN.match(file_or_url)
+        match = SHARE_URL_PATTERN.fullmatch(file_or_url)
         if not match:
             console.print(f"[red]Invalid URL format. Expected: https://opncd.ai/share/<slug> or https://flocks.ai/share/<slug>[/red]")
             raise typer.Exit(1)
@@ -277,10 +344,29 @@ async def _import_session(file_or_url: str, project_id: Optional[str]):
         
         # Ensure project_id matches
         session_info["projectID"] = project_id
-        
-        # Store session
+
+        original_id = session_info["id"]
+        if new_id:
+            from flocks.utils.id import Identifier
+
+            session_info["id"] = Identifier.descending("session")
+
+        # Sessions exported elsewhere carry that machine's working directory;
+        # lists here filter by the current worktree, so an imported session
+        # would be invisible (only reachable by ID) unless it is relocated.
+        previous_directory = None
+        if not keep_directory:
+            previous_directory = _relocate_session_directory(session_info, target_directory)
+
         session_key = f"session:{project_id}:{session_info['id']}"
-        await Storage.set(session_key, session_info, "session")
+        existing = await Storage.get(session_key)
+        if existing is not None and not force and not new_id:
+            existing_title = existing.get("title", "Untitled") if isinstance(existing, dict) else "Untitled"
+            console.print(
+                f"[red]Session already exists: {session_info['id']} ('{existing_title}'). "
+                "Re-run with --force to overwrite it or --new-id to import as a new session.[/red]"
+            )
+            raise typer.Exit(1)
         
         # Store messages using the runtime's per-message parts format.
         # WebUI/back-end still returns the same export JSON shape through
@@ -291,25 +377,52 @@ async def _import_session(file_or_url: str, project_id: Optional[str]):
         for msg_data in export_data["messages"]:
             msg_info = msg_data.get("info", {})
             parts = msg_data.get("parts", [])
+            if new_id and msg_info.get("sessionID") == original_id:
+                msg_info["sessionID"] = session_info["id"]
 
             serialized_messages.append(msg_info)
             if "id" in msg_info:
-                serialized_parts[msg_info["id"]] = [
-                    _normalize_part_data(part, message_time=msg_info.get("time"))
-                    for part in parts
-                ]
+                # A copy of a session on this machine gets its own copies of
+                # the uploads it shows (trimming or deleting the original then
+                # takes nothing from it); elsewhere the files are not here.
+                serialized_parts[msg_info["id"]] = await _imported_parts(
+                    parts, message_time=msg_info.get("time"), new_session_id=session_info["id"] if new_id else None,
+                )
 
             message_count += 1
 
         session_id = session_info["id"]
-        await Storage.set(f"message:{session_id}", serialized_messages, "message")
-        for message_id, parts in serialized_parts.items():
-            await Storage.set(f"message_parts:{session_id}:{message_id}", parts, "message_part")
+        from flocks.session.message import _refuse_removed_uploads
+
+        parts_entries = [
+            (f"message_parts:{session_id}:{message_id}", parts) for message_id, parts in serialized_parts.items()
+        ]
+        # The session, its messages and their parts go in together, or none of
+        # them; an upload a sweep removed refuses the import (the same check as
+        # every other write of parts).
+        await Storage.mutate_many(
+            set_entries=[
+                (session_key, session_info, "session"),
+                (f"message:{session_id}", serialized_messages, "message"),
+                *[(key, parts, "message_part") for key, parts in parts_entries],
+            ],
+            pre_transaction_hook=lambda db: _refuse_removed_uploads(db, parts_entries),
+        )
+        # A replaced session (--force) must not be read back from a warm cache.
+        from flocks.session.message import Message
+
+        Message.invalidate_cache(session_id)
         
         console.print(f"[green]Imported session: {session_info['id']}[/green]")
+        if new_id and session_info["id"] != original_id:
+            console.print(f"  Original ID: {original_id}")
         console.print(f"  Title: {session_info.get('title', 'Untitled')}")
         console.print(f"  Messages: {message_count}")
+        if previous_directory is not None:
+            console.print(f"  Directory: {session_info['directory']} (was {previous_directory})")
     
+    except typer.Exit:
+        raise
     except Exception as e:
         console.print(f"[red]Failed to import session: {e}[/red]")
         raise typer.Exit(1)

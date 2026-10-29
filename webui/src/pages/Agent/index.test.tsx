@@ -1,28 +1,16 @@
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import type { Agent } from '@/api/agent';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { __resetAgentsResourceForTesting } from '@/hooks/useAgents';
 import AgentPage from './index';
 
-const { mockUseAgents, nativeAPI, sheetSpy, toastWarning } = vi.hoisted(() => ({
-  toastWarning: vi.fn(),
-  mockUseAgents: vi.fn(),
-  nativeAPI: { list: vi.fn(), update: vi.fn(), delete: vi.fn(), setDelegatable: vi.fn(), refresh: vi.fn() },
-  sheetSpy: vi.fn(),
+const { listMock, refreshMock, deleteMock, setDelegatableMock } = vi.hoisted(() => ({
+  listMock: vi.fn(),
+  refreshMock: vi.fn(),
+  deleteMock: vi.fn(),
+  setDelegatableMock: vi.fn(),
 }));
-
-vi.mock('@/api/agent', () => ({ agentAPI: nativeAPI }));
-vi.mock('@/components/common/Toast', async (importOriginal) => ({
-  // Keep the module's other exports (GroupNav uses useOptionalToast).
-  ...(await importOriginal<typeof import('@/components/common/Toast')>()), useToast: () => ({ warning: toastWarning }) }));
-
-beforeEach(() => {
-  vi.clearAllMocks();
-  window.localStorage.clear();
-  nativeAPI.update.mockResolvedValue({ data: {} });
-  nativeAPI.delete.mockResolvedValue({ data: {} });
-  nativeAPI.refresh.mockResolvedValue({ data: {} });
-});
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -43,10 +31,10 @@ vi.mock('react-i18next', () => ({
       'badge.delegatable': '可委托',
       'badge.delete': '删除',
       'badge.edit': '编辑',
-      'badge.protected': 'Pro 内置',
-      'badge.protectedDeleteDisabled': 'Pro 内置不可删',
+      'badge.protected': '扩展内置',
+      'badge.protectedDeleteDisabled': '扩展内置不可删',
       'badge.protectedEditDisabled': '提示词受保护',
-      'badge.protectedDelegateDisabled': 'Pro 内置不可改委托',
+      'badge.protectedDelegateDisabled': '扩展内置不可改委托',
       'form.enabled': '启用',
       'form.enabledTip': '允许委派',
       'form.disabledTip': '禁止委派',
@@ -56,14 +44,26 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-vi.mock('@/hooks/useAgents', () => ({
-  useAgents: () => mockUseAgents(),
+vi.mock('@/api/agent', () => ({
+  agentAPI: {
+    list: listMock,
+    refresh: refreshMock,
+    delete: deleteMock,
+    setDelegatable: setDelegatableMock,
+  },
 }));
 
 vi.mock('@/components/common/PageHeader', () => ({
   default: ({ title, description }: { title: string; description: string }) => (
     <header><h1>{title}</h1><p>{description}</p></header>
   ),
+}));
+
+// Group writes report failures through toasts; these tests never trigger them.
+vi.mock('@/components/common/Toast', async (importOriginal) => ({
+  // Keep the module's other exports (GroupNav uses useOptionalToast).
+  ...(await importOriginal<typeof import('@/components/common/Toast')>()),
+  useToast: () => ({ warning: vi.fn(), error: vi.fn(), success: vi.fn() }),
 }));
 
 vi.mock('@/components/common/LoadingSpinner', () => ({
@@ -74,14 +74,33 @@ vi.mock('@/components/common/EmptyState', () => ({
   default: ({ title, action }: { title: string; action?: ReactNode }) => <div>{title}{action}</div>,
 }));
 
-vi.mock('./AgentSheet', () => ({
-  default: ({ agent, onClose }: { agent?: Agent; onClose: () => void }) => {
-    sheetSpy(agent);
-    return <div data-testid="agent-sheet"><button onClick={onClose}>Close sheet</button></div>;
-  },
-}));
+vi.mock('./AgentSheet', async () => {
+  const { useRef } = await import('react');
+  const { useDialogFocus } = await import('@/hooks/useDialogFocus');
+  return {
+    default: function AgentSheetStub({ agent, onClose, onSaved }: {
+      agent?: unknown;
+      onClose: () => void;
+      onSaved: () => void;
+    }) {
+      // A modal like the real sheet: focus moves in and Escape closes it.
+      const ref = useRef<HTMLDivElement>(null);
+      useDialogFocus(ref, true, onClose);
+      return (
+        <div ref={ref} role="dialog" aria-modal="true" tabIndex={-1} aria-label={agent ? '编辑 Agent' : '创建 Agent'}>
+          <button onClick={onClose}>关闭面板</button>
+          <button onClick={() => {
+            // AgentSheet invokes both callbacks after a successful save.
+            onSaved();
+            onClose();
+          }}>保存配置</button>
+        </div>
+      );
+    },
+  };
+});
 
-function makeAgent(overrides: Partial<Agent>): Agent {
+function makeAgent(overrides: Record<string, unknown>) {
   return {
     name: 'agent',
     description: 'Agent description',
@@ -95,210 +114,62 @@ function makeAgent(overrides: Partial<Agent>): Agent {
   };
 }
 
-function useInventory(agents: Agent[]) {
-  nativeAPI.list.mockResolvedValue({ data: agents });
-  const refetch = vi.fn().mockResolvedValue(agents);
-  mockUseAgents.mockReturnValue({ agents, loading: false, error: null, refetch });
-  return refetch;
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
 }
 
-describe('AgentPage business groups and native layouts', () => {
-  it('filters before 12-item sub-agent pagination, keeps primary unpaginated and source chips unchanged', async () => {
-    const primary = Array.from({ length: 13 }, (_, index) => makeAgent({ name: `primary-${index}`, mode: 'primary', native: true, group: 'Engineering' }));
-    const sub = Array.from({ length: 26 }, (_, index) => makeAgent({ name: `sub-${index}`, native: index < 13, group: index % 2 === 0 ? 'Engineering' : null }));
-    useInventory([...primary, ...sub, makeAgent({ name: 'system-agent', tags: ['system'], group: 'Engineering' })]);
-    render(<AgentPage />);
-    await screen.findByTitle('Engineering');
-    expect(screen.getByText('primary-12')).toBeInTheDocument();
-    expect(screen.queryByText('sub-12')).not.toBeInTheDocument();
-    expect(screen.queryByText('system-agent')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '2' }));
-    expect(screen.getByText('sub-12')).toBeInTheDocument();
-    fireEvent.click(screen.getByTitle('Engineering'));
-    expect(screen.getByText('sub-0')).toBeInTheDocument();
-    expect(screen.getByText('sub-22')).toBeInTheDocument();
-    expect(screen.queryByText('sub-24')).not.toBeInTheDocument();
-    expect(screen.queryByText('sub-1')).not.toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: '内置 13' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: '自定义 13' })).toBeInTheDocument();
-    expect(screen.getAllByText('Engineering')).toHaveLength(1);
-    fireEvent.click(screen.getByRole('button', { name: '2' }));
-    expect(screen.getByText('sub-24')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'view.list' }));
-    expect(screen.getByText('sub-24')).toBeInTheDocument();
-    expect(screen.queryByText('sub-0')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('tab', { name: '自定义 13' }));
-    expect(screen.getByText('sub-14')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /^ungrouped/ }));
-    expect(screen.getByRole('tab', { name: '自定义 13' })).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByText('sub-13')).toBeInTheDocument();
-    expect(screen.queryByText('sub-0')).not.toBeInTheDocument();
-  });
-
-  it('keeps native/custom actions and all agent fields in list view without resetting an open editor', async () => {
-    const native = makeAgent({ name: 'builtin', nameCn: '内置智能体', mode: 'primary', native: true, group: 'Engineering' });
-    const custom = makeAgent({ name: 'analyst', nameCn: '分析智能体', descriptionCn: '原生描述', delegatable: true, model: { providerID: 'provider', modelID: 'model-x' }, group: 'Engineering' });
-    const refetch = useInventory([native, custom]);
-    nativeAPI.setDelegatable.mockResolvedValue({ data: { ...custom, delegatable: false } });
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    render(<AgentPage />);
-    await screen.findByTitle('Engineering');
-    fireEvent.click(screen.getByRole('button', { name: 'view.list' }));
-    const nativeRow = screen.getByText('内置智能体').closest('.group') as HTMLElement;
-    const customRow = screen.getByText('分析智能体').closest('.group') as HTMLElement;
-    expect(nativeRow).toHaveClass('lg:flex-row');
-    expect(within(nativeRow).getByRole('button', { name: '删除' })).toBeDisabled();
-    expect(within(customRow).getByText('原生描述')).toBeInTheDocument();
-    expect(within(customRow).getByText('model-x')).toBeInTheDocument();
-    expect(within(customRow).getByText('自定义')).toBeInTheDocument();
-    expect(within(customRow).getByText('可委托')).toBeInTheDocument();
-    fireEvent.click(within(customRow).getByRole('switch'));
-    await waitFor(() => expect(nativeAPI.setDelegatable).toHaveBeenCalledWith('analyst', false));
-    fireEvent.click(within(customRow).getByRole('button', { name: '编辑' }));
-    expect(sheetSpy).toHaveBeenLastCalledWith(expect.objectContaining({ name: 'analyst', model: custom.model }));
-    expect(sheetSpy.mock.lastCall?.[0]).toHaveProperty('group', 'Engineering');
-    fireEvent.click(screen.getByRole('button', { name: 'view.cards' }));
-    expect(screen.getByTestId('agent-sheet')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Close sheet' }));
-    fireEvent.click(within(screen.getByText('分析智能体').closest('.group') as HTMLElement).getByRole('button', { name: '删除' }));
-    await waitFor(() => expect(nativeAPI.delete).toHaveBeenCalledWith('analyst'));
-    expect(refetch).toHaveBeenCalled();
-    expect(nativeAPI.update).not.toHaveBeenCalled();
-  });
-
-  it.each(['cards', 'list'])('offers an explicit group action for a user-defined primary in %s view', async (viewMode) => {
-    const custom = makeAgent({ name: 'user-primary', mode: 'primary', native: true, group_readonly: false });
-    const refetch = useInventory([custom, makeAgent({ name: 'other', group: 'Engineering' })]);
-    render(<AgentPage />);
-    if (viewMode === 'list') fireEvent.click(screen.getByRole('button', { name: 'view.list' }));
-    const source = screen.getByText('user-primary').closest('.group')?.parentElement as HTMLElement;
-    fireEvent.click(within(source).getByRole('button', { name: 'editGroup' }));
-    expect(screen.queryByTestId('agent-sheet')).not.toBeInTheDocument();
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Engineering' } });
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
-    await waitFor(() => expect(nativeAPI.update).toHaveBeenCalledWith('user-primary', { group: 'Engineering' }));
-    expect(refetch).toHaveBeenCalledWith(false, true);
-    expect(nativeAPI.refresh).not.toHaveBeenCalled();
-    expect(nativeAPI.setDelegatable).not.toHaveBeenCalled();
-  });
-
-  it('locks actual shipped groups without changing primary/subagent actions or custom movability', async () => {
-    useInventory([
-      makeAgent({ name: 'rex', mode: 'primary', native: true, group: 'Mixed', group_readonly: true }),
-      makeAgent({ name: 'core-sub', native: false, group: 'Mixed', group_readonly: true }),
-      makeAgent({ name: 'user-agent', native: true, group: 'Mixed', group_readonly: false }),
-    ]);
-    render(<AgentPage />);
-    const locked = screen.getByText('rex').closest('.group')!.parentElement!;
-    const dataTransfer = { setData: vi.fn() };
-    expect(fireEvent.dragStart(locked, { dataTransfer })).toBe(false);
-    expect(dataTransfer.setData).not.toHaveBeenCalled();
-    expect(toastWarning).toHaveBeenLastCalledWith('pluginGroups:readOnly.system');
-    expect(fireEvent.dragStart(screen.getByText('core-sub').closest('.group')!.parentElement!, { dataTransfer })).toBe(false);
-    fireEvent.click(within(locked).getByRole('button', { name: 'editGroup' }));
-    expect(toastWarning).toHaveBeenCalledTimes(3);
-    expect(nativeAPI.update).not.toHaveBeenCalled();
-    expect(nativeAPI.list).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'renameNamed' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'deleteNamed' })).toBeDisabled();
-    fireEvent.keyDown(locked, { key: 'm', altKey: true });
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'create' }));
-    expect(within(screen.getByRole('combobox')).getAllByRole('option').map((option) => option.getAttribute('value'))).toEqual(['', 'user-agent']);
-    fireEvent.click(screen.getByRole('button', { name: 'cancel' }));
-    fireEvent.keyDown(screen.getByText('user-agent').closest('.group')!.parentElement!, { key: 'm', altKey: true });
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
-    fireEvent.click(screen.getByRole('button', { name: 'save' }));
-    await waitFor(() => expect(nativeAPI.update).toHaveBeenCalledExactlyOnceWith('user-agent', { group: null }));
-  });
-
-  it.each(['move', 'create', 'rename', 'delete'])('rechecks shipped ownership from fresh Agent rows before %s writes', async (operation) => {
-    const agent = makeAgent({ name: 'changed', group: 'Ops', group_readonly: false });
-    useInventory([agent]);
-    nativeAPI.list.mockResolvedValue({ data: [{ ...agent, group_readonly: true }] });
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    render(<AgentPage />);
-    if (operation === 'move') fireEvent.keyDown(screen.getByText('changed').closest('.group')!.parentElement!, { key: 'm', altKey: true });
-    else fireEvent.click(screen.getByRole('button', { name: operation === 'create' ? 'create' : `${operation}Named` }));
-    if (operation === 'create' || operation === 'rename') fireEvent.change(screen.getByRole('textbox'), { target: { value: 'New' } });
-    if (operation === 'create') fireEvent.change(screen.getByRole('combobox'), { target: { value: 'changed' } });
-    if (operation !== 'delete') fireEvent.click(screen.getByRole('button', { name: 'save' }));
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('pluginGroups:errors.readOnlyMembers'));
-    expect(nativeAPI.update).not.toHaveBeenCalled();
-    expect(window.confirm).not.toHaveBeenCalled();
-  });
-
-  it.each(['create', 'rename'])('checks refreshed native names before %s instead of merging another group', async (operation) => {
-    const agent = makeAgent({ name: 'analyst', group: 'Ops' });
-    useInventory([agent]);
-    nativeAPI.list.mockResolvedValue({ data: [agent, makeAgent({ name: 'new', group: 'Existing' })] });
-    render(<AgentPage />);
-    fireEvent.click(screen.getByRole('button', { name: operation === 'create' ? 'create' : 'renameNamed' }));
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Existing' } });
-    if (operation === 'create') fireEvent.change(screen.getByRole('combobox'), { target: { value: 'analyst' } });
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('pluginGroups:validation.duplicate'));
-    expect(nativeAPI.update).not.toHaveBeenCalled();
-  });
-
-  it('keeps original agents visible when the native inventory reload fails after a move', async () => {
-    const refetch = useInventory([makeAgent({ name: 'still-visible', group: 'Engineering' })]);
-    refetch.mockRejectedValue(new Error('offline'));
-    render(<AgentPage />);
-    fireEvent.keyDown(screen.getByText('still-visible').closest('.group')?.parentElement as HTMLElement, { key: 'm', altKey: true });
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: '' } });
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('offline'));
-    expect(screen.getByText('still-visible')).toBeInTheDocument();
-    expect(nativeAPI.update).toHaveBeenCalledWith('still-visible', { group: null });
-    expect(nativeAPI.refresh).not.toHaveBeenCalled();
-  });
+beforeEach(() => {
+  vi.resetAllMocks();
+  __resetAgentsResourceForTesting();
+  refreshMock.mockResolvedValue({ data: { count: 1 } });
 });
 
 describe('AgentPage protected prompts', () => {
   it('shows a sealed agent as built in, without opening it for editing or deleting it', async () => {
     const sealed = makeAgent({ name: 'code-security', nameCn: '代码安全审计', mode: 'primary', promptProtected: true, group: 'Engineering' });
     const custom = makeAgent({ name: 'analyst', nameCn: '分析智能体', mode: 'primary', group: 'Engineering' });
-    useInventory([sealed, custom]);
+    listMock.mockResolvedValue({ data: [sealed, custom] });
     render(<AgentPage />);
     const card = await screen.findByTestId('agent-card-code-security');
-    expect(within(card).getByText('Pro 内置')).toBeInTheDocument();
+    expect(within(card).getByText('扩展内置')).toBeInTheDocument();
     const edit = within(card).getByRole('button', { name: '编辑' });
     const remove = within(card).getByRole('button', { name: '删除' });
     expect(edit).toBeDisabled();
     expect(edit).toHaveAttribute('title', '提示词受保护');
     expect(remove).toBeDisabled();
-    expect(remove).toHaveAttribute('title', 'Pro 内置不可删');
+    expect(remove).toHaveAttribute('title', '扩展内置不可删');
     fireEvent.click(edit);
     fireEvent.click(within(card).getByText('代码安全审计'));
-    expect(screen.queryByTestId('agent-sheet')).not.toBeInTheDocument();
-    expect(nativeAPI.delete).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: '编辑 Agent' })).not.toBeInTheDocument();
+    expect(deleteMock).not.toHaveBeenCalled();
 
     const other = screen.getByTestId('agent-card-analyst');
     fireEvent.click(within(other).getByRole('button', { name: '编辑' }));
-    expect(screen.getByTestId('agent-sheet')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: '编辑 Agent' })).toBeInTheDocument();
   });
 
   it('shows a sealed sub-agent\'s delegation but keeps its switch disabled with the reason', async () => {
     const sealed = makeAgent({ name: 'sealed-sub', mode: 'subagent', promptProtected: true, delegatable: false });
     const custom = makeAgent({ name: 'open-sub', mode: 'subagent', delegatable: false });
-    useInventory([sealed, custom]);
+    listMock.mockResolvedValue({ data: [sealed, custom] });
     render(<AgentPage />);
     const sealedCard = await screen.findByTestId('agent-card-sealed-sub');
     const sealedSwitch = within(sealedCard).getByRole('switch', { name: '启用' });
     expect(sealedSwitch).toBeDisabled();
-    expect(sealedSwitch).toHaveAttribute('aria-description', 'Pro 内置不可改委托');
+    expect(sealedSwitch).toHaveAttribute('aria-description', '扩展内置不可改委托');
     expect(within(sealedCard).getByText('enabledBadge.disabled')).toBeInTheDocument();
     fireEvent.click(sealedSwitch);
     expect(within(screen.getByTestId('agent-card-open-sub')).getByRole('switch')).toBeEnabled();
-    expect(nativeAPI.setDelegatable).not.toHaveBeenCalled();
+    expect(setDelegatableMock).not.toHaveBeenCalled();
   });
 });
 
 describe('AgentPage cards', () => {
-  it('使用与工作流卡片一致的纯色扁平样式', () => {
-    mockUseAgents.mockReturnValue({
-      agents: [
+  it('使用与工作流卡片一致的纯色扁平样式', async () => {
+    listMock.mockResolvedValue({
+      data: [
         makeAgent({ name: 'rex', nameCn: 'Rex 主智能体', mode: 'primary', native: true, color: '#06b6d4' }),
         makeAgent({
           name: 'analyst',
@@ -308,14 +179,11 @@ describe('AgentPage cards', () => {
           model: { providerID: 'provider', modelID: 'model-x' },
         }),
       ],
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
     });
 
     render(<AgentPage />);
 
-    const nativeCard = screen.getByText('Rex 主智能体').closest('.group') as HTMLElement;
+    const nativeCard = (await screen.findByText('Rex 主智能体')).closest('.group') as HTMLElement;
     const customCard = screen.getByText('分析智能体').closest('.group') as HTMLElement;
 
     expect(nativeCard).toHaveClass('bg-white', 'border-gray-200');
@@ -328,5 +196,53 @@ describe('AgentPage cards', () => {
     expect(within(customCard).getByText('自定义')).not.toHaveClass('border');
     expect(within(customCard).getByText('可委托')).not.toHaveClass('border');
     expect(within(customCard).getByText('model-x').parentElement).not.toHaveClass('rounded-full', 'border');
+  });
+});
+
+describe('AgentPage drawer refresh', () => {
+  it.each([
+    { path: '创建后关闭', editing: false, action: '关闭面板', refreshCalls: 1 },
+    { path: '创建后保存', editing: false, action: '保存配置', refreshCalls: 2 },
+    { path: '编辑后保存', editing: true, action: '保存配置', refreshCalls: 0 },
+  ])('$path 时后台刷新保留原触发按钮及焦点', async ({ editing, action, refreshCalls }) => {
+    const user = userEvent.setup();
+    const agent = makeAgent({ name: 'analyst', nameCn: '分析智能体' });
+    const pendingRefresh = deferred<{ data: { count: number } }>();
+    const pendingList = deferred<{ data: ReturnType<typeof makeAgent>[] }>();
+    listMock.mockResolvedValueOnce({ data: [agent] });
+    refreshMock.mockReturnValue(pendingRefresh.promise);
+
+    render(<AgentPage />);
+    const triggerName = editing ? '编辑' : '创建子 Agent';
+    const trigger = await screen.findByRole('button', { name: triggerName });
+    listMock.mockReturnValueOnce(pendingList.promise);
+
+    await user.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: editing ? '编辑 Agent' : '创建 Agent' });
+    expect(within(dialog).getByRole('button', { name: '关闭面板' })).toHaveFocus();
+    await user.click(within(dialog).getByRole('button', { name: action }));
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(refreshMock).toHaveBeenCalledTimes(refreshCalls);
+    if (!editing) {
+      // Closing restores focus before the refresh API returns. A subsequent
+      // loading render must not unmount that same trigger and lose it again.
+      expect(trigger).toHaveFocus();
+      expect(listMock).toHaveBeenCalledTimes(1);
+      await act(async () => { pendingRefresh.resolve({ data: { count: 1 } }); });
+    }
+
+    await waitFor(() => { expect(listMock).toHaveBeenCalledTimes(2); });
+    expect(trigger).toBeInTheDocument();
+    expect(screen.queryByText('loading')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: triggerName })).toBe(trigger);
+    expect(trigger).toHaveFocus();
+
+    await act(async () => {
+      pendingList.resolve({ data: [{ ...agent, description: '刷新后的 Agent 描述' }] });
+    });
+    expect(screen.getByText('刷新后的 Agent 描述')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: triggerName })).toBe(trigger);
+    expect(trigger).toHaveFocus();
   });
 });

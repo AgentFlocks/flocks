@@ -1594,9 +1594,10 @@ async def test_get_unviewed_results_includes_unread_and_notified_only(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_task_page_notice_drops_legacy_tables_after_third_display():
+async def test_task_page_notice_stops_after_third_display_and_keeps_legacy_tables():
     db = await TaskStore.raw_db()
     await db.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
+    await db.execute("INSERT INTO tasks (id) VALUES (?)", ("legacy-retained",))
     await db.commit()
     TaskManager._write_migration_state({"failed": True, "notice_count": 0})
 
@@ -1610,7 +1611,11 @@ async def test_task_page_notice_drops_legacy_tables_after_third_display():
     }
     assert second is not None and second["displayCount"] == 2
     assert third is not None and third["displayCount"] == 3
-    assert TaskManager._legacy_tables_exist() is False
+    assert await TaskManager.get_task_page_notice() is None
+    # Shown enough, nothing dropped: the old table and its rows stay.
+    assert TaskManager._legacy_tables_exist() is True
+    cursor = await db.execute("SELECT id FROM tasks")
+    assert [tuple(row) for row in await cursor.fetchall()] == [("legacy-retained",)]
 
 
 @pytest.mark.asyncio

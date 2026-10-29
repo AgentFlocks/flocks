@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Loader2, ShieldCheck } from 'lucide-react';
 import type { PendingPermission } from '@/api/permission';
 
@@ -22,6 +23,7 @@ export function PermissionApprovalDialog({
   error,
   onReply,
 }: PermissionApprovalDialogProps) {
+  const { t } = useTranslation('session');
   useEffect(() => {
     if (!request || submitting) return;
 
@@ -59,7 +61,7 @@ export function PermissionApprovalDialog({
       </div>
       <div className="min-w-0 flex-1">
         <div id="permission-approval-title" className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-          需要确认执行
+          {t('chat.permission.title')}
         </div>
         <code className="mt-0.5 block truncate font-mono text-xs text-zinc-700 dark:text-zinc-200" title={description}>
           $ {description}
@@ -73,7 +75,7 @@ export function PermissionApprovalDialog({
           onClick={() => onReply('deny')}
           className="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:text-zinc-200 dark:hover:bg-amber-900/40"
         >
-          拒绝
+          {t('chat.permission.deny')}
         </button>
         <button
           type="button"
@@ -82,7 +84,7 @@ export function PermissionApprovalDialog({
           className="inline-flex items-center gap-1 rounded-lg border border-amber-400 px-3 py-1.5 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:text-amber-200 dark:hover:bg-amber-900/40"
         >
           <ShieldCheck className="h-3.5 w-3.5" />
-          {networkTargetTrustEnabled ? '始终允许此目标' : '始终允许'}
+          {networkTargetTrustEnabled ? t('chat.permission.alwaysTarget') : t('chat.permission.always')}
         </button>
         {networkTrustEnabled && (
           <button
@@ -91,7 +93,7 @@ export function PermissionApprovalDialog({
             onClick={() => onReply('trust_tool_network')}
             className="inline-flex items-center gap-1 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
-            信任此工具的网络访问
+            {t('chat.permission.trustToolNetwork')}
           </button>
         )}
         <button
@@ -101,7 +103,7 @@ export function PermissionApprovalDialog({
           className="inline-flex items-center gap-1 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-          允许一次
+          {t('chat.permission.allowOnce')}
         </button>
       </div>
       {error && (

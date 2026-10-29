@@ -199,6 +199,12 @@ async def build_context_usage_snapshot(
     inferred_provider_id, inferred_model_id = _resolve_message_model(active_messages)
     provider_id = provider_id or inferred_provider_id or getattr(session, "provider", None)
     model_id = model_id or inferred_model_id or getattr(session, "model", None)
+    if not provider_id or not model_id:
+        # A fresh session has no message to infer the model from; estimate
+        # against the default LLM so the meter shows the real prompt baseline.
+        default_provider_id, default_model_id = await _resolve_default_llm()
+        provider_id = provider_id or default_provider_id
+        model_id = model_id or default_model_id
     context_window = _resolve_context_window(provider_id, model_id)
     tool_definition_tokens, prompt_tool_names = await _estimate_tool_definition_tokens(
         session_id,
@@ -545,6 +551,19 @@ async def _estimate_tool_definition_tokens(
             "error": str(exc),
         })
         return 0, ()
+
+
+async def _resolve_default_llm() -> tuple[Optional[str], Optional[str]]:
+    try:
+        from flocks.config.config import Config
+
+        default_llm = await Config.resolve_default_llm()
+    except Exception as exc:
+        log.debug("context_usage.default_llm_unavailable", {"error": str(exc)})
+        return None, None
+    if not default_llm:
+        return None, None
+    return default_llm.get("provider_id"), default_llm.get("model_id")
 
 
 def _resolve_agent_name(messages: List[Any], session: Optional[SessionInfo]) -> Optional[str]:

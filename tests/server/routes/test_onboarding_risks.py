@@ -27,7 +27,6 @@ def risk_runtime(tmp_path, monkeypatch: pytest.MonkeyPatch):
     secrets = SecretManager(tmp_path / "risk-secrets.json")
     monkeypatch.setattr(secret_module, "_secret_manager", secrets)
     monkeypatch.setattr(security, "get_secret_manager", lambda: secrets)
-    monkeypatch.setattr(onboarding_routes, "get_secret_manager", lambda: secrets)
     monkeypatch.setattr(provider_routes, "_ensure_provider_initialized", AsyncMock())
     monkeypatch.setattr(onboarding_routes.Provider, "get", lambda _provider_id: None)
     monkeypatch.setattr(onboarding_routes.Config, "resolve_default_llm", AsyncMock(return_value=None))

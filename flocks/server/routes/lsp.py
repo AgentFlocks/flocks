@@ -6,9 +6,10 @@ Implements server-side LSP routing functionality.
 """
 
 from typing import List, Optional, Any
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from pydantic import BaseModel, Field, ConfigDict
 
+from flocks.server.auth import require_admin
 from flocks.utils.log import Log
 from flocks import lsp
 
@@ -85,8 +86,8 @@ class InitializeRequest(BaseModel):
 class TextDocumentPositionRequest(BaseModel):
     """Request with text document and position"""
     file: str = Field(..., description="File path")
-    line: int = Field(..., description="Line number (0-based)")
-    character: int = Field(..., description="Character offset (0-based)")
+    line: int = Field(..., ge=0, description="Line number (0-based)")
+    character: int = Field(..., ge=0, description="Character offset (0-based)")
 
 
 class WorkspaceSymbolRequest(BaseModel):
@@ -133,7 +134,7 @@ async def initialize(request: InitializeRequest = Body(default=None)):
 
 
 @router.post("/shutdown")
-async def shutdown():
+async def shutdown(_admin: object = Depends(require_admin)):
     """
     Shutdown LSP subsystem
     

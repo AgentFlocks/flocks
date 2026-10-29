@@ -2,6 +2,7 @@ import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
 from fastapi.testclient import TestClient
 
 import flocks.workflow.service_runtime as service_runtime
@@ -84,6 +85,72 @@ def test_service_runtime_lifespan_reports_mcp_init_failure(
     init_mock.assert_awaited_once()
     shutdown_mock.assert_awaited_once()
     run_workflow_mock.assert_not_called()
+
+
+@pytest.mark.parametrize("fail_closed", [False, True])
+def test_service_runtime_interrupted_plugin_load_follows_fail_closed_rule(
+    monkeypatch, fail_closed: bool,
+) -> None:
+    """An unreadable plugin directory is skipped unless a fail-closed plugin
+    is installed; then the service reports the generic marker as not ready."""
+    from flocks.plugin import ExtensionPoint, PluginLoader
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("plugin directory unavailable")
+
+    init_mock = AsyncMock()
+    monkeypatch.setattr(PluginLoader, "_extension_points", {
+        "TOOLS": ExtensionPoint(attr_name="TOOLS", subdir="tools", consumer=lambda *_args: None),
+    })
+    monkeypatch.setattr(PluginLoader, "_load_extension_point", unavailable)
+    monkeypatch.setattr(PluginLoader, "critical_entrypoints_declared", classmethod(lambda cls: fail_closed))
+    monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", False)
+    monkeypatch.setattr(service_runtime.MCP, "init", init_mock)
+    monkeypatch.setattr(service_runtime, "get_manager", lambda: SimpleNamespace(shutdown=AsyncMock()))
+
+    app = service_runtime.create_service_app(
+        workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
+        workflow_id="wf-1",
+        release_id="rel-1",
+    )
+
+    with TestClient(app, raise_server_exceptions=True) as client:
+        health = client.get("/health")
+
+    assert PluginLoader.has_runtime_critical_entrypoint_failure() is fail_closed
+    if fail_closed:
+        assert health.status_code == 503
+        assert health.json()["mcp_error"] == "critical plugin entrypoint failure"
+        init_mock.assert_not_awaited()
+    else:
+        assert health.status_code == 200
+        assert health.json()["mcp_ready"] is True
+        init_mock.assert_awaited_once()
+
+
+def test_service_runtime_refuses_to_start_without_a_declared_requirement(monkeypatch) -> None:
+    """The same declared requirements as the main server: a missing one stops the start."""
+    from flocks.plugin import PluginLoader
+    from flocks.plugin.readiness import ENV_REQUIRED_CAPABILITIES, StartupRequirementsUnmet
+
+    init_mock = AsyncMock()
+    monkeypatch.setenv(ENV_REQUIRED_CAPABILITIES, "response_transform")
+    monkeypatch.setattr(PluginLoader, "load_all", classmethod(lambda cls, **_kwargs: SimpleNamespace(
+        has_critical_entrypoint_failure=False, critical_entrypoint_failures=[],
+    )))
+    monkeypatch.setattr(service_runtime.MCP, "init", init_mock)
+    monkeypatch.setattr(service_runtime, "get_manager", lambda: SimpleNamespace(shutdown=AsyncMock()))
+
+    app = service_runtime.create_service_app(
+        workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
+        workflow_id="wf-1",
+        release_id="rel-1",
+    )
+
+    with pytest.raises(StartupRequirementsUnmet):
+        with TestClient(app, raise_server_exceptions=True):
+            pass
+    init_mock.assert_not_awaited()
 
 
 def test_service_runtime_invoke_builds_real_tool_context(

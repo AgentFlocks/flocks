@@ -67,7 +67,7 @@ export function DashboardCards({ counts }: { counts: DashboardCounts | null }) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
       {cards.map(card => (
-        <div key={card.label} className={`${card.bg} rounded-xl p-4 flex items-center gap-3`}>
+        <div key={card.label} className={`${card.bg} rounded-xl p-4 flex items-center gap-3 max-md:gap-2 max-md:p-3`}>
           <div className="p-2 bg-white rounded-lg shadow-sm">{card.icon}</div>
           <div>
             <p className="text-xl font-bold text-gray-900">{card.value}</p>

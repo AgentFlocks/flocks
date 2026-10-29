@@ -1,20 +1,18 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, Navigate, Route, Routes, useLocation, type RouteObject } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, type RouteObject } from 'react-router-dom';
 import Layout from './Layout';
 import { ThemeProvider } from '@/contexts/ThemeContext';
-import FlocksproUpgradeCallbackPage from '@/pages/FlocksproUpgrade/Callback';
 
 const {
   checkUpdate, getCurrentRelease, onboardingAPI, sessionApi,
   getActiveNotifications, ackNotification, getNotificationAckStatus,
-  flocksproUsersApi, consoleUpgradeApi, productNameContextValue,
+  productNameContextValue,
   useAuth, useWebUIContractPages, useSceneSuiteUpdates, useTaskDashboard,
-  confirmMock, tokenPolicy, changeLanguage, finishConsoleLogin, notificationModal,
+  confirmMock, tokenPolicy, changeLanguage, updateModalProps, notificationModal,
 } = vi.hoisted(() => ({
   changeLanguage: vi.fn(),
-  finishConsoleLogin: vi.fn(),
   checkUpdate: vi.fn(),
   getCurrentRelease: vi.fn(),
   onboardingAPI: { getStatus: vi.fn() },
@@ -22,25 +20,22 @@ const {
   getActiveNotifications: vi.fn(),
   ackNotification: vi.fn(),
   getNotificationAckStatus: vi.fn(),
-  flocksproUsersApi: { hasCapability: vi.fn(), getLicenseStatus: vi.fn() },
-  consoleUpgradeApi: { getProPackageStatus: vi.fn() },
-  productNameContextValue: { productName: 'Flocks', proProductName: 'Flocks Pro', configuredDisplayName: null as string | null, logoUrl: '/favicon.svg' as string | null },
+  productNameContextValue: { productName: 'Flocks', configuredDisplayName: null as string | null, logoUrl: '/favicon.svg' as string | null },
   useAuth: vi.fn(),
   useWebUIContractPages: vi.fn(),
   useSceneSuiteUpdates: vi.fn(() => ({ hasUnseenSuites: false })),
   useTaskDashboard: vi.fn(() => ({ counts: { running: 1, queued: 2 } })),
   confirmMock: vi.fn(() => Promise.resolve(true)),
   tokenPolicy: { ready: true, notice: null, close: vi.fn(), onPresented: vi.fn() },
+  updateModalProps: [] as Record<string, unknown>[],
   notificationModal: vi.fn(),
 }));
 
-vi.mock('@/api/update', () => ({ checkUpdate, getCurrentRelease }));
+vi.mock('@/api/update', () => ({ checkUpdate, getCurrentRelease, DEFAULT_UPDATE_CHANNEL: 'default' }));
 vi.mock('@/api/onboarding', () => ({ onboardingAPI }));
 vi.mock('@/api/session', () => ({ sessionApi }));
 vi.mock('@/api/notifications', () => ({ getActiveNotifications, ackNotification, getNotificationAckStatus }));
-vi.mock('@/api/flocksproUsers', () => ({ flocksproUsersApi }));
-vi.mock('@/api/consoleUpgrade', () => ({ consoleUpgradeApi }));
-vi.mock('@/api/auth', () => ({ authApi: { finishConsoleLogin } }));
+vi.mock('@/components/common/InstallationResultBanner', () => ({ InstallationResultBanner: () => null }));
 vi.mock('@/contexts/AuthContext', () => ({ useAuth }));
 vi.mock('@/contexts/ProductNameContext', () => ({ useProductName: () => productNameContextValue }));
 vi.mock('@/components/common/ConfirmDialog', () => ({ useConfirm: () => confirmMock }));
@@ -54,6 +49,7 @@ vi.mock('@/hooks/useWorkspacePageOrders', () => ({ useWorkspacePageOrders: () =>
 vi.mock('./SessionHistoryPanel', () => ({ default: () => <div data-testid="history-panel" /> }));
 vi.mock('@/components/common/UpdateModal', () => {
   function UpdateModalMock(props: Record<string, unknown>) {
+    updateModalProps.push(props);
     React.useEffect(() => { (props.onPresented as (() => void) | undefined)?.(); }, [props.onPresented]);
     return <div role="dialog" aria-label="update-modal" />;
   }
@@ -93,8 +89,8 @@ function RouteProbe() {
 
 const routes: RouteObject[] = [
   { index: true, element: <RouteProbe /> },
-  { path: 'flockspro-upgrade', element: <Navigate to="/settings/flockspro" replace /> },
-  { path: 'flockspro-upgrade/callback', element: <FlocksproUpgradeCallbackPage /> },
+  { path: 'settings/system-logs', element: <div>system logs page</div> },
+  { path: 'settings/account', element: <div>account page</div> },
   { path: '*', element: <RouteProbe /> },
 ];
 
@@ -123,7 +119,7 @@ function sceneWorkspace(id: string, title: string, over: Record<string, any> = {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  finishConsoleLogin.mockResolvedValue(undefined);
+  updateModalProps.length = 0;
   localStorage.clear();
   Object.assign(productNameContextValue, { productName: 'Flocks', configuredDisplayName: null, logoUrl: '/favicon.svg' });
   useAuth.mockReturnValue({ user: { id: 'u1', username: 'admin', role: 'admin' }, logout: vi.fn() });
@@ -132,9 +128,6 @@ beforeEach(() => {
   getCurrentRelease.mockResolvedValue(null);
   getActiveNotifications.mockResolvedValue([]);
   getNotificationAckStatus.mockResolvedValue({ acknowledged: true });
-  flocksproUsersApi.getLicenseStatus.mockResolvedValue({ pro_enabled: false });
-  flocksproUsersApi.hasCapability.mockResolvedValue(false);
-  consoleUpgradeApi.getProPackageStatus.mockResolvedValue({ pro_enabled: false });
   useSceneSuiteUpdates.mockReturnValue({ hasUnseenSuites: false });
   useTaskDashboard.mockReturnValue({ counts: { running: 1, queued: 2 } });
   confirmMock.mockResolvedValue(true);
@@ -554,23 +547,20 @@ describe('Layout chrome', () => {
     await waitFor(() => expect(activeProbe().textContent).toBe('/channels'));
   });
 
-  it('opens settings from the footer menu with Flocks Pro in the sidebar', async () => {
-    flocksproUsersApi.hasCapability.mockResolvedValue(true);
+  it('opens settings from the footer menu with the settings sections in the sidebar', async () => {
     renderAt('/');
     fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal:admin' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'systemConfiguration' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/settings/preferences'));
     const sidebar = screen.getByRole('navigation', { name: 'moduleNavigation' });
+    // A stock build has no edition sections; those an extension registers sort in by order.
     expect(within(sidebar).getAllByRole('link').map((link) => link.textContent)).toEqual([
-      'settingsPreferences', 'accountManagement', 'securityConfig', 'systemLog', 'auditLogs', 'Flocks Pro', 'archivedData',
+      'settingsPreferences', 'accountManagement', 'systemLog', 'archivedData',
     ]);
     expect(screen.queryByTestId('history-panel')).not.toBeInTheDocument();
-    fireEvent.click(within(sidebar).getByRole('link', { name: 'auditLogs' }));
-    await waitFor(() => expect(activeProbe().textContent).toBe('/settings/audit-logs'));
-    expect(within(sidebar).getByRole('link', { name: 'auditLogs' })).toHaveAttribute('aria-current', 'page');
-    fireEvent.click(within(sidebar).getByRole('link', { name: 'Flocks Pro' }));
-    await waitFor(() => expect(activeProbe().textContent).toBe('/settings/flockspro'));
-    expect(within(sidebar).getByRole('link', { name: 'Flocks Pro' })).toHaveAttribute('aria-current', 'page');
+    fireEvent.click(within(sidebar).getByRole('link', { name: 'archivedData' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe('/settings/archived-data'));
+    expect(within(sidebar).getByRole('link', { name: 'archivedData' })).toHaveAttribute('aria-current', 'page');
     expect(within(sidebar).queryByRole('link', { name: 'sceneSuiteManager' })).not.toBeInTheDocument();
     fireEvent.click(within(sidebar).getByRole('link', { name: 'settingsPreferences' }));
     await waitFor(() => expect(activeProbe().textContent).toBe('/settings/preferences'));
@@ -585,27 +575,6 @@ describe('Layout chrome', () => {
     ]);
   });
 
-  it('returns to the workbench home after cloud login from Flocks Pro settings', async () => {
-    localStorage.setItem('flocks_layout_workspace_paths', JSON.stringify({ agent: '/sessions/previous-session' }));
-    renderAt('/flockspro-upgrade/callback?console_login_id=test-login&state=test-state');
-    await waitFor(() => expect(activeProbe().textContent).toBe('/settings/flockspro?login=success'));
-    expect(finishConsoleLogin).toHaveBeenCalledWith('test-login', 'test-state', undefined);
-    expect(JSON.parse(localStorage.getItem('flocks_layout_workspace_paths')!).agent).toBe('/sessions/previous-session');
-    const completedExchanges = finishConsoleLogin.mock.calls.length;
-    fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
-    await waitFor(() => expect(activeProbe().textContent).toBe('/'));
-    expect(screen.getByRole('button', { name: 'workbench' })).toHaveAttribute('aria-current', 'page');
-    expect(finishConsoleLogin).toHaveBeenCalledTimes(completedExchanges);
-  });
-
-  it.each(['/flockspro-upgrade?login=success', '/flockspro-upgrade/callback?console_login_id=expired'])('discards a remembered upgrade URL when returning to the workbench: %s', async (path) => {
-    localStorage.setItem('flocks_layout_workspace_paths', JSON.stringify({ agent: path }));
-    renderAt('/settings/flockspro');
-    fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
-    await waitFor(() => expect(activeProbe().textContent).toBe('/'));
-    expect(finishConsoleLogin).not.toHaveBeenCalled();
-  });
-
   it('combines account and version information in a single sidebar footer menu', () => {
     renderAt('/');
     const header = document.querySelector('[data-workspace-header]') as HTMLElement;
@@ -616,7 +585,12 @@ describe('Layout chrome', () => {
     fireEvent.click(within(sidebar).getByRole('button', { name: 'accountAndGlobal:admin' }));
     const menu = screen.getByRole('menu', { name: 'accountAndGlobal:admin' });
     expect(within(menu).getByRole('menuitem', { name: 'checkUpdate' })).toBeInTheDocument();
-    expect(within(menu).getByRole('menuitem', { name: /upgradePro/ })).toBeInTheDocument();
+    // The open build registers no extension entries: no upgrade link and no tag.
+    expect(within(menu).queryByRole('menuitem', { name: /upgrade/i })).not.toBeInTheDocument();
+    expect(menu.querySelector('.border')).toBeNull();
+    for (const link of Array.from(menu.querySelectorAll('a'))) {
+      expect(['/settings/preferences', 'https://portal.agentflocks.com']).toContain(link.getAttribute('href'));
+    }
     expect(within(menu).getByRole('menuitem', { name: 'logout' })).toBeInTheDocument();
     expect(within(menu).queryByRole('menuitem', { name: 'channels' })).not.toBeInTheDocument();
   });
@@ -700,39 +674,64 @@ describe('Layout chrome', () => {
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument());
   });
 
-  const proRelease = (component: string, notes: string) => ({
-    edition: 'flockspro',
+  it('asks the default update channel and forces a fresh check when opened by hand', async () => {
+    renderAt('/');
+    // A stock build leaves the channel unset, so the server picks its default.
+    await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', undefined));
+    fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal:admin' }));
+    fireEvent.click(within(screen.getByRole('menu', { name: 'accountAndGlobal:admin' })).getByRole('menuitem', { name: 'checkUpdate' }));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument());
+    expect(updateModalProps.at(-1)).toEqual(expect.objectContaining({ forceInitialCheck: true }));
+    expect(updateModalProps.at(-1)).not.toHaveProperty('channel');
+  });
+
+  const bundleRelease = (component: string, notes: string) => ({
+    channel: 'bundle',
     current_version: 'v2026.10.16',
     latest_version: 'v2026.10.16',
     current_bundle_version: 'v2026.10.16',
     current_core_version: 'v2026.10.15',
-    current_pro_component_version: component,
+    current_component_version: component,
     has_update: false,
     release_notes: notes,
     release_url: null,
     error: null,
   });
 
-  it('announces an installed Pro bundle with its own release notes', async () => {
-    getCurrentRelease.mockResolvedValue(proRelease('2026.10.16', 'Pro 报告中心不再列出空报告'));
+  it('announces an installed bundle with its own release notes, under the name the install shows', async () => {
+    Object.assign(productNameContextValue, { productName: 'Acme Suite', configuredDisplayName: null, logoUrl: '/favicon.svg' });
+    getCurrentRelease.mockResolvedValue(bundleRelease('2026.10.16', '报告中心不再列出空报告'));
     getNotificationAckStatus.mockResolvedValue({ acknowledged: false });
     renderAt('/');
     await waitFor(() => expect(notificationModal).toHaveBeenCalled());
-    const id = 'whats-new-flockspro-v2026.10.16-core-v2026.10.15-pro-v2026.10.16';
+    const id = 'whats-new-bundle-v2026.10.16-core-v2026.10.15-component-v2026.10.16';
     expect(getNotificationAckStatus).toHaveBeenCalledWith(id);
     expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
       expect.objectContaining({
         id,
         kind: 'whats_new',
-        title: 'Flocks Pro v2026.10.16 更新内容',
-        body: 'Pro 报告中心不再列出空报告',
+        title: 'Acme Suite v2026.10.16 更新内容',
+        body: '报告中心不再列出空报告',
         version: 'v2026.10.16',
       }),
     ]);
   });
 
-  it('does not let a dismissed Pro component hide a same-number component update', async () => {
-    getCurrentRelease.mockResolvedValue(proRelease('2026.10.16', '组件 2026.10.16 的说明'));
+  it('reads a bundle version an installer recorded under its edition prefix', async () => {
+    Object.assign(productNameContextValue, { productName: 'Acme Suite', configuredDisplayName: null, logoUrl: '/favicon.svg' });
+    getCurrentRelease.mockResolvedValue({ ...bundleRelease('acme-v2026.10.16', '说明'), current_bundle_version: 'acme-v2026.10.16' });
+    getNotificationAckStatus.mockResolvedValue({ acknowledged: false });
+    renderAt('/');
+    await waitFor(() => expect(notificationModal).toHaveBeenCalled());
+    expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-bundle-v2026.10.16-core-v2026.10.15-component-v2026.10.16');
+    expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
+      expect.objectContaining({ title: 'Acme Suite v2026.10.16 更新内容', version: 'v2026.10.16' }),
+    ]);
+  });
+
+  it('does not let a dismissed bundle component hide a same-number component update', async () => {
+    Object.assign(productNameContextValue, { productName: 'Acme Suite', configuredDisplayName: null, logoUrl: '/favicon.svg' });
+    getCurrentRelease.mockResolvedValue(bundleRelease('2026.10.16', '组件 2026.10.16 的说明'));
     getNotificationAckStatus.mockResolvedValue({ acknowledged: false });
     const first = renderAt('/');
     await waitFor(() => expect(getNotificationAckStatus).toHaveBeenCalled());
@@ -740,18 +739,20 @@ describe('Layout chrome', () => {
     first.unmount();
     vi.clearAllMocks();
 
-    getCurrentRelease.mockResolvedValue(proRelease('2026.10.17', '组件 2026.10.17 的说明'));
+    getCurrentRelease.mockResolvedValue(bundleRelease('2026.10.17', '组件 2026.10.17 的说明'));
     getNotificationAckStatus.mockImplementation(async (id: string) => ({ acknowledged: id === dismissedId }));
     renderAt('/');
     await waitFor(() => expect(notificationModal).toHaveBeenCalled());
     expect(getNotificationAckStatus).not.toHaveBeenCalledWith(dismissedId);
     expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
-      expect.objectContaining({ body: '组件 2026.10.17 的说明', title: 'Flocks Pro v2026.10.16 更新内容' }),
+      expect.objectContaining({ body: '组件 2026.10.17 的说明', title: 'Acme Suite v2026.10.16 更新内容' }),
     ]);
   });
 
-  it('keeps the Core release notice for an OSS install', async () => {
+  it('keeps the Core release notice for a Core install', async () => {
     getCurrentRelease.mockResolvedValue({
+      // The server names its own releases' channel.
+      channel: 'flocks',
       current_version: '2026.10.15',
       latest_version: '2026.10.15',
       has_update: false,
@@ -868,5 +869,19 @@ describe('Layout onboarding', () => {
       </MemoryRouter>,
     );
     expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
+  });
+});
+
+describe('Layout content panes', () => {
+  // Settings sections scroll with the page; the system log viewer sizes its own
+  // card from the viewport and scrolls inside it, so it needs no special pane.
+  it.each(['/settings/system-logs', '/settings/account'])('wraps %s in the scrolling min-h-full wrapper', async (path) => {
+    renderAt(path);
+
+    const text = path.endsWith('system-logs') ? 'system logs page' : 'account page';
+    const wrapper = (await screen.findByText(text)).parentElement as HTMLElement;
+    expect(wrapper.className).toContain('min-h-full');
+    expect(wrapper.className).not.toContain('min-h-0');
+    expect(wrapper.parentElement?.className).toContain('overflow-y-auto');
   });
 });

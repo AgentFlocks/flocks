@@ -25,6 +25,7 @@ from flocks.hooks.execution import (
 from flocks.hooks.pipeline import HookPipeline
 from flocks.mcp import MCP, get_manager
 from flocks.utils.log import Log
+from flocks.workflow._async_runtime import register_primary_loop
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
 from flocks.workflow.tool_context import build_workflow_tool_context
 
@@ -38,16 +39,46 @@ def api_key_fingerprint(api_key: str) -> str:
 
 
 def _load_runtime_plugins() -> str | None:
-    """Load generic plugins, returning only a generic critical error marker."""
-    try:
-        from flocks.plugin import PluginLoader
+    """Load generic plugins, returning only a generic critical error marker.
 
+    Then the deployment's declared requirements are checked exactly as the main
+    server checks them (flocks.server.app): a required plugin or capability that
+    is missing stops the service from starting at all.
+    """
+    from flocks.plugin import PluginLoader
+
+    failed: tuple[str, ...] = ()
+    marker: str | None = None
+    try:
         result = PluginLoader.load_all(project_dir=Path.cwd())
-        if result.has_critical_entrypoint_failure:
-            return "critical plugin entrypoint failure"
     except Exception as exc:
-        log.warning("workflow_service.plugins.load_failed", {"error": str(exc)})
-    return None
+        # Same rule as the main server: without a fail-closed plugin, skip
+        # the unreadable source and keep serving.
+        if PluginLoader.interruption_is_critical(exc):
+            log.error("workflow_service.plugins.load_failed", {"error": str(exc)})
+            failed = ("plugin_loader",)
+            marker = "critical plugin entrypoint failure"
+        else:
+            log.warning("workflow_service.plugins.load_failed", {"error": str(exc)})
+    else:
+        if result.has_critical_entrypoint_failure:
+            failed = tuple(result.critical_entrypoint_failures)
+            marker = "critical plugin entrypoint failure"
+    _enforce_runtime_requirements(failed)
+    return marker
+
+
+def _enforce_runtime_requirements(failed_entrypoints: tuple[str, ...]) -> None:
+    """Refuse to start without what the deployment declared required.
+
+    The same check the main server runs before its business services start
+    (``check_startup_readiness``): required plugins, required capabilities and
+    a requirements file.  Nothing declared, nothing enforced.
+    """
+    from flocks.plugin.readiness import check_startup_readiness, enforce_startup_readiness
+
+    report = check_startup_readiness(failed_entrypoints=failed_entrypoints)
+    enforce_startup_readiness(report)
 
 
 class InvokeRequest(BaseModel):
@@ -72,7 +103,21 @@ def create_service_app(
     async def lifespan(_app: FastAPI):
         _app.state.mcp_ready = False
         _app.state.mcp_error = None
+        refresher: Optional[asyncio.Task] = None
         critical_plugin_error = _load_runtime_plugins()
+        if critical_plugin_error is None:
+            # Sub-workflows resolve by id: managed ones must be in place
+            # before a local copy could answer for them.
+            from flocks.content.managed import ManagedContent, run_refresher
+
+            if ManagedContent.active():
+                try:
+                    await ManagedContent.ensure_loaded()
+                except Exception as exc:
+                    critical_plugin_error = f"managed content unavailable: {exc}"
+                    log.error("workflow_service.content.load_failed", {"error": str(exc)})
+                else:
+                    refresher = asyncio.create_task(run_refresher())
         if critical_plugin_error is not None:
             _app.state.mcp_error = critical_plugin_error
         else:
@@ -83,9 +128,17 @@ def create_service_app(
                 log.warning("workflow_service.mcp.init_failed", {"error": str(exc)})
             else:
                 _app.state.mcp_ready = True
+            from flocks.extensions import run_startup_hooks
+
+            await run_startup_hooks()
         try:
             yield
         finally:
+            if refresher is not None:
+                refresher.cancel()
+            from flocks.extensions import run_shutdown_hooks
+
+            await run_shutdown_hooks()
             try:
                 await get_manager().shutdown()
             except Exception as exc:
@@ -146,6 +199,7 @@ def create_service_app(
                     action_name="invoke",
                     **context_kwargs,
                 )
+                register_primary_loop()
                 return await asyncio.to_thread(
                     run_workflow,
                     workflow=app.state.workflow_json,
@@ -162,6 +216,12 @@ def create_service_app(
                 "workflow_id": app.state.workflow_id,
                 "release_id": app.state.release_id,
                 "inputs": req.inputs,
+                # The service key issued at publish time was verified above
+                # (compare_digest). It is not a managed identity, so ingress
+                # policies treat the call as the legacy compatibility carrier;
+                # the fingerprint below still lets them bind a managed key
+                # when one was registered under the same id.
+                "legacy_compat": True,
             }
             if expected_api_key:
                 action_payload["evidence"] = {
@@ -216,6 +276,12 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    # A process of its own (started by the workflow center): Log.init never
+    # runs here, so standard-library records -- uvicorn's among them -- are
+    # scrubbed only if this installs it before anything logs.
+    from flocks.utils.log import install_log_record_scrubber
+
+    install_log_record_scrubber()
     args = _parse_args()
     with open(args.workflow, "r", encoding="utf-8") as f:
         workflow_json = json.load(f)

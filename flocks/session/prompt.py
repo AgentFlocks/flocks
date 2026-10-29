@@ -1084,19 +1084,31 @@ Do not repeat an identical tool call in the same response."""
         venv = source_root / ".venv"
         python = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         available = (source_root / "pyproject.toml").is_file() and python.is_file()
-        return "\n".join([
+        lines = [
             "## Environment",
             f"Current working directory: {working_dir}",
             f"Platform: {platform.system().lower()}",
             f"Today's date: {today}",
+        ]
+        if not available:
+            # An installed release has no source .venv: a path named here would
+            # be run anyway and fail (R04, 2026-10-26), so none is named.
+            return "\n".join([
+                *lines,
+                "Flocks source .venv available: no",
+                "This Flocks installation provides no host Python environment. Do not run an interpreter from a path "
+                "inside the Flocks installation; report the missing environment before Python-dependent host work. "
+                "Container commands use the container's Python.",
+            ])
+        return "\n".join([
+            *lines,
             f"Default host Python virtual environment: {venv}",
             f"Default host Python interpreter: {python}",
-            f"Flocks source .venv available: {'yes' if available else 'no'}",
+            "Flocks source .venv available: yes",
             "For host-side Python work, default to this Flocks source .venv, independently of the current working directory. "
             "Invoke its interpreter by a quoted absolute path; use that interpreter with -m pip, -m pytest, or other modules. "
             "In PowerShell, use the & call operator before the quoted interpreter path. "
             "No activate command is needed; bare python/pip commands are not guaranteed to select this environment. "
-            "If this environment is unavailable, report the missing environment before Python-dependent work. "
             "This is the host helper environment, not the environment of the project being worked on. "
             "Container commands use the container's Python; do not assume this host path exists inside a container.",
         ])
@@ -1105,8 +1117,14 @@ Do not repeat an identical tool call in the same response."""
     async def _build_agent_skills_prompt(
         cls,
         skill_names: Iterable[str],
+        *,
+        session_id: Optional[str] = None,
     ) -> str:
-        """Load host-selected Agent skills as trusted system instructions."""
+        """Load host-selected Agent skills as trusted system instructions.
+
+        A managed skill keeps the version this session first read, the same
+        one the skill tool hands the session (flocks.content.managed).
+        """
         from flocks.skill.skill import Skill
 
         names = list(dict.fromkeys(
@@ -1118,13 +1136,13 @@ Do not repeat an identical tool call in the same response."""
             if skill is None or Skill.is_disabled(name):
                 raise ValueError(f"Configured Agent skill is unavailable: {name}")
             try:
-                content = Path(skill.location).read_text(encoding="utf-8").strip()
-            except OSError as exc:
+                content = (await Skill.read_body(skill, scope=session_id)).strip()
+            except Exception as exc:
                 raise ValueError(f"Failed to load configured Agent skill {name}: {exc}") from exc
             if content:
                 sections.append("\n".join([
                     f"## Trusted Agent Skill: {name}",
-                    f"Base directory: {Path(skill.location).parent}",
+                    f"Base directory: {Skill.base_directory(skill) or '(managed skill: no files on disk)'}",
                     content,
                 ]))
         return cls._join_prompt_parts(sections)
@@ -1301,14 +1319,18 @@ Do not repeat an identical tool call in the same response."""
         ))
         agent_skills_prompt = await cls._build_agent_skills_prompt(
             normalized_agent_skill_names,
+            session_id=session_id,
         )
         if prompt_profile == "isolated":
+            from flocks.agent.interaction_guidance import build_interaction_guidance
+
             values = [
                 ("flocks_config_guard", "global", get_prompt_flocks_config_guard().strip()),
                 ("tool_protocol", "provider", cls._build_isolated_tool_guidance_prompt(
                     use_text_tool_call_mode=use_text_tool_call_mode,
                 )),
                 ("agent_identity", "agent", cls._normalize_prompt_text(agent_prompt)),
+                ("interaction_guidance", "global", build_interaction_guidance()),
                 ("agent_skills", "agent", agent_skills_prompt),
                 ("execution_mode", "runtime", cls._normalize_prompt_text(execution_mode_prompt)),
                 ("minimal_environment", "runtime_tail", cls._build_minimal_environment(session_directory)),

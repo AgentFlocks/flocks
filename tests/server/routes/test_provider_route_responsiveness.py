@@ -28,9 +28,11 @@ async def test_initialized_provider_fast_path_does_not_schedule_worker_thread(
         raise AssertionError("initialized provider should stay on the fast path")
 
     monkeypatch.setattr(provider_routes.Provider, "_initialized", True)
-    monkeypatch.setattr(provider_routes.asyncio, "to_thread", _unexpected_to_thread)
-
-    await provider_routes._ensure_provider_initialized()
+    # This is the shared asyncio module; database fixture cleanup also uses
+    # to_thread, so the assertion must cover only the call under test.
+    with monkeypatch.context() as call_patch:
+        call_patch.setattr(provider_routes.asyncio, "to_thread", _unexpected_to_thread)
+        await provider_routes._ensure_provider_initialized()
 
 
 async def test_concurrent_provider_initialization_uses_one_worker(

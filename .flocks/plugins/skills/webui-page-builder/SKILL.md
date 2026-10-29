@@ -314,11 +314,17 @@ routes:
     path: /ack
     handler: handlers.ack_alert
     timeoutMs: 10000
+
+# Secret ids the handlers read through ctx.secrets. Only these are readable;
+# asking for any other id raises an error.
+secrets:
+  - tdp_api_key
 ```
 
 Rules:
 
 - `path` must start with `/` and is always scoped under `/api/contracts/webui/pages/<pageId>/api`.
+- List every secret id a handler reads under `secrets`; `ctx.secrets.get()` refuses ids that are not listed.
 - `handler` points to a callable in `api/handlers.py`.
 - Keep route count small and page-specific.
 - Prefer read-only `GET` for dashboards; use `POST` for actions.
@@ -350,7 +356,7 @@ Implementation expectations for the runtime:
 - Route module loading is controlled by Flocks, not by arbitrary `include_router`.
 - Handlers run as trusted local plugins, not as a security sandbox.
 - Runtime enforces auth, page ID validation, route validation, request/response size limits, timeout, and structured error reporting.
-- Secrets are read server-side through `ctx.secrets` or `get_secret_manager()`; never return secrets to the page.
+- Secrets are read server-side through `ctx.secrets`, limited to the ids listed under `secrets` in `api/routes.yaml`; never return secrets to the page.
 - Watcher should monitor `api/routes.yaml` and `api/*.py`; API changes should hot-reload without restarting Flocks.
 - API runtime errors should be visible in page diagnostics (for example `dist/meta.json` or a dedicated API meta file).
 

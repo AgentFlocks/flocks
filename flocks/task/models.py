@@ -103,6 +103,12 @@ class RetryConfig(BaseModel):
     retry_count: int = Field(0, alias="retryCount")
     retry_delay_seconds: int = Field(60, alias="retryDelaySeconds")
     retry_after: Optional[datetime] = Field(None, alias="retryAfter")
+    #: Why the run is not retried automatically: what it started may have had
+    #: effects nobody confirmed (flocks.task.outcome).  A person checks them,
+    #: then resumes the run in its session or runs it afresh.
+    blocked_reason: Optional[str] = Field(None, alias="blockedReason")
+    #: The calls whose effects are not confirmed, as "tool:callID".
+    unverified_effects: List[str] = Field(default_factory=list, alias="unverifiedEffects")
 
 
 class TaskScheduler(BaseModel):
@@ -181,12 +187,32 @@ class TaskExecution(BaseModel):
     )
     agent_name: str = Field("rex", alias="agentName")
     workflow_id: Optional[str] = Field(None, alias="workflowID")
+    # Ownership. "running" alone does not say whether anybody is still working
+    # on this, so the row records which owner claimed it and until when that
+    # claim holds.
+    owner_node_id: Optional[str] = Field(None, alias="ownerNodeID")
+    lease_expires_at: Optional[datetime] = Field(None, alias="leaseExpiresAt")
+    # Bumped on every claim. An owner that lost its lease and comes back still
+    # holds the old number, so its late writes are recognised as stale and
+    # dropped rather than overwriting the new owner's progress.
+    owner_generation: int = Field(0, alias="ownerGeneration")
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc), alias="createdAt",
     )
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc), alias="updatedAt",
     )
+
+    def lease_is_live(self, *, now: Optional[datetime] = None) -> bool:
+        """Whether some owner still holds a valid claim on this execution."""
+
+        if self.owner_node_id is None or self.lease_expires_at is None:
+            return False
+        moment = now or datetime.now(timezone.utc)
+        expires = self.lease_expires_at
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        return expires > moment
 
     def touch(self) -> None:
         self.updated_at = datetime.now(timezone.utc)
@@ -210,6 +236,25 @@ class TaskExecutionQueueRef(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc), alias="createdAt",
     )
     started_at: Optional[datetime] = Field(None, alias="startedAt")
+
+
+def validate_timezone(tz: str) -> str:
+    """Return *tz* if it names a known IANA zone, else raise ValueError.
+
+    The scheduler silently fell back to UTC for an unknown zone, so a typo
+    such as ``Mars/Olympus`` produced runs at the wrong hour without any
+    signal to the user.
+    """
+    name = (tz or "").strip()
+    if not name:
+        raise ValueError("timezone must not be empty")
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(name)
+    except Exception as exc:
+        raise ValueError(f"Invalid timezone: {name!r}. Use an IANA name such as 'Asia/Shanghai'.") from exc
+    return name
 
 
 def validate_cron_expression(cron: str) -> str:
@@ -240,6 +285,7 @@ def build_schedule(
     timezone: str = "Asia/Shanghai",
 ) -> TaskTrigger:
     normalized_cron = validate_cron_expression(cron) if cron else None
+    timezone = validate_timezone(timezone)
     if run_once:
         if not run_at and not cron:
             raise ValueError(

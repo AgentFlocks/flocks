@@ -26,22 +26,70 @@ task_app = typer.Typer(
 
 console = Console()
 
+LIST_FORMATS = ("table", "json")
 
-def _run_task_command(operation):
-    """Close invocation-owned stores before asyncio tears down the event loop."""
-    from flocks.cli.runtime import close_cli_resources
-    from flocks.task.store import TaskStore
 
-    async def execute():
+async def _with_store_cleanup(coro):
+    """Run a task command and release the stores it opened.
+
+    Release the task handle, then the other invocation-owned stores (workflow
+    store, channel bindings) and storage before asyncio closes the command's
+    event loop.
+    """
+    try:
+        return await coro
+    finally:
         try:
-            return await operation
-        finally:
-            try:
-                await TaskStore.close()
-            finally:
-                await close_cli_resources()
+            from flocks.task.store import TaskStore
 
-    return asyncio.run(execute())
+            await TaskStore.close()
+        except Exception:
+            pass
+        try:
+            from flocks.workflow.store import WorkflowStore
+
+            await WorkflowStore.close()
+        except Exception:
+            pass
+        try:
+            from flocks.channel.inbound.session_binding import close_binding_db
+
+            await close_binding_db()
+        except Exception:
+            pass
+        try:
+            await Storage.shutdown()
+        except Exception:
+            pass
+
+
+def _run(coro):
+    return asyncio.run(_with_store_cleanup(coro))
+
+
+def _validate_list_format(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized not in LIST_FORMATS:
+        raise typer.BadParameter(f"Output format must be one of: {' | '.join(LIST_FORMATS)}.")
+    return normalized
+
+
+def _validate_priority(value: str) -> str:
+    from flocks.task.models import TaskPriority
+
+    choices = [item.value for item in TaskPriority]
+    if value not in choices:
+        raise typer.BadParameter(f"Priority must be one of: {' | '.join(choices)}.")
+    return value
+
+
+def _validate_execution_mode(value: str) -> str:
+    from flocks.task.models import ExecutionMode
+
+    choices = [item.value for item in ExecutionMode]
+    if value not in choices:
+        raise typer.BadParameter(f"Mode must be one of: {' | '.join(choices)}.")
+    return value
 
 
 # ------------------------------------------------------------------
@@ -52,13 +100,13 @@ def _run_task_command(operation):
 def task_default(ctx: typer.Context):
     """Show task dashboard (default when no subcommand given)."""
     if ctx.invoked_subcommand is None:
-        _run_task_command(_dashboard())
+        _run(_dashboard())
 
 
 @task_app.command("dashboard")
 def task_dashboard():
     """Show task center overview."""
-    _run_task_command(_dashboard())
+    _run(_dashboard())
 
 
 async def _dashboard():
@@ -97,11 +145,11 @@ async def _dashboard():
 def task_list(
     status: Optional[str] = typer.Option(None, "--status", "-s", help="Filter by status"),
     task_type: Optional[str] = typer.Option(None, "--type", "-t", help="Filter by type (queued/scheduled/stream)"),
-    limit: int = typer.Option(20, "-n", "--limit", help="Max results"),
-    format: str = typer.Option("table", "--format", help="Output format: table | json"),
+    limit: int = typer.Option(20, "-n", "--limit", min=1, help="Max results"),
+    format: str = typer.Option("table", "--format", callback=_validate_list_format, help="Output format: table | json"),
 ):
     """List tasks."""
-    _run_task_command(_list_tasks(status, task_type, limit, format))
+    _run(_list_tasks(status, task_type, limit, format))
 
 
 async def _list_tasks(status_val, type_val, limit, fmt):
@@ -174,7 +222,7 @@ async def _list_tasks(status_val, type_val, limit, fmt):
 @task_app.command("show")
 def task_show(task_id: str = typer.Argument(..., help="Task ID")):
     """Show task details."""
-    _run_task_command(_show_task(task_id))
+    _run(_show_task(task_id))
 
 
 async def _show_task(task_id: str):
@@ -257,8 +305,8 @@ def task_create(
     title: str = typer.Argument(..., help="Task title"),
     description: str = typer.Option("", "--desc", "-d", help="Task description"),
     task_type: str = typer.Option("queued", "--type", "-t", help="queued | scheduled | stream"),
-    priority: str = typer.Option("normal", "--priority", "-p", help="urgent | high | normal | low"),
-    mode: str = typer.Option("agent", "--mode", "-m", help="agent | workflow"),
+    priority: str = typer.Option("normal", "--priority", "-p", callback=_validate_priority, help="urgent | high | normal | low"),
+    mode: str = typer.Option("agent", "--mode", "-m", callback=_validate_execution_mode, help="agent | workflow"),
     agent: str = typer.Option("rex", "--agent", "-a", help="Agent name (for agent mode)"),
     workflow: Optional[str] = typer.Option(None, "--workflow", "-w", help="Workflow ID (for workflow mode)"),
     skill: Optional[list[str]] = typer.Option(None, "--skill", help="Skills to inject"),
@@ -266,7 +314,7 @@ def task_create(
     prompt: Optional[str] = typer.Option(None, "--prompt", help="User prompt"),
 ):
     """Create a new task."""
-    _run_task_command(_create_task(title, description, task_type, priority, mode, agent, workflow, skill or [], cron, prompt))
+    _run(_create_task(title, description, task_type, priority, mode, agent, workflow, skill or [], cron, prompt))
 
 
 async def _create_task(title, description, task_type, priority, mode, agent, workflow, skills, cron, prompt):
@@ -329,25 +377,86 @@ def task_queue(
     resume: bool = typer.Option(False, "--resume", help="Resume queue"),
 ):
     """View or control the task queue."""
-    _run_task_command(_queue(pause, resume))
+    _run(_queue(pause, resume))
+
+
+def _service_base_url() -> Optional[str]:
+    """Locate the running Flocks service (explicit FLOCKS_SERVER_URL or the daemon's status)."""
+    import os
+
+    explicit = (os.environ.get("FLOCKS_SERVER_URL") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    try:
+        from flocks.cli.service_config import loopback_host
+        from flocks.cli.service_control import read_supervisor_status
+        from flocks.cli.service_manager import runtime_paths
+
+        status = read_supervisor_status(paths=runtime_paths(), timeout=2.0)
+    except Exception:
+        return None
+    backend = status.backend
+    if backend.state != "healthy" or not backend.port:
+        return None
+    host = loopback_host(backend.host or "127.0.0.1")
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{backend.port}"
+
+
+def _service_api_headers() -> dict[str, str]:
+    from flocks.security import get_secret_manager
+    from flocks.server.auth import API_TOKEN_SECRET_ID
+
+    token = get_secret_manager().get(API_TOKEN_SECRET_ID)
+    if not token:
+        raise RuntimeError("no local API token; run `flocks admin generate-api-token` first")
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def _service_queue_call(method: str, path: str) -> dict:
+    import httpx
+
+    base_url = _service_base_url()
+    if base_url is None:
+        raise RuntimeError("Flocks service is not running")
+    async with httpx.AsyncClient(base_url=base_url, timeout=10.0, trust_env=False) as client:
+        response = await client.request(method, path, headers=_service_api_headers())
+    response.raise_for_status()
+    return response.json()
 
 
 async def _queue(pause: bool, resume: bool):
-    await Storage.init()
-    from flocks.task.manager import TaskManager
-    from flocks.task.store import TaskStore
-    await TaskStore.init()
-
-    if pause:
-        TaskManager.pause_queue()
-        console.print("[yellow]Queue paused[/yellow]")
+    # The queue lives in the running service process; pausing an in-process
+    # TaskManager that the CLI never started would be a no-op.
+    if pause or resume:
+        action = "pause" if pause else "resume"
+        try:
+            await _service_queue_call("POST", f"/api/task-system/queue/{action}")
+        except Exception as exc:
+            console.print(
+                f"[red]Cannot {action} the task queue: {exc}. "
+                "Queue control requires the running Flocks service (`flocks start`).[/red]"
+            )
+            raise typer.Exit(1) from exc
+        if pause:
+            console.print("[yellow]Queue paused[/yellow]")
+        else:
+            console.print("[green]Queue resumed[/green]")
         return
-    if resume:
-        TaskManager.resume_queue()
-        console.print("[green]Queue resumed[/green]")
-        return
 
-    qs = await TaskManager.queue_status()
+    qs: Optional[dict] = None
+    try:
+        qs = await _service_queue_call("GET", "/api/task-system/queue/status")
+    except Exception:
+        qs = None
+    if qs is None:
+        # No running service: fall back to the persisted view (queue is never paused here).
+        await Storage.init()
+        from flocks.task.manager import TaskManager
+        from flocks.task.store import TaskStore
+        await TaskStore.init()
+        qs = await TaskManager.queue_status()
     console.print(Panel(
         f"Paused:         {qs['paused']}\n"
         f"Max concurrent: {qs['max_concurrent']}\n"
@@ -365,7 +474,7 @@ async def _queue(pause: bool, resume: bool):
 @task_app.command("scheduled")
 def task_scheduled():
     """List all scheduled tasks."""
-    _run_task_command(_scheduled())
+    _run(_scheduled())
 
 
 async def _scheduled():
@@ -407,7 +516,7 @@ async def _scheduled():
 @task_app.command("cancel")
 def task_cancel(task_id: str = typer.Argument(..., help="Task ID")):
     """Cancel a task."""
-    _run_task_command(_cancel(task_id))
+    _run(_cancel(task_id))
 
 
 async def _cancel(task_id: str):
@@ -426,7 +535,7 @@ async def _cancel(task_id: str):
 @task_app.command("retry")
 def task_retry(task_id: str = typer.Argument(..., help="Task ID")):
     """Retry a failed task."""
-    _run_task_command(_retry(task_id))
+    _run(_retry(task_id))
 
 
 async def _retry(task_id: str):
@@ -435,6 +544,14 @@ async def _retry(task_id: str):
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
+    from flocks.task.models import TaskStatus
+
+    # TaskManager.retry_execution hands back non-failed executions unchanged;
+    # only a failed execution is actually re-queued.
+    task = await TaskManager.get_execution(task_id)
+    if not task or task.status != TaskStatus.FAILED:
+        console.print(f"[red]Task {task_id} not found or not failed[/red]")
+        raise typer.Exit(1)
     task = await TaskManager.retry_execution(task_id)
     if not task:
         console.print(f"[red]Task {task_id} not found or not failed[/red]")
@@ -445,7 +562,7 @@ async def _retry(task_id: str):
 @task_app.command("rerun")
 def task_rerun(task_id: str = typer.Argument(..., help="Task ID")):
     """Rerun a task (stop if running, requeue)."""
-    _run_task_command(_rerun(task_id))
+    _run(_rerun(task_id))
 
 
 async def _rerun(task_id: str):

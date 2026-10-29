@@ -5,16 +5,24 @@ Applies unified diff patches to files.
 Supports file add, update, delete, and move operations.
 """
 
-import os
 import re
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 from difflib import unified_diff
 
+from flocks.tool import nofollow
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.tool.path_utils import resolve_tool_path, safe_relpath as _safe_relpath
+from flocks.tool.path_utils import (
+    changed_before_asking,
+    checked_error,
+    moved_since_resolved,
+    paths_changed,
+    resolve_tool_path,
+    resolved_identities,
+    safe_relpath as _safe_relpath,
+)
 from flocks.utils.log import Log
 
 
@@ -214,30 +222,57 @@ def apply_chunks(content: str, chunks: List[PatchChunk]) -> str:
         return content
     
     lines = content.split("\n")
-    
+
+    # Validate every chunk against the file before touching it: a hunk that
+    # points past the end or whose context no longer matches must fail loudly
+    # instead of deleting whatever happens to sit at that line number.
+    for chunk in chunks:
+        start_idx = chunk.start_line - 1
+        if start_idx < 0 or start_idx > len(lines) or (
+            start_idx == len(lines) and chunk.original_lines
+        ):
+            raise ValueError(
+                f"Patch hunk starts at line {chunk.start_line} but the file only has {len(lines)} lines"
+            )
+        end_idx = start_idx + len(chunk.original_lines)
+        if end_idx > len(lines):
+            raise ValueError(
+                f"Patch hunk at line {chunk.start_line} removes {len(chunk.original_lines)} lines "
+                f"but only {len(lines) - start_idx} remain in the file"
+            )
+        for offset, expected in enumerate(chunk.original_lines):
+            actual = lines[start_idx + offset]
+            if expected.rstrip() != actual.rstrip():
+                raise ValueError(
+                    f"Patch context mismatch at line {chunk.start_line + offset}: "
+                    f"expected {expected!r}, found {actual!r}. Re-read the file and regenerate the patch."
+                )
+
     # Apply chunks in reverse order to preserve line numbers
     for chunk in reversed(chunks):
         start_idx = chunk.start_line - 1
-        
-        # Find and replace the matching lines
-        if start_idx >= 0 and start_idx < len(lines):
-            # Remove original lines
-            end_idx = start_idx + len(chunk.original_lines)
-            del lines[start_idx:end_idx]
-            
-            # Insert new lines
-            for i, new_line in enumerate(chunk.new_lines):
-                lines.insert(start_idx + i, new_line)
-    
+        end_idx = start_idx + len(chunk.original_lines)
+        del lines[start_idx:end_idx]
+        for i, new_line in enumerate(chunk.new_lines):
+            lines.insert(start_idx + i, new_line)
+
     return "\n".join(lines)
 
 
-def _read_file_state(path: str) -> Optional[str]:
-    """Current text of ``path`` (None when absent), read like the hunks are."""
-    if not os.path.exists(path):
-        return None
-    with open(path, 'r', encoding='utf-8', errors='replace') as f:
-        return f.read()
+def _read_file_state(path: str) -> Optional[nofollow.FileText]:
+    """Current text of ``path`` and which file it is (None when absent).
+
+    Read without following a link on the way: one put there meanwhile
+    raises :class:`nofollow.LinkOnTheWay` instead of reading elsewhere.
+    """
+    return nofollow.read_text(path)
+
+
+def _unchanged(path: str, before: Optional[nofollow.FileText]) -> bool:
+    try:
+        return _read_file_state(path) == before
+    except OSError:
+        return False
 
 
 def generate_diff(filepath: str, old_content: str, new_content: str) -> str:
@@ -332,16 +367,37 @@ async def apply_patch_tool(
     total_diff = ""
     # What each touched path held when the patch was computed, to refuse
     # writing a stale result after a permission wait.
-    states_before: Dict[str, Optional[str]] = {}
+    states_before: Dict[str, Optional[nofollow.FileText]] = {}
+    # Where the permission patterns are relative to; every hunk resolves
+    # against the same session workspace.
+    pattern_base: Optional[str] = None
     
     for hunk in hunks:
+        # The paths of this hunk once resolved: an error quoting what was read
+        # through one that moved is not passed on.
+        hunk_paths: list[str] = []
         try:
             resolution = await resolve_tool_path(ctx, hunk.path)
+            pattern_base = resolution.worktree
             filepath = resolution.resolved_path
             move_resolution = await resolve_tool_path(ctx, hunk.move_path) if hunk.move_path else None
+            hunk_paths = [filepath, *([move_resolution.resolved_path] if move_resolution else [])]
+            # Nothing is read through a path that moved since it was checked.
+            moved = moved_since_resolved(*hunk_paths)
+            if moved:
+                return ToolResult(success=False, error=changed_before_asking(moved[0]))
 
             if hunk.type == "add":
-                states_before[filepath] = _read_file_state(filepath)
+                # Whatever stands there, looked at without opening it.
+                if nofollow.kind(filepath) is not None:
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"File already exists: {filepath}. "
+                            "Use '*** Update File:' to change it or '*** Delete File:' first."
+                        ),
+                    )
+                states_before[filepath] = None
                 old_content = ""
                 new_content = hunk.contents if hunk.contents.endswith("\n") or not hunk.contents else hunk.contents + "\n"
                 diff = generate_diff(filepath, old_content, new_content)
@@ -360,21 +416,20 @@ async def apply_patch_tool(
                 total_diff += diff + "\n"
                 
             elif hunk.type == "update":
-                if not os.path.exists(filepath):
+                state = _read_file_state(filepath)
+                if state is None:
                     return ToolResult(
                         success=False,
                         error=f"File not found for update: {filepath}"
                     )
-                
-                with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-                    old_content = f.read()
+                old_content = state.text
                 
                 new_content = apply_chunks(old_content, hunk.chunks)
                 diff = generate_diff(filepath, old_content, new_content)
                 
                 change_type = "move" if hunk.move_path else "update"
                 move_filepath = move_resolution.resolved_path if move_resolution else None
-                states_before[filepath] = old_content
+                states_before[filepath] = state
                 if move_filepath:
                     states_before[move_filepath] = _read_file_state(move_filepath)
                 
@@ -395,16 +450,15 @@ async def apply_patch_tool(
                 total_diff += diff + "\n"
                 
             elif hunk.type == "delete":
-                if not os.path.exists(filepath):
+                state = _read_file_state(filepath)
+                if state is None:
                     return ToolResult(
                         success=False,
                         error=f"File not found for deletion: {filepath}"
                     )
+                old_content = state.text
                 
-                with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-                    old_content = f.read()
-                
-                states_before[filepath] = old_content
+                states_before[filepath] = state
                 diff = generate_diff(filepath, old_content, "")
                 
                 file_changes.append({
@@ -420,15 +474,17 @@ async def apply_patch_tool(
                 })
                 total_diff += diff + "\n"
                 
+        except nofollow.LinkOnTheWay as e:
+            return ToolResult(success=False, error=changed_before_asking(e.path))
         except ValueError as e:
             return ToolResult(
                 success=False,
-                error=f"Invalid patch path for {hunk.path}: {str(e)}"
+                error=checked_error(hunk_paths, f"Invalid patch path for {hunk.path}: {str(e)}")
             )
         except Exception as e:
             return ToolResult(
                 success=False,
-                error=f"Failed to process hunk for {hunk.path}: {str(e)}"
+                error=checked_error(hunk_paths, f"Failed to process hunk for {hunk.path}: {str(e)}")
             )
 
     if sandbox_read_only:
@@ -452,6 +508,11 @@ async def apply_patch_tool(
 
     # Explicit edit rules (session, agent, delegating session) apply here.
     # A move changes its source (displayPath) as well as its destination.
+    # The request carries the diff: none read after a path moved.
+    moved = moved_since_resolved(*states_before)
+    if moved:
+        return ToolResult(success=False, error=changed_before_asking(moved[0]))
+    identities = resolved_identities(*states_before)
     await ctx.ask(
         permission="edit",
         patterns=list(dict.fromkeys(
@@ -460,11 +521,12 @@ async def apply_patch_tool(
             for pattern in (c["displayPath"], c["permissionPattern"])
         )),
         always=["*"],
-        metadata={"tool": "apply_patch", "diff": total_diff},
+        metadata={"tool": "apply_patch", "diff": total_diff, "pattern_base": pattern_base},
     )
-    changed_meanwhile = [
+    # A path that now leads elsewhere is not read through to compare.
+    changed_meanwhile = paths_changed(identities) or [
         path for path, before in states_before.items()
-        if _read_file_state(path) != before
+        if not _unchanged(path, before)
     ]
     if changed_meanwhile:
         return ToolResult(
@@ -478,34 +540,40 @@ async def apply_patch_tool(
     # Apply changes
     changed_files = []
     
+    # Each file is written or removed through directories opened without
+    # following a link, and only while it is still what was read above.
     for change in file_changes:
         filepath = change["filePath"]
         
         try:
             if change["type"] == "add":
-                # Create parent directory
-                os.makedirs(os.path.dirname(filepath), exist_ok=True)
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(change["newContent"])
+                # Missing parent directories are made on the way.
+                nofollow.write_text(filepath, change["newContent"], expect=None)
                 changed_files.append(filepath)
                 
             elif change["type"] == "update":
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(change["newContent"])
+                nofollow.replace_text(filepath, change["newContent"], before=states_before[filepath])
                 changed_files.append(filepath)
                 
             elif change["type"] == "move":
                 move_path = change["movePath"]
-                os.makedirs(os.path.dirname(move_path), exist_ok=True)
-                with open(move_path, 'w', encoding='utf-8') as f:
-                    f.write(change["newContent"])
-                os.remove(filepath)
+                landing = states_before.get(move_path)
+                if landing is None:
+                    nofollow.write_text(move_path, change["newContent"], expect=None)
+                else:
+                    nofollow.replace_text(move_path, change["newContent"], before=landing)
+                nofollow.remove(filepath, expect=states_before[filepath].identity)
                 changed_files.append(move_path)
                 
             elif change["type"] == "delete":
-                os.remove(filepath)
+                nofollow.remove(filepath, expect=states_before[filepath].identity)
                 changed_files.append(filepath)
                 
+        except (nofollow.LinkOnTheWay, nofollow.StaleFile) as e:
+            return ToolResult(
+                success=False,
+                error=f"{e.path} changed while waiting for permission; read it again and redo the patch.",
+            )
         except Exception as e:
             return ToolResult(
                 success=False,

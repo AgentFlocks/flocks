@@ -159,9 +159,10 @@ class TestAbortPropagation:
             for call in event_callback.await_args_list
             if call.args and call.args[0] == "session.status"
         ]
+        # A top-level session has no delegating ancestors.
         assert status_events == [
-            ("session.status", {"sessionID": session_info.id, "status": {"type": "busy"}}),
-            ("session.status", {"sessionID": session_info.id, "status": {"type": "idle"}}),
+            ("session.status", {"sessionID": session_info.id, "status": {"type": "busy"}, "ancestorSessionIDs": []}),
+            ("session.status", {"sessionID": session_info.id, "status": {"type": "idle"}, "ancestorSessionIDs": []}),
         ]
 
 

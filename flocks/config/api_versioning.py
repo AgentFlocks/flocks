@@ -46,6 +46,7 @@ import yaml
 
 from flocks.config.config import Config
 from flocks.utils.log import Log
+from flocks.config.config import get_user_plugins_root
 
 log = Log.create(service="config.versioning")
 
@@ -324,7 +325,7 @@ def _api_plugin_roots() -> List[Path]:
     """
     base_pairs = [
         Path.cwd() / ".flocks" / "plugins" / "tools",
-        Path.home() / ".flocks" / "plugins" / "tools",
+        get_user_plugins_root() / "tools",
     ]
     type_subdirs = ("api", "device")
 

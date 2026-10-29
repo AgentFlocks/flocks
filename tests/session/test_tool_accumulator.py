@@ -466,3 +466,37 @@ class TestFindSimilarTool:
             mock_reg.list_tools.return_value = [mock_tool]
             result = _find_similar_tool("xyz")
         assert result is None
+
+
+class TestMonitorWiring:
+    """SES-0201: the accumulator feeds the monitor behind /api/session/metrics."""
+
+    @pytest.mark.asyncio
+    async def test_parsed_and_invalid_calls_are_recorded_per_session(self):
+        from flocks.utils.monitor import get_monitor
+
+        monitor = get_monitor()
+        monitor.reset_metrics()
+        acc, proc = _make_accumulator()
+        proc.session_id = "ses_metrics"
+        with patch("flocks.session.streaming.tool_accumulator.ToolRegistry") as mock_reg, patch(
+            "flocks.session.streaming.tool_accumulator.repair_truncated_json",
+            side_effect=lambda value: value,
+        ):
+            mock_reg.get_schema.return_value = None
+            mock_reg.get.return_value = None
+            mock_reg.list_tools.return_value = []
+            await acc.feed_chunk(_make_chunk(tc_id="c1", name="read", arguments='{"path": "a"}'))
+            await acc.feed_chunk(_make_chunk(index=1, tc_id="c2", name="write", arguments='{"path": "a", "content": "'))
+            # A cut-off call is reported as a truncation error (and never
+            # executed or redirected); the metrics still record the failure.
+            with pytest.raises(StreamToolArgumentsTruncatedError):
+                await acc.flush_remaining("length")
+
+        metrics = monitor.get_session_metrics("ses_metrics")
+        assert metrics is not None
+        assert metrics["total_calls"] == 2
+        assert metrics["successful_parses"] == 1
+        assert metrics["failed_parses"] == 1
+        assert metrics["redirected_to_invalid"] == 0
+        assert monitor.get_session_metrics("ses_other") is None

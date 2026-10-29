@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { Crown } from 'lucide-react';
 import AccountMenu, { FLOCKS_LLM_USAGE_URL } from './AccountMenu';
 
 vi.mock('react-i18next', () => ({
@@ -12,7 +13,7 @@ function CurrentPath() {
 }
 
 const versionProps = {
-  version: 'v2026.10.13', isAdmin: true, isPro: true, proProductName: 'Flocks Pro', onCheckUpdate: vi.fn(),
+  version: 'v2026.10.13', onCheckUpdate: vi.fn(),
 };
 
 describe('AccountMenu', () => {
@@ -76,13 +77,44 @@ describe('AccountMenu', () => {
     expect(within(menu).getByRole('menuitem', { name: 'systemConfiguration' })).toHaveAttribute('href', '/settings/preferences');
     expect(within(menu).queryByRole('menuitem', { name: 'accountManagement' })).not.toBeInTheDocument();
     expect(within(menu).getByRole('menuitem', { name: /modelUsage/ })).toHaveAttribute('href', FLOCKS_LLM_USAGE_URL);
+    // A stock build has no edition entry: settings, usage, check update, logout.
     const items = within(menu).getAllByRole('menuitem');
-    expect(items).toHaveLength(5);
+    expect(items).toHaveLength(4);
     expect(items[0]).toHaveTextContent('systemConfiguration');
-    expect(within(menu).getByRole('menuitem', { name: /Flocks Pro/ })).toHaveAttribute('href', '/settings/flockspro');
     expect(within(menu).getByRole('menuitem', { name: 'checkUpdate' })).toBeInTheDocument();
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'logout' }));
     expect(onLogout).toHaveBeenCalledOnce();
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('adds the entries an extension registered, a highlighted one framed with its tag', () => {
+    const onNavigate = vi.fn();
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <AccountMenu
+          {...versionProps}
+          username="admin"
+          roleLabel="管理员"
+          initial="A"
+          extensionItems={[{ id: 'edition', name: 'Upgrade', href: '/settings/edition', icon: Crown, highlight: true, badge: 'PLUS' }]}
+          onLogout={vi.fn()}
+          onNavigate={onNavigate}
+        />
+        <Routes><Route path="*" element={<CurrentPath />} /></Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal' }));
+    const menu = screen.getByRole('menu');
+    const items = within(menu).getAllByRole('menuitem');
+    expect(items.map((item) => item.textContent)).toEqual([
+      'systemConfiguration', 'modelUsagemodelUsageHint', 'UpgradePLUS', 'checkUpdate', 'logout',
+    ]);
+    const upgrade = within(menu).getByRole('menuitem', { name: /Upgrade/ });
+    expect(upgrade).toHaveAttribute('href', '/settings/edition');
+    expect(upgrade).toHaveClass('border');
+    expect(upgrade.querySelector('.lucide-crown')).toHaveClass('text-amber-500');
+    fireEvent.click(upgrade);
+    expect(screen.getByTestId('path')).toHaveTextContent('/settings/edition');
+    expect(onNavigate).toHaveBeenCalledOnce();
   });
 });

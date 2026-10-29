@@ -2,8 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -35,7 +34,21 @@ jobs:
         run: uv run python scripts/validate_flockshub.py
 
       - name: Python test
-        run: uv run pytest tests/scripts tests/hub
+        run: uv run --no-sync pytest tests/scripts tests/hub
+
+      # Architecture V1.2 guarantees: caller identity, model call ids, workflow
+      # code gates, page secrets, pinned UI directory, managed-install CLI and
+      # startup declarations. Listed by file until the whole suite runs here.
+      - name: Python test (architecture guarantees)
+        run: >-
+          uv run --no-sync pytest
+          tests/session/test_v12_call_identity.py
+          tests/workflow/test_v12_workflow_gates.py
+          tests/contracts/webui/test_page_api_secrets.py
+          tests/server/test_static_webui.py
+          tests/plugin/test_v12_readiness_declarations.py
+          tests/cli/test_v12_managed_cli.py
+          tests/transform/test_response_transform.py
 
 
   frontend:
@@ -59,6 +72,9 @@ jobs:
 
       - name: Frontend lint
         run: npm run lint
+
+      - name: Frontend tests
+        run: npm run test:run
 
       - name: Frontend build
         run: npm run build

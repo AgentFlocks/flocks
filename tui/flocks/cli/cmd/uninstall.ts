@@ -140,6 +140,32 @@ async function showRemovalSummary(targets: RemovalTargets, method: Installation.
   }
 }
 
+/**
+ * Remove `dir`, but leave in place any path in `keep` (and the directories
+ * that lead down to it). Used so removing the root State directory does not
+ * delete the Data or Config directories a `--keep-*` flag protects.
+ */
+async function removeDirectoryKeeping(dir: string, keep: string[]): Promise<void> {
+  const resolved = path.resolve(dir)
+  const keptBelow = keep.filter((k) => k === resolved || k.startsWith(resolved + path.sep))
+  if (keptBelow.length === 0) {
+    await fs.rm(resolved, { recursive: true, force: true })
+    return
+  }
+  // The directory itself is kept: nothing to remove here.
+  if (keptBelow.includes(resolved)) return
+  const entries = await fs.readdir(resolved, { withFileTypes: true }).catch(() => [])
+  for (const entry of entries) {
+    const child = path.join(resolved, entry.name)
+    if (keptBelow.some((k) => k === child || k.startsWith(child + path.sep))) {
+      // This entry leads to a kept directory: recurse to prune only the rest.
+      await removeDirectoryKeeping(child, keptBelow)
+    } else {
+      await fs.rm(child, { recursive: true, force: true })
+    }
+  }
+}
+
 async function executeUninstall(method: Installation.Method, targets: RemovalTargets) {
   const spinner = prompts.spinner()
   const errors: string[] = []
@@ -157,7 +183,12 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
     if (!exists) continue
 
     spinner.start(`Removing ${dir.label}...`)
-    const err = await fs.rm(dir.path, { recursive: true, force: true }).catch((e) => e)
+    // State is the root directory, which holds the Data and Config
+    // directories: removing it wholesale would delete them even when they are
+    // kept. Remove the kept directories' siblings instead, so --keep-data and
+    // --keep-config really keep their data.
+    const keptPaths = targets.directories.filter((d) => d.keep).map((d) => path.resolve(d.path))
+    const err = await removeDirectoryKeeping(dir.path, keptPaths).catch((e) => e)
     if (err) {
       spinner.stop(`Failed to remove ${dir.label}`, 1)
       errors.push(`${dir.label}: ${err.message}`)

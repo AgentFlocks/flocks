@@ -41,11 +41,9 @@ class SessionPolicy:
             and session.owner_username == API_TOKEN_SERVICE_USER_ID
         ):
             return user.id == API_TOKEN_SERVICE_USER_ID
-        if session.owner_user_id and session.owner_user_id == user.id:
-            return True
-        if session.owner_username and session.owner_username == user.username:
-            return True
-        return False
+        # Names can be reused after account deletion. Missing legacy ids need
+        # administrator review; a matching name is not evidence of ownership.
+        return bool(session.owner_user_id and session.owner_user_id == user.id)
 
     @staticmethod
     def is_admin(user: Optional["AuthUser"]) -> bool:
@@ -71,7 +69,7 @@ class SessionPolicy:
 
     @classmethod
     def _is_admin_managed(cls, session: "SessionInfo") -> bool:
-        return cls._has_no_owner(session) or cls._is_system_owned(session)
+        return not session.owner_user_id or cls._is_system_owned(session)
 
     @classmethod
     def is_shared(
@@ -126,6 +124,10 @@ class SessionPolicy:
             return False
         if cls.is_owner(session, user):
             return False
+        if not session.owner_user_id and session.owner_username:
+            # A legacy name cannot establish the original principal. Only an
+            # explicit stable-id grant survives until an admin resolves it.
+            return user.id in cls._shared_read_user_ids(session)
         if cls.is_local_shared(session) or cls.is_project_shared(
             session,
             shared_project_ids,
@@ -146,7 +148,7 @@ class SessionPolicy:
 
         - No auth context (CLI/internal runtime): keep legacy permissive behaviour.
         - Logged-in users: owner, local-shared readers, shared readers, or admins
-          managing system-owned and ownerless legacy/channel sessions.
+          managing system-owned and legacy sessions without an owner id.
         """
         resolved = cls._resolve_user(user)
         if resolved is None:
@@ -163,7 +165,7 @@ class SessionPolicy:
         Session write permission.
 
         Owner can always write. Admins may manage system-owned sessions and
-        repair ownerless sessions accumulated before ownership was available.
+        repair legacy sessions without a stable owner id.
         """
         resolved = cls._resolve_user(user)
         if resolved is None:

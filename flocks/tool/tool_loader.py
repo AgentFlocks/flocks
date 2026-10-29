@@ -44,6 +44,9 @@ log = Log.create(service="tool.loader")
 
 _TOOLS_SUBDIR = DEFAULT_PLUGIN_ROOT / "tools"
 _PROVIDER_FILENAME = "_provider.yaml"
+# Tool / provider names become path segments under the plugin root; anything
+# with separators or ``..`` could land outside ``tools/<type>/``.
+_SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 _SECRET_PATTERN = re.compile(r"\{secret:([^}]+)\}")
 _PARAM_PATTERN = re.compile(r"\{([^}]+)\}")
 
@@ -658,6 +661,11 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
         source = None
 
     vendor: Optional[str] = provider_cfg.get("vendor") if provider_cfg else None
+    # What a call may change outside the run (flocks.task.outcome); a value
+    # the loader does not know reads as unknown, the safe side.
+    side_effect = raw.get("side_effect")
+    if side_effect not in ("none", "idempotent", "queryable", "unknown"):
+        side_effect = None
 
     info = ToolInfo(
         name=name,
@@ -673,6 +681,7 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
         provider_version=provider_version,
         source=source,
         vendor=vendor,
+        side_effect=side_effect,
     )
 
     tool = Tool(info=info, handler=handler)
@@ -835,6 +844,35 @@ def read_yaml_tool(name: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def validate_plugin_path_segment(value: str, *, field: str) -> str:
+    """Reject a tool/provider name that cannot be used as one path segment."""
+    text = str(value or "").strip()
+    if not text or ".." in text or not _SAFE_PATH_SEGMENT.match(text):
+        raise ValueError(
+            f"Invalid {field} {value!r}: use letters, digits, '_', '-' or '.' only"
+        )
+    return text
+
+
+def yaml_tool_target_path(
+    name: str,
+    *,
+    provider: Optional[str] = None,
+    tool_type: str = TOOL_TYPE_API,
+) -> Path:
+    """Return where ``create_yaml_tool`` would write ``name`` (validated, not created)."""
+    safe_name = validate_plugin_path_segment(name, field="tool name")
+    if tool_type not in ALL_TOOL_TYPES:
+        raise ValueError(f"Invalid tool type {tool_type!r}")
+    base_dir = _TOOLS_SUBDIR / tool_type
+    if provider:
+        base_dir = base_dir / validate_plugin_path_segment(provider, field="provider")
+    target_path = (base_dir / f"{safe_name}.yaml").resolve(strict=False)
+    if _TOOLS_SUBDIR.resolve(strict=False) not in target_path.parents:
+        raise ValueError(f"Invalid tool name {name!r}: resolves outside the plugin tools directory")
+    return target_path
+
+
 def create_yaml_tool(
     data: Dict[str, Any],
     provider: Optional[str] = None,
@@ -870,6 +908,7 @@ def create_yaml_tool(
     if not name:
         raise ValueError("Tool data missing required 'name' field")
 
+    target_path = yaml_tool_target_path(name, provider=provider, tool_type=tool_type)
     if _find_yaml_file(name):
         raise ValueError(f"Tool '{name}' already exists")
     from flocks.tool.registry import ToolRegistry
@@ -884,13 +923,6 @@ def create_yaml_tool(
     if "group" in data:
         data = {**data, "group": normalize_tool_group(data["group"]) or ""}
 
-    base_dir = _TOOLS_SUBDIR / tool_type
-    if provider:
-        target_dir = base_dir / provider
-    else:
-        target_dir = base_dir
-
-    target_path = target_dir / f"{name}.yaml"
     _write_yaml(target_path, data)
     log.info("tool.yaml.created", {"name": name, "tool_type": tool_type, "path": str(target_path)})
     return target_path
@@ -1061,6 +1093,21 @@ def _find_python_tool_block(tool_name: str) -> tuple[Optional[Path], Optional[in
     return None, None, None
 
 
+def _python_source_is_import_only(source: str) -> bool:
+    """True when ``source`` holds no statements besides imports and docstrings."""
+    try:
+        module = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in module.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        if isinstance(node, ast.Expr) and isinstance(getattr(node, "value", None), ast.Constant) and isinstance(node.value.value, str):
+            continue
+        return False
+    return True
+
+
 def delete_python_tool(name: str) -> bool:
     """Delete a Python plugin tool definition by tool name.
 
@@ -1082,9 +1129,13 @@ def delete_python_tool(name: str) -> bool:
             end_idx += 1
 
         remaining = lines[:start_idx] + lines[end_idx:]
-        if "".join(remaining).strip():
-            path.write_text("".join(remaining), encoding="utf-8")
+        remaining_source = "".join(remaining)
+        if remaining_source.strip() and not _python_source_is_import_only(remaining_source):
+            path.write_text(remaining_source, encoding="utf-8")
         else:
+            # Nothing but imports/docstrings is left: the file no longer
+            # registers any tool, so keeping it would only leave a dead module
+            # for the plugin scanner to import on every refresh.
             path.unlink()
         log.info("tool.python.deleted", {"name": name, "path": str(path)})
         return True

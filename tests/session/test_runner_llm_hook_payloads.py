@@ -139,6 +139,7 @@ async def test_call_llm_uses_full_hook_payloads_by_default(
 ) -> None:
     before_input, after_capture = await _run_call_llm_with_hooks(monkeypatch)
 
+    # callerID / callerType: who the call is made for (flocks.session.caller).
     assert set(before_input) == {
         "sessionID",
         "messageID",
@@ -147,6 +148,8 @@ async def test_call_llm_uses_full_hook_payloads_by_default(
         "step",
         "model",
         "request",
+        "callerID",
+        "callerType",
     }
     assert before_input["request"]["messages"][0]["role"] == "system"
     assert before_input["request"]["tools"][0]["function"]["name"] == "read"
@@ -163,5 +166,7 @@ async def test_call_llm_uses_full_hook_payloads_by_default(
         "agent",
         "step",
         "model",
+        "callerID",
+        "callerType",
     }
     assert "request" not in after_input

@@ -367,3 +367,22 @@ async def test_pid_change_drops_inherited_connections_without_closing(
     finally:
         await original_db_close()
         await original_completion_db_close()
+
+
+@pytest.mark.asyncio
+async def test_trimming_history_keeps_a_run_that_is_still_going() -> None:
+    """A long run outlived by newer short ones keeps its record and its steps."""
+    await WorkflowStore.init()
+    await WorkflowStore.upsert_execution({"id": "long", "workflowId": "wf", "status": "running", "startedAt": 100})
+    await WorkflowStore.record_steps("long", [(1, {"node_id": "n1", "outputs": {}})])
+    for index in range(3):
+        await WorkflowStore.upsert_execution(
+            {"id": f"short-{index}", "workflowId": "wf", "status": "success", "startedAt": 200 + index}
+        )
+
+    trimmed = await WorkflowStore.trim_executions("wf", keep=2)
+
+    assert trimmed == ["short-0"]
+    assert {row["id"] for row in await WorkflowStore.list_executions("wf", limit=10)} == {"long", "short-1", "short-2"}
+    _, steps = await WorkflowStore.list_steps("long", offset=0, limit=10)
+    assert steps == 1

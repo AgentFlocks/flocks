@@ -21,6 +21,7 @@ import PageHeader from '@/components/common/PageHeader';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useToast } from '@/components/common/Toast';
+import registry, { type ExtensionSettingsSection } from '@ext/registry';
 import { useAuth } from '@/contexts/AuthContext';
 import { toolFailureConfigApi } from '@/api/toolFailureConfig';
 import {
@@ -45,11 +46,8 @@ function lazySettingsPage<T extends LazySettingsModule>(
 
 const ConfigPage = lazySettingsPage(() => import('@/pages/Config'));
 const SystemLogPage = lazySettingsPage(() => import('@/pages/SystemLog'));
-const FlocksproUpgradePage = lazySettingsPage(() => import('@/pages/FlocksproUpgrade'), ['flockspro']);
-const AuditLogsPage = lazySettingsPage(() => import('@/pages/AuditLogs'), ['flockspro']);
 const ArchivedDataPage = lazySettingsPage(() => import('./ArchivedDataPanel'), ['session']);
 
-const SecurityConfigPage = lazySettingsPage(() => import('@/pages/SecurityConfig'), ['flockspro']);
 
 function PreferenceRow({
   icon: Icon,
@@ -63,10 +61,10 @@ function PreferenceRow({
   children: ReactNode;
 }) {
   return (
-    <section className="flex flex-col gap-4 border-b border-zinc-200 py-6 last:border-b-0 dark:border-zinc-800 md:grid md:grid-cols-[minmax(0,1fr)_20rem] md:items-center md:gap-8">
+    <section className="flex-col border-b border-zinc-200 py-6 last:border-b-0 dark:border-zinc-800 flex gap-4 md:grid md:grid-cols-[minmax(0,1fr)_20rem] md:items-center md:gap-8">
       <div className="flex min-w-0 items-start gap-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
-          <Icon className="h-5 w-5" />
+        <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-zinc-100 text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400 shrink-0">
+          <Icon aria-hidden="true" className="h-5 w-5" />
         </span>
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-100">{title}</h3>
@@ -103,7 +101,7 @@ function SegmentedOption({
       }`}
     >
       {/* Icons keep their size (dropped on very narrow screens); the filled background marks the selected option. */}
-      <Icon className="h-4 w-4 shrink-0 max-[359px]:hidden" />
+      <Icon aria-hidden="true" className="h-4 w-4 shrink-0 max-[359px]:hidden" />
       {children}
     </button>
   );
@@ -301,7 +299,7 @@ function PreferencesPanel() {
                 disabled={savingDisplayName || !displayNameChanged}
                 className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-500 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200 dark:disabled:bg-zinc-800 dark:disabled:text-zinc-500"
               >
-                <Save className="h-4 w-4" />
+                <Save aria-hidden="true" className="h-4 w-4" />
                 {t('saveDisplayName')}
               </button>
               <button
@@ -312,7 +310,7 @@ function PreferencesPanel() {
                 aria-label={t('resetDisplayName')}
                 className="inline-flex h-9 w-10 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-950 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
               >
-                <RotateCcw className="h-4 w-4" />
+                <RotateCcw aria-hidden="true" className="h-4 w-4" />
               </button>
             </div>
           </div>
@@ -328,7 +326,7 @@ function PreferencesPanel() {
               <span className="flex h-11 w-11 items-center justify-center rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
                 <img src={faviconUrl} alt="" className="h-7 w-7 rounded-sm object-contain" />
               </span>
-              <div className="min-w-0 text-xs text-zinc-500 dark:text-zinc-400">
+              <div className="text-xs text-zinc-500 dark:text-zinc-400 min-w-0">
                 {hasCustomFavicon ? t('faviconCustom') : t('faviconDefault')}
               </div>
             </div>
@@ -346,7 +344,7 @@ function PreferencesPanel() {
                 disabled={savingFavicon}
                 className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-500 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200 dark:disabled:bg-zinc-800 dark:disabled:text-zinc-500"
               >
-                <Upload className="h-4 w-4" />
+                <Upload aria-hidden="true" className="h-4 w-4" />
                 {t('uploadFavicon')}
               </button>
               <button
@@ -357,7 +355,7 @@ function PreferencesPanel() {
                 aria-label={t('resetFavicon')}
                 className="inline-flex h-9 w-10 items-center justify-center rounded-md border border-zinc-200 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-950 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
               >
-                <RotateCcw className="h-4 w-4" />
+                <RotateCcw aria-hidden="true" className="h-4 w-4" />
               </button>
             </div>
           </div>
@@ -436,21 +434,31 @@ function PreferencesPanel() {
   );
 }
 
+const extensionSectionPages = new Map<string, ComponentType>();
+
+function extensionSectionPage(section: ExtensionSettingsSection): ComponentType {
+  const cached = extensionSectionPages.get(section.id);
+  if (cached) return cached;
+  const page = lazySettingsPage(section.load, section.i18nNamespaces);
+  extensionSectionPages.set(section.id, page);
+  return page;
+}
+
 function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
   if (sectionId === 'preferences') return <PreferencesPanel />;
+
+  const extension = registry.settingsSections.find((section) => section.id === sectionId);
+  const ExtensionPage = extension ? extensionSectionPage(extension) : null;
 
   return (
     <Suspense fallback={<RoutePageSkeleton delayMs={180} />}>
       {sectionId === 'account' && <ConfigPage />}
       {sectionId === 'archived-data' && <ArchivedDataPage />}
-      {sectionId === 'security-config' && <SecurityConfigPage />}
       {sectionId === 'system-logs' && <SystemLogPage />}
-      {sectionId === 'audit-logs' && <AuditLogsPage />}
-      {sectionId === 'flockspro' && <FlocksproUpgradePage />}
+      {ExtensionPage && <ExtensionPage />}
     </Suspense>
   );
 }
-
 
 export default function SettingsPage() {
   const params = useParams();

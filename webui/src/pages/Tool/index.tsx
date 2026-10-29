@@ -43,6 +43,7 @@ import {
 } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useDelayedVisible } from '@/hooks/useDelayedVisible';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
 import { useToolPage } from '@/hooks/useTools';
@@ -603,15 +604,15 @@ export default function ToolPage() {
   }
 
   return (
-    <div className="min-w-0 space-y-6" aria-busy={loading}>
-      {/* Page Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="text-red-600">
+    <div className="min-w-0 space-y-6 max-md:space-y-4" aria-busy={loading}>
+      {/* Page Header (phones: actions wrap under the title) */}
+      <div className="flex items-center justify-between max-md:flex-wrap max-md:gap-3">
+        <div className="flex items-center gap-3 max-md:min-w-0">
+          <div className="text-red-600 max-md:shrink-0">
             <Wrench className="w-8 h-8" />
           </div>
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">{t('pageTitle')}</h1>
+          <div className="max-md:min-w-0">
+            <h1 className="text-2xl font-bold text-gray-900 max-md:text-xl">{t('pageTitle')}</h1>
           <p className="mt-1 text-sm text-gray-500">
             <span className="font-semibold text-gray-700">{enabledSummary.active}</span> {t('statusBadge.active')}
             <span className="mx-1.5 text-gray-300">·</span>
@@ -619,7 +620,7 @@ export default function ToolPage() {
           </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 max-md:flex-wrap">
           <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
             onClick={handleRefresh}
@@ -659,8 +660,8 @@ export default function ToolPage() {
 
       {/* Tabs row with search */}
       <div className="border-b border-gray-200">
-        <div className="flex min-h-14 items-center justify-between">
-          <nav className="-mb-px flex space-x-8">
+        <div className="flex min-h-14 items-center justify-between max-md:flex-wrap">
+          <nav className="-mb-px flex space-x-8 max-md:w-full max-md:space-x-6 max-md:overflow-x-auto">
             {TABS.map((tab) => (
               <button
                 key={tab.key}
@@ -685,14 +686,14 @@ export default function ToolPage() {
           </nav>
 
           {/* Query controls stay on the left; native actions remain above on the right. */}
-          <div className="relative mb-px order-first">
+          <div className="relative mb-px order-first max-md:w-full">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
             <input
               type="text"
               placeholder={t('search.placeholder')}
               value={searchQuery}
               onChange={(e) => handleSearchChange(e.target.value)}
-              className="w-64 pl-9 pr-4 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent bg-white"
+              className="w-64 pl-9 pr-4 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 focus:border-transparent bg-white max-md:w-full"
             />
           </div>
         </div>
@@ -872,8 +873,17 @@ export default function ToolPage() {
               }));
             }
           }}
-          onEnabledChange={(name, newEnabled) => {
-            setSelectedTool((prev) => prev ? { ...prev, enabled: newEnabled } : prev);
+          onEnabledChange={(name, newEnabled, updated) => {
+            // carry the overlay flags too: a partial update would let the
+            // drawer's prop-sync effect restore a stale "已自定义" badge
+            setSelectedTool((prev) => prev ? {
+              ...prev,
+              enabled: newEnabled,
+              ...(updated ? {
+                enabled_customized: updated.enabled_customized,
+                enabled_default: updated.enabled_default,
+              } : {}),
+            } : prev);
             void refreshToolDataAfterMutation();
           }}
         />
@@ -1778,7 +1788,7 @@ function MCPServerDetailPanel({
           ) : (
             <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-100 table-fixed">
+                <table className="min-w-full divide-y divide-gray-100 table-fixed max-md:min-w-[36rem]">
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="w-[25%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableResourceName')}</th>
@@ -1892,8 +1902,8 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   {t('toolDetail.params', { count: tool.parameters.length })}
                 </label>
-                <div className="rounded-lg border border-gray-200 overflow-hidden">
-                  <table className="min-w-full divide-y divide-gray-200">
+                <div className="rounded-lg border border-gray-200 overflow-hidden max-md:overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200 max-md:min-w-[32rem]">
                     <thead className="bg-gray-50">
                       <tr>
                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
@@ -3060,7 +3070,7 @@ function APIServiceDetailPanel({
           ) : (
             <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-100 table-fixed">
+                <table className="min-w-full divide-y divide-gray-100 table-fixed max-md:min-w-[36rem]">
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="w-[30%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableToolName')}</th>
@@ -3454,12 +3464,13 @@ function ToolTable({
   const GRID_COLS =
     '32px minmax(220px, 3fr) minmax(80px, 1fr) minmax(140px, 1.6fr) minmax(80px, 1fr) minmax(90px, 1fr)';
 
+  // Phones: the list scrolls sideways at its full column width instead of clipping the right columns.
   return (
-    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col">
+    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col max-md:overflow-x-auto">
       {/* Header */}
       <div
         className={viewMode === 'list'
-          ? 'grid items-center gap-3 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide'
+          ? 'grid items-center gap-3 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide max-md:min-w-[46rem]'
           : 'flex flex-wrap items-center gap-4 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide [&>:first-child]:hidden [&>:nth-child(2)]:hidden [&>:last-child]:hidden'}
         style={viewMode === 'list' ? { gridTemplateColumns: GRID_COLS } : undefined}
       >
@@ -3551,7 +3562,7 @@ function ToolTable({
             <div
               key={tool.name}
               {...groupDrag.dragProps(tool.name)}
-              className="grid items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors"
+              className="grid items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors max-md:min-w-[46rem]"
               style={{ gridTemplateColumns: GRID_COLS }}
             >
               {/* Icon */}
@@ -3665,9 +3676,9 @@ function Pagination({
   };
 
   return (
-    <div className="bg-white px-6 py-4 border-t border-gray-200 flex items-center justify-between">
+    <div className="bg-white px-6 py-4 border-t border-gray-200 flex items-center justify-between max-md:flex-wrap max-md:gap-2 max-md:px-4">
       <div className="text-sm text-gray-700">{t('pagination.showing', { start: startItem, end: endItem, total: totalCount })}</div>
-      <div className="flex items-center space-x-1">
+      <div className="flex items-center space-x-1 max-md:flex-wrap max-md:gap-y-1">
         <button
           onClick={() => onPageChange(Math.max(1, currentPage - 1))}
           disabled={currentPage === 1}
@@ -3723,7 +3734,7 @@ export function ToolDetailDrawer({
   onTestParamsChange: (v: string) => void;
   onTest: () => void;
   onDelete?: (name: string) => Promise<void>;
-  onEnabledChange?: (name: string, enabled: boolean) => void;
+  onEnabledChange?: (name: string, enabled: boolean, updated?: Tool) => void;
 }) {
   const { t, i18n } = useTranslation('tool');
   const [section, setSection] = useState<'info' | 'test'>('info');
@@ -3740,6 +3751,9 @@ export function ToolDetailDrawer({
   const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
   const sourceLabel = getSourceLabel(tool.source, t);
   const canDirectTest = canDirectlyTestTool(tool);
+  // Escape closes, Tab stays inside, and focus returns to the row that opened it.
+  const drawerRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(drawerRef, true, onClose);
 
   useEffect(() => {
     setEnabled(tool.enabled);
@@ -3771,9 +3785,10 @@ export function ToolDetailDrawer({
       setEnabled(updated.enabled);
       setCustomized(!!updated.enabled_customized);
       setEnabledDefault(updated.enabled_default ?? updated.enabled);
-      onEnabledChange?.(tool.name, updated.enabled);
-    } catch {
-      // revert on error
+      onEnabledChange?.(tool.name, updated.enabled, updated);
+    } catch (err: unknown) {
+      // state was never flipped, so nothing to revert; surface the reason (e.g. 403 仅管理员可执行该操作)
+      alert(extractErrorMessage(err, t('alert.unknownError')));
     } finally {
       setToggling(false);
     }
@@ -3787,9 +3802,9 @@ export function ToolDetailDrawer({
       setEnabled(updated.enabled);
       setCustomized(!!updated.enabled_customized);
       setEnabledDefault(updated.enabled_default ?? updated.enabled);
-      onEnabledChange?.(tool.name, updated.enabled);
-    } catch (err: any) {
-      alert(err.response?.data?.message || err.response?.data?.detail || err.message);
+      onEnabledChange?.(tool.name, updated.enabled, updated);
+    } catch (err: unknown) {
+      alert(extractErrorMessage(err, t('alert.unknownError')));
     } finally {
       setResetting(false);
     }
@@ -3810,14 +3825,21 @@ export function ToolDetailDrawer({
     <>
       <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
 
-      <div className="fixed right-0 top-0 bottom-0 z-50 flex min-h-0 flex-col bg-white shadow-2xl w-[520px] max-w-full">
+      <div
+        ref={drawerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="tool-detail-drawer-title"
+        tabIndex={-1}
+        className="fixed right-0 top-0 bottom-0 z-50 flex min-h-0 flex-col bg-white shadow-2xl w-[520px] max-w-full outline-none"
+      >
         <div className="flex-shrink-0 border-b border-gray-200">
           <div className="flex items-center gap-3 px-6 py-4">
             <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0">
               <Wrench className="w-4 h-4 text-gray-600" />
             </div>
             <div className="flex-1 min-w-0">
-              <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
+              <h2 id="tool-detail-drawer-title" className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
               <div className="flex items-center gap-2 mt-0.5">
                 <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${sb.className}`}>
                   {sourceLabel}
@@ -3829,7 +3851,12 @@ export function ToolDetailDrawer({
               </div>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
-              <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 transition-colors">
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label={t('toolDetail.close')}
+                className="p-1 rounded hover:bg-gray-100 transition-colors"
+              >
                 <X className="w-5 h-5 text-gray-400" />
               </button>
             </div>
@@ -3924,7 +3951,7 @@ export function ToolDetailDrawer({
                   <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.params', { count: tool.parameters.length })}</label>
                   <div className="rounded-lg border border-gray-200 overflow-hidden">
                     <div className="overflow-x-auto">
-                      <table className="min-w-full table-fixed divide-y divide-gray-200">
+                      <table className="min-w-full table-fixed divide-y divide-gray-200 max-md:min-w-[32rem]">
                       <thead className="bg-gray-50">
                         <tr>
                           <th className="w-[28%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>

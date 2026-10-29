@@ -162,6 +162,10 @@ def test_index_taxonomy_and_manifest_lookup_are_root_scoped(tmp_path, monkeypatc
         (root / 'index.json').write_text(json.dumps({'schemaVersion': 'hub.index.v1', 'plugins': []}))
         (root / 'taxonomy.json').write_text(json.dumps({'schemaVersion': 'hub.taxonomy.v1', 'categories': []}))
     # Equal size/timestamps are not enough: the root path must be part of keys.
+    # The bundled root alone: no extension lists anything here.
+    from flocks.hub import paths
+
+    monkeypatch.setattr(paths, "_EXTENSION_HUB_ROOTS", {})
     chosen = roots[0]
     monkeypatch.setattr(catalog, 'get_bundled_hub_root', lambda: chosen)
     first = catalog.load_index()

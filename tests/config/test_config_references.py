@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import json
 
 import pytest
@@ -232,6 +234,138 @@ def test_a_partly_changed_object_in_a_list_keeps_its_references():
     written = _apply(stored, changes, loaded, loaded, {"{env:PROVIDER}": "p-from-env"})
 
     assert written["fallback_providers"] == [{"provider_id": "{env:PROVIDER}", "model_id": "m2"}]
+
+
+def test_removing_an_object_from_a_list_does_not_carry_its_fields_to_the_next():
+    # The second field must not become the first one's secret field.
+    first = {"key": "api_key", "storage": "secret", "secret_id": "custom_api_api_key", "sensitive": True}
+    second = {"key": "base_url"}
+    stored = {"api_services": {"custom_api": {"credential_fields": [first, second]}}}
+    loaded = copy.deepcopy(stored)
+
+    written = _apply(stored, {"api_services": {"custom_api": {"credential_fields": [second]}}}, loaded, loaded)
+
+    assert written["api_services"]["custom_api"]["credential_fields"] == [second]
+
+
+def test_reordered_objects_keep_their_own_references():
+    stored = {"fallback_providers": [
+        {"provider_id": "{env:PRIMARY}", "model_id": "m1"},
+        {"provider_id": "openai", "model_id": "m2"},
+    ]}
+    loaded = {"fallback_providers": [
+        {"provider_id": "openai", "model_id": "m1"},
+        {"provider_id": "openai", "model_id": "m2"},
+    ]}
+    values = {"{env:PRIMARY}": "openai"}
+
+    # Sent back as an admin reads them (references written), in the other order.
+    swapped = [{"provider_id": "openai", "model_id": "m2"}, {"provider_id": "{env:PRIMARY}", "model_id": "m1"}]
+    written = _apply(stored, {"fallback_providers": swapped}, loaded, loaded, values)
+
+    assert written["fallback_providers"] == swapped
+
+
+def test_an_edited_object_that_moved_is_written_as_given():
+    first = {"key": "api_key", "storage": "secret", "secret_id": "custom_api_api_key", "sensitive": True}
+    second = {"key": "base_url"}
+    stored = {"api_services": {"custom_api": {"credential_fields": [first, second]}}}
+    loaded = copy.deepcopy(stored)
+
+    # The second moved up and was edited; the one that stood there moved down unchanged.
+    edited = [{"key": "base_url", "label": "Base URL"}, first]
+    written = _apply(stored, {"api_services": {"custom_api": {"credential_fields": edited}}}, loaded, loaded)
+
+    assert written["api_services"]["custom_api"]["credential_fields"] == edited
+
+
+def test_swapped_objects_both_edited_do_not_trade_fields():
+    first = {"key": "api_key", "storage": "secret", "secret_id": "custom_api_api_key", "sensitive": True, "label": "Key"}
+    second = {"key": "base_url", "label": "URL"}
+    stored = {"api_services": {"custom_api": {"credential_fields": [first, second]}}}
+    loaded = copy.deepcopy(stored)
+
+    # Same length, nothing left as it was: neither place holds its old object.
+    edited = [{**second, "label": "Base URL"}, {**first, "label": "API key"}]
+    written = _apply(stored, {"api_services": {"custom_api": {"credential_fields": edited}}}, loaded, loaded)
+
+    assert written["api_services"]["custom_api"]["credential_fields"] == edited
+
+
+def test_an_object_put_in_place_of_a_removed_one_does_not_take_its_fields():
+    first = {"key": "api_key", "storage": "secret", "secret_id": "custom_api_api_key", "sensitive": True}
+    second = {"key": "base_url"}
+    stored = {"api_services": {"custom_api": {"credential_fields": [first, second]}}}
+    loaded = copy.deepcopy(stored)
+
+    # The first removed and another field added: the list keeps its length.
+    replaced = [{"key": "username"}, second]
+    written = _apply(stored, {"api_services": {"custom_api": {"credential_fields": replaced}}}, loaded, loaded)
+
+    assert written["api_services"]["custom_api"]["credential_fields"] == replaced
+
+
+def test_a_reference_swapped_for_another_with_the_same_value_is_saved():
+    stored = {"mcp": {"m": {"type": "local", "command": ["runner", "--key", "{env:KEY_A}"]}}}
+    loaded = {"mcp": {"m": {"type": "local", "command": ["runner", "--key", "same-value"]}}}
+    values = {"{env:KEY_A}": "same-value", "{env:KEY_B}": "same-value"}
+
+    changed = ["runner", "--key", "{env:KEY_B}"]
+    written = _apply(stored, {"mcp": {"m": {"command": changed}}}, loaded, loaded, values)
+
+    assert written["mcp"]["m"]["command"] == changed
+
+
+def test_references_swapped_within_one_value_are_saved_as_written():
+    stored = {"mcp": {"m": {"type": "local", "command": ["runner", "--primary-token={env:A} --backup-token={env:B}"]}}}
+    loaded = {"mcp": {"m": {"type": "local", "command": ["runner", "--primary-token=same --backup-token=same"]}}}
+    values = {"{env:A}": "same", "{env:B}": "same"}
+
+    swapped = ["runner", "--primary-token={env:B} --backup-token={env:A}"]
+    written = _apply(stored, {"mcp": {"m": {"command": swapped}}}, loaded, loaded, values)
+
+    assert written["mcp"]["m"]["command"] == swapped
+
+
+def test_an_object_keeping_only_a_minor_field_is_not_merged_into_the_old_one():
+    # Name and connection replaced, only "enabled" the same: another object, whose
+    # connection must not inherit the old one's key.
+    old = {"name": "primary", "enabled": True, "connection": {"url": "https://a.example.test", "api_key": "{env:GW_KEY}"}}
+    stored = {"api_services": {"gateway": {"profiles": [old]}}}
+    loaded = {"api_services": {"gateway": {"profiles": [
+        {"name": "primary", "enabled": True, "connection": {"url": "https://a.example.test", "api_key": "sk-gateway-key"}},
+    ]}}}
+    replaced = [{"name": "secondary", "enabled": True, "connection": {"url": "https://b.example.test"}}]
+
+    written = _apply(stored, {"api_services": {"gateway": {"profiles": replaced}}}, loaded, loaded, {"{env:GW_KEY}": "sk-gateway-key"})
+
+    assert written["api_services"]["gateway"]["profiles"] == replaced
+
+
+def test_an_object_that_dropped_a_nested_field_is_not_merged_into_the_old_one():
+    # Half the fields kept (enabled, type), but the connection no longer has a key:
+    # merged into the old profile, it would take the old key to the new address.
+    old = {"name": "primary", "enabled": True, "type": "http", "connection": {"url": "https://a.example.test", "api_key": "{env:GW_KEY}"}}
+    stored = {"api_services": {"gateway": {"profiles": [old]}}}
+    loaded = {"api_services": {"gateway": {"profiles": [
+        {**old, "connection": {"url": "https://a.example.test", "api_key": "sk-gateway-key"}},
+    ]}}}
+    replaced = [{"name": "secondary", "enabled": True, "type": "http", "connection": {"url": "https://b.example.test"}}]
+
+    written = _apply(stored, {"api_services": {"gateway": {"profiles": replaced}}}, loaded, loaded, {"{env:GW_KEY}": "sk-gateway-key"})
+
+    assert written["api_services"]["gateway"]["profiles"] == replaced
+
+
+def test_most_fields_of_an_object_changed_keeps_the_reference_left_as_it_was():
+    # A client sending values as they expand: the key it left alone stays a reference.
+    stored = {"fallback_providers": [{"provider_id": "openai", "model_id": "m1", "api_key": "{env:FALLBACK_KEY}"}]}
+    loaded = {"fallback_providers": [{"provider_id": "openai", "model_id": "m1", "api_key": "sk-fallback"}]}
+    changes = {"fallback_providers": [{"provider_id": "anthropic", "model_id": "m2", "api_key": "sk-fallback"}]}
+
+    written = _apply(stored, changes, loaded, loaded, {"{env:FALLBACK_KEY}": "sk-fallback"})
+
+    assert written["fallback_providers"] == [{"provider_id": "anthropic", "model_id": "m2", "api_key": "{env:FALLBACK_KEY}"}]
 
 
 def test_changing_an_agent_copied_from_mode_starts_from_the_stored_mode_entry():

@@ -444,8 +444,10 @@ class MemoryIndexer:
                 pending_indices.append(idx)
         
         if texts_to_embed:
-            embeddings = await Provider.embed_batch(
-                texts=texts_to_embed,
+            from flocks.memory.embedding import embed_many
+
+            embeddings = await embed_many(
+                texts_to_embed,
                 provider_id=self.provider_id,
                 model=self.embedding_model,
             )
@@ -484,8 +486,10 @@ class MemoryIndexer:
                 stats["cache_hits"] += 1
             else:
                 # Generate embedding
-                embedding = await Provider.embed(
-                    text=chunk.text,
+                from flocks.memory.embedding import embed_one
+
+                embedding = await embed_one(
+                    chunk.text,
                     provider_id=self.provider_id,
                     model=self.embedding_model,
                 )

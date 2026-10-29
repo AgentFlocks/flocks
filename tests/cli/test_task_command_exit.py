@@ -18,7 +18,8 @@ import pytest
         (["dashboard"], 0, False),
         (["scheduled"], 0, False),
         (["queue"], 0, False),
-        (["queue", "--pause"], 0, False),
+        # Queue control talks to the running service; without one it fails cleanly.
+        (["queue", "--pause"], 1, False),
         (["create", "exit-test"], 0, False),
         (["show", "missing"], 1, False),
         (["cancel", "missing"], 1, False),

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -202,18 +202,26 @@ class InteractionQueue:
             raise QueueItemNotFoundError(f"Queued prompt {item_id} not found")
 
     @classmethod
+    def held_items(cls) -> List[Tuple[str, QueuedPrompt]]:
+        """Every prompt waiting in this process, with its session (a snapshot)."""
+        return [(session_id, item) for session_id, items in list(cls._queues.items()) for item in list(items)]
+
+    @classmethod
     async def clear(cls, session_id: str) -> None:
         async with cls._lock_for(session_id):
             items = cls._queues.pop(session_id, [])
             cls._paused.discard(session_id)
 
-        from flocks.session.files import remove_staged_chat_uploads_from_parts
+        from flocks.session import turn_receipt
+        from flocks.session.files import discard_staged_chat_uploads_from_parts
+
+        await turn_receipt.mark_removed(session_id, items)
 
         for item in items:
             execution_context = item.execution_context or {}
             owner_id = str(execution_context.get("_uploaderUserID") or "").strip()
             if owner_id:
-                remove_staged_chat_uploads_from_parts(owner_id, item.parts)
+                await discard_staged_chat_uploads_from_parts(owner_id, item.parts)
 
     @classmethod
     async def pause(cls, session_id: str) -> None:

@@ -650,7 +650,7 @@ export default function WorkflowCreate() {
         {panelOpen && (
           <div
             onMouseDown={onDragStart}
-            className="w-1 flex-shrink-0 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 relative group"
+            className="w-1 flex-shrink-0 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 relative group max-md:hidden"
             title={t('detail.dragAdjust')}
           >
             <div className="absolute inset-y-0 -left-1.5 -right-1.5" />

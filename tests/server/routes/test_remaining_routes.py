@@ -89,11 +89,10 @@ def isolated_workflow_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ]:
         root.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr(workflow_routes, "_workspace_root", workspace_root, raising=False)
     monkeypatch.setattr(workflow_routes, "_find_workspace_root", lambda: workspace_root)
     monkeypatch.setattr(workflow_routes, "_workflow_dir", lambda workflow_id: project_root / workflow_id)
     monkeypatch.setattr(workflow_routes, "_global_workflow_dir", lambda workflow_id: global_root / workflow_id)
-    monkeypatch.setattr(fs_store, "_workspace_root", workspace_root, raising=False)
+    monkeypatch.setattr(fs_store, "_workspace_root", workspace_root)
     monkeypatch.setattr(fs_store, "find_workspace_root", lambda: workspace_root)
     # fs_store delegates to center.resolve_workflow_scan_roots; patch its real
     # root resolvers rather than silently creating unused fs_store attributes.
@@ -430,14 +429,19 @@ class TestWorkflowRoutes:
 class TestProviderRoutes:
 
     @pytest.mark.asyncio
-    async def test_list_providers_returns_expected_shape(self, client: AsyncClient):
+    async def test_list_providers_returns_expected_shape(self, client: AsyncClient, monkeypatch):
         """GET /api/provider returns dict with all/default/connected keys."""
+        from flocks.config.config_writer import ConfigWriter
+
+        monkeypatch.setattr(ConfigWriter, "list_provider_ids", lambda: ["anthropic"])
         resp = await client.get("/api/provider")
         assert resp.status_code == status.HTTP_200_OK
         data = resp.json()
         assert "all" in data
         assert isinstance(data["all"], list)
         assert len(data["all"]) > 0
+        assert [item["id"] for item in data["all"]] == ["anthropic"]
+        assert data["connected"] == ["anthropic"]
 
     @pytest.mark.asyncio
     async def test_provider_model_fields(self, client: AsyncClient):
@@ -752,7 +756,7 @@ class TestConfigRoutes:
 
         monkeypatch.setattr(config_routes, "get_config", fake_get_config)
 
-        await config_routes.update_config(_admin_request(), 
+        await config_routes.update_config(_admin_request(),
             {"channels": {"slack": {"enabled": False, "allowFrom": None}}}
         )
 
@@ -779,7 +783,7 @@ class TestConfigRoutes:
 
         monkeypatch.setattr(config_routes, "get_config", fake_get_config)
 
-        await config_routes.update_config(_admin_request(), 
+        await config_routes.update_config(_admin_request(),
             {"channels": {"slack": {"enabled": False, "allowFrom": ["U123"]}}}
         )
 
@@ -815,7 +819,7 @@ class TestConfigRoutes:
         monkeypatch.setattr(config_routes.Config, "get_config_file", lambda: config_file)
 
         with pytest.raises(HTTPException) as exc:
-            await config_routes.update_config(_admin_request(), 
+            await config_routes.update_config(_admin_request(),
                 {
                     "share": "invalid-mode",
                     "channels": {"slack": {"allowFrom": None}},
@@ -872,10 +876,11 @@ class TestConfigRoutes:
     ):
         """UI display-name endpoints expose only the visible product name."""
         from flocks.config.config import Config
-        from flocks.server.routes import config as config_routes
+        from flocks.server import branding
 
         monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
-        monkeypatch.setattr(config_routes, "_is_flockspro_enabled", lambda: False)
+        # 没有任何 branding 扩展注册时用开源默认名
+        monkeypatch.setattr(branding, "_providers", [])
         Config._global_config = None
         Config._cached_config = None
 
@@ -919,25 +924,31 @@ class TestConfigRoutes:
         assert resp.json()["faviconUrl"] is None
 
     @pytest.mark.asyncio
-    async def test_ui_display_defaults_to_flockspro_when_pro_is_enabled(
+    async def test_ui_display_defaults_to_the_registered_branding_provider(
         self,
         client: AsyncClient,
         tmp_path,
         monkeypatch,
     ):
-        """Empty display-name config falls back to the active product edition."""
+        """Empty display-name config falls back to the registered branding provider."""
         from flocks.config.config import Config
-        from flocks.server.routes import config as config_routes
+        from flocks.server import branding
+
+        class _CustomBranding:
+            # Any extension may supply a display name through the branding protocol.
+            def display_name(self):
+                return "Sample Workspace"
 
         monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
-        monkeypatch.setattr(config_routes, "_is_flockspro_enabled", lambda: True)
+        monkeypatch.setattr(branding, "_providers", [])
+        branding.register_branding_provider(_CustomBranding())
         Config._global_config = None
         Config._cached_config = None
 
         resp = await client.get("/api/config/ui-display")
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json() == {
-            "displayName": "Flocks Pro",
+            "displayName": "Sample Workspace",
             "configuredDisplayName": None,
             "faviconUrl": None,
         }
@@ -949,7 +960,7 @@ class TestConfigRoutes:
 
         resp = await client.patch("/api/config/ui", json={"displayName": ""})
         assert resp.status_code == status.HTTP_200_OK
-        assert resp.json()["displayName"] == "Flocks Pro"
+        assert resp.json()["displayName"] == "Sample Workspace"
         assert resp.json()["configuredDisplayName"] is None
 
     @pytest.mark.parametrize(

@@ -23,6 +23,7 @@ from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.provider.model_catalog import get_raw_catalog
 from flocks.provider.provider import Provider
+from flocks.provider.sdk.openai_base import _coerce_bool, resolve_verify_ssl
 
 MAX_MODELS = 1000
 MAX_PAGES = 10
@@ -155,9 +156,23 @@ def _resolve_option(value: Any, secrets: Any) -> str | None:
     return _usable(value)
 
 
+def _transport_settings(options: dict, sdk_settings: Any) -> dict[str, bool]:
+    """TLS verification and proxy use, by the rules the provider's own client follows.
+
+    Same contract as sdk/openai_base.py: ``verify_ssl`` (or the older
+    ``ssl_verify``) in the provider options, and the ambient proxy settings
+    unless FLOCKS_HTTP_TRUST_ENV or the options' ``trust_env`` turn them off.
+    """
+    settings = options or (sdk_settings if isinstance(sdk_settings, dict) else {})
+    trust_env = _coerce_bool(os.getenv("FLOCKS_HTTP_TRUST_ENV"), True)
+    if "trust_env" in settings:
+        trust_env = _coerce_bool(settings.get("trust_env"), trust_env)
+    return {"verify": resolve_verify_ssl(settings, default=True), "trust_env": trust_env}
+
+
 async def _resolve_connection(
     provider_id: str, raw: dict, catalog: dict, api_key: str | None, base_url: str | None
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, dict[str, bool]]:
     resolved_options: dict = {}
     try:
         config = await Config.get()
@@ -237,7 +252,8 @@ async def _resolve_connection(
     )
     if provider_id in {"openai-compatible", "cherry"} and base_url is None and not (stored_url or env_url):
         effective_url = None
-    return effective_key, effective_url
+    transport = _transport_settings(resolved_options or _dict(raw_options), getattr(sdk_config, "custom_settings", None))
+    return effective_key, effective_url, transport
 
 
 def _validate_base_url(value: str | None) -> str:
@@ -405,6 +421,9 @@ def is_known_non_chat_model(model_id: str) -> bool:
     )) or bool(re.match(r"^gpt-4o(?:-mini)?-(?:transcribe|tts)(?:-|$)", name))
 
 
+_NON_CHAT_TYPES = frozenset({"embedding", "embeddings", "rerank", "image", "audio", "tts", "transcription"})
+
+
 def _normalize_model(item: Any, protocol: str, already_added: set[str]) -> dict | None:
     if not isinstance(item, dict):
         return None
@@ -442,6 +461,7 @@ def _normalize_model(item: Any, protocol: str, already_added: set[str]) -> dict 
         "supports_vision": ["supports_vision", "vision"],
         "supports_tools": ["supports_tools", "function_calling", "tool_calling"],
         "supports_reasoning": ["supports_reasoning", "reasoning"],
+        "supports_streaming": ["supports_streaming", "streaming"],
     }.items():
         for alias in aliases:
             value = item.get(alias, caps.get(alias))
@@ -461,8 +481,10 @@ def _normalize_model(item: Any, protocol: str, already_added: set[str]) -> dict 
         and isinstance(endpoints, list)
         and "chat" not in endpoints
         or caps.get("completion_chat") is False
-        or item.get("model_type") in {"embedding", "embeddings", "rerank", "image", "audio", "tts", "transcription"}
-        or item.get("type") in {"embedding", "embeddings", "rerank", "image", "audio", "tts", "transcription"}
+        # Only a text value names a type; a list or object here is metadata this does not read.
+        or any(
+            isinstance(item.get(field), str) and item[field] in _NON_CHAT_TYPES for field in ("model_type", "type")
+        )
     )
     if non_chat:
         result.update(selectable=False, unavailable_reason="not_chat_model")
@@ -524,7 +546,7 @@ async def discover_models(
             result = _catalog_result(provider_id, raw, protocol, already_added)
         else:
             async with asyncio.timeout(DISCOVERY_TIMEOUT_SECONDS):
-                key, url = await _resolve_connection(provider_id, raw, catalog, api_key, base_url)
+                key, url, transport = await _resolve_connection(provider_id, raw, catalog, api_key, base_url)
                 url = _endpoint(_validate_base_url(url), protocol)
                 if not key and not _no_auth_allowed(provider_id, raw, protocol):
                     raise DiscoveryError("missing_credentials", "Configure credentials before fetching models.")
@@ -552,7 +574,7 @@ async def discover_models(
                 seen_cursors: set[str] = set()
                 truncated = False
                 async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(10.0, connect=5.0), follow_redirects=False
+                    timeout=httpx.Timeout(10.0, connect=5.0), follow_redirects=False, **transport
                 ) as client:
                     for page in range(MAX_PAGES):
                         try:

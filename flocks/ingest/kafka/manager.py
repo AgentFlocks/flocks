@@ -45,6 +45,7 @@ from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
+from flocks.workflow.ownership import abandon_execution, execution_cancelled
 from flocks.workflow.tool_context import (
     build_workflow_tool_context,
     cleanup_workflow_tool_context,
@@ -63,7 +64,7 @@ log = Log.create(service="kafka.manager")
 
 
 # Maximum concurrent workflow executions per workflow to avoid FD exhaustion and
-# SQLite write contention. Kafka messages can carry large JSON payloads, so keep
+# database write contention. Kafka messages can carry large JSON payloads, so keep
 # this bounded even when a trigger requests a larger worker pool.
 _MAX_CONCURRENT_EXECUTIONS = 8
 # Maximum number of buffered Kafka messages per workflow.  Unlike syslog we do
@@ -787,104 +788,115 @@ class KafkaManager:
                 input_params=summarized_inputs,
             )
             exec_id = exec_data["id"]
-            start_time = time.time()
-            trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
-            trigger_input_keys = list((trigger.mapping or {}).keys()) or [input_key]
-            step_recorder = ExecutionStepRecorder(
-                step_compactor=lambda step: _compact_step_for_kafka_storage(
-                    step,
-                    input_key=input_key,
-                    input_keys=trigger_input_keys,
-                ),
-            )
-            tool_context = None
+            # Every way out of here ends the run: one whose end was not recorded (a
+            # cancel while its context is cleaned up, say) is let go, not left live.
             try:
-                if tool_context_required:
-                    tool_context = await build_workflow_tool_context(
-                        workflow_id=workflow_id,
-                        action_name=f"trigger:{trigger.type}",
-                    )
-                result = await asyncio.to_thread(
-                    run_workflow,
-                    workflow=workflow_plan,
-                    inputs=mapped_inputs,
-                    run_id=exec_id,
-                    trace=False,
-                    execution_profile="high_frequency",
-                    cancel=run_cancel_event.is_set,
-                    on_step_complete=step_recorder.on_step_complete,
-                    tool_context=tool_context,
+                start_time = time.time()
+                trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
+                trigger_input_keys = list((trigger.mapping or {}).keys()) or [input_key]
+                step_recorder = ExecutionStepRecorder(
+                    step_compactor=lambda step: _compact_step_for_kafka_storage(
+                        step,
+                        input_key=input_key,
+                        input_keys=trigger_input_keys,
+                    ),
                 )
-                status, error_msg = resolve_execution_outcome(result)
-                duration = time.time() - start_time
-                step_count = step_recorder.step_count or result.steps
-                exec_data.update(step_recorder.summary)
-                exec_data.update(
-                    {
-                        "status": status,
-                        "outputResults": _compact_for_kafka_storage(result.outputs),
-                        "finishedAt": int(time.time() * 1000),
-                        "duration": duration,
-                        "errorMessage": error_msg,
-                        "executionLog": [],
-                        "stepCount": step_count,
-                        "currentNodeId": result.last_node_id,
-                        "currentPhase": status,
-                        "currentStepIndex": step_count,
-                        "triggerId": trigger.id,
-                        "triggerType": trigger.type,
-                        "deliveryId": trigger_meta.get("deliveryId"),
-                        "attempt": trigger_meta.get("attempt"),
-                        "triggerSource": trigger_meta.get("source"),
-                    }
-                )
-            except Exception as exc:
-                duration = time.time() - start_time
-                log.error(
-                    "kafka.workflow_run_failed",
-                    {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
-                )
-                exec_data.update(step_recorder.summary)
-                exec_data.update(
-                    {
-                        "status": "error",
-                        "errorMessage": str(exc),
-                        "finishedAt": int(time.time() * 1000),
-                        "duration": duration,
-                        "executionLog": [],
-                        "currentPhase": "error",
-                        "triggerId": trigger.id,
-                        "triggerType": trigger.type,
-                        "deliveryId": trigger_meta.get("deliveryId"),
-                        "attempt": trigger_meta.get("attempt"),
-                        "triggerSource": trigger_meta.get("source"),
-                    }
-                )
-            finally:
-                steps = step_recorder.take_steps()
-                if tool_context is not None:
-                    await cleanup_workflow_tool_context(tool_context)
+                tool_context = None
                 try:
-                    await record_execution_result(
-                        workflow_id,
-                        exec_id,
-                        exec_data,
-                        steps=steps,
+                    if tool_context_required:
+                        tool_context = await build_workflow_tool_context(
+                            workflow_id=workflow_id,
+                            action_name=f"trigger:{trigger.type}",
+                        )
+                    result = await asyncio.to_thread(
+                        run_workflow,
+                        workflow=workflow_plan,
+                        inputs=mapped_inputs,
+                        run_id=exec_id,
+                        trace=False,
+                        execution_profile="high_frequency",
+                        cancel=lambda: run_cancel_event.is_set() or execution_cancelled(exec_id),
+                        on_step_complete=step_recorder.on_step_complete,
+                        tool_context=tool_context,
+                    )
+                    status, error_msg = resolve_execution_outcome(result)
+                    duration = time.time() - start_time
+                    step_count = step_recorder.step_count or result.steps
+                    exec_data.update(step_recorder.summary)
+                    exec_data.update(
+                        {
+                            "status": status,
+                            "outputResults": _compact_for_kafka_storage(result.outputs),
+                            "finishedAt": int(time.time() * 1000),
+                            "duration": duration,
+                            "errorMessage": error_msg,
+                            "executionLog": [],
+                            "stepCount": step_count,
+                            "currentNodeId": result.last_node_id,
+                            "currentPhase": status,
+                            "currentStepIndex": step_count,
+                            "triggerId": trigger.id,
+                            "triggerType": trigger.type,
+                            "deliveryId": trigger_meta.get("deliveryId"),
+                            "attempt": trigger_meta.get("attempt"),
+                            "triggerSource": trigger_meta.get("source"),
+                        }
                     )
                 except Exception as exc:
-                    log.warning("kafka.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
-            return exec_data
+                    duration = time.time() - start_time
+                    log.error(
+                        "kafka.workflow_run_failed",
+                        {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
+                    )
+                    exec_data.update(step_recorder.summary)
+                    exec_data.update(
+                        {
+                            "status": "error",
+                            "errorMessage": str(exc),
+                            "finishedAt": int(time.time() * 1000),
+                            "duration": duration,
+                            "executionLog": [],
+                            "currentPhase": "error",
+                            "triggerId": trigger.id,
+                            "triggerType": trigger.type,
+                            "deliveryId": trigger_meta.get("deliveryId"),
+                            "attempt": trigger_meta.get("attempt"),
+                            "triggerSource": trigger_meta.get("source"),
+                        }
+                    )
+                finally:
+                    steps = step_recorder.take_steps()
+                    if tool_context is not None:
+                        await cleanup_workflow_tool_context(tool_context)
+                    try:
+                        await record_execution_result(
+                            workflow_id,
+                            exec_id,
+                            exec_data,
+                            steps=steps,
+                        )
+                    except Exception as exc:
+                        log.warning("kafka.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
+                return exec_data
+            finally:
+                await abandon_execution(exec_id)
 
         try:
             action_payload = {
                 "operation": "workflow.trigger.kafka",
                 "transport": "headless",
-                # Internal adapter contract; never derive permission-carrier
-                # fields from the untrusted message body.
-                "legacy_compat": True,
                 "workflow_id": workflow_id,
                 "trigger": trigger,
                 "event": event,
+                # The listener itself is the authenticated ingress here; ingress
+                # policies read the legacy-compat carrier from the top level
+                # (the metadata copy feeds the action recheck), so keep both.
+                "legacy_compat": True,
+                "evidence": {
+                    "auth_scheme": "kafka",
+                    "trigger_id": trigger.id,
+                    "trigger_type": trigger.type,
+                },
                 "metadata": {
                     "legacy_compat": True,
                     "trigger_type": "kafka",

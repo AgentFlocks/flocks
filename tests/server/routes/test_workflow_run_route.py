@@ -571,7 +571,9 @@ async def test_run_workflow_execution_task_keeps_steps_when_runner_raises(
     final_data = record_result.await_args.args[2]
     steps = record_result.await_args.kwargs["steps"]
     assert final_data["status"] == "error"
-    assert final_data["errorMessage"] == "runner failed"
+    # The summary carries the exception type so the WebUI / alerting can tell a
+    # validation error from a runtime failure (see the hardening regressions).
+    assert final_data["errorMessage"] == "RuntimeError: runner failed"
     assert [step_index for step_index, _ in steps] == [1, 2]
     assert [step["node_id"] for _, step in steps] == ["node-1", "node-2"]
 
@@ -1008,3 +1010,32 @@ async def test_update_null_dataflow_setting_keeps_saved_mode(monkeypatch: pytest
     result = await workflow_module.update_workflow("wf-1", workflow_module.WorkflowUpdateRequest(workflowJson=updated))
 
     assert resolve_workflow_dataflow_mode(result.workflowJson["metadata"]) == "vertex_cache"
+
+
+@pytest.mark.asyncio
+async def test_run_workflow_reports_a_dedicated_session_conflict_as_409(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from flocks.session.session import SessionAgentMismatchError
+
+    monkeypatch.setattr(
+        workflow_module,
+        "_read_workflow_from_fs",
+        lambda _workflow_id: {"workflowJson": _minimal_workflow_json()},
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "_build_workflow_tool_context",
+        AsyncMock(side_effect=SessionAgentMismatchError("Session s-1 is dedicated to agent 'isolated'")),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await workflow_module.run_workflow_endpoint(
+            "wf-1",
+            workflow_module.WorkflowRunRequest(session_id="s-1", agent="rex"),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "dedicated to agent" in exc_info.value.detail

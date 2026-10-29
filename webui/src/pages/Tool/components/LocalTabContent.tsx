@@ -13,6 +13,7 @@ import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import PluginCard, { PLUGIN_CARD_GRID_CLASS } from '@/components/plugin-groups/PluginCard';
 import EnabledSwitch from '@/components/plugin-groups/EnabledSwitch';
 import { EnabledBadge } from './badges';
+import { extractErrorMessage } from '@/utils/error';
 
 interface LocalTabContentProps {
   tools: Tool[];
@@ -67,8 +68,8 @@ export default function LocalTabContent({
       setToggling(tool.name);
       await toolAPI.setEnabled(tool.name, enabled);
       await onRefreshTools();
-    } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+    } catch (err: unknown) {
+      alert(extractErrorMessage(err, t('alert.unknownError')));
     } finally {
       setToggling(null);
     }
@@ -101,7 +102,7 @@ export default function LocalTabContent({
           description={searchQuery ? t('empty.tryOtherKeywords') : t('local.noToolsDesc')}
         />
       ) : (
-        <div className={viewMode === 'list' ? 'bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100' : PLUGIN_CARD_GRID_CLASS}>
+        <div className={viewMode === 'list' ? 'bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100 max-md:overflow-x-auto' : PLUGIN_CARD_GRID_CLASS}>
           {filteredTools.map((tool) => {
             const isSelected = selectedToolName === tool.name;
             const description = getLocalizedToolDescription(tool, i18n.language);
@@ -156,7 +157,7 @@ export default function LocalTabContent({
               <div
                 key={tool.name}
                 {...groupDrag?.dragProps(tool.name)}
-                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                className={`grid items-center gap-3 px-4 py-3 transition-colors max-md:min-w-[48rem] ${isSelected ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                 style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
               >
                 {/* Icon */}

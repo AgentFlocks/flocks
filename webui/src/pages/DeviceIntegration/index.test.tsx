@@ -1901,4 +1901,16 @@ describe('DeviceIntegrationPage', () => {
       expect(screen.getByDisplayValue('long-real-onesec-api-key-Cd4Y')).toBeInTheDocument();
     });
   });
+
+  it('pads itself evenly as a full-screen page', async () => {
+    const { container } = render(<DeviceIntegrationPage />);
+
+    await screen.findByText('设备接入');
+
+    // Layout renders /devices without its padded wrapper. The navigation button
+    // now sits in the workspace header, so no extra top offset is needed.
+    const root = container.firstElementChild;
+    expect(root).toHaveClass('p-6');
+    expect(root).not.toHaveClass('pt-16');
+  });
 });

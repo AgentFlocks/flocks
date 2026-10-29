@@ -6,15 +6,12 @@ import SettingsPage from './index';
 import { ThemeContext, type Theme, type ThemeMode } from '@/contexts/ThemeContext';
 import { ToastProvider } from '@/components/common/Toast';
 
-const { changeLanguage, dataRetentionApi, flocksproUsersApi, setTheme, toolFailureConfigApi, useAuth } = vi.hoisted(() => ({
+const { changeLanguage, dataRetentionApi, setTheme, toolFailureConfigApi, useAuth } = vi.hoisted(() => ({
   changeLanguage: vi.fn(),
   dataRetentionApi: {
     get: vi.fn(),
     preview: vi.fn(),
     update: vi.fn(),
-  },
-  flocksproUsersApi: {
-    hasCapability: vi.fn(),
   },
   setTheme: vi.fn(),
   toolFailureConfigApi: {
@@ -38,10 +35,6 @@ vi.mock('@/contexts/AuthContext', () => ({
   useAuth,
 }));
 
-vi.mock('@/api/flocksproUsers', () => ({
-  flocksproUsersApi,
-}));
-
 vi.mock('@/api/toolFailureConfig', () => ({
   toolFailureConfigApi,
 }));
@@ -58,20 +51,8 @@ vi.mock('@/pages/SystemLog', () => ({
   default: () => <div>system logs page</div>,
 }));
 
-vi.mock('@/pages/AuditLogs', () => ({
-  default: () => <div>audit logs page</div>,
-}));
-
 vi.mock('./ArchivedDataPanel', () => ({
   default: () => <div>archived data page</div>,
-}));
-
-vi.mock('@/pages/SecurityConfig', () => ({
-  default: () => <div>security config page</div>,
-}));
-
-vi.mock('@/pages/FlocksproUpgrade', () => ({
-  default: () => <div>flocks pro page</div>,
 }));
 
 vi.mock('@/pages/Model', () => ({
@@ -117,7 +98,6 @@ function renderSettings(path: string, theme: Theme = 'light', state?: Record<str
 describe('SettingsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    flocksproUsersApi.hasCapability.mockResolvedValue(true);
     toolFailureConfigApi.get.mockResolvedValue({ disableOnRepeatedFailure: true });
     toolFailureConfigApi.update.mockImplementation(async (disableOnRepeatedFailure: boolean) => ({
       disableOnRepeatedFailure,
@@ -402,70 +382,10 @@ it('restarts polling when the admin refreshes after a timeout', async () => {
     expect(screen.getByTestId('settings-content')).toContainElement(screen.getByText('system logs page'));
   });
 
-  it('opens the Flocks Pro page on its own, without the management tabs', async () => {
-    const { container } = renderSettings('/settings/flockspro');
-
-    expect(await screen.findByText('flocks pro page')).toBeInTheDocument();
-    expect(flocksproUsersApi.hasCapability).toHaveBeenCalled();
-    expect(screen.queryByRole('navigation', { name: 'settingsTitle' })).not.toBeInTheDocument();
-    expect(screen.queryAllByRole('tab')).toHaveLength(0);
-    expect(container.querySelector('[data-testid="settings-content"]')).toContainElement(screen.getByText('flocks pro page'));
-  });
-
-  it('redirects members away from admin-only settings', async () => {
-    useAuth.mockReturnValue({
-      user: { id: 'user-2', username: 'member', role: 'member', status: 'active', must_reset_password: false },
-    });
-    renderSettings('/settings/security-config');
-    expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
-    expect(screen.queryByText('security config page')).not.toBeInTheDocument();
-  });
-
-  it('renders security config in settings for Flocks Pro admins', async () => {
-    renderSettings('/settings/security-config');
-
-    expect(await screen.findByText('security config page')).toBeInTheDocument();
-    expect(flocksproUsersApi.hasCapability).toHaveBeenCalled();
-  });
-
-  it('renders audit logs in settings for Flocks Pro admins', async () => {
-    renderSettings('/settings/audit-logs');
-
-    expect(await screen.findByText('audit logs page')).toBeInTheDocument();
-    expect(flocksproUsersApi.hasCapability).toHaveBeenCalled();
-  });
-
   it('renders archived data management for local users', async () => {
     renderSettings('/settings/archived-data');
 
     expect(await screen.findByText('archived data page')).toBeInTheDocument();
   });
 
-  it('hides audit logs when Flocks Pro capability is unavailable', async () => {
-    flocksproUsersApi.hasCapability.mockResolvedValue(false);
-
-    renderSettings('/settings/security-config');
-
-    expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'auditLogs' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'securityConfig' })).not.toBeInTheDocument();
-  });
-
-  it('hides Flocks Pro settings for non-admin users', async () => {
-    useAuth.mockReturnValue({
-      user: {
-        id: 'user-2',
-        username: 'member',
-        role: 'member',
-        status: 'active',
-        must_reset_password: false,
-      },
-    });
-
-    renderSettings('/settings/flockspro');
-
-    expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Flocks Pro' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'auditLogs' })).not.toBeInTheDocument();
-  });
 });

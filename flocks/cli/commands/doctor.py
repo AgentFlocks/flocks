@@ -23,6 +23,15 @@ def doctor_command() -> None:
     env = _build_source_install_env()
 
     console.print(f"[cyan]Flocks source directory:[/cyan] {source_root}")
+
+    refusal = _core_repair_refusal()
+    if refusal is not None:
+        # Managed release packages (Go core) and Docker images are not repaired
+        # in place: `uv sync` here would rewrite the venv the core owns.
+        console.print(f"[yellow]Skipping core installation repair: {refusal}[/yellow]")
+        _print_service_diagnosis()
+        return
+
     console.print("[cyan]Repairing Flocks core installation...[/cyan]")
 
     if _needs_windows_handoff():
@@ -37,6 +46,13 @@ def doctor_command() -> None:
 
     console.print("[green]安装正常[/green]")
     _print_service_diagnosis()
+
+
+def _core_repair_refusal() -> str | None:
+    """Reason the in-place core repair must not run for this deployment, else ``None``."""
+    from flocks.updater.deploy import update_refusal_reason
+
+    return update_refusal_reason()
 
 
 def _run_core_install(source_root: Path, *, env: dict[str, str] | None = None) -> None:

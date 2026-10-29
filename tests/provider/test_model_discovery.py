@@ -123,6 +123,63 @@ async def test_id_only_lists_block_known_non_chat_families_without_blocking_audi
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("options", "trust_env_var", "expected"),
+    [
+        ({}, None, {"verify": True, "trust_env": True}),
+        ({"verify_ssl": False}, None, {"verify": False, "trust_env": True}),
+        ({"ssl_verify": "false"}, None, {"verify": False, "trust_env": True}),
+        ({"trust_env": False}, None, {"verify": True, "trust_env": False}),
+        ({}, "0", {"verify": True, "trust_env": False}),
+        ({"trust_env": True}, "0", {"verify": True, "trust_env": True}),
+    ],
+)
+async def test_discovery_connects_the_way_the_providers_own_client_does(
+    options, trust_env_var, expected, discovery_runtime, upstream, monkeypatch
+):
+    """A self-signed gateway or a provider kept off the ambient proxy is reached the same way for a listing."""
+    if trust_env_var is None:
+        monkeypatch.delenv("FLOCKS_HTTP_TRUST_ENV", raising=False)
+    else:
+        monkeypatch.setenv("FLOCKS_HTTP_TRUST_ENV", trust_env_var)
+    save_provider(
+        discovery_runtime, "openai-compatible", options={"baseURL": "https://gateway.test/v1", **options}
+    )
+
+    result = await discovery_runtime.module.discover_models("openai-compatible", api_key="key")
+
+    assert result["status"] == "success"
+    assert {name: upstream.options[0][name] for name in expected} == expected
+
+
+@pytest.mark.asyncio
+async def test_type_fields_that_are_not_text_are_ignored(discovery_runtime, upstream):
+    upstream.handler = lambda request: httpx.Response(
+        200,
+        json={"data": [{"id": "chat-a", "model_type": []}, {"id": "chat-b", "type": {"kind": "chat"}}]},
+    )
+
+    result = await discovery_runtime.module.discover_models("openai-compatible", base_url="https://gateway.test/v1")
+
+    assert result["status"] == "success"
+    assert [(model["id"], model["selectable"]) for model in result["models"]] == [("chat-a", True), ("chat-b", True)]
+
+
+@pytest.mark.asyncio
+async def test_streaming_support_the_provider_reports_is_kept(discovery_runtime, upstream):
+    upstream.handler = lambda request: httpx.Response(
+        200,
+        json={"data": [{"id": "batch-only", "supports_streaming": False}, {"id": "plain"}]},
+    )
+
+    result = await discovery_runtime.module.discover_models("openai-compatible", base_url="https://gateway.test/v1")
+
+    models = {model["id"]: model for model in result["models"]}
+    assert models["batch-only"]["supports_streaming"] is False
+    assert "supports_streaming" not in models["plain"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("provider_id", OPENAI_CATALOG_IDS)
 async def test_catalog_compatible_providers_fetch_from_supplied_endpoint(
     provider_id,

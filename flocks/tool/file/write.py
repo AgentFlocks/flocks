@@ -13,10 +13,18 @@ from difflib import unified_diff
 from pathlib import Path
 from typing import Optional
 
+from flocks.tool import nofollow
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.tool.path_utils import resolve_tool_path
+from flocks.tool.path_utils import (
+    changed_before_asking,
+    checked_error,
+    moved_since_resolved,
+    paths_changed,
+    resolve_tool_path,
+    resolved_identities,
+)
 from flocks.utils.id import Identifier
 from flocks.utils.log import Log
 
@@ -116,28 +124,28 @@ def _is_filename_only(raw_path: str) -> bool:
     return bool(normalized) and not os.path.splitdrive(normalized)[0] and "/" not in normalized
 
 
-async def _resolve_owner_username(ctx: ToolContext) -> Optional[str]:
-    """Resolve owner username from auth context, then session ownership."""
+async def _resolve_output_owner(ctx: ToolContext) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a trusted output writer's username and immutable account id."""
     try:
         from flocks.auth.context import get_current_auth_user
         auth_user = get_current_auth_user()
         if auth_user and getattr(auth_user, "username", None):
-            return str(auth_user.username)
+            return str(auth_user.username), str(auth_user.id)
     except Exception:
         pass
 
     session_id = getattr(ctx, "session_id", None)
     if not session_id or session_id == "default":
-        return None
+        return None, None
     try:
         from flocks.session.session import Session
 
         session = await Session.get_by_id(session_id)
-        if session and getattr(session, "owner_username", None):
-            return str(session.owner_username)
+        if session:
+            return session.owner_username, session.owner_user_id
     except Exception:
         pass
-    return None
+    return None, None
 
 
 async def _build_output_attachment(
@@ -149,9 +157,9 @@ async def _build_output_attachment(
     try:
         from flocks.workspace.manager import WorkspaceManager
 
-        owner_username = await _resolve_owner_username(ctx)
+        owner_username, owner_user_id = await _resolve_output_owner(ctx)
         scope = WorkspaceManager.get_instance().resolve_output_scope(
-            filepath, username=owner_username,
+            filepath, username=owner_username, user_id=owner_user_id,
         )
         if scope is None or not scope.path.is_file():
             return None
@@ -173,6 +181,7 @@ async def _build_output_attachment(
                 "root": "workspace-output",
                 "path": scope.relative_path,
                 "username": scope.username,
+                "userID": scope.user_id,
             },
         }
     except (OSError, RuntimeError, ValueError) as exc:
@@ -205,9 +214,9 @@ async def _maybe_redirect_to_default_outputs(
     try:
         from flocks.workspace.manager import WorkspaceManager
 
-        owner_username = await _resolve_owner_username(ctx)
+        owner_username, owner_user_id = await _resolve_output_owner(ctx)
         outputs_dir = WorkspaceManager.get_instance().get_default_outputs_dir(
-            username=owner_username
+            username=owner_username, user_id=owner_user_id,
         )
         redirected = str((outputs_dir / filename).resolve())
         if redirected != resolved_path:
@@ -378,20 +387,24 @@ async def write_tool(
     # Get relative title for display
     title = resolution.display_path
     
+    # Nothing is read through a path that moved since it was checked, nor
+    # through a link put on the way while it is read.
+    if moved_since_resolved(filepath):
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+
     # Check if file exists and get old content
-    exists = os.path.exists(filepath)
-    old_content = ""
-    
-    if exists:
-        try:
-            with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-                old_content = f.read()
-        except Exception as e:
-            return ToolResult(
-                success=False,
-                error=f"Failed to read existing file: {str(e)}",
-                title=title
-            )
+    try:
+        existing = nofollow.read_text(filepath)
+    except nofollow.LinkOnTheWay:
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+    except Exception as e:
+        return ToolResult(
+            success=False,
+            error=checked_error((filepath,), f"Failed to read existing file: {str(e)}"),
+            title=title
+        )
+    exists = existing is not None
+    old_content = existing.text if existing is not None else ""
 
     if (
         ctx.agent == "self-improve"
@@ -417,18 +430,31 @@ async def write_tool(
     diff = trim_diff(generate_diff(filepath, old_content, content))
 
     # Explicit edit/write rules (session, agent, delegating session) apply here.
+    # The request carries the diff: none read after the path moved.
+    if moved_since_resolved(filepath):
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+    identities = resolved_identities(filepath)
     await ctx.ask(
         permission="edit",
         patterns=[resolution.permission_pattern],
         always=["*"],
-        metadata={"tool": "write", "filepath": filepath, "diff": diff},
+        metadata={
+            "tool": "write", "filepath": filepath, "diff": diff,
+            "pattern_base": resolution.worktree,
+        },
     )
+    changed = f"{filepath} changed while waiting for permission; check it again and retry."
+    if paths_changed(identities):
+        return ToolResult(success=False, error=changed, title=title)
 
-    # Create parent directory if needed
+    # Create parent directory if needed, opening each one on the way without
+    # following a link.
     parent_dir = os.path.dirname(filepath)
     if parent_dir and not os.path.exists(parent_dir):
         try:
-            os.makedirs(parent_dir, exist_ok=True)
+            nofollow.makedirs(parent_dir)
+        except nofollow.LinkOnTheWay:
+            return ToolResult(success=False, error=changed, title=title)
         except Exception as e:
             return ToolResult(
                 success=False,
@@ -436,10 +462,11 @@ async def write_tool(
                 title=title
             )
     
-    # Write file
+    # Write the file the request was about: the one read above, or none.
     try:
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(content)
+        nofollow.write_text(filepath, content, expect=existing.identity if existing is not None else None)
+    except (nofollow.LinkOnTheWay, nofollow.StaleFile):
+        return ToolResult(success=False, error=changed, title=title)
     except Exception as e:
         return ToolResult(
             success=False,

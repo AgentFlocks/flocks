@@ -83,6 +83,55 @@ class _FakeToolAccumulator:
 
 
 @pytest.mark.asyncio
+async def test_isolated_catalog_follows_final_hook_tool_ceiling(monkeypatch):
+    """A hook-hidden capability must not survive in the model's catalog."""
+    runner = _make_runner("isolated-final-tool-catalog")
+    allowed = {"type": "function", "function": {
+        "name": "read", "description": "Read approved source", "parameters": {"type": "object"},
+    }}
+    hidden = {"type": "function", "function": {
+        "name": "private_tool", "description": "PRIVATE CAPABILITY", "parameters": {"type": "object"},
+    }}
+
+    class _Processor(_FakeProcessor):
+        def set_allowed_tool_names(self, names):
+            assert set(names) == {"read"}
+
+    monkeypatch.setattr(runner_mod, "StreamProcessor", _Processor)
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=True))
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_llm_before", AsyncMock(
+        return_value=SimpleNamespace(output={"request": {"tools": [allowed]}})))
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_llm_after", AsyncMock())
+    monkeypatch.setattr(runner_mod.SessionRunner, "_end_observability", staticmethod(lambda *args, **kwargs: None))
+    monkeypatch.setattr("flocks.provider.options.build_provider_options", lambda *args: {})
+    monkeypatch.setattr("flocks.session.streaming.tool_accumulator.ToolCallAccumulator", _FakeToolAccumulator)
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod, "trace_scope", lambda **kwargs: SimpleNamespace(observation=None))
+    monkeypatch.setattr(runner_mod, "generation_scope", lambda **kwargs: SimpleNamespace(observation=None))
+
+    class _Provider:
+        def chat_stream(self, **kwargs):
+            assert kwargs["tools"] == [allowed]
+            text = str(kwargs["messages"])
+            assert "Current Callable Tools" in text
+            assert "Read approved source" in text
+            assert "private_tool" not in text
+            assert "PRIVATE CAPABILITY" not in text
+
+            async def stream():
+                yield SimpleNamespace(delta="done", reasoning=None, tool_calls=None,
+                                      event_type=None, finish_reason="stop", usage=None)
+            return stream()
+
+    result = await runner._call_llm(
+        provider=_Provider(), messages=[ChatMessage(role="user", content="继续")],
+        tools=[allowed, hidden], assistant_msg=SimpleNamespace(id="isolated-final-assistant"),
+        agent=SimpleNamespace(name="reviewer", prompt_profile="isolated", tools=["read", "private_tool"]),
+    )
+    assert result.action == "stop"
+
+
+@pytest.mark.asyncio
 async def test_hook_pipeline_runs_llm_stages():
     seen: list[tuple[str, str]] = []
 

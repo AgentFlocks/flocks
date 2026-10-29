@@ -4,7 +4,10 @@ File operations module
 Handles file reading, writing, searching, and listing
 """
 
+import asyncio
 import os
+import fnmatch
+import time
 import subprocess
 import base64
 import mimetypes
@@ -209,6 +212,10 @@ class File:
     @classmethod
     async def search(cls, query: str, limit: int = 10, dirs: bool = True, 
                     type: Optional[str] = None) -> List[str]:
+        return await asyncio.to_thread(cls._search_sync, os.getcwd(), query, limit, dirs, type)
+
+    @staticmethod
+    def _search_sync(cwd: str, query: str, limit: int, dirs: bool, type: Optional[str]) -> List[str]:
         """
         Search for files by name
         
@@ -221,128 +228,98 @@ class File:
         Returns:
             List of file paths
         """
+        matches = []
+        limit = max(0, min(limit, 200))
+        if not limit:
+            return matches
+        excluded = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+        deadline = time.monotonic() + 5.0
+        pattern = f"*{query}*"
         try:
-            # Use find command for file search
-            cwd = os.getcwd()
-            
-            # Build find command
-            cmd = ["find", ".", "-name", f"*{query}*"]
-            
-            if type == "file":
-                cmd.extend(["-type", "f"])
-            elif type == "directory":
-                cmd.extend(["-type", "d"])
-            
-            # Exclude common directories
-            excludes = [".git", "node_modules", "__pycache__", ".venv", "venv"]
-            for exclude in excludes:
-                cmd.extend(["-not", "-path", f"*/{exclude}/*"])
-            
-            result = subprocess.run(
-                cmd,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            
-            if result.returncode == 0:
-                lines = [line.strip() for line in result.stdout.split("\n") if line.strip()]
-                # Remove leading "./"
-                lines = [line[2:] if line.startswith("./") else line for line in lines]
-                return lines[:limit]
-            
-            return []
-        except Exception as e:
-            log.error("file.search.error", {"error": str(e), "query": query})
-            return []
-    
+            for directory, children, files in os.walk(cwd, followlinks=False):
+                children[:] = [name for name in children if name not in excluded]
+                candidates = []
+                if type != "file" and (dirs or type == "directory"):
+                    candidates.extend(children)
+                if type != "directory":
+                    candidates.extend(files)
+                for name in candidates:
+                    if time.monotonic() >= deadline:
+                        return matches
+                    if fnmatch.fnmatchcase(name, pattern):
+                        matches.append(os.path.relpath(os.path.join(directory, name), cwd))
+                        if len(matches) >= limit:
+                            return matches
+                if time.monotonic() >= deadline:
+                    return matches
+        except OSError as exc:
+            log.error("file.search.error", {"error": str(exc), "query": query})
+        return matches
+
     @classmethod
     async def status(cls) -> List[FileInfo]:
-        """
-        Get git status of files
-        
-        Returns:
-            List of file status info
-        """
+        """Read Git status without blocking the server's event loop."""
+        return await asyncio.to_thread(cls._status_sync, os.getcwd())
+
+    @staticmethod
+    def _status_sync(cwd: str) -> List[FileInfo]:
+        """Use one status and one batched diff, regardless of file count."""
         try:
-            cwd = os.getcwd()
-            
-            # Check if in git repo
             result = subprocess.run(
-                ["git", "rev-parse", "--git-dir"],
+                ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
                 cwd=cwd,
                 capture_output=True,
-                text=True,
                 timeout=5,
             )
-            
-            if result.returncode != 0:
+            if result.returncode != 0 or not result.stdout:
                 return []
-            
-            # Get git status
-            result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            
-            if result.returncode != 0:
-                return []
-            
+
+            stats: Dict[str, tuple[int, int]] = {}
+            try:
+                diff = subprocess.run(
+                    ["git", "diff", "--numstat", "-z", "HEAD", "--"],
+                    cwd=cwd, capture_output=True, timeout=5,
+                )
+                if diff.returncode != 0:
+                    # An unborn repository has no HEAD. Its staged files are
+                    # still useful, and --cached compares them to an empty tree.
+                    diff = subprocess.run(
+                        ["git", "diff", "--numstat", "-z", "--cached", "--"],
+                        cwd=cwd, capture_output=True, timeout=5,
+                    )
+                if diff.returncode == 0:
+                    records = iter(diff.stdout.split(b"\0"))
+                    for record in records:
+                        if not record:
+                            continue
+                        added, removed, path = record.split(b"\t", 2)
+                        if not path:
+                            # Renames/copies have separate old and new names.
+                            next(records)
+                            path = next(records)
+                        stats[os.fsdecode(path)] = (
+                            int(added) if added.isdigit() else 0,
+                            int(removed) if removed.isdigit() else 0,
+                        )
+            except (OSError, subprocess.TimeoutExpired, ValueError, StopIteration) as exc:
+                log.warn("file.status.diff_unavailable", {"error": str(exc)})
+
             files = []
-            
-            for line in result.stdout.split("\n"):
-                if not line.strip():
+            records = iter(result.stdout.split(b"\0"))
+            for record in records:
+                if not record:
                     continue
-                
-                # Parse git status format
-                status_code = line[:2]
-                file_path = line[3:].strip()
-                
-                # Determine status
-                if status_code.strip() == "A":
-                    status = "added"
-                elif status_code.strip() == "D":
+                code, path = record[:2], os.fsdecode(record[3:])
+                if b"R" in code or b"C" in code:
+                    next(records, None)
+                if b"D" in code:
                     status = "deleted"
+                elif b"A" in code or code == b"??":
+                    status = "added"
                 else:
                     status = "modified"
-                
-                # Get diff stats
-                added, removed = 0, 0
-                
-                if status != "added":
-                    try:
-                        diff_result = subprocess.run(
-                            ["git", "diff", "--numstat", "HEAD", "--", file_path],
-                            cwd=cwd,
-                            capture_output=True,
-                            text=True,
-                            timeout=5,
-                        )
-                        
-                        if diff_result.returncode == 0 and diff_result.stdout.strip():
-                            parts = diff_result.stdout.strip().split()
-                            if len(parts) >= 2:
-                                try:
-                                    added = int(parts[0])
-                                    removed = int(parts[1])
-                                except ValueError:
-                                    pass
-                    except Exception:
-                        pass
-                
-                file_info = FileInfo(
-                    path=file_path,
-                    added=added,
-                    removed=removed,
-                    status=status,
-                )
-                
-                files.append(file_info)
-            
+                added, removed = stats.get(path, (0, 0))
+                files.append(FileInfo(path=path, added=added, removed=removed, status=status))
             return files
         except Exception as e:
             log.error("file.status.error", {"error": str(e)})

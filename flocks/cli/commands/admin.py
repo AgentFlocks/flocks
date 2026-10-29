@@ -29,6 +29,7 @@ def list_users():
     """
 
     async def _run():
+        await AuthService.use_installed_backend()
         await AuthService.init()
         return await AuthService.list_users()
 
@@ -127,6 +128,7 @@ def reassign_orphan_sessions(
     """
 
     async def _run() -> Tuple[Optional[str], Optional[Dict[str, int]]]:
+        await AuthService.use_installed_backend()
         await AuthService.init()
         info = await AuthService.get_user_by_username(username)
         if not info:
@@ -176,6 +178,7 @@ def generate_one_time_password(
     """
 
     async def _run() -> str:
+        await AuthService.use_installed_backend()
         await AuthService.init()
         return await AuthService.generate_admin_temp_password(username=username)
 

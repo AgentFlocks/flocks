@@ -85,7 +85,7 @@ export default function WorkspaceHeader({
       <button
         type="button"
         onClick={onOpenMobileNav}
-        className={`${ICON_BUTTON_CLASS} lg:hidden`}
+        className={`${ICON_BUTTON_CLASS} lg:hidden max-md:shrink-0`}
         aria-label={t('openNav')}
         title={t('openNav')}
       >

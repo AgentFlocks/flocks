@@ -49,7 +49,7 @@ class HeadlessIdentityContract(HookBase):
 def isolated_hooks(monkeypatch):
     HookPipeline.reset()
     # Keep real hook dispatch but prevent loading installed, stateful plugins.
-    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock(side_effect=lambda *_: tuple(HookPipeline._hooks)))
     yield
     HookPipeline.reset()
 
@@ -156,7 +156,14 @@ async def test_message_cannot_replace_internal_carrier_or_execution_identity(ada
     assert carrier["workflow_id"] == "contract-workflow"
     assert carrier["legacy_compat"] is True
     assert carrier["metadata"] == {"legacy_compat": True, "trigger_type": adapter.kind}
-    assert not {"evidence", "subject", "context", "execution"}.intersection(carrier)
+    # The listener builds its own evidence from the trigger config; the
+    # forged message's evidence never reaches the carrier.
+    assert carrier["evidence"] == {
+        "auth_scheme": adapter.kind,
+        "trigger_id": f"{adapter.kind}-default",
+        "trigger_type": adapter.kind,
+    }
+    assert not {"subject", "context", "execution"}.intersection(carrier)
     assert carrier["event"].body == message
     assert carrier["event"].source.workflowId == "contract-workflow"
     adapter.runner.assert_called_once()

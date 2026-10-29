@@ -22,7 +22,7 @@ from flocks.config.config_writer import ConfigWriter
 from flocks.mcp import MCP, McpStatus
 from flocks.provider.provider import Provider
 from flocks.provider.types import ModelType
-from flocks.security import get_secret_manager
+from flocks.security.secrets import SecretChanges, recording_secret_changes
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.server.routes.default_model import (
     SetDefaultModelRequest,
@@ -53,6 +53,7 @@ from flocks.server.routes.provider import (
     _get_inline_provider_api_key,
     _load_api_service_metadata_data,
     _test_provider_credentials_impl,
+    _validated_base_url,
     get_service_credentials,
     set_provider_credentials,
     set_service_credentials,
@@ -73,6 +74,10 @@ from flocks.utils.log import Log
 router = APIRouter()
 log = Log.create(service="routes.onboarding")
 
+# validate() snapshots config + secrets, writes temporary credentials and
+# restores the snapshot; apply() writes for real.  Running the two concurrently
+# lets validate's restore clobber what apply just wrote, so both endpoints
+# serialise on the global config-mutation lock (``serialized_config_mutation``).
 Region = ThreatBookRegion
 
 
@@ -385,38 +390,37 @@ async def _reload_runtime_state() -> None:
         log.warning("onboarding.reload_runtime.failed", {"error": str(exc)})
 
 
-def _snapshot_config_and_secret_state() -> tuple[Dict[str, Any], Dict[str, Any]]:
-    """Capture config/secrets so callers can safely restore on failure."""
-    secrets = get_secret_manager()
-    return copy.deepcopy(ConfigWriter._read_raw()), copy.deepcopy(secrets._load())
+def _snapshot_config_state() -> Dict[str, Any]:
+    """Capture config so callers can restore it on failure (secrets are tracked per key)."""
+    return copy.deepcopy(ConfigWriter._read_raw())
 
 
 async def _restore_config_and_secret_state(
     config_snapshot: Dict[str, Any],
-    secret_snapshot: Dict[str, Any],
+    secret_changes: SecretChanges,
 ) -> None:
-    """Restore config/secrets and refresh runtime state."""
-    secrets = get_secret_manager()
+    """Restore config, take back the secrets written meanwhile and refresh runtime state."""
     ConfigWriter._write_raw(config_snapshot)
-    secrets._save(secret_snapshot)
+    secret_changes.revert()
     await _reload_runtime_state()
 
 
 @asynccontextmanager
 async def _temporary_config_and_secret_state():
-    """Snapshot config + secrets so validate can reuse real write/test paths safely."""
-    config_snapshot, secret_snapshot = _snapshot_config_and_secret_state()
+    """Snapshot config and record secret writes so validate can reuse real write/test paths safely."""
+    config_snapshot = _snapshot_config_state()
 
-    try:
-        yield
-    finally:
-        await _restore_config_and_secret_state(config_snapshot, secret_snapshot)
+    with recording_secret_changes() as secret_changes:
+        try:
+            yield
+        finally:
+            await _restore_config_and_secret_state(config_snapshot, secret_changes)
 
 
 @asynccontextmanager
 async def _rollback_on_apply_failure(mcp_name: Optional[str] = None):
     """Rollback onboarding writes if apply fails part-way through."""
-    config_snapshot, secret_snapshot = _snapshot_config_and_secret_state()
+    config_snapshot = _snapshot_config_state()
     # Reloading restored disk config cannot remove providers/models first added
     # by this transaction, or reset a provider whose original config was absent.
     providers_snapshot = dict(Provider._providers)
@@ -445,33 +449,34 @@ async def _rollback_on_apply_failure(mcp_name: Optional[str] = None):
             )
         except Exception:
             was_mcp_connected = False
-    try:
-        yield
-    except Exception:
-        if mcp_name:
-            await _restore_threatbook_mcp_setup(
-                mcp_name,
-                config_snapshot,
-                secret_snapshot,
-                previous_mcp_config,
-                was_mcp_connected,
-            )
-            await _reload_runtime_state()
-        else:
-            await _restore_config_and_secret_state(config_snapshot, secret_snapshot)
-        Provider._providers = providers_snapshot
-        Provider._models = models_snapshot
-        Provider._initialized = initialized_snapshot
-        for provider_id, provider in providers_snapshot.items():
-            original_config, original_models, original_custom_models, original_name = provider_state_snapshot[provider_id]
-            provider._config = original_config
-            provider._config_models = original_models
-            if original_custom_models is not None:
-                provider._custom_models = original_custom_models
-            provider.name = original_name
-            if hasattr(provider, "_client"):
-                provider._client = None
-        raise
+    with recording_secret_changes() as secret_changes:
+        try:
+            yield
+        except Exception:
+            if mcp_name:
+                await _restore_threatbook_mcp_setup(
+                    mcp_name,
+                    config_snapshot,
+                    secret_changes,
+                    previous_mcp_config,
+                    was_mcp_connected,
+                )
+                await _reload_runtime_state()
+            else:
+                await _restore_config_and_secret_state(config_snapshot, secret_changes)
+            Provider._providers = providers_snapshot
+            Provider._models = models_snapshot
+            Provider._initialized = initialized_snapshot
+            for provider_id, provider in providers_snapshot.items():
+                original_config, original_models, original_custom_models, original_name = provider_state_snapshot[provider_id]
+                provider._config = original_config
+                provider._config_models = original_models
+                if original_custom_models is not None:
+                    provider._custom_models = original_custom_models
+                provider.name = original_name
+                if hasattr(provider, "_client"):
+                    provider._client = None
+            raise
 
 
 async def _test_provider_or_service_with_temp_credentials(
@@ -992,6 +997,9 @@ def _known_draft_provider(provider_id: str) -> Dict[str, Any]:
 
 def _persist_draft_model(third_party: ThirdPartyLLMConfig) -> None:
     """Save local model metadata without probing services or selecting a default."""
+    # The address goes into the provider config whether or not a key comes with
+    # it: checked as saving credentials checks it, before anything is written.
+    _validated_base_url(third_party.base_url)
     provider_id = third_party.provider_id
     metadata = _known_draft_provider(provider_id)
     raw = ConfigWriter.get_provider_raw(provider_id)

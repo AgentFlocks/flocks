@@ -58,12 +58,11 @@ from flocks.session.lifecycle.retry import (
 )
 from flocks.session.lifecycle.compaction import SessionCompaction, CompactionPolicy
 from flocks.session.llm_hook_utils import (
-    StreamingTextReplacementBuffer,
     apply_hook_request_output,
-    restore_value_with_replacements,
     serialize_chat_message,
     stream_text_replacements_from_hook_output,
 )
+from flocks.session.response_rewriter import SessionResponseRewriter
 from flocks.session.streaming.model_activity import ModelActivity
 from flocks.session.streaming.stream_processor import StreamProcessor
 from flocks.session.streaming.stream_events import (
@@ -107,6 +106,7 @@ from flocks.utils.langfuse import (
     resolve_session_trace_context,
     trace_scope,
 )
+from flocks.storage.file_mirror import readable_url
 from flocks.session.utils.file_extractor import (
     read_file_part_bytes,
     is_text_extractable_mime,
@@ -238,6 +238,31 @@ async def _iter_with_chunk_timeout(
             pass
 
 
+async def _wait_through_cancel(task: asyncio.Future, timeout_s: float) -> bool:
+    """Wait up to *timeout_s* for *task* even while the caller is being cancelled.
+
+    True when it finished. Only for code already unwinding a cancellation
+    that it re-raises afterwards: a further cancel cannot change how that
+    ends, so it is not allowed to cut the wait short.
+    """
+    deadline = time.monotonic() + timeout_s
+    while not task.done():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            await asyncio.wait({task}, timeout=remaining)
+        except asyncio.CancelledError:
+            continue
+    return True
+
+
+def _read_outcome(task: asyncio.Future) -> None:
+    """Done callback: read the outcome so an unawaited failure is not reported as lost."""
+    if not task.cancelled():
+        task.exception()
+
+
 def _find_retryable_transport_exception(exception: Exception) -> Optional[Exception]:
     """Return a retryable HTTP transport error from an exception chain."""
     current: Optional[BaseException] = exception
@@ -316,6 +341,11 @@ BACKGROUND_SESSION_CATEGORIES = frozenset({"task"})
 # Applied the moment a 429 surfaces, before the slot is handed on; the retry
 # branch replaces it with the jittered delay once that is known.
 MIN_RATE_LIMIT_COOLDOWN_S = 1.0
+# How long a stopped step keeps waiting for the write of the text it had
+# already streamed, and then for that write to end once cancelled (see
+# SessionRunner._keep_interrupted_parts).
+_INTERRUPTED_PARTS_WRITE_TIMEOUT_S = 10.0
+_INTERRUPTED_PARTS_CANCEL_GRACE_S = 1.0
 
 
 @dataclass
@@ -395,6 +425,10 @@ class SessionRunner:
         # flocks.provider.concurrency. Released at first tool execution or
         # when the stream ends, whichever comes first.
         self._active_llm_slot: Optional[LlmSlot] = None
+        # Workflow LLM budget slot (flocks.provider.llm_budget) for the same
+        # request; handed back together with the provider slot when an inline
+        # tool starts, since that tool may run a workflow that needs the budget.
+        self._active_budget_slot: Optional[Any] = None
         self._llm_priority: Optional[int] = None
 
     @staticmethod
@@ -614,7 +648,8 @@ class SessionRunner:
 
         text_part = next((part for part in parts if getattr(part, "type", None) == "text"), None)
         if isinstance(text_part, TextPart):
-            text_part.text = error_message
+            # A copy: the cached part stays as it was if writing this fails.
+            text_part = text_part.model_copy(update={"text": error_message})
         else:
             text_part = TextPart(
                 id=Identifier.ascending("part"),
@@ -1428,10 +1463,27 @@ class SessionRunner:
                 "parts": [stored_part.model_dump(mode="json", by_alias=True)],
             }
 
+        from flocks.session.execution_profile import get_session_execution_profile
         from flocks.session.tool_execution import (
             build_session_tool_execution_payload,
             run_tool_execution_lifecycle,
         )
+
+        # The command is the session owner's, so the payload carries the
+        # session's subject -- the same caller its model calls name -- while
+        # entry and workspace stay those of a user-run shell command.
+        try:
+            session_profile = await get_session_execution_profile(session_id) or {}
+        except Exception as exc:
+            # Without a readable profile the command still runs, under the
+            # system caller, exactly as it did before callers existed.
+            log.warn("runner.shell.profile_unavailable", {"session_id": session_id, "error": str(exc)})
+            session_profile = {}
+        shell_subject = {
+            key: session_profile[key]
+            for key in ("subject_id", "subject_type", "owner_user_id", "owner_username")
+            if session_profile.get(key)
+        }
 
         payload = await build_session_tool_execution_payload(
             session_id=session_id,
@@ -1449,10 +1501,14 @@ class SessionRunner:
                 "required": ["command"],
             },
             tool_context_extra={
+                # Audit sinks record the attempt under the call id; a user-run
+                # shell command has no streamed call, so mint one here.
+                "tool_call_id": Identifier.create("call"),
                 "tool_source": "session_runner",
                 "tool_category": "command",
                 "workspace_dir": cwd,
                 "session_execution_profile": {
+                    **shell_subject,
                     "entry": "session.shell",
                     "workspace_dir": cwd,
                 },
@@ -1761,11 +1817,14 @@ class SessionRunner:
             tools=tools,
             minimal_prompt=minimal_prompt,
         )
+        # ``PromptRequest.system`` is a per-turn override of the agent prompt;
+        # the rest of the system prompt (environment, tools, memory) stays.
+        system_override = getattr(last_user, "system", None)
         system_prompts = await SessionPrompt.build_system_prompt_blocks(
             session_id=self.session.id,
             session_directory=self.session.directory,
             agent_name=agent.name,
-            agent_prompt=getattr(agent, "prompt", None),
+            agent_prompt=system_override or getattr(agent, "prompt", None),
             agent_skill_names=getattr(agent, "skills", ()) or (),
             prompt_profile=getattr(agent, "prompt_profile", "standard"),
             provider_id=self.provider_id,
@@ -1911,13 +1970,25 @@ class SessionRunner:
                 SessionStatus.set(self.session.id, SessionStatusBusy())
 
                 # Call LLM with tools
-                result = await self._call_llm(
-                    provider=provider,
-                    messages=chat_messages,
-                    tools=tools,
-                    agent=agent,
-                    assistant_msg=assistant_msg,
-                )
+                try:
+                    result = await self._call_llm(
+                        provider=provider,
+                        messages=chat_messages,
+                        tools=tools,
+                        agent=agent,
+                        assistant_msg=assistant_msg,
+                    )
+                except asyncio.CancelledError:
+                    # An external abort cancels the step task mid-stream. Persist
+                    # the same marker the cooperative abort path writes below so
+                    # the partial reply is not left looking in-flight forever.
+                    await asyncio.shield(Message.update(
+                        self.session.id,
+                        assistant_msg.id,
+                        error=self._build_message_aborted_error(),
+                        finish="error",
+                    ))
+                    raise
 
                 if getattr(self, "_llm_call_aborted", False):
                     await Message.update(
@@ -2772,6 +2843,53 @@ class SessionRunner:
             f"{catalog_summary}"
         )
 
+    @staticmethod
+    def _with_isolated_tool_catalog(
+        messages: List[ChatMessage],
+        agent: AgentInfo,
+        tools: List[Dict[str, Any]],
+    ) -> List[ChatMessage]:
+        """Add awareness only from final, declared callable schemas.
+
+        Run after before-LLM hooks so narrowed tools cannot remain in an old
+        catalog. Do not change the cached conversation or persisted history.
+        """
+        if getattr(agent, "prompt_profile", "standard") != "isolated":
+            return messages
+        declared = set(getattr(agent, "tools", None) or [])
+        lines = ["## Current Callable Tools", ""]
+        names = set()
+        for tool in tools:
+            function = tool.get("function") or {}
+            name = function.get("name")
+            if not isinstance(name, str) or name not in declared or name in names:
+                continue
+            names.add(name)
+            description = " ".join(str(function.get("description") or "").split())[:160]
+            lines.append(f"- `{name}`: {description}")
+        if "tool_search" in names:
+            lines.extend([
+                "",
+                "Use `tool_search` to find a matching capability or inspect exact tool names. "
+                "Discovery is limited to this agent's declared and currently allowed tools; "
+                "it cannot grant new permissions or enable an unavailable tool.",
+            ])
+        if not names:
+            lines.append("No declared tools are currently callable. State the missing capability when needed.")
+        catalog = "\n".join(lines)
+        updated = list(messages)
+        for index, message in enumerate(updated):
+            if message.role != "system":
+                continue
+            system_message = copy.deepcopy(message)
+            if isinstance(system_message.content, list):
+                system_message.content.append({"type": "text", "text": catalog})
+            else:
+                system_message.content = f"{system_message.content or ''}\n\n{catalog}"
+            updated[index] = system_message
+            return updated
+        return [ChatMessage(role="system", content=catalog), *updated]
+
     def _should_use_text_tool_call_mode(self) -> bool:
         # MiniMax models exposed through ThreatBook-managed gateways do not
         # forward the OpenAI ``tool_calls`` field on their streaming chunks
@@ -3010,6 +3128,17 @@ class SessionRunner:
             "held_s": round(time.monotonic() - slot.granted_at, 3),
         })
 
+    def _release_budget_slot(self, reason: str) -> None:
+        slot = getattr(self, "_active_budget_slot", None)
+        if slot is None:
+            return
+        self._active_budget_slot = None
+        slot.release()
+        log.debug("runner.llm_budget_slot.released", {
+            "session_id": self.session.id,
+            "reason": reason,
+        })
+
     def _exception_to_error_dict(self, exception: Exception) -> Dict[str, Any]:
         """
         Convert exception to error dict for retry checking.
@@ -3187,7 +3316,7 @@ class SessionRunner:
             bool(getattr(msg, "compacted", None)),
             getattr(msg, "finish", None),
             json.dumps(getattr(msg, "error", None), ensure_ascii=False, sort_keys=True, default=str),
-            Message.get_parts_revision(self.session.id, msg.id),
+            Message.get_parts_cache_version(self.session.id, msg.id),
             latest_user_marker,
             self._provider_capability_key(),
         )
@@ -3369,6 +3498,41 @@ class SessionRunner:
             blocks.append(block)
         return blocks
 
+    async def _restore_session_uploads(self) -> None:
+        """Bring back this session's stored uploads missing from the local disk before reading them.
+
+        Costs one listing query and a size check per upload; only missing
+        files are fetched.
+        """
+        from flocks.session.files import restore_session_uploads
+
+        try:
+            await restore_session_uploads(self.session.id)
+        except Exception as exc:
+            log.warn("runner.uploads.restore_failed", {
+                "session_id": self.session.id,
+                "error_type": type(exc).__name__,
+            })
+
+    async def _restore_channel_media(self, parts_by_message: Dict[str, List[Any]]) -> None:
+        """Bring back the channel media these messages carry when it is missing from the local disk."""
+        from flocks.session.files import restore_channel_media
+        from flocks.session.utils.file_extractor import file_url_to_path
+
+        try:
+            paths = [
+                Path(file_url_to_path(readable_url(part.url, session_id=self.session.id))).resolve(strict=False)
+                for parts in parts_by_message.values() for part in parts
+                if getattr(part, "type", None) == "file" and str(getattr(part, "url", "") or "").startswith("file:")
+            ]
+            if paths:
+                await restore_channel_media(paths)
+        except Exception as exc:
+            log.warn("runner.channel_media.restore_failed", {
+                "session_id": self.session.id,
+                "error_type": type(exc).__name__,
+            })
+
     async def _to_chat_messages(
         self,
         messages: List[MessageInfo],
@@ -3383,6 +3547,7 @@ class SessionRunner:
         - Format tool results as user messages
         """
         started_at = time.perf_counter()
+        await self._restore_session_uploads()
         chat_messages: List[ChatMessage] = []
         ctx_window_tokens = self._get_context_window_tokens()
         tool_result_refs: List[Dict[str, Any]] = []
@@ -3410,8 +3575,10 @@ class SessionRunner:
 
         preloaded_parts: List[List[Any]] = []
         message_signatures: List[Tuple[Any, ...]] = []
+        parts_by_message = await Message.parts_many(self.session.id, [msg.id for msg in messages])
+        await self._restore_channel_media(parts_by_message)
         for msg in messages:
-            parts = await Message.parts(msg.id, self.session.id)
+            parts = parts_by_message.get(msg.id, [])
             preloaded_parts.append(parts)
             message_signatures.append(
                 self._message_conversion_cache_key(
@@ -3469,7 +3636,7 @@ class SessionRunner:
             
             if not parts:
                 # Fallback: use text content only
-                content = await Message.get_text_content(msg)
+                content = await Message.get_text_content(msg, parts=parts)
                 if content.strip():
                     normalized_content = _expand_workflow_node_ref(content)
                     if role == "user" and msg.id in queued_user_message_ids:
@@ -3499,7 +3666,7 @@ class SessionRunner:
                             mime = getattr(part, 'mime', '')
                             if mime != 'application/x-directory':
                                 filename = getattr(part, 'filename', 'file')
-                                url = getattr(part, 'url', '')
+                                url = readable_url(getattr(part, 'url', ''), session_id=self.session.id)
                                 # Image bytes only ride on the latest user
                                 # turn — older turns are reduced to a short,
                                 # opaque placeholder. Crucially the placeholder
@@ -3811,6 +3978,45 @@ class SessionRunner:
         
         return chat_messages
     
+    async def _keep_interrupted_parts(self, processor: Any, assistant_msg: MessageInfo) -> None:
+        """Store the text and reasoning a cancelled step had already streamed.
+
+        They are only written at text-end / reasoning-end, which a cancelled
+        stream never reaches, so the user's stopped reply was left empty.
+        Called while unwinding the cancellation, before the step ends: the
+        write is awaited through another stop, up to a bound, and is not left
+        running past it, since once the session is released it is refused.
+        Calling it again once the parts are stored writes nothing.
+        """
+        try:
+            write = asyncio.ensure_future(processor.persist_interrupted_parts())
+        except Exception as exc:
+            log.warn("runner.stream.interrupted_parts_persist_failed", {
+                "session_id": self.session.id,
+                "message_id": assistant_msg.id,
+                "error": str(exc),
+            })
+            return
+        timed_out = not await _wait_through_cancel(write, _INTERRUPTED_PARTS_WRITE_TIMEOUT_S)
+        if timed_out:
+            log.warn("runner.stream.interrupted_parts_persist_timeout", {
+                "session_id": self.session.id,
+                "message_id": assistant_msg.id,
+            })
+            write.cancel()
+            if not await _wait_through_cancel(write, _INTERRUPTED_PARTS_CANCEL_GRACE_S):
+                write.add_done_callback(_read_outcome)
+                return
+        try:
+            write.result()
+        except (Exception, asyncio.CancelledError) as exc:
+            if not timed_out:
+                log.warn("runner.stream.interrupted_parts_persist_failed", {
+                    "session_id": self.session.id,
+                    "message_id": assistant_msg.id,
+                    "error": str(exc) or type(exc).__name__,
+                })
+
     async def _call_llm(
         self,
         provider: Any,
@@ -3889,6 +4095,10 @@ class SessionRunner:
                 })
             else:
                 self._release_llm_slot("tool_execution_started")
+                # Same for the workflow budget: an inline run_workflow inside a
+                # budgeted session would otherwise wait for the slot this turn
+                # holds while the turn waits for the tool.
+                self._release_budget_slot("tool_execution_started")
             if self.callbacks.on_tool_start:
                 await self.callbacks.on_tool_start(tool_name, tool_input)
 
@@ -4007,17 +4217,21 @@ class SessionRunner:
                 "modelID": self.model_id,
             },
         }
+        # The caller every hook stage of this call sees, derived like the actor
+        # of the tool payloads this response may produce.
+        from flocks.session.caller import session_caller
+
+        llm_hook_metadata.update((await session_caller(self.session.id)).as_metadata())
         llm_before_enabled = False
         llm_after_enabled = False
-        replacements: list[tuple[str, str]] = []
-        stream_text_rewriter: Optional[StreamingTextReplacementBuffer] = None
-        stream_reasoning_rewriter: Optional[StreamingTextReplacementBuffer] = None
+        legacy_replacements: list[tuple[str, str]] = []
+        response_rewriter: Optional[SessionResponseRewriter] = None
         self._llm_call_aborted = False
 
         async def _flush_reasoning_rewriter() -> None:
-            if stream_reasoning_rewriter is None or not hasattr(self, '_current_reasoning_id'):
+            if response_rewriter is None or not hasattr(self, '_current_reasoning_id'):
                 return
-            trailing_reasoning = stream_reasoning_rewriter.flush()
+            trailing_reasoning = await response_rewriter.flush_reasoning()
             if not trailing_reasoning:
                 return
             reasoning_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
@@ -4064,10 +4278,7 @@ class SessionRunner:
                 hook_started_at = time.perf_counter()
                 llm_before_ctx = await HookPipeline.run_llm_before(llm_before_hook_input)
                 hook_output = getattr(llm_before_ctx, "output", None) or {}
-                replacements = stream_text_replacements_from_hook_output(hook_output)
-                if replacements:
-                    stream_text_rewriter = StreamingTextReplacementBuffer(replacements)
-                    stream_reasoning_rewriter = StreamingTextReplacementBuffer(replacements)
+                legacy_replacements = stream_text_replacements_from_hook_output(hook_output)
                 updated_request = hook_output.get("request")
                 if isinstance(updated_request, dict):
                     messages, provider_options = apply_hook_request_output(
@@ -4106,6 +4317,19 @@ class SessionRunner:
             except Exception as exc:
                 log.error("runner.hook.llm_before.error", {"error": str(exc)})
                 raise RuntimeError("LLM before-hook failed; request was not sent") from exc
+
+        messages = self._with_isolated_tool_catalog(messages, agent, tools)
+
+        try:
+            response_rewriter = await SessionResponseRewriter.create(
+                llm_hook_metadata,
+                legacy_replacements=legacy_replacements,
+            )
+        except Exception as exc:
+            log.error("runner.response_transform.open_failed", {"error": str(exc)})
+            raise RuntimeError(
+                "Response transform could not be started; request was not sent"
+            ) from exc
 
         # -- Observability: create trace & generation scopes after llm_before,
         # so previews use the same redacted messages that will be sent to the provider.
@@ -4215,6 +4439,7 @@ class SessionRunner:
         # Keep it that way when adding tools that call the model themselves.
         llm_budget_slot = llm_slot()
         await llm_budget_slot.acquire()
+        self._active_budget_slot = llm_budget_slot
         # Then the provider's request slot (flocks.provider.concurrency), in
         # this order: waiting for the loop budget never holds a provider slot
         # that sessions on other loops are queueing for.
@@ -4228,7 +4453,7 @@ class SessionRunner:
         except BaseException:
             # Cancelled or failed while queued: the try/finally below has not
             # started, so hand the loop budget back here.
-            llm_budget_slot.release()
+            self._release_budget_slot("provider_slot_failed")
             raise
         slot_waited_s = time.perf_counter() - slot_wait_started
         if slot_waited_s >= 0.5:
@@ -4244,6 +4469,9 @@ class SessionRunner:
         self.execution_activity.update(
             state="waiting_model", request_started_at=time.time(), last_activity_at=time.time(),
         )
+        # Whatever a caller may be handling around this call: the finally
+        # below sees it in sys.exception() when nothing propagates from here.
+        caller_exception = sys.exception()
         try:
             await model_activity.start()
             async for chunk in _iter_with_chunk_timeout(
@@ -4314,8 +4542,8 @@ class SessionRunner:
                 event_type = getattr(chunk, 'event_type', None)
                 chunk_metadata = getattr(chunk, 'metadata', None) or {}
                 display_chunk_metadata = (
-                    restore_value_with_replacements(chunk_metadata, replacements)
-                    if replacements
+                    await response_rewriter.transform_metadata(chunk_metadata, llm_hook_metadata)
+                    if response_rewriter is not None
                     else chunk_metadata
                 )
                 reasoning_event_types = {"reasoning", "reasoning-start", "reasoning-end"}
@@ -4385,8 +4613,8 @@ class SessionRunner:
                         ))
 
                     if chunk_reasoning:
-                        if stream_reasoning_rewriter is not None:
-                            reasoning_text = stream_reasoning_rewriter.feed(reasoning_text)
+                        if response_rewriter is not None:
+                            reasoning_text = await response_rewriter.feed_reasoning(reasoning_text)
                         if reasoning_text:
                             await processor.process_event(ReasoningDeltaEvent(
                                 id=self._current_reasoning_id,
@@ -4409,8 +4637,8 @@ class SessionRunner:
 
                 # 3) Process text delta.
                 raw_chunk_text = chunk_text
-                if chunk_text and stream_text_rewriter is not None:
-                    chunk_text = stream_text_rewriter.feed(chunk_text)
+                if chunk_text and response_rewriter is not None:
+                    chunk_text = await response_rewriter.feed_text(chunk_text)
 
                 if raw_chunk_text:
                     self._attempt_state.observable_output_started = True
@@ -4436,7 +4664,7 @@ class SessionRunner:
             # The stream is over: give the LLM slot back before waiting on
             # foreground children, which run on this same loop and need slots
             # of their own (holding it here could deadlock the whole budget).
-            llm_budget_slot.release()
+            self._release_budget_slot("stream_over")
             # Not a user abort (that has stopped them already): a workflow
             # node timeout or a watchdog gave up on this execution. Stop the
             # subagents it started now, not after the drain below, which can
@@ -4448,11 +4676,16 @@ class SessionRunner:
                 from flocks.session.session_loop import SessionLoop
 
                 SessionLoop.end_cancelled_execution(self.session.id)
-            await model_activity.stop()
             self._release_llm_slot("cancelled")
+            # Before any other await, so a second stop cannot land in front
+            # of it (the finally below catches the rest).
+            await self._keep_interrupted_parts(processor, assistant_msg)
+            await model_activity.stop()
             # Foreground delegate tasks own child sessions. Let their
             # cancellation/finalization finish before unwinding this step.
             await processor.drain_parallel_tool_calls(execute_deferred=False)
+            if response_rewriter is not None:
+                await response_rewriter.close()
             raise
         except Exception as exc:
             # First statement in the branch, and synchronous on purpose: an
@@ -4462,7 +4695,7 @@ class SessionRunner:
             # refines the duration with the jittered delay; the limiter keeps
             # the longer of the two.
             self._report_rate_limit_cooldown_for_exception(exc)
-            llm_budget_slot.release()
+            self._release_budget_slot("stream_error")
             await model_activity.stop()
             self._release_llm_slot("stream_error")
             # A foreground delegate may already be running when the provider
@@ -4491,6 +4724,8 @@ class SessionRunner:
                     )
                 except Exception as hook_exc:
                     log.debug("runner.hook.llm_after.error", {"error": str(hook_exc)})
+            if response_rewriter is not None:
+                await response_rewriter.close()
             sent_output_limit = provider_options.get("max_tokens")
             if (
                 not self._attempt_state.received_chunk
@@ -4516,8 +4751,17 @@ class SessionRunner:
             # Free the provider slot first (synchronous, instant) so a queued
             # caller can start while the activity marker is persisted.
             self._release_llm_slot("stream_finished")
-            llm_budget_slot.release()
-            await model_activity.stop()
+            self._release_budget_slot("stream_finished")
+            try:
+                await model_activity.stop()
+            finally:
+                # Every way out of the stream passes here. A stop landing on
+                # an await of the error branch, or on this one after the
+                # stream ended, skips both the cancel branch's write and the
+                # text-end below.
+                unwinding = sys.exception()
+                if unwinding is not caller_exception and isinstance(unwinding, asyncio.CancelledError):
+                    await self._keep_interrupted_parts(processor, assistant_msg)
 
         self.execution_activity.update(state="processing", last_activity_at=time.time())
         log.debug("runner.stream.summary", {
@@ -4531,6 +4775,7 @@ class SessionRunner:
         })
 
         tool_args_truncated = False
+        response_rewriter_closed = False
         sent_output_limit = provider_options.get("max_tokens")
         next_output_limit = output_limits.next_max_tokens(
             self.provider_id,
@@ -4580,8 +4825,8 @@ class SessionRunner:
                     "raised_max_tokens": next_output_limit,
                 })
 
-            if stream_text_rewriter is not None:
-                trailing_text = stream_text_rewriter.flush()
+            if response_rewriter is not None:
+                trailing_text = await response_rewriter.flush_text()
                 if trailing_text:
                     if not text_started:
                         await processor.process_event(TextStartEvent())
@@ -4604,12 +4849,25 @@ class SessionRunner:
                 if hasattr(self, '_current_reasoning_metadata'):
                     delattr(self, '_current_reasoning_metadata')
 
+            # Every channel has been flushed, so the transform has nothing left to
+            # hold and its stream can be released.
+            if response_rewriter is not None:
+                response_rewriter_closed = True
+                await response_rewriter.close()
+
             # Emit finish event
             await processor.process_event(FinishEvent(
                 finish_reason=processor.get_finish_reason()
             ))
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                # Stopped while the finished stream was being closed (tool
+                # arguments, text-end running tool calls written in the text):
+                # the text is not stored yet here either.
+                await self._keep_interrupted_parts(processor, assistant_msg)
             await processor.drain_parallel_tool_calls(execute_deferred=False)
+            if response_rewriter is not None and not response_rewriter_closed:
+                await response_rewriter.close()
             raise
 
         # Foreground subagent tool-calls are launched concurrently during
@@ -4863,6 +5121,39 @@ class SessionRunner:
         agent = await Agent.get(agent_name) or await Agent.get("rex")
         return self._permission_ruleset_for_agent(agent)
 
+    def _patterns_seen_by(
+        self,
+        other: Any,
+        patterns: List[str],
+        metadata: Dict[str, Any],
+    ) -> List[str]:
+        """File patterns as the rules of ``other`` (a delegating session) see them.
+
+        File tools name paths relative to the directory of the session they
+        run in (``pattern_base``), and a session's ``edit`` rules are written
+        relative to its own directory.  A delegated session can run in another
+        directory (an agent with its own session directory, for one), so its
+        patterns are re-expressed from there.  Patterns based elsewhere (the
+        host Memory or Skill roots, a sandbox) do not depend on the session.
+        """
+        base = metadata.get("pattern_base")
+        own = str(getattr(self.session, "directory", "") or "")
+        theirs = str(getattr(other, "directory", "") or "")
+        if not (isinstance(base, str) and base and own and theirs):
+            return patterns
+        from flocks.tool.path_utils import normalize_user_path, safe_relpath
+
+        base = normalize_user_path(base)
+        their_base = normalize_user_path(theirs)
+        if base != normalize_user_path(own) or base == their_base:
+            return patterns
+        # An absolute pattern is a path the tool could not express relative to
+        # its base (another drive on Windows); it may still sit under theirs.
+        return [
+            safe_relpath(os.path.normpath(os.path.join(base, pattern)), their_base)
+            for pattern in patterns
+        ]
+
     async def _handle_permission(self, request) -> None:
         """Handle permission request."""
         from flocks.permission.next import PermissionNext
@@ -4886,7 +5177,12 @@ class SessionRunner:
             if inherited:
                 configured_action = PermissionNext.stricter(
                     configured_action,
-                    PermissionNext.evaluate_request(request.permission, patterns, inherited, aliases),
+                    PermissionNext.evaluate_request(
+                        request.permission,
+                        self._patterns_seen_by(parent, patterns, metadata),
+                        inherited,
+                        aliases,
+                    ),
                 )
         deny_only_preflight = metadata.get("reason") == "question_tool"
 

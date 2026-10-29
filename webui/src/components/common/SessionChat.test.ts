@@ -41,6 +41,7 @@ import {
   formatProcessDuration,
 } from './SessionChat';
 import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
 
 const clientGetMock = vi.fn();
 const clientPostMock = vi.fn();
@@ -862,7 +863,7 @@ describe('SessionChat subagent permission requests', () => {
     });
     expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/ask.marker');
 
-    await userEvent.setup().click(screen.getByRole('button', { name: '允许一次' }));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'chat.permission.allowOnce' }));
     expect(clientPostMock).toHaveBeenCalledWith(
       '/api/permission/perm-grandchild/reply',
       { allow: true, always: false },
@@ -929,7 +930,7 @@ describe('SessionChat subagent permission requests', () => {
       useSSEOptionsRef.current.onEvent({ type: 'permission.request', properties: nextRequest });
     });
 
-    await userEvent.setup().click(screen.getByRole('button', { name: '允许一次' }));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'chat.permission.allowOnce' }));
 
     await waitFor(() => {
       expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/next.marker');
@@ -1106,7 +1107,7 @@ describe('SessionChat focused message deep links', () => {
       truncateAfterMessage: vi.fn(),
     });
 
-    render(React.createElement(SessionChat, {
+    const { rerender } = render(React.createElement(SessionChat, {
       sessionId: 'sess-1',
       focusMessageId: 'target-message',
       onFocusMessageConsumed,
@@ -1114,6 +1115,11 @@ describe('SessionChat focused message deep links', () => {
 
     await waitFor(() => expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled());
     expect(onFocusMessageConsumed).toHaveBeenCalledTimes(1);
+    rerender(React.createElement(SessionChat, { sessionId: 'sess-1', onFocusMessageConsumed }));
+    rerender(React.createElement(SessionChat, {
+      sessionId: 'sess-1', focusMessageId: 'target-message', onFocusMessageConsumed,
+    }));
+    await waitFor(() => expect(onFocusMessageConsumed).toHaveBeenCalledTimes(2));
   });
 });
 
@@ -1687,6 +1693,7 @@ describe('SessionChat embedded full layout', () => {
 
     expect(container.querySelector('.space-y-5.px-12')).toBeInTheDocument();
   });
+
 });
 
 describe('SessionChat copy action', () => {
@@ -2756,6 +2763,69 @@ describe('SessionChat welcome prompt sending', () => {
 });
 
 describe('SessionChat composer controls', () => {
+  function ModalChat({ onClose }: { onClose: () => void }) {
+    const dialogRef = React.useRef<HTMLDivElement>(null);
+    useDialogFocus(dialogRef, true, onClose);
+    return React.createElement('div', { ref: dialogRef, role: 'dialog', tabIndex: -1 },
+      React.createElement(SessionChat, { sessionId: 'sess-1', contextWindowTokens: 1000 }));
+  }
+
+  it.each([
+    ['添加', '添加'],
+    ['chat.contextUsageTitle', 'Context Usage'],
+  ])('Escape closes the %s menu before its enclosing modal', async (triggerLabel, menuLabel) => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    clientGetMock.mockImplementation(async (url: string) => ({ data: url === '/api/permission' ? [] : {} }));
+    render(React.createElement(ModalChat, { onClose }));
+    const trigger = screen.getByRole('button', { name: triggerLabel });
+    await user.click(trigger);
+    expect(screen.getByRole('menu', { name: menuLabel })).toBeInTheDocument();
+    if (triggerLabel === '添加') {
+      await user.tab();
+      expect(screen.getByRole('menuitem', { name: '文件和图片' })).toHaveFocus();
+    }
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu', { name: menuLabel })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('Escape dismisses the Add menu opened from @ without losing the draft or its focus', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    clientGetMock.mockImplementation(async (url: string) => ({ data: url === '/api/permission' ? [] : {} }));
+    render(React.createElement(ModalChat, { onClose }));
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    await user.type(textarea, 'keep this @');
+    expect(screen.getByRole('menu', { name: '添加' })).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu', { name: '添加' })).not.toBeInTheDocument();
+    expect(textarea).toHaveFocus();
+    expect(textarea).toHaveValue('keep this ');
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('returns from paged history using the shared primary action', async () => {
+    const user = userEvent.setup();
+    const loadLatest = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      ...useSessionMessagesMock(),
+      messages: [makeMessage({ id: 'older-message', role: 'user', parts: [{ type: 'text', text: 'Earlier question' }] })],
+      hasNewer: true,
+      loadLatest,
+    });
+    clientGetMock.mockImplementation(async (url: string) => ({ data: url === '/api/permission' ? [] : {} }));
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    const latest = screen.getByRole('button', { name: 'chat.history.latest' });
+    // Drawn in dev's palette (the dark primary button), not the v2 token classes.
+    expect(latest).toHaveClass('bg-slate-800', 'text-white');
+    await user.click(latest);
+    expect(loadLatest).toHaveBeenCalledTimes(1);
+  });
+
   it('enables Auto on an existing session before sending without a model override', async () => {
     const user = userEvent.setup();
     render(React.createElement(SessionChat, {
@@ -2786,10 +2856,9 @@ describe('SessionChat composer controls', () => {
   });
 
   it('keeps the disabled send button visible in dark mode', () => {
-    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
-
-    const disabledButtons = Array.from(container.querySelectorAll('button:disabled'));
-    const sendButton = disabledButtons.find((button) => button.querySelector('svg'));
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    const sendButton = screen.getByRole('button', { name: 'chat.sendTitle' });
+    expect(sendButton).toBeDisabled();
 
     expect(sendButton?.className).toContain('bg-ui-subtle');
     expect(sendButton?.className).toContain('text-ui-muted');
@@ -4134,6 +4203,10 @@ describe('SessionChat intermediate process collapse', () => {
     expect(screen.getByTestId('chat-process-reasoning-preview')).not.toHaveClass('flex-1');
     expect(screen.getByTestId('chat-process-reasoning-preview').nextElementSibling).toHaveClass('lucide-chevron-down');
     expect(screen.getByTestId('chat-process-tool-step')).toHaveTextContent('读取文件');
+    // the timeline shows the tool status as an icon; its label must still be exposed
+    const toolStep = screen.getByTestId('chat-process-tool-step');
+    expect(toolStep).toHaveAttribute('data-tool-status', 'completed');
+    expect(toolStep.querySelector('summary [role="img"]')).toHaveAttribute('aria-label', '已完成');
   });
 
   it('hides the reasoning preview while the reasoning body is expanded', () => {
@@ -4976,6 +5049,35 @@ describe('SessionChat optimistic message identity', () => {
 
       const optimisticMessage = addMessage.mock.calls[0][0] as Message;
       expect(removeMessage).toHaveBeenCalledWith(optimisticMessage.id);
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('reports a rejected prompt through a toast (not a blocking alert) and keeps the draft', async () => {
+    const user = userEvent.setup();
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const err = Object.assign(new Error('Request failed with status code 403'), { response: { status: 403, data: { message: '无权向此会话发送' } } });
+    clientPostMock.mockRejectedValueOnce(err);
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    try {
+      render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+      await user.type(screen.getByPlaceholderText('请输入消息'), '这条会被 403{enter}');
+
+      await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith('chat.sendFailed', '无权向此会话发送'));
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('这条会被 403');
     } finally {
       alertSpy.mockRestore();
     }
@@ -6554,6 +6656,8 @@ describe('SessionChat context usage popover', () => {
     expect(contextButton).toHaveTextContent('29%');
 
     await user.click(screen.getByLabelText('chat.edit'));
+    // editing shows the raw-content hint above the editor
+    expect(screen.getByTestId('chat-edit-raw-hint')).toHaveTextContent('chat.editRawHint');
     fireEvent.change(screen.getByDisplayValue(originalText), { target: { value: editedText } });
     await user.click(screen.getByLabelText('chat.sendEdited'));
 
@@ -7418,7 +7522,7 @@ describe('SessionChat fallback polling', () => {
       expect(refetch).toHaveBeenCalledTimes(1);
       expect(clientGetMock.mock.calls.filter(
         ([url]) => url === '/api/session/sess-1/message',
-      )).toHaveLength(2);
+      )).toHaveLength(1);
 
       await act(async () => {
         resolveRefetch?.();
@@ -7476,6 +7580,7 @@ describe('SessionChat fallback polling', () => {
 
       expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message', {
         params: { page: true, limit: 50, include_archived: true },
+        signal: expect.any(AbortSignal),
       });
       expect(clientGetMock).not.toHaveBeenCalledWith('/api/session/status');
       expect(refetch).not.toHaveBeenCalled();
@@ -7534,7 +7639,7 @@ describe('SessionChat fallback polling', () => {
         await vi.advanceTimersByTimeAsync(5_000);
       });
 
-      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status', { signal: expect.any(AbortSignal) });
       expect(refetch).toHaveBeenCalledTimes(1);
       expect(onStreamingDone).toHaveBeenCalledTimes(1);
 
@@ -7587,6 +7692,7 @@ describe('SessionChat fallback polling', () => {
       expect(clientGetMock).not.toHaveBeenCalledWith('/api/session/status');
       expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message', {
         params: { page: true, limit: 50, include_archived: true },
+        signal: expect.any(AbortSignal),
       });
     } finally {
       vi.useRealTimers();
@@ -7677,6 +7783,98 @@ describe('SessionChat fallback polling', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('SessionChat fallback request lifecycle', () => {
+  const finishedPage = { data: { items: [makeFetchedMessage({ id: 'done', role: 'assistant', finish: 'stop' })] } };
+  const emitStatus = (sessionID: string, type: string) => {
+    act(() => useSSEOptionsRef.current.onEvent({ type: 'session.status', properties: { sessionID, status: { type } } }));
+  };
+  async function mountChat(key?: string) {
+    const view = render(React.createElement(SessionChat, { key, sessionId: 'sess-1', live: true }));
+    await act(async () => {});
+    emitStatus('sess-1', 'busy');
+    return view;
+  }
+  afterEach(() => { vi.useRealTimers(); });
+
+  it.each([false, true])('ignores an old session response after switching (keyed=%s)', async (keyed) => {
+    vi.useFakeTimers();
+    const pending = deferred<any>();
+    const view = await mountChat(keyed ? 'sess-1' : undefined);
+    clientGetMock.mockImplementation((url: string) => url === '/api/session/sess-1/message'
+      ? pending.promise : Promise.resolve({ data: {} }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    view.rerender(React.createElement(SessionChat, { key: keyed ? 'sess-2' : undefined, sessionId: 'sess-2', live: true }));
+    await act(async () => {});
+    emitStatus('sess-2', 'busy');
+    clientGetMock.mockClear();
+    await act(async () => { pending.resolve(finishedPage); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(clientGetMock.mock.calls.filter(([url]) => url === '/api/session/status')).toHaveLength(0);
+  });
+
+  it('ignores the old idle response after a new turn starts in the same batched update', async () => {
+    vi.useFakeTimers();
+    const pending = deferred<any>();
+    await mountChat();
+    clientGetMock.mockImplementation((url: string) => url.endsWith('/message')
+      ? Promise.resolve(finishedPage) : url === '/api/session/status' ? pending.promise : Promise.resolve({ data: {} }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({ type: 'session.status', properties: { sessionID: 'sess-1', status: { type: 'idle' } } });
+      useSSEOptionsRef.current.onEvent({ type: 'session.status', properties: { sessionID: 'sess-1', status: { type: 'busy' } } });
+    });
+    await act(async () => { pending.resolve({ data: {} }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+  });
+
+  it('ignores an idle response after a newer active tool event', async () => {
+    vi.useFakeTimers();
+    const pending = deferred<any>();
+    await mountChat();
+    clientGetMock.mockImplementation((url: string) => url.endsWith('/message')
+      ? Promise.resolve(finishedPage) : url === '/api/session/status' ? pending.promise : Promise.resolve({ data: {} }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    act(() => useSSEOptionsRef.current.onEvent({ type: 'message.part.updated', properties: {
+      part: { id: 'new-tool', messageID: 'new-assistant', sessionID: 'sess-1', type: 'tool', tool: 'bash', state: { status: 'running' } },
+    } }));
+    await act(async () => { pending.resolve({ data: {} }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+  });
+
+  it('allows only one slow poll and aborts it when the component unmounts', async () => {
+    vi.useFakeTimers();
+    const pending = deferred<any>();
+    const view = await mountChat();
+    clientGetMock.mockImplementation((url: string) => url.endsWith('/message') ? pending.promise : Promise.resolve({ data: {} }));
+    clientGetMock.mockClear();
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    const requests = clientGetMock.mock.calls.filter(([url]) => url.endsWith('/message'));
+    expect(requests).toHaveLength(1);
+    const signal = requests[0][1].signal as AbortSignal;
+    view.unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => { pending.resolve(finishedPage); });
+    expect(clientGetMock.mock.calls.filter(([url]) => url === '/api/session/status')).toHaveLength(0);
+  });
+
+  it('retries after a failed poll and completes on the next idle response', async () => {
+    vi.useFakeTimers();
+    await mountChat();
+    let messageRequests = 0;
+    clientGetMock.mockImplementation((url: string) => {
+      if (!url.endsWith('/message')) return Promise.resolve({ data: {} });
+      messageRequests += 1;
+      return messageRequests === 1 ? Promise.reject(new Error('network down')) : Promise.resolve(finishedPage);
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(messageRequests).toBe(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(messageRequests).toBe(2);
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
   });
 });
 

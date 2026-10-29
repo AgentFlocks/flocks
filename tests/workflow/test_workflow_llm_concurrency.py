@@ -22,18 +22,44 @@ class _Response:
 
 
 class _CountingProvider:
-    """Records how many chat() calls overlap."""
+    """Records how many chat() calls overlap.
 
-    def __init__(self, provider_id: str, hold_s: float = 0.15) -> None:
+    Workflows call a workflow-local clone of the provider, so clones share the
+    counters with the instance the test inspects.
+    """
+
+    def __init__(self, provider_id: str, hold_s: float = 0.15, _state: dict | None = None) -> None:
         self.id = provider_id
         self.hold_s = hold_s
-        self.now = 0
-        self.peak = 0
-        self.calls = 0
-        self._lock = threading.Lock()
+        self._state = _state if _state is not None else {"now": 0, "peak": 0, "calls": 0}
+        self._lock = self._state.setdefault("lock", threading.Lock())
 
     def __copy__(self):
-        return self
+        return _CountingProvider(self.id, self.hold_s, self._state)
+
+    @property
+    def now(self) -> int:
+        return self._state["now"]
+
+    @now.setter
+    def now(self, value: int) -> None:
+        self._state["now"] = value
+
+    @property
+    def peak(self) -> int:
+        return self._state["peak"]
+
+    @peak.setter
+    def peak(self, value: int) -> None:
+        self._state["peak"] = value
+
+    @property
+    def calls(self) -> int:
+        return self._state["calls"]
+
+    @calls.setter
+    def calls(self, value: int) -> None:
+        self._state["calls"] = value
 
     def configure(self, cfg):
         return None

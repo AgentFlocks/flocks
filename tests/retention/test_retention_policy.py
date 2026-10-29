@@ -9,6 +9,7 @@ from flocks.config.config import ConfigInfo
 from flocks.retention import RetentionPolicy, apply_log_retention, policy_from_config
 from flocks.utils.log import (
     Log,
+    get_log_dir,
     get_log_retention_days,
     list_expired_log_paths,
     set_log_retention_days_override,
@@ -74,20 +75,119 @@ def test_bad_config_values_never_break_loading(section):
 
 
 async def test_preload_log_retention_applies_saved_policy_before_cleanup(monkeypatch, tmp_path):
-    from flocks.config.config import Config, ConfigInfo
+    from flocks.config.config_writer import ConfigWriter
     from flocks.retention import preload_log_retention
 
     monkeypatch.setenv("FLOCKS_LOG_RETENTION_DAYS", "30")
     set_log_retention_days_override(None)
     assert get_log_retention_days() == 30
 
-    async def _fake_get():
-        return ConfigInfo.model_validate({"dataRetention": {"logDays": 0, "messageDays": 0, "sessionDays": 0}})
-
-    monkeypatch.setattr(Config, "get", classmethod(lambda cls: _fake_get()))
+    ConfigWriter._write_raw({"dataRetention": {"logDays": 0, "messageDays": 0, "sessionDays": 0}})
     await preload_log_retention()
     # 0 = keep forever, applied before any first cleanup would run.
     assert get_log_retention_days() == 0
+
+
+async def test_after_preload_only_the_scheduler_deletes_logs(monkeypatch):
+    # Every Flocks process preloads; from then on its logger deletes nothing on its
+    # own (startup or rollover), and expired logs go in the scheduler's fenced round.
+    import flocks.utils.log as log_module
+    from flocks.config.config_writer import ConfigWriter
+    from flocks.retention import preload_log_retention
+    from flocks.retention.scheduler import DataRetentionScheduler
+    from flocks.utils.log import LogLevel
+
+    log_dir = get_log_dir()
+    old_dir = log_dir / (datetime.now() - timedelta(days=20)).date().isoformat()
+    old_dir.mkdir(parents=True)
+    ConfigWriter._write_raw({"dataRetention": {"logDays": 7, "messageDays": 0, "sessionDays": 0}})
+
+    class FakeDate:
+        current = (datetime.now() - timedelta(days=1)).date()
+
+        @classmethod
+        def today(cls):
+            return cls.current
+
+    monkeypatch.setattr(log_module, "date", FakeDate)
+    try:
+        await preload_log_retention()
+        await Log.init(print=False, dev=False, level=LogLevel.INFO)  # a CLI process starting
+        assert old_dir.exists()
+        FakeDate.current = datetime.now().date()
+        Log.Default.info("next day")  # its day rollover
+        assert old_dir.exists()
+
+        report = await DataRetentionScheduler.run_once()
+        assert report is not None and report.log_paths == 1 and not old_dir.exists()
+    finally:
+        if Log._writer:
+            Log._writer.close()
+            Log._writer = None
+        if Log._error_writer:
+            Log._error_writer.close()
+            Log._error_writer = None
+        Log._log_file = None
+        Log._log_dir_path = None
+        Log._log_date = None
+
+
+async def test_stopping_the_scheduler_keeps_a_preloaded_logger_out_of_deleting(monkeypatch):
+    # Shutdown can cross midnight. The logger only knows the period it read last,
+    # older than what another process saved since, so stop() must not hand
+    # deleting back to it.
+    import flocks.utils.log as log_module
+    from flocks.config.config_writer import ConfigWriter
+    from flocks.retention import bump_policy_version, preload_log_retention
+    from flocks.retention.scheduler import DataRetentionScheduler
+    from flocks.utils.log import LogLevel, set_log_cleanup_managed
+
+    log_dir = get_log_dir()
+    old_dir = log_dir / (datetime.now() - timedelta(days=20)).date().isoformat()
+    old_dir.mkdir(parents=True)
+    ConfigWriter._write_raw({"dataRetention": {"logDays": 7, "messageDays": 0, "sessionDays": 0}})
+
+    class FakeDate:
+        current = (datetime.now() - timedelta(days=1)).date()
+
+        @classmethod
+        def today(cls):
+            return cls.current
+
+    monkeypatch.setattr(log_module, "date", FakeDate)
+    try:
+        await preload_log_retention()
+        await Log.init(print=False, dev=False, level=LogLevel.INFO)
+        await DataRetentionScheduler.start()
+        # Another process saves "keep forever"; this one runs no round before it stops.
+        ConfigWriter._write_raw({"dataRetention": {"logDays": 0, "messageDays": 0, "sessionDays": 0}})
+        await bump_policy_version()
+        await DataRetentionScheduler.stop()
+
+        FakeDate.current = datetime.now().date()
+        Log.Default.info("next day, after shutdown")  # its day rollover
+        assert old_dir.exists()
+
+        from flocks.utils.log import log_cleanup_managed
+
+        assert log_cleanup_managed() is True
+        # Without a preload (library use, tests) stop() gives deleting back as before.
+        set_log_cleanup_managed(False)
+        await DataRetentionScheduler.start()
+        assert log_cleanup_managed() is True
+        await DataRetentionScheduler.stop()
+        assert log_cleanup_managed() is False
+    finally:
+        await DataRetentionScheduler.stop()
+        if Log._writer:
+            Log._writer.close()
+            Log._writer = None
+        if Log._error_writer:
+            Log._error_writer.close()
+            Log._error_writer = None
+        Log._log_file = None
+        Log._log_dir_path = None
+        Log._log_date = None
 
 
 def test_oversized_values_are_capped():
@@ -193,3 +293,79 @@ def test_zero_days_keeps_every_log(tmp_path):
     Log._cleanup_sync(log_dir, retention_days=0)
 
     assert sorted(path.name for path in log_dir.iterdir()) == before
+
+
+
+
+async def test_day_rollover_leaves_log_cleanup_to_the_scheduler(monkeypatch):
+    # flocks.json says 7 days, but the effective policy is "keep forever" from a
+    # higher-priority layer (FLOCKS_CONFIG_CONTENT). The logger's own period is 7, so
+    # while the scheduler runs, rollover deletes nothing; the scheduler's round reads
+    # every layer and keeps the logs too.
+    import flocks.utils.log as log_module
+    from flocks.config.config import Config
+    from flocks.config.config_writer import ConfigWriter
+    from flocks.retention.scheduler import DataRetentionScheduler
+    from flocks.utils.log import LogLevel, set_log_cleanup_managed
+
+    log_dir = get_log_dir()
+    first_day = (datetime.now() - timedelta(days=1)).date()
+    old_dir = log_dir / (datetime.now() - timedelta(days=20)).date().isoformat()
+    old_dir.mkdir(parents=True)
+    (old_dir / "flocks.log").write_text("old", encoding="utf-8")
+
+    class FakeDate:
+        current = first_day
+
+        @classmethod
+        def today(cls):
+            return cls.current
+
+    monkeypatch.setattr(log_module, "date", FakeDate)
+    try:
+        await Log.init(print=False, dev=False, level=LogLevel.INFO)
+        ConfigWriter._write_raw({"dataRetention": {"logDays": 7, "messageDays": 0, "sessionDays": 0}})
+        monkeypatch.setenv("FLOCKS_CONFIG_CONTENT", '{"dataRetention": {"logDays": 0}}')
+        Config._global_config = None
+        Config.clear_cache()
+        apply_log_retention(RetentionPolicy(logDays=7, messageDays=0, sessionDays=0))
+        set_log_cleanup_managed(True)  # what the running scheduler sets
+
+        FakeDate.current = datetime.now().date()
+        Log.Default.info("next day")
+        assert old_dir.exists()
+
+        report = await DataRetentionScheduler.run_once()
+        assert report is not None and report.log_paths == 0
+        assert old_dir.exists()
+    finally:
+        set_log_cleanup_managed(False)
+        if Log._writer:
+            Log._writer.close()
+            Log._writer = None
+        if Log._error_writer:
+            Log._error_writer.close()
+            Log._error_writer = None
+        Log._log_file = None
+        Log._log_dir_path = None
+        Log._log_date = None
+
+
+async def test_the_scheduler_follows_the_highest_priority_configuration(monkeypatch):
+    # flocks.json says 7 days, the inline configuration (FLOCKS_CONFIG_CONTENT) says keep forever.
+    from flocks.config.config import Config
+    from flocks.config.config_writer import ConfigWriter
+    from flocks.retention.scheduler import DataRetentionScheduler
+
+    log_dir = get_log_dir()
+    old_dir = log_dir / (datetime.now() - timedelta(days=20)).date().isoformat()
+    old_dir.mkdir(parents=True)
+    ConfigWriter._write_raw({"dataRetention": {"logDays": 7, "messageDays": 0, "sessionDays": 0}})
+    monkeypatch.setenv("FLOCKS_CONFIG_CONTENT", '{"dataRetention": {"logDays": 0}}')
+    Config._global_config = None
+    Config.clear_cache()
+
+    report = await DataRetentionScheduler.run_once()
+
+    assert report is not None and report.log_paths == 0 and old_dir.exists()
+

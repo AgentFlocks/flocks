@@ -29,10 +29,55 @@ def test_is_owner_by_user_id():
     assert SessionPolicy.is_owner(session, user) is True
 
 
-def test_is_owner_by_username_fallback():
-    user = _make_user(user_id="usr_999")  # id differs
+def test_legacy_username_does_not_identify_the_current_account():
+    user = _make_user(user_id="usr_999")
+    session = _make_session(owner_user_id=None)
+    assert SessionPolicy.is_owner(session, user) is False
+    assert SessionPolicy.can_read(session, user) is False
+    assert SessionPolicy.can_write(session, user) is False
+    assert SessionPolicy.can_delete(session, user) is False
+
+
+def test_legacy_username_session_allows_admin_management_and_explicit_readers():
+    admin = _make_user(user_id="usr_admin", username="admin", role="admin")
+    reader = _make_user(user_id="usr_reader", username="reader")
+    session = _make_session(owner_user_id=None, metadata={"shared_read_access_user_ids": [reader.id]})
+    assert SessionPolicy.can_read(session, admin) is True
+    assert SessionPolicy.can_write(session, admin) is True
+    assert SessionPolicy.can_delete(session, admin) is True
+    assert SessionPolicy.can_read(session, reader) is True
+    assert SessionPolicy.can_write(session, reader) is False
+    assert SessionPolicy.can_delete(session, reader) is False
+
+
+def test_legacy_username_session_does_not_inherit_broad_sharing():
+    reader = _make_user(user_id="usr_new", username="alice")
+    session = _make_session(owner_user_id=None, metadata={"shared_local": True})
+    assert SessionPolicy.can_read(session, reader, shared_project_ids={session.project_id}) is False
+
+
+def test_matching_username_does_not_override_different_owner_id():
+    user = _make_user(user_id="usr_recreated")
     session = _make_session()
-    assert SessionPolicy.is_owner(session, user) is True
+    assert SessionPolicy.is_owner(session, user) is False
+    assert SessionPolicy.can_read(session, user) is False
+    assert SessionPolicy.can_write(session, user) is False
+    assert SessionPolicy.can_delete(session, user) is False
+
+
+def test_matching_username_on_shared_session_is_read_only_for_different_id():
+    user = _make_user(user_id="usr_recreated")
+    session = _make_session(metadata={"shared_local": True})
+    assert SessionPolicy.can_read(session, user) is True
+    assert SessionPolicy.can_write(session, user) is False
+    assert SessionPolicy.can_delete(session, user) is False
+
+
+def test_same_owner_id_remains_owner_after_username_change():
+    user = _make_user(username="renamed-alice")
+    session = _make_session()
+    assert SessionPolicy.can_read(session, user) is True
+    assert SessionPolicy.can_write(session, user) is True
 
 
 def test_can_read_admin_cannot_read_private_of_others():

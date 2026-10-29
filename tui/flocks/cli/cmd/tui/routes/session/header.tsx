@@ -1,7 +1,7 @@
 import { type Accessor, createMemo, createSignal, Match, Show, Switch } from "solid-js"
 import { useRouteData } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
-import { pipe, sumBy } from "remeda"
+import { sessionCost } from "./cost"
 import { useTheme } from "@tui/context/theme"
 import { SplitBorder } from "@tui/component/border"
 import type { AssistantMessage, Session } from "@flocks-ai/sdk/v2"
@@ -36,10 +36,7 @@ export function Header() {
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
 
   const cost = createMemo(() => {
-    const total = pipe(
-      messages(),
-      sumBy((x) => (x.role === "assistant" ? x.cost : 0)),
-    )
+    const total = sessionCost(messages())
     return new Intl.NumberFormat("en-US", {
       style: "currency",
       currency: "USD",

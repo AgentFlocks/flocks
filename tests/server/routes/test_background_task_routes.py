@@ -139,15 +139,34 @@ def test_parent_session_decides_before_the_task_has_its_own(sessions) -> None:
     assert _client(_user("other-id")).get("/api/background-task/bg_pending").status_code == 404
 
 
-def test_tasks_without_a_stored_session_are_admin_only(sessions) -> None:
-    _add_task("bg_orphan", session_id="ses_deleted")
+def test_ownerless_and_sessionless_tasks_are_admin_only(sessions) -> None:
     _add_task("bg_system", session_id="ses_ownerless")
+    _add_task("bg_sessionless", session_id=None)
 
     member_ids = [item["id"] for item in _client(_user("member-id")).get("/api/background-task").json()]
     admin_ids = [item["id"] for item in _client(_user("admin-id", role="admin")).get("/api/background-task").json()]
 
     assert member_ids == []
-    assert sorted(admin_ids) == ["bg_orphan", "bg_system"]
+    assert sorted(admin_ids) == ["bg_sessionless", "bg_system"]
+
+
+def test_tasks_of_a_session_that_is_gone_stay_hidden_even_from_admins(sessions) -> None:
+    """v2: a finished task keeps its prompt and output in memory after its
+    private session is deleted, and an admin could not read that session
+    while it existed. A failed read looks the same (``None``)."""
+    _add_task("bg_orphan", session_id="ses_deleted")
+    admin = _client(_user("admin-id", role="admin"))
+
+    assert admin.get("/api/background-task").json() == []
+    assert admin.get("/api/background-task/bg_orphan").status_code == 404
+    assert admin.post("/api/background-task/bg_orphan/cancel").status_code == 404
+
+
+def test_a_missing_own_session_does_not_fall_back_to_the_parent(sessions) -> None:
+    """The parent session stands in only before the task has a session of its own."""
+    _add_task("bg_child_gone", session_id="ses_deleted", parent_session_id="ses_owner")
+
+    assert _client(_user("owner-id")).get("/api/background-task/bg_child_gone").status_code == 404
 
 
 def test_cancel_of_a_scheduled_task_run_goes_through_the_task_manager(sessions, monkeypatch) -> None:
@@ -191,3 +210,16 @@ async def test_cancelling_a_finished_task_changes_nothing(client, session_id: st
 
     assert response.status_code == 409
     assert (task.status, task.completed_at) == ("completed", 1_700_000_000_000)
+
+
+def test_shared_reader_sees_the_task_but_cannot_cancel_it(sessions) -> None:
+    """v2: a session shared read-only shows its task, but only the owner stops it."""
+    sessions["ses_shared"] = _session("ses_shared", "owner-id").model_copy(
+        update={"metadata": {"shared_local": True}}
+    )
+    task = _add_task("bg_shared", session_id="ses_shared")
+    reader = _client(_user("reader-id"))
+
+    assert reader.get("/api/background-task/bg_shared").status_code == 200
+    assert reader.post("/api/background-task/bg_shared/cancel").status_code == 403
+    assert task.status == "running"

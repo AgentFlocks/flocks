@@ -4,6 +4,21 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { PermissionApprovalDialog } from './PermissionApprovalDialog';
 
+// Mirror of zh-CN/session.json chat.permission so the assertions keep reading
+// like what users see; the component itself is now translated.
+const zh: Record<string, string> = {
+  'chat.permission.title': '需要确认执行',
+  'chat.permission.deny': '拒绝',
+  'chat.permission.always': '始终允许',
+  'chat.permission.alwaysTarget': '始终允许此目标',
+  'chat.permission.trustToolNetwork': '信任此工具的网络访问',
+  'chat.permission.allowOnce': '允许一次',
+  'chat.permission.replyFailed': '提交确认失败，请重试。',
+};
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({ t: (key: string) => zh[key] ?? key, i18n: { language: 'zh-CN' } }),
+}));
+
 const request = {
   id: 'permission-1',
   sessionID: 'session-1',
@@ -86,5 +101,14 @@ describe('PermissionApprovalDialog', () => {
     await user.keyboard('{Escape}');
 
     expect(onReply).toHaveBeenCalledWith('deny');
+  });
+
+  it('takes every visible label from the session namespace (no hardcoded Chinese)', async () => {
+    const source = (await import('./PermissionApprovalDialog.tsx?raw')).default as string;
+    // The English UI used to show 需要确认执行/拒绝/始终允许/允许一次 regardless of language.
+    expect(source).not.toMatch(/[\u4e00-\u9fff]/);
+    for (const key of ['title', 'deny', 'always', 'alwaysTarget', 'trustToolNetwork', 'allowOnce']) {
+      expect(source).toContain(`t('chat.permission.${key}')`);
+    }
   });
 });

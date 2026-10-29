@@ -16,11 +16,13 @@ Flocks TUI expects Config format:
 }
 """
 
+import asyncio
+import copy
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, Any, Optional
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile, status
+from typing import Dict, Any, NamedTuple, Optional
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from defusedxml import ElementTree as DefusedET
@@ -35,6 +37,7 @@ from flocks.retention import (
     DataRetentionScheduler,
     RetentionPolicy,
     apply_log_retention,
+    bump_policy_version,
     collect_targets,
     load_policy,
     policy_from_config,
@@ -45,6 +48,7 @@ from flocks.config.references import (
     drop_unchanged,
     leftover_masks,
     member_view,
+    quote_bare_references,
     restore_hidden,
 )
 from flocks.server.auth import get_optional_user, require_admin
@@ -222,6 +226,10 @@ def _merge_config_models(
         merged = _build_model_from_config(provider_id, model_id, model_cfg, existing)
         if merged:
             models_dict[model_id] = merged
+        else:
+            # disabled (soft-deleted) in flocks.json: hide it even if the runtime
+            # still lists it
+            models_dict.pop(model_id, None)
 
     return models_dict
 
@@ -303,7 +311,6 @@ class DataRetentionPreviewResponse(BaseModel):
 
 
 DEFAULT_UI_DISPLAY_NAME = "Flocks"
-DEFAULT_UI_PRO_DISPLAY_NAME = "Flocks Pro"
 FAVICON_MAX_BYTES = 512 * 1024
 FAVICON_RELATIVE_DIR = "assets"
 FAVICON_BASENAME = "favicon"
@@ -414,18 +421,17 @@ SVG_UNSAFE_VALUE_PATTERN = re.compile(
 SVG_URL_PATTERN = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.IGNORECASE)
 
 
-def _is_flockspro_enabled() -> bool:
-    try:
-        from flocks.server.routes.console_upgrade import _get_pro_capability_status
-
-        status_data = _get_pro_capability_status()
-    except Exception:
-        return False
-    return any(status_data.get(key) is True for key in ("pro_enabled", "active", "activated"))
-
-
 def _default_display_name() -> str:
-    return DEFAULT_UI_PRO_DISPLAY_NAME if _is_flockspro_enabled() else DEFAULT_UI_DISPLAY_NAME
+    """The product name when the deployment has not configured one.
+
+    Comes from whatever branding provider is registered, so an installation
+    that ships its own name supplies it through the extension point rather than
+    this module knowing which packages exist and what they are called.
+    """
+
+    from flocks.server.branding import default_display_name
+
+    return default_display_name()
 
 
 def _effective_display_name(
@@ -579,7 +585,9 @@ async def get_ui_display() -> UIDisplayResponse:
     """Return only the effective WebUI display name for public screens."""
     try:
         complete_config, places = await Config.get_with_reference_places()
-        display_name, configured_display_name = _effective_display_name(complete_config, places)
+        display_name, configured_display_name = await asyncio.to_thread(
+            _effective_display_name, complete_config, places
+        )
         return UIDisplayResponse(
             displayName=display_name,
             configuredDisplayName=configured_display_name,
@@ -592,7 +600,10 @@ async def get_ui_display() -> UIDisplayResponse:
 
 @router.patch("/ui", response_model=UIDisplayResponse, summary="Update UI display preferences")
 @serialized_config_mutation
-async def update_ui_config(request: UIConfigUpdateRequest) -> UIDisplayResponse:
+async def update_ui_config(
+    request: UIConfigUpdateRequest,
+    _admin: object = Depends(require_admin),
+) -> UIDisplayResponse:
     """Update visible WebUI display preferences."""
     try:
         if request.display_name and contains_reference(request.display_name):
@@ -617,11 +628,13 @@ async def update_ui_config(request: UIConfigUpdateRequest) -> UIDisplayResponse:
 @router.get("/ui-favicon", summary="Get custom UI favicon")
 async def get_ui_favicon() -> FileResponse:
     """Return the uploaded favicon, if one is configured."""
+    from flocks.utils.http_file_read_guard import require_http_private_path_access
     try:
         complete_config = await Config.get()
         path = _configured_favicon_path(complete_config)
         if not path:
             raise HTTPException(status_code=404, detail="custom favicon is not configured")
+        require_http_private_path_access(path)
         return FileResponse(path, media_type=_favicon_media_type(path))
     except HTTPException:
         raise
@@ -632,7 +645,10 @@ async def get_ui_favicon() -> FileResponse:
 
 @router.post("/ui/favicon", response_model=UIDisplayResponse, summary="Upload UI favicon")
 @serialized_config_mutation
-async def upload_ui_favicon(file: UploadFile = File(...)) -> UIDisplayResponse:
+async def upload_ui_favicon(
+    file: UploadFile = File(...),
+    _admin: object = Depends(require_admin),
+) -> UIDisplayResponse:
     """Upload a custom favicon for visible WebUI branding."""
     filename = Path(file.filename or "").name
     ext = Path(filename).suffix.lower()
@@ -683,7 +699,7 @@ async def upload_ui_favicon(file: UploadFile = File(...)) -> UIDisplayResponse:
 
 @router.delete("/ui/favicon", response_model=UIDisplayResponse, summary="Reset UI favicon")
 @serialized_config_mutation
-async def reset_ui_favicon() -> UIDisplayResponse:
+async def reset_ui_favicon(_admin: object = Depends(require_admin)) -> UIDisplayResponse:
     """Remove the uploaded favicon and fall back to the default bundled favicon."""
     assets_dir = _ui_assets_dir()
     if assets_dir.exists():
@@ -726,6 +742,7 @@ async def get_tool_failure_preference() -> ToolFailurePreference:
 @serialized_config_mutation
 async def update_tool_failure_preference(
     request: ToolFailurePreference,
+    _admin: object = Depends(require_admin),
 ) -> ToolFailurePreference:
     """Update only the repeated-failure switch in flocks.json."""
     try:
@@ -741,6 +758,12 @@ async def update_tool_failure_preference(
     except Exception as e:
         log.error("config.tool_failure.update.error", {"error": str(e)})
         raise HTTPException(status_code=400, detail=str(e))
+
+
+
+# ---------------------------------------------------------------------------
+# dataRetention — how long logs, messages and sessions are kept
+# ---------------------------------------------------------------------------
 
 
 async def _data_retention_status() -> DataRetentionResponse:
@@ -803,6 +826,8 @@ async def update_data_retention(
     except Exception as e:
         log.error("config.data_retention.update.error", {"error": str(e)})
         raise HTTPException(status_code=400, detail=str(e))
+    # Waits out deletes still running under the old policy in any worker.
+    await bump_policy_version()
     apply_log_retention(policy)
     DataRetentionScheduler.request_run()
     log.info("config.data_retention.updated", policy.to_config())
@@ -814,6 +839,66 @@ def _is_admin(request: Request) -> bool:
     return bool(user and user.role == "admin")
 
 
+class _AdminConfigView(NamedTuple):
+    """What an admin reads of the config, and the config in force it stands for."""
+
+    view: Dict[str, Any]
+    loaded: Dict[str, Any]
+    # Masked view only: each masked place and the value it hides (``member_view``).
+    hidden: Optional[Dict[Any, Any]] = None
+
+
+def _restore_unchanged(sent: Any, shown: Any, loaded: Any) -> Any:
+    """``sent`` with every part the admin sent back exactly as shown set to the value in force.
+
+    Compared part by part through objects; a list counts only as a whole, since
+    layers merge some lists (``plugin``, ``instructions``) in no fixed order and
+    the shown list need not line up with the loaded one. A changed list is kept
+    as sent, references written out.
+    """
+    if sent == shown:
+        return copy.deepcopy(loaded)
+    if isinstance(sent, dict) and isinstance(shown, dict) and isinstance(loaded, dict):
+        return {
+            key: _restore_unchanged(value, shown[key], loaded[key]) if key in shown and key in loaded else value
+            for key, value in sent.items()
+        }
+    return sent
+
+
+def _raise_if_config_file_unreadable() -> None:
+    """Raise ValueError when flocks.json is not JSON(C), templates outside strings allowed."""
+    path = ConfigWriter._get_config_path()
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    if text.strip():
+        Config.parse_jsonc(quote_bare_references(text), path)
+
+
+async def _admin_config_view() -> _AdminConfigView:
+    """The config as admins read it: references written out, never their values.
+
+    A client that sends it back unchanged keeps the references
+    (``_restore_admin_payload``). When the files cannot be read unexpanded (a
+    typed field holding a reference), the loaded config is shown with every
+    referenced and credential-looking value masked, as members see it.
+    """
+    complete_config, places = await Config.get_with_reference_places()
+    loaded = complete_config.model_dump(by_alias=True, exclude_none=True)
+    try:
+        unresolved = (await Config.get_unresolved()).model_dump(by_alias=True, exclude_none=True)
+    except ValueError as exc:
+        # An unreadable file must surface as an error (never serve the
+        # stale cached config for a corrupt flocks.json) ...
+        _raise_if_config_file_unreadable()
+        # ... but a typed field holding an unresolved reference is fine.
+        log.warning("config.get.unresolved_failed", {"error": str(exc)})
+        view, hidden = member_view(loaded, places)
+        return _AdminConfigView(view, loaded, hidden)
+    return _AdminConfigView(unresolved, loaded)
+
+
 @router.get("", summary="Get configuration")
 async def get_config(request: Request) -> Dict[str, Any]:
     """
@@ -822,18 +907,19 @@ async def get_config(request: Request) -> Dict[str, Any]:
     Retrieve the current Flocks configuration settings and preferences.
     Flocks TUI expects the merged Config object directly.
 
-    The loaded config holds expanded {secret:…}/{env:…}/{file:…} values, so for
-    non-admins every value a config file stores as a reference, and every
-    credential-looking value, is masked.
+    The loaded config holds expanded {secret:…}/{env:…}/{file:…} values, so it
+    is never returned as such: admins read the references written out
+    (``_admin_config_view``); for non-admins every value a config file stores
+    as a reference, and every credential-looking value, is masked.
     """
     try:
+        if _is_admin(request):
+            return (await _admin_config_view()).view
         # Get complete configuration (includes global + project + env)
         complete_config, places = await Config.get_with_reference_places()
         
         # Return merged config in Flocks format
         data = complete_config.model_dump(by_alias=True, exclude_none=True)
-        if _is_admin(request):
-            return data
         return member_view(data, places)[0]
     except Exception as e:
         log.error("config.get.error", {"error": str(e)})
@@ -979,9 +1065,38 @@ async def _restore_member_payload(request: Request, config_data: Dict[str, Any])
     return restored
 
 
+async def _restore_admin_payload(request: Request, config_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Turn what an admin read back into the loaded values, so unchanged references stay as stored.
+
+    Admins read the config with its references written out (``get_config``),
+    and the Channel page sends the whole of it back. What comes back unchanged
+    gets its loaded value again, so ``Config.update`` sees it as unchanged and
+    keeps what each file stores, instead of copying references from other
+    config layers into flocks.json; a reference the admin changed or moved is
+    written as given.
+    """
+    if not _is_admin(request) or not isinstance(config_data, dict):
+        return config_data
+    shown = await _admin_config_view()
+    if shown.hidden is None:
+        return _restore_unchanged(config_data, shown.view, shown.loaded)
+    # The masked view comes from the loaded config itself, so masks map back by place.
+    restored = restore_hidden(config_data, shown.view, shown.hidden)
+    if leftover_masks(drop_unchanged(restored, shown.loaded), shown.view, shown.hidden):
+        raise HTTPException(
+            status_code=400,
+            detail="Masked values cannot be saved where they were not shown; enter the real value",
+        )
+    return restored
+
+
 @router.patch("/", summary="Update configuration")
 @serialized_config_mutation
-async def update_config(request: Request, config_data: Dict[str, Any]) -> Dict[str, Any]:
+async def update_config(
+    request: Request,
+    config_data: Dict[str, Any],
+    _admin: object = Depends(require_admin),
+) -> Dict[str, Any]:
     """
     Update configuration
 
@@ -993,6 +1108,7 @@ async def update_config(request: Request, config_data: Dict[str, Any]) -> Dict[s
     {secret:channel_<id>_<field>} references before the config is written to
     flocks.json, so that plaintext secrets never land in that file.
     """
+    config_data = await _restore_admin_payload(request, config_data)
     config_data = await _restore_member_payload(request, config_data)
     await _guard_model_config_change(request, config_data)
     retention_changed = await _guard_data_retention_change(request, config_data)
@@ -1017,6 +1133,13 @@ async def update_config(request: Request, config_data: Dict[str, Any]) -> Dict[s
 
         # Parse and validate configuration
         config = ConfigInfoModel.model_validate(config_data)
+        # ``memory`` is typed as Any on ConfigInfo; validate it against the
+        # memory schema here so bad values fail the request instead of the
+        # memory subsystem later.
+        if isinstance(config_data.get("memory"), dict):
+            from flocks.memory.config import MemoryConfig
+
+            MemoryConfig.model_validate(config_data["memory"])
 
         # Update project config
         await Config.update(
@@ -1049,9 +1172,11 @@ async def update_config(request: Request, config_data: Dict[str, Any]) -> Dict[s
             invalidate_channel_config_cache()
 
         if retention_changed:
-            # Mirror the dedicated endpoint: apply the new log period and kick a
+            # Mirror the dedicated endpoint: fence off deletes under the old
+            # policy in every worker, apply the new log period and kick a
             # cleanup (which also bumps the scheduler generation so an in-flight
-            # round stops deleting under the superseded policy).
+            # round here stops deleting under the superseded policy).
+            await bump_policy_version()
             apply_log_retention(await load_policy())
             DataRetentionScheduler.request_run()
 

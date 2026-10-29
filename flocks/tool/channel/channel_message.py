@@ -12,7 +12,10 @@ is bound to multiple channels.
 
 from __future__ import annotations
 
+import fnmatch
 import os
+import re
+from pathlib import Path
 
 from flocks.tool.registry import (
     ParameterType,
@@ -58,6 +61,57 @@ def _normalize_channel_type(channel_type: str | None) -> str | None:
         if lower in [a.lower() for a in aliases]:
             return canonical
     return lower
+
+
+_URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+_SENSITIVE_MEDIA_BASENAMES = (".secret.json", ".env", ".env.*", ".netrc", ".npmrc", "credentials.json",
+                              "service-account*.json", "*.pem", "*.key", "*.p12", "*.jks", "id_rsa*", "id_ed25519*")
+# Inside the runtime root only these trees hold user-facing artifacts (tool
+# outputs, reports, project files); everything else there — config, databases,
+# logs, caches, plugin sources and any extension's own state directory — is
+# private and never a legitimate IM attachment.
+_SHAREABLE_RUNTIME_SUBDIRS = ("workspace", "projects")
+
+
+def _sensitive_media_error(media: str | None) -> str | None:
+    """Refuse local paths that would leak credentials/keys to an IM channel.
+
+    ``media`` is either a URL (passed through) or a local file path handed to
+    the channel plugin as ``media_url``; private runtime state, ``~/.ssh`` and
+    well-known secret files must never be delivered.
+    """
+    if not media or _URL_SCHEME_RE.match(media):
+        return None
+    path = Path(media).expanduser()
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path.absolute()
+
+    def _under(root: Path) -> bool:
+        try:
+            root = root.resolve()
+        except OSError:
+            return False
+        return resolved == root or root in resolved.parents
+
+    protected: list[Path] = [Path.home() / ".ssh"]
+    try:
+        from flocks.config.config import _get_config_dir, _get_flocks_root
+
+        protected.append(_get_config_dir())
+        runtime_root = _get_flocks_root()
+        if _under(runtime_root) and not any(
+            _under(runtime_root / sub) for sub in _SHAREABLE_RUNTIME_SUBDIRS
+        ):
+            return f"media 指向受保护目录中的文件，拒绝发送: {media}"
+    except Exception:
+        pass
+    if any(_under(root) for root in protected):
+        return f"media 指向受保护目录中的文件，拒绝发送: {media}"
+    if any(fnmatch.fnmatch(resolved.name, pattern) for pattern in _SENSITIVE_MEDIA_BASENAMES):
+        return f"media 指向敏感文件，拒绝发送: {media}"
+    return None
 
 
 def _get_api_token() -> str | None:
@@ -228,6 +282,10 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
     chat_id: str | None = kwargs.get("chat_id")
     raw_channel_type: str | None = kwargs.get("channel_type")
     channel_type: str | None = _normalize_channel_type(raw_channel_type)
+
+    media_error = _sensitive_media_error(media)
+    if media_error:
+        return ToolResult(success=False, error=media_error)
 
     # Prefer the HTTP endpoint of the running flocks server to reuse its WS connection.
     port = _get_server_port()

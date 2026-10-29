@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 from collections import Counter
 from collections.abc import Callable, Iterable
 from datetime import datetime
@@ -15,6 +16,11 @@ from flocks.contracts.access.models import DriverResult, Predicate, QueryPlan, C
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 JSON_DATA_SUFFIXES = frozenset({".jsonl", ".json"})
+#: What one query may scan of a database source before it is refused as too large.
+MAX_SCAN_ROWS = 50_000
+MAX_SCAN_BYTES = 32 * 1024 * 1024
+MAX_SCAN_SECONDS = 30
+SOURCE_ROW_ID_FIELD = "__flocks_source_row_id"
 
 
 class DriverProxy:
@@ -63,12 +69,14 @@ class SqliteJsonDriverExecutor:
         record_column = _sqlite_identifier(options.get("recordColumn"), "record_json")
         date_column = _sqlite_identifier(options.get("dateColumn"), "record_date")
         event_time_column = _sqlite_identifier_optional(options.get("eventTimeColumn"))
+        row_id_column = _sqlite_identifier_optional(options.get("rowIdColumn"))
         # A store nobody has written to yet (no file, or an empty database
         # without the table) is an empty data source, not a broken one: the
         # SOC alert pages are opened before the first alert is ingested.
         if not db_path.is_file():
             return _empty_sqlite_result(db_path)
-        query = f"SELECT {record_column} FROM {table}"
+        projection = record_column + (f", {row_id_column}" if row_id_column else "")
+        query = f"SELECT {projection} FROM {table}"
         conditions: list[str] = []
         query_params: list[Any] = []
         start_date, end_date = JsonlDriverExecutor()._request_date_range(plan.params)
@@ -82,7 +90,7 @@ class SqliteJsonDriverExecutor:
             query_params.extend([start_time, end_time])
         if conditions:
             query += f" WHERE {' AND '.join(conditions)}"
-        query += " ORDER BY rowid"
+        query += f" ORDER BY rowid LIMIT {MAX_SCAN_ROWS + 1}"
 
         rows: list[dict[str, Any]] = []
         seen_record_ids: set[str] = set()
@@ -94,8 +102,22 @@ class SqliteJsonDriverExecutor:
         try:
             connection = sqlite3.connect(db_path)
             try:
-                cursor = connection.execute(query, query_params)
-                raw_records = cursor.fetchall()
+                raw_records = []
+                started = time.monotonic()
+                scanned_bytes = 0
+                # Row by row, within a budget: a wide range must not pull a
+                # whole table into memory.
+                for count, source_row in enumerate(connection.execute(query, query_params), start=1):
+                    raw = source_row[0]
+                    scanned_bytes += len(raw.encode("utf-8")) if isinstance(raw, str) else 0
+                    if (count > MAX_SCAN_ROWS or scanned_bytes > MAX_SCAN_BYTES
+                            or time.monotonic() - started > MAX_SCAN_SECONDS):
+                        raise ContractRuntimeError(
+                            "query_range_too_large", status_code=422,
+                            user_message="Query range is too large; select a shorter time range.",
+                            admin_message="SQLite contract scan exceeded its row, byte or time budget.",
+                        )
+                    raw_records.append(source_row)
             finally:
                 connection.close()
         except sqlite3.OperationalError as exc:
@@ -118,7 +140,8 @@ class SqliteJsonDriverExecutor:
                 admin_message=f"SQLite query failed for {db_path}: {exc}",
             ) from exc
 
-        for (record_value,) in raw_records:
+        for source_row in raw_records:
+            record_value = source_row[0]
             try:
                 record = json.loads(record_value) if isinstance(record_value, str) else None
             except json.JSONDecodeError:
@@ -126,6 +149,11 @@ class SqliteJsonDriverExecutor:
             if not isinstance(record, dict):
                 parse_errors += 1
                 continue
+            # Only an explicitly configured database column can supply source
+            # identity. A JSON payload cannot impersonate another stored row.
+            record = {key: value for key, value in record.items() if key != SOURCE_ROW_ID_FIELD}
+            if row_id_column and source_row[1] is not None:
+                record[SOURCE_ROW_ID_FIELD] = str(source_row[1])
             if record.get("_type") == "file_header":
                 continue
             if not sql_event_time_filtered and not self._matches_event_time_range(record, start_time, end_time):

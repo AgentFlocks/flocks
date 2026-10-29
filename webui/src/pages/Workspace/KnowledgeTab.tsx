@@ -2,6 +2,7 @@ import { useId, useState } from 'react';
 import { Database, FolderOpen, Settings2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { knowledgebaseAPI } from '@/api/knowledgebase';
+import { useAuth } from '@/contexts/AuthContext';
 import FilesPage from './knowledge/FilesPage';
 import DatasetsPage from './knowledge/DatasetsPage';
 import ConnectionSettingsSheet from './knowledge/ConnectionSettingsSheet';
@@ -11,6 +12,8 @@ import './knowledge/knowledge.css';
 
 export default function KnowledgeTab({ active = true }: { active?: boolean }) {
   const { t } = useTranslation('workspace');
+  // The engine connection is shared configuration; the API only lets admins replace it.
+  const canConfigure = useAuth().user?.role === 'admin';
   const navigationId = useId();
   const [page, setPage] = useState<'files' | 'datasets'>('files');
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -57,15 +60,15 @@ export default function KnowledgeTab({ active = true }: { active?: boolean }) {
           <Icon aria-hidden="true" /><span>{label}</span>{count !== undefined && <span className="kb-tab-count" aria-hidden="true">{count}</span>}
         </button>)}
       </div>
-      <Button variant="quiet" className="kb-connection-button" onClick={() => setSettingsOpen(true)}><Settings2 aria-hidden="true" />{t('knowledge.connection.title')}</Button>
+      {canConfigure && <Button variant="quiet" className="kb-connection-button" onClick={() => setSettingsOpen(true)}><Settings2 aria-hidden="true" />{t('knowledge.connection.title')}</Button>}
     </div>
     <div id={`${navigationId}-panel`} role="tabpanel" aria-labelledby={`${navigationId}-${page}`} className="kb-page-content">
       <LoadState loading={status.loading} error={status.error} retry={status.reload}>
         {!ready && status.data && <div role="status" className="kb-connection-notice">
           <p>{t('knowledge.unavailable.knowledgebase_not_configured')}</p>
-          <p className="kb-help">{t('knowledge.unavailable.knowledgebase_not_configuredHint')}</p>
+          <p className="kb-help">{t(canConfigure ? 'knowledge.unavailable.knowledgebase_not_configuredHint' : 'knowledge.unavailable.knowledgebase_not_configuredMemberHint')}</p>
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button variant="secondary" onClick={() => setSettingsOpen(true)}>{t('knowledge.connection.title')}</Button>
+            {canConfigure && <Button variant="secondary" onClick={() => setSettingsOpen(true)}>{t('knowledge.connection.title')}</Button>}
             <Button variant="secondary" onClick={status.reload}>{t('knowledge.unavailable.check')}</Button>
           </div>
         </div>}
@@ -73,6 +76,6 @@ export default function KnowledgeTab({ active = true }: { active?: boolean }) {
         {ready && page === 'datasets' && <DatasetsPage key={connectionRevision} revision={revision} onChanged={changed} />}
       </LoadState>
     </div>
-    {settingsOpen && <ConnectionSettingsSheet onClose={() => setSettingsOpen(false)} onSaved={connectionSaved} />}
+    {settingsOpen && canConfigure && <ConnectionSettingsSheet onClose={() => setSettingsOpen(false)} onSaved={connectionSaved} />}
   </div>;
 }

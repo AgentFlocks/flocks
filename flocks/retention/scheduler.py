@@ -7,8 +7,8 @@ import time
 from typing import Any, Dict, Optional
 
 from flocks.retention.cleanup import RetentionReport, apply_policy
-from flocks.retention.policy import apply_log_retention, load_policy
-from flocks.utils.log import Log
+from flocks.retention.policy import apply_log_retention, load_policy, load_saved_policy
+from flocks.utils.log import Log, log_cleanup_managed, set_log_cleanup_managed
 
 log = Log.create(service="retention.scheduler")
 
@@ -29,6 +29,9 @@ class DataRetentionScheduler:
     # deleting once this moves past the generation it started with.
     _generation: int = 0
     _running: bool = False
+    # Whether the logger had already left deleting to retention before start();
+    # stop() puts that back instead of handing deleting to the logger.
+    _log_managed_before: Optional[bool] = None
 
     @classmethod
     def _get_lock(cls) -> asyncio.Lock:
@@ -46,6 +49,11 @@ class DataRetentionScheduler:
             return
         cls._wake = asyncio.Event()
         cls._task = asyncio.create_task(cls._run_loop(), name="data-retention-scheduler")
+        # Expired logs go in its rounds, under the policy as last saved
+        # (preload_log_retention has usually handed them over already).
+        if cls._log_managed_before is None:
+            cls._log_managed_before = log_cleanup_managed()
+        set_log_cleanup_managed(True)
 
     @classmethod
     async def stop(cls) -> None:
@@ -64,6 +72,11 @@ class DataRetentionScheduler:
         cls._wake = None
         cls._lock = None
         cls._running = False
+        if cls._log_managed_before is not None:
+            # As before start: a process that preloaded keeps its logger out of
+            # deleting (shutdown may cross midnight with an outdated period).
+            set_log_cleanup_managed(cls._log_managed_before)
+            cls._log_managed_before = None
 
     @classmethod
     def is_running(cls) -> bool:
@@ -146,10 +159,10 @@ class DataRetentionScheduler:
             try:
                 from flocks.config.config import Config
 
-                # Re-read the policy from disk so a worker whose Config cache
-                # predates an admin's change (multi-worker) uses the latest.
+                # The policy as saved, past any cache: the CLI may have changed
+                # it since this process last read it.
+                policy = await load_saved_policy()
                 Config.clear_cache()
-                policy = await load_policy()
                 apply_log_retention(policy)
                 generation = cls._generation
                 report = await apply_policy(

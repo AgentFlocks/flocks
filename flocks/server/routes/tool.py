@@ -14,6 +14,7 @@ from pydantic_core import PydanticCustomError
 from flocks.server.auth import require_admin
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.server.routes._timing import log_route_timing
+from flocks.utils.id import Identifier
 from flocks.utils.log import Log
 from flocks.config.config_writer import ConfigWriter
 from flocks.permission.interactive import legacy_tool_permission_prompt_required
@@ -171,6 +172,15 @@ _VERIFIED_CONTEXT_REQUIRED_MESSAGE = (
     "Direct HTTP execution for local or permission-gated tools requires a verified "
     "session-backed request with both sessionID and messageID."
 )
+_SESSION_TOOL_WRITE_REQUIRED_MESSAGE = (
+    "Running a tool in a session requires write access to that session; "
+    "a read-only share cannot run tools."
+)
+_SESSION_TOOL_ARCHIVED_MESSAGE = "Archived sessions cannot run tools; restore the session first."
+# ``Tool.execute`` turns a PermissionError raised inside the handler into a
+# failed ToolResult; the HTTP context records the refusal here so the route
+# can still answer 403 instead of a 200 with success=false.
+_HTTP_PERMISSION_DENIED_KEY = "http_permission_denied"
 
 
 @dataclass(frozen=True)
@@ -213,6 +223,11 @@ def _tool_summary_cache_current_key() -> tuple[Any, ...]:
     return (*ToolRegistry.snapshot_identity(), ToolRegistry._current_config_state_token())
 
 
+# Internal sentinels: registered so the runtime can name them, but not tools a
+# user lists, groups or enables (catalogs and callable schemas skip them too).
+_INTERNAL_TOOL_NAMES = frozenset({"invalid", "_noop"})
+
+
 def _get_tool_summary_items() -> List[ToolListIndexItem]:
     """Return cached, lightweight tool summaries for list filtering."""
     global _tool_summary_cache_key, _tool_summary_cache_expires_at, _tool_summary_cache_items
@@ -227,7 +242,11 @@ def _get_tool_summary_items() -> List[ToolListIndexItem]:
         ):
             return list(_tool_summary_cache_items)
 
-        items = tuple(_build_tool_index_item(t) for t in ToolRegistry.list_tools())
+        items = tuple(
+            _build_tool_index_item(t)
+            for t in ToolRegistry.list_tools()
+            if t.name not in _INTERNAL_TOOL_NAMES
+        )
         _tool_summary_cache_key = cache_key
         _tool_summary_cache_expires_at = now + _TOOL_SUMMARY_CACHE_TTL_SECONDS
         _tool_summary_cache_items = items
@@ -444,6 +463,50 @@ def _requires_session_backed_context(tool_info: ToolInfo) -> bool:
     return source == "builtin"
 
 
+def _require_session_tool_write_access(session: Any) -> None:
+    """Running a tool in a session's context is a write to that session.
+
+    Seeing the session is not enough: an invited read-only user or a project
+    share can read it, but the tool would run under the session's execution
+    settings. In-process callers without an HTTP user keep their access, as
+    for other session writes.
+    """
+    from flocks.auth.context import get_current_auth_user
+    from flocks.session.policy import SessionPolicy
+
+    user = get_current_auth_user()
+    if user is None:
+        return
+    if not SessionPolicy.can_write(session, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_SESSION_TOOL_WRITE_REQUIRED_MESSAGE,
+        )
+    if getattr(session, "status", "active") != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_SESSION_TOOL_ARCHIVED_MESSAGE,
+        )
+
+
+def _http_actor_subject() -> Optional[Dict[str, str]]:
+    """The authenticated HTTP caller, as the actor of a tool run in a session.
+
+    Without it the execution payload (and its audit) would name the session
+    owner, not whoever ran the tool through this route.
+    """
+    from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, get_current_auth_user
+
+    user = get_current_auth_user()
+    subject_id = str(getattr(user, "id", "") or "").strip()
+    if not subject_id:
+        return None
+    return {
+        "id": subject_id,
+        "type": "service" if subject_id == API_TOKEN_SERVICE_USER_ID else "human",
+    }
+
+
 async def _validate_verified_session_message_context(
     *,
     requires_verified_context: bool,
@@ -473,6 +536,7 @@ async def _validate_verified_session_message_context(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session not found: {effective_session_id}",
         )
+    _require_session_tool_write_access(session)
 
     message = await Message.get(effective_session_id, effective_message_id)
     if not message:
@@ -509,6 +573,12 @@ def _build_http_tool_context(
     """Create a safe ToolContext for HTTP-triggered execution."""
     agent_name = agent or "rex"
     effective_message_id = message_id or f"http-tool:{tool_name}"
+    # Every execution needs its own call id: the tool gate keys carried
+    # verdicts on it and audit extensions refuse to run a tool whose attempt
+    # cannot be recorded under an id (the session flow mints one per call).
+    call_id = Identifier.create("call")
+
+    denied_marker: Dict[str, str] = {}
 
     if session_id:
         async def permission_callback(request) -> None:
@@ -527,12 +597,20 @@ def _build_http_tool_context(
                 tool={"name": tool_name},
             )
             if reply in {"deny", "reject", "never"}:
-                raise PermissionError(f"Permission denied: {request.permission}")
+                message = f"Permission denied: {request.permission}"
+                denied_marker["message"] = message
+                raise PermissionError(message)
 
+        extra: Dict[str, Any] = {_HTTP_PERMISSION_DENIED_KEY: denied_marker}
+        actor = _http_actor_subject()
+        if actor is not None:
+            extra["actor_subject"] = actor
         return ToolContext(
             session_id=session_id,
             message_id=effective_message_id,
             agent=agent_name,
+            call_id=call_id,
+            extra=extra,
             permission_callback=permission_callback,
         )
 
@@ -543,16 +621,52 @@ def _build_http_tool_context(
         )
 
     async def deny_permission_callback(request) -> None:
-        raise PermissionError(
-            "This HTTP execution context cannot auto-approve tool permissions."
-        )
+        message = "This HTTP execution context cannot auto-approve tool permissions."
+        denied_marker["message"] = message
+        raise PermissionError(message)
 
     return ToolContext(
         session_id="http-tool",
         message_id=effective_message_id,
         agent=agent_name,
+        call_id=call_id,
+        extra={
+            _HTTP_PERMISSION_DENIED_KEY: denied_marker,
+            "session_execution_profile": _http_execution_profile(),
+        },
         permission_callback=deny_permission_callback,
     )
+
+
+def _http_execution_profile() -> Dict[str, Any]:
+    """Execution profile for a tool run directly over HTTP (no session).
+
+    ``build_session_tool_execution_payload`` derives the actor subject from
+    the session execution profile; without a session there is none, so
+    policy extensions would see an anonymous actor and refuse the call.
+    Describe the authenticated HTTP caller instead.
+    """
+    from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, get_current_auth_user
+    from flocks.session.execution_profile import PROFILE_VERSION
+
+    user = get_current_auth_user()
+    subject_id = str(getattr(user, "id", "") or "").strip() or None
+    subject_type = None
+    if subject_id:
+        subject_type = "service" if subject_id == API_TOKEN_SERVICE_USER_ID else "human"
+    return {
+        "version": PROFILE_VERSION,
+        "session_id": "http-tool",
+        "entry": "api",
+        "owner_user_id": subject_id,
+        "owner_username": str(getattr(user, "username", "") or "").strip() or None,
+        "subject_id": subject_id,
+        "subject_type": subject_type,
+        "permission_mode": "readonly",
+        "runtime_mode": "exe-mode",
+        "network_mode": "require-confirm",
+        "source": "tool.execute.http",
+    }
 
 
 def _permission_denied_http_error(exc: Exception) -> HTTPException:
@@ -584,9 +698,13 @@ async def _execute_with_http_context(
         agent=agent,
     )
     try:
-        return await ToolRegistry.execute(tool_name=tool_name, ctx=ctx, **params)
+        result = await ToolRegistry.execute(tool_name=tool_name, ctx=ctx, **params)
     except (DeniedError, PermissionError) as exc:
         raise _permission_denied_http_error(exc) from exc
+    denied = ctx.extra.get(_HTTP_PERMISSION_DENIED_KEY) or {}
+    if denied.get("message") and not result.success:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=denied["message"])
+    return result
 
 
 async def _execute_batch_with_http_context(
@@ -748,7 +866,7 @@ async def list_tools(
             )
     
     tools = ToolRegistry.list_tools(category=cat_filter)
-    result = [_build_tool_response(t) for t in tools]
+    result = [_build_tool_response(t) for t in tools if t.name not in _INTERNAL_TOOL_NAMES]
     
     # Apply source filter if specified
     if source:
@@ -791,7 +909,9 @@ async def list_tools_page(
     category_filter = _split_csv_filter(category)
     source_filter = _split_csv_filter(source)
     source_name_filter = _split_csv_filter(source_name)
-    enabled_filter = _split_csv_filter(enabled)
+    # ``enabled`` is matched against ``str(bool).lower()``; accept any casing
+    # (``TRUE`` / ``False``) the way ``q`` already does.
+    enabled_filter = _split_csv_filter(enabled.lower() if enabled else enabled)
     query = (q or "").strip().lower()
 
     all_items = _get_tool_summary_items()
@@ -954,8 +1074,17 @@ async def update_tool(
     if device_id:
         from flocks.tool.device.store import (
             delete_device_tool_setting,
+            fetch_device,
             set_device_tool_enabled,
         )
+
+        # device_tool_settings.device_id references device_integrations(id):
+        # an unknown device would otherwise surface as an IntegrityError 500.
+        if await fetch_device(device_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Device not found: {device_id}",
+            )
 
         if desired:
             if not tool.info.enabled:
@@ -1382,12 +1511,15 @@ async def list_tool_fixtures(name: str) -> List[FixtureItemResponse]:
 # Plugin Tool CRUD Routes
 # =============================================================================
 
+_PLUGIN_SEGMENT_PATTERN = r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$"
+
+
 class CreateToolRequest(BaseModel):
     """Request to create a YAML plugin tool"""
-    name: str = Field(..., description="Tool name (snake_case)")
+    name: str = Field(..., min_length=1, pattern=_PLUGIN_SEGMENT_PATTERN, description="Tool name (snake_case)")
     description: str = Field("", description="Tool description")
     category: str = Field("custom", description="Tool category")
-    provider: Optional[str] = Field(None, description="Provider name for grouping")
+    provider: Optional[str] = Field(None, min_length=1, pattern=_PLUGIN_SEGMENT_PATTERN, description="Provider name for grouping")
     enabled: bool = Field(True, description="Is tool enabled")
     requires_confirmation: bool = Field(False, description="Requires user confirmation")
     inputSchema: Optional[Dict[str, Any]] = Field(None, description="MCP-compatible JSON Schema")
@@ -1436,6 +1568,7 @@ async def create_tool(request: CreateToolRequest, _admin: object = Depends(requi
     from flocks.tool.tool_loader import (
         create_yaml_tool,
         yaml_to_tool,
+        yaml_tool_target_path,
         TOOL_TYPE_API,
     )
 
@@ -1460,10 +1593,24 @@ async def create_tool(request: CreateToolRequest, _admin: object = Depends(requi
     if request.provider:
         data["provider"] = request.provider
 
+    # Build the tool from the definition before anything touches disk so a
+    # bad handler (unknown type, missing/escaping script) never leaves a
+    # YAML file behind that the next refresh would fail on.
+    try:
+        target_path = yaml_tool_target_path(request.name, provider=request.provider, tool_type=TOOL_TYPE_API)
+        yaml_to_tool(data, target_path)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid tool definition: {e}")
+    except Exception as e:
+        log.warning("tool.create.invalid_definition", {"error": str(e), "name": request.name})
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid tool definition: {e}")
+
     try:
         yaml_path = create_yaml_tool(data, provider=request.provider, tool_type=TOOL_TYPE_API)
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+        if "already exists" in str(e):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         log.error("tool.create.error", {"error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
@@ -1535,6 +1682,21 @@ async def update_plugin_tool(name: str, request: UpdateToolRequest, _admin: obje
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No updates provided",
         )
+
+    # Reject a definition the loader cannot build before it overwrites the
+    # YAML on disk (otherwise the tool breaks on the next refresh/restart).
+    # A group-only edit leaves the definition untouched, so there is nothing
+    # to rebuild (and the live handler must not be reloaded for it).
+    if set(updates) != {"group"}:
+        current_path = find_yaml_tool(name)
+        try:
+            merged = {**_read_yaml_raw(current_path), **updates}
+            yaml_to_tool(merged, current_path)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid tool definition: {e}",
+            )
 
     try:
         if not update_yaml_tool(name, updates):

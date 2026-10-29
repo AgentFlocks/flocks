@@ -1566,8 +1566,9 @@ class StreamProcessor:
             if not runtime.sandboxed:
                 return result
 
-            # Sandbox tool constraints are Pro-owned policy input.  OSS does
-            # not normalize, merge, or decide against this raw metadata.
+            # Sandbox tool constraints are policy input owned by the policy
+            # extension.  Flocks does not normalize, merge, or decide against
+            # this raw metadata.
             result["extra"]["sandbox_tool_policy"] = runtime.tool_policy_metadata
 
             if self._sandbox_config_cache is None:
@@ -1849,6 +1850,33 @@ class StreamProcessor:
                     "请重试并要求模型使用原生工具调用；残余文本已保留。"
                 )
 
+    async def persist_interrupted_parts(self) -> None:
+        """Store the text and reasoning streamed so far when the step is cancelled.
+
+        Text is written at ``text-end`` and reasoning at ``reasoning-end``. A
+        cancelled step (the stop button cancels its task) never reaches them,
+        so the stored text part stayed the empty placeholder from
+        ``text-start`` although the user had already seen the text. Keep what
+        was shown: the display-sanitized text, without running any tool call
+        embedded in it. The parts are taken before they are written, so a
+        write that was given up on is not attempted again.
+        """
+        now = int(datetime.now().timestamp() * 1000)
+        part, self.current_text_part = self.current_text_part, None
+        reasoning_parts = list(self.reasoning_parts.values())
+        self.reasoning_parts.clear()
+        if part is not None:
+            part.text = self._sanitize_streaming_text_for_display(part.text).rstrip()
+            if part.time and part.time.end is None:
+                part.time.end = now
+            await Message.store_part(self.session_id, self.assistant_message.id, part)
+        for reasoning in reasoning_parts:
+            reasoning.text = reasoning.text.strip()
+            if reasoning.time and reasoning.time.end is None:
+                reasoning.time.end = now
+            if reasoning.text:
+                await Message.store_part(self.session_id, self.assistant_message.id, reasoning)
+
     def _should_run_tool_call_parallel(self, event: ToolCallEvent) -> bool:
         """Return true for independent foreground subagent tool-calls."""
         if event.tool_name not in {"delegate_task", "task"}:
@@ -2023,6 +2051,10 @@ class StreamProcessor:
         Sent text cannot be taken back: when the display text shrinks (a tool
         tag becomes recognisable), only what follows the shared prefix goes out.
         """
+        # Plain appends are the common case; scanning the whole history on every
+        # delta would make a long reply quadratic.
+        if current.startswith(previous):
+            return current[len(previous):]
         return current[len(os.path.commonprefix([previous, current])):]
 
     _DSML_NAMESPACE_RE = r"(?:(?:\|\s*){1,2}DSML(?:\s*\|){1,2}|(?:｜\s*){1,2}DSML(?:\s*｜){1,2})"

@@ -78,6 +78,7 @@ async def test_cleanup_discards_deferred_sleep_and_finalizes_state(input_started
         assistant_message=SimpleNamespace(id="msg-assistant"),
         agent=SimpleNamespace(name="rex"),
         event_publish_callback=publish,
+        allowed_tool_names=["sleep"],
     )
     execute = AsyncMock(return_value=ToolResult(success=True))
     with (

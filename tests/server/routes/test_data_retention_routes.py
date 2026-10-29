@@ -88,6 +88,8 @@ async def test_saving_writes_flocks_json_applies_log_days_and_starts_cleanup(cli
     assert again.json()["sessionDays"] == 90
 
 
+
+
 async def test_saving_keeps_unrelated_config_and_extra_keys(client, run_requests):
     from flocks.config.config_writer import ConfigWriter
 
@@ -174,14 +176,14 @@ async def test_members_cannot_change_policy_via_generic_config_endpoint(client):
     app.include_router(router, prefix="/api/config")
     member = TestClient(app, raise_server_exceptions=False)
 
-    # Changing the policy -> 403; an unrelated partial save or an unchanged
-    # echo still works for a member.
+    # Changing the policy -> 403. Every write through this endpoint is an admin's
+    # (test_config_mutations_require_admin), so an unrelated partial save or an
+    # unchanged echo is refused to a member as well.
     assert member.patch("/api/config/", json={"dataRetention": {"logDays": 1, "messageDays": 1, "sessionDays": 1}}).status_code == 403
-    assert member.patch("/api/config/", json={"toolFailure": {"disableOnRepeatedFailure": True}}).status_code == 200
-    assert member.patch("/api/config/", json={"dataRetention": {"logDays": 30, "messageDays": 0, "sessionDays": 0}}).status_code == 200
-    # The destructive 1/1/1 never landed; at most the harmless default is stored.
-    saved = _flocks_json().get("dataRetention")
-    assert saved in (None, {"logDays": 30, "messageDays": 0, "sessionDays": 0})
+    assert member.patch("/api/config/", json={"toolFailure": {"disableOnRepeatedFailure": True}}).status_code == 403
+    assert member.patch("/api/config/", json={"dataRetention": {"logDays": 30, "messageDays": 0, "sessionDays": 0}}).status_code == 403
+    # Nothing a member sent landed.
+    assert _flocks_json().get("dataRetention") is None
 
 
 async def test_members_cannot_change_policy_via_snake_case_key(client):

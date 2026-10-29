@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -13,6 +13,9 @@ const { applyUpdate, checkUpdate, checkRestartReadiness } = vi.hoisted(() => ({
 vi.mock('@/api/update', () => ({
   applyUpdate,
   checkUpdate,
+  DEFAULT_UPDATE_CHANNEL: 'default',
+  IncompleteUpdateError: class extends Error {},
+  UpdateStreamTimeoutError: class extends Error {},
 }));
 
 vi.mock('@/utils/restartPolling', () => ({ checkRestartReadiness }));
@@ -48,7 +51,7 @@ describe('UpdateModal update checks', () => {
     );
 
     await waitFor(() => {
-      expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flocks', true);
+      expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'default', true);
     });
   });
 
@@ -64,7 +67,7 @@ describe('UpdateModal update checks', () => {
     await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
 
     await waitFor(() => {
-      expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flocks', true);
+      expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'default', true);
     });
   });
 });
@@ -141,6 +144,110 @@ describe('UpdateModal deploy-mode notices', () => {
     expect(await screen.findByText('dockerModeTitle')).toBeInTheDocument();
     expect(screen.queryByText('offlineModeTitle')).not.toBeInTheDocument();
   });
+
+  const withUpdate = {
+    ...currentVersion,
+    latest_version: '2026.09.14',
+    has_update: true,
+    update_allowed: false,
+  };
+
+  it('shows the managed-package notice instead of Docker guidance on managed installs', () => {
+    render(<UpdateModal initialInfo={{ ...withUpdate, deploy_mode: 'managed' }} onClose={vi.fn()} />);
+    expect(screen.getByText('managedModeTitle')).toBeTruthy();
+    expect(screen.getByText('managedModeDesc')).toBeTruthy();
+    expect(screen.queryByText('dockerModeTitle')).toBeNull();
+    expect(screen.queryByText('dockerUpgradeHint')).toBeNull();
+  });
+
+  it('keeps the Docker guidance for docker installs', () => {
+    render(<UpdateModal initialInfo={{ ...withUpdate, deploy_mode: 'docker' }} onClose={vi.fn()} />);
+    expect(screen.getByText('dockerModeTitle')).toBeTruthy();
+    expect(screen.queryByText('managedModeTitle')).toBeNull();
+  });
+
+  it.each(['docker', 'managed'] as const)('does not offer an upgrade for %s', (deploy_mode) => {
+    render(<UpdateModal initialInfo={{ ...withUpdate, deploy_mode }} onClose={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: 'confirmAction' })).toBeNull();
+    expect(applyUpdate).not.toHaveBeenCalled();
+  });
+
+});
+
+describe('UpdateModal terminal states', () => {
+  // dev's progress card: the header X closes it once nothing runs, and an
+  // error adds the 「稍后」 button; the footer spinner only shows while upgrading.
+  const initialInfo = { ...currentVersion, latest_version: '2026.09.20', has_update: true };
+  const headerClose = () => document.querySelector<HTMLButtonElement>('button:has(svg.lucide-x)')!;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkRestartReadiness.mockResolvedValue({ ready: false, reason: 'still restarting' });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('stops the spinner and allows closing after done without restarting', async () => {
+    applyUpdate.mockImplementation(async (_version, progress) => progress({ stage: 'done', success: true, message: 'Complete' }));
+    const onClose = vi.fn();
+    render(<UpdateModal initialInfo={initialInfo} onClose={onClose} />);
+    fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await waitFor(() => expect(headerClose()).not.toBeDisabled());
+    expect(screen.queryByText('upgrading')).toBeNull();
+    fireEvent.click(headerClose());
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('cannot dismiss an in-progress upgrade using the backdrop or the close button', async () => {
+    applyUpdate.mockImplementationOnce(() => new Promise(() => {}));
+    const onClose = vi.fn();
+    render(<UpdateModal initialInfo={initialInfo} onClose={onClose} />);
+    fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
+    expect(headerClose()).toBeDisabled();
+    fireEvent.click(document.querySelector('div.fixed.inset-0')!);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('reports early EOF and releases the close controls', async () => {
+    const { IncompleteUpdateError } = await import('@/api/update');
+    applyUpdate.mockRejectedValue(new IncompleteUpdateError());
+    render(<UpdateModal initialInfo={initialInfo} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await screen.findByText('streamInterrupted');
+    expect(screen.queryByText('upgrading')).toBeNull();
+    expect(headerClose()).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
+  });
+
+  it('surfaces server errors without retaining the progress spinner', async () => {
+    applyUpdate.mockRejectedValue(new Error('Update refused'));
+    render(<UpdateModal initialInfo={initialInfo} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await screen.findByText('Update refused');
+    expect(screen.queryByText('upgrading')).toBeNull();
+  });
+
+  it('reports a silent connection timeout and allows closing', async () => {
+    const { UpdateStreamTimeoutError } = await import('@/api/update');
+    applyUpdate.mockRejectedValue(new UpdateStreamTimeoutError());
+    render(<UpdateModal initialInfo={initialInfo} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await screen.findByText('streamTimeout');
+    expect(screen.queryByText('upgrading')).toBeNull();
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
+  });
+
+  it('keeps restart polling after EOF then unlocks the dialog on restart timeout', async () => {
+    vi.useFakeTimers();
+    applyUpdate.mockImplementation(async (_version, progress) => progress({ stage: 'restarting', message: 'Restarting' }));
+    render(<UpdateModal initialInfo={initialInfo} onClose={vi.fn()} />);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'confirmAction' })); });
+    expect(headerClose()).toBeDisabled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(303_000); });
+    expect(checkRestartReadiness).toHaveBeenCalled();
+    expect(screen.getByText('restartTimeout')).toBeInTheDocument();
+    expect(document.querySelector('.animate-spin')).toBeNull();
+    expect(headerClose()).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
+  });
 });
 
 describe('UpdateModal upgrade results', () => {
@@ -156,8 +263,8 @@ describe('UpdateModal upgrade results', () => {
     applyUpdate.mockImplementation(async (_version: string, onProgress: (progress: unknown) => void) => {
       onProgress({
         stage: 'fetching',
-        message: 'Downloading Flocks Pro bundle',
-        bundle_filename: 'flockspro-bundle-v2026.10.13.zip',
+        message: 'Downloading bundle',
+        bundle_filename: 'bundle-v2026.10.13.zip',
         downloaded_bytes: 36 * 1024 * 1024,
         total_bytes: 36 * 1024 * 1024,
         percent: 100,
@@ -166,7 +273,7 @@ describe('UpdateModal upgrade results', () => {
       throw new Error(uvMissing);
     });
     const user = userEvent.setup();
-    render(<UpdateModal initialInfo={updatable} edition="flockspro" onClose={vi.fn()} />);
+    render(<UpdateModal initialInfo={updatable} channel="bundle" onClose={vi.fn()} />);
 
     await user.click(screen.getByRole('button', { name: 'confirmAction' }));
 

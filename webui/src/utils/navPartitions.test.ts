@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AGENT_WORKSPACE,
   AGENT_WORKSHOP,
@@ -13,6 +13,18 @@ import {
   workspaceIdFromPath,
 } from './navPartitions';
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
+
+// An extension's sign-in callback counts as settings; the stock registry has none.
+vi.mock('@ext/registry', () => ({
+  __esModule: true,
+  default: {
+    routes: [{ path: 'reports-login/callback', area: 'settings', load: async () => ({ default: () => null }) }],
+    navItems: [],
+    settingsSections: [],
+    slots: [],
+    i18n: {},
+  },
+}));
 
 const scene = (over: Partial<WebUIContractWorkspaceListItem>): WebUIContractWorkspaceListItem => ({
   id: 'soc_ui',
@@ -49,13 +61,13 @@ describe('navPartitions', () => {
     }
   });
 
-  it('classifies legacy Pro upgrade and cloud-login callback URLs as settings', () => {
-    for (const path of ['/flockspro-upgrade', '/flockspro-upgrade?login=success', '/flockspro-upgrade/callback?console_login_id=test-login']) {
+  it('classifies an extension route registered under settings as settings', () => {
+    for (const path of ['/reports-login/callback', '/reports-login/callback?login_id=test-login', '/reports-login/callback/done']) {
       expect(resolveNavRoute(path)).toEqual({ kind: 'settings' });
     }
-    saveWorkspacePaths({ [AGENT_WORKSPACE]: '/flockspro-upgrade?login=success' });
-    expect(readWorkspacePaths()).toEqual({});
-    saveWorkspacePaths({ [AGENT_WORKSPACE]: '/flockspro-upgrade/callback?console_login_id=test-login' });
+    // Only that route: a sibling path is an ordinary page.
+    expect(resolveNavRoute('/reports-login')).toEqual({ kind: 'workspace', workspace: AGENT_WORKSPACE });
+    saveWorkspacePaths({ [AGENT_WORKSPACE]: '/reports-login/callback?login_id=test-login' });
     expect(readWorkspacePaths()).toEqual({});
   });
 
@@ -72,6 +84,19 @@ describe('navPartitions', () => {
       expect(resolveNavRoute(path)).toEqual({ kind: 'workspace', workspace: AGENT_WORKSHOP });
     }
     expect(resolveNavRoute('/agents-extra')).toEqual({ kind: 'workspace', workspace: AGENT_WORKSPACE });
+  });
+
+  it('routes the pages extensions list in the workshop menu to the workshop', () => {
+    const workshopPaths = ['/ext/agent-hub', '/ext/reports?view=all'];
+    for (const path of ['/ext/agent-hub', '/ext/agent-hub/item', '/ext/reports', '/ext/reports?view=mine']) {
+      expect(resolveNavRoute(path, null, workshopPaths)).toEqual({ kind: 'workspace', workspace: AGENT_WORKSHOP });
+    }
+    expect(resolveNavRoute('/ext/agent-hubs', null, workshopPaths)).toEqual({ kind: 'workspace', workspace: AGENT_WORKSPACE });
+    expect(resolveNavRoute('/ext/agent-hub')).toEqual({ kind: 'workspace', workspace: AGENT_WORKSPACE });
+    // The workshop's remembered page survives a reload when it is such a page.
+    saveWorkspacePaths({ [AGENT_WORKSHOP]: '/ext/agent-hub/item' });
+    expect(readWorkspacePaths(workshopPaths)).toEqual({ [AGENT_WORKSHOP]: '/ext/agent-hub/item' });
+    expect(readWorkspacePaths()).toEqual({});
   });
 
   it('drops stale workbench capability paths while retaining workshop query paths', () => {

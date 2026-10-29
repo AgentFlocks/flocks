@@ -936,10 +936,32 @@ class Storage:
         assert last_exc is not None
         raise last_exc
 
+    @staticmethod
+    def _require_sqlite_backend() -> None:
+        """Refuse to open SQLite when this process was set up for another database backend.
+
+        An installed backend replaces this module (``flocks.db_backend``), so
+        this code running means the chosen one is not installed.  Opening
+        SQLite anyway would show a new, empty database in place of the data the
+        deployment keeps in the other one.
+        """
+        from flocks import db_backend
+
+        state = db_backend.installed()
+        choice = state.choice if state is not None else db_backend.backend_choice()
+        if choice.is_sqlite:
+            return
+        raise db_backend.BackendConfigurationError(
+            f"The database backend is {choice.backend!r} (chosen by {choice.source}), but no installed "
+            f"package provides it. Install the package that does, or set {db_backend.BACKEND_ENV}=sqlite "
+            "to run on SQLite."
+        )
+
     @classmethod
     @asynccontextmanager
     async def connect(cls, db_path: Optional[Path] = None) -> AsyncIterator[aiosqlite.Connection]:
         """Open a configured async SQLite connection for the active storage DB."""
+        cls._require_sqlite_backend()
         target = Path(db_path) if db_path is not None else cls.get_db_path()
         cls._assert_active_db_identity(target)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -954,6 +976,7 @@ class Storage:
     @classmethod
     def connect_sync(cls, db_path: Optional[Path] = None) -> sqlite3.Connection:
         """Open a configured sync SQLite connection for the active storage DB."""
+        cls._require_sqlite_backend()
         target = Path(db_path) if db_path is not None else cls.get_db_path()
         cls._assert_active_db_identity(target)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1092,6 +1115,7 @@ class Storage:
         Args:
             db_path: Path to SQLite database file
         """
+        cls._require_sqlite_backend()
         if db_path is None:
             data_dir = Config.get_data_path()
             data_dir.mkdir(parents=True, exist_ok=True)
@@ -1638,11 +1662,15 @@ class Storage:
         set_entries: Sequence[Tuple[str, Any, str]] = (),
         delete_keys: Sequence[str] = (),
         delete_prefixes: Sequence[str] = (),
+        pre_transaction_hook: Optional[TransactionHook] = None,
         transaction_hook: Optional[TransactionHook] = None,
         invalidate_caches: bool = True,
     ) -> int:
         """Apply related set/delete operations in one SQLite transaction.
 
+        ``pre_transaction_hook`` runs first, inside the transaction and before
+        any write: it can check the rows the writes are about to change, and
+        raising there rolls everything back.
         ``transaction_hook`` is reserved for derived relational indexes that
         must commit atomically with their canonical KV records.
         ``invalidate_caches=False`` skips the runtime cache eviction for the
@@ -1658,6 +1686,7 @@ class Storage:
             and not keys_to_delete
             and not prefixes_to_delete
             and transaction_hook is None
+            and pre_transaction_hook is None
         ):
             return 0
 
@@ -1694,6 +1723,8 @@ class Storage:
             async with cls.connect(db_path) as db:
                 try:
                     await db.execute("BEGIN IMMEDIATE")
+                    if pre_transaction_hook is not None:
+                        await pre_transaction_hook(db)
                     for key, serialized, value_type in serialized_entries:
                         await db.execute(
                             """

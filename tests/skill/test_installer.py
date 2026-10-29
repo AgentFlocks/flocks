@@ -994,6 +994,17 @@ INSTALL_GROUP_FAMILIES = [
 
 
 async def _install_group_package(family, content, tmp_path, monkeypatch, *, scope="global"):
+    """Replace through each installer family; v2 only replaces a skill after an explicit overwrite."""
+    from flocks.skill import installer as installer_module
+
+    token = installer_module._OVERWRITE_ALLOWED.set(True)
+    try:
+        return await _install_group_package_once(family, content, tmp_path, monkeypatch, scope=scope)
+    finally:
+        installer_module._OVERWRITE_ALLOWED.reset(token)
+
+
+async def _install_group_package_once(family, content, tmp_path, monkeypatch, *, scope="global"):
     """Exercise each real replacement boundary with offline download responses."""
     import httpx
 
