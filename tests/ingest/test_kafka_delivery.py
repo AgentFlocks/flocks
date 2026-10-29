@@ -444,6 +444,89 @@ async def test_terminal_record_failure_cannot_ack_a_successful_business_run(pipe
 
 
 @pytest.mark.asyncio
+async def test_restart_during_failed_generation_cleanup_finishes_old_consumer_first(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, 0)])
+    closing = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = []
+    failing = True
+
+    async def slow_stop(consumer):
+        closing.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.append(consumer)
+            raise
+        consumer.closed = True
+
+    async def dispatch(*args, **kwargs):
+        if failing:
+            raise RuntimeError("synthetic business failure")
+        return acknowledge()
+
+    monkeypatch.setattr(broker.Consumer, "stop", slow_stop)
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    await start(broker)
+    await asyncio.wait_for(closing.wait(), 3)
+    failing = False
+    restarting = asyncio.create_task(start(broker))
+    try:
+        await asyncio.sleep(0.03)
+        assert not cancelled, "restart cancelled the old client's in-progress stop"
+        assert not restarting.done()
+        assert len(broker.consumers) == 1
+        release.set()
+        await restarting
+        assert broker.consumers[0].closed
+        await eventually(lambda: broker.committed.get(Partition("alerts", 0)) == 1)
+    finally:
+        release.set()
+        await asyncio.gather(restarting, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_slow_client_close_bounds_restart_and_retains_the_old_supervisor(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, 0)])
+    closing = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_stop(consumer):
+        closing.set()
+        await release.wait()
+        consumer.closed = True
+
+    async def dispatch(*args, **kwargs):
+        return acknowledge()
+
+    monkeypatch.setattr(broker.Consumer, "stop", slow_stop)
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    monkeypatch.setattr(kafka_manager, "_CONSUMER_STOP_WAIT_TIMEOUT_S", 0.02)
+    await start(broker)
+    old = manager._tasks["delivery-test"]
+    try:
+        await asyncio.wait_for(manager.stop_workflow("delivery-test"), 1)
+        await asyncio.wait_for(closing.wait(), 1)
+        for _ in range(2):
+            status = await asyncio.wait_for(manager.restart_workflow("delivery-test"), 1)
+            assert status["state"] == "failed"
+            assert status["error_code"] == "consumer_stop_timeout"
+            assert manager._tasks["delivery-test"] is old
+            assert not old.done()
+            assert len(broker.consumers) == 1
+        release.set()
+        await manager.stop_workflow("delivery-test")
+        assert broker.consumers[0].closed
+        assert "delivery-test" not in manager._tasks
+        await start(broker)
+        assert len(broker.consumers) == 2
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
 async def test_transient_initial_database_lock_recovers_without_losing_or_reexecuting_business_work(
     pipeline, monkeypatch,
 ):  # noqa: ANN001

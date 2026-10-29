@@ -88,6 +88,9 @@ _DELIVERY_RETRY_DELAY_S = 0.25
 # aiokafka may retry retriable commit failures internally without a deadline.
 _OFFSET_OPERATION_TIMEOUT_S = _REQUEST_TIMEOUT_MS / 1000 + 1.0
 _WORKER_DRAIN_TIMEOUT_S = 5.0
+# Keep lifecycle endpoints bounded without cancelling an in-flight client close.
+# A timed-out supervisor remains tracked and prevents a second group member.
+_CONSUMER_STOP_WAIT_TIMEOUT_S = _WORKER_DRAIN_TIMEOUT_S + 2 * _REQUEST_TIMEOUT_MS / 1000 + 1.0
 _REBALANCE_RECOVERY_DELAY_S = 1.0
 _REBALANCE_RECOVERY_MAX_DELAY_S = 30.0
 _RECOVERABLE_OWNERSHIP_ERRORS = frozenset({
@@ -315,6 +318,25 @@ async def _until_aborted(operation: Awaitable[Any], abort: asyncio.Event) -> Any
             if not pending.done():
                 pending.cancel()
         await asyncio.gather(task, stopped, return_exceptions=True)
+
+
+async def _finish_cleanup(operation: Awaitable[Any]) -> None:
+    """Finish client/worker teardown before a cancelled supervisor can exit.
+
+    aiokafka marks a consumer closed before awaiting its coordinator/fetcher.
+    Cancelling stop() midway can leave the old group member alive, and a second
+    stop() then returns immediately. Keep the original finalizer alive instead.
+    """
+    task = asyncio.ensure_future(operation)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    task.result()
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 def _strip_execution_only_comments(value: Any) -> Any:
@@ -634,15 +656,25 @@ class KafkaManager:
         ev = self._abort_events.get(workflow_id)
         if ev is not None:
             ev.set()
-        task = self._tasks.pop(workflow_id, None)
+        task = self._tasks.get(workflow_id)
         if task is not None and not task.done():
             task.cancel()
+            _, pending = await asyncio.wait({task}, timeout=_CONSUMER_STOP_WAIT_TIMEOUT_S)
+            if pending:
+                self._status[workflow_id] = {
+                    **self._status.get(workflow_id, {}), "state": "failed",
+                    "error": "previous_consumer_still_closing", "error_code": "consumer_stop_timeout",
+                }
+                log.warning("kafka.stop_pending", {"workflow_id": workflow_id})
+                return
             try:
                 await task
             except asyncio.CancelledError:
                 pass
             except Exception:
                 pass
+        if self._tasks.get(workflow_id) is task:
+            self._tasks.pop(workflow_id, None)
         await self._cleanup_runtime_resources(workflow_id)
         if workflow_id in self._status:
             self._status[workflow_id] = {"state": "stopped", "error": None}
@@ -668,6 +700,9 @@ class KafkaManager:
         surface connection errors to the user.
         """
         await self._stop_workflow_unlocked(workflow_id)
+        previous = self._tasks.get(workflow_id)
+        if previous is not None and not previous.done():
+            return self.get_consumer_status(workflow_id)
         if self._active_draining_workers(workflow_id):
             error = "previous_workers_still_draining"
             self._status[workflow_id] = {"state": "failed", "error": error}
@@ -833,7 +868,7 @@ class KafkaManager:
             ready.set()
             log.error("kafka.supervisor_failed", {"workflow_id": workflow_id, **_delivery_error_diagnostics(exc)})
         finally:
-            await self._cleanup_runtime_resources(workflow_id)
+            await _finish_cleanup(self._cleanup_runtime_resources(workflow_id))
             if self._tasks.get(workflow_id) is asyncio.current_task():
                 self._tasks.pop(workflow_id, None)
 
@@ -972,6 +1007,17 @@ class KafkaManager:
             if anchor_tasks:
                 await asyncio.gather(*tuple(anchor_tasks), return_exceptions=True)
 
+        async def shutdown() -> None:
+            tracker.close()
+            try:
+                await stop_assignments()
+                await self._cleanup_runtime_resources(workflow_id)
+            finally:
+                try:
+                    await consumer.stop()
+                except Exception as exc:
+                    log.warning("kafka.stop_failed", {"workflow_id": workflow_id, "error": str(exc)})
+
         async def anchor_assignment(assigned: Any, version: int) -> None:
             try:
                 for partition in assigned:
@@ -1029,16 +1075,10 @@ class KafkaManager:
                 raise _KafkaGenerationStopped()
         except _KafkaGenerationStopped:
             ready.set()
-            await stop_assignments()
-            await self._cleanup_runtime_resources(workflow_id)
-            await consumer.stop()
+            await _finish_cleanup(shutdown())
             return
         except asyncio.CancelledError:
-            await stop_assignments()
-            try:
-                await consumer.stop()
-            except Exception:
-                pass
+            await _finish_cleanup(shutdown())
             raise
         except Exception as exc:
             self._status[workflow_id] = {
@@ -1053,12 +1093,7 @@ class KafkaManager:
                 "kafka.connect_failed",
                 {"workflow_id": workflow_id, "error": str(exc), "broker": broker, "topic": topic},
             )
-            await stop_assignments()
-            try:
-                await consumer.stop()
-            except Exception:
-                pass
-            await self._cleanup_runtime_resources(workflow_id)
+            await _finish_cleanup(shutdown())
             return
 
         self._status[workflow_id] = {
@@ -1130,13 +1165,7 @@ class KafkaManager:
                 {"workflow_id": workflow_id, **_delivery_error_diagnostics(exc)},
             )
         finally:
-            tracker.close()
-            await stop_assignments()
-            await self._cleanup_runtime_resources(workflow_id)
-            try:
-                await consumer.stop()
-            except Exception:
-                pass
+            await _finish_cleanup(shutdown())
 
     async def _worker_loop(
         self,
