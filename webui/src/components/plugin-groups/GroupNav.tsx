@@ -270,7 +270,7 @@ export default function GroupNav({
           className="rounded p-1 text-gray-500 hover:bg-gray-100 disabled:opacity-40"><Plus className="h-4 w-4" /></button>
       </div>
       <p className="mb-2 px-2 text-[11px] leading-4 text-gray-400">{t('countsDescription')}</p>
-      <nav className="space-y-0.5">
+      <nav className="space-y-0.5 max-md:max-h-48 max-md:overflow-y-auto">
         <div className="flex">{navigationButton(null, t('all'), total)}</div>
         {ordered.map((group) => {
           const entry = groups.find((row) => row.name === group) ?? { name: group, count: 0 };

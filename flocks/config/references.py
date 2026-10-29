@@ -555,13 +555,59 @@ def _seed_agents_from_mode(stored: Dict[str, Any], agent_changes: Dict[str, Any]
     return {**stored, agent_key: agents} if seeded else stored
 
 
+def _expanded(value: Any, values: Dict[str, str]) -> Any:
+    """``value`` with the references in ``values`` written out as they expand."""
+    if isinstance(value, str):
+        return CONFIG_REFERENCE.sub(lambda match: values.get(match.group(0), match.group(0)), value)
+    if isinstance(value, dict):
+        return {key: _expanded(child, values) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_expanded(child, values) for child in value]
+    return value
+
+
+def _same_shape(item: Any, original: Any) -> bool:
+    """Whether ``item`` has the fields ``original`` has, nested objects included."""
+    if isinstance(item, dict) and isinstance(original, dict):
+        return set(item) == set(original) and all(_same_shape(item[key], original[key]) for key in item)
+    return isinstance(item, dict) == isinstance(original, dict)
+
+
+def _closest_object(item: Dict[str, Any], candidates: List[Any]) -> Optional[int]:
+    """The one candidate object ``item`` keeps the most field values of; None on a tie or none kept."""
+    best: Optional[int] = None
+    best_kept = 0
+    tied = False
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            continue
+        kept = sum(1 for key, value in item.items() if key in candidate and candidate[key] == value)
+        if kept > best_kept:
+            best, best_kept, tied = index, kept, False
+        elif kept and kept == best_kept:
+            tied = True
+    return None if tied else best
+
+
 def _apply_list(stored, new, seen, loaded, own_values, others, items_annotation, path) -> List[Any]:
     """A changed list: stored items keep their stored text, new ones are written as given.
 
     An item counts as stored when it equals what one of the file's items
-    expands to, wherever it now stands. Two stored references with that same
-    value cannot be told apart, and an item still carrying a reference's value
-    (edited, or from another file) cannot be written: both refuse the save.
+    expands to, wherever it now stands. One sent back with references in it
+    (as an admin reads them) is written as given, references and all, so a
+    reference swapped for another is kept as written. Two stored references
+    with that same value cannot be told apart, and an item still carrying a
+    reference's value (edited, or from another file) cannot be written: both
+    refuse the save.
+
+    An object is merged into the stored one at its place only when it is
+    clearly that object with some values changed: the same fields, nested
+    objects included (a merge cannot drop a field the object no longer has),
+    more of them kept from that object than from any other, and that object
+    not found elsewhere in the list. The merge then keeps the stored text only
+    where the value is unchanged. Anything else (a removal, an insertion, a
+    reordering, another object put there) is written as given, so no stored
+    object passes its fields to another one.
     """
     stored_items = stored if isinstance(stored, list) else []
     loaded_items = loaded if isinstance(loaded, list) and len(loaded) == len(stored_items) else []
@@ -573,16 +619,23 @@ def _apply_list(stored, new, seen, loaded, own_values, others, items_annotation,
     for index, item in enumerate(loaded_items):
         by_value.setdefault(_fingerprint(item), []).append(index)
     values = (_values_in(stored, own_values) if not is_missing(stored) else set()) | others(path)
+
+    matched = [by_value.get(_fingerprint(item), []) for item in new]
+    moved = {match for matches in matched for match in matches}
     result: List[Any] = []
     for index, item in enumerate(new):
         item_path = path + (index,)
+        matches = matched[index]
         if (
             in_place
+            and not matches
             and index < len(seen_items)
-            and item != seen_items[index]
+            and index not in moved
             and isinstance(item, dict)
             and isinstance(seen_items[index], dict)
             and isinstance(stored_items[index], dict)
+            and _same_shape(item, seen_items[index])
+            and _closest_object(_expanded(item, own_values), seen_items) == index
         ):
             # The object at this place of this file's list, partly changed.
             result.append(apply_changes(
@@ -596,7 +649,6 @@ def _apply_list(stored, new, seen, loaded, own_values, others, items_annotation,
                 path=item_path,
             ))
             continue
-        matches = by_value.get(_fingerprint(item), [])
         if len({_fingerprint(stored_items[match]) for match in matches}) > 1:
             raise ChangeRefused(item_path, ambiguous=True)
         if matches:

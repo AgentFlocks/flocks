@@ -4,6 +4,7 @@ import asyncio
 import contextvars
 import functools
 import threading
+from collections import OrderedDict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -26,6 +27,11 @@ _TASK_ABSOLUTE_TIMEOUT_S: int = 2 * 3600
 _workflow_cancel_lock = threading.Lock()
 _workflow_cancel_events: dict[str, threading.Event] = {}
 _workflow_done_events: dict[str, threading.Event] = {}
+#: Workflow-mode runs this process dispatched (execution id -> whether it got
+#: as far as running the workflow, so whatever its nodes do may have happened
+#: -- flocks.task.outcome).
+_workflow_started: "OrderedDict[str, bool]" = OrderedDict()
+_WORKFLOW_STARTED_MAX = 4096
 
 
 class TaskExecutionStopped(RuntimeError):
@@ -46,6 +52,17 @@ def _release_workflow_run(
 
 
 class TaskExecutor:
+    @classmethod
+    def workflow_started(cls, execution: TaskExecution) -> Optional[bool]:
+        """Whether this workflow-mode run started the workflow; None when this process did not run it."""
+        with _workflow_cancel_lock:
+            return _workflow_started.get(execution.id)
+
+    @classmethod
+    def forget_workflow_started(cls, execution_id: str) -> None:
+        with _workflow_cancel_lock:
+            _workflow_started.pop(execution_id, None)
+
     @classmethod
     def request_runtime_cancel(cls, execution: TaskExecution) -> bool:
         if execution.execution_mode != ExecutionMode.WORKFLOW:
@@ -71,9 +88,20 @@ class TaskExecutor:
             execution.status = TaskStatus.RUNNING
         if execution.started_at is None:
             execution.started_at = datetime.now(timezone.utc)
+        if execution.execution_mode == ExecutionMode.WORKFLOW:
+            with _workflow_cancel_lock:
+                # This attempt has started nothing yet (an earlier one may have).
+                _workflow_started[execution.id] = False
+                _workflow_started.move_to_end(execution.id)
+                while len(_workflow_started) > _WORKFLOW_STARTED_MAX:
+                    _workflow_started.popitem(last=False)
 
         session_id: Optional[str] = None
-        if execution.execution_mode == ExecutionMode.AGENT:
+        if execution.execution_mode == ExecutionMode.AGENT and execution.session_id:
+            # Resumed by a person after a run whose effects were not
+            # confirmed: on in the session it ran in, its checkpoint.
+            session_id = await cls._resume_task_session(execution)
+        elif execution.execution_mode == ExecutionMode.AGENT:
             session_id = await cls._create_task_session(execution, scheduler)
 
         execution.session_id = session_id
@@ -105,6 +133,7 @@ class TaskExecutor:
             else:
                 result = await cls._run_agent_session(execution, session_id)
             final_status = TaskStatus.COMPLETED
+            cls.forget_workflow_started(execution.id)
             execution.result_summary = result
             execution.delivery_status = DeliveryStatus.UNREAD
         except TaskExecutionStopped as exc:
@@ -151,6 +180,26 @@ class TaskExecutor:
             agent=execution.agent_name,
         )
         return session.id
+
+    @classmethod
+    async def _resume_task_session(cls, execution: TaskExecution) -> str:
+        """Continue a held run in its own session, told what to check first."""
+        from flocks.session.message import Message, MessageRole
+
+        effects = ", ".join(execution.retry.unverified_effects[:20]) or "unknown"
+        await Message.create(
+            session_id=execution.session_id,
+            role=MessageRole.USER,
+            content=(
+                "[Task resumed] The previous attempt stopped after starting actions whose "
+                f"effects were not confirmed: {effects}. Before doing anything again, check "
+                "whether each of them already took effect, and do not repeat one that did. "
+                "Then finish the task."
+            ),
+            agent=execution.agent_name,
+        )
+        execution.retry.unverified_effects = []
+        return execution.session_id
 
     @classmethod
     async def _run_agent_session(
@@ -257,6 +306,8 @@ class TaskExecutor:
                 ),
             )
             handed_off = True
+            with _workflow_cancel_lock:
+                _workflow_started[execution.id] = True
             worker.add_done_callback(lambda done: done.cancelled() or done.exception())
             try:
                 result = await asyncio.shield(worker)

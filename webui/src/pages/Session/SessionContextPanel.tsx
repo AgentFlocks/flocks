@@ -584,7 +584,7 @@ export default function SessionContextPanel({
                       <span className="text-xs leading-4 text-ui-muted">{item.kind === 'project' ? t('context.project') : t('context.folder')}</span>
                     </button>
                     {item.kind === 'folder' && (
-                      <button type="button" onClick={() => void removeFolder(item)} className="mr-1 rounded p-1 text-ui-muted opacity-0 hover:bg-ui-hover hover:text-red-500 group-hover:opacity-100"><X className="h-3 w-3" /></button>
+                      <button type="button" onClick={() => void removeFolder(item)} className="mr-1 rounded p-1 text-ui-muted opacity-0 hover:bg-ui-hover hover:text-red-500 group-hover:opacity-100 max-md:opacity-100"><X className="h-3 w-3" /></button>
                     )}
                   </div>
                 ))}
@@ -676,10 +676,10 @@ function FileRows({
             </span>
             {file.size != null && <span className="text-xs leading-4 text-ui-muted">{formatBytes(file.size)}</span>}
           </button>
-          <button type="button" onClick={() => onFocusMessage(file.sourceMessageID)} className="rounded p-1 text-ui-muted opacity-0 hover:bg-ui-hover hover:text-ui-text group-hover:opacity-100" title={t('context.locateMessage')}>
+          <button type="button" onClick={() => onFocusMessage(file.sourceMessageID)} className="rounded p-1 text-ui-muted opacity-0 hover:bg-ui-hover hover:text-ui-text group-hover:opacity-100 max-md:opacity-100" title={t('context.locateMessage')}>
             <ArrowLeft className="h-3 w-3" />
           </button>
-          <a href={sessionApi.contextFileDownloadUrl(sessionId, file.resourceID)} download={file.displayName} className="mr-1 rounded p-1 text-ui-muted opacity-0 hover:bg-ui-hover hover:text-ui-text group-hover:opacity-100" title={t('context.download')}>
+          <a href={sessionApi.contextFileDownloadUrl(sessionId, file.resourceID)} download={file.displayName} className="mr-1 rounded p-1 text-ui-muted opacity-0 hover:bg-ui-hover hover:text-ui-text group-hover:opacity-100 max-md:opacity-100" title={t('context.download')}>
             <Download className="h-3 w-3" />
           </a>
         </div>

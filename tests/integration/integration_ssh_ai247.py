@@ -1,8 +1,8 @@
 """Optional manual smoke test for the neutral OSS SSH transport.
 
 This is intentionally excluded from the normal test suite.  It validates
-connectivity only; command authorization, audit, and command safety belong to
-FlocksPro and must be exercised by its local policy tests rather than here.
+connectivity only; extensions own command authorization, audit, and command
+safety and exercise those policies in their own tests.
 """
 
 from __future__ import annotations

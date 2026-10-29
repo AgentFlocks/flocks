@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
 PluginType = Literal["skill", "agent", "tool", "device", "workflow", "webui", "component"]
-# Which edition may install a plugin. Pro-only suites stay visible in the
-# catalog so the operator can see what an upgrade unlocks.
-PluginEdition = Literal["oss", "pro"]
+# Which edition a plugin belongs to: "oss" for the open product's own, or a
+# name an extension gives its plugins. What any other name means is the
+# extension's business, not the hub's.
+PluginEdition = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]{0,31}$")]
 
 PluginState = Literal[
     "available",
@@ -24,7 +25,9 @@ PluginState = Literal[
 
 
 class HubSource(BaseModel):
-    kind: Literal["bundled", "github", "cloud"] = "bundled"
+    # bundled, github, cloud, or a kind of its own that an extension's
+    # provider gives the plugins it delivers (see flocks.hub.providers).
+    kind: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]{0,31}$")] = "bundled"
     path: Optional[str] = None
     repo: Optional[str] = None
     ref: Optional[str] = None

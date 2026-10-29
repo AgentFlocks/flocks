@@ -738,9 +738,12 @@ class TestAgentUpdate:
         monkeypatch.setattr(agent_routes, "_load_delegatable_overrides", lambda: {})
         monkeypatch.setattr(agent_routes, "_get_all_tool_names_async", AsyncMock(return_value=[]))
 
+        # Agent definitions are global configuration: the route needs an admin.
+        admin_request = SimpleNamespace(state=SimpleNamespace(auth_user=SimpleNamespace(role="admin", username="admin")))
         response = await agent_routes.update_agent(
             "yaml-agent",
             agent_routes.AgentUpdateRequest(skills=[], tools=[]),
+            admin_request,
         )
 
         update_yaml.assert_called_once_with(
@@ -1049,9 +1052,14 @@ class TestProtectedAgentPrompt:
         assert response.json()["prompt"] is None
 
     @pytest.mark.asyncio
-    async def test_a_stale_storage_record_never_unseals_the_agent(self, client, sealed_agent):
+    async def test_a_stale_storage_record_never_unseals_the_agent(self, client, sealed_agent, monkeypatch):
         from flocks.agent.registry import Agent
+        from flocks.provider.provider import Provider
         from flocks.storage.storage import Storage
+
+        # Model updates must name a known provider; register the one used below.
+        real_get = Provider.get
+        monkeypatch.setattr(Provider, "get", lambda provider_id: object() if provider_id == "provider" else real_get(provider_id))
 
         await Storage.write(
             "agent/custom/sealed-demo",

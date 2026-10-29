@@ -601,6 +601,12 @@ def test_build_dependency_sync_command_keeps_project_install_on_non_windows(
     assert updater._build_dependency_sync_command("uv") == ["uv", "sync", "--inexact", "--no-python-downloads"]
 
 
+def test_prebuilt_dependency_sync_keeps_user_installed_packages(tmp_path: Path) -> None:
+    command = updater._build_prebuilt_dependency_sync_command("/opt/flocks/tools/uv/uv", tmp_path / "wheels")
+
+    assert command[:6] == ["/opt/flocks/tools/uv/uv", "sync", "--inexact", "--frozen", "--offline", "--no-python-downloads"]
+
+
 def test_wheel_build_config_does_not_force_include_runtime_or_build_outputs() -> None:
     pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
@@ -690,7 +696,7 @@ async def test_fetch_gitee_release_returns_web_archive_urls(monkeypatch: pytest.
             assert follow_redirects is True
             return _FakeResponse()
 
-    monkeypatch.setattr(updater.httpx, "AsyncClient", lambda timeout=15: _FakeClient())
+    monkeypatch.setattr(updater.httpx, "AsyncClient", lambda **_kw: _FakeClient())
 
     tag, notes, html_url, zip_url, tar_url = await updater._fetch_gitee_release("flocks/flocks", "token")
 
@@ -740,7 +746,7 @@ async def test_download_archive_uses_curl_user_agent_for_gitee_web_archive(
     monkeypatch.setattr(
         updater.httpx,
         "AsyncClient",
-        lambda timeout, follow_redirects=True: _FakeClient(),
+        lambda **_kw: _FakeClient(),
     )
 
     archive_path = await updater._download_archive(
@@ -795,7 +801,7 @@ async def test_download_archive_keeps_auth_header_for_non_gitee_sources(
     monkeypatch.setattr(
         updater.httpx,
         "AsyncClient",
-        lambda timeout, follow_redirects=True: _FakeClient(),
+        lambda **_kw: _FakeClient(),
     )
 
     archive_path = await updater._download_archive(

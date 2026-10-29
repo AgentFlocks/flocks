@@ -271,13 +271,25 @@ async def test_notification_failure_does_not_replace_execution_error_or_skip_cle
 @pytest.mark.asyncio
 async def test_manual_stop_is_not_reported_as_fault(poller_deps, monkeypatch):
     def stopped(**kwargs):
-        kwargs["cancel"].__self__.set()
+        for event in poller_deps.manager._run_cancel_events["monitor"]:
+            event.set()
+        assert kwargs["cancel"]()
         raise RuntimeError("user stopped")
     monkeypatch.setattr(poller, "run_workflow", stopped)
     result = await poller_deps.manager._execute_run("monitor", {}, CONFIG)
     assert result["lastStatus"] == "cancelled"
     assert not poller_deps.notifications and len(poller_deps.cleaned) == 1
     assert not poller_deps.manager._run_cancel_events
+
+
+@pytest.mark.asyncio
+async def test_history_cancel_is_not_reported_as_fault(poller_deps, monkeypatch):
+    monkeypatch.setattr(poller, "execution_cancelled", lambda eid: eid == "test-execution")
+    monkeypatch.setattr(poller, "run_workflow", lambda **_: poller.RunWorkflowResult(status="SUCCEEDED"))
+    result = await poller_deps.manager._execute_run("monitor", {}, CONFIG)
+    assert result["lastStatus"] == "cancelled"
+    assert not poller_deps.notifications
+    assert len(poller_deps.cleaned) == 1 and not poller_deps.manager._run_cancel_events
 
 
 @pytest.mark.asyncio

@@ -255,6 +255,34 @@ class TestConfigWriter:
         assert "new" in data["provider"]
 
 
+class TestConfigWriterSections:
+
+    def test_update_merges_into_the_section_and_creates_missing_objects(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        written = ConfigWriter.update_config_section("channels.feishu", {"enabled": True, "appId": "cli_a"})
+        assert written == {"enabled": True, "appId": "cli_a"}
+        ConfigWriter.update_config_section("channels.feishu", {"appSecret": "{secret:channel_feishu_appSecret}"})
+
+        data = json.loads((temp_project / "flocks.json").read_text())
+        assert data["channels"]["feishu"] == {
+            "enabled": True, "appId": "cli_a", "appSecret": "{secret:channel_feishu_appSecret}",
+        }
+        # Everything else in the file is kept.
+        assert data["mcp"] == {"test": {"type": "local"}} and "anthropic" in data["provider"]
+
+    @pytest.mark.parametrize(("section", "values"), [
+        ("", {"a": 1}), ("channels..feishu", {"a": 1}), ("mcp.test.type", {"a": 1}), ("channels.feishu", ["a"]),
+    ])
+    def test_update_refuses_what_is_not_an_object(self, temp_project, section, values):
+        from flocks.config.config_writer import ConfigWriter
+
+        before = (temp_project / "flocks.json").read_text()
+        with pytest.raises(ValueError):
+            ConfigWriter.update_config_section(section, values)
+        assert (temp_project / "flocks.json").read_text() == before
+
+
 class TestConfigWriterModelSettings:
     """Test model_settings section CRUD."""
 

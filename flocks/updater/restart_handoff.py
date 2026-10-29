@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Sequence
@@ -213,9 +214,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--current-version", required=True)
     parser.add_argument("--uv-default-index")
     parser.add_argument("--npm-registry")
-    parser.add_argument("--pro-wheel-path")
-    parser.add_argument("--pro-bundle-manifest-path")
-    parser.add_argument("--bundle-sha256")
+    # Installed after the dependency sync; given by an update channel's plan.
+    parser.add_argument("--extra-wheel", action="append", default=[])
+    # JSON ``[staged, destination]``: put in place once the install succeeded.
+    parser.add_argument("--success-file", action="append", default=[])
     parser.add_argument("--cleanup-dir")
     parser.add_argument("--prebuilt", action="store_true")
     parser.add_argument("--dependency-wheels-dir")
@@ -236,11 +238,8 @@ def _run_upgrade_tasks(args: argparse.Namespace) -> str | None:
                 version=args.version,
                 uv_default_index=args.uv_default_index,
                 npm_registry=args.npm_registry,
-                pro_wheel_path=Path(args.pro_wheel_path) if args.pro_wheel_path else None,
-                pro_bundle_manifest_path=(
-                    Path(args.pro_bundle_manifest_path) if args.pro_bundle_manifest_path else None
-                ),
-                bundle_sha256=args.bundle_sha256,
+                extra_wheels=[Path(path) for path in getattr(args, "extra_wheel", None) or []],
+                success_files=_success_files(args),
                 sync_timeout=args.sync_timeout,
                 prebuilt=bool(getattr(args, "prebuilt", False)),
                 dependency_wheels_dir=(
@@ -315,6 +314,28 @@ def _apply_new_source(args: argparse.Namespace) -> None:
     updater_module._replace_install_dir(content_root, Path(args.install_root))
 
 
+def _restore_install_from_backup(backup_path: Path, install_root: Path) -> None:
+    """Put the pre-upgrade source back from the backup archive.
+
+    备份是升级前源码的 tar.gz（排除运行时/构建目录），按升级本身同样的覆盖方式回放到安装目录，
+    半替换状态里被新版本改过的文件会全部回到旧版本；备份文件本身保留，供人工核对。
+    """
+    with tempfile.TemporaryDirectory(prefix="flocks-restore-") as tmp:
+        content_root = updater_module._extract_archive(backup_path, Path(tmp))
+        updater_module._replace_install_dir(content_root, install_root)
+
+
+def _restore_after_failed_replace(args: argparse.Namespace, backup_path: Path) -> tuple[bool, str | None]:
+    """Roll the install back after a failed source replacement; returns (restored, error)."""
+    try:
+        _restore_install_from_backup(backup_path, Path(args.install_root))
+    except Exception as exc:  # 还原也失败：留人工路径（backup_path）
+        _record_handoff_log(f"source_restore_failed backup={backup_path} error={exc}")
+        return False, str(exc)
+    _record_handoff_log(f"source_restored_from_backup backup={backup_path}")
+    return True, None
+
+
 def _build_captured_start_argv(args: argparse.Namespace) -> list[str]:
     """Build ``flocks start`` directly from the pre-upgrade config snapshot."""
     if not args.restart_argv:
@@ -378,9 +399,11 @@ def _write_upgrade_result(
     backup_path: Path | None = None,
     stdout: str | None = None,
     stderr: str | None = None,
+    restored_from_backup: bool | None = None,
+    restore_error: str | None = None,
     progress: dict[str, object] | None = None,
 ) -> None:
-    """Persist a result record without driving automatic recovery."""
+    """Persist a result record（自动回滚的结果也记在这里：restored_from_backup / restore_error）."""
     try:
         config_payload = json.loads(args.service_config_json or "{}")
     except json.JSONDecodeError:
@@ -398,6 +421,10 @@ def _write_upgrade_result(
         payload["failed_stage"] = failed_stage
     if backup_path is not None:
         payload["backup_path"] = str(backup_path)
+    if restored_from_backup is not None:
+        payload["restored_from_backup"] = restored_from_backup
+    if restore_error:
+        payload["restore_error"] = restore_error
     if stdout:
         payload["stdout"] = stdout
     if stderr:
@@ -414,20 +441,12 @@ def _write_upgrade_result(
             pass
 
 
-def _report_pending_pro_bundle_install_receipt(args: argparse.Namespace) -> None:
-    if not args.pro_bundle_manifest_path:
-        return
-    try:
-        from flocks.console.login import ConsoleLoginService
-
-        reported = asyncio.run(ConsoleLoginService.report_pending_pro_bundle_install_receipt())
-    except Exception as exc:
-        _record_handoff_log(f"install_receipt_report_failed error={exc}")
-        return
-    if reported:
-        _record_handoff_log("install_receipt_reported")
-    else:
-        _record_handoff_log("install_receipt_report_skipped")
+def _success_files(args: argparse.Namespace) -> list[tuple[Path, Path]]:
+    pairs: list[tuple[Path, Path]] = []
+    for raw in getattr(args, "success_file", None) or []:
+        staged, destination = json.loads(raw)
+        pairs.append((Path(staged), Path(destination)))
+    return pairs
 
 
 def _planned_upgrade_steps(args: argparse.Namespace, *, source_replace: bool = True) -> list[str]:
@@ -438,8 +457,8 @@ def _planned_upgrade_steps(args: argparse.Namespace, *, source_replace: bool = T
         steps.append("check_runtime")
     if not prebuilt or getattr(args, "dependency_wheels_dir", None):
         steps.append("sync_dependencies")
-    if args.pro_wheel_path:
-        steps.append("install_pro")
+    if getattr(args, "extra_wheel", None):
+        steps.append("install_components")
     if not prebuilt:
         steps.append("build_webui")
     return [*steps, "finalize", "start"]
@@ -504,6 +523,8 @@ class _UpgradeReporter:
         backup_path: Path | None = None,
         stdout: str | None = None,
         stderr: str | None = None,
+        restored_from_backup: bool | None = None,
+        restore_error: str | None = None,
     ) -> int:
         """Record the failed step and serve it until the upgrade dialog has read it."""
         self.progress.fail(error)
@@ -515,6 +536,8 @@ class _UpgradeReporter:
             backup_path=backup_path,
             stdout=stdout,
             stderr=stderr,
+            restored_from_backup=restored_from_backup,
+            restore_error=restore_error,
             progress=self.progress.snapshot(),
         )
         # After a stop timeout or a failed start the port may be free again.
@@ -576,7 +599,28 @@ def _run_reported_upgrade(args: argparse.Namespace, reporter: _UpgradeReporter) 
     except Exception as exc:
         error = str(exc)
         _record_handoff_log(f"source_replace_failed error={error}")
-        return reporter.fail(error, failed_stage="source_replace", backup_path=backup_path)
+        # 替换到一半失败不能留半新半旧的目录：先从备份自动还原，还原成功再把原本在跑的服务拉起来，
+        # 保证基础 OSS 能力可用；只有还原也失败才把 backup_path 留给人工处理
+        restored, restore_error = _restore_after_failed_replace(args, backup_path)
+        stdout = stderr = ""
+        if restored:
+            # The restored service binds the public port the progress responder holds.
+            reporter.release_port()
+            try:
+                _started, stdout, stderr = _start_service_after_upgrade(args)
+            except Exception as restart_exc:
+                _started, stdout, stderr = False, "", str(restart_exc)
+            if not _started:
+                _record_handoff_log("service_restart_after_restore_failed")
+        return reporter.fail(
+            error,
+            failed_stage="source_replace",
+            backup_path=backup_path,
+            stdout=stdout or None,
+            stderr=stderr or None,
+            restored_from_backup=restored,
+            restore_error=restore_error,
+        )
 
     args.upgrade_step_callback = reporter.start
     try:
@@ -587,7 +631,6 @@ def _run_reported_upgrade(args: argparse.Namespace, reporter: _UpgradeReporter) 
         _record_handoff_log(f"install_failed error={task_error}")
         return reporter.fail(task_error, failed_stage="install", backup_path=backup_path, stderr=task_error)
 
-    _report_pending_pro_bundle_install_receipt(args)
     reporter.start("start")
     # The upgraded service binds the same port.
     reporter.release_port()
@@ -788,11 +831,11 @@ def run(argv: Sequence[str] | None = None) -> int:
     legacy_daemon_pid = _legacy_supervisor_pid(args) if args.prepare_handover else None
     legacy_service_ports = tuple(sorted({args.backend_port, args.frontend_port}))
     supervisor_stopped = False
-    pro_install = bool(args.pro_wheel_path or args.pro_bundle_manifest_path)
-    # A web upgrade that only changes the Pro component restarts through this mode.
+    component_install = bool(getattr(args, "extra_wheel", None) or getattr(args, "success_file", None))
+    # A web upgrade that only changes an extension's component restarts through this mode.
     reporter = (
         _UpgradeReporter(args, progress_token, _planned_upgrade_steps(args, source_replace=False))
-        if progress_token and pro_install and not args.prepare_handover
+        if progress_token and component_install and not args.prepare_handover
         else None
     )
 
@@ -822,7 +865,9 @@ def run(argv: Sequence[str] | None = None) -> int:
                 _record_handoff_log("legacy_handover_stop_timeout")
                 _cleanup_dir(args.cleanup_dir)
                 return 1
-    elif pro_install:
+    elif component_install:
+        # A change that keeps the local source (an extension's component): the
+        # service still has to be down while its runtime changes under it.
         if reporter is not None:
             reporter.start("stop")
         supervisor_stopped = _stop_supervisor_before_restart(
@@ -830,7 +875,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             service_ports=(args.frontend_port,),
         )
         if not supervisor_stopped:
-            _record_handoff_log("pro_handover_stop_timeout")
+            _record_handoff_log("component_handover_stop_timeout")
             _cleanup_dir(args.cleanup_dir)
             return _restart_failed(reporter, "service stop timed out", "stop")
         if not _ensure_backend_port_free(args.backend_port):
@@ -854,7 +899,6 @@ def run(argv: Sequence[str] | None = None) -> int:
         _record_handoff_log(f"upgrade_tasks_failed error={task_error}")
         _cleanup_dir(args.cleanup_dir)
         return _restart_failed(reporter, task_error, "install")
-    _report_pending_pro_bundle_install_receipt(args)
 
     uses_legacy_protocol = bool(args.backup_path or args.prepare_handover or args.backend_pid_file)
     if uses_legacy_protocol and not _cleanup_legacy_upgrade_handover(args):

@@ -15,15 +15,120 @@ Usage:
     api_key = secrets.get("anthropic_llm_key")
 """
 
+import contextvars
 import json
 import os
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Iterator, Optional
+
+from filelock import FileLock
 
 from flocks.config.config import Config
 from flocks.utils.log import Log
 
 log = Log.create(service="security.secrets")
+
+
+def secret_file_lock(secret_file: Path) -> FileLock:
+    """The lock every writer of ``secret_file`` takes, across threads and processes."""
+    return FileLock(str(secret_file.with_suffix(".lock")), timeout=5, mode=0o600)
+
+
+def replace_secret_file(secret_file: Path, text: str) -> None:
+    """Replace the file atomically, so no reader ever sees a partial write.
+
+    A partial read parses as nothing; a writer that then saved would drop
+    every other secret. mkstemp creates the replacement with mode 600.
+    """
+    descriptor, temporary = tempfile.mkstemp(prefix=".secret-", suffix=".json", dir=secret_file.parent)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, secret_file)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def initialize_secret_file(secret_file: Path, text: str) -> bool:
+    """Create ``secret_file`` with ``text`` unless another writer already did; True if created."""
+    secret_file = Path(os.path.realpath(secret_file))  # secret-guard: allow (a path, not a secret)
+    if secret_file.exists():
+        return False
+    secret_file.parent.mkdir(parents=True, exist_ok=True)
+    with secret_file_lock(secret_file):
+        if secret_file.exists():
+            return False
+        replace_secret_file(secret_file, text)
+        return True
+
+
+# A key that is not in the file, as opposed to one holding any value.
+_ABSENT = object()
+
+
+class SecretChanges:
+    """The secrets one operation wrote, so a failed operation takes back exactly those.
+
+    Restoring a snapshot of the whole file instead would also undo what another
+    request or the CLI wrote in the meantime.
+    """
+
+    def __init__(self, parent: Optional["SecretChanges"] = None) -> None:
+        self._parent = parent
+        # (secret file, secret id) -> (value before the first write, value the operation left)
+        self._writes: Dict[tuple[Path, str], tuple[object, object]] = {}
+
+    def record(self, secret_file: Path, secret_id: str, before: object, after: object) -> None:
+        """Called under the file's write lock, so records follow the order of the writes."""
+        key = (secret_file, secret_id)
+        recorded = self._writes.get(key)
+        # Taking these writes back returns to what was there before the first of
+        # them -- or, if someone else wrote the key between two of them, to that.
+        baseline = recorded[0] if recorded is not None and recorded[1] == before else before
+        self._writes[key] = (baseline, after)
+        if self._parent is not None:
+            # An enclosing operation that fails later takes these writes back as well.
+            self._parent.record(secret_file, secret_id, before, after)
+
+    def revert(self) -> list[str]:
+        """Give each written key its earlier value; return the keys left as they are
+        because someone else wrote them since."""
+        by_file: Dict[Path, Dict[str, tuple[object, object]]] = {}
+        for (secret_file, secret_id), change in self._writes.items():
+            by_file.setdefault(secret_file, {})[secret_id] = change
+        kept: list[str] = []
+        for secret_file, changes in by_file.items():
+            # An enclosing operation hears of each restore under the same lock,
+            # before any later write: its own records stay in order.
+            notify = self._parent.record if self._parent is not None else None
+            left = SecretManager(secret_file)._restore(changes, notify)
+            # Forgotten once restored: a revert that fails can be tried again.
+            for secret_id in changes:
+                del self._writes[(secret_file, secret_id)]
+            kept.extend(left)
+        return kept
+
+
+_recording: contextvars.ContextVar[Optional[SecretChanges]] = contextvars.ContextVar(
+    "flocks_secret_changes", default=None,
+)
+
+
+@contextmanager
+def recording_secret_changes() -> Iterator[SecretChanges]:
+    """Record the secrets written in this context, including by tasks and
+    ``asyncio.to_thread`` calls started from it (they copy the context)."""
+    changes = SecretChanges(_recording.get())
+    previous = _recording.set(changes)
+    try:
+        yield changes
+    finally:
+        _recording.reset(previous)
 
 
 def get_mcp_secret_id(server_name: str) -> str:
@@ -61,15 +166,23 @@ class SecretManager:
         if secret_file is None:
             secret_file = Config.get_secret_file()
 
-        self.secret_file = secret_file
+        # Writes replace the file; through a symlink they must replace its target.
+        self.secret_file = Path(os.path.realpath(secret_file))  # secret-guard: allow (a path, not a secret)
         self._ensure_secure()
+
+    def _lock(self) -> FileLock:
+        """One writer at a time, across threads and processes (server, CLI)."""
+        return secret_file_lock(self.secret_file)
+
+    def _record(self, secret_id: str, before: object, after: object) -> None:
+        changes = _recording.get()
+        if changes is not None:
+            changes.record(self.secret_file, secret_id, before, after)
 
     def _ensure_secure(self) -> None:
         """Ensure secret file exists with secure permissions."""
-        self.secret_file.parent.mkdir(parents=True, exist_ok=True)
-
-        if not self.secret_file.exists():
-            self.secret_file.write_text("{}")
+        # Another process may create (and fill) it meanwhile: checked again under the lock.
+        if initialize_secret_file(self.secret_file, "{}"):
             log.info("secrets.created", {"path": str(self.secret_file)})
 
         # Set secure permissions (600: owner read/write only)
@@ -105,11 +218,9 @@ class SecretManager:
             return {}
 
     def _save(self, data: Dict[str, str]) -> None:
-        """Save secrets to file."""
+        """Save secrets; callers hold the lock."""
         try:
-            self.secret_file.write_text(json.dumps(data, indent=2))
-            # Ensure permissions are still secure after write
-            self.secret_file.chmod(0o600)
+            replace_secret_file(self.secret_file, json.dumps(data, indent=2))
             log.debug("secrets.saved", {"path": str(self.secret_file)})
         except Exception as e:
             log.error("secrets.save_failed", {"error": str(e)})
@@ -148,10 +259,47 @@ class SecretManager:
             secret_id: Secret identifier (e.g., "anthropic_llm_key")
             value: Secret value
         """
-        data = self._load()
-        data[secret_id] = value
-        self._save(data)
+        # Read-modify-write of the whole file: unlocked, two writers keep only one change.
+        with self._lock():
+            data = self._load()
+            before = data.get(secret_id, _ABSENT)
+            data[secret_id] = value
+            self._save(data)
+            self._record(secret_id, before, value)
         log.info("secrets.set", {"secret_id": secret_id})
+
+    def _restore(
+        self,
+        changes: Dict[str, tuple[object, object]],
+        notify: Optional[Callable[[Path, str, object, object], None]] = None,
+    ) -> list[str]:
+        """Put back the value each key had before ``changes`` (see SecretChanges.revert).
+
+        A key that no longer holds what was written keeps its current value; the
+        keys kept are returned. ``notify(file, key, value replaced, value put
+        back)`` hears of each restore while the lock is still held.
+        """
+        restored: Dict[str, tuple[object, object]] = {}
+        kept: list[str] = []
+        with self._lock():
+            data = self._load()
+            for secret_id, (before, after) in changes.items():
+                current = data.get(secret_id, _ABSENT)
+                if current != after:
+                    kept.append(secret_id)
+                    continue
+                if before is _ABSENT:
+                    data.pop(secret_id, None)
+                else:
+                    data[secret_id] = before
+                restored[secret_id] = (current, before)
+            if restored:
+                self._save(data)
+                if notify is not None:
+                    for secret_id, (previous, value) in restored.items():
+                        notify(self.secret_file, secret_id, previous, value)
+        log.info("secrets.reverted", {"secret_ids": sorted(restored), "kept": kept})
+        return kept
 
     def delete(self, secret_id: str) -> bool:
         """
@@ -163,13 +311,15 @@ class SecretManager:
         Returns:
             True if deleted, False if not found
         """
-        data = self._load()
-        if secret_id in data:
-            del data[secret_id]
+        with self._lock():
+            data = self._load()
+            if secret_id not in data:
+                return False
+            before = data.pop(secret_id)
             self._save(data)
-            log.info("secrets.deleted", {"secret_id": secret_id})
-            return True
-        return False
+            self._record(secret_id, before, _ABSENT)
+        log.info("secrets.deleted", {"secret_id": secret_id})
+        return True
 
     def list(self) -> list[str]:
         """

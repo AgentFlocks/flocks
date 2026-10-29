@@ -592,7 +592,7 @@ export default function HubPage() {
         icon={<Archive className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">
-            <div className="relative w-80 2xl:w-96">
+            <div className="relative w-80 2xl:w-96 max-md:w-full">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
               <input
                 value={query}
@@ -625,7 +625,7 @@ export default function HubPage() {
         }
       />
 
-      <div className="shrink-0 px-4 pb-3">
+      <div className="shrink-0 px-4 pb-3 max-md:px-0">
         <div className="rounded-xl border border-gray-200 bg-gradient-to-r from-slate-50 via-white to-white shadow-sm overflow-hidden">
           <div className="p-3">
             <FilterRow
@@ -723,7 +723,7 @@ export default function HubPage() {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-4 [scrollbar-gutter:stable]">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-4 [scrollbar-gutter:stable] max-md:px-0">
         {visibleCatalogError && (
           <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             {visibleCatalogError}
@@ -813,13 +813,13 @@ function FilterRow({ label, value, options, onChange }: {
   const [allOption, ...facetOptions] = options;
 
   return (
-    <div className="flex min-h-8 items-start gap-3 text-sm">
-      <div className="w-20 shrink-0 pt-1.5">
+    <div className="flex min-h-8 items-start gap-3 text-sm max-md:flex-col max-md:gap-1">
+      <div className="w-20 shrink-0 pt-1.5 max-md:w-auto max-md:pt-0">
         <span className="inline-flex px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200 text-xs font-medium">
           {label}
         </span>
       </div>
-      <div className="flex-1 min-w-0 flex items-start gap-x-1">
+      <div className="flex-1 min-w-0 flex items-start gap-x-1 max-md:w-full">
         {allOption && <div className="shrink-0">{renderOption(allOption)}</div>}
         <div className="min-w-0 flex-1 flex flex-wrap gap-x-1 gap-y-1">
           {facetOptions.map(renderOption)}
@@ -841,11 +841,11 @@ function PaginationBar({ total, page, pageSize, totalPages, text, onPageChange, 
   const start = total === 0 ? 0 : (page - 1) * pageSize + 1;
   const end = Math.min(total, page * pageSize);
   return (
-    <div className="h-12 shrink-0 px-4 py-2 border-t border-gray-200 bg-white flex items-center justify-between text-xs text-gray-500">
+    <div className="h-12 shrink-0 px-4 py-2 border-t border-gray-200 bg-white flex items-center justify-between text-xs text-gray-500 max-md:h-auto max-md:flex-wrap max-md:gap-2">
       <div>
         {text.showing} {start}-{end} / {text.of} {total} {text.plugins}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 max-md:whitespace-nowrap">
         <span>{text.perPage}</span>
         <select
           value={pageSize}
@@ -884,8 +884,8 @@ function HubTable({ items, actionId, tagLabels, language, text, onSelect, onActi
   onAction: (entry: HubCatalogEntry, action: 'install' | 'update' | 'uninstall') => void;
 }) {
   return (
-    <div className="min-h-full bg-white border border-gray-200 rounded-xl overflow-hidden">
-      <table className="min-w-full table-fixed text-xs">
+    <div className="min-h-full bg-white border border-gray-200 rounded-xl overflow-hidden max-md:overflow-x-auto">
+      <table className="min-w-full table-fixed text-xs max-md:min-w-[40rem]">
         <colgroup>
           <col style={{ width: '7%' }} />
           <col style={{ width: '38%' }} />
@@ -1094,14 +1094,16 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
           try {
             setWorkflowJson(JSON.parse(res.data.content) as WorkflowJSON);
           } catch (err) {
-            setWorkflowError(err instanceof Error ? err.message : text.parseWorkflowFailed);
+            // JSON.parse always throws an Error, so the localized label must be the lead text;
+          // the engine message is kept as a hint for whoever edits the plugin.
+          setWorkflowError(err instanceof Error ? `${text.parseWorkflowFailed}: ${err.message}` : text.parseWorkflowFailed);
           }
         })
         .catch(err => {
-          setWorkflowError(err instanceof Error ? err.message : text.readWorkflowFailed);
+          setWorkflowError(`${text.readWorkflowFailed}: ${extractErrorMessage(err, text.unknownError)}`);
         });
     }
-  }, [entry.type, entry.id, text.parseWorkflowFailed, text.readWorkflowFailed]);
+  }, [entry.type, entry.id, text.parseWorkflowFailed, text.readWorkflowFailed, text.unknownError]);
 
   const openFile = async (path: string) => {
     const res = await hubAPI.fileContent(entry.type, entry.id, path);
@@ -1109,26 +1111,26 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
   };
 
   return (
-    <div className="fixed inset-y-0 right-0 z-40 w-[860px] max-w-[95vw] bg-white border-l border-gray-200 shadow-xl flex flex-col">
-      <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between">
-        <div>
-          <div className="flex items-center gap-2">
+    <div className="fixed inset-y-0 right-0 z-40 w-[860px] max-w-[95vw] bg-white border-l border-gray-200 shadow-xl flex flex-col max-md:top-14 max-md:max-w-full">
+      <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between max-md:gap-3 max-md:px-4">
+        <div className="max-md:min-w-0">
+          <div className="flex items-center gap-2 max-md:flex-wrap">
             <h2 className="text-lg font-semibold text-gray-900">{getHubName(entry, language)}</h2>
             <StateBadge state={entry.state} text={text} guidedKind={entry.guidedInstall?.kind} />
           </div>
           <p className="text-sm text-gray-500 mt-1">{getHubDescription(entry, language)}</p>
         </div>
-        <button onClick={onClose} className="p-1 rounded-lg hover:bg-gray-100"><X className="w-5 h-5" /></button>
+        <button onClick={onClose} className="p-1 rounded-lg hover:bg-gray-100 max-md:shrink-0"><X className="w-5 h-5" /></button>
       </div>
-      <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
-        <div className="flex gap-2">
+      <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between max-md:flex-wrap max-md:gap-2 max-md:px-4">
+        <div className="flex gap-2 max-md:w-full max-md:overflow-x-auto">
           {((entry.type === 'workflow'
             ? ['overview', 'flow', 'files', 'deps', 'permissions', 'versions']
             : ['overview', 'files', 'deps', 'permissions', 'versions']) as Array<'overview' | 'flow' | 'files' | 'deps' | 'permissions' | 'versions'>).map(tab => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-3 py-1.5 text-sm rounded-lg ${activeTab === tab ? 'bg-slate-800 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+              className={`px-3 py-1.5 text-sm rounded-lg max-md:shrink-0 max-md:whitespace-nowrap ${activeTab === tab ? 'bg-slate-800 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
             >
               {text.tabs[tab]}
             </button>
@@ -1138,7 +1140,7 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
       </div>
       <div className="flex-1 overflow-hidden">
         {activeTab === 'overview' && (
-          <div className="p-5 space-y-4 overflow-auto h-full text-sm">
+          <div className="p-5 space-y-4 overflow-auto h-full text-sm max-md:p-4">
             <InfoBlock label="ID" value={entry.id} />
             <InfoBlock label={text.type} value={formatPluginTypeLabel(entry.type, language)} />
             <InfoBlock label="Tag" value={entry.tags.join(', ') || '-'} />
@@ -1187,8 +1189,8 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
           </div>
         )}
         {activeTab === 'files' && (
-          <div className="h-full grid grid-cols-[280px_1fr]">
-            <div className="border-r border-gray-200 overflow-auto p-3">
+          <div className="h-full grid grid-cols-[280px_1fr] max-md:grid-cols-1 max-md:grid-rows-[auto_minmax(0,1fr)]">
+            <div className="border-r border-gray-200 overflow-auto p-3 max-md:max-h-48 max-md:border-b max-md:border-r-0">
               {tree ? <FileTree node={tree} onOpen={openFile} root /> : <LoadingSpinner />}
             </div>
             <div className="overflow-auto">

@@ -1416,6 +1416,24 @@ class TestMemoryView:
         }
         assert target.read_text() == "new content"
 
+    def test_write_memory_file_the_stored_notes_did_not_take_is_503(self, workspace_client, monkeypatch):
+        from flocks.memory.sync import mirror
+
+        answers = iter([True, False])
+
+        async def _reconcile_note(root, note, *, attempts=1):
+            return next(answers)
+
+        monkeypatch.setattr(mirror, "reconcile_note", _reconcile_note)
+        r = _client(workspace_client).put(
+            "/api/workspace/memory/file",
+            json={"path": "daily/2026-03-14.md", "content": "new content"},
+        )
+
+        assert r.status_code == 503
+        assert r.json()["detail"] == mirror.MemoryNotShared.SAVED_UNSETTLED
+        assert (_mem(workspace_client) / "daily" / "2026-03-14.md").read_text() == "new content"
+
     def test_write_non_editable_memory_file_returns_403(self, workspace_client):
         mem = _mem(workspace_client)
         target = mem / "SHORT_MEMORY.md"

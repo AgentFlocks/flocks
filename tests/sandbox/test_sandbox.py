@@ -774,145 +774,53 @@ class TestSystemPrompt:
 
 
 class TestFileToolSandboxPaths:
-    """文件工具沙箱路径限制测试."""
+    """文件工具（read / write / edit 等）共用 resolve_tool_path 做沙箱路径限制.
 
-    @pytest.mark.asyncio
-    async def test_read_sandbox_path_resolution(self):
-        """read 工具的沙箱路径解析 — 正常路径."""
-        from flocks.tool.file.read import _resolve_sandbox_file_path
+    工具层的行为（只读模式拒绝写入、各工具拒绝沙箱外路径）见 test_sandbox_file_tools.py。
+    """
+
+    @staticmethod
+    def _ctx(workspace=None):
         from flocks.tool.registry import ToolContext
 
-        ctx = ToolContext(
-            session_id="test",
-            message_id="msg1",
-            extra={"sandbox": {"workspace_dir": "/tmp/sandbox_ws"}},
-        )
-        resolved, error = await _resolve_sandbox_file_path(
-            ctx, "/tmp/sandbox_ws/file.txt"
-        )
-        assert error is None
-        assert resolved == "/tmp/sandbox_ws/file.txt"
+        extra = {"sandbox": {"workspace_dir": str(workspace)}} if workspace else {}
+        return ToolContext(session_id="test", message_id="msg1", extra=extra)
 
     @pytest.mark.asyncio
-    async def test_read_sandbox_blocks_escape(self):
-        """read 工具的沙箱路径逃逸检测."""
-        from flocks.tool.file.read import _resolve_sandbox_file_path
-        from flocks.tool.registry import ToolContext
+    async def test_sandbox_path_resolution(self, tmp_path):
+        """沙箱内的绝对路径原样解析."""
+        from flocks.tool.path_utils import resolve_tool_path
 
-        ctx = ToolContext(
-            session_id="test",
-            message_id="msg1",
-            extra={"sandbox": {"workspace_dir": "/tmp/sandbox_ws"}},
-        )
-        resolved, error = await _resolve_sandbox_file_path(
-            ctx, "/tmp/sandbox_ws/../etc/passwd"
-        )
-        assert resolved is None
-        assert "escapes sandbox" in error
+        resolution = await resolve_tool_path(self._ctx(tmp_path), str(tmp_path / "file.txt"))
+        assert resolution.resolved_path == str(tmp_path / "file.txt")
+        assert resolution.sandbox_root == str(tmp_path)
 
     @pytest.mark.asyncio
-    async def test_read_no_sandbox_passthrough(self):
+    @pytest.mark.parametrize("escape", ["../etc/passwd", "/outside/path/file.txt"])
+    async def test_sandbox_blocks_escape(self, tmp_path, escape):
+        """用 .. 逃出沙箱、或沙箱外的绝对路径都被拒绝."""
+        from flocks.tool.path_utils import resolve_tool_path
+
+        path = str(tmp_path / escape) if not escape.startswith("/") else escape
+        with pytest.raises(ValueError, match="escapes sandbox"):
+            await resolve_tool_path(self._ctx(tmp_path), path)
+
+    @pytest.mark.asyncio
+    async def test_no_sandbox_passthrough(self, tmp_path):
         """无沙箱时路径直接透传."""
-        from flocks.tool.file.read import _resolve_sandbox_file_path
-        from flocks.tool.registry import ToolContext
+        from flocks.tool.path_utils import resolve_tool_path
 
-        ctx = ToolContext(
-            session_id="test",
-            message_id="msg1",
-            extra={},
-        )
-        resolved, error = await _resolve_sandbox_file_path(ctx, "/any/path/file.txt")
-        assert error is None
-        assert resolved == "/any/path/file.txt"
+        resolution = await resolve_tool_path(self._ctx(), str(tmp_path / "any" / "file.txt"))
+        assert resolution.resolved_path == str(tmp_path / "any" / "file.txt")
+        assert resolution.sandbox_root is None
 
     @pytest.mark.asyncio
-    async def test_read_relative_path_joined(self):
-        """read 相对路径拼接到 sandbox workspace_dir."""
-        from flocks.tool.file.read import _resolve_sandbox_file_path
-        from flocks.tool.registry import ToolContext
+    async def test_relative_path_joined(self, tmp_path):
+        """相对路径拼接到 sandbox workspace_dir."""
+        from flocks.tool.path_utils import resolve_tool_path
 
-        ctx = ToolContext(
-            session_id="test",
-            message_id="msg1",
-            extra={"sandbox": {"workspace_dir": "/tmp/sandbox_ws"}},
-        )
-        resolved, error = await _resolve_sandbox_file_path(ctx, "subdir/file.txt")
-        assert error is None
-        assert resolved == "/tmp/sandbox_ws/subdir/file.txt"
-
-    @pytest.mark.asyncio
-    async def test_write_sandbox_path_resolution(self):
-        """write 工具的沙箱路径解析."""
-        from flocks.tool.file.write import _resolve_sandbox_file_path
-        from flocks.tool.registry import ToolContext
-
-        ctx = ToolContext(
-            session_id="test",
-            message_id="msg1",
-            extra={"sandbox": {"workspace_dir": "/tmp/sandbox_ws"}},
-        )
-        resolved, error, sandbox = await _resolve_sandbox_file_path(
-            ctx, "/tmp/sandbox_ws/new_file.txt"
-        )
-        assert error is None
-        assert resolved == "/tmp/sandbox_ws/new_file.txt"
-        assert isinstance(sandbox, dict)
-
-    @pytest.mark.asyncio
-    async def test_write_sandbox_blocks_escape(self):
-        """write 工具的沙箱路径逃逸检测."""
-        from flocks.tool.file.write import _resolve_sandbox_file_path
-        from flocks.tool.registry import ToolContext
-
-        ctx = ToolContext(
-            session_id="test",
-            message_id="msg1",
-            extra={"sandbox": {"workspace_dir": "/tmp/sandbox_ws"}},
-        )
-        resolved, error, _ = await _resolve_sandbox_file_path(
-            ctx, "/tmp/sandbox_ws/../../etc/malicious"
-        )
-        assert resolved is None
-        assert "escapes sandbox" in error
-
-    @pytest.mark.asyncio
-    async def test_write_sandbox_ro_returns_dict(self):
-        """write ro 模式下返回 sandbox dict 以便后续检查."""
-        from flocks.tool.file.write import _resolve_sandbox_file_path
-        from flocks.tool.registry import ToolContext
-
-        ctx = ToolContext(
-            session_id="test",
-            message_id="msg1",
-            extra={
-                "sandbox": {
-                    "workspace_dir": "/tmp/sandbox_ws",
-                    "workspace_access": "ro",
-                }
-            },
-        )
-        resolved, error, sandbox = await _resolve_sandbox_file_path(
-            ctx, "/tmp/sandbox_ws/file.txt"
-        )
-        assert error is None
-        assert sandbox["workspace_access"] == "ro"
-
-    @pytest.mark.asyncio
-    async def test_edit_sandbox_blocks_escape(self):
-        """edit 工具的沙箱路径逃逸检测."""
-        from flocks.tool.file.edit import _resolve_sandbox_file_path
-        from flocks.tool.registry import ToolContext
-
-        ctx = ToolContext(
-            session_id="test",
-            message_id="msg1",
-            extra={"sandbox": {"workspace_dir": "/tmp/sandbox_ws"}},
-        )
-        resolved, error, _ = await _resolve_sandbox_file_path(
-            ctx, "/outside/path/file.txt"
-        )
-        assert resolved is None
-        assert "escapes sandbox" in error
+        resolution = await resolve_tool_path(self._ctx(tmp_path), "subdir/file.txt")
+        assert resolution.resolved_path == str(tmp_path / "subdir" / "file.txt")
 
 
 # ==================== 14. Bash 沙箱辅助函数测试 ====================

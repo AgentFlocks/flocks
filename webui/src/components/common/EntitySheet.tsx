@@ -517,14 +517,14 @@ export default function EntitySheet({
       {/* Backdrop */}
       <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
 
-      {/* Drawer */}
+      {/* Drawer (full screen width on phones, where the remembered desktop width would leave a strip) */}
       <div
-        className="fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl transition-colors"
+        className="fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl transition-colors max-md:!w-full"
         style={{ width: drawerWidth, maxWidth: '100%' }}
       >
         {/* Drag handle */}
         <div
-          className={`absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-red-400 transition-colors ${
+          className={`absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-red-400 transition-colors max-md:hidden ${
             isDragging ? 'bg-red-500' : ''
           }`}
           onMouseDown={handleDragStart}
@@ -535,7 +535,7 @@ export default function EntitySheet({
         </div>
         {/* ── Header ── */}
         <div className="flex-shrink-0 border-b border-gray-200">
-          <div className="flex items-center gap-3 px-6 py-4">
+          <div className="flex items-center gap-3 px-6 py-4 max-md:px-4">
             {icon && <div className="text-gray-500 flex-shrink-0">{icon}</div>}
             <h2 className="text-lg font-semibold text-gray-900 flex-1 min-w-0 break-words">
               {title}
@@ -550,7 +550,7 @@ export default function EntitySheet({
 
           {/* Tabs */}
           {showTabs && (
-            <div className="flex w-full px-6">
+            <div className="flex w-full px-6 max-md:px-4">
               {hasFormTab && (
                 <SheetTab
                   active={activeTab === 'form'}
@@ -587,7 +587,7 @@ export default function EntitySheet({
           {/* Form Tab */}
           {hasFormTab && (
             <div
-              className={`h-full overflow-y-auto px-6 py-5 space-y-4 ${
+              className={`h-full overflow-y-auto px-6 py-5 space-y-4 max-md:px-4 ${
                 !showTabs || activeTab === 'form' ? '' : 'hidden'
               }`}
             >
@@ -769,8 +769,8 @@ export default function EntitySheet({
 
         {/* ── Footer ── */}
         {(!showTabs || activeTab === 'form') && (
-          <div className="flex-shrink-0 border-t border-gray-200 bg-white px-6 py-4">
-            <div className="flex items-center justify-between gap-3">
+          <div className="flex-shrink-0 border-t border-gray-200 bg-white px-6 py-4 max-md:px-4">
+            <div className="flex items-center justify-between gap-3 max-md:flex-wrap">
               {/* Left: custom footer element and/or test button */}
               <div className="flex items-center gap-2">
                 {footerLeft}
@@ -799,7 +799,7 @@ export default function EntitySheet({
 
         {/* ── Rex tab footer: extract / switch actions only ── */}
         {showRexFooter && (
-          <div className="flex-shrink-0 border-t border-gray-200 bg-white px-6 py-3">
+          <div className="flex-shrink-0 border-t border-gray-200 bg-white px-6 py-3 max-md:px-4">
             {extractError && (
               <p className="text-xs text-red-500 mb-2 flex items-center gap-1">
                 <AlertCircle className="w-3 h-3" />

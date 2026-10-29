@@ -1,6 +1,3 @@
-from pathlib import Path
-import tempfile
-
 import pytest
 
 from flocks.storage.storage import Storage
@@ -8,16 +5,19 @@ from flocks.session.callable_state import (
     add_session_callable_tools,
     clear_session_callable_tools,
     get_session_callable_tools,
+    invalidate_session_callable_tools_cache,
 )
 
 
 @pytest.fixture
-async def callable_storage():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test_session_callable.db"
-        await Storage.init(db_path)
-        yield
-        await Storage.clear()
+def callable_storage(isolate_session_storage):
+    """Reuse the outer storage lifetime and isolate process-local tool state."""
+    session_ids = ("session-callable", "session-callable-clear")
+    for session_id in session_ids:
+        invalidate_session_callable_tools_cache(session_id)
+    yield
+    for session_id in session_ids:
+        invalidate_session_callable_tools_cache(session_id)
 
 
 @pytest.mark.asyncio

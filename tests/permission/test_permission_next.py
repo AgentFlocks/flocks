@@ -13,11 +13,14 @@ async def permission_storage():
     with tempfile.TemporaryDirectory() as tmpdir:
         await Storage.init(Path(tmpdir) / "permission.db")
         PermissionNext._pending = {}
+        PermissionNext._permanent_rules = {}
+        PermissionNext._session_permissions = {}
+        PermissionNext._state_loaded = False
         PermissionNext.set_callbacks(None, None)
         yield
         PermissionNext._pending = {}
         PermissionNext.set_callbacks(None, None)
-        await Storage.clear()
+        await Storage.shutdown()
 
 
 @pytest.mark.asyncio
@@ -161,8 +164,8 @@ async def test_session_denial_applies_to_active_request_without_global_rule(perm
 
     await PermissionNext.reply(request_id, "deny_session", session_id=session_id)
 
-    with pytest.raises(DeniedError):
-        await asyncio.wait_for(ask_task, timeout=2)
+    # Core transports the reply; the Pro policy decides how denial is enforced.
+    assert await asyncio.wait_for(ask_task, timeout=2) == "deny_session"
 
     assert PermissionNext._session_permissions[session_id]["bash"] == "deny"
     assert "bash" not in PermissionNext._permanent_rules

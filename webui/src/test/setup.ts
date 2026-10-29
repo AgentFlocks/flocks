@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
 import { afterEach } from 'vitest';
+import { resetSharedRequestsForTesting } from '@/utils/sharedRequest';
 
 function createStorageMock(): Storage {
   let store: Record<string, string> = {};
@@ -41,6 +42,8 @@ if (typeof globalThis.localStorage?.clear !== 'function') {
 
 afterEach(() => {
   cleanup();
+  // A request a test never settles must not be shared into the next test.
+  resetSharedRequestsForTesting();
 });
 
 global.ResizeObserver = class ResizeObserver {

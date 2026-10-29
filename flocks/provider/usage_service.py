@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import aiosqlite
@@ -33,6 +33,16 @@ _auto_backfill_lock = asyncio.Lock()
 # go into a hit rate.  Keep in step with usage_record_reports_cache.
 _CACHE_REPORTED_SQL = "cache_reported = 1"
 
+# created_at is ISO text. The service writes UTC (+00:00), but rows posted to
+# /api/usage/record before it did may carry any offset Python accepts (under
+# ±24h, past the ±14:00 SQLite's own date functions take) or none (UTC). Date
+# bounds and the daily grouping therefore use created_at in UTC, through a
+# function registered on the connection; a text range widened by the largest
+# offset only narrows the scan, so idx_usage_time stays usable.
+_MAX_UTC_OFFSET = timedelta(hours=24)
+_UTC_FUNCTION = "flocks_usage_utc"
+_CREATED_AT_UTC_SQL = f"{_UTC_FUNCTION}(created_at)"
+
 
 class RecordUsageRequest(BaseModel):
     """Usage write request."""
@@ -42,15 +52,17 @@ class RecordUsageRequest(BaseModel):
     credential_id: Optional[str] = None
     session_id: Optional[str] = None
     message_id: Optional[str] = None
-    input_tokens: int = 0  # whole prompt, cache reads and writes included
-    output_tokens: int = 0
-    cached_tokens: int = 0  # cache reads, part of input_tokens
-    cache_write_tokens: int = 0  # cache writes, part of input_tokens
+    # Token counters are quantities: a negative value can only be a caller
+    # bug and would corrupt cost / usage aggregates, so reject it (422).
+    input_tokens: int = Field(0, ge=0)  # whole prompt, cache reads and writes included
+    output_tokens: int = Field(0, ge=0)
+    cached_tokens: int = Field(0, ge=0)  # cache reads, part of input_tokens
+    cache_write_tokens: int = Field(0, ge=0)  # cache writes, part of input_tokens
     # Whether the provider reported cache usage (None: not known).
     cache_reported: Optional[bool] = None
-    reasoning_tokens: int = 0
+    reasoning_tokens: int = Field(0, ge=0)
     response_id: Optional[str] = None
-    latency_ms: Optional[int] = None
+    latency_ms: Optional[int] = Field(None, ge=0)
     pricing: Optional[PriceConfig] = None
     cost_override: Optional[UsageCost] = None
     source: str = "live"
@@ -260,6 +272,32 @@ def _usage_record_from_row(row: aiosqlite.Row) -> UsageRecord:
     )
 
 
+def _utc(value: datetime) -> datetime:
+    """*value* in UTC; a value without an offset is taken as UTC."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _utc_text(value: Optional[str]) -> Optional[str]:
+    """A stored created_at (or a bound) as the UTC text the filters compare: ``YYYY-MM-DD HH:MM:SS.ffffff``."""
+    if value is None:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return _utc(moment).replace(tzinfo=None).isoformat(sep=" ", timespec="microseconds")
+
+
+async def _with_utc_function(db: aiosqlite.Connection) -> aiosqlite.Connection:
+    await db.create_function(_UTC_FUNCTION, 1, _utc_text, deterministic=True)
+    return db
+
+
+def _created_at_text_bound(value: datetime) -> str:
+    """*value* as the ISO text (to the second, no offset) a created_at range compares with."""
+    return value.replace(tzinfo=None).isoformat(timespec="seconds")
+
+
 def _build_filters(
     *,
     start_date: Optional[str],
@@ -268,16 +306,36 @@ def _build_filters(
     model_id: Optional[str],
     session_ids: Optional[Sequence[str]],
 ) -> tuple[str, List[str]]:
-    """Build SQL filters for usage queries."""
+    """Build SQL filters for usage queries.
+
+    Date bounds are ISO strings; one without an offset is UTC. The connection
+    the clause runs on needs ``_with_utc_function``.
+    """
     clauses: List[str] = []
     params: List[str] = []
 
     if start_date:
-        clauses.append("created_at >= ?")
-        params.append(start_date)
+        start = _utc(datetime.fromisoformat(start_date))
+        try:
+            floor = start - _MAX_UTC_OFFSET
+            clauses.append("created_at >= ?")
+            params.append(_created_at_text_bound(floor))
+        except OverflowError:
+            pass
+        clauses.append(f"{_CREATED_AT_UTC_SQL} >= ?")
+        params.append(_utc_text(start.isoformat()))
     if end_date:
-        clauses.append("created_at <= ?")
-        params.append(end_date)
+        end = _utc(datetime.fromisoformat(end_date))
+        try:
+            # Whole seconds: a stored value equal to the bound up to the
+            # seconds sorts after it whatever fraction or offset follows.
+            ceiling = end.replace(microsecond=0) + _MAX_UTC_OFFSET + timedelta(seconds=1)
+            clauses.append("created_at < ?")
+            params.append(_created_at_text_bound(ceiling))
+        except OverflowError:
+            pass
+        clauses.append(f"{_CREATED_AT_UTC_SQL} <= ?")
+        params.append(_utc_text(end.isoformat()))
     if provider_id:
         clauses.append("provider_id = ?")
         params.append(provider_id)
@@ -361,7 +419,9 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
     await Storage._ensure_init()
 
     total_tokens = req.input_tokens + req.output_tokens + req.reasoning_tokens
-    created_at = req.created_at or datetime.now(UTC)
+    # Stored in one form, UTC, whatever offset the caller wrote it with: the
+    # daily grouping takes the date off the text.
+    created_at = _utc(req.created_at or datetime.now(UTC))
 
     if req.cost_override:
         input_cost = req.cost_override.input_cost
@@ -478,6 +538,7 @@ async def get_usage_records(
     )
     async with Storage.connect(Storage._db_path) as db:
         db.row_factory = aiosqlite.Row
+        await _with_utc_function(db)
         async with db.execute(
             f"""SELECT id, provider_id, model_id, credential_id, session_id, message_id,
                        input_tokens, output_tokens, cached_tokens, cache_write_tokens, cache_reported,
@@ -512,6 +573,7 @@ async def get_usage_stats(
 
     async with Storage.connect(Storage._db_path) as db:
         db.row_factory = aiosqlite.Row
+        await _with_utc_function(db)
 
         async with db.execute(
             f"""SELECT
@@ -645,12 +707,12 @@ async def get_usage_stats(
             )
 
         async with db.execute(
-            f"""SELECT DATE(created_at) AS date, currency,
+            f"""SELECT substr({_CREATED_AT_UTC_SQL}, 1, 10) AS date, currency,
                        COALESCE(SUM(total_tokens), 0) AS total_tokens,
                        COALESCE(SUM(total_cost), 0) AS total_cost,
                        COUNT(*) AS request_count
                 FROM usage_records{where_sql}
-                GROUP BY DATE(created_at), currency
+                GROUP BY substr({_CREATED_AT_UTC_SQL}, 1, 10), currency
                 ORDER BY date DESC, currency ASC
                 LIMIT 180""",
             params,

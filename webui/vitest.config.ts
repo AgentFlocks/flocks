@@ -1,6 +1,9 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import { EXTENSION_DEDUPE_PACKAGES, extensionAliases, resolveExtensionRegistry } from './src/config/extensionRegistry';
+
+const extensionRegistry = resolveExtensionRegistry(process.env, __dirname);
 
 export default defineConfig({
   plugins: [react()],
@@ -23,11 +26,12 @@ export default defineConfig({
     },
   },
   resolve: {
-    dedupe: ['react', 'react-dom'],
-    alias: {
-      '@': path.resolve(__dirname, './src'),
+    alias: [
+      ...extensionAliases(extensionRegistry),
+      { find: '@', replacement: path.resolve(__dirname, './src') },
       // Same shim the page builder aliases in (reads the runtime the test installs on globalThis).
-      '@flocks/webui-contract-sdk': path.resolve(__dirname, '../flocks/contracts/webui/shims/sdk.js'),
-    },
+      { find: '@flocks/webui-contract-sdk', replacement: path.resolve(__dirname, '../flocks/contracts/webui/shims/sdk.js') },
+    ],
+    dedupe: EXTENSION_DEDUPE_PACKAGES,
   },
 });

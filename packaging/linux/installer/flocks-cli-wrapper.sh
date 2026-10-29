@@ -5,6 +5,9 @@ set -euo pipefail
 ENV_FILE="@ENV_FILE@"
 FLOCKS_CLI="@FLOCKS_CLI@"
 SERVICE_USER="@SERVICE_USER@"
+# Commands target the installed service, so candidate credentials inherited
+# from an operator shell must not conflict with its DSN/DSN_FILE choice.
+unset FLOCKS_DB_BACKEND FLOCKS_DB_DSN FLOCKS_DB_DSN_FILE
 if [[ "$(id -u)" -eq 0 && "$SERVICE_USER" != "root" ]]; then
   # the service user cannot necessarily read root's current directory, so start from the repo dir
   exec runuser -u "$SERVICE_USER" -- bash -c 'set -a; . "$0" || exit 97; set +a; cd "${FLOCKS_REPO_ROOT:-/}" 2>/dev/null || cd /; exec "$@"' "$ENV_FILE" "$FLOCKS_CLI" "$@"

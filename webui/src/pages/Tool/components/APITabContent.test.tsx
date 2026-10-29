@@ -205,7 +205,8 @@ describe('APITabContent', () => {
     fireEvent.click(within(ungroupedRow).getByRole('button', { name: 'editGroup' }));
     expect(screen.getByText('ungrouped-child-tool')).toBeInTheDocument();
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Alpha' } });
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'save' }));
+    // The tools drawer stays open behind the group dialog and is a dialog too.
+    fireEvent.click(within(screen.getByRole('combobox').closest('dialog') as HTMLElement).getByRole('button', { name: 'save' }));
     await waitFor(() => expect(providerAPI.updateApiService).toHaveBeenCalledWith('service-b', { group: 'Alpha' }));
     await waitFor(() => expect(providerAPI.listApiServices).toHaveBeenCalledWith({ force: true }));
     expect(props.onRefreshTools).not.toHaveBeenCalled();

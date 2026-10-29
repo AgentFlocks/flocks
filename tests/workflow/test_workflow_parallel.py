@@ -22,6 +22,21 @@ from flocks.workflow.models import Workflow
 from flocks.workflow.repl_runtime import PythonExecRuntime
 
 
+@pytest.fixture(autouse=True)
+def _no_installed_hooks(monkeypatch):
+    """Time the scheduler, not whatever policy hooks happen to be installed.
+
+    Code nodes pass the tool-execution gate; an installed extension's policy
+    hooks make that a real round-trip, which these tests -- timing nodes at a
+    few hundred milliseconds -- would otherwise count as node time.
+    """
+    from unittest.mock import AsyncMock
+
+    from flocks.hooks.pipeline import HookPipeline
+
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock(return_value=()))
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

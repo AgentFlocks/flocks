@@ -932,7 +932,8 @@ class TestWeComInboundMedia:
         )
 
         assert media is not None
-        assert media.filename == ".._report.bin"
+        # The shared sanitizer keeps only the last path component.
+        assert media.filename == "report.bin"
         assert media.mime == "application/octet-stream"
         assert Path(media.url.removeprefix("file://")).read_bytes() == b"hellok1"
         assert FakeWeComApiClient.last_instance._client.closed is True

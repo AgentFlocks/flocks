@@ -22,6 +22,7 @@ import { createStore, produce, reconcile } from "solid-js/store"
 import { useSDK } from "@tui/context/sdk"
 import { Binary } from "@flocks-ai/util/binary"
 import { createSimpleContext } from "./helper"
+import { dataOr } from "./sync-data"
 import type { Snapshot } from "@/snapshot"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
@@ -376,16 +377,19 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           Promise.all([
             ...(args.continue ? [] : [sessionListPromise]),
             sdk.client.command.list().then((x) => setStore("command", reconcile(x.data ?? []))),
-            sdk.client.lsp.status().then((x) => setStore("lsp", reconcile(x.data!))),
-            sdk.client.mcp.status().then((x) => setStore("mcp", reconcile(x.data!))),
+            // 非阻塞请求失败（如 500）时 x.data 为 undefined，保留默认值让界面降级，不能写入 undefined（home/footer 会 Object.values 崩溃）
+            sdk.client.lsp.status().then((x) => setStore("lsp", reconcile(dataOr(x, [])))),
+            sdk.client.mcp.status().then((x) => setStore("mcp", reconcile(dataOr(x, {})))),
             sdk.client.experimental.resource.list().then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
-            sdk.client.formatter.status().then((x) => setStore("formatter", reconcile(x.data!))),
+            sdk.client.formatter.status().then((x) => setStore("formatter", reconcile(dataOr(x, [])))),
             sdk.client.session.status().then((x) => {
-              setStore("session_status", reconcile(x.data!))
+              setStore("session_status", reconcile(dataOr(x, {})))
             }),
             sdk.client.provider.auth().then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
             sdk.client.vcs.get().then((x) => setStore("vcs", reconcile(x.data))),
-            sdk.client.path.get().then((x) => setStore("path", reconcile(x.data!))),
+            sdk.client.path.get().then((x) => {
+              if (x.data) setStore("path", reconcile(x.data))
+            }),
           ]).then(() => {
             setStore("status", "complete")
           })

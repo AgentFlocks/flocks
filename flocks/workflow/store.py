@@ -46,6 +46,28 @@ _EXECUTION_UPSERT_SQL = """
      trigger_id, trigger_type, started_at, finished_at, duration, updated_at, payload)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
+#: A running summary never replaces the record of a run that already ended:
+#: progress that a worker thread reports after its run was recorded as
+#: cancelled (ownership.abandon_execution) must not bring it back to running.
+_EXECUTION_RUNNING_UPSERT_SQL = """
+    INSERT INTO workflow_executions
+    (id, workflow_id, status, current_phase, current_node_id, current_node_type,
+     current_step_index, step_count, input_params, output_results, error_message,
+     trigger_id, trigger_type, started_at, finished_at, duration, updated_at, payload)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+        workflow_id = excluded.workflow_id, status = excluded.status,
+        current_phase = excluded.current_phase, current_node_id = excluded.current_node_id,
+        current_node_type = excluded.current_node_type,
+        current_step_index = excluded.current_step_index, step_count = excluded.step_count,
+        input_params = excluded.input_params, output_results = excluded.output_results,
+        error_message = excluded.error_message, trigger_id = excluded.trigger_id,
+        trigger_type = excluded.trigger_type, started_at = excluded.started_at,
+        finished_at = excluded.finished_at, duration = excluded.duration,
+        updated_at = excluded.updated_at, payload = excluded.payload
+    WHERE workflow_executions.status = 'running'
+"""
+_ABANDONED_EXECUTION_MESSAGE = "Run stopped before it finished"
 
 
 def _write_operation(operation: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
@@ -526,7 +548,72 @@ class WorkflowStore:
     async def upsert_execution(cls, exec_data: Dict[str, Any]) -> None:
         db = await cls._completion_db()
         _, _, row = cls._execution_row(exec_data)
-        await db.execute(_EXECUTION_UPSERT_SQL, row)
+        running = row[2] == "running"
+        await db.execute(_EXECUTION_RUNNING_UPSERT_SQL if running else _EXECUTION_UPSERT_SQL, row)
+
+    @classmethod
+    async def recover_expired_executions(cls, message: str, *, limit: int = 500) -> int:
+        """Finalize executions left running by a process that is gone.
+
+        An execution runs only in the process that started it, so one still
+        recorded as running that is not live here (ownership.running_here) can
+        never finish.  Returns how many were finalized (at most *limit* per call).
+        """
+        from flocks.workflow.ownership import running_here
+
+        db = await cls._db()
+        async with db.execute(
+            "SELECT payload FROM workflow_executions WHERE status = 'running' ORDER BY started_at ASC",
+        ) as cur:
+            rows = await cur.fetchall()
+        recovered = 0
+        for row in rows:
+            if recovered >= max(1, limit):
+                break
+            exec_data = cls._json_loads(row["payload"], None)
+            if not isinstance(exec_data, dict) or running_here(str(exec_data.get("id") or "")):
+                continue
+            now = cls._now_ms()
+            exec_data.update(
+                status="error", currentPhase="error", errorMessage=message, finishedAt=now, updatedAt=now,
+            )
+            await cls.upsert_execution(exec_data)
+            recovered += 1
+        return recovered
+
+    @classmethod
+    async def request_execution_cancel(cls, exec_id: str) -> bool:
+        """Ask the run to stop at its next node; False when it is not live in this process."""
+        from flocks.workflow.ownership import request_cancel
+
+        return request_cancel(exec_id)
+
+    @classmethod
+    @_write_operation
+    async def end_abandoned_execution(cls, exec_id: str) -> bool:
+        """Record a run that nobody will finish as cancelled, unless it already ended."""
+        db = await cls._completion_db()
+        async with db.execute(
+            "SELECT payload FROM workflow_executions WHERE id = ? AND status = 'running'",
+            (exec_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        exec_data = cls._json_loads(row["payload"], None) if row else None
+        if not isinstance(exec_data, dict):
+            return False
+        now = cls._now_ms()
+        started_at = cls._as_int(exec_data.get("startedAt"))
+        exec_data.update(
+            status="cancelled",
+            currentPhase="cancelled",
+            errorMessage=exec_data.get("errorMessage") or _ABANDONED_EXECUTION_MESSAGE,
+            finishedAt=now,
+            updatedAt=now,
+        )
+        if started_at is not None and not isinstance(exec_data.get("duration"), (int, float)):
+            exec_data["duration"] = max(0.0, (now - started_at) / 1000.0)
+        await db.execute(_EXECUTION_UPSERT_SQL, cls._execution_row(exec_data)[2])
+        return True
 
     @classmethod
     async def get_execution(cls, exec_id: str) -> Optional[Dict[str, Any]]:
@@ -603,11 +690,16 @@ class WorkflowStore:
     @classmethod
     @_write_operation
     async def trim_executions(cls, workflow_id: str, *, keep: int) -> List[str]:
+        """Delete finished executions past the newest *keep* finished ones.
+
+        A run still going is neither removed nor counted: a long run would
+        otherwise lose its record once enough shorter ones finished after it.
+        """
         db = await cls._completion_db()
         async with db.execute(
             """
             SELECT id FROM workflow_executions
-            WHERE workflow_id = ?
+            WHERE workflow_id = ? AND status <> 'running'
             ORDER BY started_at DESC, rowid DESC
             LIMIT -1 OFFSET ?
             """,
@@ -901,6 +993,25 @@ class WorkflowStore:
         else:
             cur = await db.execute("DELETE FROM workflow_configs WHERE workflow_id = ?", (workflow_id,))
         return cur.rowcount
+
+    @classmethod
+    async def claim_webhook_delivery(
+        cls, key: str, delivery_id: str, window_s: float, claim_token: str = "",
+    ) -> Optional[str]:
+        """Record a webhook delivery unless the same one is still within its window.
+
+        Returns ``None`` -- go ahead and run -- or the first delivery's id when
+        *key* is a replay.  Nothing is recorded here, so every delivery runs.
+        *claim_token* identifies this claim to :meth:`release_webhook_delivery`.
+        """
+        return None
+
+    @classmethod
+    async def release_webhook_delivery(cls, key: str, claim_token: str) -> None:
+        """Forget the delivery one claim recorded, so the same one may be sent again.
+
+        Only that claim: a later claim of the same key carries another token and stays.
+        """
 
     @classmethod
     @_write_operation

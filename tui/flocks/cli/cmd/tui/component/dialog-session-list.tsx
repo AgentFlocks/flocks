@@ -2,6 +2,7 @@ import { useDialog } from "@tui/ui/dialog"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { useRoute } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
+import { isRootSession } from "@tui/util/session-root"
 import { createMemo, createSignal, createResource, onMount, Show } from "solid-js"
 import { Locale } from "@/util/locale"
 import { useKeybind } from "../context/keybind"
@@ -39,7 +40,7 @@ export function DialogSessionList() {
   const options = createMemo(() => {
     const today = new Date().toDateString()
     return sessions()
-      .filter((x) => x.parentID === undefined)
+      .filter(isRootSession)
       .toSorted((a, b) => b.time.updated - a.time.updated)
       .map((x) => {
         const date = new Date(x.time.updated)

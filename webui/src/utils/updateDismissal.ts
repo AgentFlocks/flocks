@@ -1,4 +1,4 @@
-import type { VersionInfo } from '@/api/update';
+import { DEFAULT_UPDATE_CHANNEL, type VersionInfo } from '@/api/update';
 
 export const UPDATE_DISMISSED_KEY = 'flocks-update-dismissed';
 
@@ -7,26 +7,17 @@ function normalizeVersionPart(value?: string | null): string {
   return normalized || 'none';
 }
 
+/** `<channel>:<latest version>`; the channel keeps dismissals of different update channels apart. */
 export function buildUpdateDismissalKey(info?: VersionInfo | null): string | null {
   if (!info) {
     return null;
-  }
-
-  const edition = info.edition || 'flocks';
-  if (edition === 'flockspro') {
-    return [
-      edition,
-      normalizeVersionPart(info.latest_bundle_version || info.latest_version),
-      normalizeVersionPart(info.latest_core_version),
-      normalizeVersionPart(info.latest_pro_component_version),
-    ].join(':');
   }
 
   const latestVersion = info.latest_version || info.current_version;
   if (!latestVersion) {
     return null;
   }
-  return `${edition}:${normalizeVersionPart(latestVersion)}`;
+  return `${info.channel || DEFAULT_UPDATE_CHANNEL}:${normalizeVersionPart(latestVersion)}`;
 }
 
 export function isUpdateDismissed(info: VersionInfo | null | undefined, dismissedValue: string | null): boolean {
@@ -39,7 +30,10 @@ export function isUpdateDismissed(info: VersionInfo | null | undefined, dismisse
     return true;
   }
 
-  // Keep old OSS dismissals working; Pro uses component-aware keys to avoid
-  // hiding component-only bundle updates behind the previous current_version.
-  return (info?.edition || 'flocks') === 'flocks' && dismissedValue === info?.current_version;
+  // Older releases stored either the bare current version or a differently
+  // prefixed `<prefix>:<version>` key; keep those dismissals valid for the same version.
+  const latestVersion = normalizeVersionPart(info?.latest_version || info?.current_version);
+  const separator = dismissedValue.indexOf(':');
+  const dismissedVersion = separator === -1 ? dismissedValue : dismissedValue.slice(separator + 1);
+  return dismissedVersion === latestVersion || dismissedValue === info?.current_version;
 }

@@ -4,6 +4,7 @@ import { X, Calendar, Clock, Loader2 } from 'lucide-react';
 import { useToast } from '@/components/common/Toast';
 import { taskAPI, TaskScheduler, TaskPriority, ExecutionMode } from '@/api/task';
 import { describeCron, CRON_PRESETS } from './helpers';
+import { extractErrorMessage } from '@/utils/error';
 
 export default function EditScheduledTaskDialog({ task, onClose, onSaved }: {
   task: TaskScheduler;
@@ -74,7 +75,7 @@ export default function EditScheduledTaskDialog({ task, onClose, onSaved }: {
       }
       onSaved();
     } catch (err: unknown) {
-      toast.error(t('taskSheet.saveFailed'), err instanceof Error ? err.message : String(err));
+      toast.error(t('taskSheet.saveFailed'), extractErrorMessage(err));
     } finally {
       setSubmitting(false);
     }

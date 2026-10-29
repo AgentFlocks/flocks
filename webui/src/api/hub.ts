@@ -148,7 +148,8 @@ export interface HubSceneSuite {
   descriptionCn?: string | null;
   version: string;
   installedVersion?: string | null;
-  edition: 'oss' | 'pro';
+  /** `oss` for the open product's own suites; an extension may name others. */
+  edition: string;
   state: HubPluginState;
   workspaceId?: string | null;
   workspaceTitle?: string | null;
@@ -157,6 +158,12 @@ export interface HubSceneSuite {
   /** Installed / latest version of the suite's page package (can lag behind the suite). */
   workspaceVersion?: string | null;
   workspaceLatestVersion?: string | null;
+  /** Set by an extension's hub access policy: a locked suite is listed but does not install. */
+  locked?: boolean | null;
+  /** The policy's own reason, handed to its `sceneSuites.lockedAction` component. */
+  lockReason?: string | null;
+  /** What the policy knows about the suite, for its own components on the page. */
+  annotations?: Record<string, unknown>;
 }
 
 export interface HubUpdatePlanPage {

@@ -226,6 +226,17 @@
     "azureModelIdHint": "For Azure OpenAI, Model ID should be the deployment name from Azure Portal.",
     "azureCustomDeployments": "Custom Azure Deployments",
     "azureNoCustomDeployments": "No custom Azure deployment has been added yet.",
+    "selectProviderRequired": "Please select a Provider",
+    "providerNameRequired": "Please enter Provider Name",
+    "apiKeyRequired": "Please enter API Key",
+    "apiKeyRequiredFirst": "Please enter API Key first",
+    "save": "Save",
+    "configure": "Configure",
+    "delete": "Delete",
+    "providerName": "Provider Name",
+    "retry": "Retry",
+    "compatCreateFirst": "OpenAI-compatible providers must be created first; test the connection from the configuration dialog afterwards",
+    "providerNameHint": "Creates a separate OpenAI-compatible provider instance; existing configurations are not overwritten.",
     "close": "Close"
   },
   "wizard": {

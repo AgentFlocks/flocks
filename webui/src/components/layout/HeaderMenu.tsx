@@ -110,14 +110,16 @@ export default function HeaderMenu({
       aria-label={label}
       onKeyDown={onMenuKeyDown}
       style={portalled ? position ?? { visibility: 'hidden' } : undefined}
-      className={`${portalled ? 'fixed' : `absolute top-full mt-2 ${align === 'right' ? 'right-0' : 'left-0'}`} z-[60] max-h-[calc(100dvh-5rem)] max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-xl border border-ui-border bg-ui-surface p-1.5 text-ui-text shadow-ui-panel [&_svg]:stroke-[1.75] ${menuClassName}`}
+      // Phones: a header menu is a full-width sheet under the header, so a menu opened
+      // mid-bar cannot run off the screen; a portalled menu is already placed on screen.
+      className={`${portalled ? 'fixed' : `absolute top-full mt-2 ${align === 'right' ? 'right-0' : 'left-0'}`} z-[60] max-h-[calc(100dvh-5rem)] max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-xl border border-ui-border bg-ui-surface p-1.5 text-ui-text shadow-ui-panel [&_svg]:stroke-[1.75] ${menuClassName}${portalled ? '' : ' max-md:fixed max-md:inset-x-3 max-md:top-14 max-md:w-auto'}`}
     >
       {children(close)}
     </div>
   ) : null;
 
   return (
-    <div ref={rootRef} className="relative">
+    <div ref={rootRef} className="relative max-md:min-w-0">
       <button
         ref={buttonRef}
         type="button"

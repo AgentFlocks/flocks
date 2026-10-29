@@ -25,6 +25,19 @@ vi.mock('react-i18next', () => ({
 }));
 
 import MonitoringPage from './index';
+import { appendTrendPoint, TREND_MAX_POINTS, TREND_WINDOW_MS, type TrendPoint } from './PerformanceTrend';
+
+function snapshot(timestamp: number, toolCallRate: number | null) {
+  return {
+    timestamp,
+    messageRate: null,
+    toolCallRate,
+    errorRate: null,
+    toolParseFailureRate: 0.5,
+    avgResponseTime: null,
+    activeRequests: null,
+  };
+}
 
 describe('MonitoringPage', () => {
   beforeEach(() => {
@@ -65,6 +78,48 @@ describe('MonitoringPage', () => {
     expect(screen.getAllByText('No data').length).toBeGreaterThanOrEqual(5);
     expect(screen.getByText('2.5/min')).toBeInTheDocument();
     expect(screen.queryByText('0.0/min')).not.toBeInTheDocument();
+  });
+
+  it('shows a sampled trend instead of the development placeholder', async () => {
+    vi.useFakeTimers();
+    let timestamp = 1_000;
+    monitoringAPI.getMetrics.mockImplementation(async () => ({ data: snapshot((timestamp += 5_000), 3) }));
+
+    const { unmount } = render(<MonitoringPage />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText('performanceTrend')).toBeInTheDocument();
+    expect(screen.queryByText(/recharts/)).not.toBeInTheDocument();
+    expect(screen.getByText('trendCollecting')).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(screen.getByRole('img', { name: 'trendAriaLabel' })).toBeInTheDocument();
+    expect(screen.queryByText('trendCollecting')).not.toBeInTheDocument();
+    unmount();
+  });
+
+  it('keeps sampling through the first rate window, then says the metrics are unavailable', async () => {
+    vi.useFakeTimers();
+    let timestamp = 1_000;
+    // The server's clock: each poll here stands for a minute of real time.
+    monitoringAPI.getMetrics.mockImplementation(async () => ({
+      data: { ...snapshot((timestamp += 60_000), null), toolParseFailureRate: null },
+    }));
+
+    const { unmount } = render(<MonitoringPage />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(screen.getByText('trendCollecting')).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(screen.getByText('trendUnavailable')).toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: 'trendAriaLabel' })).not.toBeInTheDocument();
+    unmount();
   });
 
   it('waits for the current polling batch to finish before scheduling another', async () => {
@@ -168,5 +223,29 @@ describe('MonitoringPage', () => {
     expect(await screen.findByText('22')).toBeInTheDocument();
     expect(monitoringAPI.getStatus).toHaveBeenCalledTimes(1);
     unmount();
+  });
+});
+
+describe('appendTrendPoint', () => {
+  it('ignores repeated or older samples and keeps the last ten minutes', () => {
+    let points: TrendPoint[] = appendTrendPoint([], snapshot(10, 1));
+    expect(appendTrendPoint(points, snapshot(10, 2))).toBe(points);
+    expect(appendTrendPoint(points, snapshot(5, 2))).toBe(points);
+    for (let at = 11; at < 200; at += 1) points = appendTrendPoint(points, snapshot(at, at));
+    expect(points).toHaveLength(TREND_MAX_POINTS);
+    expect(points[0].timestamp).toBe(200 - TREND_MAX_POINTS);
+    expect(points[points.length - 1]).toEqual({ timestamp: 199, toolCallRate: 199, toolParseFailureRate: 0.5 });
+  });
+});
+
+describe('appendTrendPoint window', () => {
+  it('drops samples older than ten minutes even when the tab polled slowly', () => {
+    let points: TrendPoint[] = [];
+    // A background tab: one sample a minute for an hour.
+    for (let minute = 0; minute <= 60; minute += 1) {
+      points = appendTrendPoint(points, snapshot(minute * 60_000, minute));
+    }
+    expect(points[points.length - 1].timestamp - points[0].timestamp).toBeLessThanOrEqual(TREND_WINDOW_MS);
+    expect(points.map((point) => point.toolCallRate)).toEqual([50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
   });
 });

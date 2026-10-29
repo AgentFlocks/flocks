@@ -226,6 +226,17 @@
     "azureModelIdHint": "对于 Azure OpenAI，模型 ID 请填写 Azure Portal 中的 deployment name。",
     "azureCustomDeployments": "自定义 Azure Deployments",
     "azureNoCustomDeployments": "尚未添加自定义 Azure deployment。",
+    "selectProviderRequired": "请先选择 Provider",
+    "providerNameRequired": "请填写 Provider 名称",
+    "apiKeyRequired": "请填写 API Key",
+    "apiKeyRequiredFirst": "请先填写 API Key",
+    "save": "保存",
+    "configure": "配置",
+    "delete": "删除",
+    "providerName": "Provider 名称",
+    "retry": "重试",
+    "compatCreateFirst": "OpenAI-compatible Provider 需要先创建，创建后可在配置弹窗中测试连接",
+    "providerNameHint": "用于创建独立的 OpenAI-compatible Provider 实例，不会覆盖已有配置。",
     "close": "关闭"
   },
   "wizard": {

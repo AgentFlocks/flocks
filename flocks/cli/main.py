@@ -6,18 +6,20 @@ Provides command-line interface for Flocks
 
 import asyncio
 import os
+import re
 import secrets as secrets_lib
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
 import typer
-from dotenv import load_dotenv
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 
 from flocks import __version__
 from flocks.cli.commands import (
+    acp_app,
     admin_app,
     agent_app,
     exec_command,
@@ -27,6 +29,7 @@ from flocks.cli.commands import (
     plugin_app,
     BROWSER_CONTEXT_SETTINGS,
     browser_command,
+    debug_app,
     doctor_command,
     export_app,
     import_app,
@@ -59,11 +62,12 @@ from flocks.cli.service_manager import (
     write_backend_runtime_record,
 )
 from flocks.cli.service_supervisor import run_service_daemon
+from flocks import startup_env
 from flocks.config.config import Config
 from flocks.utils.log import Log, LogLevel
 
-# Load .env file from current directory
-load_dotenv()
+# The .env flocks loaded on import (flocks/startup_env.py); a no-op by now.
+startup_env.load()
 
 app = typer.Typer(
     name="flocks",
@@ -87,6 +91,10 @@ app.add_typer(stats_app, name="stats")
 app.add_typer(task_app, name="task")
 app.add_typer(skill_app, name="skills")
 app.add_typer(admin_app, name="admin")
+# Developer/editor-integration groups: invocable, but kept out of `flocks --help`.
+# (`agent` is registered above as part of the Agent CLI panel.)
+app.add_typer(acp_app, name="acp", hidden=True)
+app.add_typer(debug_app, name="debug", hidden=True)
 
 app.command(name="update")(update_command)
 app.command(name="doctor")(doctor_command)
@@ -173,6 +181,43 @@ def _should_load_cli_extensions(target: typer.Typer) -> bool:
 
 console = Console()
 
+_SERVICE_PREFIX_RE = re.compile(r"\[(flocks|daemon|watchdog)\]")
+_LOG_LEVELS = (LogLevel.DEBUG, LogLevel.INFO, LogLevel.WARN, LogLevel.ERROR)
+_PORT_OPTION_KWARGS: dict[str, Any] = {"min": 1, "max": 65535}
+
+
+class _ServiceConsole:
+    """Console adapter for service lifecycle output.
+
+    Service messages carry literal ``[flocks]`` / ``[daemon]`` prefixes that Rich
+    would otherwise parse as (unknown) markup tags and silently drop.  Escape those
+    prefixes so the terminal shows the same text as the daemon log files.
+    """
+
+    def __init__(self, base: Console) -> None:
+        self._base = base
+
+    def print(self, *objects: Any, **kwargs: Any) -> None:
+        rendered = tuple(
+            _SERVICE_PREFIX_RE.sub(lambda match: "\\" + match.group(0), item) if isinstance(item, str) else item
+            for item in objects
+        )
+        self._base.print(*rendered, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+
+def _service_console() -> _ServiceConsole:
+    return _ServiceConsole(console)
+
+
+def _service_error_types() -> tuple[type[BaseException], ...]:
+    """Exceptions that service commands report as `[flocks] error:` lines."""
+    from flocks.server.static_webui import WebUIDistMissingError
+
+    return (ServiceConfigError, ServiceError, WebUIDistMissingError)
+
 
 def _ensure_server_api_token() -> bool:
     """Ensure local non-browser clients such as `flocks tui` can authenticate."""
@@ -224,14 +269,32 @@ def main_callback(
 
     Flocks Python implementation
     """
+    normalized_level = (log_level or "").strip().upper()
+    if normalized_level not in _LOG_LEVELS:
+        raise typer.BadParameter(
+            f"{log_level!r} is not a valid log level. Choose from: {', '.join(_LOG_LEVELS)}.",
+            param_hint="'--log-level'",
+        )
+
     # Initialize logging
     async def _init_logging() -> None:
         from flocks.retention import preload_log_retention
 
+        # A saved log period (dataRetention.logDays) must apply before the
+        # logger's first prune.
         await preload_log_retention()
-        await Log.init(print=print_logs, dev=False, level=log_level)
+        await Log.init(print=print_logs, dev=False, level=normalized_level)
 
-    asyncio.run(_init_logging())
+    try:
+        asyncio.run(_init_logging())
+    except OSError as error:
+        # Read-only / root-owned FLOCKS_ROOT: say so instead of dumping a traceback.
+        console.print(
+            f"[red]\\[flocks] error: 无法创建日志目录 {rich_escape(str(getattr(error, 'filename', '') or ''))}: "
+            f"{rich_escape(str(error.strerror or error))}，请检查 FLOCKS_ROOT 目录属主/权限"
+            "（chown 为运行用户，如容器内 1000:1000；SELinux 主机 -v 挂载加 :Z）。[/red]"
+        )
+        raise typer.Exit(1) from error
 
     Log.Default.info(
         "flocks.start",
@@ -256,7 +319,15 @@ def _service_config(
     default_webui_port: Optional[int] = None,
 ) -> ServiceConfig:
     """Build service config from environment and CLI toggles."""
-    global_config = Config.get_global()
+    try:
+        global_config = Config.get_global()
+    except OSError as error:
+        # Read-only / root-owned FLOCKS_ROOT (e.g. a docker bind mount): report a
+        # service error with the permission hint instead of a Python traceback.
+        raise ServiceError(
+            f"无法访问运行时目录 {getattr(error, 'filename', '') or ''}: {error.strerror or error}；"
+            "请检查 FLOCKS_ROOT 目录的属主与权限（Docker 挂载卷需 chown 为容器用户，如 1000:1000）。"
+        ) from error
     return build_service_config(
         no_browser=no_browser,
         skip_webui_build=skip_webui_build,
@@ -308,7 +379,7 @@ def _restart_service_config(
 
 def _handle_service_error(error: Exception) -> None:
     """Print service errors consistently."""
-    console.print(f"[red][flocks] error: {error}[/red]")
+    console.print(f"[red]\\[flocks] error: {rich_escape(str(error))}[/red]")
     raise typer.Exit(1) from error
 
 
@@ -321,30 +392,28 @@ def start(
         help="Skip WebUI static asset build before starting Flocks service",
     ),
     host: Optional[str] = typer.Option(None, "--host", "-h", help="Public service host"),
-    port: Optional[int] = typer.Option(None, "--port", "-p", help="Public service port"),
+    port: Optional[int] = typer.Option(None, "--port", "-p", help="Public service port", **_PORT_OPTION_KWARGS),
     server_host: Optional[str] = typer.Option(None, "--server-host", help="Backend server host"),
-    server_port: Optional[int] = typer.Option(None, "--server-port", help="Backend server port"),
+    server_port: Optional[int] = typer.Option(None, "--server-port", help="Backend server port", **_PORT_OPTION_KWARGS),
     webui_host: Optional[str] = typer.Option(None, "--webui-host", help="WebUI host"),
-    webui_port: Optional[int] = typer.Option(None, "--webui-port", help="WebUI port"),
+    webui_port: Optional[int] = typer.Option(None, "--webui-port", help="WebUI port", **_PORT_OPTION_KWARGS),
 ):
     """
     Start Flocks service in daemon mode.
     """
     try:
-        start_all(
-            _service_config(
-                no_browser=no_browser,
-                skip_webui_build=skip_webui_build,
-                host=host,
-                port=port,
-                server_host=server_host,
-                server_port=server_port,
-                webui_host=webui_host,
-                webui_port=webui_port,
-            ),
-            console,
+        config = _service_config(
+            no_browser=no_browser,
+            skip_webui_build=skip_webui_build,
+            host=host,
+            port=port,
+            server_host=server_host,
+            server_port=server_port,
+            webui_host=webui_host,
+            webui_port=webui_port,
         )
-    except ServiceError as error:
+        start_all(config, _service_console())
+    except _service_error_types() as error:
         _handle_service_error(error)
 
 
@@ -354,8 +423,8 @@ def stop():
     Stop Flocks service.
     """
     try:
-        stop_all(console)
-    except ServiceError as error:
+        stop_all(_service_console())
+    except _service_error_types() as error:
         _handle_service_error(error)
 
 
@@ -373,11 +442,11 @@ def restart(
         help="Skip WebUI static asset build before starting Flocks service",
     ),
     host: Optional[str] = typer.Option(None, "--host", "-h", help="Public service host"),
-    port: Optional[int] = typer.Option(None, "--port", "-p", help="Public service port"),
+    port: Optional[int] = typer.Option(None, "--port", "-p", help="Public service port", **_PORT_OPTION_KWARGS),
     server_host: Optional[str] = typer.Option(None, "--server-host", help="Backend server host"),
-    server_port: Optional[int] = typer.Option(None, "--server-port", help="Backend server port"),
+    server_port: Optional[int] = typer.Option(None, "--server-port", help="Backend server port", **_PORT_OPTION_KWARGS),
     webui_host: Optional[str] = typer.Option(None, "--webui-host", help="WebUI host"),
-    webui_port: Optional[int] = typer.Option(None, "--webui-port", help="WebUI port"),
+    webui_port: Optional[int] = typer.Option(None, "--webui-port", help="WebUI port", **_PORT_OPTION_KWARGS),
 ):
     """
     Restart Flocks service. Agents must use `flocks restart --server-only`;
@@ -385,7 +454,7 @@ def restart(
     """
     try:
         if server_only:
-            restart_server(console)
+            restart_server(_service_console())
             return
         restart_all(
             _restart_service_config(
@@ -398,9 +467,9 @@ def restart(
                 webui_host=webui_host,
                 webui_port=webui_port,
             ),
-            console,
+            _service_console(),
         )
-    except (ServiceConfigError, ServiceError) as error:
+    except _service_error_types() as error:
         _handle_service_error(error)
 
 
@@ -410,8 +479,8 @@ def status():
     Show Flocks service status.
     """
     try:
-        show_status(console)
-    except ServiceError as error:
+        show_status(_service_console())
+    except _service_error_types() as error:
         _handle_service_error(error)
 
 
@@ -426,8 +495,8 @@ def logs(
     Show Flocks service logs.
     """
     try:
-        show_logs(console, backend=backend, webui=webui, follow=follow, lines=lines)
-    except ServiceError as error:
+        show_logs(_service_console(), backend=backend, webui=webui, follow=follow, lines=lines)
+    except _service_error_types() as error:
         _handle_service_error(error)
 
 
@@ -482,6 +551,10 @@ def serve(
             host=host,
             port=port,
             reload=reload,
+            # Session loops, agent inboxes, the config cache and the knowledge engine
+            # client live in this process; an explicit 1 stops WEB_CONCURRENCY from
+            # forking workers that would each hold a diverging copy.
+            workers=1,
             log_level="info",
             log_config=_uvicorn_log_config(),
             access_log=False,
@@ -521,6 +594,81 @@ def service_daemon(
             no_browser=True,
             skip_frontend_build=skip_webui_build,
         ),
+    )
+
+
+def _refuse_local_runtime_when_managed(command: str) -> None:
+    """See :func:`flocks.cli.managed.refuse_local_runtime_when_managed`."""
+    from flocks.cli.managed import refuse_local_runtime_when_managed
+
+    refuse_local_runtime_when_managed(command)
+
+
+def _attach_tui_to_managed_service(*, tui_dir: Path, project_dir: Path, server_url: str, session: Optional[str]) -> None:
+    """Attach the TUI to the supervised service instead of starting a server.
+
+    No local token is minted and no server environment is set: the service
+    has its own configuration, and this command only connects to it.
+    """
+    import subprocess
+
+    import httpx
+
+    try:
+        # loopback health probe: never through a proxy
+        healthy = httpx.get(f"{server_url}/api/health", timeout=2.0, trust_env=False).status_code == 200
+    except Exception:
+        healthy = False
+    if not healthy:
+        console.print(
+            f"[red]No Flocks service answered at {server_url}. In a managed install the TUI only "
+            "attaches to the running service; pass --host/--port to point at it.[/red]"
+        )
+        raise typer.Exit(1)
+    console.print(f"[cyan]Attaching the TUI to the managed service at {server_url}...[/cyan]")
+    tui_cmd = [
+        "bun",
+        "run",
+        "--conditions=browser",
+        str(tui_dir / "src" / "index.ts"),
+        "attach",
+        server_url,
+        "--dir",
+        str(project_dir),
+    ]
+    if session:
+        tui_cmd.extend(["--session", session])
+    subprocess.run(tui_cmd, cwd=tui_dir)
+
+
+@app.command(hidden=True)
+def run(
+    message: Optional[str] = typer.Argument(None, help="Message to send; omit to start an interactive session"),
+    directory: Optional[Path] = typer.Option(None, "--directory", "-d", help="Project directory"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Model ID (provider/model)"),
+    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Agent name"),
+    session: Optional[str] = typer.Option(None, "--session", "-s", help="Session ID to continue"),
+    continue_session: bool = typer.Option(False, "--continue", "-c", help="Continue the most recent session"),
+    auto_confirm: bool = typer.Option(False, "--auto-confirm", "-y", help="Auto-confirm permission requests"),
+):
+    """
+    Run an interactive Flocks session in the terminal (no server required).
+    """
+    _refuse_local_runtime_when_managed("flocks run")
+    from flocks.cli import session_runner
+
+    project_dir = (directory or Path.cwd()).expanduser().resolve()
+    asyncio.run(
+        session_runner.run_session(
+            directory=project_dir,
+            message=message,
+            model=model,
+            agent=agent,
+            session_id=session,
+            continue_session=continue_session,
+            console=console,
+            auto_confirm=auto_confirm,
+        )
     )
 
 
@@ -575,6 +723,17 @@ def tui(
             console.print(f"[red]Failed to install TUI dependencies: {e}[/red]")
             raise typer.Exit(1) from e
 
+    from flocks.updater.deploy import declared_managed
+
+    if declared_managed():
+        _attach_tui_to_managed_service(
+            tui_dir=tui_dir,
+            project_dir=project_dir,
+            server_url=f"http://{host}:{port}",
+            session=session,
+        )
+        return
+
     console.print(Panel(logo(), border_style="cyan"))
     console.print("[cyan]Starting Flocks TUI...[/cyan]")
     console.print(f"[dim]Project directory: {project_dir}[/dim]")
@@ -616,7 +775,8 @@ def tui(
         max_retries = 30
         for _i in range(max_retries):
             try:
-                response = httpx.get(f"{server_url}/api/health", timeout=1.0)
+                # loopback health probe: never through a proxy
+                response = httpx.get(f"{server_url}/api/health", timeout=1.0, trust_env=False)
                 if response.status_code == 200:
                     console.print(f"[green]✓ Server started (PID: {server_process.pid})[/green]")
                     break
@@ -640,7 +800,7 @@ def tui(
         console.print("[green]═══════════════════════════════════════════════════════════════[/green]")
         console.print()
         console.print("[dim]Tips:[/dim]")
-        console.print("  - Press Ctrl+K to open command palette")
+        console.print("  - Press Ctrl+P to open command palette")
         console.print("  - Press Ctrl+C to exit")
         console.print(f"  - API docs: {server_url}/docs")
         console.print()

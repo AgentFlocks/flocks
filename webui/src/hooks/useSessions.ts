@@ -2,10 +2,38 @@ import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import type { Session, Message } from '@/types';
+import { useOptionalAuth } from '@/contexts/authState';
+import { noteChange, requestClock, shareRequest } from '@/utils/sharedRequest';
 
 const VISIBLE_CATEGORIES = new Set(['user', 'workflow', 'entity-config']);
 const ABORTED_TOOL_ERROR = 'Tool execution was interrupted';
 const SESSION_LIST_PAGE_SIZE = 100;
+// The server's bounds for one grouped request.
+const GROUPED_MAX_PROJECTS = 512;
+const GROUPED_MAX_LIMIT = 10000;
+// The session page mounts a moment after the sidebar and asks the same question.
+const FIRST_LOAD_SHARE_MS = 3000;
+const SESSION_LIST_TOPIC = 'session-list';
+
+/**
+ * A session list may have changed (an event arrived, or this tab changed one):
+ * no list request started before `at` is shared from then on.
+ */
+export function noteSessionListChange(at?: number): void {
+  noteChange(SESSION_LIST_TOPIC, at);
+}
+
+/**
+ * First page per project in the history sidebar. The session page asks for
+ * the same page, so the two share one request instead of reading twice.
+ */
+export const SESSION_HISTORY_PAGE_SIZE = 20;
+
+/** A project's sessions as a whole, reported with its first page. */
+export interface SessionGroupStats {
+  total: number;
+  lastActivityAt: number | null;
+}
 
 function finalizeStoppedMessageParts(parts: Message['parts'], stoppedAt = Date.now()): Message['parts'] {
   return parts.map((part) => {
@@ -219,6 +247,7 @@ type UseSessionsOptions = {
   projectIds?: string[];
   pageSize?: number;
   loadMorePageSize?: number;
+  enabled?: boolean;
 };
 
 function sessionEffectiveProjectId(session: Session): string {
@@ -232,6 +261,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [hasMoreByProject, setHasMoreByProject] = useState<Record<string, boolean>>({});
+  const [statsByProject, setStatsByProject] = useState<Record<string, SessionGroupStats>>({});
   const [loadingMoreProjectIds, setLoadingMoreProjectIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   // Track whether the initial fetch has completed — refetches should be silent
@@ -248,13 +278,32 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
     : [...options.projectIds].sort().join('\u0000');
   const pageSize = options?.pageSize ?? SESSION_LIST_PAGE_SIZE;
   const loadMorePageSize = options?.loadMorePageSize ?? pageSize;
+  const enabled = options?.enabled ?? true;
+  // Shared answers are per account: another account's list never reaches this one.
+  const shareScope = useOptionalAuth()?.user?.id ?? '';
   const queryKey = `${projectIdsKey ?? '*'}\u0001${pageSize}\u0001${search.trim()}`;
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
 
-  const fetchSessions = useCallback(async (fetchOptions?: { append?: boolean; projectId?: string }) => {
+  /**
+   * `firstLoad` is this list's own load of a new query. `freshAfter` (a
+   * `requestClock()` time) lets a refresh use an identical list request another
+   * view started after it, running or answered; without it a refresh always
+   * sends its own, which cannot predate a change the caller just made.
+   */
+  const fetchSessions = useCallback(async (fetchOptions?: {
+    append?: boolean;
+    projectId?: string;
+    freshAfter?: number;
+    firstLoad?: boolean;
+  }) => {
+    if (!enabled) return;
     const append = Boolean(fetchOptions?.append);
+    if (!append && !fetchOptions?.firstLoad && fetchOptions?.freshAfter === undefined) {
+      // A refresh of the caller's own making: other views must not reuse what came before it.
+      noteSessionListChange();
+    }
     const appendProjectKey = fetchOptions?.projectId ?? '*';
     const replaceRequestSeq = append
       ? replaceRequestSeqRef.current
@@ -303,6 +352,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         setSessions([]);
         setHasMore(false);
         setHasMoreByProject({});
+        setStatsByProject({});
         hasLoadedOnceRef.current = true;
         loadedQueryKeyRef.current = queryKey;
         return;
@@ -313,7 +363,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
       if (typeof performance !== 'undefined') performance.mark(startMark);
       const projectTargets = targetProjectIds ?? [undefined];
       const preserveLoadedDepth = !append && loadedQueryKeyRef.current === queryKey;
-      const responses = await Promise.all(projectTargets.map(async (projectId) => {
+      const requests = projectTargets.map((projectId) => {
         const loadedCount = sessionsRef.current.filter((session) => (
           !optimisticSessionsRef.current.has(session.id)
           && (projectId === undefined || sessionEffectiveProjectId(session) === projectId)
@@ -324,6 +374,21 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
             ? Math.max(pageSize, loadedCount)
             : pageSize;
         const offset = append ? loadedCount : 0;
+        return { projectId, requestLimit, offset };
+      });
+      // A first load may take another view's identical request from the last
+      // moments (it shows what that view shows); a refresh only one started
+      // after what it must show. Neither takes one from before a noted change.
+      const joinAfter = fetchOptions?.firstLoad
+        ? requestClock() - FIRST_LOAD_SHARE_MS
+        : fetchOptions?.freshAfter ?? Number.POSITIVE_INFINITY;
+      type ListResult = {
+        projectId: string | undefined;
+        requestLimit: number;
+        response: Session[];
+        stats?: SessionGroupStats;
+      };
+      const fetchIndividually = (batch: typeof requests) => Promise.all(batch.map(async ({ projectId, requestLimit, offset }): Promise<ListResult> => {
         const response = await sessionApi.list({
           view: 'list',
           manager: true,
@@ -335,6 +400,70 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         });
         return { projectId, requestLimit, response };
       }));
+      const fetchBatch = async (batch: typeof requests): Promise<ListResult[]> => {
+        // "Load more" reads one project's next page; a page deeper than the
+        // grouped limits keeps the old, unrestricted GET.
+        if (targetProjectIds === null || append || batch.some(({ requestLimit }) => requestLimit > GROUPED_MAX_LIMIT)) {
+          return fetchIndividually(batch);
+        }
+        try {
+          const projects = batch.map(({ projectId, requestLimit, offset }) => ({
+            projectID: projectId as string,
+            limit: requestLimit,
+            offset,
+          }));
+          const searchTerm = search.trim() || undefined;
+          const groups = await shareRequest(
+            SESSION_LIST_TOPIC,
+            `list-grouped\u0000${shareScope}\u0000${JSON.stringify([projects, searchTerm ?? null])}`,
+            joinAfter,
+            () => sessionApi.listGrouped(projects, searchTerm),
+          );
+          if (!Array.isArray(groups) || groups.length !== batch.length || groups.some((group, index) => (
+            group.projectID !== batch[index].projectId || !Array.isArray(group.items)
+          ))) {
+            throw new Error('Invalid grouped session list response');
+          }
+          return batch.map(({ projectId, requestLimit }, index) => {
+            const { items, total, lastActivityAt } = groups[index];
+            return {
+              projectId,
+              requestLimit,
+              response: items,
+              // Older servers send pages without statistics.
+              stats: typeof total === 'number' ? { total, lastActivityAt: lastActivityAt ?? null } : undefined,
+            };
+          });
+        } catch (groupedError: any) {
+          if (!isCurrentRequest()) return [];
+          // A frontend can temporarily be served by an older backend during upgrades.
+          // Only a missing endpoint should trigger the more expensive legacy requests.
+          if (groupedError?.response?.status !== 404 && groupedError?.response?.status !== 405) {
+            throw groupedError;
+          }
+          return fetchIndividually(batch);
+        }
+      };
+      // Bound each batch to the server's request limits. A single project
+      // deeper than that limit keeps the old, unrestricted GET behavior.
+      const batches: Array<typeof requests> = [];
+      let batch: typeof requests = [];
+      let batchLimit = 0;
+      for (const request of requests) {
+        if (batch.length && (batch.length >= GROUPED_MAX_PROJECTS || batchLimit + request.requestLimit > GROUPED_MAX_LIMIT)) {
+          batches.push(batch);
+          batch = [];
+          batchLimit = 0;
+        }
+        if (request.requestLimit > GROUPED_MAX_LIMIT) {
+          batches.push([request]);
+        } else {
+          batch.push(request);
+          batchLimit += request.requestLimit;
+        }
+      }
+      if (batch.length) batches.push(batch);
+      const responses = (await Promise.all(batches.map(fetchBatch))).flat();
       if (!isCurrentRequest()) return;
       markMeasure(append ? 'sessions:list:older-page' : 'sessions:list:first-render', startMark);
       const nextSessions = responses.flatMap(({ response }) => (
@@ -346,14 +475,22 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
       const nextHasMoreByProject = Object.fromEntries(
         responses
           .filter(({ projectId }) => projectId !== undefined)
-          .map(({ projectId, requestLimit, response }) => [
+          .map(({ projectId, requestLimit, response, stats }) => [
             projectId as string,
-            Array.isArray(response) && response.length >= requestLimit,
+            Array.isArray(response) && (stats ? response.length < stats.total : response.length >= requestLimit),
           ]),
       );
       setHasMoreByProject((current) => append
         ? { ...current, ...nextHasMoreByProject }
         : nextHasMoreByProject);
+      if (!append && targetProjectIds !== null) {
+        const freshStats = new Map(responses.map(({ projectId, stats }) => [projectId, stats]));
+        // A project read without statistics keeps the last known ones.
+        setStatsByProject((current) => Object.fromEntries(targetProjectIds.flatMap((projectId) => {
+          const stats = freshStats.get(projectId) ?? current[projectId];
+          return stats ? [[projectId, stats]] : [];
+        })));
+      }
       setSessions((previous) => {
         if (append) return appendSessionList(previous, nextSessions);
         if (targetProjectIds === null) {
@@ -396,9 +533,10 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         initializedRef.current = true;
       }
     }
-  }, [pageSize, loadMorePageSize, projectIdsKey, queryKey, search]);
+  }, [enabled, pageSize, loadMorePageSize, projectIdsKey, queryKey, search, shareScope]);
 
   const updateSessionTitle = useCallback((sessionId: string, title: string) => {
+    noteSessionListChange();
     const optimistic = optimisticSessionsRef.current.get(sessionId);
     if (optimistic) {
       optimisticSessionsRef.current.set(sessionId, { ...optimistic, title });
@@ -411,25 +549,38 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
   }, []);
 
   useEffect(() => {
+    if (!enabled) {
+      // Do not let an earlier request populate a disabled list.
+      replaceRequestSeqRef.current += 1;
+      return;
+    }
     if (!hasLoadedOnceRef.current) {
       initializedRef.current = false;
     }
-    fetchSessions();
-  }, [fetchSessions]);
+    void fetchSessions({ firstLoad: true });
+  }, [enabled, fetchSessions]);
 
   const removeSession = useCallback((sessionId: string) => {
+    noteSessionListChange();
     optimisticSessionsRef.current.delete(sessionId);
     setSessions(prev => prev.filter(s => s.id !== sessionId));
   }, []);
 
   const removeSessions = useCallback((sessionIds: string[]) => {
+    noteSessionListChange();
     const idSet = new Set(sessionIds);
     sessionIds.forEach(sessionId => optimisticSessionsRef.current.delete(sessionId));
     setSessions(prev => prev.filter(s => !idSet.has(s.id)));
   }, []);
 
+  const refetch = useCallback(
+    (refetchOptions?: { freshAfter?: number }) => fetchSessions({ freshAfter: refetchOptions?.freshAfter }),
+    [fetchSessions],
+  );
+
   /** Optimistically prepend a newly created session without a full refetch. */
   const addSession = useCallback((session: Session) => {
+    noteSessionListChange();
     optimisticSessionsRef.current.set(session.id, session);
     setSessions(prev => {
       if (prev.some(s => s.id === session.id)) return prev;
@@ -442,13 +593,14 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
     loading,
     refreshing,
     error,
-    refetch: fetchSessions,
+    refetch,
     updateSessionTitle,
     removeSession,
     removeSessions,
     addSession,
     hasMore,
     hasMoreByProject,
+    statsByProject,
     loadingMore,
     loadingMoreProjectIds,
     loadMore: (projectId?: string) => fetchSessions({ append: true, projectId }),
@@ -459,10 +611,20 @@ export function useSessionMessages(sessionId?: string) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasOlder, setHasOlder] = useState(false);
+  const [hasNewer, setHasNewer] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [loadingNewer, setLoadingNewer] = useState(false);
+  const pageRef = useRef({ before: null as string | null, after: null as string | null, anchor: null as string | null });
+  const pendingPageRef = useRef(new Map<string, symbol>());
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const activeSessionIdRef = useRef(sessionId);
   const requestIdRef = useRef(0);
   const provisionalMessageIdsRef = useRef<Set<string>>(new Set());
   const messageMutationVersionsRef = useRef<Map<string, number>>(new Map());
+  const deletedMessageVersionsRef = useRef(new Map<string, number>());
+  const activeRequestVersionsRef = useRef(new Map<symbol, { generation: number; mutation: number }>());
   const mutationVersionRef = useRef(0);
 
   const markMessageMutation = (messageId: string) => {
@@ -470,28 +632,71 @@ export function useSessionMessages(sessionId?: string) {
     messageMutationVersionsRef.current.set(messageId, mutationVersionRef.current);
   };
 
-  const fetchMessages = useCallback(async () => {
+  const fetchMessages = useCallback(async (mode: 'refresh' | 'older' | 'newer' | 'focus' | 'latest' = 'refresh', target?: string) => {
     if (!sessionId || activeSessionIdRef.current !== sessionId) return;
-
+    const extending = mode === 'older' || mode === 'newer';
+    if (extending && pendingPageRef.current.has(mode)) return;
+    const cursor = mode === 'older' ? pageRef.current.before : pageRef.current.after;
+    if (extending && !cursor) return;
     const requestSessionId = sessionId;
-    const requestId = ++requestIdRef.current;
+    const requestId = extending ? requestIdRef.current : ++requestIdRef.current;
     const requestMutationVersion = mutationVersionRef.current;
+    const requestToken = Symbol(mode);
+    if (!extending) {
+      pendingPageRef.current.clear();
+      setLoadingOlder(false);
+      setLoadingNewer(false);
+    } else {
+      pendingPageRef.current.set(mode, requestToken);
+    }
+    activeRequestVersionsRef.current.set(requestToken, { generation: requestId, mutation: requestMutationVersion });
+    const anchor = mode === 'focus' ? target : mode === 'latest' ? null : pageRef.current.anchor;
     const isCurrentRequest = () => (
       activeSessionIdRef.current === requestSessionId
       && requestIdRef.current === requestId
     );
     
     try {
-      setLoading(true);
+      if (mode === 'older') setLoadingOlder(true);
+      else if (mode === 'newer') setLoadingNewer(true);
+      else setLoading(true);
       setError(null);
       const startMark = 'session:messages:start';
       if (typeof performance !== 'undefined') performance.mark(startMark);
       const response = await client.get(`/api/session/${sessionId}/message`, {
-        params: { include_archived: true },
+        params: {
+          page: true, limit: 50, include_archived: true,
+          ...(mode === 'older' ? { before: cursor } : mode === 'newer' ? { after: cursor } : anchor ? { around: anchor } : {}),
+        },
       });
       markMeasure('session:messages', startMark);
       if (!isCurrentRequest()) return;
       const messagesData = transformMessageResponse(response.data);
+      const older = response.data?.hasMore === true;
+      const newer = response.data?.hasNewer === true;
+      const compare = (a: Message, b: Message) => a.timestamp - b.timestamp || a.id.localeCompare(b.id);
+      const first = messagesData[0];
+      const last = messagesData[messagesData.length - 1];
+      const current = messagesRef.current;
+      const currentIds = new Set(current
+        .filter(message => !provisionalMessageIdsRef.current.has(message.id))
+        .map(message => message.id));
+      // A reconnect can miss more than one page. Without an overlap we cannot
+      // claim that the retained window is continuous; use the new page's cursors.
+      // A new SSE tail message is not proof that the intervening history loaded.
+      const resetWindow = mode === 'refresh' && current.length > 0
+        && !messagesData.some(message => currentIds.has(message.id));
+      const keepOlderCursor = mode === 'refresh' && !resetWindow && first && current[0] && compare(current[0], first) < 0;
+      const keepNewerCursor = mode === 'refresh' && !resetWindow && anchor && last && current.length > 0 && compare(current[current.length - 1], last) > 0;
+      if (mode !== 'newer' && !keepOlderCursor) {
+        pageRef.current.before = response.data?.nextBefore ?? null;
+        setHasOlder(older);
+      }
+      if (mode !== 'older' && !keepNewerCursor) {
+        pageRef.current.after = response.data?.nextAfter ?? null;
+        setHasNewer(newer);
+      }
+      if (!extending) pageRef.current.anchor = anchor ?? null;
       const protectedMessageIds = new Set(
         Array.from(messageMutationVersionsRef.current.entries())
           .filter(([, version]) => version > requestMutationVersion)
@@ -502,24 +707,49 @@ export function useSessionMessages(sessionId?: string) {
           provisionalMessageIdsRef.current.delete(message.id);
         }
       });
-      messageMutationVersionsRef.current.forEach((version, messageId) => {
-        if (version <= requestMutationVersion) {
-          messageMutationVersionsRef.current.delete(messageId);
-        }
-      });
-      setMessages(prev => mergeCompleteFetchedMessages(
-        prev,
-        messagesData,
-        provisionalMessageIdsRef.current,
-        protectedMessageIds,
+      const fetchedMessages = messagesData.filter(message => (
+        (deletedMessageVersionsRef.current.get(message.id) ?? 0) <= requestMutationVersion
       ));
+      setMessages(prev => {
+        const replace = mode === 'focus' || mode === 'latest' || resetWindow;
+        const complete = !older && !newer;
+        const retained = replace || (!extending && complete) ? [] : prev.filter(message => (
+          extending || (first && compare(message, first) < 0) || (anchor && last && compare(message, last) > 0)
+        ));
+        const byId = new Map(retained.map(message => [message.id, message]));
+        for (const message of fetchedMessages) byId.set(message.id, message);
+        return mergeCompleteFetchedMessages(
+          prev, [...byId.values()].sort(compare), provisionalMessageIdsRef.current, protectedMessageIds,
+        );
+      });
+      return true;
     } catch (err: any) {
       if (isCurrentRequest()) {
         setError(err.message || 'Failed to fetch messages');
       }
+      return false;
     } finally {
+      activeRequestVersionsRef.current.delete(requestToken);
+      // A later response must not discard deletion/update protection needed by
+      // another page that is still in flight. Retain only that request horizon.
+      let oldestMutation = Infinity;
+      activeRequestVersionsRef.current.forEach(request => {
+        if (request.generation === requestIdRef.current) {
+          oldestMutation = Math.min(oldestMutation, request.mutation);
+        }
+      });
+      for (const versions of [messageMutationVersionsRef.current, deletedMessageVersionsRef.current]) {
+        versions.forEach((version, messageId) => {
+          if (version <= oldestMutation) versions.delete(messageId);
+        });
+      }
       if (isCurrentRequest()) {
         setLoading(false);
+      }
+      if (activeSessionIdRef.current === requestSessionId && extending && pendingPageRef.current.get(mode) === requestToken) {
+        pendingPageRef.current.delete(mode);
+        if (mode === 'older') setLoadingOlder(false);
+        else setLoadingNewer(false);
       }
     }
   }, [sessionId]);
@@ -530,7 +760,16 @@ export function useSessionMessages(sessionId?: string) {
     activeSessionIdRef.current = sessionId;
     provisionalMessageIdsRef.current.clear();
     messageMutationVersionsRef.current.clear();
+    deletedMessageVersionsRef.current.clear();
+    activeRequestVersionsRef.current.clear();
     mutationVersionRef.current = 0;
+    requestIdRef.current += 1;
+    pageRef.current = { before: null, after: null, anchor: null };
+    pendingPageRef.current.clear();
+    setHasOlder(false);
+    setHasNewer(false);
+    setLoadingOlder(false);
+    setLoadingNewer(false);
     setMessages([]);
     setError(null);
     if (sessionId) {
@@ -548,13 +787,23 @@ export function useSessionMessages(sessionId?: string) {
     messages,
     loading,
     error,
-    refetch: fetchMessages,
+    refetch: useCallback(() => fetchMessages(), [fetchMessages]),
+    hasOlder,
+    hasNewer,
+    loadingOlder,
+    loadingNewer,
+    loadOlder: useCallback(() => fetchMessages('older'), [fetchMessages]),
+    loadNewer: useCallback(() => fetchMessages('newer'), [fetchMessages]),
+    loadLatest: useCallback(() => fetchMessages('latest'), [fetchMessages]),
+    focusMessage: useCallback((messageId: string) => fetchMessages('focus', messageId), [fetchMessages]),
     addMessage: (message: Message) => {
+      if (pageRef.current.after) void fetchMessages('latest');
       provisionalMessageIdsRef.current.add(message.id);
       markMessageMutation(message.id);
       setMessages(prev => [...prev, message]);
     },
     updateMessage: (messageInfo: any) => {
+      if (pageRef.current.after && !messagesRef.current.some(message => message.id === messageInfo.id)) return;
       markMessageMutation(messageInfo.id);
       setMessages(prev => {
         const existingIndex = prev.findIndex(m => m.id === messageInfo.id);
@@ -642,6 +891,7 @@ export function useSessionMessages(sessionId?: string) {
      * frame-level typing cadence and Markdown parse budget.
      */
     updateMessagePart: (partInfo: any, delta?: string) => {
+      if (pageRef.current.after && !messagesRef.current.some(message => message.id === partInfo.messageID)) return;
       markMessageMutation(partInfo.messageID);
       setMessages(prev => {
         if (!prev.some((message) => message.id === partInfo.messageID)) {
@@ -653,12 +903,18 @@ export function useSessionMessages(sessionId?: string) {
     removeMessage: (messageId: string) => {
       provisionalMessageIdsRef.current.delete(messageId);
       messageMutationVersionsRef.current.delete(messageId);
+      mutationVersionRef.current += 1;
+      if (activeRequestVersionsRef.current.size > 0) {
+        deletedMessageVersionsRef.current.set(messageId, mutationVersionRef.current);
+      }
       setMessages(prev => prev.filter((message) => message.id !== messageId));
     },
     clearMessages: () => {
       requestIdRef.current += 1;
       provisionalMessageIdsRef.current.clear();
       messageMutationVersionsRef.current.clear();
+      deletedMessageVersionsRef.current.clear();
+      activeRequestVersionsRef.current.clear();
       mutationVersionRef.current = 0;
       setMessages([]);
       setError(null);

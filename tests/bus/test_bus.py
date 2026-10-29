@@ -6,6 +6,7 @@ Validates event definition, publishing, and subscription.
 
 import pytest
 import asyncio
+from collections import defaultdict
 from pydantic import BaseModel
 from flocks.bus.bus_event import BusEvent
 from flocks.bus.bus import Bus
@@ -18,13 +19,11 @@ class SampleEventProps(BaseModel):
 
 
 @pytest.fixture(autouse=True)
-def cleanup():
-    """Clear registry and subscriptions before/after each test"""
-    BusEvent.clear_registry()
-    Bus.clear_subscriptions()
-    yield
-    BusEvent.clear_registry()
-    Bus.clear_subscriptions()
+def cleanup(monkeypatch):
+    """Isolate test events while retaining subscribers installed at import."""
+    monkeypatch.setattr(BusEvent, "_registry", {})
+    monkeypatch.setattr(Bus, "_subscriptions", defaultdict(list))
+    monkeypatch.setattr(Bus, "_global_callback", None)
 
 
 def test_define_event():

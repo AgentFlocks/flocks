@@ -51,19 +51,19 @@ const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/On
 const UpdateModal = lazyLayoutComponent(() => import('@/components/common/UpdateModal'), ['update']);
 const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
 const TokenPolicyNotice = lazyLayoutComponent(() => import('@/components/common/TokenPolicyNotice'), ['notification']);
-import { checkUpdate, getCurrentRelease, type VersionInfo } from '@/api/update';
-import { consoleUpgradeApi } from '@/api/consoleUpgrade';
+import { DEFAULT_UPDATE_CHANNEL, checkUpdate, getCurrentRelease, type VersionInfo } from '@/api/update';
 import {
   ackNotification,
   getActiveNotifications,
   getNotificationAckStatus,
   type UserNotification,
 } from '@/api/notifications';
-import { flocksproUsersApi } from '@/api/flocksproUsers';
+import registry, { type ExtensionNavItem } from '@ext/registry';
 import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import { BackendStatusBanner } from '@/components/common/BackendStatusBanner';
+import { InstallationResultBanner } from '@/components/common/InstallationResultBanner';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
@@ -102,7 +102,7 @@ import {
   type NavWorkspacePaths,
 } from '@/utils/navPartitions';
 import WorkspaceHeader, { type HeaderWorkspace } from './WorkspaceHeader';
-import AccountMenu from './AccountMenu';
+import AccountMenu, { type AccountMenuExtraItem } from './AccountMenu';
 import { useSettingsSectionGroups } from '@/utils/settingsSections';
 import SessionHistoryPanel from './SessionHistoryPanel';
 import SidebarHistorySplit from './SidebarHistorySplit';
@@ -140,56 +140,56 @@ interface LayoutProps {
   contentRoutes?: RouteObject[];
 }
 
-function formatProVersion(version?: string | null): string | null {
-  const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
-  return normalized ? `v${normalized}` : null;
-}
-
 function formatUpdateVersion(version?: string | null): string | null {
   const raw = (version || '').trim();
   if (!raw) return null;
-  return /^(pro-)?v/i.test(raw) ? raw : `v${raw}`;
+  return /^([a-z]+-)?v/i.test(raw) ? raw : `v${raw}`;
 }
 
-function currentProductVersion(info: VersionInfo, isFlocksproActive: boolean): string | null {
-  if (isFlocksproActive || info.edition === 'flockspro') {
-    return info.current_bundle_version || info.current_version || null;
-  }
+function currentProductVersion(info: VersionInfo): string | null {
   return info.current_version || null;
 }
 
-function latestProductVersion(info: VersionInfo, isFlocksproActive: boolean): string | null {
-  if (isFlocksproActive || info.edition === 'flockspro') {
-    return info.latest_bundle_version || info.latest_version || null;
-  }
+function latestProductVersion(info: VersionInfo): string | null {
   return info.latest_version || null;
 }
 
-function buildUpdateNotification(info: VersionInfo | null, language: string): UserNotification | null {
+/** A bundle version written as `v<number>` (installers may record it as `<edition>-v<number>`). */
+function formatBundleVersion(version?: string | null): string | null {
+  const normalized = (version || '').trim().replace(/^[a-z]+-v(?=\d)/i, '').replace(/^v/i, '');
+  return normalized ? `v${normalized}` : null;
+}
+
+function buildUpdateNotification(
+  info: VersionInfo | null,
+  language: string,
+  productName: string,
+): UserNotification | null {
   const releaseNotes = getLocalizedReleaseNotes(info?.release_notes, language);
   if (!info || info.error || !releaseNotes) return null;
   const isZh = language.toLowerCase().startsWith('zh');
   const summary = isZh ? '这里是本次版本值得关注的新功能和变化。' : 'Here are the highlights from this version.';
-  if (info.edition === 'flockspro') {
-    const proVersion = formatProVersion(info.current_bundle_version || info.latest_version || info.current_version);
-    if (!proVersion) return null;
-    // Own prefix: a Pro bundle may share its number with a Core release. Core and component versions,
-    // as in the Pro update dismissal key: a component-only update keeps the bundle number.
-    const coreVersion = formatProVersion(info.current_core_version);
-    const componentVersion = formatProVersion(info.current_pro_component_version);
+  if (info.channel && info.channel !== 'flocks' && info.channel !== DEFAULT_UPDATE_CHANNEL) {
+    // A release an update channel installed announces itself, under the name the install shows.
+    const bundleVersion = formatBundleVersion(info.current_bundle_version || info.latest_version || info.current_version);
+    if (!bundleVersion) return null;
+    // Own prefix: a bundle may share its number with a Core release. Core and component versions
+    // are part of the key: a component-only update keeps the bundle number.
+    const coreVersion = formatBundleVersion(info.current_core_version);
+    const componentVersion = formatBundleVersion(info.current_component_version);
     const releaseKey = [
-      proVersion,
+      bundleVersion,
       coreVersion && `core-${coreVersion}`,
-      componentVersion && `pro-${componentVersion}`,
+      componentVersion && `component-${componentVersion}`,
     ].filter(Boolean).join('-');
     return {
-      id: `whats-new-flockspro-${releaseKey}`,
+      id: `whats-new-${info.channel}-${releaseKey}`,
       kind: 'whats_new',
-      title: isZh ? `Flocks Pro ${proVersion} 更新内容` : `What's new in Flocks Pro ${proVersion}`,
+      title: isZh ? `${productName} ${bundleVersion} 更新内容` : `What's new in ${productName} ${bundleVersion}`,
       summary,
       body: releaseNotes,
       highlights: [],
-      version: proVersion,
+      version: bundleVersion,
       priority: 20,
     };
   }
@@ -222,7 +222,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const confirm = useConfirm();
   const { t, i18n } = useTranslation('nav');
   const { t: tAuth } = useTranslation('auth');
-  const { productName, proProductName, logoUrl } = useProductName();
+  const { productName, logoUrl } = useProductName();
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(readSidebarCollapsed);
@@ -235,6 +235,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const canOnboard = user?.role === 'admin';
   const onboardingOpen = showOnboarding && canOnboard;
   const [updateState, setUpdateState] = useState<'idle' | 'pending' | 'visible'>('idle');
+  // Whether the open dialog was asked for explicitly. Inferring it from
+  // "we have no cached version info" was fragile: a background refresh landing
+  // while the dialog was open filled the cache and silently turned the forced
+  // check off under it.
+  const [updateCheckForced, setUpdateCheckForced] = useState(false);
   const tokenPolicy = useTokenPolicyNotice(user?.id, onboardingOpen || updateState === 'visible');
   const handleUpdatePresented = useCallback(() => {
     if (document.visibilityState === 'visible') setUpdateState('visible');
@@ -242,7 +247,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const requestUpdate = useCallback(() => {
     setUpdateState((state) => (state === 'visible' ? state : 'pending'));
   }, []);
-  const closeUpdate = useCallback(() => setUpdateState('idle'), []);
+  const closeUpdate = useCallback(() => {
+    setUpdateState('idle');
+    setUpdateCheckForced(false);
+  }, []);
 
   const [hasUpdate, setHasUpdate] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
@@ -259,12 +267,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const [updateNotificationReady, setUpdateNotificationReady] = useState(false);
   const [acknowledgingNotificationIds, setAcknowledgingNotificationIds] = useState<string[]>([]);
   const lastNotificationFetchKeyRef = useRef<string | null>(null);
-  const [isFlocksproActive, setIsFlocksproActive] = useState(false);
-  const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
-  const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
-  const isAdmin = user?.role === 'admin';
-  const notificationGateReady = flocksproStatusReady && (!canManageUpdates || hasCompletedUpdateCheck);
+  const notificationGateReady = !canManageUpdates || hasCompletedUpdateCheck;
   const currentReleaseReady = !!user?.id && currentRelease?.userId === user.id;
 
   const {
@@ -283,6 +287,33 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     openTabRecordsRef.current = openTabRecords;
   }, [openTabRecords]);
   const [collapsedNavSectionIds, setCollapsedNavSectionIds] = useState<Set<string>>(new Set());
+
+  // Entries an extension registered, admin-only ones dropped for members, in
+  // registry order. Empty in a stock build.
+  const extensionNavItems = useMemo(() => {
+    const label = (item: ExtensionNavItem) => {
+      const ns = item.ns || 'nav';
+      return i18n.exists?.(item.labelKey, { ns }) === false
+        ? item.labelKey
+        : t(item.labelKey, { ns, productName });
+    };
+    const toItem = (item: ExtensionNavItem): AccountMenuExtraItem => ({
+      id: item.id,
+      name: label(item),
+      href: item.href,
+      icon: item.icon,
+      highlight: item.highlight,
+      badge: item.badge,
+    });
+    const visible = registry.navItems
+      .filter((item) => !item.adminOnly || user?.role === 'admin')
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    return {
+      accountMenu: visible.filter((item) => item.placement === 'accountMenu').map(toItem),
+      // Sidebar entries join the Agent workshop's tools and models group.
+      workshop: visible.filter((item) => (item.placement ?? 'sidebar') === 'sidebar').map(toItem),
+    };
+  }, [i18n, productName, t, user?.role]);
 
   const toggleCollapsed = useCallback(() => {
     setCollapsed((value) => {
@@ -332,7 +363,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, [handleOpenOnboarding]);
 
   const refreshUpdateStatus = useCallback(async (bypassMinGap = false) => {
-    if (!flocksproStatusReady || !canManageUpdates) return;
+    if (!canManageUpdates) return;
 
     const now = Date.now();
     if (checkingUpdateRef.current) return;
@@ -342,12 +373,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     lastUpdateCheckAtRef.current = now;
 
     try {
-      const edition = isFlocksproActive ? 'flockspro' : 'flocks';
-      const info = await checkUpdate(i18n.language, edition);
+      const info = await checkUpdate(i18n.language, registry.updateChannel);
       setUpdateInfo(info);
 
-      const displayCurrentVersion = currentProductVersion(info, edition === 'flockspro');
-      const displayLatestVersion = latestProductVersion(info, edition === 'flockspro');
+      const displayCurrentVersion = currentProductVersion(info);
+      const displayLatestVersion = latestProductVersion(info);
 
       if (displayCurrentVersion) {
         setCurrentVersion(displayCurrentVersion);
@@ -380,10 +410,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       checkingUpdateRef.current = false;
       setHasCompletedUpdateCheck(true);
     }
-  }, [canManageUpdates, flocksproStatusReady, i18n.language, isFlocksproActive, requestUpdate]);
+  }, [canManageUpdates, i18n.language, requestUpdate]);
 
   useEffect(() => {
-    if (!flocksproStatusReady || !canManageUpdates) return undefined;
+    if (!canManageUpdates) return undefined;
 
     const initialCheckTimerId = window.setTimeout(() => {
       refreshUpdateStatus(true);
@@ -414,57 +444,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleWindowFocus);
     };
-  }, [canManageUpdates, flocksproStatusReady, refreshUpdateStatus]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setFlocksproStatusReady(false);
-    if (!user?.id) {
-      setIsFlocksproActive(false);
-      setFlocksproVersion(null);
-      setFlocksproStatusReady(true);
-      return () => {
-        cancelled = true;
-      };
-    }
-    const refreshFlocksproStatus = () => {
-      setFlocksproStatusReady(false);
-      void Promise.all([
-        flocksproUsersApi.getLicenseStatus().catch(() => null),
-        consoleUpgradeApi.getProPackageStatus().catch(() => null),
-      ])
-        .then(([licenseStatus, packageStatus]) => {
-          if (cancelled) return;
-          const active = licenseStatus?.pro_enabled === true || packageStatus?.pro_enabled === true;
-          setIsFlocksproActive(active);
-          const version = active
-            ? formatProVersion(
-                packageStatus?.bundle_version ||
-                  packageStatus?.installed_version ||
-                  packageStatus?.flockspro_component_version,
-              )
-            : null;
-          setFlocksproVersion(version);
-        })
-        .catch(() => {
-          if (!cancelled) {
-            setIsFlocksproActive(false);
-            setFlocksproVersion(null);
-          }
-        })
-        .finally(() => {
-          if (!cancelled) {
-            setFlocksproStatusReady(true);
-          }
-        });
-    };
-    refreshFlocksproStatus();
-    window.addEventListener('flockspro-license-status-changed', refreshFlocksproStatus);
-    return () => {
-      cancelled = true;
-      window.removeEventListener('flockspro-license-status-changed', refreshFlocksproStatus);
-    };
-  }, [user?.id]);
+  }, [canManageUpdates, refreshUpdateStatus]);
 
   useEffect(() => {
     if (!user?.id) {
@@ -540,7 +520,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     if (!notificationGateReady || !currentReleaseReady) return;
 
     setUpdateNotificationReady(false);
-    const notification = buildUpdateNotification(currentRelease?.info ?? null, i18n.language);
+    const notification = buildUpdateNotification(currentRelease?.info ?? null, i18n.language, productName);
     if (!notification) {
       setUpdateNotification(null);
       setUpdateNotificationReady(true);
@@ -563,7 +543,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     return () => {
       cancelled = true;
     };
-  }, [currentRelease, currentReleaseReady, i18n.language, notificationGateReady, user?.id]);
+  }, [currentRelease, currentReleaseReady, i18n.language, notificationGateReady, productName, user?.id]);
 
   const allNotifications = updateNotification
     ? [...notifications, updateNotification].sort((a, b) => a.priority - b.priority)
@@ -628,16 +608,18 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     || webuiContractPages.length > 0;
 
   // Last path visited inside each workspace, so switching back lands there.
-  const workspacePathsRef = useRef<NavWorkspacePaths>(readWorkspacePaths());
+  // Extension pages listed in the workshop's menu belong to the workshop.
+  const workshopPaths = useMemo(() => extensionNavItems.workshop.map((item) => item.href), [extensionNavItems]);
+  const workspacePathsRef = useRef<NavWorkspacePaths>(readWorkspacePaths(workshopPaths));
   // Validate remembered paths against the workspace's current placement.
   const pathNavigation = useCallback((path: string | undefined): NavWorkspaceId | null => {
     if (!path) return null;
-    const route = resolveNavRoute(path, webuiContractWorkspaces);
+    const route = resolveNavRoute(path, webuiContractWorkspaces, workshopPaths);
     return route.kind === 'workspace' ? route.workspace : null;
-  }, [webuiContractWorkspaces]);
+  }, [webuiContractWorkspaces, workshopPaths]);
 
   // Remember the module to return to when leaving settings or scene management.
-  const routeNav = resolveNavRoute(`${location.pathname}${location.search}`, navStateReady ? webuiContractWorkspaces : null);
+  const routeNav = resolveNavRoute(`${location.pathname}${location.search}`, navStateReady ? webuiContractWorkspaces : null, workshopPaths);
   const [rememberedWorkspace, setRememberedWorkspace] = useState<NavWorkspaceId>(readCurrentWorkspace);
   const routeWorkspace = routeNav.kind === 'workspace' ? routeNav.workspace : null;
   const inHeader = (workspaceId: NavWorkspaceId | null) => headerWorkspaces.some((workspace) => workspace.id === workspaceId);
@@ -713,8 +695,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       { name: t('models'), href: '/models', icon: Brain },
       { name: t('channels'), href: '/channels', icon: Radio },
       { name: t('hub', { productName }), href: '/hub', icon: Blocks },
+      ...extensionNavItems.workshop,
     ] },
-  ], [productName, t]);
+  ], [extensionNavItems, productName, t]);
 
   const sceneSections = useMemo(() => {
     const map = new Map<string, NavSection[]>();
@@ -846,8 +829,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     [openTabPathByHref],
   );
 
-  // A scene whose workspace closed (uninstalled, disabled or license lapsed)
-  // cannot stay on screen: fall back to its suite manager.
+  // A scene whose workspace closed (uninstalled, disabled or locked by an
+  // extension) cannot stay on screen: fall back to its suite manager.
   const routeSceneId = routeWorkspace && sceneWorkspaceIdOf(routeWorkspace)
     ? workspaceIdFromPath(location.pathname) : null;
   useEffect(() => {
@@ -894,6 +877,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   const openManualUpdateCheck = useCallback(() => {
     setUpdateInfo(null);
+    setUpdateCheckForced(true);
     requestUpdate();
   }, [requestUpdate]);
 
@@ -915,11 +899,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     });
   }, [confirm, t]);
 
-  const displayVersion = isFlocksproActive
-    ? updateInfo?.edition === 'flockspro'
-      ? formatProVersion(currentProductVersion(updateInfo, true))
-      : flocksproVersion || (currentVersion ? formatProVersion(currentVersion) : null)
-    : formatUpdateVersion(currentVersion);
+  const displayVersion = formatUpdateVersion(currentVersion);
   const accountInitial = (user?.username || productName || 'F').trim().charAt(0).toUpperCase();
   const accountRoleLabel = user?.role === 'admin' ? tAuth('admin.roleAdmin') : tAuth('admin.roleMember');
   const hasVisibleUpdate = hasUpdate && canManageUpdates;
@@ -948,7 +928,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           data-tip={collapsed ? item.name : undefined}
           className={`w-full ${navLinkClass(false)} ${item.accent ? 'text-red-600 dark:text-red-400' : ''}`}
         >
-          <item.icon className={iconClass} />
+          <item.icon aria-hidden="true" className={iconClass} />
           {!collapsed && <span className="min-w-0 flex-1 truncate text-left">{item.name}</span>}
         </button>
       );
@@ -963,7 +943,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         data-tip={collapsed ? item.name : undefined}
         className={navLinkClass(active)}
       >
-        <item.icon className={iconClass} />
+        <item.icon aria-hidden="true" className={iconClass} />
         {!collapsed && (
           <>
             <span className="min-w-0 flex-1 truncate">{item.name}</span>
@@ -986,7 +966,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
                     <button type="button" onClick={() => toggleNavSection(section.id)} aria-expanded={!sectionCollapsed}
                       className="flex h-6 w-full items-center justify-between rounded transition-colors hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus">
                       <span className="min-w-0 truncate">{section.name}</span>
-                      <ChevronRight className={`ml-2 h-3.5 w-3.5 shrink-0 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
+                      <ChevronRight aria-hidden="true" className={`ml-2 h-3.5 w-3.5 shrink-0 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
                     </button>
                   ) : section.name}
                 </h3>
@@ -1015,9 +995,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           initial={accountInitial}
           version={displayVersion}
           update={versionUpdate}
-          isAdmin={isAdmin}
-          isPro={isFlocksproActive}
-          proProductName={proProductName}
+          extensionItems={extensionNavItems.accountMenu}
           onCheckUpdate={openManualUpdateCheck}
           onNavigate={() => setSidebarOpen(false)}
           onLogout={() => void handleLogout()}
@@ -1040,17 +1018,26 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           {tokenPolicy.notice && !onboardingOpen && updateState !== 'visible' && (
             <TokenPolicyNotice onClose={tokenPolicy.close} onPresented={tokenPolicy.onPresented} />
           )}
+        </Suspense>
+        {/* One boundary per modal. Sharing a single Suspense meant that whenever
+            one of these chunks started loading, the fallback replaced the others
+            -- so a notification arriving while the update dialog was open blanked
+            the dialog out from under the reader. */}
+        <Suspense fallback={null}>
           {updateState !== 'idle' && (updateState === 'visible' || (tokenPolicy.ready && !tokenPolicy.notice && !onboardingOpen)) && (
             <UpdateModal
               initialInfo={updateInfo}
-              forceInitialCheck={updateInfo === null}
-              edition={isFlocksproActive ? 'flockspro' : 'flocks'}
+              forceInitialCheck={updateCheckForced || updateInfo === null}
+              // The channel the reminder checked; a stock build leaves it to the server.
+              {...(registry.updateChannel ? { channel: registry.updateChannel } : {})}
               canUpgrade={canManageUpdates}
               onPresented={handleUpdatePresented}
               onClose={closeUpdate}
               onDismiss={closeUpdate}
             />
           )}
+        </Suspense>
+        <Suspense fallback={null}>
           {visibleNotifications.length > 0 && (
             <NotificationModal
               notifications={visibleNotifications}
@@ -1111,13 +1098,14 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           aria-label={collapsed ? t('expandNav') : t('collapseNav')}
           title={collapsed ? t('expandNav') : t('collapseNav')}
         >
-          {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : <ChevronLeft className="h-3.5 w-3.5 shrink-0" />}
+          {collapsed ? <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0" /> : <ChevronLeft aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />}
         </button>
       </aside>
 
-      <div className={`flex h-screen flex-col pt-14 lg:pl-[var(--sidebar-width)] ${sidebarResize.dragging ? '' : 'transition-[padding]'}`}>
+      <div className={`flex h-screen flex-col pt-14 max-md:h-[100dvh] lg:pl-[var(--sidebar-width)] ${sidebarResize.dragging ? '' : 'transition-[padding]'}`}>
         {/* In the flow under the fixed header: a fixed banner would either hide under it or cover it. */}
         <BackendStatusBanner inline />
+        <InstallationResultBanner />
         <main className="relative flex-1 overflow-hidden bg-ui-canvas">
           <KeepAlivePanes panes={keepAlivePanes} activeHref={activePaneHref} location={location} routes={contentRoutes} />
         </main>

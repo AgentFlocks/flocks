@@ -184,6 +184,12 @@
     "incidentResponseSuggestion": "Help me handle a security incident: ransomware infection detected"
   },
   "chat": {
+    "history": {
+      "older": "Load earlier messages",
+      "newer": "Load newer messages",
+      "latest": "Back to latest",
+      "loading": "Loading messages…"
+    },
     "cacheUsage": {
       "sessionSummary": "Session cache hit rate {{rate}}",
       "sessionScope": "Aggregates loaded assistant records in this session, weighted by input tokens. Includes compacted history, but excludes compaction summaries, child sessions, and internal retries without separate records.",
@@ -218,6 +224,7 @@
     "retry": "Retry",
     "suggestions": "Example questions",
     "stopTitle": "Stop execution",
+    "sendTitle": "Send message",
     "contextUsageTitle": "Context used: {{used}} / {{total}} ({{percent}}%)",
     "contextUsageUnknown": "Context usage unknown",
     "contextUsage": {
@@ -493,7 +500,17 @@
         "timeout": "Timed out",
         "cancelled": "Cancelled"
       }
-    }
+    },
+    "permission": {
+      "title": "Confirmation required",
+      "deny": "Deny",
+      "always": "Always allow",
+      "alwaysTarget": "Always allow this target",
+      "trustToolNetwork": "Trust this tool's network access",
+      "allowOnce": "Allow once",
+      "replyFailed": "Failed to submit the decision, please retry."
+    },
+    "sendFailed": "Send failed"
   },
   "context": {
     "title": "Context",
@@ -795,10 +812,12 @@
       "install_failed": "The install failed unexpectedly",
       "interrupted": "The install was interrupted (service restart or stopped by an uninstall)",
       "uninstalling": "REA is being uninstalled; install it after the uninstall finished",
+      "busy": "Another Flocks process on this server is installing or uninstalling REA; try again when it finished",
       "forbidden": "Only administrators can install the REA plugin. Ask an administrator.",
       "plan_mode": "Plan mode cannot install. Switch to Build mode and send the request again.",
       "tasks_running": "Some conversations did not stop; REA was not changed",
       "tasks_unreadable": "A busy conversation could not be read, so it can be neither confirmed nor stopped; REA was not changed. Retry when it finished",
+      "managed": "This is a managed install: REA comes with the deployment's release and cannot be installed from a conversation",
       "unknown": "Unknown cause"
     },
     "card": {

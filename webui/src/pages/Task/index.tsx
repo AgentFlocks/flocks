@@ -51,7 +51,7 @@ export default function TaskPage() {
         }
       />
 
-      <div className="flex-1 overflow-auto px-6 pb-6 space-y-4">
+      <div className="flex-1 overflow-auto px-6 pb-6 space-y-4 max-md:px-0 max-md:pb-4">
         {notice?.message && (
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             {notice.message}
@@ -59,7 +59,7 @@ export default function TaskPage() {
         )}
         {activeTab !== 'services' && <DashboardCards counts={counts} />}
 
-        <div className="flex gap-1 bg-gray-100 rounded-lg p-1 w-fit">
+        <div className="flex gap-1 bg-gray-100 rounded-lg p-1 w-fit max-md:max-w-full max-md:overflow-x-auto">
           {MAIN_TABS.map(tab => {
             const Icon = tab.icon;
             const count = tab.countKey ? (counts?.[tab.countKey] as number | undefined) : undefined;
@@ -67,7 +67,7 @@ export default function TaskPage() {
               <button
                 key={tab.key}
                 onClick={() => setActiveTab(tab.key)}
-                className={`flex items-center gap-2 px-4 py-2 text-sm rounded-md transition-colors ${
+                className={`flex items-center gap-2 px-4 py-2 text-sm rounded-md transition-colors max-md:shrink-0 max-md:whitespace-nowrap max-md:px-3 ${
                   activeTab === tab.key
                     ? 'bg-white text-slate-800 shadow-sm font-medium'
                     : 'text-gray-600 hover:text-gray-900'

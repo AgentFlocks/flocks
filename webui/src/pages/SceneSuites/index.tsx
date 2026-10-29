@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AlertCircle, ArrowUpCircle, Download, Loader2, Power, RefreshCw, Trash2 } from 'lucide-react';
 import { hubAPI, type HubInstallProgressEvent, type HubSceneSuite } from '@/api/hub';
@@ -10,7 +10,7 @@ import SuiteInstallProgressPanel, {
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
 import { webuiContractPagesAPI } from '@/api/webuiContractPages';
-import { flocksproUsersApi } from '@/api/flocksproUsers';
+import ExtensionSlot from '@/components/extensions/ExtensionSlot';
 import { useToast } from '@/components/common/Toast';
 import { useProtectedHubUpdate } from '@/components/hub/useProtectedHubUpdate';
 import { notifySceneSuitesChanged, useSceneSuiteUpdates } from '@/hooks/useSceneSuiteUpdates';
@@ -38,9 +38,6 @@ const TEXT = {
     incompatible: '不兼容',
     localOnly: '仅本地',
     disabled: '已停用',
-    proBadge: '需要 Flocks Pro',
-    proHint: '当前为开源版，升级后可安装该场景。',
-    upgrade: '去升级',
     currentVersion: '已装 v{v}',
     latestVersion: '最新 v{v}',
     pagesVersion: '场景页面 v{installed} → v{latest}',
@@ -79,9 +76,6 @@ const TEXT = {
     incompatible: 'Incompatible',
     localOnly: 'Local only',
     disabled: 'Disabled',
-    proBadge: 'Flocks Pro required',
-    proHint: 'This is the open-source edition; upgrade to install this scene.',
-    upgrade: 'Upgrade',
     currentVersion: 'installed v{v}',
     latestVersion: 'latest v{v}',
     pagesVersion: 'scene pages v{installed} → v{latest}',
@@ -161,14 +155,12 @@ export default function SceneSuitesPage() {
     (SUITE_DISPLAY_ORDER[a.id] ?? 3) - (SUITE_DISPLAY_ORDER[b.id] ?? 3)), [suites]);
   const [busyId, setBusyId] = useState<string | null>(null);
   const protectedUpdate = useProtectedHubUpdate();
-  const [hasPro, setHasPro] = useState(false);
   // Installing a suite pulls in its pages, tool and workflows one by one; show
   // the same per-component progress the hub used to show.
   const [installProgress, setInstallProgress] = useState<SuiteInstallProgressState | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
-    void flocksproUsersApi.hasCapability().then(setHasPro).catch(() => setHasPro(false));
     return () => { mountedRef.current = false; };
   }, []);
 
@@ -272,7 +264,7 @@ export default function SceneSuitesPage() {
   if (loading) {
     return (
       <div className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400">
-        <Loader2 className="h-4 w-4 animate-spin" />
+        <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
       </div>
     );
   }
@@ -300,14 +292,14 @@ export default function SceneSuitesPage() {
           disabled={busyId !== null}
           className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
         >
-          <RefreshCw className="h-4 w-4" />
+          <RefreshCw aria-hidden="true" className="h-4 w-4" />
           {text.refresh}
         </button>
       </div>
 
       {error && (
         <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
-          <AlertCircle className="h-4 w-4 shrink-0" />
+          <AlertCircle aria-hidden="true" className="h-4 w-4 shrink-0" />
           {error}
         </div>
       )}
@@ -318,7 +310,9 @@ export default function SceneSuitesPage() {
 
       <div className="space-y-3">
         {orderedSuites.map((suite) => {
-          const proLocked = suite.edition === 'pro' && !hasPro;
+          // An extension's hub access policy may lock a suite: it is listed but
+          // does not install; what to do about it is the extension's to say.
+          const locked = suite.locked === true;
           const isPartial = suite.state === 'partial';
           const isInstalled = isPartial || suite.state === 'installed' || suite.state === 'updateAvailable' || suite.state === 'localOnly';
           const awaitingLaunch = suite.id === 'ai-redteam-workspace' && (!isInstalled || isPartial);
@@ -346,11 +340,7 @@ export default function SceneSuitesPage() {
                     <span className="rounded border border-zinc-200 px-1.5 py-0.5 text-[11px] font-medium text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
                       {stateLabel[suite.state] ?? suite.state}
                     </span>
-                    {suite.edition === 'pro' && (
-                      <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
-                        {text.proBadge}
-                      </span>
-                    )}
+                    <ExtensionSlot name="sceneSuites.badges" context={{ suite }} />
                     {isInstalled && suite.workspaceEnabled === false && (
                       <span className="rounded border border-zinc-300 px-1.5 py-0.5 text-[11px] font-medium text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
                         {text.disabled}
@@ -370,9 +360,7 @@ export default function SceneSuitesPage() {
                       </>
                     )}
                   </p>
-                  {proLocked && !awaitingLaunch && (
-                    <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">{text.proHint}</p>
-                  )}
+                  <ExtensionSlot name="sceneSuites.notice" context={{ suite, awaitingLaunch }} />
                   {isPartial && !awaitingLaunch && (
                     <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">
                       {hasWorkspace ? text.partialWorkspace : text.partialSuite}
@@ -390,39 +378,34 @@ export default function SceneSuitesPage() {
                     <p className="py-1.5 text-sm font-medium text-zinc-500 dark:text-zinc-400">
                       {text.redteamLaunch}
                     </p>
-                  ) : proLocked ? (
-                    <Link
-                      to="/settings/flockspro"
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-amber-600"
-                    >
-                      <ArrowUpCircle className="h-4 w-4" />
-                      {text.upgrade}
-                    </Link>
                   ) : (
                     <>
-                      {(!isInstalled || isPartial) && (
+                      {locked && (
+                        <ExtensionSlot name="sceneSuites.lockedAction" context={{ suiteId: suite.id, reason: suite.lockReason ?? null }} />
+                      )}
+                      {!locked && (!isInstalled || isPartial) && (
                         <button
                           type="button"
                           disabled={busyId !== null}
                           onClick={() => void runAction(suite, 'install')}
                           className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
                         >
-                          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                          {busy ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : <Download aria-hidden="true" className="h-4 w-4" />}
                           {isPartial ? text.completeInstall : text.install}
                         </button>
                       )}
-                      {suite.state === 'updateAvailable' && (
+                      {!locked && suite.state === 'updateAvailable' && (
                         <button
                           type="button"
                           disabled={busyId !== null}
                           onClick={() => void runAction(suite, 'update')}
                           className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
                         >
-                          <ArrowUpCircle className="h-4 w-4" />
+                          <ArrowUpCircle aria-hidden="true" className="h-4 w-4" />
                           {text.update}
                         </button>
                       )}
-                      {isInstalled && suite.workspaceId && hasWorkspace && (
+                      {!locked && isInstalled && suite.workspaceId && hasWorkspace && (
                         <button
                           type="button"
                           disabled={busyId !== null}
@@ -431,7 +414,7 @@ export default function SceneSuitesPage() {
                             ? 'inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white'
                             : 'inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 px-3 py-1.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800'}
                         >
-                          <Power className="h-4 w-4" />
+                          <Power aria-hidden="true" className="h-4 w-4" />
                           {suite.workspaceEnabled === false ? text.enable : text.disable}
                         </button>
                       )}
@@ -442,7 +425,7 @@ export default function SceneSuitesPage() {
                           onClick={() => void runAction(suite, 'uninstall')}
                           className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:opacity-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950/40"
                         >
-                          <Trash2 className="h-4 w-4" />
+                          <Trash2 aria-hidden="true" className="h-4 w-4" />
                           {text.uninstall}
                         </button>
                       )}

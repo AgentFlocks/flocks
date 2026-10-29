@@ -1,5 +1,6 @@
 """Sandbox runtime integration tests."""
 
+import asyncio
 import time
 from types import SimpleNamespace
 
@@ -306,7 +307,11 @@ async def test_stream_processor_tool_call_diff_when_sandbox_on_off(
 
     assert len(captured_extras) == 2
     assert captured_extras[0][0] == "bash"
-    assert captured_extras[0][1] == {
+    off_extra = dict(captured_extras[0][1])
+    # Per-call runtime handles, not configuration: check their kind only.
+    assert isinstance(off_extra.pop("tool_finished"), asyncio.Event)
+    assert off_extra.pop("agent_inbox") is None
+    assert off_extra == {
         "agent_execution_session": True,
         "enforce_callable_tools": True,
         "turn_callable_tool_names": ["bash"],

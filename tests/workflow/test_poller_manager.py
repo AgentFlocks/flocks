@@ -177,11 +177,14 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
             },
         ),
     )
-    monkeypatch.setattr(
-        poller_manager,
-        "record_execution_result",
-        lambda workflow_id, exec_id, exec_data: asyncio.sleep(0),
-    )
+    recorded: list[tuple[str, str]] = []
+
+    async def _record_execution_result(workflow_id, exec_id, exec_data, *, steps=None):
+        # Takes what the manager passes (steps included): a mock that did not
+        # failed with a TypeError the manager swallows, and nothing was recorded.
+        recorded.append((workflow_id, exec_data.get("status")))
+
+    monkeypatch.setattr(poller_manager, "record_execution_result", _record_execution_result)
     monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
 
     status = await manager.run_once("wf-run-once")
@@ -195,6 +198,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
     assert captured_inputs["input_date"]
     assert captured_inputs["_trigger"] == "poller"
     assert captured_inputs["_poller_run_id"].startswith("poller-")
+    assert recorded == [("wf-run-once", "success")]
 
 
 @pytest.mark.asyncio
@@ -380,11 +384,14 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
             },
         ),
     )
-    monkeypatch.setattr(
-        poller_manager,
-        "record_execution_result",
-        lambda workflow_id, exec_id, exec_data: asyncio.sleep(0),
-    )
+    recorded: list[tuple[str, str]] = []
+
+    async def _record_execution_result(workflow_id, exec_id, exec_data, *, steps=None):
+        # Takes what the manager passes (steps included): a mock that did not
+        # failed with a TypeError the manager swallows, and nothing was recorded.
+        recorded.append((workflow_id, exec_data.get("status")))
+
+    monkeypatch.setattr(poller_manager, "record_execution_result", _record_execution_result)
     monkeypatch.setattr(
         poller_manager,
         "read_workflow_from_fs",
@@ -407,6 +414,11 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
 
     assert status["lastStatus"] == "skipped"
     assert status["lastError"] == "previous_run_still_active"
+    for _ in range(100):  # the first run records its end once its thread is done
+        if recorded:
+            break
+        await asyncio.sleep(0.02)
+    assert [workflow_id for workflow_id, _ in recorded] == ["wf-overlap"], "the first run, recorded once"
 
 
 @pytest.mark.asyncio

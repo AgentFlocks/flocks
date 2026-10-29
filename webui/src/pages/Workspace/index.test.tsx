@@ -789,4 +789,60 @@ describe('WorkspacePage', () => {
     expect(beta.compareDocumentPosition(gamma) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(gamma.compareDocumentPosition(alpha) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
+
+  it('文本文件保存后预览面板保持打开并显示新内容', async () => {
+    mocks.list.mockResolvedValue({
+      data: [file('notes.txt', 'notes.txt')],
+    });
+    mocks.readFile.mockResolvedValue({
+      data: { path: 'notes.txt', content: 'old text', truncated: false },
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByText('notes.txt'));
+    await user.click(await screen.findByTitle('Edit'));
+
+    const editor = screen.getAllByRole('textbox').find(
+      (element) => element.tagName === 'TEXTAREA',
+    );
+    if (!editor) throw new Error('File editor not found');
+    await user.clear(editor);
+    await user.type(editor, 'new text');
+    await user.click(screen.getByTitle('Save'));
+
+    await waitFor(() => {
+      expect(mocks.writeFile).toHaveBeenCalledWith('notes.txt', 'new text');
+    });
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('Saved successfully');
+    // The directory is reloaded for fresh sizes, but the saved file stays open.
+    await waitFor(() => {
+      expect(mocks.list.mock.calls).toHaveLength(2);
+    });
+    expect(screen.getByTitle('Close')).toBeInTheDocument();
+    expect(screen.getByTitle('Edit')).toBeInTheDocument();
+    expect(screen.getByText('new text')).toBeInTheDocument();
+    expect(screen.getByText('8 B')).toBeInTheDocument();
+  });
+
+  it('新建目录失败时 toast 展示服务端 message（HTTPException 错误体）', async () => {
+    mocks.list.mockResolvedValue({ data: [] });
+    mocks.createDir.mockRejectedValue({
+      message: 'Request failed with status code 400',
+      response: { status: 400, data: { error: 'HTTPException', message: 'Path traversal detected: ../x' } },
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByTitle('New directory'));
+    await user.type(screen.getByPlaceholderText('Folder name'), '../x');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      expect(mocks.createDir).toHaveBeenCalledWith('../x');
+    });
+    expect(mocks.toastError).toHaveBeenCalledWith('files.toast.createDirFailed', 'Path traversal detected: ../x');
+  });
 });

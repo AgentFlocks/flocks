@@ -210,6 +210,71 @@ async def test_delete_restores_caches_when_message_persistence_fails(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["store_part", "add_part", "update_part", "remove_part"])
+async def test_a_part_change_whose_write_failed_is_not_written_later(
+    monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    """The message also has a running tool's change waiting to be written: that one is, the failed one is not."""
+    from flocks.session.message import ToolPart, ToolStateRunning
+
+    session_id = f"ses_parts_failed_{change}"
+    await Message.create(session_id, MessageRole.USER, "keep me", id="msg_a", part_id="part_a")
+    await Message.store_part(session_id, "msg_a", ToolPart(
+        id="part_tool", sessionID=session_id, messageID="msg_a", callID="call_a", tool="read",
+        state=ToolStateRunning(input={}, time={"start": 1}),
+    ))  # running: written a little later
+    new_text = TextPart(id="part_new", sessionID=session_id, messageID="msg_a", text="never written")
+    with monkeypatch.context() as failing, pytest.raises(RuntimeError, match="storage unavailable"):
+        failing.setattr(Storage, "mutate_many", AsyncMock(side_effect=RuntimeError("storage unavailable")))
+        if change == "store_part":
+            await Message.store_part(session_id, "msg_a", new_text)
+        elif change == "add_part":
+            await Message.add_part(session_id, "msg_a", new_text)
+        elif change == "update_part":
+            await Message.update_part(session_id, "msg_a", "part_a", text="never written")
+        else:
+            await Message.remove_part(session_id, "msg_a", "part_a")
+
+    def shape(message):
+        return [(part.type, part.text if part.type == "text" else part.state.status) for part in message.parts]
+
+    expected = [("text", "keep me"), ("tool", "running")]
+    assert shape(await Message.get_with_parts_lazy(session_id, "msg_a")) == expected, "this process"
+    await Message.quiesce_parts(session_id, persist=True)  # whatever is still pending is written now
+    Message.invalidate_cache(session_id)
+    assert shape(await Message.get_with_parts_lazy(session_id, "msg_a")) == expected, "storage"
+
+
+@pytest.mark.asyncio
+async def test_an_error_text_whose_write_failed_is_not_written_later(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runner's visible error text, under the same failure: not changed in the cache before it is written."""
+    from types import SimpleNamespace
+
+    from flocks.session.message import ToolPart, ToolStateRunning
+    from flocks.session.runner import SessionRunner
+
+    session_id = "ses_parts_failed_error_text"
+    await Message.create(session_id, MessageRole.USER, "hi", id="msg_u", part_id="part_u")
+    reply = await Message.create(session_id, MessageRole.ASSISTANT, "", id="msg_a", part_id="part_a", parentID="msg_u")
+    await Message.store_part(session_id, "msg_a", ToolPart(
+        id="part_tool", sessionID=session_id, messageID="msg_a", callID="call_a", tool="read",
+        state=ToolStateRunning(input={}, time={"start": 1}),
+    ))  # running: written a little later
+    runner = SimpleNamespace(session=SimpleNamespace(id=session_id))
+    with monkeypatch.context() as failing, pytest.raises(RuntimeError, match="storage unavailable"):
+        failing.setattr(Storage, "mutate_many", AsyncMock(side_effect=RuntimeError("storage unavailable")))
+        await SessionRunner._ensure_visible_error_text(runner, reply, "the model returned nothing")
+
+    def texts(message):
+        return [part.text for part in message.parts if part.type == "text"]
+
+    assert texts(await Message.get_with_parts_lazy(session_id, "msg_a")) == [""], "this process"
+    await Message.quiesce_parts(session_id, persist=True)
+    Message.invalidate_cache(session_id)
+    assert texts(await Message.get_with_parts_lazy(session_id, "msg_a")) == [""], "storage"
+
+
+@pytest.mark.asyncio
 async def test_delete_removes_message_and_parts_atomically() -> None:
     session_id = "ses_parts_delete_parts_failure"
     await Message.create(

@@ -17,6 +17,8 @@ vi.mock('@/api/knowledgebase', () => ({ knowledgebaseAPI: {
   documentText: vi.fn(), documentContentUrl: vi.fn(),
 } }));
 vi.mock('@/components/common/Toast', () => ({ useToast: () => feedback }));
+// Connection settings are admin-only; these flows exercise them as an administrator.
+vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ user: { role: 'admin' } }) }));
 vi.mock('@/components/common/ConfirmDialog', () => ({ useConfirm: () => feedback.confirm }));
 // Isolate the ordinary form UI from shared chat/model hooks.
 vi.mock('@/components/common/EntitySheet', () => ({ default: ({ children, mode, hideRex, hideTest, onClose, onSubmit, submitLabel, submitDisabled, submitLoading }: {

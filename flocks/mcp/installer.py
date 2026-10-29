@@ -15,6 +15,7 @@ import sys
 from typing import TYPE_CHECKING, List
 
 from flocks.utils.log import Log
+from flocks.config.config import get_user_plugins_root
 
 if TYPE_CHECKING:
     from flocks.mcp.catalog import CatalogEntry
@@ -66,7 +67,7 @@ async def _run_subprocess(cmd: List[str], timeout: float = 120.0) -> None:
 
 
 def _mcp_root() -> Path:
-    root = Path.home() / ".flocks" / "plugins" / "mcp"
+    root = get_user_plugins_root() / "mcp"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

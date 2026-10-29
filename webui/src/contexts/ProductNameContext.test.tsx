@@ -16,11 +16,12 @@ vi.mock("@/api/uiConfig", () => ({
 }));
 
 function ProductNames() {
-  const { productName, proProductName, logoUrl } = useProductName();
+  const { productName, displayName, configuredDisplayName, logoUrl } = useProductName();
   return (
     <div>
       <span data-testid="product-name">{productName}</span>
-      <span data-testid="pro-product-name">{proProductName}</span>
+      <span data-testid="display-name">{displayName}</span>
+      <span data-testid="configured-name">{configuredDisplayName ?? "(none)"}</span>
       <span data-testid="logo-url">{logoUrl ?? "none"}</span>
     </div>
   );
@@ -31,7 +32,7 @@ describe("ProductNameProvider", () => {
     vi.clearAllMocks();
   });
 
-  it("uses Flocks Pro for Pro surfaces when no custom display name is configured", async () => {
+  it("uses the server default name when no custom display name is configured", async () => {
     uiConfigApi.getDisplay.mockResolvedValue({
       displayName: "Flocks",
       configuredDisplayName: null,
@@ -47,13 +48,13 @@ describe("ProductNameProvider", () => {
     await waitFor(() =>
       expect(screen.getByTestId("product-name")).toHaveTextContent("Flocks"),
     );
-    expect(screen.getByTestId("pro-product-name")).toHaveTextContent(
-      "Flocks Pro",
-    );
+    expect(screen.getByTestId("display-name")).toHaveTextContent("Flocks");
+    expect(screen.getByTestId("configured-name")).toHaveTextContent("(none)");
+    expect(document.title).toBe("Flocks");
     expect(screen.getByTestId("logo-url")).toHaveTextContent("/favicon.svg");
   });
 
-  it("uses the configured display name for Pro surfaces", async () => {
+  it("uses the configured display name everywhere", async () => {
     uiConfigApi.getDisplay.mockResolvedValue({
       displayName: "Acme SOC",
       configuredDisplayName: "Acme SOC",
@@ -69,9 +70,22 @@ describe("ProductNameProvider", () => {
     await waitFor(() =>
       expect(screen.getByTestId("product-name")).toHaveTextContent("Acme SOC"),
     );
-    expect(screen.getByTestId("pro-product-name")).toHaveTextContent(
-      "Acme SOC",
-    );
+    expect(screen.getByTestId("display-name")).toHaveTextContent("Acme SOC");
+    expect(screen.getByTestId("configured-name")).toHaveTextContent("Acme SOC");
     expect(screen.getByTestId("logo-url")).toHaveTextContent("none");
+  });
+
+  it("falls back to the default name when the display config cannot be loaded", async () => {
+    uiConfigApi.getDisplay.mockRejectedValue(new Error("offline"));
+
+    render(
+      <ProductNameProvider>
+        <ProductNames />
+      </ProductNameProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("product-name")).toHaveTextContent("Flocks"),
+    );
   });
 });

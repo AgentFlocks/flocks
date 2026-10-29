@@ -54,7 +54,9 @@ try:
     from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
     _PLUGIN_AGENTS_DIR = DEFAULT_PLUGIN_ROOT / "agents"
 except ImportError:
-    _PLUGIN_AGENTS_DIR = Path.home() / ".flocks" / "plugins" / "agents"
+    from flocks.config.config import get_user_plugins_root
+
+    _PLUGIN_AGENTS_DIR = get_user_plugins_root() / "agents"
 
 
 def _project_plugin_agents_dir() -> Path:
@@ -436,6 +438,12 @@ def yaml_to_agent_info(raw: dict, yaml_path: Path) -> AgentInfo:
         prompt_path = yaml_path.parent / raw["prompt_file"]
         if prompt_path.is_file():
             prompt = prompt_path.read_text(encoding="utf-8").strip()
+        else:
+            log.error("agent.factory.prompt_file_missing", {
+                "name": name,
+                "path": str(yaml_path),
+                "prompt_file": str(prompt_path),
+            })
 
     model_raw = raw.get("model")
     model = AgentModel(**model_raw) if isinstance(model_raw, dict) else None

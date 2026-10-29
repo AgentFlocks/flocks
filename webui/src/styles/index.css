@@ -1,3 +1,5 @@
+@import './tokens.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -375,10 +377,13 @@
   background-color: var(--flocks-dark-surface-raised);
 }
 
+/* Inverted controls (bg-zinc-950 + dark:bg-zinc-100 dark:text-zinc-950, e.g.
+   the selected preference option) keep their own light dark-mode fill: forcing
+   the surface here put their dark label on a dark background (1.7:1). */
 .dark .bg-zinc-900,
 .dark .bg-gray-900,
 .dark .bg-slate-900,
-.dark .bg-zinc-950,
+.dark .bg-zinc-950:not(.dark\:bg-zinc-100),
 .dark .bg-gray-950,
 .dark .bg-slate-950 {
   background-color: var(--flocks-dark-surface) !important;
@@ -1787,4 +1792,117 @@
 
 .dark .device-room-actions-fade[data-selected='true'] {
   --device-room-action-fade: rgb(37 99 235 / 0.16);
+}
+
+/* v2 新增界面（dev 没有对应页面）用的组件类，取值来自 tokens.css，已对齐 dev 的配色 */
+@layer components {
+  .ui-btn {
+    @apply inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-control border border-line-control bg-surface px-3 text-sm font-medium text-fg transition-colors duration-fast;
+    min-height: var(--control-md);
+    line-height: 20px;
+    align-self: center;
+  }
+  .ui-btn:hover:not(:disabled, [aria-disabled='true']) { background-color: var(--bg-hover); }
+  .ui-btn:disabled, .ui-btn[aria-disabled='true'] {
+    @apply cursor-not-allowed border-line bg-disabled text-fg-disabled;
+  }
+  .ui-btn-primary { @apply border-transparent bg-action text-action-fg; }
+  /* Disabled keeps the disabled colours under the pointer (same specificity, later rule). */
+  .ui-btn-primary:hover:not(:disabled, [aria-disabled='true']) { background-color: var(--action-hover); }
+  .ui-btn-primary:active:not(:disabled, [aria-disabled='true']) { background-color: var(--action-pressed); }
+  .ui-btn-danger { @apply border-transparent bg-action-danger text-action-danger-fg; }
+  .ui-btn-danger:hover:not(:disabled, [aria-disabled='true']) { background-color: var(--action-pressed); }
+  .ui-btn-ghost { @apply border-transparent bg-transparent; }
+  .ui-btn-sm { min-height: var(--control-sm); @apply px-2.5 text-xs; }
+  .ui-btn-lg { min-height: var(--control-lg); @apply px-4; }
+  .ui-btn-icon { @apply px-0; width: var(--control-md); min-height: var(--control-md); }
+  .ui-btn-icon.ui-btn-sm { width: var(--control-sm); min-height: var(--control-sm); }
+
+  .ui-input {
+    @apply w-full rounded-control border border-line-control bg-surface px-3 text-sm text-fg placeholder:text-fg-placeholder;
+    height: var(--control-md);
+  }
+  .ui-input:disabled { @apply cursor-not-allowed border-line bg-disabled text-fg-disabled; }
+  .ui-input[aria-invalid='true'], .ui-input.is-error { border-color: var(--status-danger); }
+  .ui-textarea { @apply ui-input h-auto py-2; min-height: 84px; resize: vertical; }
+  .ui-select { @apply ui-input pr-8; }
+
+  .ui-label { @apply mb-2 block text-sm font-medium text-fg; }
+  .ui-label-required::after { content: ' *'; color: var(--status-danger); }
+  .ui-hint { @apply mt-1 text-xs text-fg-secondary; }
+  .ui-error { @apply mt-1 text-xs text-danger; }
+
+  .ui-card { @apply rounded-card border border-line bg-surface p-4; }
+  .ui-card-interactive { @apply ui-card cursor-pointer transition-colors duration-fast; }
+  .ui-card-interactive:hover { background-color: var(--bg-hover); }
+  .ui-card-selected { border-color: var(--focus-ring); box-shadow: inset 0 0 0 1px var(--focus-ring); background-color: var(--bg-selected); }
+
+  .ui-tag { @apply inline-flex items-center whitespace-nowrap rounded-tag bg-subtle px-2 text-xs leading-5 text-fg-secondary; }
+  .ui-badge { @apply inline-flex items-center gap-1 whitespace-nowrap rounded-tag px-2 text-xs leading-5; }
+  .ui-badge-success { @apply bg-success-soft text-success; }
+  .ui-badge-warning { @apply bg-warning-soft text-warning; }
+  .ui-badge-danger { @apply bg-danger-soft text-danger; }
+  .ui-badge-info { @apply bg-info-soft text-info; }
+  .ui-badge-ai { @apply bg-ai-soft text-ai; }
+  .ui-badge-data { @apply bg-data-soft text-data; }
+  .ui-badge-brand { @apply bg-brand-soft text-brand; }
+
+  /* 分段切换：外框 8px 圆角、内项 32px 高 */
+  .ui-segmented { @apply inline-flex gap-1 rounded-control bg-subtle p-1; }
+  .ui-segmented > * { @apply rounded-segment px-3 text-xs text-fg-secondary; min-height: var(--control-sm); }
+  .ui-segmented > [aria-selected='true'], .ui-segmented > [aria-pressed='true'] { @apply bg-selected font-semibold text-fg; }
+
+  /* 分类 Tab：44px 高，选中项底部 2px 品牌红 */
+  .ui-tabs { @apply flex gap-1 border-b border-line; }
+  .ui-tab { @apply border-b-2 border-transparent px-3 text-sm text-fg-secondary; min-height: 44px; }
+  .ui-tab[aria-selected='true'] { @apply border-action font-semibold text-fg; }
+
+  /* 开关：轨道 32×18，滑块 12 */
+  /* Same shape as dev's toggles (h-5 w-9, white thumb, slate-500 when on). */
+  .ui-switch { @apply relative inline-block shrink-0 rounded-full border-2 border-transparent bg-gray-200 transition-colors duration-150; width: 36px; height: 20px; }
+  .dark .ui-switch { background-color: var(--flocks-dark-surface-raised); }
+  .ui-switch::before { content: ''; @apply absolute left-0 top-0 rounded-full shadow transition-transform duration-150; width: 16px; height: 16px; background-color: var(--switch-thumb); }
+  .ui-switch[aria-checked='true'] { background-color: var(--switch-on); }
+  .ui-switch[aria-checked='true']::before { transform: translateX(16px); }
+  .ui-switch:disabled, .ui-switch[aria-disabled='true'] { @apply cursor-not-allowed opacity-50; }
+
+  /* 弹层：弹窗 560、抽屉 480，标题 20/28，内容内边距 24 */
+  .ui-overlay-backdrop { @apply fixed inset-0 z-50 bg-overlay-backdrop; }
+  .ui-modal { @apply w-full max-w-modal rounded-overlay border border-line bg-surface p-6 shadow-overlay; }
+  .ui-drawer { @apply flex h-full w-full max-w-drawer flex-col border-l border-line bg-surface shadow-overlay; }
+  .ui-overlay-title { @apply text-xl font-semibold text-fg; }
+  .ui-overlay-footer { @apply flex justify-end gap-2 pt-6; }
+
+  .ui-empty { @apply flex min-h-[200px] flex-col items-center justify-center text-center; }
+  .ui-empty-icon { @apply mb-3 flex h-8 w-8 items-center justify-center rounded-control bg-subtle text-fg-secondary; }
+
+  .ui-table { @apply w-full border-collapse text-sm; }
+  .ui-table th { @apply border-b border-line bg-subtle px-3 py-2 text-left text-xs font-medium text-fg-secondary; }
+  .ui-table td { @apply border-b border-line px-3 py-2 text-fg; }
+  .ui-table tbody tr:hover { background-color: var(--bg-hover); }
+
+  @media (max-width: 767px), (pointer: coarse) {
+    .ui-btn, .ui-btn-sm, .ui-btn-lg, .ui-btn-icon, .ui-btn-icon.ui-btn-sm,
+    .ui-input, .ui-select, .ui-tab, .ui-segmented > * {
+      min-height: var(--control-touch);
+    }
+    .ui-btn-icon, .ui-btn-icon.ui-btn-sm { min-width: var(--control-touch); }
+  }
+}
+
+/* Phones only: wide content scrolls sideways instead of being squeezed into a
+   one-character column or cut off at the screen edge. Desktop is untouched. */
+@media (max-width: 767px) {
+  /* Markdown tables (chat replies, previews, workflow docs). */
+  .prose table {
+    display: block;
+    width: max-content;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .prose th,
+  .prose td {
+    white-space: nowrap;
+  }
 }

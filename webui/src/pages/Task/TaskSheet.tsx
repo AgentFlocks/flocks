@@ -25,6 +25,7 @@ import { workflowAPI, WorkflowSummary } from '@/api/workflow';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 import { StatusBadge } from './components';
+import { extractErrorMessage } from '@/utils/error';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -213,7 +214,7 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
       onSaved();
       onClose();
     } catch (err: unknown) {
-      toast.error(t(isEdit ? 'taskSheet.saveFailed' : 'taskSheet.createFailed'), err instanceof Error ? err.message : String(err));
+      toast.error(t(isEdit ? 'taskSheet.saveFailed' : 'taskSheet.createFailed'), extractErrorMessage(err));
     } finally {
       setLoading(false);
     }

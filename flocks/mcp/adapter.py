@@ -9,7 +9,13 @@ from typing import Dict, Any
 
 from flocks.mcp.types import McpToolDef
 from flocks.mcp.client import McpClient
-from flocks.mcp.utils import generate_tool_name, calculate_schema_hash
+from flocks.mcp.errors import McpServerBusyError
+from flocks.mcp.utils import (
+    calculate_schema_hash,
+    check_name_conflict,
+    generate_tool_name,
+    resolve_conflict,
+)
 from flocks.tool.registry import (
     Tool,
     ToolInfo,
@@ -22,6 +28,39 @@ from flocks.tool.registry import (
 from flocks.utils.log import Log
 
 log = Log.create(service="mcp.adapter")
+
+
+async def conversation_scope(ctx: ToolContext) -> str:
+    """The conversation a call belongs to: its root session, which its sub-agents share.
+
+    ``ctx.extra["mcp_scope"]`` names a scope of its own (e.g. a validation run).
+    """
+    explicit = (ctx.extra or {}).get("mcp_scope")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    from flocks.session.session import Session
+
+    session_id = ctx.session_id
+    seen: set = set()
+    while session_id and session_id not in seen:
+        seen.add(session_id)
+        session = await Session.get_by_id_unfiltered(session_id)
+        parent_id = getattr(session, "parent_id", None) if session is not None else None
+        if not parent_id:
+            break
+        session_id = parent_id
+    return f"session:{session_id}"
+
+
+async def call_mcp_tool(server_name: str, client: McpClient, ctx: ToolContext, tool: str, args: Dict[str, Any]):
+    """Call ``tool``; an isolated server answers on the conversation's own connection."""
+    from flocks.mcp import get_manager
+
+    manager = get_manager()
+    if manager.isolation(server_name) != "session":
+        return await client.call_tool(tool, args)
+    async with manager.scoped_client(server_name, await conversation_scope(ctx)) as scoped:
+        return await scoped.call_tool(tool, args)
 
 
 class McpToolAdapter:
@@ -61,6 +100,17 @@ class McpToolAdapter:
         """
         # 1. Generate tool name (avoid conflicts)
         tool_name = generate_tool_name(server_name, mcp_tool.name)
+        if check_name_conflict(tool_name):
+            # Never overwrite an existing (built-in / plugin / other MCP) tool:
+            # the registry's ``register`` replaces entries silently.
+            resolved_name = resolve_conflict(tool_name)
+            log.warn("mcp.tool.name_conflict", {
+                "server": server_name,
+                "tool": mcp_tool.name,
+                "requested": tool_name,
+                "resolved": resolved_name,
+            })
+            tool_name = resolved_name
         
         # 2. Convert parameters
         parameters = McpToolAdapter._convert_parameters(mcp_tool.input_schema)
@@ -93,7 +143,7 @@ class McpToolAdapter:
                 })
                 
                 # Call MCP tool
-                result = await client.call_tool(mcp_tool.name, kwargs)
+                result = await call_mcp_tool(server_name, client, ctx, mcp_tool.name, kwargs)
                 
                 # Check if it's an error
                 if hasattr(result, 'isError') and result.isError:
@@ -113,10 +163,18 @@ class McpToolAdapter:
                     # MCP SDK result has content field
                     content = result.content
                     if isinstance(content, list) and len(content) > 0:
-                        # content is a list, take the first item
-                        output = content[0] if hasattr(content[0], 'text') else content[0]
-                        if hasattr(output, 'text'):
-                            output = output.text
+                        # content is a list of blocks; join every text block so
+                        # multi-part results are not truncated to the first item.
+                        text_parts = [
+                            item.text for item in content
+                            if hasattr(item, 'text') and isinstance(item.text, str)
+                        ]
+                        if len(text_parts) == len(content):
+                            output = "\n".join(text_parts)
+                        elif len(content) == 1:
+                            output = content[0]
+                        else:
+                            output = content
                     else:
                         output = content
                 else:
@@ -137,6 +195,10 @@ class McpToolAdapter:
                     }
                 )
                 
+            except McpServerBusyError as e:
+                # Busy for a moment, not broken: the repeated-failure switch must
+                # not turn the tool off for every conversation over it.
+                return ToolResult(success=False, error=str(e), metadata={"transient": True})
             except Exception as e:
                 if isinstance(e, FuturesTimeoutError):
                     raise

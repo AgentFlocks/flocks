@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from itertools import islice
 import sys
 import threading
 import time
 import uuid
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from flocks.session.recorder import Recorder
 from flocks.utils.log import Log
+from flocks.workflow.ownership import abandon_execution, start_renewal, stop_renewal
 from flocks.workflow.runner import RunWorkflowResult
 from flocks.workflow.store import WorkflowStore
 
@@ -611,6 +613,16 @@ def build_initial_execution_record(
     }
 
 
+@contextmanager
+def for_webhook_delivery(key: str, claim_token: str) -> Iterator[None]:
+    """Runs started inside are for this webhook delivery.
+
+    Nothing is recorded for a delivery here (WorkflowStore.claim_webhook_delivery),
+    so there is nothing to bind a run to.
+    """
+    yield
+
+
 async def create_execution_record(
     workflow_id: str,
     *,
@@ -633,6 +645,7 @@ async def create_execution_record(
         exec_id=exec_id,
     )
     await WorkflowStore.upsert_execution(compact_execution_summary(exec_data))
+    start_renewal(exec_data)
     return exec_data
 
 
@@ -645,6 +658,9 @@ async def record_execution_result(
 ) -> None:
     """Persist the final execution record, step batch, audit trail, and stats."""
     summary_data = dict(exec_data)
+    if summary_data.get("status") == "running":
+        # A run that ends without saying how was stopped on the way.
+        summary_data.update(status="cancelled", currentPhase="cancelled", finishedAt=int(time.time() * 1000))
     prepared_steps = (
         list(steps)
         if steps is not None
@@ -665,10 +681,17 @@ async def record_execution_result(
         finished_at = summary_data.get("finishedAt", int(time.time() * 1000))
         duration = max(0.0, (finished_at - started_at) / 1000.0)
 
-    await WorkflowStore.complete_execution(
-        compact_execution_summary(summary_data),
-        prepared_steps,
-    )
+    try:
+        await WorkflowStore.complete_execution(
+            compact_execution_summary(summary_data),
+            prepared_steps,
+        )
+    except BaseException:
+        # Nothing else would end the record.
+        await abandon_execution(exec_id)
+        raise
+    finally:
+        await stop_renewal(exec_id)
 
     try:
         await WorkflowStore.increment_stats(

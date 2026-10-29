@@ -2284,15 +2284,15 @@ async def test_to_chat_messages_skips_reasoning_only_aborted_assistant(monkeypat
     )
     monkeypatch.setattr(
         runner_mod.Message,
-        "parts",
-        AsyncMock(return_value=[
+        "parts_many",
+        AsyncMock(return_value={"msg_aborted_reasoning_only": [
             ReasoningPart(
                 sessionID=runner.session.id,
                 messageID="msg_aborted_reasoning_only",
                 text="This should not leak into replay history.",
                 time=PartTime(start=1),
             )
-        ]),
+        ]}),
     )
     monkeypatch.setattr(runner_mod.Message, "get_parts_revision", lambda *_args: 1)
 
@@ -4124,13 +4124,13 @@ async def test_to_chat_messages_expands_workflow_node_ref_marker(monkeypatch):
 
     monkeypatch.setattr(
         runner_mod.Message,
-        "parts",
-        AsyncMock(return_value=[
+        "parts_many",
+        AsyncMock(return_value={"msg_user_node_ref": [
             SimpleNamespace(
                 type="text",
                 text="@@node:query_fofa|python\n只修改这个节点的代码并保留其他节点不变",
             ),
-        ]),
+        ]}),
     )
 
     chat_messages = await runner._to_chat_messages([user_message], [])

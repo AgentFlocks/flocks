@@ -1532,7 +1532,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
           </fieldset>
         </div>
 
-        <div className="border-t border-gray-100 bg-gray-50/80 px-6 py-4">
+        <div className="border-t border-gray-100 bg-gray-50/80 px-6 py-4 max-md:px-4">
           {startStatus && (
             <div className="mb-3">
               <ValidationPanel t={t} status={startStatus} />
@@ -1548,7 +1548,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
             >
               {t('onboarding.bootstrap.dontShowAgain')}
             </button>
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 max-md:justify-end max-md:[&>button]:whitespace-nowrap">
               <button
                 type="button"
                 onClick={() => setSkipConfirm(step)}

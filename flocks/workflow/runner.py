@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import gc
 import logging
 import os
@@ -241,6 +242,53 @@ def _resolve_sandbox_payload_from_config(tool_context: Optional[Any]) -> Optiona
     return payload
 
 
+class WorkflowSandboxUnavailable(RuntimeError):
+    """``sandbox.mode`` asks for an isolated runtime and none is available.
+
+    The workflow's Python is then not run at all: falling back to the host
+    would run code meant for the sandbox with the server's own reach.
+    """
+
+
+def resolve_python_sandbox(tool_context: Optional[Any]) -> Optional[Dict[str, Any]]:
+    """The sandbox a workflow's Python must run in, or None for the host.
+
+    ``sandbox.mode`` decides: off runs on the host; on runs in the sandbox the
+    call carries or the configuration names -- and when there is none, raises
+    :class:`WorkflowSandboxUnavailable` instead of running on the host.
+    """
+    if _resolve_workflow_runtime_preference(tool_context) == "host":
+        return None
+    sandbox_payload = _extract_sandbox_runtime_payload(tool_context) or _resolve_sandbox_payload_from_config(tool_context)
+    if not sandbox_payload:
+        _logger.warning("workflow runtime: sandbox.mode requires a sandbox and none is available; not running")
+        raise WorkflowSandboxUnavailable(
+            "sandbox.mode requires an isolated runtime for workflow code, and no sandbox is available; "
+            "the code was not run on the host"
+        )
+    return sandbox_payload
+
+
+def workflow_python_runtime(
+    tool_context: Optional[Any],
+    *,
+    tool_registry: Any = None,
+    **host_options: Any,
+) -> Any:
+    """The runtime a workflow's Python runs in, by the same rule as a whole run.
+
+    For running one node on its own (the run-node route and tool): the sandbox
+    when ``sandbox.mode`` asks for one (refusing when there is none), the host
+    otherwise.  *tool_registry* carries the caller's tool context, which the
+    engine's checkpoint names the operation after.
+    """
+    registry = tool_registry or get_tool_registry(tool_context=tool_context)
+    sandbox_payload = resolve_python_sandbox(tool_context)
+    if sandbox_payload:
+        return SandboxPythonExecRuntime(sandbox=sandbox_payload, tool_registry=registry)
+    return PythonExecRuntime(tool_registry=registry, **host_options)
+
+
 def _extract_sandbox_runtime_payload(tool_context: Optional[Any]) -> Optional[Dict[str, Any]]:
     """Extract sandbox config payload from ToolContext.extra if available."""
     if tool_context is None:
@@ -342,6 +390,26 @@ def _validate_lint_results(lint_results: tuple[Dict[str, Any], ...]) -> None:
         _logger.warning(f"workflow lint 检查发现 {len(lint_warnings)} 个警告: {lint_warnings[:5]}")
 
 
+def _as_one_task(fn: Callable[..., "RunWorkflowResult"]) -> Callable[..., "RunWorkflowResult"]:
+    """Run a workflow as one task of the managed content (flocks.content.managed.task_scope).
+
+    Sub-workflows it loads by id then keep the version they had when the run
+    first read them; a run inside a session run is part of that run's task.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> "RunWorkflowResult":
+        import uuid
+
+        from flocks.content.managed import task_scope
+
+        with task_scope(f"workflow-run:{kwargs.get('run_id') or uuid.uuid4().hex}"):
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
+@_as_one_task
 def run_workflow(
     *,
     workflow: WorkflowSource,
@@ -483,8 +551,9 @@ def run_workflow(
     _logger.debug("初始化工具注册表和运行时环境...")
     llm_max_concurrency = _apply_workflow_llm_concurrency()
     registry = tool_registry or get_tool_registry(tool_context=tool_context)
-    sandbox_payload = _extract_sandbox_runtime_payload(tool_context)
     runtime_preference = _resolve_workflow_runtime_preference(tool_context)
+    # Raises when the sandbox is required and missing: no fallback to the host.
+    sandbox_payload = resolve_python_sandbox(tool_context)
     isolated_runtime_options: Dict[str, Any] = {}
     runtime_metadata = wf.metadata.get("runtime") if isinstance(wf.metadata, dict) else None
     if isinstance(runtime_metadata, dict):
@@ -500,15 +569,6 @@ def run_workflow(
             ]
         if "process_rpc_max_workers" in runtime_metadata:
             isolated_runtime_options["isolated_rpc_max_workers"] = runtime_metadata["process_rpc_max_workers"]
-
-    if runtime_preference == "host":
-        sandbox_payload = None
-    elif runtime_preference == "sandbox" and not sandbox_payload:
-        sandbox_payload = _resolve_sandbox_payload_from_config(tool_context)
-        if not sandbox_payload:
-            _logger.warning(
-                "workflow runtime: default=sandbox but sandbox context unavailable, fallback to host runtime"
-            )
 
     if sandbox_payload:
         _logger.debug("workflow runtime: sandbox python execution enabled")

@@ -5,8 +5,9 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom
 import SceneSuitesPage from './index';
 import { __resetSceneSuiteUpdatesForTesting } from '@/hooks/useSceneSuiteUpdates';
 import { SCENE_SUITES_CHANGED_EVENT } from '@/utils/sceneSuites';
+import { __resetExtensionSlotCacheForTesting } from '@/components/extensions/ExtensionSlot';
 
-const { hubAPI, webuiContractPagesAPI, flocksproUsersApi, toast } = vi.hoisted(() => ({
+const { hubAPI, webuiContractPagesAPI, extensionRegistry, toast } = vi.hoisted(() => ({
   hubAPI: {
     sceneSuites: vi.fn(),
     install: vi.fn(),
@@ -18,13 +19,20 @@ const { hubAPI, webuiContractPagesAPI, flocksproUsersApi, toast } = vi.hoisted((
   webuiContractPagesAPI: {
     setWorkspaceEnabled: vi.fn(),
   },
-  flocksproUsersApi: { hasCapability: vi.fn() },
+  // Extensions reach this page only through its slots.
+  extensionRegistry: {
+    routes: [],
+    navItems: [],
+    settingsSections: [],
+    slots: [] as Array<{ id: string; slot: string; component: (props: { context: Record<string, unknown> }) => JSX.Element | null }>,
+    i18n: {},
+  },
   toast: { success: vi.fn(), error: vi.fn() },
 }));
 
 vi.mock('@/api/hub', () => ({ hubAPI }));
 vi.mock('@/api/webuiContractPages', () => ({ webuiContractPagesAPI }));
-vi.mock('@/api/flocksproUsers', () => ({ flocksproUsersApi }));
+vi.mock('@ext/registry', () => ({ __esModule: true, default: extensionRegistry }));
 vi.mock('@/components/common/Toast', () => ({ useToast: () => toast }));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'zh-CN' } }),
@@ -109,7 +117,8 @@ describe('SceneSuitesPage', () => {
     } });
     __resetSceneSuiteUpdatesForTesting();
     hubAPI.sceneSuites.mockResolvedValue({ data: [SOC, AI_REDTEAM, CODE_AUDIT] });
-    flocksproUsersApi.hasCapability.mockResolvedValue(false);
+    extensionRegistry.slots = [];
+    __resetExtensionSlotCacheForTesting();
     hubAPI.install.mockResolvedValue({});
     hubAPI.installStream.mockResolvedValue(undefined);
     hubAPI.update.mockResolvedValue({});
@@ -145,24 +154,92 @@ describe('SceneSuitesPage', () => {
     expect(within(soc).queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
   });
 
-  it('locks a Pro suite behind an upgrade link in the open-source edition', async () => {
+  it('locks a suite an extension locked, with no action of its own', async () => {
+    // The red team suite is locked too, but it is not launched yet: no action.
+    hubAPI.sceneSuites.mockResolvedValue({ data: [
+      SOC, { ...AI_REDTEAM, locked: true, lockReason: 'edition' }, { ...CODE_AUDIT, locked: true, lockReason: 'edition' },
+    ] });
     renderPage();
 
     const audit = await waitFor(() => card('code-audit-workspace'));
-    await waitFor(() => expect(flocksproUsersApi.hasCapability).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(within(audit).getByRole('link', { name: '去升级' })).toHaveAttribute('href', '/settings/flockspro');
-    });
     expect(within(audit).queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
-    expect(within(audit).getByText('需要 Flocks Pro')).toBeInTheDocument();
+    // What to do about the lock is for an extension to offer; the open build offers nothing.
+    expect(within(audit).queryByRole('link')).not.toBeInTheDocument();
     const redteam = within(card('ai-redteam-workspace'));
     expect(redteam.getByText('预计 2026年11月上线')).toBeInTheDocument();
     expect(redteam.queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
-    expect(redteam.queryByRole('link', { name: '去升级' })).not.toBeInTheDocument();
+    expect(redteam.queryByRole('link')).not.toBeInTheDocument();
   });
 
-  it('lets a Pro edition install a Pro suite', async () => {
-    flocksproUsersApi.hasCapability.mockResolvedValue(true);
+  it('lets an extension offer the action on a locked suite', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    extensionRegistry.slots = [{
+      id: 'test-locked-action',
+      slot: 'sceneSuites.lockedAction',
+      component: ({ context }) => {
+        seen.push(context);
+        return <a href={`/get/${String(context.reason)}`}>{`get-${String(context.reason)}`}</a>;
+      },
+    }];
+    __resetExtensionSlotCacheForTesting();
+    hubAPI.sceneSuites.mockResolvedValue({ data: [
+      { ...CODE_AUDIT, locked: true, lockReason: 'edition' },
+      { ...CODE_AUDIT, id: 'threat-hunting-workspace', nameCn: '威胁狩猎场景套件', locked: true, lockReason: 'license' },
+      SOC,
+    ] });
+    renderPage();
+
+    const audit = await waitFor(() => card('code-audit-workspace'));
+    expect(within(audit).getByRole('link', { name: 'get-edition' })).toBeInTheDocument();
+    const lockedSuite = card('threat-hunting-workspace');
+    expect(within(lockedSuite).getByRole('link', { name: 'get-license' })).toBeInTheDocument();
+    expect(within(lockedSuite).queryByRole('button', { name: '安装' })).not.toBeInTheDocument();
+    expect(within(card('soc-workspace')).queryByRole('link')).not.toBeInTheDocument();
+    expect(seen).toEqual(expect.arrayContaining([
+      { suiteId: 'code-audit-workspace', reason: 'edition' },
+      { suiteId: 'threat-hunting-workspace', reason: 'license' },
+    ]));
+  });
+
+  it('lets an extension add badges and a notice to each suite', async () => {
+    const badges: Array<Record<string, unknown>> = [];
+    const notices: Array<Record<string, unknown>> = [];
+    extensionRegistry.slots = [
+      {
+        id: 'test-badges',
+        slot: 'sceneSuites.badges',
+        component: ({ context }) => {
+          badges.push(context);
+          const suite = context.suite as { id: string; annotations?: { note?: string } };
+          return suite.annotations?.note ? <span>{suite.annotations.note}</span> : null;
+        },
+      },
+      {
+        id: 'test-notice',
+        slot: 'sceneSuites.notice',
+        component: ({ context }) => {
+          notices.push(context);
+          return context.awaitingLaunch ? null : <p>{`notice-${(context.suite as { id: string }).id}`}</p>;
+        },
+      },
+    ];
+    __resetExtensionSlotCacheForTesting();
+    hubAPI.sceneSuites.mockResolvedValue({ data: [
+      SOC, { ...CODE_AUDIT, annotations: { note: 'from-extension' } }, AI_REDTEAM,
+    ] });
+    renderPage();
+
+    const audit = await waitFor(() => card('code-audit-workspace'));
+    expect(within(audit).getByText('from-extension')).toBeInTheDocument();
+    expect(within(audit).getByText('notice-code-audit-workspace')).toBeInTheDocument();
+    expect(within(card('ai-redteam-workspace')).queryByText('notice-ai-redteam-workspace')).not.toBeInTheDocument();
+    expect(badges.map((context) => (context.suite as { id: string }).id)).toEqual(
+      expect.arrayContaining(['soc-workspace', 'code-audit-workspace', 'ai-redteam-workspace']),
+    );
+    expect(notices.find((context) => (context.suite as { id: string }).id === 'ai-redteam-workspace')?.awaitingLaunch).toBe(true);
+  });
+
+  it('installs a suite of another edition when no extension locks it', async () => {
     const user = userEvent.setup();
     renderPage();
 
@@ -184,8 +261,20 @@ describe('SceneSuitesPage', () => {
     await waitFor(() => expect(hubAPI.sceneSuites).toHaveBeenCalledTimes(2));
   });
 
+  it('keeps uninstall, and nothing else, for an installed suite an extension locked', async () => {
+    hubAPI.sceneSuites.mockResolvedValue({ data: [{
+      ...CODE_AUDIT, installedVersion: '1.0.0', state: 'updateAvailable', workspaceEnabled: true,
+      locked: true, lockReason: 'license',
+    }] });
+    renderPage();
+
+    const audit = await waitFor(() => card('code-audit-workspace'));
+    await waitFor(() => expect(within(audit).getByRole('button', { name: '卸载' })).toBeInTheDocument());
+    expect(within(audit).queryByRole('button', { name: '更新' })).not.toBeInTheDocument();
+    expect(within(audit).queryByRole('button', { name: '停用' })).not.toBeInTheDocument();
+  });
+
   it('shows per-component install progress while a suite installs', async () => {
-    flocksproUsersApi.hasCapability.mockResolvedValue(true);
     // Drive the progress callback the way the server stream would.
     hubAPI.installStream.mockImplementation(async (_type, _id, onProgress) => {
       onProgress({

@@ -3,13 +3,13 @@
 All edits in one call are matched against the same original file snapshot.
 """
 
-import os
 import unicodedata
 from dataclasses import dataclass
 from difflib import unified_diff
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from flocks.tool import nofollow
 from flocks.tool.registry import (
     ParameterType,
     ToolCategory,
@@ -18,7 +18,14 @@ from flocks.tool.registry import (
     ToolRegistry,
     ToolResult,
 )
-from flocks.tool.path_utils import resolve_tool_path
+from flocks.tool.path_utils import (
+    changed_before_asking,
+    checked_error,
+    moved_since_resolved,
+    paths_changed,
+    resolve_tool_path,
+    resolved_identities,
+)
 from flocks.utils.log import Log
 
 
@@ -513,24 +520,29 @@ async def edit_tool(
         return ToolResult(success=False, error=validation_error, title=title)
     assert prepared_edits is not None
 
-    if not os.path.exists(filepath):
-        return ToolResult(success=False, error=f"File {filepath} not found", title=title)
-    if os.path.isdir(filepath):
+    # Nothing is read through a path that moved since it was checked, nor
+    # through a link put on the way while it is read.
+    if moved_since_resolved(filepath):
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+    try:
+        before = nofollow.read_text(filepath, newline="")
+    except nofollow.LinkOnTheWay:
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+    except IsADirectoryError:
         return ToolResult(
             success=False,
             error=f"Path is a directory, not a file: {filepath}",
             title=title,
         )
-
-    try:
-        with open(filepath, "r", encoding="utf-8", errors="replace", newline="") as file_handle:
-            raw_content_old = file_handle.read()
     except Exception as error:
         return ToolResult(
             success=False,
-            error=f"Failed to read file: {str(error)}",
+            error=checked_error((filepath,), f"Failed to read file: {str(error)}"),
             title=title,
         )
+    if before is None:
+        return ToolResult(success=False, error=f"File {filepath} not found", title=title)
+    raw_content_old = before.text
 
     bom, content_without_bom = strip_bom(raw_content_old)
     original_line_ending = detect_line_ending(content_without_bom)
@@ -543,7 +555,8 @@ async def edit_tool(
             filepath,
         )
     except ValueError as error:
-        return ToolResult(success=False, error=str(error), title=title)
+        # Counts and snippets in the error describe what was read.
+        return ToolResult(success=False, error=checked_error((filepath,), str(error)), title=title)
 
     content_new = bom + restore_line_endings(normalized_content_new, original_line_ending)
     diff = trim_diff(generate_diff(filepath, base_content, normalized_content_new))
@@ -569,28 +582,31 @@ async def edit_tool(
             )
 
     # Explicit edit rules (session, agent, delegating session) apply here.
+    # The request carries the diff: none read after the path moved.
+    if moved_since_resolved(filepath):
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+    identities = resolved_identities(filepath)
     await ctx.ask(
         permission="edit",
         patterns=[resolution.permission_pattern],
         always=["*"],
-        metadata={"tool": "edit", "filepath": filepath, "diff": diff},
+        metadata={
+            "tool": "edit", "filepath": filepath, "diff": diff,
+            "pattern_base": resolution.worktree,
+        },
     )
     # The replacement was computed before a possibly long permission wait;
-    # writing it over a file changed meanwhile would undo that change.
+    # writing it over a file changed meanwhile would undo that change, and a
+    # path that now leads elsewhere is not the file that was approved. The
+    # file is checked and written through one descriptor, opened without
+    # following a link.
+    changed = f"File {filepath} changed while waiting for permission; read it again and redo the edit."
+    if paths_changed(identities):
+        return ToolResult(success=False, error=changed, title=title)
     try:
-        with open(filepath, "r", encoding="utf-8", errors="replace", newline="") as file_handle:
-            changed_meanwhile = file_handle.read() != raw_content_old
-    except OSError:
-        changed_meanwhile = True
-    if changed_meanwhile:
-        return ToolResult(
-            success=False,
-            error=f"File {filepath} changed while waiting for permission; read it again and redo the edit.",
-            title=title,
-        )
-    try:
-        with open(filepath, "w", encoding="utf-8", newline="") as file_handle:
-            file_handle.write(content_new)
+        nofollow.replace_text(filepath, content_new, before=before, read_newline="", write_newline="")
+    except (nofollow.LinkOnTheWay, nofollow.StaleFile):
+        return ToolResult(success=False, error=changed, title=title)
     except Exception as error:
         return ToolResult(
             success=False,

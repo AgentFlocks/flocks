@@ -4,9 +4,10 @@ import asyncio
 import json
 import os
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import aiosqlite
 from pydantic import BaseModel
@@ -22,10 +23,26 @@ from .models import (
     TaskPriority,
     TaskScheduler,
     TaskStatus,
+    TaskTrigger,
 )
 
 log = Log.create(service="task.store")
 
+
+_EXECUTION_INSERT_SQL = """
+    INSERT INTO task_executions
+    (id, scheduler_id, title, description, priority, source, trigger_type,
+     status, delivery_status, queued_at, started_at, completed_at, duration_ms,
+     session_id, result_summary, error, execution_input_snapshot,
+     workspace_directory, retry, execution_mode, agent_name, workflow_id,
+     created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+_QUEUE_REF_INSERT_SQL = """
+    INSERT INTO task_execution_queue_refs (id, execution_id, status, created_at, started_at)
+    VALUES (?, ?, ?, ?, ?)
+    """
+_ACTIVE_STATUSES_SQL = "('pending', 'queued', 'running')"
 
 _EXECUTION_UPDATE_SQL = """
     UPDATE task_executions SET
@@ -88,6 +105,8 @@ class TaskStore:
     # connection in the child — SQLite explicitly warns that sharing a
     # connection across ``fork()`` corrupts the DB.
     _init_pid: Optional[int] = None
+    _write_lock: Optional[asyncio.Lock] = None
+    _write_lock_loop: Optional[asyncio.AbstractEventLoop] = None
 
     @classmethod
     def get_db_path(cls) -> Path:
@@ -163,6 +182,7 @@ class TaskStore:
             cls._conn = None
             cls._initialized = False
             cls._init_pid = None
+        cls._write_lock = None
 
     @classmethod
     async def _db(cls) -> aiosqlite.Connection:
@@ -181,6 +201,31 @@ class TaskStore:
     @classmethod
     async def raw_db(cls) -> aiosqlite.Connection:
         return await cls._db()
+
+    @classmethod
+    @asynccontextmanager
+    async def _writing(cls) -> AsyncIterator[aiosqlite.Connection]:
+        """The shared connection, for one write (statements and commit) at a time.
+
+        Statements of different coroutines on one connection share its open
+        transaction: a queue claim's rollback undid a scheduler edit that was
+        about to be committed.  A write that fails leaves nothing open behind.
+        """
+        db = await cls._db()
+        loop = asyncio.get_running_loop()
+        if cls._write_lock is None or cls._write_lock_loop is not loop:
+            cls._write_lock = asyncio.Lock()
+            cls._write_lock_loop = loop
+        async with cls._write_lock:
+            try:
+                yield db
+            except BaseException:
+                if db.in_transaction:
+                    try:
+                        await db.rollback()
+                    except Exception:
+                        pass
+                raise
 
     @staticmethod
     def _decode_legacy_text(value: bytes) -> str:
@@ -376,18 +421,18 @@ class TaskStore:
             existing = await cls.get_scheduler_by_dedup_key(scheduler.dedup_key)
             if existing is not None:
                 return None
-        db = await cls._db()
-        await db.execute(
-            """
-            INSERT INTO task_schedulers
-            (id, title, description, mode, status, priority, source, trigger,
-             execution_mode, agent_name, workflow_id, skills, category, context,
-             workspace_directory, retry, tags, created_at, updated_at, created_by, dedup_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            cls._scheduler_to_row(scheduler),
-        )
-        await db.commit()
+        async with cls._writing() as db:
+            await db.execute(
+                """
+                INSERT INTO task_schedulers
+                (id, title, description, mode, status, priority, source, trigger,
+                 execution_mode, agent_name, workflow_id, skills, category, context,
+                 workspace_directory, retry, tags, created_at, updated_at, created_by, dedup_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                cls._scheduler_to_row(scheduler),
+            )
+            await db.commit()
         return scheduler
 
     @classmethod
@@ -477,16 +522,16 @@ class TaskStore:
     @classmethod
     async def update_scheduler(cls, scheduler: TaskScheduler) -> TaskScheduler:
         scheduler.touch()
-        db = await cls._db()
-        await db.execute(
-            """
-            UPDATE task_schedulers SET
-              title=?, description=?, mode=?, status=?, priority=?, source=?, trigger=?,
-              execution_mode=?, agent_name=?, workflow_id=?, skills=?, category=?, context=?,
-              workspace_directory=?, retry=?, tags=?, updated_at=?, created_by=?, dedup_key=?
-            WHERE id=?
-            """,
-            (
+        async with cls._writing() as db:
+            await db.execute(
+                """
+                UPDATE task_schedulers SET
+                  title=?, description=?, mode=?, status=?, priority=?, source=?, trigger=?,
+                  execution_mode=?, agent_name=?, workflow_id=?, skills=?, category=?, context=?,
+                  workspace_directory=?, retry=?, tags=?, updated_at=?, created_by=?, dedup_key=?
+                WHERE id=?
+                """,
+                (
                 scheduler.title,
                 scheduler.description,
                 scheduler.mode.value,
@@ -507,19 +552,19 @@ class TaskStore:
                 scheduler.created_by,
                 scheduler.dedup_key,
                 scheduler.id,
-            ),
-        )
-        await db.commit()
+                ),
+            )
+            await db.commit()
         return scheduler
 
     @classmethod
     async def delete_scheduler(cls, scheduler_id: str) -> bool:
-        db = await cls._db()
-        cur = await db.execute(
-            "DELETE FROM task_schedulers WHERE id = ?",
-            (scheduler_id,),
-        )
-        await db.commit()
+        async with cls._writing() as db:
+            cur = await db.execute(
+                "DELETE FROM task_schedulers WHERE id = ?",
+                (scheduler_id,),
+            )
+            await db.commit()
         return cur.rowcount > 0
 
     # ------------------------------------------------------------------
@@ -528,20 +573,9 @@ class TaskStore:
 
     @classmethod
     async def create_execution(cls, execution: TaskExecution) -> TaskExecution:
-        db = await cls._db()
-        await db.execute(
-            """
-            INSERT INTO task_executions
-            (id, scheduler_id, title, description, priority, source, trigger_type,
-             status, delivery_status, queued_at, started_at, completed_at, duration_ms,
-             session_id, result_summary, error, execution_input_snapshot,
-             workspace_directory, retry, execution_mode, agent_name, workflow_id,
-             created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            cls._execution_to_row(execution),
-        )
-        await db.commit()
+        async with cls._writing() as db:
+            await db.execute(_EXECUTION_INSERT_SQL, cls._execution_to_row(execution))
+            await db.commit()
         return execution
 
     @classmethod
@@ -677,9 +711,9 @@ class TaskStore:
     @classmethod
     async def update_execution(cls, execution: TaskExecution) -> TaskExecution:
         execution.touch()
-        db = await cls._db()
-        await db.execute(_EXECUTION_UPDATE_SQL + "WHERE id=?", _execution_update_values(execution))
-        await db.commit()
+        async with cls._writing() as db:
+            await db.execute(_EXECUTION_UPDATE_SQL + "WHERE id=?", _execution_update_values(execution))
+            await db.commit()
         return execution
 
     @classmethod
@@ -690,12 +724,12 @@ class TaskStore:
         cancellation; returns False when the row had already finished.
         """
         execution.touch()
-        db = await cls._db()
-        cur = await db.execute(
-            _EXECUTION_UPDATE_SQL + "WHERE id=? AND status IN ('pending', 'queued', 'running')",
-            _execution_update_values(execution),
-        )
-        await db.commit()
+        async with cls._writing() as db:
+            cur = await db.execute(
+                _EXECUTION_UPDATE_SQL + "WHERE id=? AND status IN ('pending', 'queued', 'running')",
+                _execution_update_values(execution),
+            )
+            await db.commit()
         return cur.rowcount > 0
 
     @classmethod
@@ -713,27 +747,128 @@ class TaskStore:
         meanwhile survives.  Returns False when the execution had already
         finished or does not exist.
         """
-        db = await cls._db()
-        cur = await db.execute(
-            """
-            UPDATE task_executions SET
-              status = 'cancelled',
-              completed_at = COALESCE(completed_at, ?),
-              duration_ms = COALESCE(duration_ms, ?),
-              error = COALESCE(error, ?),
-              updated_at = ?
-            WHERE id = ? AND status IN ('pending', 'queued', 'running')
-            """,
-            (
-                _iso(completed_at),
-                duration_ms,
-                error,
-                datetime.now(timezone.utc).isoformat(),
-                execution_id,
-            ),
-        )
-        await db.commit()
+        async with cls._writing() as db:
+            cur = await db.execute(
+                """
+                UPDATE task_executions SET
+                  status = 'cancelled',
+                  completed_at = COALESCE(completed_at, ?),
+                  duration_ms = COALESCE(duration_ms, ?),
+                  error = COALESCE(error, ?),
+                  updated_at = ?
+                WHERE id = ? AND status IN ('pending', 'queued', 'running')
+                """,
+                (
+                    _iso(completed_at),
+                    duration_ms,
+                    error,
+                    datetime.now(timezone.utc).isoformat(),
+                    execution_id,
+                ),
+            )
+            await db.commit()
         return cur.rowcount > 0
+
+    @classmethod
+    async def expire_queued_execution(
+        cls,
+        execution_id: str,
+        *,
+        completed_at: datetime,
+        error: str,
+    ) -> bool:
+        """Cancel an execution that is still waiting, with its queue ref.
+
+        False, and nothing written, when it was claimed (or finished) after
+        the caller saw it waiting: a running execution is not cancelled here.
+        """
+        async with cls._writing() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute(
+                """
+                UPDATE task_executions SET
+                  status = 'cancelled', completed_at = ?, error = ?, updated_at = ?
+                WHERE id = ? AND status IN ('pending', 'queued')
+                """,
+                (_iso(completed_at), error, datetime.now(timezone.utc).isoformat(), execution_id),
+            )
+            if cur.rowcount == 0:
+                await db.rollback()
+                return False
+            await db.execute(
+                "DELETE FROM task_execution_queue_refs WHERE execution_id = ? AND status = 'queued'",
+                (execution_id,),
+            )
+            await db.commit()
+        return True
+
+    @classmethod
+    async def update_execution_if_unchanged(
+        cls,
+        execution: TaskExecution,
+        *,
+        expected_updated_at: datetime,
+    ) -> bool:
+        """Write the whole row only if nobody wrote it since the caller read it.
+
+        Every write of an execution moves ``updated_at`` on, so it is the
+        row's version: a snapshot that is out of date (a retry, a cancel, a
+        newer failure since) is not written, and False is returned.
+        """
+        execution.touch()
+        async with cls._writing() as db:
+            cur = await db.execute(
+                _EXECUTION_UPDATE_SQL + "WHERE id=? AND task_timestamp_us(updated_at)=?",
+                (*_execution_update_values(execution), _timestamp_microseconds(_iso(expected_updated_at))),
+            )
+            await db.commit()
+        return cur.rowcount > 0
+
+    @classmethod
+    async def requeue_execution(
+        cls,
+        execution: TaskExecution,
+        *,
+        expected_status: TaskStatus,
+        expected_updated_at: datetime,
+    ) -> bool:
+        """Write *execution* (as queued) with a queued ref, if the row is still as the caller read it.
+
+        Still *expected_status* and still *expected_updated_at* (the row's
+        version, see update_execution_if_unchanged): a row that changed after
+        the caller read it (claimed, cancelled, retried or failed again) is
+        left alone and False is returned.
+        """
+        execution.touch()
+        async with cls._writing() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute(
+                _EXECUTION_UPDATE_SQL + "WHERE id=? AND status=? AND task_timestamp_us(updated_at)=?",
+                (
+                    *_execution_update_values(execution),
+                    expected_status.value,
+                    _timestamp_microseconds(_iso(expected_updated_at)),
+                ),
+            )
+            if cur.rowcount == 0:
+                await db.rollback()
+                return False
+            cur = await db.execute(
+                """
+                UPDATE task_execution_queue_refs
+                SET status = 'queued', started_at = NULL
+                WHERE execution_id = ? AND status IN ('queued', 'running')
+                """,
+                (execution.id,),
+            )
+            if cur.rowcount == 0:
+                ref = TaskExecutionQueueRef(execution_id=execution.id)
+                await db.execute(
+                    _QUEUE_REF_INSERT_SQL,
+                    (ref.id, ref.execution_id, ref.status.value, ref.created_at.isoformat(), None),
+                )
+            await db.commit()
+        return True
 
     @classmethod
     async def start_execution_session(
@@ -748,29 +883,29 @@ class TaskStore:
         Never revives a finished row: returns False when the execution was
         cancelled (or finished) meanwhile, and then nothing is written.
         """
-        db = await cls._db()
-        cur = await db.execute(
-            """
-            UPDATE task_executions SET
-              session_id = ?,
-              status = 'running',
-              started_at = COALESCE(started_at, ?),
-              updated_at = ?
-            WHERE id = ? AND status IN ('pending', 'queued', 'running')
-            """,
-            (session_id, _iso(started_at), datetime.now(timezone.utc).isoformat(), execution_id),
-        )
-        await db.commit()
+        async with cls._writing() as db:
+            cur = await db.execute(
+                """
+                UPDATE task_executions SET
+                  session_id = ?,
+                  status = 'running',
+                  started_at = COALESCE(started_at, ?),
+                  updated_at = ?
+                WHERE id = ? AND status IN ('pending', 'queued', 'running')
+                """,
+                (session_id, _iso(started_at), datetime.now(timezone.utc).isoformat(), execution_id),
+            )
+            await db.commit()
         return cur.rowcount > 0
 
     @classmethod
     async def delete_execution(cls, execution_id: str) -> bool:
-        db = await cls._db()
-        cur = await db.execute(
-            "DELETE FROM task_executions WHERE id = ?",
-            (execution_id,),
-        )
-        await db.commit()
+        async with cls._writing() as db:
+            cur = await db.execute(
+                "DELETE FROM task_executions WHERE id = ?",
+                (execution_id,),
+            )
+            await db.commit()
         return cur.rowcount > 0
 
     @classmethod
@@ -781,12 +916,12 @@ class TaskStore:
             return 0
         placeholders = ",".join("?" for _ in execution_ids)
         now = datetime.now(timezone.utc).isoformat()
-        db = await cls._db()
-        cur = await db.execute(
-            f"UPDATE task_executions SET status=?, updated_at=? WHERE id IN ({placeholders})",
-            (status.value, now, *execution_ids),
-        )
-        await db.commit()
+        async with cls._writing() as db:
+            cur = await db.execute(
+                f"UPDATE task_executions SET status=?, updated_at=? WHERE id IN ({placeholders})",
+                (status.value, now, *execution_ids),
+            )
+            await db.commit()
         return cur.rowcount
 
     @classmethod
@@ -794,12 +929,12 @@ class TaskStore:
         if not execution_ids:
             return 0
         placeholders = ",".join("?" for _ in execution_ids)
-        db = await cls._db()
-        cur = await db.execute(
-            f"DELETE FROM task_executions WHERE id IN ({placeholders})",
-            tuple(execution_ids),
-        )
-        await db.commit()
+        async with cls._writing() as db:
+            cur = await db.execute(
+                f"DELETE FROM task_executions WHERE id IN ({placeholders})",
+                tuple(execution_ids),
+            )
+            await db.commit()
         return cur.rowcount
 
     # ------------------------------------------------------------------
@@ -810,40 +945,13 @@ class TaskStore:
     async def enqueue_execution_ref(
         cls, execution_id: str
     ) -> Optional[TaskExecutionQueueRef]:
-        active = await cls.get_queue_ref(execution_id)
-        if active is not None:
-            return None
-        ref = TaskExecutionQueueRef(execution_id=execution_id)
-        db = await cls._db()
-        await db.execute(
-            """
-            INSERT INTO task_execution_queue_refs (id, execution_id, status, created_at, started_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                ref.id,
-                ref.execution_id,
-                ref.status.value,
-                ref.created_at.isoformat(),
-                None,
-            ),
-        )
-        await db.commit()
-        return ref
-
-    @classmethod
-    async def ensure_queued_execution_ref(
-        cls, execution_id: str
-    ) -> TaskExecutionQueueRef:
-        active = await cls.get_queue_ref(execution_id)
-        db = await cls._db()
-        if active is None:
+        async with cls._writing() as db:
+            active = await cls.get_queue_ref(execution_id)
+            if active is not None:
+                return None
             ref = TaskExecutionQueueRef(execution_id=execution_id)
             await db.execute(
-                """
-                INSERT INTO task_execution_queue_refs (id, execution_id, status, created_at, started_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
+                _QUEUE_REF_INSERT_SQL,
                 (
                     ref.id,
                     ref.execution_id,
@@ -853,17 +961,38 @@ class TaskStore:
                 ),
             )
             await db.commit()
-            return ref
+        return ref
 
-        await db.execute(
-            """
-            UPDATE task_execution_queue_refs
-            SET status = 'queued', started_at = NULL
-            WHERE id = ?
-            """,
-            (active.id,),
-        )
-        await db.commit()
+    @classmethod
+    async def ensure_queued_execution_ref(
+        cls, execution_id: str
+    ) -> TaskExecutionQueueRef:
+        async with cls._writing() as db:
+            active = await cls.get_queue_ref(execution_id)
+            if active is None:
+                ref = TaskExecutionQueueRef(execution_id=execution_id)
+                await db.execute(
+                    _QUEUE_REF_INSERT_SQL,
+                    (
+                        ref.id,
+                        ref.execution_id,
+                        ref.status.value,
+                        ref.created_at.isoformat(),
+                        None,
+                    ),
+                )
+                await db.commit()
+                return ref
+
+            await db.execute(
+                """
+                UPDATE task_execution_queue_refs
+                SET status = 'queued', started_at = NULL
+                WHERE id = ?
+                """,
+                (active.id,),
+            )
+            await db.commit()
         active.status = TaskStatus.QUEUED
         active.started_at = None
         return active
@@ -945,7 +1074,7 @@ class TaskStore:
               e.*
             FROM task_execution_queue_refs q
             JOIN task_executions e ON e.id = q.execution_id
-            WHERE q.status = 'queued' {excl}
+            WHERE q.status = 'queued' AND e.status IN ('pending', 'queued') {excl}
             ORDER BY
               CASE e.priority
                 WHEN 'urgent' THEN 1
@@ -956,30 +1085,29 @@ class TaskStore:
               q.created_at ASC
             LIMIT 1
         """
-        db = await cls._db()
-        db.row_factory = aiosqlite.Row
-        async with db.execute(sql, tuple(params)) as cur:
-            row = await cur.fetchone()
-        if not row:
-            return None
+        async with cls._writing() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, tuple(params)) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return None
 
-        queue_ref = TaskExecutionQueueRef(
-            id=row["queue_ref_id"],
-            execution_id=row["queue_ref_execution_id"],
-            status=TaskStatus(row["queue_ref_status"]),
-            created_at=datetime.fromisoformat(row["queue_ref_created_at"]),
-            started_at=(
-                datetime.fromisoformat(row["queue_ref_started_at"])
-                if row["queue_ref_started_at"] else None
-            ),
-        )
-        claimed_at = datetime.now(timezone.utc)
-        claimed_iso = claimed_at.isoformat()
-        # Atomically flip both the queue ref and the execution row so the two
-        # tables can never be observed in an inconsistent state. If any step
-        # of the transaction fails we will roll back and leave the execution
-        # in `queued`, letting the next poll retry the claim.
-        try:
+            queue_ref = TaskExecutionQueueRef(
+                id=row["queue_ref_id"],
+                execution_id=row["queue_ref_execution_id"],
+                status=TaskStatus(row["queue_ref_status"]),
+                created_at=datetime.fromisoformat(row["queue_ref_created_at"]),
+                started_at=(
+                    datetime.fromisoformat(row["queue_ref_started_at"])
+                    if row["queue_ref_started_at"] else None
+                ),
+            )
+            claimed_at = datetime.now(timezone.utc)
+            claimed_iso = claimed_at.isoformat()
+            # Atomically flip both the queue ref and the execution row so the two
+            # tables can never be observed in an inconsistent state. If any step
+            # of the transaction fails we will roll back and leave the execution
+            # in `queued`, letting the next poll retry the claim.
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(
                 """
@@ -992,7 +1120,7 @@ class TaskStore:
             if cur.rowcount == 0:
                 await db.rollback()
                 return None
-            await db.execute(
+            cur = await db.execute(
                 """
                 UPDATE task_executions
                 SET status = 'running',
@@ -1003,13 +1131,11 @@ class TaskStore:
                 """,
                 (claimed_iso, claimed_iso, queue_ref.execution_id),
             )
-            await db.commit()
-        except Exception:
-            try:
+            if cur.rowcount == 0:
+                # Cancelled or finished since it was read: not a run to start.
                 await db.rollback()
-            except Exception:
-                pass
-            raise
+                return None
+            await db.commit()
 
         queue_ref.status = TaskStatus.RUNNING
         queue_ref.started_at = claimed_at
@@ -1032,15 +1158,15 @@ class TaskStore:
 
     @classmethod
     async def finish_queue_ref(cls, execution_id: str) -> None:
-        db = await cls._db()
-        await db.execute(
-            """
-            DELETE FROM task_execution_queue_refs
-            WHERE execution_id = ? AND status IN ('queued', 'running')
-            """,
-            (execution_id,),
-        )
-        await db.commit()
+        async with cls._writing() as db:
+            await db.execute(
+                """
+                DELETE FROM task_execution_queue_refs
+                WHERE execution_id = ? AND status IN ('queued', 'running')
+                """,
+                (execution_id,),
+            )
+            await db.commit()
 
     @classmethod
     async def count_running(cls) -> int:
@@ -1062,16 +1188,71 @@ class TaskStore:
 
     @classmethod
     async def requeue_running_refs(cls) -> int:
-        db = await cls._db()
-        cur = await db.execute(
-            """
-            UPDATE task_execution_queue_refs
-            SET status = 'queued', started_at = NULL
-            WHERE status = 'running'
-            """
-        )
-        await db.commit()
+        async with cls._writing() as db:
+            cur = await db.execute(
+                """
+                UPDATE task_execution_queue_refs
+                SET status = 'queued', started_at = NULL
+                WHERE status = 'running'
+                """
+            )
+            await db.commit()
         return cur.rowcount
+
+    @classmethod
+    async def fire_scheduler(
+        cls,
+        scheduler: TaskScheduler,
+        execution: TaskExecution,
+        *,
+        trigger: TaskTrigger,
+        status: SchedulerStatus,
+    ) -> bool:
+        """Start one due run of *scheduler* as *execution*, queued, in one transaction.
+
+        Only while the scheduler is still as the caller read it (active, same
+        ``updated_at``) and has no pending, queued or running execution: an
+        edit or a disable that landed meanwhile wins, and the next tick reads
+        it again.  The scheduler moves on to *trigger* and *status*.
+        """
+        now = datetime.now(timezone.utc)
+        moves_on = trigger != scheduler.trigger or status != scheduler.status
+        execution.status = TaskStatus.QUEUED
+        execution.queued_at = now
+        execution.touch()
+        ref = TaskExecutionQueueRef(execution_id=execution.id)
+        async with cls._writing() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute(
+                f"""
+                UPDATE task_schedulers SET trigger = ?, status = ?, updated_at = ?
+                WHERE id = ? AND status = 'active' AND task_timestamp_us(updated_at) = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM task_executions
+                    WHERE scheduler_id = ? AND status IN {_ACTIVE_STATUSES_SQL}
+                  )
+                """,
+                (
+                    _json(trigger),
+                    status.value,
+                    (now if moves_on else scheduler.updated_at).isoformat(),
+                    scheduler.id,
+                    _timestamp_microseconds(scheduler.updated_at.isoformat()),
+                    scheduler.id,
+                ),
+            )
+            if cur.rowcount == 0:
+                await db.rollback()
+                return False
+            await db.execute(_EXECUTION_INSERT_SQL, cls._execution_to_row(execution))
+            await db.execute(
+                _QUEUE_REF_INSERT_SQL,
+                (ref.id, ref.execution_id, ref.status.value, ref.created_at.isoformat(), None),
+            )
+            await db.commit()
+        if moves_on:
+            scheduler.trigger, scheduler.status, scheduler.updated_at = trigger, status, now
+        return True
 
     # ------------------------------------------------------------------
     # Dashboard / delivery
@@ -1331,34 +1512,34 @@ class TaskStore:
 
     @classmethod
     async def _normalize_legacy_paused_executions(cls) -> None:
-        db = await cls._db()
         now = datetime.now(timezone.utc).isoformat()
-        await db.execute(
-            """
-            DELETE FROM task_execution_queue_refs
-            WHERE status = 'paused'
-               OR execution_id IN (
-                   SELECT id FROM task_executions WHERE status = 'paused'
-               )
-            """
-        )
-        await db.execute(
-            """
-            UPDATE task_executions
-            SET status = ?,
-                completed_at = COALESCE(completed_at, updated_at, created_at, ?),
-                error = COALESCE(NULLIF(error, ''), ?),
-                updated_at = ?
-            WHERE status = 'paused'
-            """,
-            (
-                TaskStatus.CANCELLED.value,
-                now,
-                "Normalized from legacy paused state.",
-                now,
-            ),
-        )
-        await db.commit()
+        async with cls._writing() as db:
+            await db.execute(
+                """
+                DELETE FROM task_execution_queue_refs
+                WHERE status = 'paused'
+                   OR execution_id IN (
+                       SELECT id FROM task_executions WHERE status = 'paused'
+                   )
+                """
+            )
+            await db.execute(
+                """
+                UPDATE task_executions
+                SET status = ?,
+                    completed_at = COALESCE(completed_at, updated_at, created_at, ?),
+                    error = COALESCE(NULLIF(error, ''), ?),
+                    updated_at = ?
+                WHERE status = 'paused'
+                """,
+                (
+                    TaskStatus.CANCELLED.value,
+                    now,
+                    "Normalized from legacy paused state.",
+                    now,
+                ),
+            )
+            await db.commit()
 
     @classmethod
     def _row_to_queue_ref(

@@ -1,4 +1,9 @@
-"""Secrets referenced from flocks.json stay out of members' sight and off disk."""
+"""Secrets referenced from flocks.json stay out of sight and off disk.
+
+arch_v2 rules on top of dev's: the generic config endpoint writes for admins
+only, and nobody, admins included, reads a resolved secret from it: admins
+read the references written out, members a masked view.
+"""
 
 from __future__ import annotations
 
@@ -66,28 +71,31 @@ def test_members_read_references_and_masks_instead_of_secrets(stored_secret):
     assert body["mcp"]["m"]["headers"]["Authorization"] == REDACTED
     assert body["provider"]["p"]["options"]["baseURL"] == "https://gw.example.test/v1"
 
-    # Admins (and the TUI's API token) still get the loaded config.
-    admin = _client("admin").get("/api/config").json()
-    assert admin["provider"]["p"]["options"]["apiKey"] == SECRET
-    assert admin["mcp"]["m"]["headers"]["Authorization"] == INLINE
+    # Admins (and the TUI's API token) read the reference itself, never its value;
+    # a value stored inline in flocks.json reads as stored.
+    admin = _client("admin").get("/api/config")
+    assert SECRET not in admin.text
+    assert admin.json()["provider"]["p"]["options"]["apiKey"] == "{secret:p_llm_key}"
+    assert admin.json()["mcp"]["m"]["headers"]["Authorization"] == INLINE
 
 
 def test_saving_does_not_write_expanded_secrets_back(stored_secret):
-    member = _client("member")
-    response = member.patch("/api/config/", json={"toolFailure": {"disableOnRepeatedFailure": False}})
+    admin = _client("admin")
+    response = admin.patch("/api/config/", json={"toolFailure": {"disableOnRepeatedFailure": False}})
     assert response.status_code == 200
     assert SECRET not in response.text
     assert _raw()["provider"]["p"]["options"]["apiKey"] == "{secret:p_llm_key}"
 
     # The Channel page sends back the whole config it read.
-    admin = _client("admin")
     assert admin.patch("/api/config/", json=admin.get("/api/config").json()).status_code == 200
     assert _raw()["provider"]["p"]["options"]["apiKey"] == "{secret:p_llm_key}"
 
-    echoed = member.get("/api/config").json()
-    assert member.patch("/api/config/", json=echoed).status_code == 200
+    # Generic config writes are admin-only in v2: a member's echo is refused, nothing is written.
+    member = _client("member")
+    before = _raw()
+    assert member.patch("/api/config/", json=member.get("/api/config").json()).status_code == 403
     raw = _raw()
-    assert raw["provider"]["p"]["options"]["apiKey"] == "{secret:p_llm_key}"
+    assert raw == before
     assert raw["mcp"]["m"]["headers"]["Authorization"] == INLINE
     assert REDACTED not in json.dumps(raw)
 
@@ -118,9 +126,9 @@ def test_display_name_never_carries_a_reference(stored_secret):
     from flocks.config.config import Config
     from flocks.config.config_writer import ConfigWriter
 
-    for role in ("member", "admin"):
-        response = _client(role).patch("/api/config/ui", json={"displayName": "{secret:p_llm_key}"})
-        assert response.status_code == 400
+    # Members may not change the display name at all; an admin may not give it a reference.
+    assert _client("member").patch("/api/config/ui", json={"displayName": "{secret:p_llm_key}"}).status_code == 403
+    assert _client("admin").patch("/api/config/ui", json={"displayName": "{secret:p_llm_key}"}).status_code == 400
     assert "ui" not in _raw()
 
     # One stored before this check is not shown on the public login page either.
@@ -133,7 +141,7 @@ def test_display_name_never_carries_a_reference(stored_secret):
     assert SECRET not in public.text
     assert public.json()["configuredDisplayName"] is None
 
-    ok = _client("member").patch("/api/config/ui", json={"displayName": "Acme SOC"})
+    ok = _client("admin").patch("/api/config/ui", json={"displayName": "Acme SOC"})
     assert ok.status_code == 200 and ok.json()["displayName"] == "Acme SOC"
 
 
@@ -160,7 +168,10 @@ def test_references_are_found_whatever_the_key_spelling_or_typed_neighbours(monk
     member = _client("member")
     read = member.get("/api/config")
     assert read.status_code == 200 and SECRET not in read.text
-    assert member.patch("/api/config/", json={"toolFailure": {"disableOnRepeatedFailure": False}}).status_code == 200
+    # The typed port cannot be read unexpanded, so admins get the masked view too.
+    admin = _client("admin")
+    assert SECRET not in admin.get("/api/config").text
+    assert admin.patch("/api/config/", json={"toolFailure": {"disableOnRepeatedFailure": False}}).status_code == 200
     assert SECRET not in json.dumps(_raw())
 
 
@@ -175,10 +186,11 @@ def test_list_references_survive_merging_across_layers():
     (_config_dir() / "config.json").write_text(json.dumps({"instructions": ["other.md"]}), encoding="utf-8")
     Config.clear_cache()
 
-    member = _client("member")
-    echoed = member.get("/api/config")
+    assert SECRET not in _client("member").get("/api/config").text
+    admin = _client("admin")
+    echoed = admin.get("/api/config")
     assert SECRET not in echoed.text
-    assert member.patch("/api/config/", json=echoed.json()).status_code == 200
+    assert admin.patch("/api/config/", json=echoed.json()).status_code == 200
     assert "{file:note.md}" in _raw()["instructions"]
     assert SECRET not in json.dumps(_raw())
 
@@ -193,11 +205,14 @@ def test_echoing_a_higher_layer_secret_never_writes_its_plaintext(stored_secret)
     )
     Config.clear_cache()
 
-    for role in ("member", "admin"):
-        client = _client(role)
-        assert client.patch("/api/config/", json=client.get("/api/config").json()).status_code == 200
-        on_disk = json.dumps(_raw())
-        assert "sk-higher-layer-value-789" not in on_disk and SECRET not in on_disk
+    member = _client("member")
+    assert member.patch("/api/config/", json=member.get("/api/config").json()).status_code == 403
+    admin = _client("admin")
+    assert admin.patch("/api/config/", json=admin.get("/api/config").json()).status_code == 200
+    on_disk = json.dumps(_raw())
+    assert "sk-higher-layer-value-789" not in on_disk and SECRET not in on_disk
+    # The higher layer's reference is not copied into flocks.json either.
+    assert _raw()["provider"]["p"]["options"]["apiKey"] == "{secret:p_llm_key}"
 
 
 def test_channel_env_reference_is_kept_through_an_echo(monkeypatch):
@@ -208,10 +223,12 @@ def test_channel_env_reference_is_kept_through_an_echo(monkeypatch):
     ConfigWriter._write_raw({"channels": {"feishu": {"enabled": False, "appId": "cli_x", "appSecret": "{env:FLOCKS_TEST_FEISHU_SECRET}"}}})
     Config.clear_cache()
 
-    for role in ("member", "admin"):
-        client = _client(role)
-        assert client.patch("/api/config/", json=client.get("/api/config").json()).status_code == 200
-        assert _raw()["channels"]["feishu"]["appSecret"] == "{env:FLOCKS_TEST_FEISHU_SECRET}"
+    member = _client("member")
+    assert member.patch("/api/config/", json=member.get("/api/config").json()).status_code == 403
+    admin = _client("admin")
+    assert SECRET not in admin.get("/api/config").text
+    assert admin.patch("/api/config/", json=admin.get("/api/config").json()).status_code == 200
+    assert _raw()["channels"]["feishu"]["appSecret"] == "{env:FLOCKS_TEST_FEISHU_SECRET}"
 
 
 def test_mcp_credentials_in_urls_and_auth_are_masked_and_kept():
@@ -229,7 +246,9 @@ def test_mcp_credentials_in_urls_and_auth_are_masked_and_kept():
     member = _client("member")
     read = member.get("/api/config")
     assert SECRET not in read.text and INLINE not in read.text
-    assert member.patch("/api/config/", json=read.json()).status_code == 200
+    assert member.patch("/api/config/", json=read.json()).status_code == 403
+    admin = _client("admin")
+    assert admin.patch("/api/config/", json=admin.get("/api/config").json()).status_code == 200
     assert _raw()["mcp"]["m"]["url"] == server["url"]
     assert _raw()["mcp"]["m"]["auth"]["value"] == INLINE
 
@@ -293,12 +312,13 @@ def test_a_literal_field_held_in_a_reference_saves_as_before(monkeypatch):
     })
     Config.clear_cache()
 
-    for role in ("member", "admin"):
-        client = _client(role)
-        assert client.patch("/api/config/", json=client.get("/api/config").json()).status_code == 200
-        raw = _raw()
-        assert raw["agent"]["demo"]["mode"] == "{env:FLOCKS_TEST_MODE}"
-        assert raw["server"]["port"] == "{env:FLOCKS_TEST_PORT}"
+    member = _client("member")
+    assert member.patch("/api/config/", json=member.get("/api/config").json()).status_code == 403
+    admin = _client("admin")
+    assert admin.patch("/api/config/", json=admin.get("/api/config").json()).status_code == 200
+    raw = _raw()
+    assert raw["agent"]["demo"]["mode"] == "{env:FLOCKS_TEST_MODE}"
+    assert raw["server"]["port"] == "{env:FLOCKS_TEST_PORT}"
 
 
 def test_equal_values_from_different_references_keep_their_own(monkeypatch):
@@ -337,7 +357,11 @@ def test_a_value_mixing_a_reference_and_inline_secret_is_masked_whole(monkeypatc
     member = _client("member")
     read = member.get("/api/config")
     assert SECRET not in read.text and "{env:FLOCKS_TEST_HOST}" not in read.text
-    assert member.patch("/api/config/", json=read.json()).status_code == 200
+    assert member.patch("/api/config/", json=read.json()).status_code == 403
+    admin = _client("admin")
+    # Admins read the url as stored: its reference written out, the inline key as written.
+    assert admin.get("/api/config").json()["mcp"]["m"]["url"] == url
+    assert admin.patch("/api/config/", json=admin.get("/api/config").json()).status_code == 200
     assert _raw()["mcp"]["m"]["url"] == url
 
 
@@ -358,12 +382,13 @@ def test_other_layers_are_not_copied_into_flocks_json(tmp_path, monkeypatch):
     Config.clear_cache()
     assert asyncio.run(Config.get()).provider["p"].options.api_key == SECRET
 
-    for role in ("member", "admin"):
-        client = _client(role)
-        assert client.patch("/api/config/", json=client.get("/api/config").json()).status_code == 200
-        raw = _raw()
-        assert "provider" not in raw, raw
-        assert SECRET not in json.dumps(raw)
+    member = _client("member")
+    assert member.patch("/api/config/", json=member.get("/api/config").json()).status_code == 403
+    admin = _client("admin")
+    assert admin.patch("/api/config/", json=admin.get("/api/config").json()).status_code == 200
+    raw = _raw()
+    assert "provider" not in raw, raw
+    assert SECRET not in json.dumps(raw)
     Config.clear_cache()
     assert asyncio.run(Config.get()).provider["p"].options.api_key == SECRET
     Config._global_config = None
@@ -384,7 +409,9 @@ def test_unquoted_templates_do_not_switch_the_protection_off(monkeypatch):
 
     member = _client("member")
     assert SECRET not in member.get("/api/config").text
-    assert member.patch("/api/config/", json={"toolFailure": {"disableOnRepeatedFailure": False}}).status_code == 200
+    admin = _client("admin")
+    assert SECRET not in admin.get("/api/config").text
+    assert admin.patch("/api/config/", json={"toolFailure": {"disableOnRepeatedFailure": False}}).status_code == 200
     stored = (_config_dir() / "flocks.json").read_text(encoding="utf-8")
     assert SECRET not in stored and "{env:FLOCKS_TEST_KEY}" in stored
     # Written back the way it was stored: outside quotes, so it still expands to a number.
@@ -407,10 +434,10 @@ def test_a_reference_under_the_deprecated_mode_stays_hidden_and_stored(monkeypat
     member = _client("member")
     read = member.get("/api/config")
     assert read.status_code == 200 and SECRET not in read.text
-    assert member.patch("/api/config/", json={"toolFailure": {"disableOnRepeatedFailure": False}}).status_code == 200
-    assert member.patch("/api/config/", json=member.get("/api/config").json()).status_code == 200
+    assert member.patch("/api/config/", json=member.get("/api/config").json()).status_code == 403
 
     admin = _client("admin")
+    assert SECRET not in admin.get("/api/config").text
     assert admin.patch("/api/config/", json=admin.get("/api/config").json()).status_code == 200
     assert admin.patch("/api/config/", json={"agent": {"demo": {"temperature": 0.2}}}).status_code == 200
     raw = _raw()
@@ -434,24 +461,32 @@ def test_two_spellings_of_the_display_name_never_publish_a_reference(monkeypatch
     assert SECRET not in _client("member").get("/api/config").text
 
 
-def test_changing_a_list_from_another_file_with_a_reference_is_refused(monkeypatch):
+def test_changing_a_list_from_another_file_keeps_its_reference(monkeypatch):
     monkeypatch.setenv("FLOCKS_TEST_KEY", SECRET)
     _write_config("flocks.json", {"theme": "dark"})
     _write_config("config.json", {"mcp": {"runner": {"type": "local", "command": ["runner", "--api-key", "{env:FLOCKS_TEST_KEY}"]}}})
     before = _raw()
 
-    for role in ("member", "admin"):
-        client = _client(role)
-        body = client.get("/api/config").json()
-        body["mcp"]["runner"]["command"].append("--verbose")
-        refused = client.patch("/api/config/", json=body)
-        assert refused.status_code == 400, refused.text
-        assert SECRET not in refused.text
-        assert _raw() == before
+    member = _client("member")
+    body = member.get("/api/config").json()
+    body["mcp"]["runner"]["command"].append("--verbose")
+    assert member.patch("/api/config/", json=body).status_code == 403
+    assert _raw() == before
 
-    # An admin can still write the list with the reference itself.
+    # Admins read the reference itself, so the changed list they send back still
+    # holds the reference, not its value: it is saved as written (dev, which shows
+    # admins the value, refuses this save to keep the value off disk).
     admin = _client("admin")
-    command = ["runner", "--api-key", "{env:FLOCKS_TEST_KEY}", "--verbose"]
+    body = admin.get("/api/config").json()
+    body["mcp"]["runner"]["command"].append("--verbose")
+    saved = admin.patch("/api/config/", json=body)
+    assert saved.status_code == 200, saved.text
+    assert SECRET not in saved.text
+    assert _raw()["mcp"]["runner"]["command"] == ["runner", "--api-key", "{env:FLOCKS_TEST_KEY}", "--verbose"]
+    assert SECRET not in json.dumps(_raw())
+
+    # An admin can also write the list with the reference directly.
+    command = ["runner", "--api-key", "{env:FLOCKS_TEST_KEY}", "--debug"]
     assert admin.patch("/api/config/", json={"mcp": {"runner": {"type": "local", "command": command}}}).status_code == 200
     assert _raw()["mcp"]["runner"]["command"] == command
 
@@ -460,12 +495,17 @@ def test_a_list_in_flocks_json_keeps_its_references_when_items_are_added(monkeyp
     monkeypatch.setenv("FLOCKS_TEST_KEY", SECRET)
     _write_config("flocks.json", {"mcp": {"runner": {"type": "local", "command": ["runner", "--api-key", "{env:FLOCKS_TEST_KEY}"]}}})
 
-    for role, extra in (("member", "--verbose"), ("admin", "--debug")):
-        client = _client(role)
-        body = client.get("/api/config").json()
-        body["mcp"]["runner"]["command"].append(extra)
-        assert client.patch("/api/config/", json=body).status_code == 200
-    assert _raw()["mcp"]["runner"]["command"] == ["runner", "--api-key", "{env:FLOCKS_TEST_KEY}", "--verbose", "--debug"]
+    member = _client("member")
+    body = member.get("/api/config").json()
+    body["mcp"]["runner"]["command"].append("--verbose")
+    assert member.patch("/api/config/", json=body).status_code == 403
+
+    admin = _client("admin")
+    body = admin.get("/api/config").json()
+    assert body["mcp"]["runner"]["command"] == ["runner", "--api-key", "{env:FLOCKS_TEST_KEY}"]
+    body["mcp"]["runner"]["command"].append("--debug")
+    assert admin.patch("/api/config/", json=body).status_code == 200
+    assert _raw()["mcp"]["runner"]["command"] == ["runner", "--api-key", "{env:FLOCKS_TEST_KEY}", "--debug"]
 
 
 def test_equal_references_in_one_list_are_never_swapped(monkeypatch):
@@ -474,18 +514,18 @@ def test_equal_references_in_one_list_are_never_swapped(monkeypatch):
     command = ["runner", "--primary", "{env:FLOCKS_TEST_KEY_A}", "--secondary", "{env:FLOCKS_TEST_KEY_B}"]
     _write_config("flocks.json", {"mcp": {"runner": {"type": "local", "command": command}}, "theme": "dark"})
 
-    for role in ("member", "admin"):
-        client = _client(role)
-        assert client.patch("/api/config/", json={"theme": f"{role}-theme"}).status_code == 200
-        assert client.patch("/api/config/", json=client.get("/api/config").json()).status_code == 200
-        assert _raw()["mcp"]["runner"]["command"] == command
-
     admin = _client("admin")
+    assert admin.patch("/api/config/", json={"theme": "admin-theme"}).status_code == 200
+    assert admin.patch("/api/config/", json=admin.get("/api/config").json()).status_code == 200
+    assert _raw()["mcp"]["runner"]["command"] == command
+
+    # Admins see the references themselves, so a moved one is still told apart:
+    # each keeps its own flag (dev refuses this save, having shown two equal values).
     body = admin.get("/api/config").json()
     body["mcp"]["runner"]["command"].insert(0, "--first")
-    refused = admin.patch("/api/config/", json=body)
-    assert refused.status_code == 400 and SECRET not in refused.text
-    assert _raw()["mcp"]["runner"]["command"] == command
+    saved = admin.patch("/api/config/", json=body)
+    assert saved.status_code == 200 and SECRET not in saved.text
+    assert _raw()["mcp"]["runner"]["command"] == ["--first", *command]
 
 
 def test_a_member_cannot_save_a_mask_where_it_was_not_shown(monkeypatch):
@@ -497,5 +537,32 @@ def test_a_member_cannot_save_a_mask_where_it_was_not_shown(monkeypatch):
     body = member.get("/api/config").json()
     body["mcp"]["runner"]["command"].insert(0, "--first")
     response = member.patch("/api/config/", json=body)
-    assert response.status_code == 400
+    assert response.status_code == 403
     assert _raw() == before
+
+
+def test_an_admin_cannot_save_a_mask_where_it_was_not_shown(monkeypatch):
+    # A typed field holding a reference cannot be read unexpanded, so admins get
+    # the masked view; a mask that moved must not be written over the value.
+    monkeypatch.setenv("FLOCKS_TEST_KEY", SECRET)
+    monkeypatch.setenv("FLOCKS_TEST_PORT", "8123")
+    _write_config("flocks.json", {
+        "server": {"port": "{env:FLOCKS_TEST_PORT}"},
+        "mcp": {"runner": {"type": "local", "command": ["runner", "--api-key", "{env:FLOCKS_TEST_KEY}"]}},
+    })
+    before = _raw()
+
+    admin = _client("admin")
+    body = admin.get("/api/config").json()
+    assert body["mcp"]["runner"]["command"][2] == REDACTED and SECRET not in json.dumps(body)
+    body["mcp"]["runner"]["command"].insert(0, "--first")
+    response = admin.patch("/api/config/", json=body)
+    assert response.status_code == 400, response.text
+    assert _raw() == before
+
+    # Sent back where it was shown, the mask keeps the stored value.
+    body = admin.get("/api/config").json()
+    body["theme"] = "dark"
+    assert admin.patch("/api/config/", json=body).status_code == 200
+    assert _raw()["mcp"]["runner"]["command"] == ["runner", "--api-key", "{env:FLOCKS_TEST_KEY}"]
+    assert _raw()["theme"] == "dark"

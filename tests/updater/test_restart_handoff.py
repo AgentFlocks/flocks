@@ -397,7 +397,6 @@ def test_upgrade_start_failure_records_process_output_and_keeps_temp(
     monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
     monkeypatch.setattr(restart_handoff, "_apply_new_source", lambda _args: None)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda _args: None)
-    monkeypatch.setattr(restart_handoff, "_report_pending_pro_bundle_install_receipt", lambda _args: None)
     monkeypatch.setattr(
         restart_handoff,
         "_start_service_after_upgrade",
@@ -911,55 +910,46 @@ def test_restart_only_waits_for_port_after_parent_exit(
     ]
 
 
-def test_run_reports_pending_install_receipt_after_pro_bundle_tasks(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    events: list[str] = []
-    restart_argv = ["python.exe", "-m", "flocks.cli.main", "serve"]
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text("{}", encoding="utf-8")
-    args = _handoff_args(tmp_path, restart_argv)
+def test_component_arguments_reach_the_installer(monkeypatch, tmp_path: Path) -> None:
+    """What an update channel planned -- extra wheels, files to put in place -- survives the handoff."""
+    captured: dict[str, object] = {}
+    wheel = tmp_path / "component.whl"
+    staged = tmp_path / "staged-marker.json"
+    destination = tmp_path / "run" / "marker.json"
+    args = _handoff_args(tmp_path, ["python.exe", "-m", "flocks.cli.main", "start"])
     separator_index = args.index("--")
-    args[separator_index:separator_index] = ["--pro-bundle-manifest-path", str(manifest)]
+    args[separator_index:separator_index] = [
+        "--extra-wheel",
+        str(wheel),
+        "--success-file",
+        json.dumps([str(staged), str(destination)]),
+    ]
 
-    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
-    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda parent_pid: True)
-    monkeypatch.setattr(restart_handoff, "_stop_supervisor_before_restart", lambda **_kwargs: True)
-    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda backend_port: True)
-    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda args: events.append("tasks") or None)
-    monkeypatch.setattr(
-        restart_handoff,
-        "_report_pending_pro_bundle_install_receipt",
-        lambda args: events.append("receipt"),
-    )
-    monkeypatch.setattr(
-        restart_handoff.subprocess,
-        "Popen",
-        lambda argv, cwd=None, close_fds=False: events.append(f"spawn:{list(argv)}") or SimpleNamespace(pid=4321),
-    )
-    code = restart_handoff.run(args)
+    async def fake_install(**kwargs):
+        captured.update(kwargs)
 
-    assert code == 0
-    assert events.index("tasks") < events.index("receipt")
-    assert any(event.startswith("spawn:") for event in events)
+    monkeypatch.setattr(restart_handoff.updater_module, "install_or_repair_source", fake_install)
+
+    assert restart_handoff._run_upgrade_tasks(restart_handoff._parse_args(args)) is None
+    assert captured["extra_wheels"] == [wheel]
+    assert captured["success_files"] == [(staged, destination)]
 
 
-def test_pro_bundle_handoff_stops_supervisor_before_port_check_and_install(
+def test_component_handoff_stops_supervisor_before_port_check_and_install(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     events: list[str] = []
     restart_argv = ["python.exe", "-m", "flocks.cli.main", "start"]
-    pro_wheel = tmp_path / "flockspro.whl"
-    manifest = tmp_path / "manifest.json"
+    wheel = tmp_path / "component.whl"
+    marker = tmp_path / "marker.json"
     args = _handoff_args(tmp_path, restart_argv)
     separator_index = args.index("--")
     args[separator_index:separator_index] = [
-        "--pro-wheel-path",
-        str(pro_wheel),
-        "--pro-bundle-manifest-path",
-        str(manifest),
+        "--extra-wheel",
+        str(wheel),
+        "--success-file",
+        json.dumps([str(marker), str(tmp_path / "run" / "marker.json")]),
     ]
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
@@ -983,7 +973,6 @@ def test_pro_bundle_handoff_stops_supervisor_before_port_check_and_install(
         "_run_upgrade_tasks",
         lambda _args: events.append("install") or None,
     )
-    monkeypatch.setattr(restart_handoff, "_report_pending_pro_bundle_install_receipt", lambda _args: None)
     monkeypatch.setattr(
         restart_handoff.subprocess,
         "Popen",
@@ -1310,6 +1299,110 @@ def test_ensure_backend_port_free_waits_again_after_timeout(monkeypatch) -> None
     ]
 
 
+def test_upgrade_source_replace_failure_restores_from_backup_and_restarts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """OPS-0380：源码替换失败 → 自动从备份还原 → 原本在跑的服务重新拉起；备份保留，结果记 restored_from_backup=True。"""
+    events: list[str] = []
+    results: list[dict[str, object]] = []
+    backup_path = tmp_path / "backup.tar.gz"
+    backup_path.write_text("backup", encoding="utf-8")
+    args = _simple_upgrade_handoff_args(tmp_path)
+
+    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
+    monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_apply_new_source",
+        lambda _args: (_ for _ in ()).throw(RuntimeError("[Errno 13] Permission denied: 'flocks/unreadable.py'")),
+    )
+    restored: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(
+        restart_handoff,
+        "_restore_install_from_backup",
+        lambda backup, install_root: restored.append((backup, install_root)),
+    )
+    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda _args: events.append("install") or None)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_start_service_after_upgrade",
+        lambda _args: events.append("start") or (True, "started", ""),
+    )
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(message))
+    monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
+
+    assert restart_handoff.run(args) == 1
+    assert restored == [(backup_path, tmp_path / "install")]
+    assert "install" not in events  # 半替换后不再继续装依赖
+    assert "start" in events  # 还原成功且升级前在跑 → 重新拉起
+    assert any(event.startswith("source_restored_from_backup") for event in events)
+    assert backup_path.exists()
+    assert results[-1]["phase"] == "failed"
+    assert results[-1]["failed_stage"] == "source_replace"
+    assert results[-1]["backup_path"] == backup_path
+    assert results[-1]["restored_from_backup"] is True
+    assert results[-1]["restore_error"] is None
+    assert "Permission denied" in str(results[-1]["error"])
+
+
+def test_upgrade_source_replace_failure_keeps_manual_path_when_restore_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """还原也失败：不拉起服务，结果里 restored_from_backup=False + restore_error，backup_path 留给人工。"""
+    events: list[str] = []
+    results: list[dict[str, object]] = []
+    backup_path = tmp_path / "backup.tar.gz"
+    backup_path.write_text("backup", encoding="utf-8")
+    args = _simple_upgrade_handoff_args(tmp_path)
+
+    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
+    monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
+    monkeypatch.setattr(restart_handoff, "_apply_new_source", lambda _args: (_ for _ in ()).throw(RuntimeError("copy failed")))
+    monkeypatch.setattr(
+        restart_handoff,
+        "_restore_install_from_backup",
+        lambda backup, install_root: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    monkeypatch.setattr(restart_handoff, "_start_service_after_upgrade", lambda _args: events.append("start") or (True, "", ""))
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(message))
+    monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
+
+    assert restart_handoff.run(args) == 1
+    assert "start" not in events
+    assert any(event.startswith("source_restore_failed") for event in events)
+    assert results[-1]["failed_stage"] == "source_replace"
+    assert results[-1]["restored_from_backup"] is False
+    assert results[-1]["restore_error"] == "disk full"
+    assert results[-1]["backup_path"] == backup_path
+
+
+def test_restore_install_from_backup_puts_half_replaced_tree_back(tmp_path: Path) -> None:
+    """真实备份归档：半替换（pyproject 已是新版本、多了新文件）后按备份回放，旧文件全部回来。"""
+    from flocks.updater import updater
+
+    install = tmp_path / "install"
+    (install / "flocks").mkdir(parents=True)
+    (install / "pyproject.toml").write_text('[project]\nname = "flocks"\nversion = "2026.8.17"\n', encoding="utf-8")
+    (install / "flocks" / "keep.py").write_text("old", encoding="utf-8")
+    (install / ".flocks").mkdir()
+    (install / ".flocks" / "runtime.json").write_text("{}", encoding="utf-8")  # 运行时数据不进备份、不被动
+    backup = updater._backup_current_version(install, "2026.8.17")
+
+    # 模拟替换到一半
+    (install / "pyproject.toml").write_text('[project]\nname = "flocks"\nversion = "2099.1.1"\n', encoding="utf-8")
+    (install / "flocks" / "keep.py").write_text("new", encoding="utf-8")
+    (install / "flocks" / "added.py").write_text("x", encoding="utf-8")
+
+    restart_handoff._restore_install_from_backup(backup, install)
+
+    assert "2026.8.17" in (install / "pyproject.toml").read_text(encoding="utf-8")
+    assert (install / "flocks" / "keep.py").read_text(encoding="utf-8") == "old"
+    assert (install / ".flocks" / "runtime.json").exists()
+    assert backup.exists()
+
+
 class _FakeResponder:
     instances: list["_FakeResponder"] = []
 
@@ -1368,7 +1461,6 @@ def test_upgrade_handoff_reports_each_step_and_frees_port_before_start(
     monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: events.append("stop") or True)
     monkeypatch.setattr(restart_handoff, "_apply_new_source", lambda _args: events.append("replace"))
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", run_tasks)
-    monkeypatch.setattr(restart_handoff, "_report_pending_pro_bundle_install_receipt", lambda _args: None)
     monkeypatch.setattr(restart_handoff, "_start_service_after_upgrade", start_service)
     monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
 
@@ -1447,7 +1539,6 @@ def test_upgrade_handoff_without_token_does_not_bind_the_service_port(
     monkeypatch.setattr(restart_handoff, "_stop_services_before_upgrade", lambda _args: True)
     monkeypatch.setattr(restart_handoff, "_apply_new_source", lambda _args: None)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda _args: None)
-    monkeypatch.setattr(restart_handoff, "_report_pending_pro_bundle_install_receipt", lambda _args: None)
     monkeypatch.setattr(restart_handoff, "_start_service_after_upgrade", lambda _args: (True, "", ""))
     monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **_kwargs: None)
 
@@ -1466,11 +1557,13 @@ def test_planned_upgrade_steps_follow_the_install_mode(tmp_path: Path) -> None:
         "finalize",
         "start",
     ]
-    online.pro_wheel_path = "/tmp/flockspro.whl"
-    assert "install_pro" in restart_handoff._planned_upgrade_steps(online)
+    online.extra_wheel = ["/tmp/component.whl"]
+    assert "install_components" in restart_handoff._planned_upgrade_steps(online)
     online.prebuilt = True
     online.dependency_wheels_dir = None
-    assert restart_handoff._planned_upgrade_steps(online) == ["stop", "source_replace", "install_pro", "finalize", "start"]
+    assert restart_handoff._planned_upgrade_steps(online) == [
+        "stop", "source_replace", "install_components", "finalize", "start",
+    ]
 
 
 def _patch_reported_upgrade(monkeypatch, results: list[dict[str, object]], **overrides) -> None:
@@ -1480,7 +1573,6 @@ def _patch_reported_upgrade(monkeypatch, results: list[dict[str, object]], **ove
         "_stop_services_before_upgrade": lambda _args: True,
         "_apply_new_source": lambda _args: None,
         "_run_upgrade_tasks": lambda _args: None,
-        "_report_pending_pro_bundle_install_receipt": lambda _args: None,
         "_start_service_after_upgrade": lambda _args: (True, "", ""),
         "_write_upgrade_result": lambda **kwargs: results.append(kwargs),
     }
@@ -1496,7 +1588,7 @@ def test_upgrade_handoff_serves_a_failed_start_again_with_the_output_tail(
 ) -> None:
     results: list[dict[str, object]] = []
     monkeypatch.setenv(restart_handoff.handoff_progress.UPGRADE_PROGRESS_TOKEN_ENV, "tok-123")
-    stderr = "Traceback (most recent call last):\n" + "x" * 1000 + "\nModuleNotFoundError: No module named 'flockspro'"
+    stderr = "Traceback (most recent call last):\n" + "x" * 1000 + "\nModuleNotFoundError: No module named 'vendor_extension'"
     _patch_reported_upgrade(
         monkeypatch,
         results,
@@ -1509,7 +1601,7 @@ def test_upgrade_handoff_serves_a_failed_start_again_with_the_output_tail(
     assert final["phase"] == "failed"
     assert final["failed_stage"] == "start"
     assert final["error"].startswith("service restart failed: ...")
-    assert final["error"].endswith("No module named 'flockspro'")
+    assert final["error"].endswith("No module named 'vendor_extension'")
     assert _statuses(final["progress"])["start"] == "failed"
     # the first responder made way for the new service; the failure is served again
     assert [instance.events for instance in fake_responder.instances] == [
@@ -1563,31 +1655,22 @@ def test_upgrade_handoff_reports_an_unexpected_crash_at_the_current_step(
     results: list[dict[str, object]] = []
     monkeypatch.setenv(restart_handoff.handoff_progress.UPGRADE_PROGRESS_TOKEN_ENV, "tok-123")
 
-    def run_tasks(handoff_args) -> None:
-        handoff_args.upgrade_step_callback("build_webui")
-        handoff_args.upgrade_step_callback("finalize")
+    def stop_services(_args) -> bool:
+        raise RuntimeError("service registry is locked")
 
-    def report_receipt(_args) -> None:
-        raise RuntimeError("receipt store is locked")
-
-    _patch_reported_upgrade(
-        monkeypatch,
-        results,
-        _run_upgrade_tasks=run_tasks,
-        _report_pending_pro_bundle_install_receipt=report_receipt,
-    )
+    _patch_reported_upgrade(monkeypatch, results, _stop_services_before_upgrade=stop_services)
 
     assert restart_handoff.run(_simple_upgrade_handoff_args(tmp_path)) == 1
 
-    assert results[-1]["error"] == "upgrade handoff crashed: receipt store is locked"
-    assert results[-1]["progress"]["failed_step"] == "finalize"
+    assert results[-1]["error"] == "upgrade handoff crashed: service registry is locked"
+    assert results[-1]["progress"]["failed_step"] == "stop"
     assert fake_responder.instances[0].events[-1].startswith("linger:")
 
 
-def _pro_component_restart_args(tmp_path: Path) -> list[str]:
+def _component_restart_args(tmp_path: Path) -> list[str]:
     args = _handoff_args(tmp_path, ["python", "-m", "flocks.cli.main", "start"])
     separator_index = args.index("--")
-    args[separator_index:separator_index] = ["--pro-wheel-path", str(tmp_path / "flockspro.whl")]
+    args[separator_index:separator_index] = ["--extra-wheel", str(tmp_path / "component.whl")]
     return args
 
 
@@ -1612,7 +1695,7 @@ def test_restart_handoff_never_passes_the_upgrade_token_to_the_service(monkeypat
     assert spawned_env == [False]
 
 
-def test_pro_component_restart_reports_steps_and_frees_the_port_before_start(
+def test_component_restart_reports_steps_and_frees_the_port_before_start(
     monkeypatch,
     tmp_path: Path,
     fake_responder,
@@ -1622,7 +1705,7 @@ def test_pro_component_restart_reports_steps_and_frees_the_port_before_start(
     monkeypatch.setenv(restart_handoff.handoff_progress.UPGRADE_PROGRESS_TOKEN_ENV, "tok-123")
 
     def run_tasks(handoff_args) -> None:
-        for step in ("check_runtime", "sync_dependencies", "install_pro", "build_webui", "finalize"):
+        for step in ("check_runtime", "sync_dependencies", "install_components", "build_webui", "finalize"):
             handoff_args.upgrade_step_callback(step)
 
     def start_service(argv, **kwargs):
@@ -1635,7 +1718,6 @@ def test_pro_component_restart_reports_steps_and_frees_the_port_before_start(
     monkeypatch.setattr(restart_handoff, "_stop_supervisor_before_restart", lambda **_kwargs: True)
     monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda _port: True)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", run_tasks)
-    monkeypatch.setattr(restart_handoff, "_report_pending_pro_bundle_install_receipt", lambda _args: None)
     monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
     monkeypatch.setattr(restart_handoff.subprocess, "run", start_service)
     monkeypatch.setattr(
@@ -1644,7 +1726,7 @@ def test_pro_component_restart_reports_steps_and_frees_the_port_before_start(
         lambda *_args, **_kwargs: pytest.fail("a web upgrade waits for the start command"),
     )
 
-    assert restart_handoff.run(_pro_component_restart_args(tmp_path)) == 0
+    assert restart_handoff.run(_component_restart_args(tmp_path)) == 0
 
     assert fake_responder.instances[0].endpoint == ("127.0.0.1", 5173)
     assert events == ["start", "stop", f"start:start:{tmp_path}"]
@@ -1652,7 +1734,7 @@ def test_pro_component_restart_reports_steps_and_frees_the_port_before_start(
         "stop",
         "check_runtime",
         "sync_dependencies",
-        "install_pro",
+        "install_components",
         "build_webui",
         "finalize",
         "start",
@@ -1660,7 +1742,7 @@ def test_pro_component_restart_reports_steps_and_frees_the_port_before_start(
     assert results[-1]["phase"] == "done"
 
 
-def test_pro_component_restart_failure_is_served_to_the_dialog(
+def test_component_restart_failure_is_served_to_the_dialog(
     monkeypatch,
     tmp_path: Path,
     fake_responder,
@@ -1669,8 +1751,8 @@ def test_pro_component_restart_failure_is_served_to_the_dialog(
     monkeypatch.setenv(restart_handoff.handoff_progress.UPGRADE_PROGRESS_TOKEN_ENV, "tok-123")
 
     def run_tasks(handoff_args) -> str:
-        handoff_args.upgrade_step_callback("install_pro")
-        return "Pro wheel install failed: hash mismatch"
+        handoff_args.upgrade_step_callback("install_components")
+        return "Component install failed (component.whl): hash mismatch"
 
     monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
     monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
@@ -1684,16 +1766,16 @@ def test_pro_component_restart_failure_is_served_to_the_dialog(
         lambda *_args, **_kwargs: pytest.fail("a failed install must not start the service"),
     )
 
-    assert restart_handoff.run(_pro_component_restart_args(tmp_path)) == 1
+    assert restart_handoff.run(_component_restart_args(tmp_path)) == 1
 
     assert results[-1]["phase"] == "failed"
     assert results[-1]["failed_stage"] == "install"
-    assert results[-1]["error"] == "Pro wheel install failed: hash mismatch"
-    assert _statuses(results[-1]["progress"])["install_pro"] == "failed"
+    assert results[-1]["error"] == "Component install failed (component.whl): hash mismatch"
+    assert _statuses(results[-1]["progress"])["install_components"] == "failed"
     assert fake_responder.instances[0].events == ["start", f"linger:{restart_handoff.PROGRESS_FAILURE_LINGER_SECONDS}"]
 
 
-def test_pro_component_restart_serves_a_start_command_that_exits_with_an_error(
+def test_component_restart_serves_a_start_command_that_exits_with_an_error(
     monkeypatch,
     tmp_path: Path,
     fake_responder,
@@ -1705,7 +1787,6 @@ def test_pro_component_restart_serves_a_start_command_that_exits_with_an_error(
     monkeypatch.setattr(restart_handoff, "_stop_supervisor_before_restart", lambda **_kwargs: True)
     monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda _port: True)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda _args: None)
-    monkeypatch.setattr(restart_handoff, "_report_pending_pro_bundle_install_receipt", lambda _args: None)
     monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
     monkeypatch.setattr(
         restart_handoff.subprocess,
@@ -1713,7 +1794,7 @@ def test_pro_component_restart_serves_a_start_command_that_exits_with_an_error(
         lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 1, b"", b"ImportError: cannot import name 'PolicyGateHook'"),
     )
 
-    assert restart_handoff.run(_pro_component_restart_args(tmp_path)) == 1
+    assert restart_handoff.run(_component_restart_args(tmp_path)) == 1
 
     assert results[-1]["phase"] == "failed"
     assert results[-1]["failed_stage"] == "start"

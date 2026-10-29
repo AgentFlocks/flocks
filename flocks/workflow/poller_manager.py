@@ -27,7 +27,9 @@ from flocks.workflow.execution_plan import build_workflow_execution_plan
 from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
 from flocks.workflow.health_notifications import WorkflowHealthNotifier
-from flocks.workflow.runner import RunWorkflowResult, run_workflow
+from flocks.workflow._async_runtime import register_primary_loop
+from flocks.workflow.ownership import abandon_execution, execution_cancelled
+from flocks.workflow.runner import RunWorkflowResult, _validate_lint_results, run_workflow
 from flocks.workflow.store import WorkflowStore
 from flocks.workflow.tool_context import (
     build_workflow_tool_context,
@@ -341,6 +343,9 @@ class WorkflowPollerManager:
 
         try:
             workflow_plan = build_workflow_execution_plan(Workflow.from_dict(workflow_json))
+            # Fail at (re)start instead of on every scheduled run when the
+            # definition can never execute (strict edge mapping / schema errors).
+            _validate_lint_results(workflow_plan.lint_results)
         except Exception as exc:
             err = f"workflow_plan_failed: {exc}"
             self._status[workflow_id] = {
@@ -515,6 +520,7 @@ class WorkflowPollerManager:
                 action_name="trigger:schedule",
             )
             failure_stage = "execution"
+            register_primary_loop()
             result = await asyncio.to_thread(
                 run_workflow,
                 workflow=workflow_json,
@@ -524,13 +530,14 @@ class WorkflowPollerManager:
                 trace=False,
                 execution_profile="high_frequency",
                 tool_context=tool_context,
-                cancel=cancel_event.is_set,
+                # Stopping the poller, or a cancel from the run's history page.
+                cancel=lambda: cancel_event.is_set() or execution_cancelled(exec_id),
                 on_step_complete=step_recorder.on_step_complete,
             )
             if not isinstance(result, RunWorkflowResult):
                 result = RunWorkflowResult(status="failed", error="invalid_run_result")
             status_value, error_message = resolve_execution_outcome(result)
-            if cancel_event.is_set() and status_value == "success":
+            if (cancel_event.is_set() or execution_cancelled(exec_id)) and status_value == "success":
                 status_value = "cancelled"
                 error_message = error_message or f"Run cancelled: run_id={result.run_id or exec_id}"
             duration_ms = _now_ms() - started_at_ms
@@ -611,6 +618,10 @@ class WorkflowPollerManager:
             self._status[workflow_id] = current
             log.warning("poller.run_failed", {"workflow_id": workflow_id, "error": str(exc)})
         finally:
+            # Keep caller cancellation distinct from stopping leftover worker
+            # threads at the end of every run; normal faults still need notices.
+            was_cancelled = cancel_event.is_set() or bool(exec_id and execution_cancelled(exec_id))
+            cancel_event.set()
             steps = step_recorder.take_steps()
             persistence_error = None
             try:
@@ -626,7 +637,7 @@ class WorkflowPollerManager:
                             "workflow_id": workflow_id, "exec_id": exec_id, "error": persistence_error,
                         })
                 current = self._status.get(workflow_id) or self._base_status(workflow_id)
-                if not cancel_event.is_set():
+                if not was_cancelled:
                     original_error = str(exec_data.get("errorMessage") or "")
                     notice_status = "persistence_error" if persistence_error else str(exec_data.get("status") or "error")
                     notice_error = (original_error + ("; " if original_error else "")
@@ -635,7 +646,7 @@ class WorkflowPollerManager:
                         await self._health_notifier.notify(
                             workflow_id, config, status=notice_status, error=notice_error,
                             stage="execution_record_persist" if persistence_error else failure_stage,
-                            tool_context=tool_context, cancelled=cancel_event.is_set(),
+                            tool_context=tool_context, cancelled=was_cancelled,
                         )
                     except Exception as exc:
                         # Preserve the original execution error and make any
@@ -648,6 +659,8 @@ class WorkflowPollerManager:
                 except Exception as exc:
                     log.warning("poller.tool_context_cleanup_failed", {"workflow_id": workflow_id, "error": str(exc)})
                 finally:
+                    if exec_id:
+                        await abandon_execution(exec_id)
                     cancel_events.discard(cancel_event)
                     if not cancel_events:
                         self._run_cancel_events.pop(workflow_id, None)

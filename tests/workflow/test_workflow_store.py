@@ -390,7 +390,9 @@ async def test_open_read_snapshot_cannot_poison_workflow_writes() -> None:
             {"id": "after", "workflowId": "wf-snapshot", "status": "running", "startedAt": 3}
         )
         await WorkflowStore.increment_stats("wf-snapshot", success=True, duration=1)
-        assert await WorkflowStore.trim_executions("wf-snapshot", keep=2) == ["before"]
+        # Only finished runs count toward retention; the newer running entry
+        # must survive without counting against the one retained completion.
+        assert await WorkflowStore.trim_executions("wf-snapshot", keep=1) == ["before"]
         assert not writer.in_transaction
         with pytest.raises(sqlite3.OperationalError, match="readonly"):
             await reader.execute("DELETE FROM workflow_executions")
@@ -784,3 +786,22 @@ async def test_parallel_writes_survive_repeated_close_and_reinitialization(round
             await WorkflowStore.init()
     await asyncio.wait_for(asyncio.gather(*(writer(i) for i in range(24)), closer()), timeout=10)
     assert await asyncio.gather(*(WorkflowStore.kv_get(f"stress-{i}") for i in range(24))) == [2] * 24
+
+
+@pytest.mark.asyncio
+async def test_trimming_history_keeps_a_run_that_is_still_going() -> None:
+    """A long run outlived by newer short ones keeps its record and its steps."""
+    await WorkflowStore.init()
+    await WorkflowStore.upsert_execution({"id": "long", "workflowId": "wf", "status": "running", "startedAt": 100})
+    await WorkflowStore.record_steps("long", [(1, {"node_id": "n1", "outputs": {}})])
+    for index in range(3):
+        await WorkflowStore.upsert_execution(
+            {"id": f"short-{index}", "workflowId": "wf", "status": "success", "startedAt": 200 + index}
+        )
+
+    trimmed = await WorkflowStore.trim_executions("wf", keep=2)
+
+    assert trimmed == ["short-0"]
+    assert {row["id"] for row in await WorkflowStore.list_executions("wf", limit=10)} == {"long", "short-1", "short-2"}
+    _, steps = await WorkflowStore.list_steps("long", offset=0, limit=10)
+    assert steps == 1

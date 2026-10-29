@@ -1,9 +1,21 @@
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ChevronUp, Crown, Gauge, LogOut, RefreshCw, Settings } from 'lucide-react';
+import { ChevronUp, Gauge, LogOut, RefreshCw, Settings, type LucideIcon } from 'lucide-react';
 import HeaderMenu, { MENU_ITEM_CLASS, MENU_SEPARATOR_CLASS } from './HeaderMenu';
 
 export const FLOCKS_LLM_USAGE_URL = 'https://portal.agentflocks.com';
+
+/** An entry an extension registry contributed to the menu. */
+export interface AccountMenuExtraItem {
+  id: string;
+  name: string;
+  href: string;
+  icon: LucideIcon;
+  /** Drawn as a framed call-to-action instead of a plain row. */
+  highlight?: boolean;
+  /** Short tag shown at the end of the row. */
+  badge?: string;
+}
 
 interface AccountMenuProps {
   collapsed?: boolean;
@@ -13,9 +25,8 @@ interface AccountMenuProps {
   initial: string;
   version: string | null;
   update?: { title: string; onClick: () => void } | null;
-  isAdmin: boolean;
-  isPro: boolean;
-  proProductName: string;
+  /** Extension entries placed in the account menu itself. */
+  extensionItems?: AccountMenuExtraItem[];
   onCheckUpdate: () => void;
   onLogout: () => void;
 }
@@ -23,7 +34,7 @@ interface AccountMenuProps {
 /** Account and version details share one footer entry and one menu. */
 export default function AccountMenu({
   collapsed = false, onNavigate, username, roleLabel, initial,
-  version, update, isAdmin, isPro, proProductName, onCheckUpdate, onLogout,
+  version, update, extensionItems = [], onCheckUpdate, onLogout,
 }: AccountMenuProps) {
   const { t } = useTranslation('nav');
   return (
@@ -47,7 +58,7 @@ export default function AccountMenu({
               {update && <span title={update.title} className="shrink-0 rounded bg-amber-50 px-1 py-0.5 text-[10px] font-semibold text-amber-600 dark:bg-amber-950 dark:text-amber-300">{t('newVersion')}</span>}
             </span>
           </span>}
-          {!collapsed && <ChevronUp className="absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 rotate-180 stroke-[1.75] text-ui-secondary transition-transform group-aria-expanded:rotate-0" />}
+          {!collapsed && <ChevronUp aria-hidden="true" className="absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 rotate-180 stroke-[1.75] text-ui-secondary transition-transform group-aria-expanded:rotate-0" />}
         </>
       )}
     >
@@ -61,37 +72,44 @@ export default function AccountMenu({
           <div className={MENU_SEPARATOR_CLASS} role="separator" />
           {/* A plain link: no trailing chevron, which would promise a submenu. */}
           <Link to="/settings/preferences" role="menuitem" onClick={() => { close(); onNavigate?.(); }} className={MENU_ITEM_CLASS}>
-            <Settings className="h-4 w-4 shrink-0 text-ui-secondary" />
+            <Settings aria-hidden="true" className="h-4 w-4 shrink-0 text-ui-secondary" />
             {t('systemConfiguration')}
           </Link>
           <a href={FLOCKS_LLM_USAGE_URL} target="_blank" rel="noopener noreferrer" role="menuitem" onClick={() => close()} className={MENU_ITEM_CLASS}>
-            <Gauge className="h-4 w-4 shrink-0 text-ui-secondary" />
+            <Gauge aria-hidden="true" className="h-4 w-4 shrink-0 text-ui-secondary" />
             <span className="min-w-0 flex-1">
               <span className="block truncate">{t('modelUsage')}</span>
               <span className="block text-[11px] text-ui-muted">{t('modelUsageHint')}</span>
             </span>
           </a>
-          {isAdmin && (
-            <Link to="/settings/flockspro" role="menuitem" onClick={() => { close(); onNavigate?.(); }}
-              className={`${MENU_ITEM_CLASS} mt-1 border border-ui-border bg-ui-subtle`}>
-              <Crown className="h-4 w-4 shrink-0 text-amber-500" />
-              <span className="min-w-0 flex-1 truncate">{isPro ? proProductName : t('upgradePro', { name: proProductName })}</span>
-              <span className="shrink-0 rounded bg-ui-action px-1.5 text-[10px] font-semibold leading-4 text-ui-on-action">PRO</span>
+          {extensionItems.map((item) => (
+            <Link
+              key={item.id}
+              to={item.href}
+              role="menuitem"
+              onClick={() => { close(); onNavigate?.(); }}
+              className={item.highlight ? `${MENU_ITEM_CLASS} mt-1 border border-ui-border bg-ui-subtle` : MENU_ITEM_CLASS}
+            >
+              <item.icon aria-hidden="true" className={`h-4 w-4 shrink-0 ${item.highlight ? 'text-amber-500' : 'text-ui-secondary'}`} />
+              <span className="min-w-0 flex-1 truncate">{item.name}</span>
+              {item.badge && (
+                <span className="shrink-0 rounded bg-ui-action px-1.5 text-[10px] font-semibold leading-4 text-ui-on-action">{item.badge}</span>
+              )}
             </Link>
-          )}
+          ))}
           <div className={MENU_SEPARATOR_CLASS} role="separator" />
           {update && (
             <button type="button" role="menuitem" className={MENU_ITEM_CLASS} onClick={() => { close(); update.onClick(); }}>
-              <RefreshCw className="h-4 w-4 shrink-0 text-amber-500" />
+              <RefreshCw aria-hidden="true" className="h-4 w-4 shrink-0 text-amber-500" />
               {update.title}
             </button>
           )}
           <button type="button" role="menuitem" className={MENU_ITEM_CLASS} onClick={() => { close(); onCheckUpdate(); }}>
-            <RefreshCw className="h-4 w-4 shrink-0 text-ui-secondary" />
+            <RefreshCw aria-hidden="true" className="h-4 w-4 shrink-0 text-ui-secondary" />
             {t('checkUpdate')}
           </button>
           <button type="button" role="menuitem" onClick={() => { close(); onLogout(); }} className={MENU_ITEM_CLASS}>
-            <LogOut className="h-4 w-4 shrink-0 text-ui-secondary" />
+            <LogOut aria-hidden="true" className="h-4 w-4 shrink-0 text-ui-secondary" />
             {t('logout')}
           </button>
         </>

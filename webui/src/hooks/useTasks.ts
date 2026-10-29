@@ -234,14 +234,19 @@ function useAdaptiveTaskPolling<T extends { status: string }>(
       return hasActive ? Math.min(pollInterval, 4000) : pollInterval;
     };
 
+    let cancelled = false;
     let timerId: number;
     const tick = async () => {
       await resource.fetch({ silent: true });
+      if (cancelled) return;
       timerId = window.setTimeout(tick, scheduleDelay());
     };
 
     timerId = window.setTimeout(tick, scheduleDelay());
-    return () => window.clearTimeout(timerId);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerId);
+    };
   }, [activeStatuses, pollInterval, resource]);
 }
 

@@ -20,10 +20,12 @@ from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal
 from fastapi import APIRouter, Body, HTTPException, Request, status, Query
 from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic_core import PydanticCustomError
 import uuid
 
 from flocks.workflow.models import Workflow, Node, Edge
 from flocks.workflow.service_port import resolve_service_port
+from flocks.workflow._async_runtime import register_primary_loop
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
 from flocks.workflow.center import (
     WorkflowCenterError,
@@ -39,17 +41,22 @@ from flocks.workflow.center import (
     stop_workflow_service,
 )
 from flocks.session.recorder import Recorder
+from flocks.session.session import SessionAgentMismatchError
 from flocks.workflow.workflow_lint import lint_workflow
 from flocks.workflow.validation import validate_workflow_python
 from flocks.workflow.compiler import compile_workflow
 from flocks.workflow.fs_store import (
     find_workspace_root as _find_workspace_root,
+    is_safe_workflow_id as _is_safe_workflow_id,
     read_workflow_dir as _read_workflow_dir,
     read_workflow_from_fs as shared_read_workflow_from_fs,
     workflow_scan_dirs as _all_scan_dirs,
     normalize_workflow_group,
     patch_workflow_metadata,
     resolve_workflow_from_fs,
+    is_managed_workflow,
+    overlay_managed_workflows,
+    refuse_managed_workflow_write,
     is_system_workflow_definition,
 )
 from flocks.ingest.kafka.constants import WORKFLOW_KAFKA_CONFIG_PREFIX
@@ -70,6 +77,7 @@ from flocks.workflow.execution_store import (
 )
 from flocks.workflow.io import load_workflow, dump_workflow
 from flocks.workflow.store import WorkflowStore
+from flocks.workflow.ownership import abandon_execution, execution_cancelled
 from flocks.workflow.tool_context import build_workflow_tool_context
 from flocks.workflow.tools import get_tool_registry
 from flocks.workflow.visibility import is_hidden_workflow_data
@@ -84,7 +92,7 @@ from flocks.workflow.triggers import (
     workflow_trigger_definitions_from_json,
 )
 from flocks.workflow.triggers.models import TriggerType
-from flocks.workflow.triggers.dispatcher import evaluate_trigger_filter
+from flocks.workflow.triggers.dispatcher import TriggerDispatchError, evaluate_trigger_filter
 from flocks.workflow.triggers.runtime import default_runtime as default_trigger_runtime
 from flocks.workflow.triggers.compat import (
     kafka_trigger_to_legacy_config,
@@ -97,9 +105,11 @@ from flocks.workflow.triggers.compat import (
 from flocks.config.config import Config
 from flocks.hooks.execution import ExecutionStopped, current_execution_context
 from flocks.storage.storage import Storage
+from flocks.server.auth import get_optional_user
 from flocks.server.routes.event import publish_event
 from flocks.tool import ToolContext
 from flocks.utils.log import Log
+from flocks.config.config import get_user_plugins_root
 
 router = APIRouter()
 webhook_router = APIRouter()
@@ -162,6 +172,13 @@ _active_workflow_executions: Dict[str, ActiveWorkflowExecution] = {}
 # =============================================================================
 
 
+def _require_visible_workflow_name(value: Optional[str]) -> Optional[str]:
+    """A workflow name must show something: spaces or tabs alone are no name."""
+    if value is not None and not value.strip():
+        raise PydanticCustomError("workflow_name_blank", "Workflow name must not be blank")
+    return value
+
+
 class WorkflowCreateRequest(BaseModel):
     """Request to create a workflow"""
 
@@ -170,7 +187,8 @@ class WorkflowCreateRequest(BaseModel):
     group: Optional[str] = None
     _validate_group = field_validator("group", mode="before")(normalize_workflow_group)
 
-    name: str = Field(..., description="Workflow name")
+    name: str = Field(..., min_length=1, description="Workflow name")
+    _validate_name = field_validator("name")(_require_visible_workflow_name)
     name_i18n: Optional[Dict[str, str]] = Field(None, alias="nameI18n", description="Localized workflow display names")
     description: Optional[str] = Field(None, description="Workflow description")
     category: Optional[str] = Field("default", description="Workflow category")
@@ -191,6 +209,7 @@ class WorkflowUpdateRequest(BaseModel):
     _validate_group = field_validator("group", mode="before")(normalize_workflow_group)
 
     name: Optional[str] = Field(None, description="Workflow name")
+    _validate_name = field_validator("name")(_require_visible_workflow_name)
     name_i18n: Optional[Dict[str, str]] = Field(None, alias="nameI18n", description="Localized workflow display names")
     description: Optional[str] = Field(None, description="Workflow description")
     category: Optional[str] = Field(None, description="Workflow category")
@@ -250,7 +269,8 @@ class WorkflowResponse(BaseModel):
     category: str = Field("default", description="Category")
     workflowJson: Dict[str, Any] = Field(..., description="Workflow JSON")
     status: str = Field("draft", description="Status")
-    source: Optional[str] = Field(None, description="Storage location: 'project' or 'global'")
+    source: Optional[str] = Field(None, description="Storage location: 'project', 'global' or 'managed'")
+    managed: bool = Field(False, description="Served by the deployment's content source; read-only")
     createdBy: Optional[str] = Field(None, description="Creator")
     createdAt: int = Field(..., description="Created timestamp (ms)")
     updatedAt: int = Field(..., description="Updated timestamp (ms)")
@@ -370,8 +390,8 @@ def _workflow_dir(workflow_id: str) -> Path:
 
 
 def _global_workflow_dir(workflow_id: str) -> Path:
-    """Return the global-level directory for a workflow (~/.flocks/plugins/workflows/<id>/)."""
-    return Path.home() / ".flocks" / "plugins" / "workflows" / workflow_id
+    """Return the global-level directory for a workflow (<flocks root>/plugins/workflows/<id>/)."""
+    return get_user_plugins_root() / "workflows" / workflow_id
 
 
 def _existing_workflow_dir(workflow_id: str) -> Optional[Path]:
@@ -397,6 +417,15 @@ def _workflow_config_dir(workflow_id: str, workflow_data: Optional[Dict[str, Any
 def _workflow_integration_config_key(workflow_id: str) -> str:
     """Storage key for the publish/integration template used by the UI."""
     return f"{_WORKFLOW_INTEGRATION_CONFIG_PREFIX}{workflow_id}"
+
+
+_MANAGED_WORKFLOW_DETAIL = "This workflow is managed by the deployment and is read-only"
+
+
+def _refuse_managed_workflow_change(workflow_id: str) -> None:
+    """A managed workflow's definition is the deployment's: no edit or delete here."""
+    if is_managed_workflow(workflow_id):
+        raise HTTPException(status_code=403, detail=_MANAGED_WORKFLOW_DETAIL)
 
 
 def _read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:
@@ -451,6 +480,7 @@ def _write_workflow_to_fs(
     """
     if create_only and target_dir is None:
         raise ValueError("Create-only migration requires an explicit destination")
+    refuse_managed_workflow_write(workflow_id)
     wf_dir = target_dir or _existing_workflow_dir(workflow_id) or (
         _global_workflow_dir(workflow_id) if global_store else _workflow_dir(workflow_id)
     )
@@ -616,6 +646,10 @@ def _delete_workflow_from_fs(workflow_id: str) -> bool:
     Returns True if at least one directory was deleted.
     """
     deleted = False
+    if not _is_safe_workflow_id(workflow_id):
+        # ``<root>/..`` would be the parent of the workflow root; never rmtree it.
+        log.warning("workflow.fs.delete_rejected", {"id": workflow_id, "reason": "unsafe_workflow_id"})
+        return False
     for root, _source in _all_scan_dirs():
         wf_dir = root / workflow_id
         if wf_dir.is_dir():
@@ -717,7 +751,17 @@ def _list_workflows_from_fs() -> List[Dict[str, Any]]:
     by_id: Dict[str, Dict[str, Any]] = {}
     for scan_path, source in _all_scan_dirs():
         by_id.update(_scan_workflow_base_dir(scan_path, source))
-    return list(by_id.values())
+    # Workflows the deployment manages replace local ones of the same id.
+    overlay_managed_workflows(by_id)
+    return [data for data in by_id.values() if not is_hidden_workflow_data(data)]
+
+
+_INTERRUPTED_EXECUTION_MESSAGE = "Execution interrupted: the worker stopped or lost execution ownership"
+
+
+async def mark_interrupted_executions() -> int:
+    """Finalize runs without a live owner; a restart is only one possible cause."""
+    return await WorkflowStore.recover_expired_executions(_INTERRUPTED_EXECUTION_MESSAGE)
 
 
 async def sync_workflows_from_filesystem() -> int:
@@ -726,8 +770,13 @@ async def sync_workflows_from_filesystem() -> int:
     The filesystem is the source of truth for workflow definitions. Startup only
     needs to migrate any legacy Storage-only records to disk and report how many
     workflows are currently discoverable from the configured workflow roots.
+    Execution records orphaned by the previous process are finalized here too.
     """
+    # Workflow threads hand hook-bound coroutines back to this (the server's)
+    # loop; see flocks.workflow._async_runtime.register_primary_loop.
+    register_primary_loop()
     await _migrate_storage_to_filesystem()
+    await mark_interrupted_executions()
     return len(_list_workflows_from_fs())
 
 
@@ -752,7 +801,8 @@ async def _migrate_storage_to_filesystem() -> None:
             if "/" in remainder:
                 continue
             workflow_id = remainder
-            if not workflow_id:
+            if not workflow_id or is_managed_workflow(workflow_id):
+                # A managed id never gets a local definition.
                 continue
 
             def already_on_disk() -> bool:
@@ -852,7 +902,39 @@ async def _get_workflow_trigger_defs(
 
 
 def _trigger_to_api_dict(trigger: TriggerDefinition) -> Dict[str, Any]:
-    return trigger.model_dump(mode="json", by_alias=True, exclude_none=True)
+    """Serialize a trigger for API responses with webhook secrets redacted.
+
+    ``auth.apiKey`` is write-only: responses carry ``apiKeyConfigured`` instead
+    (the same shape ``/config`` already uses), and saving a trigger without an
+    ``apiKey`` keeps the stored one (see ``_merge_trigger_secrets``).
+    """
+    payload = trigger.model_dump(mode="json", by_alias=True, exclude_none=True)
+    auth = payload.get("auth")
+    if isinstance(auth, dict) and "apiKey" in auth:
+        auth = dict(auth)
+        auth.pop("apiKey", None)
+        auth["apiKeyConfigured"] = True
+        payload["auth"] = auth
+    return payload
+
+
+def _merge_trigger_secrets(
+    trigger: TriggerDefinition,
+    existing: Optional[TriggerDefinition],
+) -> TriggerDefinition:
+    """Carry a stored webhook apiKey over when a save omits it (write-only secret)."""
+    auth = trigger.auth
+    if auth is None:
+        return trigger
+    auth_payload = auth.model_dump(mode="json", by_alias=True, exclude_none=True)
+    auth_payload.pop("apiKeyConfigured", None)
+    if not auth_payload.get("apiKey") and existing is not None and existing.auth is not None:
+        existing_key = existing.auth.apiKey
+        if existing_key and _webhook_auth_type(existing) == _webhook_auth_type(trigger):
+            auth_payload["apiKey"] = existing_key
+    from flocks.workflow.triggers.models import TriggerAuth
+
+    return trigger.model_copy(update={"auth": TriggerAuth.model_validate(auth_payload)})
 
 
 def _drop_none_values(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1340,6 +1422,10 @@ async def _run_workflow_execution_task(
     execution_error: Optional[Exception] = None
     try:
         try:
+            # The worker thread's tool calls must hop back onto this server
+            # loop (channels bound to it stay usable); see
+            # flocks.workflow._async_runtime.register_primary_loop.
+            register_primary_loop()
             result = await asyncio.to_thread(
                 run_workflow,
                 workflow=workflow_json,
@@ -1348,7 +1434,7 @@ async def _run_workflow_execution_task(
                 trace=req.trace,
                 on_step_start=_on_step_start,
                 on_step_complete=_on_step_complete,
-                cancel=cancel_event.is_set,
+                cancel=lambda: cancel_event.is_set() or execution_cancelled(exec_id),
                 tool_context=tool_context,
             )
         except Exception as exc:
@@ -1395,7 +1481,7 @@ async def _run_workflow_execution_task(
                     "status": "cancelled" if cancel_event.is_set() else "error",
                     "finishedAt": int(time.time() * 1000),
                     "duration": duration,
-                    "errorMessage": str(execution_error),
+                    "errorMessage": f"{type(execution_error).__name__}: {execution_error}",
                     "executionLog": final_history,
                     "stepCount": final_steps,
                     "currentPhase": "cancelled" if cancel_event.is_set() else "error",
@@ -1431,6 +1517,8 @@ async def _run_workflow_execution_task(
                 },
             )
     finally:
+        cancel_event.set()
+        await abandon_execution(exec_id)
         _active_workflow_executions.pop(exec_id, None)
 
 
@@ -1746,6 +1834,7 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
     a Markdown draft never creates an executable workflow.json.
     """
     try:
+        _refuse_managed_workflow_change(workflow_id)
         selected = resolve_workflow_from_fs(workflow_id)
         if selected is None:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
@@ -1866,6 +1955,7 @@ async def delete_workflow(workflow_id: str):
         data = _read_workflow_from_fs(workflow_id)
         if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+        _refuse_managed_workflow_change(workflow_id)
 
         # Stop runtime resources before removing the filesystem source of truth.
         await _stop_workflow_runtime_resources(workflow_id)
@@ -1904,6 +1994,8 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
 
     Runs the workflow with provided inputs and returns execution results.
     """
+    exec_id: Optional[str] = None
+    dispatched = False
     try:
         data = _read_workflow_from_fs(workflow_id)
         if not data:
@@ -1926,6 +2018,7 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
             workflow_id,
             input_params=req.inputs or {},
         )
+        exec_id = str(exec_data["id"])
         if req.session_id or req.message_id:
             exec_data.update(
                 {
@@ -1936,7 +2029,6 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
                 }
             )
             await WorkflowStore.upsert_execution(compact_execution_summary(exec_data))
-        exec_id = str(exec_data["id"])
         progress_writer = ExecutionProgressWriter(exec_data)
 
         cancel_event = threading.Event()
@@ -1965,8 +2057,12 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
         # map from growing forever when tasks are abandoned.
         def _cleanup_active(_t: asyncio.Task, _eid: str = exec_id) -> None:
             _active_workflow_executions.pop(_eid, None)
+            # A task cancelled before its first step never enters the runner's
+            # finally block: end its record instead of leaving it running.
+            asyncio.create_task(abandon_execution(_eid), name=f"workflow-release-{_eid}")
 
         task.add_done_callback(_cleanup_active)
+        dispatched = True
 
         log.info(
             "workflow.execution.started",
@@ -1978,9 +2074,15 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
         return WorkflowExecutionResponse(**exec_data)
     except HTTPException:
         raise
+    except SessionAgentMismatchError as exc:
+        # The requested session is dedicated to another agent.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as e:
         log.error("workflow.run.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to run workflow: {str(e)}")
+    finally:
+        if exec_id is not None and not dispatched:
+            await abandon_execution(exec_id)
 
 
 @router.post("/workflow/{workflow_id}/history/{exec_id}/cancel")
@@ -1995,6 +2097,11 @@ async def cancel_workflow_execution(workflow_id: str, exec_id: str):
 
         active = _active_workflow_executions.get(exec_id)
         if active is None:
+            if exec_data.get("status") == "running" and await WorkflowStore.request_execution_cancel(exec_id):
+                return {
+                    "status": "accepted", "message": "Cancellation sent to the execution owner",
+                    "executionId": exec_id,
+                }
             return {
                 "status": "ignored",
                 "message": f"Execution {exec_id} is already {exec_data.get('status', 'completed')}",
@@ -2186,6 +2293,9 @@ async def workflow_center_invoke(workflow_id: str, req: WorkflowCenterInvokeRequ
         )
         await _record_execution_result(workflow_id, exec_id, exec_data)
         return result
+    except asyncio.CancelledError:
+        await abandon_execution(exec_id)
+        raise
     except (WorkflowNotFoundError, WorkflowNotPublishedError) as e:
         duration = time.time() - started
         exec_data.update(
@@ -2389,9 +2499,27 @@ async def import_workflow(workflow_json: Dict[str, Any]):
     """
     try:
         try:
-            Workflow.from_dict(workflow_json)
+            workflow_model = Workflow.from_dict(workflow_json)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid workflow JSON: {str(e)}")
+        strict_mapping_errors = _strict_edge_mapping_lint_errors(workflow_model)
+        if strict_mapping_errors:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Workflow strict edge mapping failed: "
+                    f"{strict_mapping_errors[:5]}"
+                ),
+            )
+        schema_errors = _schema_lint_errors(workflow_model)
+        if schema_errors:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Workflow schema lint failed: "
+                    f"{schema_errors[:5]}"
+                ),
+            )
 
         workflow_json = dict(workflow_json)
         metadata = dict(workflow_json.get("metadata") or {})
@@ -2400,7 +2528,9 @@ async def import_workflow(workflow_json: Dict[str, Any]):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         workflow_json["metadata"] = metadata
-        name = workflow_json.get("name", "Imported Workflow")
+        raw_name = workflow_json.get("name")
+        # Same rule as create: a blank name falls back to the default one.
+        name = raw_name if isinstance(raw_name, str) and raw_name.strip() else "Imported Workflow"
         description = metadata.get("description")
         category = metadata.get("category", "default")
 
@@ -2497,6 +2627,8 @@ def _kafka_config_key(workflow_id: str) -> str:
 
 async def _prepare_workflow_api_registry(workflow_id: str) -> tuple[Dict[str, Any], int]:
     """Write the current workflow snapshot to the workflow center registry."""
+    # The snapshot is the definition on disk: never for a managed workflow.
+    refuse_managed_workflow_write(workflow_id)
     data = _read_workflow_from_fs(workflow_id)
     if not data:
         raise WorkflowNotFoundError(f"Workflow not found: {workflow_id}")
@@ -2623,6 +2755,7 @@ async def run_workflow_api_health_monitor() -> None:
     """Continuously maintain the health snapshot consumed by workflow cards."""
     while True:
         try:
+            await mark_interrupted_executions()
             await refresh_workflow_api_health_cache()
         except asyncio.CancelledError:
             raise
@@ -2905,11 +3038,16 @@ class SyslogConfigRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     enabled: bool = False
-    protocol: str = "udp"
+    protocol: Literal["udp", "tcp"] = "udp"
     host: str = "0.0.0.0"
     port: int = Field(5140, ge=1, le=65535, description="Listener port (1-65535)")
     msg_format: str = Field("auto", alias="format")
     input_key: str = Field("syslog_message", alias="inputKey")
+
+    @field_validator("protocol", mode="before")
+    @classmethod
+    def _normalize_protocol(cls, value: Any) -> Any:
+        return value.strip().lower() if isinstance(value, str) else value
 
 
 @router.post("/workflow/{workflow_id}/publish")
@@ -2925,6 +3063,7 @@ async def publish_workflow_as_api(
     """
     existing_service: Dict[str, Any] = {}
     try:
+        _refuse_managed_workflow_change(workflow_id)
         data, now_ms = await _prepare_workflow_api_registry(workflow_id)
 
         # Preserve existing API key across re-publishes so callers don't break.
@@ -3011,15 +3150,36 @@ async def unpublish_workflow_api(workflow_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to stop workflow service: {str(e)}")
 
 
+def _redact_service_api_key_for_user(
+    service: Optional[Dict[str, Any]],
+    request: Optional[Request],
+) -> Optional[Dict[str, Any]]:
+    """Only administrators (incl. the API-token service identity) see the plaintext key.
+
+    ``request`` is ``None`` for in-process callers (tests / internal reuse), which
+    keep the full record.
+    """
+    if request is None or not isinstance(service, dict) or not service.get("apiKey"):
+        return service
+    user = get_optional_user(request)
+    if user is not None and user.role == "admin":
+        return service
+    redacted = dict(service)
+    redacted.pop("apiKey", None)
+    redacted["apiKeyConfigured"] = True
+    return redacted
+
+
 @router.get("/workflow/{workflow_id}/service")
-async def get_workflow_service(workflow_id: str):
+async def get_workflow_service(workflow_id: str, request: Request = None):
     """
     Get published API service info for a workflow.
     Returns null if not published.
     """
     try:
         service = await WorkflowStore.kv_get(_api_service_key(workflow_id))
-        return await _normalize_listed_api_service(_api_service_key(workflow_id), service)
+        normalized = await _normalize_listed_api_service(_api_service_key(workflow_id), service)
+        return _redact_service_api_key_for_user(normalized, request)
     except Exception as e:
         log.error("workflow.service.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get service info: {str(e)}")
@@ -3176,7 +3336,7 @@ async def sync_workflow_config(workflow_id: str):
 
 
 @router.get("/workflow-services")
-async def list_workflow_services():
+async def list_workflow_services(request: Request = None):
     """
     List all published workflow API services.
     """
@@ -3187,7 +3347,7 @@ async def list_workflow_services():
             entry = await WorkflowStore.kv_get(key)
             service = await _normalize_listed_api_service(key, entry)
             if service:
-                services.append(service)
+                services.append(_redact_service_api_key_for_user(service, request))
         services.sort(key=lambda s: s.get("publishedAt", 0), reverse=True)
         return services
     except Exception as e:
@@ -3251,10 +3411,34 @@ def _validate_webhook_trigger_auth(trigger: TriggerDefinition) -> None:
         raise HTTPException(status_code=400, detail="Webhook hmac auth requires secretRef.")
 
 
+def _validate_cron_expression(cron_expression: str) -> None:
+    """Reject cron strings croniter cannot schedule (5/6/7 columns accepted)."""
+    from croniter import croniter
+
+    try:
+        if not croniter.is_valid(cron_expression):
+            raise ValueError("invalid cron expression")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid cron expression: {cron_expression!r} ({exc})")
+
+
+def _validate_schedule_trigger_source(trigger: TriggerDefinition) -> None:
+    if trigger.type != "schedule":
+        return
+    source = trigger.source if isinstance(trigger.source, dict) else {}
+    cron_expression = str(source.get("cron") or source.get("cronExpression") or "").strip()
+    mode = str(source.get("mode") or "").strip().lower()
+    if cron_expression:
+        _validate_cron_expression(cron_expression)
+    elif mode == "cron":
+        raise HTTPException(status_code=400, detail="Schedule trigger with mode 'cron' requires source.cron")
+
+
 def _validate_trigger_definitions(triggers: List[TriggerDefinition]) -> None:
     _validate_trigger_type_constraints(triggers)
     for trigger in triggers:
         _validate_webhook_trigger_auth(trigger)
+        _validate_schedule_trigger_source(trigger)
 
 
 @router.get("/workflow/{workflow_id}/triggers")
@@ -3283,10 +3467,13 @@ async def list_workflow_triggers(workflow_id: str):
 @router.post("/workflow/{workflow_id}/triggers", response_model=TriggerSaveResponse)
 async def create_workflow_trigger(workflow_id: str, trigger: TriggerDefinition):
     """Create or replace a unified trigger definition."""
+    # Triggers live in the definition, which a managed workflow does not let us rewrite.
+    _refuse_managed_workflow_change(workflow_id)
     data = _read_workflow_from_fs(workflow_id)
     if not data:
         raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
     existing = await _get_workflow_trigger_defs(workflow_id, data)
+    trigger = _merge_trigger_secrets(trigger, next((item for item in existing if item.id == trigger.id), None))
     updated = _replace_or_append_trigger(existing, trigger)
     _validate_trigger_definitions(updated)
     persisted = await _persist_workflow_triggers(workflow_id, data, updated)
@@ -3298,12 +3485,14 @@ async def create_workflow_trigger(workflow_id: str, trigger: TriggerDefinition):
 @router.put("/workflow/{workflow_id}/triggers/{trigger_id}", response_model=TriggerSaveResponse)
 async def update_workflow_trigger(workflow_id: str, trigger_id: str, trigger: TriggerDefinition):
     """Update a unified trigger definition."""
+    # Triggers live in the definition, which a managed workflow does not let us rewrite.
+    _refuse_managed_workflow_change(workflow_id)
     data = _read_workflow_from_fs(workflow_id)
     if not data:
         raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
     existing = await _get_workflow_trigger_defs(workflow_id, data)
-    _find_trigger_or_404(existing, trigger_id)
-    updated_trigger = trigger.model_copy(update={"id": trigger_id})
+    current = _find_trigger_or_404(existing, trigger_id)
+    updated_trigger = _merge_trigger_secrets(trigger.model_copy(update={"id": trigger_id}), current)
     updated = _replace_or_append_trigger(existing, updated_trigger)
     _validate_trigger_definitions(updated)
     persisted = await _persist_workflow_triggers(workflow_id, data, updated)
@@ -3315,6 +3504,8 @@ async def update_workflow_trigger(workflow_id: str, trigger_id: str, trigger: Tr
 @router.delete("/workflow/{workflow_id}/triggers/{trigger_id}")
 async def delete_workflow_trigger(workflow_id: str, trigger_id: str):
     """Delete a unified trigger definition."""
+    # Triggers live in the definition, which a managed workflow does not let us rewrite.
+    _refuse_managed_workflow_change(workflow_id)
     data = _read_workflow_from_fs(workflow_id)
     if not data:
         raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
@@ -3322,8 +3513,10 @@ async def delete_workflow_trigger(workflow_id: str, trigger_id: str):
     trigger = _find_trigger_or_404(existing, trigger_id)
     remaining = [item for item in existing if item.id != trigger_id]
     persisted = await _persist_workflow_triggers(workflow_id, data, remaining)
-    await _remove_legacy_trigger_state(workflow_id, trigger)
     await default_trigger_runtime.restart_workflow(workflow_id, persisted.get("workflowJson") or {})
+    # After the restart re-synced legacy configs, drop the deleted trigger's
+    # legacy record so ``/poller-config`` etc. read back as unconfigured.
+    await _remove_legacy_trigger_state(workflow_id, trigger)
     return {"ok": True, "triggerId": trigger_id}
 
 
@@ -3357,11 +3550,15 @@ async def preview_workflow_trigger_mapping(
         path_params=payload.path_params,
     )
     matched, filter_error = evaluate_trigger_filter(trigger, event)
+    try:
+        mapped_inputs = preview_trigger_mapping(trigger, event)
+    except TriggerDispatchError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return TriggerPreviewResponse(
         triggerId=trigger.id or trigger_id,
         triggerType=trigger.type,
         matched=matched,
-        inputs=preview_trigger_mapping(trigger, event),
+        inputs=mapped_inputs,
         filterError=filter_error,
     )
 
@@ -3374,7 +3571,7 @@ async def _dispatch_trigger_event(
     event: TriggerEvent,
     verified_auth: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
-    """Dispatch a trigger event, answering an extension's refusal with 403."""
+    """Dispatch a trigger event: 400 for a bad filter, 403 when an extension refuses."""
     try:
         return await default_trigger_runtime.dispatch_event(
             workflow_id=workflow_id,
@@ -3383,10 +3580,12 @@ async def _dispatch_trigger_event(
             event=event,
             verified_auth=verified_auth,
         )
+    except TriggerDispatchError as exc:
+        raise HTTPException(status_code=400, detail=f"Trigger filter error: {exc}") from exc
     except ExecutionStopped as exc:
-        # The message is the reason the extension gave (for example Flocks
-        # Pro's "headless_evidence_missing"); pass it on so the caller does
-        # not have to read the server log to learn why the run was refused.
+        # The message is the reason the extension gave (for example an
+        # ingress policy's "headless_evidence_missing"); pass it on so the
+        # caller does not have to read the server log to learn why.
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Workflow trigger stopped by extension: {exc}",
@@ -3429,6 +3628,63 @@ async def test_workflow_trigger(
 @router.get("/workflow-trigger-plugins")
 async def list_workflow_trigger_plugins():
     return default_trigger_runtime.list_plugin_specs()
+
+
+_WEBHOOK_REPLAY_WINDOW_ENV = "FLOCKS_WEBHOOK_REPLAY_WINDOW_S"
+_WEBHOOK_REPLAY_WINDOW_DEFAULT_S = 300.0
+# Headers an external system may use to give a delivery a stable identity.
+_WEBHOOK_DELIVERY_ID_HEADERS = ("x-flocks-delivery-id", "x-idempotency-key", "idempotency-key", "x-delivery-id")
+
+
+def _webhook_replay_window_s() -> float:
+    raw = os.getenv(_WEBHOOK_REPLAY_WINDOW_ENV, "").strip()
+    if not raw:
+        return _WEBHOOK_REPLAY_WINDOW_DEFAULT_S
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _WEBHOOK_REPLAY_WINDOW_DEFAULT_S
+
+
+def _webhook_client_delivery_id(headers: Dict[str, str]) -> Optional[str]:
+    for name in _WEBHOOK_DELIVERY_ID_HEADERS:
+        value = headers.get(name)
+        if value and value.strip():
+            return value.strip()[:200]
+    return None
+
+
+def _webhook_delivery_key(workflow_id: str, trigger_id: str, client_delivery_id: Optional[str], raw_body: bytes) -> str:
+    if client_delivery_id:
+        return f"{workflow_id}/{trigger_id}/id:{client_delivery_id}"
+    return f"{workflow_id}/{trigger_id}/body:{hashlib.sha256(raw_body).hexdigest()}"
+
+
+async def _register_webhook_delivery(key: str, delivery_id: str, claim_token: str) -> Optional[str]:
+    """Claim a delivery; return the first deliveryId when *key* is a replay.
+
+    Replays are keyed per (workflow, trigger) by a client-supplied delivery id,
+    else by the body digest, within ``FLOCKS_WEBHOOK_REPLAY_WINDOW_S`` seconds
+    (default 300; ``0`` disables).  Whether one is recorded is up to the store
+    (WorkflowStore.claim_webhook_delivery).  *claim_token* names this
+    request's claim, so only this request can release it.
+    """
+    window = _webhook_replay_window_s()
+    if window <= 0:
+        return None
+    return await WorkflowStore.claim_webhook_delivery(key, delivery_id, window, claim_token)
+
+
+def _dispatch_stopped_before_run(exc: BaseException) -> bool:
+    """Whether a failed trigger dispatch ended before the workflow could run.
+
+    A filter error, or an extension refusing the event in ``ingress.before``;
+    the 400/403 raised for them carries the original as its cause.
+    """
+    cause = exc.__cause__ if isinstance(exc, HTTPException) else exc
+    if isinstance(cause, TriggerDispatchError):
+        return True
+    return isinstance(cause, ExecutionStopped) and cause.stop_stage == "ingress.before"
 
 
 def _resolve_trigger_secret(secret_ref: Optional[str]) -> Optional[str]:
@@ -3477,7 +3733,7 @@ def _authorize_webhook_trigger(
             raise HTTPException(status_code=401, detail="Webhook trigger API key is not configured")
         header_name = (auth.headerName or "x-api-key").lower()
         actual = headers.get(header_name) or query.get(auth.queryParam or "api_key")
-        if actual != expected:
+        if not actual or not hmac.compare_digest(str(actual).encode("utf-8"), str(expected).encode("utf-8")):
             raise HTTPException(status_code=401, detail="Invalid webhook API key")
         return {"auth_scheme": "api_key", "api_key_id": _webhook_secret_fingerprint(expected)}
     if auth_type == "hmac":
@@ -3524,6 +3780,7 @@ async def invoke_workflow_webhook_trigger(
     except Exception:
         body = raw_body.decode("utf-8", errors="replace")
 
+    client_delivery_id = _webhook_client_delivery_id(headers)
     event = build_trigger_event(
         workflow_id=workflow_id,
         trigger=trigger,
@@ -3533,16 +3790,60 @@ async def invoke_workflow_webhook_trigger(
         path_params={"workflow_id": workflow_id, "trigger_id": trigger_id},
         raw=body,
         source=(trigger.source or {}).get("path") or str(request.url.path),
+        delivery_id=client_delivery_id,
     )
-    result = await _dispatch_trigger_event(
-        workflow_id=workflow_id,
-        workflow_json=workflow_json,
-        trigger=trigger,
-        event=event,
-        verified_auth=verified_auth,
-    )
+    delivery_key = _webhook_delivery_key(workflow_id, trigger_id, client_delivery_id, raw_body)
+    recorded_delivery_id = event.source.deliveryId or ""
+    claim_token = uuid.uuid4().hex  # secret-guard: allow 误报：uuid4 生成的 claim token
+    original_delivery_id = await _register_webhook_delivery(delivery_key, recorded_delivery_id, claim_token)
+    if original_delivery_id is not None:
+        log.info(
+            "workflow.webhook.duplicate_delivery",
+            {"id": workflow_id, "trigger_id": trigger_id, "delivery_id": original_delivery_id},
+        )
+        return {
+            "ok": True,
+            "duplicate": True,
+            "matched": False,
+            "executed": False,
+            "inputs": {},
+            "deliveryId": original_delivery_id,
+        }
+    from flocks.workflow.execution_store import for_webhook_delivery
+
+    try:
+        if _webhook_replay_window_s() > 0:
+            # The run this delivery starts belongs to its claim.
+            with for_webhook_delivery(delivery_key, claim_token):
+                result = await _dispatch_trigger_event(
+                    workflow_id=workflow_id,
+                    workflow_json=workflow_json,
+                    trigger=trigger,
+                    event=event,
+                    verified_auth=verified_auth,
+                )
+        else:
+            result = await _dispatch_trigger_event(
+                workflow_id=workflow_id,
+                workflow_json=workflow_json,
+                trigger=trigger,
+                event=event,
+                verified_auth=verified_auth,
+            )
+    except BaseException as exc:
+        # A delivery refused before the workflow ran may be sent again (say,
+        # once the operator fixed what the 403 named) and must not then be
+        # dropped as a duplicate. Any other failure may follow side effects,
+        # so it stays recorded and a retry is answered as a duplicate.
+        if _dispatch_stopped_before_run(exc) and _webhook_replay_window_s() > 0:
+            try:
+                await WorkflowStore.release_webhook_delivery(delivery_key, claim_token)
+            except Exception as release_error:
+                log.warning("workflow.webhook.release_failed", {"id": workflow_id, "error": str(release_error)})
+        raise
     return {
         "ok": True,
+        "duplicate": False,
         "matched": result.get("matched", True),
         "executed": result.get("executed", False),
         "inputs": result.get("inputs", {}),
@@ -3560,6 +3861,8 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
     are surfaced as ``409 Conflict`` so the UI can show an actionable error
     instead of falsely claiming the consumer is running.
     """
+    # The trigger lives in the definition, which a managed workflow does not let us rewrite.
+    _refuse_managed_workflow_change(workflow_id)
     try:
         data = _read_workflow_from_fs(workflow_id)
         if not data:
@@ -3667,6 +3970,8 @@ async def get_kafka_status(workflow_id: str):
 @router.post("/workflow/{workflow_id}/poller-config")
 async def save_workflow_poller_config(workflow_id: str, req: WorkflowPollerConfigRequest):
     """Save background poller configuration for a workflow."""
+    # The trigger lives in the definition, which a managed workflow does not let us rewrite.
+    _refuse_managed_workflow_change(workflow_id)
     try:
         data = _read_workflow_from_fs(workflow_id)
         if not data:
@@ -3678,6 +3983,10 @@ async def save_workflow_poller_config(workflow_id: str, req: WorkflowPollerConfi
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         cron_expression = (req.cronExpression or "").strip()
+        if cron_expression:
+            # Validate before anything is persisted; a bad expression must not
+            # leave an enabled config behind that fails on every restart.
+            _validate_cron_expression(cron_expression)
         trigger_source: Dict[str, Any]
         if cron_expression:
             trigger_source = {
@@ -3802,6 +4111,8 @@ async def save_syslog_config(workflow_id: str, req: SyslogConfigRequest):
     surfaced as ``409 Conflict`` so the UI can show an actionable error
     instead of falsely claiming "Listening".
     """
+    # The trigger lives in the definition, which a managed workflow does not let us rewrite.
+    _refuse_managed_workflow_change(workflow_id)
     try:
         data = _read_workflow_from_fs(workflow_id)
         if not data:
@@ -3960,14 +4271,25 @@ async def run_single_node(workflow_id: str, req: RunNodeRequest):
         try:
             from flocks.workflow.models import Workflow as WfModel
             from flocks.workflow.engine import WorkflowEngine
-            from flocks.workflow.repl_runtime import PythonExecRuntime
+            from flocks.workflow.runner import WorkflowSandboxUnavailable, workflow_python_runtime
 
             wf = WfModel.from_dict(workflow_json)
-            engine = WorkflowEngine(
-                wf,
-                runtime=PythonExecRuntime(tool_registry=get_tool_registry(tool_context=tool_context)),
-            )
+            try:
+                # The same runtime rule as a whole run: in the sandbox when one is
+                # required, refused when it is not there.  Off the event loop:
+                # finding the sandbox can mean starting a container (or pulling
+                # its image), and the server's other requests and lease renewals
+                # must not wait for that.
+                runtime = await asyncio.to_thread(
+                    workflow_python_runtime,
+                    tool_context,
+                    tool_registry=get_tool_registry(tool_context=tool_context),
+                )
+            except WorkflowSandboxUnavailable as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            engine = WorkflowEngine(wf, runtime=runtime)
 
+            register_primary_loop()
             step_result = await asyncio.to_thread(engine.run_node, req.node_id, req.inputs)
 
             log.info(
@@ -3991,6 +4313,8 @@ async def run_single_node(workflow_id: str, req: RunNodeRequest):
             )
         except KeyError as e:
             raise HTTPException(status_code=400, detail=f"Node not found: {e}")
+        except HTTPException:
+            raise
         except Exception as e:
             log.error("workflow.run_node.error", {"workflow_id": workflow_id, "node_id": req.node_id, "error": str(e)})
             return RunNodeResponse(
@@ -4052,6 +4376,7 @@ async def save_sample_inputs(workflow_id: str, req: SampleInputsRequest):
     survive server restarts and are available for pre-filling the Run tab.
     """
     try:
+        _refuse_managed_workflow_change(workflow_id)
         data = _read_workflow_from_fs(workflow_id)
         if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")

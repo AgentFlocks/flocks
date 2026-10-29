@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import userEvent from '@testing-library/user-event';
 import { render, screen } from '@testing-library/react';
 import React from 'react';
 import SkillSheet from '@/pages/Skill/SkillSheet';
@@ -159,6 +160,30 @@ describe('SkillSheet', () => {
     it('should default to Form tab in edit mode', () => {
       render(<SkillSheet {...defaultProps} skill={skill} />);
       expect(screen.getByText('详情')).toBeInTheDocument();
+    });
+
+    it('flags a non-kebab-case name and disables submit (TOL-1190)', async () => {
+      const user = userEvent.setup();
+      render(<SkillSheet {...defaultProps} skill={skill} />);
+      const nameInput = screen.getByPlaceholderText('my-skill') as HTMLInputElement;
+      await user.clear(nameInput);
+      await user.type(nameInput, 'My Skill');
+      expect(screen.getByTestId('skill-name-hint')).toHaveTextContent('sheet.nameFormatHint');
+      expect(screen.getByRole('button', { name: '保存' })).toBeDisabled();
+      await user.clear(nameInput);
+      await user.type(nameInput, 'my-skill');
+      expect(screen.queryByTestId('skill-name-hint')).toBeNull();
+      expect(screen.getByRole('button', { name: '保存' })).toBeEnabled();
+    });
+
+    it('keeps the 关闭 button clickable on a read-only (project) skill (TOL-1191)', async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      render(<SkillSheet {...defaultProps} onClose={onClose} skill={{ ...skill, source: 'project' }} />);
+      const closeBtn = screen.getByRole('button', { name: 'sheet.submitClose' });
+      expect(closeBtn).toBeEnabled();
+      await user.click(closeBtn);
+      expect(onClose).toHaveBeenCalled();
     });
 
     it('should show name field in edit mode', () => {

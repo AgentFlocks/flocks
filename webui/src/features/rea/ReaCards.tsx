@@ -38,7 +38,8 @@ const TIER_CAPABILITIES: Record<ReaTier, string[]> = {
 };
 const KNOWN_ERRORS = new Set([
   'environment', 'blocked', 'component_failed', 'service_failed', 'validation_failed', 'install_failed',
-  'interrupted', 'uninstalling', 'forbidden', 'plan_mode', 'tasks_running', 'tasks_unreadable',
+  'interrupted', 'uninstalling', 'busy', 'forbidden', 'plan_mode', 'tasks_running', 'tasks_unreadable',
+  'managed',
 ]);
 const KNOWN_BLOCKERS = new Set([
   'jdk_no_dnf', 'jdk_needs_root', 'ghidra_dir_not_writable', 'ghidra_dir_occupied', 'ghidra_decompiler_missing',
@@ -426,8 +427,11 @@ function useSendOnce(cardKey: string) {
   const [sent, setSent] = useCardState<string | null>(cardKey, 'sent', null);
   const [message, setMessage] = useCardState<string | null>(cardKey, 'message', null);
   const { t } = useTranslation('session');
+  // Set before any re-render: a second call while the first is in flight sends nothing.
+  const inFlight = useRef(false);
   const send = async (id: string, text: string) => {
-    if (!chat?.submitPrompt) return;
+    if (!chat?.submitPrompt || inFlight.current) return;
+    inFlight.current = true;
     setSending(true);
     setMessage(null);
     try {
@@ -436,6 +440,7 @@ function useSendOnce(cardKey: string) {
     } catch (sendError) {
       setMessage(t('rea.card.sendFailed', { message: errorText(sendError) }));
     } finally {
+      inFlight.current = false;
       setSending(false);
     }
   };
@@ -768,7 +773,8 @@ function ReaInstallCard({ part, cardKey, isLatest, readOnly }: {
   const errorCode = typeof meta.errorCode === 'string' ? meta.errorCode : null;
   // Other conversations kept REA from being changed: no stage, the conversations instead.
   const tasksError = errorCode === 'tasks_running' || errorCode === 'tasks_unreadable';
-  const simple = errorCode === 'forbidden' || errorCode === 'plan_mode' || errorCode === 'uninstalling';
+  // Refusals a retry here cannot change (a managed install changes REA only with its release).
+  const simple = errorCode === 'forbidden' || errorCode === 'plan_mode' || errorCode === 'uninstalling' || errorCode === 'managed';
   // A retry sends the tier's confirmation again: the install tool takes only that as consent to write.
   const canRetry = isLatest && !readOnly && !simple && Boolean(chat?.submitPrompt) && canInstallNow(status);
   return (

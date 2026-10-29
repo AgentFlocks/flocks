@@ -132,8 +132,16 @@ def runtime_paths() -> RuntimePaths:
 def ensure_runtime_dirs(paths: RuntimePaths | None = None) -> RuntimePaths:
     """Create runtime directories if needed."""
     current = paths or runtime_paths()
-    current.run_dir.mkdir(parents=True, exist_ok=True)
-    current.log_dir.mkdir(parents=True, exist_ok=True)
+    for directory in (current.run_dir, current.log_dir):
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            # A root-owned bind mount (docker -v) or a read-only FLOCKS_ROOT ends
+            # here; report it as a service error instead of a Python traceback.
+            raise ServiceError(
+                f"无法创建运行时目录 {directory}: {error.strerror or error}，"
+                "请检查 FLOCKS_ROOT 目录属主/权限（chown 为运行用户，如容器内 1000:1000；SELinux 主机 -v 挂载加 :Z）。"
+            ) from error
     return current
 
 
@@ -966,10 +974,17 @@ def _trusted_flocks_port_owner(pid: int, *, service: str, root: Path) -> bool:
     webui_text = str(root / "webui").lower()
     if service == "backend":
         looks_like_uvicorn_backend = "uvicorn" in command_line and "flocks.server.app:app" in command_line
+        # Match `serve` only as a standalone argument of the flocks CLI: a plain
+        # substring check also hit unrelated processes run from the same venv
+        # (e.g. `python -m http.server`) and killed them as "leftovers".
+        tokens = command_line.split()
+        looks_like_flocks_cli = "flocks.cli.main" in tokens or any(
+            Path(token).name in {"flocks", "flocks.exe", "flocks.cmd"} for token in tokens
+        )
         return (
             looks_like_uvicorn_backend
-            or ("flocks.cli.main" in command_line and "serve" in command_line)
-            or ("flocks" in command_line and "serve" in command_line and root_text in command_line)
+            or ("flocks.cli.main" in tokens and "serve" in tokens)
+            or (looks_like_flocks_cli and "serve" in tokens and root_text in command_line)
         )
     if service == "webui":
         looks_like_vite = "vite" in command_line and (
@@ -1107,17 +1122,99 @@ def _trusted_flocks_daemon_owner(pid: int, *, root: Path) -> bool:
     return "service-daemon" in command_line and "flocks" in command_line and root_text in command_line
 
 
-def trusted_daemon_process_pids(*, root: Path | None = None) -> list[int]:
-    """Return trusted daemon pids for the current Flocks install."""
+def _recorded_daemon_pid(paths: RuntimePaths) -> int | None:
+    """Return the daemon pid recorded for this runtime root, dropping stale records."""
+    from flocks.cli.service_supervisor import supervisor_pid_path
+
+    pid_path = supervisor_pid_path(paths)
+    try:
+        raw = pid_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    pid = _coerce_positive_int(raw)
+    if pid is None or not pid_is_running(pid):
+        pid_path.unlink(missing_ok=True)
+        return None
+    return pid
+
+
+def _process_environment(pid: int) -> dict[str, str] | None:
+    """Best-effort snapshot of a running process's environment (Linux ``/proc``, macOS ``ps -E``); ``None`` when unreadable."""
+    if sys.platform.startswith("linux"):
+        try:
+            data = Path(f"/proc/{pid}/environ").read_bytes()
+        except OSError:
+            return None
+        env: dict[str, str] = {}
+        for item in data.split(b"\0"):
+            key, sep, value = item.partition(b"=")
+            if sep:
+                env[key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+        return env
+    if sys.platform == "darwin":
+        try:
+            completed = subprocess.run(
+                ["ps", "-p", str(pid), "-wwE", "-o", "command="],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if completed.returncode != 0 or not completed.stdout.strip():
+            return None
+        # ``ps -E`` appends ``KEY=value`` pairs after the command line, space separated.
+        env = {}
+        for token in completed.stdout.split():
+            key, sep, value = token.partition("=")
+            if sep and key.isidentifier():
+                env[key] = value
+        return env
+    return None
+
+
+def _process_uses_runtime_root(pid: int, paths: RuntimePaths) -> bool:
+    """Whether *pid* runs with this runtime root (``FLOCKS_ROOT`` override or the default root)."""
+    env = _process_environment(pid)
+    if env is None:
+        return False
+    override = env.get("FLOCKS_ROOT", "").strip()
+    try:
+        process_root = Path(override).expanduser().resolve() if override else (Path.home() / ".flocks").resolve()
+        return process_root == paths.root.resolve()
+    except OSError:
+        return False
+
+
+def trusted_daemon_process_pids(*, root: Path | None = None, paths: RuntimePaths | None = None) -> list[int]:
+    """Return trusted daemon pids for the current Flocks install *and* runtime root.
+
+    Several runtime roots (``FLOCKS_ROOT``) may share one install. When the
+    daemon of *this* root recorded its pid, only that daemon is a candidate;
+    without a record, only daemons whose environment names this root are
+    claimed (older daemons that predate the pid file). Another root's daemon
+    is never touched by ``flocks stop`` / ``flocks status``.
+    """
     current_root = root or ensure_install_layout()
+    current_paths = paths or runtime_paths()
     if sys.platform == "win32":
-        return _windows_trusted_daemon_process_pids(root=current_root)
-    return [pid for pid in _process_list_pids() if _trusted_flocks_daemon_owner(pid, root=current_root)]
+        candidates = _windows_trusted_daemon_process_pids(root=current_root)
+    else:
+        candidates = [pid for pid in _process_list_pids() if _trusted_flocks_daemon_owner(pid, root=current_root)]
+    recorded = _recorded_daemon_pid(current_paths)
+    if recorded is not None:
+        return [pid for pid in candidates if pid == recorded]
+    if sys.platform == "win32":
+        # No process-environment attribution on Windows; daemons started by this
+        # code always leave a pid record, so this only affects legacy daemons.
+        return candidates
+    return [pid for pid in candidates if _process_uses_runtime_root(pid, current_paths)]
 
 
-def cleanup_trusted_daemon_processes(*, console, root: Path | None = None) -> list[int]:
+def cleanup_trusted_daemon_processes(*, console, root: Path | None = None, paths: RuntimePaths | None = None) -> list[int]:
     """Clean trusted Flocks daemon processes whose control API is unavailable."""
-    trusted = trusted_daemon_process_pids(root=root)
+    trusted = trusted_daemon_process_pids(root=root, paths=paths)
     for pid in trusted:
         _terminate_orphan_pid(pid, "daemon", console)
     return trusted
@@ -1694,10 +1791,28 @@ def _startup_failure_message(payload: dict[str, Any]) -> str:
     return f"Flocks service 启动失败（{', '.join(details)}）{suffix}"
 
 
+# sun_path is 104 bytes on macOS/BSD and 108 on Linux (both including the NUL).
+MAX_UNIX_SOCKET_PATH_BYTES = 103
+
+
+def _ensure_control_socket_path_fits(paths: RuntimePaths) -> None:
+    """Fail early when the runtime root is too deep for an AF_UNIX socket path."""
+    if supervisor_uses_tcp_control():
+        return
+    socket_path = supervisor_socket_path(paths)
+    length = len(os.fsencode(str(socket_path)))
+    if length > MAX_UNIX_SOCKET_PATH_BYTES:
+        raise ServiceError(
+            f"Flocks daemon 控制套接字路径过长（{length} 字节，上限 {MAX_UNIX_SOCKET_PATH_BYTES}）: {socket_path}；"
+            "请通过 FLOCKS_ROOT 使用更短的运行时目录。"
+        )
+
+
 def _start_supervisor_process(config: ServiceConfig, paths: RuntimePaths, console) -> subprocess.Popen:
     """Spawn the detached service supervisor daemon."""
     root = ensure_install_layout()
     log_path = supervisor_log_path(paths)
+    _ensure_control_socket_path_fits(paths)
     if not supervisor_uses_tcp_control():
         supervisor_socket_path(paths).unlink(missing_ok=True)
     command = resolve_flocks_cli_command(root) + [
@@ -2038,7 +2153,7 @@ def build_status_lines(paths: RuntimePaths | None = None) -> list[str]:
     except Exception:
         residual_daemons = []
         try:
-            residual_daemons = trusted_daemon_process_pids(root=ensure_install_layout())
+            residual_daemons = trusted_daemon_process_pids(root=ensure_install_layout(), paths=current)
         except Exception:
             residual_daemons = []
         if residual_daemons:
@@ -2073,7 +2188,7 @@ def _status_lines_from_payload(payload: dict[str, Any]) -> list[str]:
 
 
 def _service_status_line(label: str, payload: dict[str, Any]) -> str:
-    host = _loopback_host(str(payload.get("host") or "127.0.0.1"))
+    host = _format_host_for_url(_loopback_host(str(payload.get("host") or "127.0.0.1")))
     port = payload.get("port")
     pid = payload.get("pid")
     state = payload.get("state") or "unknown"

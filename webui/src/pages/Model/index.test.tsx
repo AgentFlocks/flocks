@@ -71,6 +71,11 @@ vi.mock('react-i18next', () => ({
         'form.searchProvider': 'Search providers...',
         'form.noResults': 'No results',
         'form.alreadyAdded': 'Already added',
+        'form.save': 'Save',
+        'form.configure': 'Configure',
+        'form.delete': 'Delete',
+        'form.providerName': 'Provider Name',
+        'form.retry': 'Retry',
       };
       return translations[key] ?? key;
     },
@@ -440,6 +445,30 @@ describe('ModelPage add provider dialog', () => {
     expect(mocks.testCredentials).not.toHaveBeenCalled();
   });
 
+  it('retries a hand-typed Azure deployment whose first import failed', async () => {
+    mocks.catalogList.mockResolvedValue({ data: { providers: [{
+      id: 'azure-openai', name: 'Azure OpenAI', description: 'Azure deployments',
+      credential_schemas: [{ auth_method: 'api_key', fields: [{
+        name: 'api_key', label: 'API Key', type: 'secret', required: true, placeholder: 'Paste Azure key',
+      }] }],
+      env_vars: [], default_base_url: '', model_count: 0, models: [], allow_multiple: false,
+    }] } });
+    mocks.importModels.mockRejectedValueOnce(new Error('upstream timeout'));
+    const user = userEvent.setup();
+    renderWithRouter(<ModelPage />);
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await user.click(await screen.findByRole('button', { name: /Azure OpenAI/ }));
+    await user.type(screen.getByPlaceholderText('Paste Azure key'), 'azure-key');
+    await user.type(screen.getByPlaceholderText('https://api.example.com/v1'), 'https://res.openai.azure.com');
+    await user.type(screen.getByPlaceholderText('form.azureDeploymentPlaceholder'), 'prod-gpt4');
+    await user.click(screen.getByRole('button', { name: 'Save and add 1 models' }));
+
+    await user.click(await screen.findByRole('button', { name: 'discovery.retryFailed' }));
+
+    await waitFor(() => expect(mocks.importModels).toHaveBeenCalledTimes(2));
+    expect(mocks.importModels).toHaveBeenLastCalledWith('azure-openai', [expect.objectContaining({ id: 'prod-gpt4' })]);
+  });
+
   it('imports chosen models with Auto limits only after saving the provider', async () => {
     const user = userEvent.setup(); await openThreatBook(user);
     await user.click(screen.getByRole('button', { name: 'discovery.title' }));
@@ -615,6 +644,16 @@ describe('ModelPage configure provider dialog', () => {
     await user.click(editor.getByRole('button', { name: 'compact.apply' }));
     await user.click(screen.getByRole('button', { name: 'compact.save' }));
     await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledWith('openai', { models: [expect.objectContaining({ id: 'gpt-4o', context_window: null, max_output_tokens: 8192, edited: true })], deleted: [] }));
+  });
+
+  it('saves without the key the dialog opened with, so a key rotated meanwhile is kept', async () => {
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' });
+    expect(screen.getByLabelText('API Key')).toHaveValue('sk-existing-secret-1234');
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalledTimes(1));
+    expect(mocks.setCredentials.mock.calls[0][1].api_key).toBeUndefined();
+    expect(mocks.setCredentials).toHaveBeenCalledWith('openai', expect.objectContaining({ base_url: 'https://old.example.com/v1' }));
   });
 
   it('stages explicit deletion until save and keeps failures visible for retry', async () => {

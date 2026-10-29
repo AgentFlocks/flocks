@@ -185,6 +185,12 @@
     "incidentResponseSuggestion": "帮我处理一个安全事件：发现勒索软件感染"
   },
   "chat": {
+    "history": {
+      "older": "加载更早的消息",
+      "newer": "加载后续消息",
+      "latest": "回到最新消息",
+      "loading": "正在加载消息…"
+    },
     "cacheUsage": {
       "sessionSummary": "会话缓存命中率 {{rate}}",
       "sessionScope": "汇总当前会话已加载的助手消息记录（Tokens），按输入量加权。包含压缩前记录，不含压缩摘要、子会话或未单独保留的内部重试。",
@@ -219,6 +225,7 @@
     "retry": "重试",
     "suggestions": "示例问题",
     "stopTitle": "停止执行",
+    "sendTitle": "发送消息",
     "contextUsageTitle": "上下文已用：{{used}} / {{total}}（{{percent}}%）",
     "contextUsageUnknown": "上下文使用量未知",
     "contextUsage": {
@@ -494,7 +501,17 @@
         "timeout": "超时",
         "cancelled": "已取消"
       }
-    }
+    },
+    "permission": {
+      "title": "需要确认执行",
+      "deny": "拒绝",
+      "always": "始终允许",
+      "alwaysTarget": "始终允许此目标",
+      "trustToolNetwork": "信任此工具的网络访问",
+      "allowOnce": "允许一次",
+      "replyFailed": "提交确认失败，请重试。"
+    },
+    "sendFailed": "发送失败"
   },
   "context": {
     "title": "上下文",
@@ -796,10 +813,12 @@
       "install_failed": "安装过程出错",
       "interrupted": "安装被中断（服务重启或被卸载停止）",
       "uninstalling": "REA 正在卸载，卸载完成后再安装",
+      "busy": "这台服务器上另一个 Flocks 进程正在安装或卸载 REA，等它结束后再试",
       "forbidden": "只有管理员可以安装 REA 插件，请联系管理员。",
       "plan_mode": "计划模式下不能安装，请切到 Build 模式后重新发送。",
       "tasks_running": "有会话没能停下来，REA 没有改动",
       "tasks_unreadable": "有忙碌的会话读不到状态，没法确认也没法替你停下，REA 没有改动；等它结束后再重试",
+      "managed": "这是受管部署，REA 随部署的发版安装和移除，不能在会话里安装",
       "unknown": "未知原因"
     },
     "card": {

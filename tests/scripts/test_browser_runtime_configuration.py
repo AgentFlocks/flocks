@@ -16,9 +16,10 @@ def test_bash_installer_prefers_explicit_browser_configuration() -> None:
     assert 'Downloading Chrome for Testing.' in script
     assert 'If browser installation fails, Flocks can still start and you can reinstall it later.' in script
     assert 'npm_config_registry="$NPM_REGISTRY" "$NPX_CMD" --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 1>&2' in script
-    assert '"$browser_dir"/**/"Google Chrome for Testing"' in script
-    assert '"$browser_dir"/**/chrome.exe' in script
-    assert '"$browser_dir"/**/chrome' in script
+    # Recursive lookup uses ``find`` (globstar needs bash 4+; macOS ships bash 3.2).
+    assert 'for name in "Google Chrome for Testing" chrome.exe chrome; do' in script
+    assert 'find "$browser_dir" -type f -name "$name" -perm -u+x' in script
+    assert "shopt -s globstar" not in script
     assert '"$HOME/.flocks/browser"' in script
     assert 'Found existing Chrome for Testing. agent-browser will use: $browser_path' in script
     assert 'npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 2>&1 | tee' not in script

@@ -73,6 +73,31 @@ def restore_redacted_echo(original: Any, patched: Any) -> Any:
     return patched
 
 
+def merge_redacted_rewrite(original: Any, rewritten: Any) -> Any:
+    """Return *original* with only its secret-bearing values taken from *rewritten*.
+
+    A hook written against the flat legacy ``tool.input`` rewrites it in place,
+    outside the ``redact_sensitive`` view that policies judge.  A value at a
+    redacted position reads ``[REDACTED]`` to every policy before and after such
+    a rewrite, so it can be taken over (a redaction hook restores secrets
+    this way); anything a policy can see has to arrive as
+    ``validated_input_patch``.  Keys the rewrite added or dropped are ignored.
+    """
+    if isinstance(original, dict) and isinstance(rewritten, dict):
+        merged: Dict[str, Any] = {}
+        for key, item in original.items():
+            if key not in rewritten:
+                merged[key] = item
+            elif str(key).strip().lower() in _SENSITIVE_KEYS:
+                merged[key] = rewritten[key]
+            else:
+                merged[key] = merge_redacted_rewrite(item, rewritten[key])
+        return merged
+    if isinstance(original, list) and isinstance(rewritten, list) and len(original) == len(rewritten):
+        return [merge_redacted_rewrite(item, rewritten[index]) for index, item in enumerate(original)]
+    return original
+
+
 def schema_digest(value: dict[str, Any]) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

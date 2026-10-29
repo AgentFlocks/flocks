@@ -27,7 +27,7 @@ import uuid
 
 
 TEST_PATHS = [
-    "tests/workflow", "tests/ingest", "tests/storage",
+    "tests/workflow", "tests/ingest", "tests/storage", "tests/retention", "tests/test_db_backend.py",
     "tests/tool/test_channel_message.py",
     "tests/server/routes/test_workflow_run_route.py",
     "tests/server/routes/test_workflow_poller_routes.py",
@@ -36,6 +36,7 @@ TEST_PATHS = [
     "tests/server/routes/test_workflow_trigger_routes.py",
     "tests/server/routes/test_workflow_health_monitor.py",
     "tests/server/routes/test_workflow_routes_visibility.py",
+    "tests/server/routes/test_workflow_routes_hardening_regressions.py",
     "tests/server/routes/test_channel_routes.py",
     "tests/server/routes/test_channel_security_lifecycle.py",
 ]
@@ -109,6 +110,7 @@ def main() -> int:
             "FLOCKS_DATA_DIR": str(root / "data"),
             "FLOCKS_WORKSPACE_DIR": str(root / "workspace"),
             "FLOCKS_CONFIG_CONTENT": "{}", "PYTHONUTF8": "1",
+            "FLOCKS_RELIABILITY_TEST_HOME": str(root / "home"),
         })
         env.pop("FLOCKS_KAFKA_TEST_BROKER", None)
         if args.kafka_broker:

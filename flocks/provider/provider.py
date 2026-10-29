@@ -766,7 +766,12 @@ class Provider:
                 for model_id, model in list(cls._models.items()):
                     if model.provider_id == pid and model_id not in desired:
                         del cls._models[model_id]
-                cls._models.update(desired)
+                # A model ID another provider already publishes keeps its owner,
+                # as when the inventory is saved (routes/model_discovery.py).
+                for model_id, model in desired.items():
+                    current = cls._models.get(model_id)
+                    if current is None or current.provider_id == pid:
+                        cls._models[model_id] = model
 
     @staticmethod
     def apply_provider_config(provider: "BaseProvider", pconfig: Any) -> None:
@@ -877,6 +882,11 @@ class Provider:
                         elif isinstance(model_data, dict):
                             model_dict = model_data
                         else:
+                            continue
+
+                        # ``disabled: true`` marks a soft-deleted model; keep it
+                        # out of the runtime like the custom-provider loader does.
+                        if model_dict.get("disabled") is True:
                             continue
 
                         # Track which fields the user explicitly set in flocks.json

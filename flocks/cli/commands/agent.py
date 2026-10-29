@@ -38,6 +38,14 @@ def _format_mode(mode: str) -> str:
     return mode_colors.get(mode, mode)
 
 
+def _rule_action(rule) -> str:
+    """Return the rule decision as text (``level`` on current PermissionRule, ``action`` on legacy ones)."""
+    value = getattr(rule, "level", None)
+    if value is None:
+        value = getattr(rule, "action", "")
+    return str(getattr(value, "value", value) or "")
+
+
 def _format_permission_rules(agent: AgentInfo) -> str:
     """Format permission rules as compact string"""
     if not agent.permission:
@@ -53,11 +61,12 @@ def _format_permission_rules(agent: AgentInfo) -> str:
         if rule.pattern and rule.pattern != "*":
             target = f"{target}:{rule.pattern}"
         
-        if rule.level.value == "allow":
+        action = _rule_action(rule)
+        if action == "allow":
             allow.append(target)
-        elif rule.level.value == "deny":
+        elif action == "deny":
             deny.append(target)
-        elif rule.level.value == "ask":
+        elif action == "ask":
             ask.append(target)
     
     parts = []
@@ -228,14 +237,15 @@ def agent_show(
     
     if agent.permission:
         for rule in agent.permission:
+            action = _rule_action(rule)
             action_color = {
                 "allow": "green",
                 "deny": "red",
                 "ask": "yellow",
-            }.get(rule.level.value, "white")
+            }.get(action, "white")
             
             pattern_str = f" ({rule.pattern})" if rule.pattern and rule.pattern != "*" else ""
-            console.print(f"  [{action_color}]{rule.level.value:5}[/{action_color}] {rule.permission}{pattern_str}")
+            console.print(f"  [{action_color}]{action:5}[/{action_color}] {rule.permission}{pattern_str}")
     else:
         console.print("  [dim]No rules defined[/dim]")
     

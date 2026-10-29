@@ -136,3 +136,6 @@ tests/integration_ssh_*.py
 .cursor
 .claude/
 .codex/
+
+# Claude Code 本地上下文文件，不进版本管理
+CLAUDE.md

@@ -172,6 +172,7 @@ class Session:
     )
     # Secondary index: session_id → storage key for O(1) lookup
     _id_index: Dict[str, str] = {}
+    _id_index_limit = 4096
     # Hot-path cache for repeatedly listing sessions in the UI.
     _all_sessions_cache: Optional[List[SessionInfo]] = None
     # Serializes tree topology changes only. Ordinary writes use a keyed lock,
@@ -197,11 +198,29 @@ class Session:
         return SessionPolicy.can_read(session)
 
     @staticmethod
+    def _is_writable_to_current_user(session: SessionInfo) -> bool:
+        """Keep trusted internal maintenance while enforcing user mutations."""
+        from flocks.session.policy import SessionPolicy
+
+        user = get_current_auth_user()
+        return user is None or SessionPolicy.can_write(session, user)
+
+    @staticmethod
     def _is_owned_by_auth_user(session: SessionInfo, auth_user) -> bool:
         """Delegate to the unified SessionPolicy (kept for backward compatibility)."""
         from flocks.session.policy import SessionPolicy
 
         return SessionPolicy.is_owner(session, auth_user)
+
+    @classmethod
+    def _remember_key(cls, session_id: str, storage_key: str) -> None:
+        """Remember where a session is stored; the oldest entries go past the limit."""
+        cls._id_index.pop(session_id, None)
+        if len(cls._id_index) >= cls._id_index_limit:
+            oldest = next(iter(cls._id_index), None)
+            if oldest is not None:
+                cls._id_index.pop(oldest, None)
+        cls._id_index[session_id] = storage_key
 
     @classmethod
     def _sync_list_cache(cls, session: SessionInfo) -> None:
@@ -383,7 +402,7 @@ class Session:
         updated_session = session.model_copy(update={"metadata": metadata})
         storage_key = f"session:{session.project_id}:{session.id}"
         await Storage.set(storage_key, updated_session, "session")
-        cls._id_index[session.id] = storage_key
+        cls._remember_key(session.id, storage_key)
         cls._sync_list_cache(updated_session)
         return True
 
@@ -547,6 +566,8 @@ class Session:
             if parent_id is not None:
                 if parent is None:
                     raise ValueError(f"Parent session {parent_id} not found")
+                if not cls._is_writable_to_current_user(parent):
+                    raise PermissionError("Cannot attach a child to another user's session")
                 child_owner_id = kwargs.get("owner_user_id")
                 child_owner_username = kwargs.get("owner_username")
                 if parent.owner_user_id and child_owner_id and parent.owner_user_id != child_owner_id:
@@ -571,7 +592,7 @@ class Session:
             # lock, so an archive cannot commit between them in this process.
             storage_key = f"session:{project_id}:{created.id}"
             await Storage.set(storage_key, created, "session")
-            cls._id_index[created.id] = storage_key
+            cls._remember_key(created.id, storage_key)
             cls._sync_list_cache(created)
             return created
 
@@ -725,7 +746,7 @@ class Session:
                         if session and session.status != "deleted":
                             if not cls._is_accessible_to_current_user(session):
                                 return None
-                            cls._id_index[session_id] = key
+                            cls._remember_key(session_id, key)
                             return session
                     except Exception as _e:
                         log.debug("session.get_by_id.parse_failed", {"key": key, "error": str(_e)})
@@ -759,7 +780,7 @@ class Session:
                     if session.status != "deleted":
                         if cls._is_accessible_to_current_user(session):
                             sessions.append(session)
-                        cls._id_index[session.id] = key
+                        cls._remember_key(session.id, key)
                 except Exception as e:
                     log.warn("session.parse.error", {"key": key, "error": str(e)})
 
@@ -789,7 +810,7 @@ class Session:
                 try:
                     if session.status != "deleted":
                         sessions.append(session)
-                        cls._id_index[session.id] = key
+                        cls._remember_key(session.id, key)
                 except Exception as e:
                     log.warn("session.parse.error", {"key": key, "error": str(e)})
 
@@ -829,13 +850,29 @@ class Session:
         Returns:
             Updated session info or None
         """
-        async with cls.lifecycle_lock(session_id):
-            updated_session = await cls._update_locked(
-                project_id,
-                session_id,
-                allow_inactive=allow_inactive,
-                **updates,
-            )
+        async def update_locked():
+            async with cls.lifecycle_lock(session_id):
+                return await cls._update_locked(
+                    project_id,
+                    session_id,
+                    allow_inactive=allow_inactive,
+                    **updates,
+                )
+
+        identity_fields = {
+            "id", "project_id", "projectID", "parent_id", "parentID",
+            "owner_user_id", "ownerUserID", "owner_username", "ownerUsername",
+        }
+        if identity_fields.intersection(updates):
+            from flocks.project.project import Project
+
+            # Identity/topology changes share the lifecycle linearization point.
+            # Ordinary runner metadata writes must remain free of this guard:
+            # stop/archive may wait for those writes while owning the project.
+            async with Project.lifecycle_guard(project_id):
+                updated_session = await update_locked()
+        else:
+            updated_session = await update_locked()
         if updated_session is None:
             return None
         
@@ -861,6 +898,8 @@ class Session:
         session = await cls.get(project_id, session_id)
         if not session or (session.status != "active" and not allow_inactive):
             return None
+        if not cls._is_writable_to_current_user(session):
+            return None
 
         alias_map = {
             "project_id": "projectID",
@@ -873,10 +912,12 @@ class Session:
         current_policy = (update_data.get("metadata") or {}).get(
             DEDICATED_AGENT_POLICY_METADATA_KEY
         )
+        # An ordinary ``None`` leaves the metadata untouched (see the loop
+        # below); only a supplied value or ``_UNSET`` replaces it.
         if (
             isinstance(current_policy, dict)
             and current_policy.get("version") == 1
-            and "metadata" in updates
+            and updates.get("metadata") is not None
         ):
             supplied_metadata = updates.get("metadata")
             supplied_policy = (
@@ -942,9 +983,15 @@ class Session:
         update_data["time"]["updated"] = int(datetime.now().timestamp() * 1000)
 
         updated_session = SessionInfo(**update_data)
+        if get_current_auth_user() is not None and (
+            updated_session.id != session.id
+            or updated_session.project_id != session.project_id
+            or updated_session.parent_id != session.parent_id
+        ):
+            raise PermissionError("Session topology cannot be changed through generic update")
         storage_key = f"session:{project_id}:{session_id}"
         await Storage.set(storage_key, updated_session, "session")
-        cls._id_index[session_id] = storage_key
+        cls._remember_key(session_id, storage_key)
         cls._sync_list_cache(updated_session)
         return updated_session
 
@@ -1065,7 +1112,7 @@ class Session:
                     ],
                 )
                 for session in moved_sessions:
-                    cls._id_index[session.id] = f"session:{target_project_id}:{session.id}"
+                    cls._remember_key(session.id, f"session:{target_project_id}:{session.id}")
                     cls._sync_list_cache(session)
 
                 log.info("session.project_moved", {
@@ -1122,6 +1169,9 @@ class Session:
         Returns:
             True if deleted
         """
+        from flocks.session.policy import SessionPolicy
+
+        actor = get_current_auth_user()
         # ``precheck`` is evaluated inside _begin_lifecycle_transition — under the
         # tree's lifecycle locks and before the generation bump — so a tree that
         # must be kept is never claimed: no generation change, no abort side
@@ -1140,7 +1190,10 @@ class Session:
                 await Message.quiesce_parts(session.id, persist=False)
 
             refreshed = await cls.collect_tree(project_id, session_id)
-            if not refreshed:
+            if not refreshed or (
+                actor is not None
+                and any(not SessionPolicy.can_delete(item, actor) for item in refreshed)
+            ):
                 return False
             sessions = refreshed
             session_ids = [session.id for session in sessions]
@@ -1149,8 +1202,33 @@ class Session:
             from flocks.storage.session_search import delete_session_documents
 
             permission_keys = await PermissionNext.deletion_storage_keys(session_ids)
+            # Their uploads become candidates in the delete's own transaction;
+            # one that cannot be listed stops the delete rather than be left
+            # behind with no record.
+            from flocks.session.files import session_upload_candidates
+            from flocks.session.message import register_upload_candidates
+
+            upload_candidates = await session_upload_candidates(session_ids)
+
+            async def _recheck_delete_permission(db) -> None:
+                # The rows as this transaction sees them, before it deletes
+                # them: an owner changed since the tree was read keeps the
+                # delete from going ahead.
+                keys = [f"session:{item.project_id}:{item.id}" for item in sessions]
+                placeholders = ", ".join("?" for _ in keys)
+                cursor = await db.execute(
+                    f"SELECT value FROM storage WHERE key IN ({placeholders})", keys,
+                )
+                rows = await cursor.fetchall()
+                if len(rows) != len(keys) or any(
+                    not SessionPolicy.can_delete(SessionInfo.model_validate_json(row[0]), actor)
+                    for row in rows
+                ):
+                    raise PermissionError("Session delete permission changed")
 
             async def _delete_search_index(db) -> None:
+                for owner, relatives in upload_candidates.items():
+                    await register_upload_candidates(db, owner, relatives)
                 if not Storage.session_search_available():
                     return
                 await delete_session_documents(db, session_ids)
@@ -1178,6 +1256,7 @@ class Session:
                         f"system_prompts:{session.id}:",
                     )
                 ],
+                pre_transaction_hook=_recheck_delete_permission if actor is not None else None,
                 transaction_hook=_delete_search_index,
             )
             PermissionNext.clear_session_runtime(session_ids)
@@ -1195,16 +1274,20 @@ class Session:
                 Message.invalidate_cache(session.id)
                 invalidate_session_callable_tools_cache(session.id)
 
-                try:
-                    from flocks.session.files import remove_session_uploads
+            try:
+                # Their uploads go, except ones another session still names
+                # (an older copy of one of them): those stay candidates.
+                from flocks.session.files import sweep_deleted_session_uploads
 
-                    if await asyncio.to_thread(remove_session_uploads, session.id):
-                        log.info("session.uploads.cleaned", {"session_id": session.id})
-                except Exception as exc:
-                    log.warn("session.uploads.cleanup_failed", {
-                        "session_id": session.id,
-                        "error": str(exc),
-                    })
+                removed = await sweep_deleted_session_uploads(upload_candidates)
+                if removed:
+                    log.info("session.uploads.cleaned", {"session_ids": list(upload_candidates), "removed": removed})
+            except Exception as exc:
+                # The candidates are recorded; a later sweep takes them.
+                log.warn("session.uploads.cleanup_failed", {
+                    "session_ids": list(upload_candidates),
+                    "error": str(exc),
+                })
 
             for session in reversed(sessions):
                 try:
@@ -1235,6 +1318,8 @@ class Session:
             })
             deleted = True
             return True
+        except PermissionError:
+            return False
         finally:
             await cls._end_lifecycle_transition(sessions)
             if deleted:
@@ -1244,10 +1329,10 @@ class Session:
     @classmethod
     async def retain_deleted_user_sessions(cls, user_id: str, username: str) -> int:
         """
-        Detach session ownership from a deleted user id while preserving username ownership.
+        Preserve deleted-account sessions for administrator review.
 
-        This allows a newly created account with the same username to regain access
-        to historical private sessions.
+        The retained username is historical metadata, not an ownership grant
+        for a later account that happens to reuse the same name.
         """
         entries = await Storage.list_entries(prefix="session:", model=SessionInfo)
         migrated = 0
@@ -1257,14 +1342,15 @@ class Session:
                 continue
             if session.owner_user_id != user_id:
                 continue
-            await cls.update(
+            updated = await cls.update(
                 project_id=session.project_id,
                 session_id=session.id,
                 allow_inactive=True,
                 owner_user_id=_UNSET,
                 owner_username=username,
             )
-            migrated += 1
+            if updated is not None:
+                migrated += 1
 
         return migrated
 
@@ -1409,7 +1495,7 @@ class Session:
                     for session in changed
                 ])
                 for session in changed:
-                    cls._id_index[session.id] = f"session:{session.project_id}:{session.id}"
+                    cls._remember_key(session.id, f"session:{session.project_id}:{session.id}")
                     cls._sync_list_cache(session)
             archive_committed = True
 
@@ -1492,7 +1578,7 @@ class Session:
                     for session in changed
                 ])
                 for session in changed:
-                    cls._id_index[session.id] = f"session:{session.project_id}:{session.id}"
+                    cls._remember_key(session.id, f"session:{session.project_id}:{session.id}")
                     cls._sync_list_cache(session)
 
             from flocks.session.interaction_queue import InteractionQueue
@@ -1527,6 +1613,9 @@ class Session:
         )
 
         async with Project.lifecycle_guard(project_id):
+            tree = await cls.collect_tree(project_id, session_id)
+            if not tree or any(not cls._is_writable_to_current_user(item) for item in tree):
+                return False
             project_state = (
                 Project.registry_state(project_id, owner_id=project_owner_id)
                 if project_owner_id
@@ -1614,7 +1703,7 @@ class Session:
         """
         async with cls._tree_lock:
             sessions = await cls.collect_tree(project_id, session_id)
-            if not sessions:
+            if not sessions or any(not cls._is_writable_to_current_user(item) for item in sessions):
                 return []
             if require_root and sessions[0].parent_id is not None:
                 log.warn("session.lifecycle.non_root_rejected", {"id": session_id})
@@ -1630,6 +1719,7 @@ class Session:
                 ids = {session.id for session in sessions}
                 if (
                     not sessions
+                    or any(not cls._is_writable_to_current_user(item) for item in sessions)
                     or ids & cls._lifecycle_transition_ids
                     or any(cls.has_active_operations(item_id) for item_id in ids)
                 ):
@@ -1757,6 +1847,12 @@ class Session:
                     part_data["id"] = Identifier.ascending("part")
                     part_data["sessionID"] = new_session.id
                     part_data["messageID"] = new_id
+                    if part.type == "file" and part_data.get("url"):
+                        # The fork's own copy: trimming or deleting the
+                        # original then takes nothing the fork still shows.
+                        from flocks.session.files import adopt_session_upload
+
+                        part_data["url"] = await adopt_session_upload(new_session.id, part_data["url"])
                     cloned_part = Message.deserialize_part(part_data)
                     await Message.store_part(new_session.id, new_id, cloned_part)
 

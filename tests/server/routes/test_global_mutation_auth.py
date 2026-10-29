@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -27,6 +27,23 @@ def _user_client(router, *, prefix: str, role: str) -> TestClient:
 
     app.include_router(router, prefix=prefix)
     return TestClient(app, raise_server_exceptions=True)
+
+
+@pytest.mark.parametrize("prefix", ["/api", ""])
+@pytest.mark.parametrize("action", ["pause", "resume"])
+@pytest.mark.parametrize("role,expected", [("member", 403), ("admin", 200)])
+def test_global_task_queue_control_requires_admin(monkeypatch, prefix, action, role, expected):
+    from flocks.server.routes.task_entities import router
+    from flocks.task.manager import TaskManager
+    control = Mock()
+    monkeypatch.setattr(TaskManager, f"{action}_queue", control)
+    client = _user_client(router, prefix=prefix, role=role)
+    response = client.post(f"{prefix}/task-system/queue/{action}")
+    assert response.status_code == expected
+    if role == "admin":
+        control.assert_called_once_with()
+    else:
+        control.assert_not_called()
 
 
 def test_provider_global_configuration_credentials_and_tests_require_admin():
@@ -152,10 +169,11 @@ def test_members_cannot_change_model_settings_via_generic_config_endpoint():
         return {key: raw.get(key) for key in model_settings}
 
     member = _user_client(config_router, prefix="/api/config", role="member")
-    # The Channel page sends back the whole config it read; members keep saving it.
+    # Every write through this endpoint is an admin's (test_config_mutations_require_admin):
+    # a member's unchanged echo of what it read, or an unrelated save, is refused too.
     echoed = member.get("/api/config").json()
-    assert member.patch("/api/config/", json=echoed).status_code == 200
-    assert member.patch("/api/config/", json={"toolFailure": {"disableOnRepeatedFailure": True}}).status_code == 200
+    assert member.patch("/api/config/", json=echoed).status_code == 403
+    assert member.patch("/api/config/", json={"toolFailure": {"disableOnRepeatedFailure": True}}).status_code == 403
 
     changes = [
         {"model": "example/m2"},

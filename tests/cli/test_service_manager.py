@@ -1820,6 +1820,8 @@ def test_supervisor_reports_webui_as_static_endpoint(monkeypatch, tmp_path: Path
     paths = _make_runtime_paths(tmp_path)
     calls: list[str] = []
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    # 探活会真的连 9995 端口；不打桩就取决于本机有没有东西在听，结果不稳定
+    monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda *_args: True)
     daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig(backend_port=9995, frontend_port=9996))
     daemon.paths = paths
     daemon.backend.process = _fake_process(111, ["backend"])
@@ -2138,6 +2140,13 @@ def test_cleanup_trusted_daemon_processes_cleans_current_install_only(monkeypatc
         }[pid],
     )
     monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: cleaned.append(pid))
+    # Daemons of this install are only claimed when they run with this runtime root.
+    current_root = str(service_manager.runtime_paths().root)
+    monkeypatch.setattr(
+        service_manager,
+        "_process_environment",
+        lambda pid: {111: {"FLOCKS_ROOT": current_root}, 222: {"FLOCKS_ROOT": current_root}, 333: {}}[pid],
+    )
 
     result = service_manager.cleanup_trusted_daemon_processes(console=DummyConsole(), root=tmp_path)
 

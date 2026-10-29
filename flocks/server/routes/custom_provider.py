@@ -14,10 +14,11 @@ from datetime import UTC, datetime
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.provider.base_url import BaseURLValidationError, validate_provider_base_url
 from flocks.provider.credential import get_api_key
 from flocks.provider.provider import (
     BaseProvider,
@@ -131,10 +132,10 @@ class CreateModelReq(BaseModel):
     name: str = Field(..., min_length=1)
     context_window: Optional[int] = Field(None, ge=1024)
     max_output_tokens: Optional[int] = Field(None, ge=1)
-    supports_vision: bool = False
-    supports_tools: bool = True
-    supports_streaming: bool = True
-    supports_reasoning: bool = True
+    supports_vision: StrictBool = False
+    supports_tools: StrictBool = True
+    supports_streaming: StrictBool = True
+    supports_reasoning: StrictBool = True
     input_price: float = Field(0.0, ge=0)
     output_price: float = Field(0.0, ge=0)
     cache_read_price: Optional[float] = Field(None, ge=0)
@@ -180,11 +181,27 @@ async def list_providers():
     return results
 
 
+def _validate_custom_provider_id(pid: str) -> None:
+    """Reject ids that cannot be routed or that look like path traversal."""
+    if (
+        "/" in pid
+        or "\\" in pid
+        or ".." in pid
+        or any(ch.isspace() or ord(ch) < 32 for ch in pid)
+    ):
+        raise HTTPException(422, "Provider name must not contain '/', '\\', '..' or whitespace")
+
+
 @router.post("/providers", response_model=ProviderResp, status_code=201)
 @serialized_config_mutation
 async def create_provider(body: CreateProviderReq, _admin: object = Depends(require_admin)):
     """Create a custom OpenAI-compatible provider in flocks.json."""
     pid = "custom-" + body.name.lower().replace(" ", "-").replace("_", "-")
+    _validate_custom_provider_id(pid)
+    try:
+        base_url = validate_provider_base_url(body.base_url)
+    except BaseURLValidationError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
     # Check if already exists
     if ConfigWriter.get_provider_raw(pid) is not None:
@@ -196,7 +213,7 @@ async def create_provider(body: CreateProviderReq, _admin: object = Depends(requ
     config_dict = ConfigWriter.build_provider_config(
         pid,
         npm="@ai-sdk/openai-compatible",
-        base_url=body.base_url,
+        base_url=base_url,
     )
     config_dict["name"] = body.name
     if body.description:
@@ -218,11 +235,11 @@ async def create_provider(body: CreateProviderReq, _admin: object = Depends(requ
         log.warning("custom_provider.secret_save_failed", {"id": pid, "error": str(e)})
 
     # Register in runtime
-    _register_provider(pid, body.name, body.base_url, body.api_key)
+    _register_provider(pid, body.name, base_url, body.api_key)
 
     log.info("custom_provider.created", {"id": pid})
     return ProviderResp(
-        id=pid, name=body.name, base_url=body.base_url,
+        id=pid, name=body.name, base_url=base_url,
         description=body.description, created_at=now,
     )
 
@@ -231,6 +248,9 @@ async def create_provider(body: CreateProviderReq, _admin: object = Depends(requ
 @serialized_config_mutation
 async def delete_provider(provider_id: str, _admin: object = Depends(require_admin)):
     """Delete a custom provider from flocks.json."""
+    if not provider_id.startswith("custom-"):
+        # Built-in providers are removed via DELETE /api/provider/{id}/credentials.
+        raise HTTPException(400, "Only custom-* providers can be deleted here")
     raw = ConfigWriter.get_provider_raw(provider_id)
     if raw is None:
         raise HTTPException(404, "Not found")
@@ -515,11 +535,18 @@ async def _fetch_models_dev() -> Optional[dict[str, Any]]:
 
     try:
         import httpx
+        import asyncio
 
-        async with httpx.AsyncClient(timeout=MODELS_DEV_TIMEOUT_SEC) as client:
-            response = await client.get(MODELS_DEV_URL)
-            response.raise_for_status()
-            data = response.json()
+        async def _get() -> Any:
+            async with httpx.AsyncClient(timeout=MODELS_DEV_TIMEOUT_SEC) as client:
+                response = await client.get(MODELS_DEV_URL)
+                response.raise_for_status()
+                return response.json()
+
+        # httpx's timeout is per phase (connect/read/...); bound the whole
+        # request so model creation never waits longer than the advertised
+        # MODELS_DEV_TIMEOUT_SEC.
+        data = await asyncio.wait_for(_get(), timeout=MODELS_DEV_TIMEOUT_SEC)
     except Exception as exc:
         log.warning("custom_model.models_dev_fetch_failed", {"error": str(exc)})
         return _models_dev_cache

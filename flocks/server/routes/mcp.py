@@ -9,6 +9,7 @@ MCP state is instance-scoped for project isolation.
 
 import asyncio
 import copy
+import re
 from typing import Dict, Optional, List, Any
 from urllib.parse import parse_qs, urlparse
 
@@ -50,8 +51,8 @@ from flocks.mcp.utils import (
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.security import get_secret_manager
-from flocks.security.secrets import get_mcp_secret_id
-from flocks.server.auth import get_request_ip, get_request_user_agent, require_admin
+from flocks.security.secrets import SecretChanges, get_mcp_secret_id, recording_secret_changes
+from flocks.server.auth import API_TOKEN_SECRET_ID, get_request_ip, get_request_user_agent, require_admin
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.server.threatbook_regions import (
     THREATBOOK_REGION_PRESETS,
@@ -63,6 +64,78 @@ from flocks.utils.log import Log
 
 router = APIRouter()
 log = Log.create(service="routes.mcp")
+
+# Server names become flocks.json keys and YAML file stems under
+# ``~/.flocks/plugins/tools/mcp``; keep them to a safe identifier charset so a
+# name like ``../../evil`` can never escape that directory.
+_MCP_NAME_MAX_LENGTH = 128
+_MCP_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_MCP_TYPE_REQUIRED_MESSAGE = (
+    "MCP config field 'type' is required (one of: stdio, local, remote, sse)"
+)
+
+
+def _validate_mcp_server_name(name: str) -> str:
+    """Return the stripped name or raise HTTP 400 for unsafe / oversized names."""
+    candidate = (name or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="MCP server name must not be empty")
+    if len(candidate) > _MCP_NAME_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"MCP server name too long (max {_MCP_NAME_MAX_LENGTH} characters)",
+        )
+    if not _MCP_NAME_PATTERN.match(candidate) or ".." in candidate:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid MCP server name: only letters, digits, '.', '_' and '-' are "
+                "allowed and it must start with a letter or digit"
+            ),
+        )
+    return candidate
+
+
+def _config_type_missing(config: Dict[str, Any]) -> bool:
+    return not str(config.get("type", "") or "").strip()
+
+
+def _remote_mcp_url_error(config: Dict[str, Any]) -> Optional[str]:
+    """Reject remote MCP URLs that are not http(s) or point at link-local /
+    cloud-metadata addresses (SSRF surface). Loopback stays allowed because
+    local MCP servers commonly listen on 127.0.0.1.
+    """
+    if config.get("type") not in REMOTE_MCP_TYPES:
+        return None
+    raw_url = str(config.get("url", "") or "").strip()
+    if not raw_url:
+        return None
+    from urllib.parse import urlparse
+    import ipaddress
+    import socket
+
+    parsed = urlparse(raw_url)
+    if parsed.scheme.lower() not in ("http", "https"):
+        return "MCP server url must use http:// or https://"
+    host = parsed.hostname
+    if not host:
+        return "MCP server url is missing a host"
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or 80, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return None  # unresolvable: let the connect attempt report the real error
+    for info in infos:
+        ip_text = info[4][0].split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(ip_text)
+        except ValueError:
+            continue
+        if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+            return (
+                f"MCP server url resolves to a link-local/reserved address ({ip_text}); "
+                "metadata and link-local targets are not allowed"
+            )
+    return None
 
 
 def _read_stored_mcp_group(value: Any) -> Optional[str]:
@@ -166,7 +239,12 @@ def _load_raw_mcp_server_config(name: str) -> Optional[Dict[str, Any]]:
 def _effective_mcp_group(name: str, config: Dict[str, Any]) -> Optional[str]:
     if "group" in config:
         return _read_stored_mcp_group(config["group"])
-    entry = McpCatalog.get().get_entry(name)
+    try:
+        entry = McpCatalog.get().get_entry(name)
+    except FileNotFoundError:
+        # Without mcp_list.json there is no catalog default group; that must not
+        # fail the add / status / info request that only wanted to label the server.
+        return None
     return normalize_mcp_group(getattr(entry, "group", None))
 
 
@@ -217,6 +295,20 @@ class McpAddRequest(BaseModel):
     """Request to add an MCP server"""
     name: str = Field(..., description="Server name")
     config: Dict[str, Any] = Field(..., description="Server configuration (McpLocalConfig or McpRemoteConfig)")
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, value: str) -> str:
+        if not str(value).strip():
+            raise ValueError("Server name must not be blank")
+        return value
+
+    @field_validator("config")
+    @classmethod
+    def _config_requires_type(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+        if _config_type_missing(value):
+            raise ValueError(_MCP_TYPE_REQUIRED_MESSAGE)
+        return value
 
     @field_validator("config")
     @classmethod
@@ -271,21 +363,23 @@ async def get_mcp_status():
     operation_id="mcp.add"
 )
 @serialized_config_mutation
-async def add_mcp_server(
-    request: McpAddRequest,
-    _admin: object = Depends(require_admin),
-):
+async def add_mcp_server(request: McpAddRequest, _admin: object = Depends(require_admin)):
     """
     Add a new MCP server and persist to both flocks.json and
     ``~/.flocks/plugins/tools/mcp/``.
 
     Returns the updated status of ALL MCP servers (not just the new one).
     """
+    server_name = _validate_mcp_server_name(request.name)
+    request.name = server_name
     try:
         # Extract any API key embedded in the URL and move it to .secret.json.
         # The URL is rewritten to use a {secret:...} reference so that the
         # plain-text credential is never written to flocks.json.
         clean_config = _prepare_mcp_config_for_save(request.name, request.config)
+        url_error = _remote_mcp_url_error(clean_config)
+        if url_error:
+            raise HTTPException(status_code=400, detail=url_error)
 
         if should_skip_connect_on_add(clean_config):
             _persist_mcp_server_config(request.name, clean_config)
@@ -313,6 +407,9 @@ async def add_mcp_server(
                 })
                 return await _build_mcp_status_response()
 
+            # Nothing was persisted: drop the FAILED runtime entry so the
+            # rejected name does not linger in GET /api/mcp listings.
+            await MCP.remove(request.name)
             raise ValueError(
                 error_detail or f"Failed to connect to server: {request.name}"
             )
@@ -325,6 +422,8 @@ async def add_mcp_server(
 
         # Return updated status, including configured-but-not-connected entries.
         return await _build_mcp_status_response()
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -385,8 +484,13 @@ async def test_mcp_connection(
     import time
     start = time.time()
     temp_name = f"{request.name}__test__"
+    if _config_type_missing(request.config):
+        return {"success": False, "message": _MCP_TYPE_REQUIRED_MESSAGE}
     try:
         normalized_config = normalize_mcp_config(request.config)
+        url_error = _remote_mcp_url_error(normalized_config)
+        if url_error:
+            return {"success": False, "message": url_error}
         success = await MCP.connect(temp_name, normalized_config)
         if not success:
             status = await MCP.status()
@@ -423,14 +527,13 @@ async def test_mcp_connection(
 async def _restore_threatbook_mcp_setup(
     name: str,
     config_snapshot: Dict[str, Any],
-    secret_snapshot: Dict[str, Any],
+    secret_changes: SecretChanges,
     previous_config: Optional[Dict[str, Any]],
     was_connected: bool,
 ) -> None:
     """Restore persisted and runtime state after a failed ThreatBook apply."""
-    secrets = get_secret_manager()
     ConfigWriter._write_raw(config_snapshot)
-    secrets._save(secret_snapshot)
+    secret_changes.revert()
 
     from flocks.tool.tool_loader import delete_mcp_config, save_mcp_config
 
@@ -501,7 +604,6 @@ async def configure_threatbook_mcp(
 
     secrets = get_secret_manager()
     config_snapshot = copy.deepcopy(ConfigWriter._read_raw())
-    secret_snapshot = copy.deepcopy(secrets._load())
     previous_config = copy.deepcopy(_load_raw_mcp_server_config(name))
     runtime_status = await MCP.status()
     previous_status = runtime_status.get(name)
@@ -521,42 +623,43 @@ async def configure_threatbook_mcp(
         "enabled": True,
     }
 
-    try:
-        secrets.set(secret_id, api_key)
-        _persist_mcp_server_config(name, next_config)
+    with recording_secret_changes() as secret_changes:
+        try:
+            secrets.set(secret_id, api_key)
+            _persist_mcp_server_config(name, next_config)
 
-        if previous_status is not None:
-            await MCP.remove(name)
-        resolved_config = await _load_mcp_server_config(name)
-        if not resolved_config or not await MCP.connect(name, resolved_config):
-            raise ValueError("ThreatBook MCP could not reconnect after saving")
+            if previous_status is not None:
+                await MCP.remove(name)
+            resolved_config = await _load_mcp_server_config(name)
+            if not resolved_config or not await MCP.connect(name, resolved_config):
+                raise ValueError("ThreatBook MCP could not reconnect after saving")
 
-        tools_count = await MCP.refresh_tools(name)
-        return ThreatBookMcpConfigureResponse(
-            success=True,
-            message="ThreatBook MCP configured and connected successfully",
-            region=request.region,
-            endpoint=endpoint,
-            connected=True,
-            tools_count=tools_count,
-        )
-    except Exception as exc:
-        await _restore_threatbook_mcp_setup(
-            name,
-            config_snapshot,
-            secret_snapshot,
-            previous_config,
-            was_connected,
-        )
-        log.error("mcp.threatbook.configure_failed", {
-            "name": name,
-            "region": request.region,
-            "error": str(exc),
-        })
-        raise HTTPException(
-            status_code=500,
-            detail=f"ThreatBook MCP configuration failed: {exc}",
-        ) from exc
+            tools_count = await MCP.refresh_tools(name)
+            return ThreatBookMcpConfigureResponse(
+                success=True,
+                message="ThreatBook MCP configured and connected successfully",
+                region=request.region,
+                endpoint=endpoint,
+                connected=True,
+                tools_count=tools_count,
+            )
+        except Exception as exc:
+            await _restore_threatbook_mcp_setup(
+                name,
+                config_snapshot,
+                secret_changes,
+                previous_config,
+                was_connected,
+            )
+            log.error("mcp.threatbook.configure_failed", {
+                "name": name,
+                "region": request.region,
+                "error": str(exc),
+            })
+            raise HTTPException(
+                status_code=500,
+                detail=f"ThreatBook MCP configuration failed: {exc}",
+            ) from exc
 
 
 @router.post(
@@ -583,6 +686,9 @@ async def test_existing_mcp_connection(
         merged_config = dict(base_config)
         merged_config.update(normalize_mcp_config(request.config))
         merged_config = restore_masked_mcp_config_secrets(base_config, merged_config)
+        url_error = _remote_mcp_url_error(merged_config)
+        if url_error:
+            return {"success": False, "message": url_error}
 
         success = await MCP.connect(temp_name, merged_config)
         if not success:
@@ -625,10 +731,7 @@ async def test_existing_mcp_connection(
     operation_id="mcp.remove"
 )
 @serialized_config_mutation
-async def remove_mcp_server(
-    name: str,
-    _admin: object = Depends(require_admin),
-):
+async def remove_mcp_server(name: str, _admin: object = Depends(require_admin)):
     """
     Remove an MCP server.
 
@@ -653,8 +756,11 @@ async def remove_mcp_server(
             )
 
         # Clean up installed npm packages under ~/.flocks/mcp if this is a catalog entry
-        catalog = McpCatalog.get()
-        entry = catalog.get_entry(name)
+        try:
+            entry = McpCatalog.get().get_entry(name)
+        except Exception as catalog_err:
+            log.warn("mcp.remove.catalog_unavailable", {"name": name, "error": str(catalog_err)})
+            entry = None
         if entry:
             try:
                 await preflight_uninstall(entry)
@@ -723,6 +829,9 @@ async def update_mcp_server(
             existing_config, updated_config
         )
         clean_config = _prepare_mcp_config_for_save(name, updated_config)
+        url_error = _remote_mcp_url_error(clean_config)
+        if url_error:
+            raise HTTPException(status_code=400, detail=url_error)
         _persist_mcp_server_config(name, clean_config)
 
         status = await MCP.status()
@@ -1216,11 +1325,7 @@ async def reveal_mcp_credential(
     description="Set authentication credentials for an MCP server."
 )
 @serialized_config_mutation
-async def set_mcp_credentials(
-    name: str,
-    request: McpCredentialRequest,
-    _admin: object = Depends(require_admin),
-):
+async def set_mcp_credentials(name: str, request: McpCredentialRequest, _admin: object = Depends(require_admin)):
     """Set credentials for a server.
 
     Stores in .secret.json with flat KV format.
@@ -1233,6 +1338,10 @@ async def set_mcp_credentials(
 
         # Use the provided secret ID or the canonical MCP naming convention.
         secret_id = request.secret_id or get_mcp_secret_id(name)
+        if secret_id == API_TOKEN_SECRET_ID:
+            # The server API token is not an MCP credential; overwriting it here
+            # would lock every non-browser client out of the instance.
+            raise HTTPException(status_code=400, detail=f"secret_id '{secret_id}' is reserved")
         secrets.set(secret_id, request.api_key)
 
         log.info("mcp.credentials.set", {"name": name, "secret_id": secret_id})
@@ -1257,10 +1366,7 @@ async def set_mcp_credentials(
     description="Delete stored credentials for an MCP server."
 )
 @serialized_config_mutation
-async def delete_mcp_credentials(
-    name: str,
-    _admin: object = Depends(require_admin),
-):
+async def delete_mcp_credentials(name: str, _admin: object = Depends(require_admin)):
     """Delete credentials for a server."""
     try:
         secrets = get_secret_manager()
@@ -1485,9 +1591,7 @@ async def get_catalog_configured():
     operation_id="mcp.catalog.auto_setup"
 )
 @serialized_config_mutation
-async def auto_setup_catalog(
-    _admin: object = Depends(require_admin),
-):
+async def auto_setup_catalog(_admin: object = Depends(require_admin)):
     """Batch write all no-secret catalog entries to flocks.json with enabled=false."""
     try:
         catalog = McpCatalog.get()
@@ -1534,10 +1638,7 @@ async def auto_setup_catalog(
     operation_id="mcp.catalog.install"
 )
 @serialized_config_mutation
-async def install_from_catalog(
-    request: CatalogInstallRequest,
-    _admin: object = Depends(require_admin),
-):
+async def install_from_catalog(request: CatalogInstallRequest, _admin: object = Depends(require_admin)):
     """Install an MCP server from catalog into flocks.json.
 
     If credentials are provided, they are saved to .secret.json and the config
@@ -1591,6 +1692,7 @@ async def install_from_catalog(
                 status = await MCP.status()
                 server_status = status.get(request.server_id)
                 error_detail = getattr(server_status, "error", None) if server_status else None
+                await MCP.remove(request.server_id)
                 raise HTTPException(
                     status_code=400,
                     detail=error_detail or f"Failed to connect to server: {request.server_id}",

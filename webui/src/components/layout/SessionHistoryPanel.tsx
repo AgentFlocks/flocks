@@ -26,7 +26,7 @@ import {
 } from 'lucide-react';
 import apiClient from '@/api/client';
 import { sessionApi } from '@/api/session';
-import { useSessions } from '@/hooks/useSessions';
+import { SESSION_HISTORY_PAGE_SIZE, noteSessionListChange, useSessions } from '@/hooks/useSessions';
 import { useSSE, type SSEEvent } from '@/hooks/useSSE';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/components/common/Toast';
@@ -37,11 +37,12 @@ import { getSessionDisplayTitle, isRunningSessionStatus, readRunningSessionIds }
 import { exportSessionJson } from '@/utils/sessionExport';
 import ProjectFolderDialog, { pathBasename, type ProjectFolderSummary } from './ProjectFolderDialog';
 import { announceProjectsChanged, onProjectsChanged } from '@/utils/projectEvents';
+import { requestClock } from '@/utils/sharedRequest';
 
 // Sessions outside any registered folder are grouped as "未分类".
 const UNGROUPED_ID = 'tasks';
 const ARCHIVE_CONCURRENCY = 4;
-const HISTORY_PAGE_SIZE = 20;
+const HISTORY_PAGE_SIZE = SESSION_HISTORY_PAGE_SIZE;
 const HISTORY_LOAD_MORE_SIZE = 50;
 // "加载更多" reveals the rest of a list (fetching another page when needed); "收起" goes back to the
 // first page, so the compact list is exactly what the panel showed when it opened.
@@ -51,9 +52,9 @@ const REFRESH_DEBOUNCE_MS = 500;
 const SCROLLBAR_HIDE_DELAY_MS = 800;
 const REFRESH_EVENTS = new Set(['session.created', 'session.updated', 'session.deleted', 'session.archived', 'session.unarchived']);
 
+// Session counts come with the session pages (`useSessions().statsByProject`),
+// not from the folder list.
 interface FolderInfo extends ProjectFolderSummary {
-  sessionCount?: number;
-  lastActivityAt?: number | null;
   pathStatus?: 'available' | 'missing' | 'unreadable';
   canWrite?: boolean;
   canDelete?: boolean;
@@ -171,6 +172,8 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   const pinnedKey = `flocks:history:pinned-folders:${user?.id ?? 'anonymous'}`;
 
   const [folders, setFolders] = useState<FolderInfo[]>([]);
+  const [foldersReady, setFoldersReady] = useState(false);
+  const folderRequestSeqRef = useRef(0);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => readIdSet(collapsedKey));
   const [pinnedFolders, setPinnedFolders] = useState<Set<string>>(() => readIdSet(pinnedKey));
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
@@ -188,6 +191,8 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   const [historyScrolling, setHistoryScrolling] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const refreshTimerRef = useRef<number | null>(null);
+  // When the latest list-changing event arrived: the refresh it schedules must start later.
+  const refreshEventAtRef = useRef(0);
   const scrollbarTimerRef = useRef<number | null>(null);
 
   useEffect(() => () => {
@@ -214,12 +219,14 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
     updateSessionTitle,
     removeSession,
     hasMoreByProject = {},
+    statsByProject = {},
     loadingMoreProjectIds = new Set<string>(),
     loadMore,
   } = useSessions('', {
     projectIds: folderIds,
     pageSize: HISTORY_PAGE_SIZE,
     loadMorePageSize: HISTORY_LOAD_MORE_SIZE,
+    enabled: foldersReady,
   });
   const compactCount = HISTORY_PAGE_SIZE;
 
@@ -256,13 +263,19 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   const listedSessionsRef = useRef(listedSessions);
   listedSessionsRef.current = listedSessions;
 
+  // Folder counts and recent activity arrive with each folder's first page of
+  // sessions, so the folder list itself skips the session statistics.
   const fetchFolders = useCallback(async () => {
+    const requestSeq = ++folderRequestSeqRef.current;
     try {
-      const response = await apiClient.get('/api/project');
+      const response = await apiClient.get('/api/project', { params: { includeSessionStats: false } });
+      if (requestSeq !== folderRequestSeqRef.current) return;
       const list = Array.isArray(response.data) ? (response.data as FolderInfo[]) : [];
       setFolders(list.filter((folder) => folder.id !== UNGROUPED_ID && !folder.isDefault));
     } catch {
       // Keep the last known folders; the next refresh tries again.
+    } finally {
+      if (requestSeq === folderRequestSeqRef.current) setFoldersReady(true);
     }
   }, []);
 
@@ -272,9 +285,10 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
     return onProjectsChanged('sidebar', () => { void fetchFolders(); });
   }, [fetchFolders]);
 
-  const refreshAll = useCallback(async () => {
+  /** `freshAfter`: see `useSessions`; refreshes after the panel's own changes leave it out. */
+  const refreshAll = useCallback(async (freshAfter?: number) => {
     setOlderOpenSessionVersion((version) => version + 1);
-    await Promise.allSettled([fetchFolders(), refetch()]);
+    await Promise.allSettled([fetchFolders(), refetch(freshAfter === undefined ? undefined : { freshAfter })]);
   }, [fetchFolders, refetch]);
 
   // Live updates: one shared event stream; bursts become one refresh.
@@ -296,10 +310,14 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
     if (event.type === 'session.updated' && event.properties?.id && event.properties?.title) {
       updateSessionTitle(event.properties.id, event.properties.title);
     }
+    refreshEventAtRef.current = requestClock();
+    // A view that opens now must not show a list read before this event.
+    noteSessionListChange(refreshEventAtRef.current);
     if (refreshTimerRef.current !== null) return;
     refreshTimerRef.current = window.setTimeout(() => {
       refreshTimerRef.current = null;
-      void refreshAll();
+      // The session page refreshes on the same events; one request serves both.
+      void refreshAll(refreshEventAtRef.current);
     }, REFRESH_DEBOUNCE_MS);
   }, [refreshAll, updateSessionTitle]);
 
@@ -365,14 +383,14 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
     const ordered = [...folders].sort((a, b) => {
       const pinDiff = Number(pinnedFolders.has(b.id)) - Number(pinnedFolders.has(a.id));
       if (pinDiff !== 0) return pinDiff;
-      const activity = (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0);
+      const activity = (statsByProject[b.id]?.lastActivityAt ?? 0) - (statsByProject[a.id]?.lastActivityAt ?? 0);
       return activity !== 0 ? activity : folderLabel(a).localeCompare(folderLabel(b));
     });
     return {
       folders: ordered.map((folder) => ({ folder, sessions: byFolder.get(folder.id) ?? [] })),
       ungrouped: byFolder.get(UNGROUPED_ID) ?? [],
     };
-  }, [folders, listedSessions, pinnedFolders]);
+  }, [folders, listedSessions, pinnedFolders, statsByProject]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
@@ -690,9 +708,9 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   };
 
   const iconButtonClass = 'grid h-7 w-7 shrink-0 place-items-center rounded-lg text-ui-secondary transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus';
-  const rowMenuButtonClass = 'grid h-6 w-6 shrink-0 place-items-center rounded text-ui-secondary opacity-0 transition-all hover:bg-ui-hover hover:text-ui-text focus:opacity-100 group-hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus';
-  // Reveal actions only for the hovered folder header, or for keyboard focus.
-  const folderActionButtonClass = 'pointer-events-none grid h-6 w-6 shrink-0 place-items-center rounded text-ui-secondary opacity-0 transition-all hover:bg-ui-hover hover:text-ui-text group-hover/folder:pointer-events-auto group-hover/folder:opacity-100 group-hover/folder:disabled:opacity-50 focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus';
+  const rowMenuButtonClass = 'grid h-6 w-6 shrink-0 place-items-center rounded text-ui-secondary opacity-0 transition-all hover:bg-ui-hover hover:text-ui-text focus:opacity-100 group-hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus max-md:opacity-100';
+  // Reveal actions only for the hovered folder header, or for keyboard focus; phones have no hover.
+  const folderActionButtonClass = 'pointer-events-none grid h-6 w-6 shrink-0 place-items-center rounded text-ui-secondary opacity-0 transition-all hover:bg-ui-hover hover:text-ui-text group-hover/folder:pointer-events-auto group-hover/folder:opacity-100 group-hover/folder:disabled:opacity-50 focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus max-md:pointer-events-auto max-md:opacity-100 max-md:disabled:opacity-50';
 
   if (collapsed) {
     return (
@@ -839,7 +857,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
             {groups.folders.map(({ folder, sessions: folderSessions }) => {
               const isCollapsed = collapsedFolders.has(folder.id);
               const pinned = pinnedFolders.has(folder.id);
-              const remoteMore = folderSessions.length < (folder.sessionCount ?? 0) || hasMoreByProject[folder.id];
+              const remoteMore = folderSessions.length < (statsByProject[folder.id]?.total ?? 0) || hasMoreByProject[folder.id];
               return (
                 <div key={folder.id}>
                   <div className="group/folder flex items-center gap-0.5 rounded-lg px-1 transition-colors hover:bg-ui-hover">

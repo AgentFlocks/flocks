@@ -2,10 +2,44 @@
 Pytest configuration and global fixtures
 """
 
+import importlib.metadata
 import os
 from pathlib import Path
 
 import pytest
+
+_RELIABILITY_INHERITED_HOME = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+
+# The suite runs on the runtime's own SQLite backend: a backend chosen by the
+# developer's shell (or by a persisted choice under a real home directory)
+# must not switch it. Set before flocks is imported, which reads it once.
+os.environ["FLOCKS_DB_BACKEND"] = "sqlite"
+for _name in ("FLOCKS_DB_DSN", "FLOCKS_DB_DSN_FILE"):
+    os.environ.pop(_name, None)
+
+
+_installed_entry_points = importlib.metadata.entry_points
+
+
+def _core_entry_points(**params):
+    """``importlib.metadata.entry_points`` without other packages' ``flocks.*`` entries.
+
+    A development venv may have an optional extension package installed next to
+    Core. Its ``flocks.plugins`` / ``flocks.plugins.critical`` / ``flocks.cli``
+    entry points would load while these tests build an app or import the CLI and
+    replace Core behaviour (workspace layout, identity, licensing, commands), so
+    the suite would test that package instead of Core, which Core's CI never has.
+    Tests of entry-point loading install their own fakes over this one.
+    """
+    kept = importlib.metadata.EntryPoints(
+        entry_point
+        for entry_point in _installed_entry_points()
+        if not entry_point.group.startswith("flocks.")
+        or entry_point.dist is None
+        or entry_point.dist.name == "flocks"
+    )
+    return kept.select(**params) if params else kept
+
 
 _API_KEY_MARKERS = {
     "requires_anthropic_key": ("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY not set"),
@@ -31,6 +65,12 @@ def pytest_configure(config):
     )
     for marker_name, (_, reason) in _API_KEY_MARKERS.items():
         config.addinivalue_line("markers", f"{marker_name}: skip if {reason}")
+    # Before collection: importing flocks.cli.main already loads CLI extensions.
+    importlib.metadata.entry_points = _core_entry_points
+
+
+def pytest_unconfigure(config):
+    importlib.metadata.entry_points = _installed_entry_points
 
 
 def pytest_runtest_setup(item):
@@ -56,8 +96,17 @@ def _home_honors_env(monkeypatch):
     behavior-preserving when ``HOME`` already points at the real home (the
     default), so tests that never touch ``HOME`` see no change.
     """
-    def _home() -> Path:
+    def _home_text():
         candidate = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+        # The acceptance runner opts into a disposable fallback home. Preserve
+        # any more specific HOME override made by a test's own fixture.
+        fallback = os.environ.get("FLOCKS_RELIABILITY_TEST_HOME")
+        if fallback and candidate == _RELIABILITY_INHERITED_HOME:
+            return fallback
+        return candidate
+
+    def _home() -> Path:
+        candidate = _home_text()
         if candidate:
             return Path(candidate)
         return Path(os.path.expanduser("~"))
@@ -78,7 +127,7 @@ def _home_honors_env(monkeypatch):
         # forms to the real implementation so we never change its type
         # contract or raise on a bytes path.
         if isinstance(text, str):
-            home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+            home = _home_text()
             if home and (text == "~" or text.startswith("~/") or text.startswith("~\\")):
                 return home + text[1:]
         return _real_expanduser(path)
@@ -132,3 +181,79 @@ async def _cleanup_runtime_singletons_after_test():
     except Exception:
         pass
 
+
+@pytest.fixture(autouse=True)
+def _reset_log_retention_handover():
+    """Give the logger its own cleanup back after every test.
+
+    Starting the CLI or the server hands log cleanup to data retention for the
+    rest of the process (``preload_log_retention``); a test that does so would
+    otherwise leave later tests' loggers deleting nothing, whatever they expect.
+    """
+    yield
+    from flocks.utils.log import set_log_cleanup_managed, set_log_retention_days_override
+
+    set_log_cleanup_managed(False)
+    set_log_retention_days_override(None)
+
+
+@pytest.fixture(autouse=True)
+def _restore_log_output():
+    """Give the logger its output back after every test.
+
+    Invoking a CLI command initialises logging to the day's file
+    (``Log.init(print=False)``); left that way, every later test's log lines
+    go to that file and a test reading them from stderr sees nothing.
+    """
+    from flocks.utils.log import Log
+
+    fields = ("_writer", "_error_writer", "_log_file", "_log_dir_path", "_log_date", "_level")
+    before = {name: getattr(Log, name, None) for name in fields}
+    yield
+    with Log._state_lock:
+        for name in ("_writer", "_error_writer"):
+            current = getattr(Log, name, None)
+            if current is not None and current is not before[name]:
+                try:
+                    current.close()
+                except Exception:
+                    pass
+        for name, value in before.items():
+            setattr(Log, name, value)
+
+
+@pytest.fixture(autouse=True)
+def _default_source_deploy_mode(monkeypatch):
+    """Run the updater as a plain source install unless a test opts into another mode.
+
+    ``flocks.updater.deploy.detect_deploy_mode`` takes a runtime root carrying a
+    ``config/deployment.json`` descriptor at its word (a *managed* release
+    package refuses in-place upgrades) and treats a container as ``docker``.
+    Developer machines and CI runners in either situation would otherwise flip
+    every updater test into a refusal path, so pin the default to ``source``
+    here; tests covering docker/managed behaviour set ``FLOCKS_DEPLOY_MODE``
+    themselves (after this fixture) and clear the detection cache.
+    """
+    from flocks.updater.deploy import detect_deploy_mode
+
+    if not os.environ.get("FLOCKS_DEPLOY_MODE"):
+        monkeypatch.setenv("FLOCKS_DEPLOY_MODE", "source")
+    detect_deploy_mode.cache_clear()
+    yield
+    detect_deploy_mode.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_root_from_shell(monkeypatch):
+    """Drop a ``FLOCKS_ROOT`` (and its sibling overrides) inherited from the shell.
+
+    Suites isolate the runtime tree by ``monkeypatch.setenv("HOME", tmp)`` and
+    expect the plugin root / config dir / data dir to follow ``~/.flocks``.
+    Those paths now resolve from ``FLOCKS_ROOT`` first, so a developer shell
+    that exports it (e.g. to drive a test instance) would make dozens of
+    HOME-isolated tests read the *real* instance's plugins and config.
+    Tests that need a runtime root set it themselves; this fixture runs before
+    per-directory conftests (``tests/server/conftest.py`` sets its own root).
+    """
+    for name in ("FLOCKS_ROOT", "FLOCKS_CONFIG_DIR", "FLOCKS_DATA_DIR", "FLOCKS_WORKSPACE_DIR"):
+        monkeypatch.delenv(name, raising=False)

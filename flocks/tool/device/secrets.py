@@ -81,10 +81,20 @@ def persist_fields(
     - **Sensitive, non-empty** → write to SecretManager, store placeholder.
     - **Sensitive, empty** → delete existing placeholder and secret.
     - **Sensitive, absent** → keep existing placeholder (no-op).
+    - **Sensitive, unchanged masked preview** → keep existing secret (no-op).
     - **Non-sensitive** → store plaintext.
     - Keys absent from ``incoming`` inherit from ``prior_db_fields``.
+
+    The masked-preview guard mirrors the connectivity probe's
+    ``_resolve_test_fields``: the GET/list endpoints only ever return a masked
+    preview of a secret (e.g. ``sk-***1234``), so if that exact preview comes
+    back on an update it means the field was not edited. Writing it verbatim
+    would overwrite the real secret with its own mask and irrecoverably destroy
+    the credential. Treat an incoming value that equals the current secret's
+    mask as "unchanged" and keep the stored secret.
     """
     from flocks.security import get_secret_manager
+    from flocks.security.secrets import SecretManager
 
     secret_keys = _secret_keys_for(storage_key)
     secrets = get_secret_manager()
@@ -104,6 +114,15 @@ def persist_fields(
                             {"id": sid, "error": str(exc)},
                         )
                 continue
+            prior_sid = _parse_placeholder(result.get(key))
+            if prior_sid:
+                try:
+                    current_secret = secrets.get(prior_sid) or ""
+                except Exception:
+                    current_secret = ""
+                if current_secret and value == SecretManager.mask(current_secret):
+                    # Unchanged masked preview: keep the existing secret intact.
+                    continue
             sid = _secret_id(device_id, key)
             try:
                 secrets.set(sid, value)

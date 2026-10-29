@@ -41,11 +41,14 @@ class AsyncTokenBucket:
             self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
             self._last_refill = now
 
-            if self._tokens < 1:
-                wait = (1 - self._tokens) / self._rate
-                self._tokens = 0
-            else:
-                self._tokens -= 1
+            # Always consume the token, even when it has to be borrowed: the
+            # deficit is what makes the next caller wait its own full share.
+            # Zeroing the balance instead let the refill earned during this
+            # caller's sleep be spent again immediately by the next caller,
+            # so two sends slipped through on every rate boundary.
+            self._tokens -= 1
+            if self._tokens < 0:
+                wait = -self._tokens / self._rate
 
         if wait > 0:
             await asyncio.sleep(wait)

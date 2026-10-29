@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import contextvars
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 
+from flocks.security.secrets import SecretChanges, SecretManager
 from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, AuthUser
 from flocks.server.routes import onboarding as onboarding_routes
 
@@ -41,32 +43,22 @@ def default_threatbook_intel_status(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture
-def draft_secrets(monkeypatch: pytest.MonkeyPatch):
+def draft_secrets(tmp_path, monkeypatch: pytest.MonkeyPatch):
     from flocks import security
+    from flocks.security import secrets as secret_module
     from flocks.server.routes import provider as provider_routes
 
-    class Secrets:
-        def __init__(self):
-            self.values = {}
+    class Secrets(SecretManager):
+        """A real secret file under tmp_path: v2 rolls a failed save back by the
+        writes it recorded, which only a real secret manager reports."""
 
-        def get(self, key):
-            return self.values.get(key)
+        @property
+        def values(self):
+            return {key: self.get(key) for key in self.list()}
 
-        def set(self, key, value):
-            self.values[key] = value
-
-        def delete(self, key):
-            return self.values.pop(key, None) is not None
-
-        def _load(self):
-            return dict(self.values)
-
-        def _save(self, values):
-            self.values = dict(values)
-
-    secrets = Secrets()
+    secrets = Secrets(tmp_path / "draft-secrets.json")
+    monkeypatch.setattr(secret_module, "_secret_manager", secrets)
     monkeypatch.setattr(security, "get_secret_manager", lambda: secrets)
-    monkeypatch.setattr(onboarding_routes, "get_secret_manager", lambda: secrets)
     monkeypatch.setattr(provider_routes, "_ensure_provider_initialized", AsyncMock())
     monkeypatch.setattr(onboarding_routes.Provider, "get", lambda _provider_id: None)
     monkeypatch.setattr(onboarding_routes.Provider, "_models", dict(onboarding_routes.Provider._models))
@@ -174,6 +166,29 @@ class TestOnboardingDraftRoutes:
         assert onboarding_routes.ConfigWriter.get_provider_raw("invented-provider") is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("api_key", ["", "new-key"])
+    async def test_a_draft_address_is_checked_like_saved_credentials(self, client, draft_secrets, api_key):
+        # Without a key the draft skips saving credentials, which is where the
+        # address used to be checked; a cloud metadata address must not get in.
+        saved = await client.post("/api/onboarding/draft", json={"model": {
+            "region": "global", "use_threatbook_model": False,
+            "third_party_llm": {"provider_id": "openai-compatible", "api_key": "saved-key", "model_id": "m",
+                                "base_url": "https://models.example.test/v1"},
+        }})
+        assert saved.status_code == 200, saved.text
+
+        response = await client.post("/api/onboarding/draft", json={"model": {
+            "region": "global", "use_threatbook_model": False,
+            "third_party_llm": {"provider_id": "openai-compatible", "api_key": api_key, "model_id": "m",
+                                "base_url": "http://169.254.169.254/latest/meta-data/"},
+        }})
+
+        assert response.status_code == 422, response.text
+        raw = onboarding_routes.ConfigWriter.get_provider_raw("openai-compatible")
+        assert raw["options"]["baseURL"] == "https://models.example.test/v1"
+        assert draft_secrets.get("openai-compatible_llm_key") == "saved-key"
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("provider_id", ["azure-openai", "azure", "openai-compatible"])
     async def test_manual_model_or_azure_deployment_is_saved_without_setting_default(
         self, client, draft_secrets, provider_id
@@ -210,6 +225,13 @@ class TestOnboardingDraftRoutes:
     ):
         probe = AsyncMock(return_value={"success": True, "message": "ok"})
         monkeypatch.setattr(onboarding_routes, "_test_provider_or_service_with_temp_credentials", probe)
+
+        async def record_default(model_type, body, *_args, **_kwargs):
+            # v2's default-model route checks the provider against the runtime
+            # registry, which this fixture stubs out; onboarding only has to ask.
+            onboarding_routes.ConfigWriter.set_default_model(model_type.value, body.provider_id, body.model_id)
+
+        monkeypatch.setattr(onboarding_routes, "set_default_model", record_default)
         response = await client.post("/api/onboarding/apply", json={
             "region": "global", "use_threatbook_model": False,
             "third_party_llm": {
@@ -337,7 +359,7 @@ async def test_apply_rollback_restores_provider_registries_and_previous_instance
     monkeypatch.setattr(onboarding_routes.Provider, "_providers", {provider.id: provider})
     monkeypatch.setattr(onboarding_routes.Provider, "_models", {"original-model": old_model})
     monkeypatch.setattr(onboarding_routes.Provider, "_initialized", True)
-    monkeypatch.setattr(onboarding_routes, "_snapshot_config_and_secret_state", lambda: ({}, {}))
+    monkeypatch.setattr(onboarding_routes, "_snapshot_config_state", lambda: {})
     monkeypatch.setattr(onboarding_routes, "_restore_config_and_secret_state", AsyncMock())
 
     with pytest.raises(RuntimeError, match="failed after mutation"):
@@ -359,16 +381,11 @@ async def test_apply_rollback_restores_provider_registries_and_previous_instance
 @pytest.mark.asyncio
 async def test_apply_rollback_restores_mcp_runtime(monkeypatch: pytest.MonkeyPatch):
     config_snapshot = {"mcp": {"threatbook_mcp": {"url": "old"}}}
-    secret_snapshot = {"threatbook_mcp_key": "old-key"}
     previous_config = {"type": "remote", "url": "old"}
     restore = AsyncMock()
     reload_runtime = AsyncMock()
 
-    monkeypatch.setattr(
-        onboarding_routes,
-        "_snapshot_config_and_secret_state",
-        lambda: (config_snapshot, secret_snapshot),
-    )
+    monkeypatch.setattr(onboarding_routes, "_snapshot_config_state", lambda: config_snapshot)
     monkeypatch.setattr(
         onboarding_routes,
         "_load_raw_mcp_server_config",
@@ -395,11 +412,32 @@ async def test_apply_rollback_restores_mcp_runtime(monkeypatch: pytest.MonkeyPat
     restore.assert_awaited_once_with(
         "threatbook_mcp",
         config_snapshot,
-        secret_snapshot,
+        ANY,
         previous_config,
         True,
     )
+    assert isinstance(restore.await_args.args[2], SecretChanges)
     reload_runtime.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_validation_takes_back_only_the_secrets_it_wrote(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    path = tmp_path / ".secret.json"
+    path.write_text(json.dumps({"threatbook_llm_key": "saved"}))
+    manager = SecretManager(path)
+    config = {"provider": {}}
+    monkeypatch.setattr(onboarding_routes.ConfigWriter, "_read_raw", lambda: json.loads(json.dumps(config)))
+    monkeypatch.setattr(onboarding_routes.ConfigWriter, "_write_raw", lambda data: None)
+    monkeypatch.setattr(onboarding_routes, "_reload_runtime_state", AsyncMock())
+
+    async with onboarding_routes._temporary_config_and_secret_state():
+        manager.set("threatbook_llm_key", "candidate")
+        # Saved meanwhile by another request or the CLI, outside this validation.
+        contextvars.Context().run(SecretManager(path).set, "virustotal_api_key", "saved meanwhile")
+
+    assert json.loads(path.read_text()) == {
+        "threatbook_llm_key": "saved", "virustotal_api_key": "saved meanwhile",
+    }
 
 
 @pytest.mark.asyncio
@@ -1203,3 +1241,38 @@ class TestOnboardingApplyRoutes:
         assert ("provider", "openai") not in calls
         assert ("default_model", "openai") not in calls
         assert "default_llm" not in data["skipped"]
+
+
+class TestOnboardingConcurrency:
+    @pytest.mark.asyncio
+    async def test_validate_and_apply_are_serialised(self, client, monkeypatch: pytest.MonkeyPatch):
+        """validate() restores a config/secret snapshot when it finishes; if it
+        ran interleaved with apply(), that restore would wipe apply's writes.
+        Both endpoints must take the module lock so their bodies never overlap."""
+        import asyncio
+
+        active = {"n": 0, "max": 0}
+        order: list[str] = []
+
+        async def fake_validate(request):
+            active["n"] += 1
+            active["max"] = max(active["max"], active["n"])
+            order.append("validate:enter")
+            await asyncio.sleep(0.05)
+            active["n"] -= 1
+            order.append("validate:exit")
+            return onboarding_routes.OnboardingValidateResponse(
+                success=False, can_apply=False, threatbook_enabled=False,
+                error_code="nothing_to_apply", message="x", threatbook_resources=[], resource_results={},
+            )
+
+        monkeypatch.setattr(onboarding_routes, "_validate_onboarding_request", fake_validate)
+        body = {"region": "cn", "use_threatbook_model": False, "threatbook_services_only": True}
+
+        responses = await asyncio.gather(
+            client.post("/api/onboarding/validate", json=body),
+            client.post("/api/onboarding/apply", json=body),
+        )
+        assert [r.status_code for r in responses] == [200, 400]
+        assert active["max"] == 1, order
+        assert order == ["validate:enter", "validate:exit", "validate:enter", "validate:exit"]

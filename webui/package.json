@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.19",
+    "@tanstack/react-virtual": "^3.14.13",
     "@xyflow/react": "^12.10.0",
     "axios": "^1.6.7",
     "clsx": "^2.1.0",
