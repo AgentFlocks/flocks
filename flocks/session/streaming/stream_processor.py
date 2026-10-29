@@ -443,7 +443,8 @@ class StreamProcessor:
                 self._merge_reasoning_metadata(part, event.metadata)
             
             self._log_dsml_markers(part.text, "reasoning")
-            if self._contains_dsml_tool_markup(part.text):
+            reasoning_call_attempt = self._has_dsml_call_attempt(part.text)
+            if reasoning_call_attempt:
                 # Reasoning may describe hypothetical calls. Do not execute it.
                 log.warn("stream.reasoning_tool_calls_detected", {
                     "session_id": self.session_id,
@@ -479,6 +480,11 @@ class StreamProcessor:
             
             # Remove from active tracking
             del self.reasoning_parts[event.id]
+            if reasoning_call_attempt:
+                raise ValueError(
+                    "模型将 DSML 工具调用写入了 reasoning，调用未执行。"
+                    "请重试并要求模型通过原生工具调用通道发送；本轮不能视为任务完成。"
+                )
     
     async def _handle_tool_input_start(self, event: ToolInputStartEvent) -> None:
         """
@@ -1738,7 +1744,7 @@ class StreamProcessor:
             raw_text = self.current_text_part.text
             self._log_dsml_markers(raw_text, "text")
             all_text_tool_calls: list[dict] = []
-            cleaned = raw_text
+            cleaned, literals = self._protect_dsml_literals(raw_text)
 
             if (
                 "<tool_use>" in cleaned
@@ -1753,10 +1759,28 @@ class StreamProcessor:
                 cleaned = json_cleaned
                 all_text_tool_calls.extend(json_calls)
 
+            self._restore_dsml_call_inputs(all_text_tool_calls, literals)
+            attempted_dsml = self._has_dsml_call_attempt(raw_text)
+            malformed_dsml = attempted_dsml and (
+                not self._dsml_tags_balanced(raw_text)
+                or not all_text_tool_calls
+                or self._has_invalid_dsml_block(raw_text)
+                or self._has_dsml_call_attempt(cleaned)
+            )
+            if malformed_dsml:
+                # Preserve the payload and following prose as inert evidence.
+                # Do not execute a partial batch or discard its complete calls.
+                cleaned, literals = self._protect_dsml_literals(raw_text)
+                cleaned = re.sub(
+                    r"<\s*/?\s*" + self._DSML_NAMESPACE_RE,
+                    lambda match: match.group().replace("<", "&lt;", 1),
+                    cleaned, flags=re.IGNORECASE,
+                )
+            cleaned = self._restore_dsml_literals(cleaned, literals)
             if cleaned != raw_text:
                 self.current_text_part.text = cleaned
 
-            if all_text_tool_calls:
+            if all_text_tool_calls and not malformed_dsml:
                 log.warn("stream.text_tool_calls_detected", {
                     "count": len(all_text_tool_calls),
                     "names": [tc["name"] for tc in all_text_tool_calls],
@@ -1784,6 +1808,16 @@ class StreamProcessor:
                 self.current_text_part.text, final=True
             )
 
+            # Release text held while a potential tag was incomplete, including
+            # inert malformed-call evidence, to append-only CLI consumers too.
+            if self.text_delta_callback:
+                final_delta = self._appended_delta(
+                    self._callback_visible_text, self.current_text_part.text
+                )
+                self._callback_visible_text = self.current_text_part.text
+                if final_delta:
+                    await self.text_delta_callback(final_delta)
+
             # Update time
             if self.current_text_part.time:
                 self.current_text_part.time.end = int(datetime.now().timestamp() * 1000)
@@ -1809,6 +1843,11 @@ class StreamProcessor:
             })
             
             self.current_text_part = None
+            if malformed_dsml:
+                raise ValueError(
+                    "模型返回了不完整或无效的 DSML 工具调用，本段调用未执行。"
+                    "请重试并要求模型使用原生工具调用；残余文本已保留。"
+                )
 
     def _should_run_tool_call_parallel(self, event: ToolCallEvent) -> bool:
         """Return true for independent foreground subagent tool-calls."""
@@ -2021,8 +2060,101 @@ class StreamProcessor:
                 "markers": [marker[:120] for marker in markers],
             })
 
+    @staticmethod
+    def _protect_dsml_literals(text: str) -> tuple[str, dict[str, str]]:
+        """Keep Markdown examples out of both execution and display filtering.
+
+        Unclosed code spans/fences are protected too while streaming. Only
+        spans containing DSML need masking; other fallback formats retain
+        their existing behavior.
+        """
+        prefix = "\x00dsml_literal_"
+        while prefix in text:
+            prefix += "_"
+        literals: dict[str, str] = {}
+        pattern = re.compile(
+            r"(?m:^[ \t]{0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n"
+            r"[\s\S]*?(?:^[ \t]{0,3}(?P=fence)[ \t]*(?:\n|$)|\Z))"
+            r"|(?P<ticks>`+)(?:(?!(?P=ticks))[\s\S])*?(?:(?P=ticks)|\Z)"
+            r"|(?m:^[ \t]*>[^\n]*(?:\n|$))"
+            r"|\\<[^>]*(?:>|$)"
+        )
+
+        def protect(match: re.Match[str]) -> str:
+            literal = match.group()
+            if "DSML" not in literal.upper() and not re.search(r"[|｜]", literal):
+                return literal
+            key = f"{prefix}{len(literals)}\x00"
+            literals[key] = literal
+            return key
+
+        return pattern.sub(protect, text), literals
+
+    @staticmethod
+    def _restore_dsml_literals(text: str, literals: dict[str, str]) -> str:
+        for key, value in literals.items():
+            text = text.replace(key, value)
+        return text
+
+    @classmethod
+    def _restore_dsml_call_inputs(cls, calls: list[dict], literals: dict[str, str]) -> None:
+        # A real write call can contain Markdown examples in its arguments.
+        def restore(value: Any) -> Any:
+            if isinstance(value, str):
+                return cls._restore_dsml_literals(value, literals)
+            if isinstance(value, list):
+                return [restore(item) for item in value]
+            if isinstance(value, dict):
+                return {key: restore(item) for key, item in value.items()}
+            return value
+
+        for call in calls:
+            call["input"] = restore(call["input"])
+
+    def _has_invalid_dsml_block(self, text: str) -> bool:
+        text, _ = self._protect_dsml_literals(text)
+        for pattern in (self._DSML_COMPLETE_BLOCK_RE, self._DSML_COMPLETE_INVOKE_RE):
+            for match in pattern.finditer(text):
+                block = match.group()
+                if self._has_dsml_call_attempt(block) and not self._parse_dsml_text_tool_calls(block):
+                    return True
+        return False
+
+    @classmethod
+    def _dsml_tags_balanced(cls, text: str) -> bool:
+        text, _ = cls._protect_dsml_literals(text)
+        stack: list[str] = []
+        for match in cls._DSML_TAG_RE.finditer(text):
+            name = match.group(2).lower()
+            if match.group(1):
+                if not stack or stack.pop() != name:
+                    return False
+            else:
+                stack.append(name)
+        return not stack and not re.search(
+            r"<\s*/?\s*" + cls._DSML_NAMESPACE_RE + r"[^>]*$", text, re.IGNORECASE
+        )
+
+    @classmethod
+    def _has_dsml_call_attempt(cls, text: str) -> bool:
+        text, _ = cls._protect_dsml_literals(text)
+        if re.search(
+            r"<\s*" + cls._DSML_NAMESPACE_RE + r"\s*invoke\b"
+            r"|(?m:^[ \t]*<\s*" + cls._DSML_NAMESPACE_RE
+            + r"\s*(?:tool_use|tool_calls|calls|tool_call|function_calls)\b)",
+            text, re.IGNORECASE,
+        ):
+            return True
+        normalized = cls._normalize_dsml_tags(text)
+        return bool(re.search(
+            r"<dsml:invoke\b|<dsml:(?:tool_use|tool_calls|calls|tool_call|function_calls)\b[^>]*>\s*[\[{]"
+            r"|(?m:^[ \t]*<dsml:(?:tool_use|tool_calls|calls|tool_call|function_calls)\b)",
+            normalized, re.IGNORECASE,
+        ))
+
     @classmethod
     def _contains_dsml_tool_markup(cls, text: str) -> bool:
+        text, _ = cls._protect_dsml_literals(text)
         return bool(cls._DSML_OPEN_BLOCK_RE.search(text))
 
     @classmethod
@@ -2042,7 +2174,7 @@ class StreamProcessor:
 
     @staticmethod
     def _sanitize_streaming_text_for_display(text: str, *, final: bool = False) -> str:
-        visible = text
+        visible, literals = StreamProcessor._protect_dsml_literals(text)
 
         visible = StreamProcessor._strip_dsml_blocks(visible)
 
@@ -2070,23 +2202,21 @@ class StreamProcessor:
                 start = visible.find(start_tag, end + len(end_tag))
 
         dsml_start = StreamProcessor._DSML_OPEN_BLOCK_RE.search(visible)
-        if dsml_start:
+        if dsml_start and not final:
             truncate_at = dsml_start.start() if truncate_at is None else min(truncate_at, dsml_start.start())
 
         if truncate_at is not None:
             visible = visible[:truncate_at]
 
-        # Unknown DSML tags must not leak through the display fallback.
-        visible = re.sub(r"<[^<>]*DSML[^<>]*>", "", visible, flags=re.IGNORECASE)
         partial = re.search(r"<[^<>]*$", visible)
         if partial:
             suffix = partial.group()
             candidate = re.sub(r"[\s/|｜]", "", suffix[1:]).upper()
-            if candidate.startswith("DSML") or (not final and (not candidate or "DSML".startswith(candidate))):
+            if not final and (candidate.startswith("DSML") or not candidate or "DSML".startswith(candidate)):
                 visible = visible[:partial.start()]
 
         visible = re.sub(r"\n{3,}", "\n\n", visible)
-        return visible.rstrip()
+        return StreamProcessor._restore_dsml_literals(visible.rstrip(), literals)
     
     def _parse_xml_text_tool_calls(self, text: str) -> tuple[str, list[dict]]:
         """
@@ -2099,6 +2229,7 @@ class StreamProcessor:
         Returns:
             (cleaned_text, tool_calls)
         """
+        text, literals = self._protect_dsml_literals(text)
         tool_calls: list[dict] = []
 
         tool_use_re = re.compile(r'<tool_use>(.*?)</tool_use>', re.DOTALL)
@@ -2199,10 +2330,12 @@ class StreamProcessor:
         cleaned = self._strip_dsml_blocks(cleaned)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
 
-        return cleaned, tool_calls
+        self._restore_dsml_call_inputs(tool_calls, literals)
+        return self._restore_dsml_literals(cleaned, literals), tool_calls
 
     def _parse_dsml_text_tool_calls(self, text: str) -> list[dict]:
         """Extract tool calls from DeepSeek-style DSML text blocks."""
+        text, literals = self._protect_dsml_literals(text)
         normalized = self._normalize_dsml_tags(text)
         tool_calls: list[dict] = []
 
@@ -2271,6 +2404,7 @@ class StreamProcessor:
                 "input": raw_input,
             })
 
+        self._restore_dsml_call_inputs(tool_calls, literals)
         return tool_calls
 
     @staticmethod
