@@ -334,6 +334,10 @@ fi
 # written when a component outside this package was installed into the venv (an earlier package
 # that carried it, or its own online upgrade); this package would leave it out
 COMPONENT_MARKER_PATTERN="run/*-bundle-installed.json"
+# ...except the Python enterprise package of before (flockspro, 2026.10 and earlier): it is carried
+# into the new venv, as `flocks update` keeps it on an online install, and the end of the run says
+# where the enterprise edition went (a separate installer now, flockspro-<release>.run).
+PREVIOUS_PRO_MARKER="run/pro-bundle-installed.json"
 # the venv names the build root: anywhere else it is rewritten (after the last refusal, in staging)
 RELOCATE=0
 if [[ "$INSTALL_ROOT" != "$BUILD_ROOT" ]]; then
@@ -651,17 +655,37 @@ for root in "$DATA_ROOT" ${MIGRATE_FROM:+"$MIGRATE_FROM"}; do
     fail "${root} 属于一个由外部管理进程托管的安装（${declared_in} 声明了 managed），它的升级由那个管理进程负责，开源版离线包不能覆盖。本次未做任何改动"
   fi
   if [[ -n "$database_in" ]]; then
+    if [[ -e "$root/$PREVIOUS_PRO_MARKER" ]]; then
+      fail "${root} 所属的安装${database_in}（老企业版切过库）；本离线包只支持 SQLite。这台机器请用新企业版安装包升级：以 root 执行 bash flockspro-<版本>-<平台>.run，数据库、数据和授权都沿用。本次未做任何改动"
+    fi
     fail "${root} 所属的安装${database_in}；本离线包只支持 SQLite，覆盖安装后服务会起不来。请按那套安装原来的方式升级，或先把数据迁回 SQLite 再用本安装包。本次未做任何改动"
   fi
   for marker in "$root"/${COMPONENT_MARKER_PATTERN}; do
+    if [[ "$marker" == "$root/$PREVIOUS_PRO_MARKER" ]]; then
+      continue
+    fi
     if [[ -e "$marker" || -L "$marker" ]]; then
       fail "${root} 所属的安装装过本安装包不带的组件（${marker}），覆盖安装会让它失效；请按该组件提供的方式升级，或先在页面上把它卸掉再用本安装包升级。本次未做任何改动"
     fi
   done
 done
+PREVIOUS_PRO=0
+for root in "$DATA_ROOT" ${MIGRATE_FROM:+"$MIGRATE_FROM"}; do
+  if [[ -e "$root/$PREVIOUS_PRO_MARKER" ]]; then
+    PREVIOUS_PRO=1
+  fi
+done
+# where its package comes from: as installed in the venv that runs now (parked beside the new one
+# below), which is the version the machine runs (an upgrade from the page may have made it newer
+# than the bundle); else the newest wheel in the bundle an earlier offline package carried
+PREVIOUS_PRO_WHEEL=""
+if [[ "$PREVIOUS_PRO" -eq 1 ]]; then
+  PREVIOUS_PRO_WHEEL="$(ls "$INSTALL_ROOT"/bundle/wheels/flockspro-*.whl 2>/dev/null | sort -V | tail -n 1 || true)"
+  log "这台机器装着老企业版（Python 版），升级后照旧保留"
+fi
 
 if [[ "$DRY_RUN" == "1" ]]; then
-  log "dry-run: 将安装到 ${INSTALL_ROOT}，基目录 ${BASE:-（默认布局）}，服务用户 ${SERVICE_USER}，数据目录 ${DATA_ROOT}，配置 ${ENV_FILE}，日志 ${LOG_FILE}，端口 ${PORT}，systemd=${HAVE_SYSTEMD}，relocate=${RELOCATE}，迁移旧数据=${MIGRATE_FROM:-无}"
+  log "dry-run: 将安装到 ${INSTALL_ROOT}，基目录 ${BASE:-（默认布局）}，服务用户 ${SERVICE_USER}，数据目录 ${DATA_ROOT}，配置 ${ENV_FILE}，日志 ${LOG_FILE}，端口 ${PORT}，systemd=${HAVE_SYSTEMD}，relocate=${RELOCATE}，迁移旧数据=${MIGRATE_FROM:-无}，保留老企业版=$([[ "$PREVIOUS_PRO" -eq 1 ]] && echo "是（原来的 Python 环境里的${PREVIOUS_PRO_WHEEL:+，没有就用 ${PREVIOUS_PRO_WHEEL}}）" || echo 否)"
   if [[ -n "$BASE" && ! -d "$BASE" ]]; then
     log "dry-run: 基目录 ${BASE} 还不存在，正式安装前要先建好（或挂载好）"
   fi
@@ -761,6 +785,10 @@ for dir in tools flocks cache; do
 done
 # installer/ (this script's directory) is moved into place last, see finish_staging
 mv "$SRC_ROOT/versions.json" "$INSTALL_ROOT/versions.json"
+# this package has no bundle/; the one an earlier package carried the enterprise package in goes back
+if [[ "$PREVIOUS_PRO" -eq 1 && -d "$INSTALL_ROOT/bundle.bak-$STAMP" && ! -e "$INSTALL_ROOT/bundle" ]]; then
+  mv "$INSTALL_ROOT/bundle.bak-$STAMP" "$INSTALL_ROOT/bundle"
+fi
 # the payload now lives under the install root; use the python from its final location
 BUNDLED_PY="$INSTALL_ROOT/tools/python/bin/python3"
 [[ -x "$FLOCKS_CLI" ]] || fail "安装包不完整：缺少 ${FLOCKS_CLI}"
@@ -888,6 +916,118 @@ if [[ "$RELOCATE" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# the Python enterprise package of before, carried into the new venv
+# ---------------------------------------------------------------------------
+# As it was installed in the venv just parked, else from the bundle's wheel (without its
+# dependencies, which this venv has). It is put together in a directory of its own first and goes
+# into the venv only once the new program's own plugin loader, run on it the way the service runs it
+# at start, loads and calls every entry point it declares without a failure: a critical one that
+# fails closes the whole service, an ordinary one that fails leaves its features broken. A package
+# that does not pass, or a step that fails on the way, leaves nothing behind in the venv.
+# 0: kept; 1: not kept, PREVIOUS_PRO_PROBLEM says why.
+PREVIOUS_PRO_PROBLEM=""
+PREVIOUS_PRO_CHECK='
+import importlib.metadata as m, os, sys
+staging = sys.argv[1]
+sys.path.insert(0, staging)
+dists = [d for d in m.distributions(path=[staging]) if (d.metadata["Name"] or "").lower() == "flockspro"]
+if not dists:
+    print("no flockspro distribution", file=sys.stderr); sys.stdout.flush(); os._exit(1)
+names = {ep.name for ep in dists[0].entry_points if ep.group in ("flocks.plugins", "flocks.plugins.critical")}
+from flocks.plugin.loader import PluginLoader
+result = PluginLoader._load_entry_points()
+failed = sorted({n for n in result.critical_entrypoint_failures if n in names}
+                | {e for e in PluginLoader._last_load_errors if any(e.startswith(f"entry point {n}:") for n in names)})
+if failed:
+    print("; ".join(failed)[:300], file=sys.stderr)
+sys.stderr.flush()
+# its bootstrap may leave threads running: the answer is in, end here
+os._exit(1 if failed else 0)
+'
+keep_previous_enterprise_package() {
+  local wheel="$1" old_venv="$2" new_venv="$3" old_site new_site staging entry name check_out moved=""
+  new_site="$(ls -d "$new_venv"/lib/python3.*/site-packages 2>/dev/null | head -n 1 || true)"
+  old_site="$(ls -d "$old_venv"/lib/python3.*/site-packages 2>/dev/null | head -n 1 || true)"
+  if [[ -z "$new_site" ]]; then
+    PREVIOUS_PRO_PROBLEM="新的 Python 环境里没有 site-packages（${new_venv}）"
+    return 1
+  fi
+  # (inside the if that calls this, a failing command does not stop the installer: each step is checked)
+  staging="$(mktemp -d "$INSTALL_ROOT/cache/previous-enterprise.XXXXXX" 2>/dev/null || true)"
+  if [[ -z "$staging" || ! -d "$staging" ]]; then
+    PREVIOUS_PRO_PROBLEM="在 ${INSTALL_ROOT}/cache 下建不了临时目录"
+    return 1
+  fi
+  if [[ -n "$old_site" && -d "$old_site/flockspro" ]]; then
+    # the package, its metadata (entry points) and the code-audit engine it may have brought
+    for entry in "$old_site"/flockspro "$old_site"/flockspro-*.dist-info "$old_site"/flocks_code_security* "$old_site"/flocks_code_security-*.dist-info; do
+      [[ -e "$entry" && ! -e "$staging/${entry##*/}" ]] || continue
+      if ! cp -a "$entry" "$staging/"; then
+        PREVIOUS_PRO_PROBLEM="拷不出 ${entry}"
+        break
+      fi
+    done
+    if [[ -z "$PREVIOUS_PRO_PROBLEM" ]] && ! chown -R "$SERVICE_USER:$SERVICE_USER" "$staging"; then
+      PREVIOUS_PRO_PROBLEM="改不了 ${staging} 的属主"
+    fi
+  elif [[ -n "$wheel" && -f "$wheel" ]]; then
+    if ! chown -R "$SERVICE_USER:$SERVICE_USER" "$staging"; then
+      PREVIOUS_PRO_PROBLEM="改不了 ${staging} 的属主"
+    elif ! run_as_service_user "$UV_BIN" pip install --offline --python "$new_venv/bin/python" --no-deps --target "$staging" "$wheel" >/dev/null 2>&1; then
+      PREVIOUS_PRO_PROBLEM="${wheel##*/} 装不进新的 Python 环境"
+    fi
+  else
+    PREVIOUS_PRO_PROBLEM="原来的 Python 环境里找不到它（${old_site:-$old_venv}），也没有老离线包带的 wheel"
+  fi
+  if [[ -z "$PREVIOUS_PRO_PROBLEM" ]]; then
+    for entry in "$staging"/*; do
+      name="${entry##*/}"
+      [[ "$name" != bin ]] || continue
+      if [[ -e "$new_site/$name" ]]; then
+        PREVIOUS_PRO_PROBLEM="新的 Python 环境里已经有 ${name}"
+        break
+      fi
+    done
+  fi
+  if [[ -z "$PREVIOUS_PRO_PROBLEM" ]]; then
+    if ! check_out="$(run_as_service_user $(command -v timeout >/dev/null 2>&1 && echo timeout 300) "$new_venv/bin/python" -I -c "$PREVIOUS_PRO_CHECK" "$staging" 2>&1 >/dev/null)"; then
+      PREVIOUS_PRO_PROBLEM="它在新版开源上加载不起来（老企业版包和这一版不配${check_out:+：$(printf '%s' "$check_out" | tail -n 1)}）"
+    fi
+  fi
+  if [[ -z "$PREVIOUS_PRO_PROBLEM" ]]; then
+    for entry in "$staging"/*; do
+      name="${entry##*/}"
+      [[ "$name" != bin ]] || continue
+      if mv "$entry" "$new_site/"; then
+        moved="$moved $name"
+      else
+        PREVIOUS_PRO_PROBLEM="${name} 移不进新的 Python 环境"
+        break
+      fi
+    done
+    if [[ -n "$PREVIOUS_PRO_PROBLEM" ]]; then
+      # half a package (its dist-info without its code, say) is worse than none: what went in comes out
+      for name in $moved; do
+        mv "$new_site/$name" "$staging/" || PREVIOUS_PRO_PROBLEM="${PREVIOUS_PRO_PROBLEM}；${new_site}/${name} 没能撤回，请手工移走"
+      done
+    fi
+  fi
+  # what is left in the staging directory goes, file by file (nothing else is in it)
+  find "$staging" ! -type d -exec rm -f {} + 2>/dev/null || true
+  find "$staging" -depth -type d -exec rmdir {} + 2>/dev/null || true
+  [[ -z "$PREVIOUS_PRO_PROBLEM" ]]
+}
+PREVIOUS_PRO_KEPT=0
+if [[ "$PREVIOUS_PRO" -eq 1 ]]; then
+  if keep_previous_enterprise_package "$PREVIOUS_PRO_WHEEL" "$INSTALL_ROOT/flocks.bak-$STAMP/.venv" "$REPO_DIR/.venv"; then
+    PREVIOUS_PRO_KEPT=1
+    log "老企业版（Python 版）已装进新的 Python 环境"
+  else
+    log "警告: 老企业版没能保留：${PREVIOUS_PRO_PROBLEM}；这台机器先按开源版运行（老企业版的功能和安全配置都不在了），授权文件还在，升级到新企业版时照样沿用"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # CLI wrapper
 # ---------------------------------------------------------------------------
 sed -e "s|@ENV_FILE@|$ENV_FILE|g" -e "s|@FLOCKS_CLI@|$FLOCKS_CLI|g" -e "s|@SERVICE_USER@|$SERVICE_USER|g" \
@@ -987,6 +1127,9 @@ finish_staging() {
 report_migration() {
   if [[ -n "$MIGRATE_FROM" ]]; then
     log "旧数据目录 ${MIGRATE_FROM} 原样保留；确认新实例里的账号、会话和配置都在之后可自行清理"
+  fi
+  if [[ "$PREVIOUS_PRO" -eq 1 ]]; then
+    log "企业版换成了单独的安装包，老企业版不再更新；升级到新企业版：以 root 执行 bash flockspro-<版本>-<平台>.run（数据和授权沿用），或在网页左下角的账号菜单 → Flocks Pro 里升级"
   fi
 }
 

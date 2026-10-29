@@ -118,11 +118,38 @@ async def _install_from_channel(name: str, *, restart: bool) -> None:
             console.print(f"[green]✓ 已安装 {release.label} {release.version}[/green]")
 
 
+def _print_previous_edition_notice() -> None:
+    """A machine with the Python enterprise package of before: say where the enterprise edition
+    went, so an upgrade of the open part is not taken for the whole of it."""
+    from flocks.updater import enterprise
+
+    try:
+        previous = enterprise.previous_edition()
+    except Exception:
+        return
+    if previous is None:
+        return
+    what = f"老企业版（Python 版 {previous.get('version')}）" if previous.get("version") else "老企业版的授权"
+    licence = f"，授权 {previous['license_id']}" if previous.get("license_id") else ""
+    console.print(
+        Panel(
+            f"这台机器装着{what}{licence}。\n"
+            "flocks update 只升级开源部分；企业版换成了单独的安装包（程序在 /opt/flockspro，数据和授权沿用这台机器的），"
+            "老企业版不再更新。\n"
+            "升级到新企业版：网页左下角的账号菜单 → Flocks Pro，或者把安装包拷到这台机器后执行\n"
+            f"  [bold]{enterprise.situation()['manual_command']}[/bold]",
+            title="企业版",
+            border_style="yellow",
+        )
+    )
+
+
 async def _update(check: bool, yes: bool, force: bool = False, region: str | None = None) -> None:
     from flocks.updater import check_update, detect_deploy_mode, perform_update
     from flocks.updater.deploy import update_refusal_reason
     from flocks.cli.install_profile import is_cn_install_language
 
+    _print_previous_edition_notice()
     if region is None and is_cn_install_language():
         region = "cn"
 

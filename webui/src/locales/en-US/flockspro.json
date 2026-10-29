@@ -1,0 +1,61 @@
+{
+  "description": "The enterprise edition: a Go core, its own PostgreSQL, audit logs, security configuration, user management, high availability.",
+  "loading": "Loading...",
+  "machine": {
+    "previousTitle": "This machine has the previous enterprise edition",
+    "openTitle": "This machine runs the open edition",
+    "version": "Enterprise edition",
+    "pythonEdition": "Python edition {{version}}",
+    "licence": "Licence",
+    "status": "Licence status",
+    "expires": "Expires",
+    "previousNote": "The enterprise edition is a separate installer now, and the previous one gets no more releases. The open part keeps upgrading with flocks update; the previous edition's audit logs, security configuration and user management pages come back with the new enterprise edition.",
+    "openNote": "The enterprise edition is a separate installer: it takes this install's data over (moved into its own PostgreSQL on its first start) and is used the same way. Contact us for a licence and the installer."
+  },
+  "licenceStatus": {
+    "commercial": "Commercial",
+    "poc": "Trial",
+    "expired": "Expired",
+    "revoked": "Revoked",
+    "unactivated": "Not activated",
+    "invalid": "Invalid"
+  },
+  "upgrade": {
+    "title": "Upgrade to the new enterprise edition",
+    "whatChanges": "After the upgrade the program is in {{root}}, the data stays where it is (moved into the bundled PostgreSQL on the first start; the original is kept) and the machine's licence is carried over; flocks start|stop|restart|status|logs|update work as before.",
+    "systemd": "systemd runs this machine (the open edition's offline package): the installer runs as root. The page can download it; then run the command it gives.",
+    "prepare": "{{account}} cannot write {{root}} yet: run this once as root, then come back.",
+    "recheck": "Done, check again",
+    "check": "Check for the new enterprise edition",
+    "loginConsole": "Sign in to Console",
+    "consoleAccount": "Console account: {{account}}",
+    "offer": "New enterprise edition {{version}}",
+    "start": "Upgrade to {{version}}",
+    "download": "Download the installer",
+    "manualTitle": "Upgrade by hand",
+    "manual": "Copy the installer (flockspro-<version>-<platform>.run) to this machine and run, as {{account}}:"
+  },
+  "progress": {
+    "downloading": "Downloading the new enterprise edition {{version}}",
+    "installing": "The installer runs ({{version}}): the open edition stops first, and the enterprise edition's first start moves the data, which can take a few minutes. This page reloads once it is done.",
+    "restarting": "The open edition has stopped and the enterprise edition is starting for the first time (moving the data). The page reloads if it listens on this address; otherwise open the address the installer printed.",
+    "finished": "The new enterprise edition {{version}} is installed; reload the page.",
+    "failed": "The install did not finish and the open edition keeps running; the installer output below says why.",
+    "failedCode": "The install did not finish (exit code {{code}}) and the open edition keeps running; the installer output below says why.",
+    "command": "The installer is downloaded. Run, as root:",
+    "commandPrepare": "The installer is downloaded. First let this account have the install directory (as root), then run the installer:",
+    "log": "Installer output"
+  },
+  "errors": {
+    "load": "Could not read this machine's state",
+    "check": "Check failed",
+    "start": "Upgrade failed",
+    "login": "Could not start the Console sign-in"
+  },
+  "callback": {
+    "processing": "Finishing the Console sign-in...",
+    "missingConsoleLoginId": "console_login_id is missing; the sign-in cannot be finished.",
+    "exchangeFailed": "The sign-in callback failed",
+    "failedTitle": "Sign-in failed"
+  }
+}

@@ -4,15 +4,19 @@ import { describe, expect, it, vi } from 'vitest';
 import registry from './registry';
 import { EXTENSION_REGISTRY_ENV, extensionAliases, resolveExtensionRegistry } from '../config/extensionRegistry';
 
-// OSS default build: the bundled registry is empty and the application asks
-// the server for the default update channel (OPS-0452).
+// OSS default build: the bundled registry carries only the way to the
+// enterprise edition (the Flocks Pro page), and the application asks the
+// server for the default update channel (OPS-0452).
 describe('default WebUI extension registry', () => {
-  it('registers nothing', () => {
-    expect(registry.routes).toEqual([]);
-    expect(registry.navItems).toEqual([]);
-    expect(registry.settingsSections).toEqual([]);
+  it('registers the Flocks Pro page and nothing else', () => {
+    expect(registry.routes.map((r) => r.path)).toEqual(['flockspro-upgrade/callback']);
+    expect(registry.navItems.map((n) => [n.id, n.href, n.placement, n.adminOnly])).toEqual([
+      ['flockspro-upgrade', '/settings/flockspro', 'accountMenu', true],
+    ]);
+    expect(registry.settingsSections.map((s) => [s.id, s.group, s.adminOnly])).toEqual([['flockspro', 'system', true]]);
     expect(registry.slots).toEqual([]);
-    expect(registry.i18n).toEqual({});
+    expect(Object.keys(registry.i18n).sort()).toEqual(['en-US', 'zh-CN']);
+    expect(registry.i18n['zh-CN'].nav).toEqual({ flocksproUpgrade: 'Flocks Pro' });
     expect(registry.updateChannel).toBeUndefined();
   });
 

@@ -624,3 +624,25 @@ def test_update_check_with_channel_reports_a_failed_version_check(monkeypatch, t
     assert result.exit_code == 1, output.getvalue()
     assert "检查失败" in output.getvalue() and "network connection" in output.getvalue()
     assert cli_channel.released == []
+
+
+def test_update_says_where_the_previous_enterprise_edition_went(monkeypatch, tmp_path) -> None:
+    """A machine with the Python enterprise package of before: flocks update upgrades the open
+    part only, and says so, with the way to the new enterprise edition."""
+    from flocks.updater import enterprise
+
+    output = StringIO()
+    monkeypatch.setattr(update_cmd, "console", Console(file=output, force_terminal=False, width=200))
+    monkeypatch.setattr(enterprise, "previous_edition", lambda: {"version": "2026.10.19", "license_id": "lic-old-7"})
+    monkeypatch.setattr(enterprise, "situation", lambda: {"manual_command": "bash flockspro-<版本>-linux-arm64.run"})
+
+    update_cmd._print_previous_edition_notice()
+
+    text = output.getvalue()
+    assert "老企业版（Python 版 2026.10.19）" in text and "授权 lic-old-7" in text
+    assert "账号菜单 → Flocks Pro" in text and "bash flockspro-<版本>-linux-arm64.run" in text
+
+    output.truncate(0)
+    monkeypatch.setattr(enterprise, "previous_edition", lambda: None)
+    update_cmd._print_previous_edition_notice()
+    assert output.getvalue().strip() == ""
