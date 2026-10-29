@@ -63,7 +63,11 @@ export default function WebUIContractWorkspaceHost() {
     };
   }, [loading, workspace, workspaceId]);
 
-  const currentPage = pages.find((page) => page.id === pageId);
+  // Sections describe navigation; an enabled page can remain reachable by a
+  // direct link while it is temporarily omitted from those sections.
+  const currentPage = pages.find((page) => page.id === pageId) ?? (workspace?.enabled
+    ? workspace.pages.find((page) => page.id === pageId && page.enabled)
+    : undefined);
   const currentSection = currentPage
     ? findWorkspaceSection(sections, currentPage.id, location.search)
     : undefined;
@@ -161,7 +165,7 @@ export default function WebUIContractWorkspaceHost() {
   // Installed, but an extension locked it.
   if (workspace.locked) return lockedNotice(workspace.lockReason, null);
 
-  if (pages.length === 0) {
+  if (pages.length === 0 && !currentPage) {
     return <div className="text-sm text-zinc-500">{t('workspace.empty')}</div>;
   }
 

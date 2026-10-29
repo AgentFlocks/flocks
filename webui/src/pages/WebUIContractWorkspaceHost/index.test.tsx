@@ -304,6 +304,37 @@ describe('WebUIContractWorkspaceHost', () => {
     expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();
   });
 
+  it('keeps an enabled page reachable by direct link when it is omitted from navigation', async () => {
+    const data = useWebUIContractPagesMock();
+    data.workspaces[0].sections[1].pageIds = ['ops-overview'];
+
+    renderHostAt('/contracts/webui/workspaces/scene_workspace/investigation-list');
+
+    expect(await screen.findByText('page:investigation-list')).toBeInTheDocument();
+  });
+
+  it('does not restore direct access to an unlisted disabled page', async () => {
+    const data = useWebUIContractPagesMock();
+    data.workspaces[0].sections[1].pageIds = ['ops-overview'];
+    data.workspaces[0].pages.find((page: { id: string }) => page.id === 'investigation-list').enabled = false;
+
+    renderHostAt('/contracts/webui/workspaces/scene_workspace/investigation-list');
+
+    expect(await screen.findByText('workspace.pageNotFound')).toBeInTheDocument();
+    expect(screen.queryByText('page:investigation-list')).not.toBeInTheDocument();
+  });
+
+  it('keeps a locked workspace closed when an unlisted page is requested directly', async () => {
+    const data = useWebUIContractPagesMock();
+    data.workspaces[0].sections[1].pageIds = ['ops-overview'];
+    data.workspaces[0].locked = true;
+
+    renderHostAt('/contracts/webui/workspaces/scene_workspace/investigation-list');
+
+    expect(await screen.findByText('workspace.lockedTitle')).toBeInTheDocument();
+    expect(screen.queryByText('page:investigation-list')).not.toBeInTheDocument();
+  });
+
   it('temporarily uses dark theme for the posture dashboard when the user preference is light', async () => {
     const setTemporaryThemeOverride = vi.fn();
     const { unmount } = render(
