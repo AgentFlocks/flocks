@@ -128,6 +128,10 @@ class _KafkaGenerationStopped(Exception):
     """The consumer generation no longer owns its queued deliveries."""
 
 
+class _KafkaAssignmentChanged(Exception):
+    """Discard a fetch from the previous assignment and wait for its successor."""
+
+
 class _KafkaDeliveryError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -816,6 +820,18 @@ class KafkaManager:
                 queue, abort = self._create_generation(workflow_id, workflow_plan, trigger, configured_inputs, topic)
                 ready = asyncio.Event()
                 self._ready[workflow_id] = ready
+        except Exception as exc:
+            # Constructor/adapter failures can happen outside consumer_loop's
+            # transport guards. Wake startup waiters and never leave a dead
+            # supervisor reported as connecting indefinitely.
+            abort.set()
+            if self._tasks.get(workflow_id) is asyncio.current_task():
+                self._status[workflow_id] = {
+                    **self._status.get(workflow_id, {}), "state": "failed",
+                    **_delivery_error_diagnostics(exc),
+                }
+            ready.set()
+            log.error("kafka.supervisor_failed", {"workflow_id": workflow_id, **_delivery_error_diagnostics(exc)})
         finally:
             await self._cleanup_runtime_resources(workflow_id)
             if self._tasks.get(workflow_id) is asyncio.current_task():
@@ -933,9 +949,49 @@ class KafkaManager:
         )
         manager = self
         cancel_event = self._generation_cancel_events.get(workflow_id) or threading.Event()
+        assignment_ready = asyncio.Event()
+        assignment_version = 0
+        pending_fetch: Optional[asyncio.Task] = None
+        anchor_tasks: set[asyncio.Task] = set()
+
+        def invalidate_fetch() -> None:
+            nonlocal assignment_version
+            assignment_version += 1
+            assignment_ready.clear()
+            # getone can already be awaiting records across a rebalance. Cancel
+            # it before a new assignment becomes fetchable; checking ownership
+            # after getone is too late because it advances the fetch position.
+            if pending_fetch is not None and not pending_fetch.done():
+                pending_fetch.cancel()
+            for task in tuple(anchor_tasks):
+                if not task.done():
+                    task.cancel()
+
+        async def stop_assignments() -> None:
+            invalidate_fetch()
+            if anchor_tasks:
+                await asyncio.gather(*tuple(anchor_tasks), return_exceptions=True)
+
+        async def anchor_assignment(assigned: Any, version: int) -> None:
+            try:
+                for partition in assigned:
+                    epoch = tracker.epoch_for(partition)
+                    await manager._retry_delivery(
+                        lambda: tracker.anchor_partition(partition, epoch),
+                        workflow_id=workflow_id, abort=abort, cancel=cancel_event,
+                        phase="anchor", delivery=None,
+                    )
+                if version == assignment_version and not abort.is_set():
+                    assignment_ready.set()
+            except _KafkaGenerationStopped:
+                return
+            except Exception as exc:
+                tracker.close()
+                manager._fail_generation(workflow_id, abort, exc)
 
         class _RebalanceListener(ConsumerRebalanceListener):
             async def on_partitions_revoked(self, revoked: Any) -> None:
+                invalidate_fetch()
                 # Do not wait for workers (or the commit lock) from this callback:
                 # commit itself can be waiting for the coordinator/rebalance.
                 # Uncommitted records will be replayed by their next owner.
@@ -951,38 +1007,34 @@ class KafkaManager:
                     )
 
             async def on_partitions_assigned(self, assigned: Any) -> None:
+                invalidate_fetch()
+                version = assignment_version
                 tracker.assigned(assigned)
-                for partition in assigned:
-                    epoch = tracker.epoch_for(partition)
-                    try:
-                        await manager._retry_delivery(
-                            lambda: tracker.anchor_partition(partition, epoch),
-                            workflow_id=workflow_id,
-                            abort=abort,
-                            cancel=cancel_event,
-                            phase="anchor",
-                            delivery=None,
-                        )
-                    except _KafkaGenerationStopped:
-                        return
-                    except Exception as exc:
-                        # aiokafka logs and suppresses listener exceptions. Set
-                        # our failed state explicitly instead of allowing fetch.
-                        tracker.close()
-                        manager._fail_generation(workflow_id, abort, exc)
-                        return
+                # GroupCoordinator starts heartbeats after this callback.
+                # A slow offset RPC must not hold the callback/session open;
+                # the consumer loop waits on our separate durable barrier.
+                task = asyncio.create_task(anchor_assignment(tuple(assigned), version),
+                                           name=f"kafka-anchor-{workflow_id}-{version}")
+                anchor_tasks.add(task)
+                task.add_done_callback(anchor_tasks.discard)
 
         try:
             consumer.subscribe(topics=[topic], listener=_RebalanceListener())
             await consumer.start()
+            # aiokafka.start() waits for assignment publication, which precedes
+            # listener completion. Do not fetch or report running until every
+            # assigned partition has a durable starting position.
+            await _until_aborted(assignment_ready.wait(), abort)
             if abort.is_set():
                 raise _KafkaGenerationStopped()
         except _KafkaGenerationStopped:
             ready.set()
+            await stop_assignments()
             await self._cleanup_runtime_resources(workflow_id)
             await consumer.stop()
             return
         except asyncio.CancelledError:
+            await stop_assignments()
             try:
                 await consumer.stop()
             except Exception:
@@ -1001,6 +1053,7 @@ class KafkaManager:
                 "kafka.connect_failed",
                 {"workflow_id": workflow_id, "error": str(exc), "broker": broker, "topic": topic},
             )
+            await stop_assignments()
             try:
                 await consumer.stop()
             except Exception:
@@ -1021,7 +1074,29 @@ class KafkaManager:
         delivery = None
 
         async def _fetch() -> Any:
-            message = await consumer.getone()
+            nonlocal pending_fetch
+            await assignment_ready.wait()
+            version = assignment_version
+            fetch = asyncio.create_task(consumer.getone())
+            pending_fetch = fetch
+            try:
+                message = await fetch
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
+                if version == assignment_version and assignment_ready.is_set():
+                    raise _KafkaDeliveryError(
+                        "fetch_cancelled", "Kafka fetch was cancelled without an assignment change",
+                    ) from None
+                raise _KafkaAssignmentChanged() from None
+            finally:
+                if pending_fetch is fetch:
+                    pending_fetch = None
+            if version != assignment_version or not assignment_ready.is_set():
+                raise _KafkaDeliveryError(
+                    "partition_changed_before_dispatch",
+                    "Kafka assignment changed after fetching a record; rejoining to replay it",
+                )
             partition = TopicPartition(message.topic, message.partition)
             # Capture ownership in the same task immediately after getone,
             # before the message can wait for queue/acknowledgement capacity.
@@ -1030,7 +1105,10 @@ class KafkaManager:
         try:
             while not abort.is_set():
                 delivery = None
-                msg, partition, epoch = await _until_aborted(_fetch(), abort)
+                try:
+                    msg, partition, epoch = await _until_aborted(_fetch(), abort)
+                except _KafkaAssignmentChanged:
+                    continue
                 raw_value = msg.value
                 await _until_aborted(tracker.wait_for_slot(), abort)
                 delivery = tracker.register(partition, msg.offset, epoch)
@@ -1053,6 +1131,7 @@ class KafkaManager:
             )
         finally:
             tracker.close()
+            await stop_assignments()
             await self._cleanup_runtime_resources(workflow_id)
             try:
                 await consumer.stop()

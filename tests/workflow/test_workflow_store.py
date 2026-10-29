@@ -767,3 +767,20 @@ async def test_cancelled_close_finishes_both_connections_and_allows_reinitializa
     assert WorkflowStore._conn is None and WorkflowStore._completion_conn is None
     await WorkflowStore.kv_put('after-cancel-close', 'ready')
     assert await WorkflowStore.kv_get('after-cancel-close') == 'ready'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rounds", [1, 3, 7])
+async def test_parallel_writes_survive_repeated_close_and_reinitialization(rounds):
+    async def writer(index):
+        for iteration in range(3):
+            if (index + iteration) % 2:
+                await asyncio.sleep(0)
+            await WorkflowStore.kv_put(f"stress-{index}", iteration)
+    async def closer():
+        for _ in range(rounds):
+            await asyncio.sleep(0)
+            await WorkflowStore.close()
+            await WorkflowStore.init()
+    await asyncio.wait_for(asyncio.gather(*(writer(i) for i in range(24)), closer()), timeout=10)
+    assert await asyncio.gather(*(WorkflowStore.kv_get(f"stress-{i}") for i in range(24))) == [2] * 24

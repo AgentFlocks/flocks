@@ -848,3 +848,138 @@ async def test_invalid_trigger_is_visible_as_startup_failure(monkeypatch):
     assert result["state"] == "failed"
     assert "workflow_plan_failed" in result["error"]
     assert manager.get_consumer_status("invalid-trigger")["state"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_async_assignment_must_anchor_before_any_record_is_fetched(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, 42)])
+    partition = Partition("alerts", 0)
+    broker.initial_positions[partition] = None
+    position_entered, release_position = asyncio.Event(), asyncio.Event()
+    release_business = asyncio.Event()
+    callback_tasks = []
+    original = broker.Consumer
+    class ConcurrentAssignmentConsumer(original):
+        async def start(self):
+            self.reset_position(partition)
+            self.pending.extend(broker.records)
+            # aiokafka signals wait_for_assignment before awaiting the listener.
+            callback_tasks.append(asyncio.create_task(self.listener.on_partitions_assigned({partition})))
+            await position_entered.wait()
+        async def position(self, assigned):
+            position_entered.set()
+            await release_position.wait()
+            return await super().position(assigned)
+    broker.Consumer = ConcurrentAssignmentConsumer
+    async def dispatch(*args, **kwargs):
+        await release_business.wait()
+        return acknowledge()
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    starting = asyncio.create_task(start(broker, reset_policy="latest"))
+    try:
+        await asyncio.wait_for(position_entered.wait(), timeout=2)
+        # Give the consumer loop a chance to fetch while position() is pending.
+        await asyncio.sleep(0.03)
+        assert broker.fetched == [], "getone advanced the position before the assignment anchor was durable"
+        release_position.set()
+        await starting
+        await eventually(lambda: broker.fetched == [(0, 42)])
+        assert broker.committed[partition] == 42
+        release_business.set()
+        await eventually(lambda: broker.committed[partition] == 43)
+    finally:
+        release_position.set()
+        release_business.set()
+        await asyncio.gather(starting, *callback_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_idle_fetch_is_cancelled_across_repeated_assignment_callbacks(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, 0)])
+    partition = Partition("alerts", 0)
+    waiting = asyncio.Event()
+    original = broker.Consumer
+    class WatchingConsumer(original):
+        async def getone(self):
+            if not self.pending:
+                waiting.set()
+            return await super().getone()
+    broker.Consumer = WatchingConsumer
+    calls = []
+    async def dispatch(wid, plan, message, *args, **kwargs):
+        calls.append(message["offset"])
+        return acknowledge()
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    await start(broker)
+    consumer = broker.consumers[0]
+    await eventually(lambda: broker.committed.get(partition) == 1 and waiting.is_set())
+    for offset in range(1, 11):
+        await consumer.listener.on_partitions_revoked({partition})
+        waiting.clear()
+        consumer.reset_position(partition)
+        consumer.pending.append(record(0, offset))
+        await consumer.listener.on_partitions_assigned({partition})
+        await eventually(lambda: broker.committed.get(partition) == offset + 1 and waiting.is_set())
+    assert calls == list(range(11))
+    assert len(broker.consumers) == 1
+    assert manager.get_consumer_status("delivery-test")["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_consumer_constructor_failure_reports_failed_promptly(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, 0)])
+    original = broker.Consumer
+    class InvalidConsumer(original):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            raise ValueError("invalid bootstrap configuration")
+    broker.Consumer = InvalidConsumer
+    monkeypatch.setattr(kafka_manager, "_CONNECT_WAIT_TIMEOUT_S", 0.02)
+    await start(broker, expected_state="failed")
+    assert "invalid bootstrap configuration" in manager.get_consumer_status("delivery-test")["error"]
+
+
+@pytest.mark.asyncio
+async def test_assignment_callback_does_not_block_coordinator_heartbeat_startup(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, 42)])
+    partition = Partition("alerts", 0)
+    broker.initial_positions[partition] = None
+    heartbeat_started = asyncio.Event()
+    original = broker.Consumer
+    class CoordinatorConsumer(original):
+        async def start(self):
+            self.reset_position(partition)
+            self.pending.extend(broker.records)
+            await self.listener.on_partitions_assigned({partition})
+            # Real GroupCoordinator starts heartbeat only after this callback.
+            heartbeat_started.set()
+        async def position(self, assigned):
+            await heartbeat_started.wait()
+            return await super().position(assigned)
+    broker.Consumer = CoordinatorConsumer
+    monkeypatch.setattr(kafka_manager, "_OFFSET_OPERATION_TIMEOUT_S", 0.02)
+    async def dispatch(*args, **kwargs):
+        return acknowledge()
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    await start(broker, reset_policy="latest")
+    await eventually(lambda: broker.committed.get(partition) == 43)
+    assert heartbeat_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_fetch_cancellation_fails_instead_of_silently_hanging(pipeline):
+    manager, start = pipeline
+    broker = Broker([record(0, 0)])
+    original = broker.Consumer
+    class CancelledConsumer(original):
+        async def getone(self):
+            raise asyncio.CancelledError()
+    broker.Consumer = CancelledConsumer
+    await start(broker)
+    await eventually(lambda: manager.get_consumer_status("delivery-test")["state"] == "failed")
+    assert manager.get_consumer_status("delivery-test")["error_code"] == "fetch_cancelled"
+    assert not broker.commit_attempts

@@ -71,6 +71,8 @@ class WorkflowPollerManager:
 
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
+        self._lifecycle_locks: dict[str, asyncio.Lock] = {}
+        self._stopping_all = False
         self._abort_events: dict[str, asyncio.Event] = {}
         self._run_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._run_cancel_events: dict[str, set[threading.Event]] = {}
@@ -207,6 +209,7 @@ class WorkflowPollerManager:
         return status
 
     async def start_all(self) -> None:
+        self._stopping_all = False
         try:
             configs = await WorkflowStore.list_configs(kind="workflow_poller_config")
         except Exception as exc:
@@ -231,10 +234,17 @@ class WorkflowPollerManager:
                     )
 
     async def stop_all(self) -> None:
-        for workflow_id in list(self._tasks.keys()):
+        self._stopping_all = True
+        # Include restarts still loading config and manual runs with no loop.
+        workflows = self._tasks.keys() | self._lifecycle_locks.keys() | self._run_tasks.keys() | self._run_cancel_events.keys()
+        for workflow_id in list(workflows):
             await self.stop_workflow(workflow_id)
 
     async def stop_workflow(self, workflow_id: str) -> None:
+        async with self._lifecycle_locks.setdefault(workflow_id, asyncio.Lock()):
+            await self._stop_workflow_unlocked(workflow_id)
+
+    async def _stop_workflow_unlocked(self, workflow_id: str) -> None:
         abort_event = self._abort_events.get(workflow_id)
         if abort_event is not None:
             abort_event.set()
@@ -267,19 +277,28 @@ class WorkflowPollerManager:
         self._status[workflow_id] = current
 
     async def restart_workflow(
+        self, workflow_id: str, *, startup: bool = False,
+    ) -> Dict[str, Any]:
+        async with self._lifecycle_locks.setdefault(workflow_id, asyncio.Lock()):
+            if self._stopping_all:
+                return self.get_status(workflow_id)
+            return await self._restart_workflow_unlocked(workflow_id, startup=startup)
+
+    async def _restart_workflow_unlocked(
         self,
         workflow_id: str,
         *,
         startup: bool = False,
     ) -> Dict[str, Any]:
-        await self.stop_workflow(workflow_id)
+        await self._stop_workflow_unlocked(workflow_id)
         try:
             stored = await WorkflowStore.get_config(workflow_id, kind="workflow_poller_config")
         except Exception as exc:
             log.warning("poller.restart_read_failed", {"workflow_id": workflow_id, "error": str(exc)})
-            return {"workflowId": workflow_id, "state": "failed", "error": str(exc)}
+            self._status[workflow_id] = {**self._base_status(workflow_id), "state": "failed", "error": str(exc)}
+            return self.get_status(workflow_id)
 
-        if not isinstance(stored, dict) or not stored.get("enabled"):
+        if self._stopping_all or not isinstance(stored, dict) or not stored.get("enabled"):
             self._status[workflow_id] = {
                 **self._base_status(workflow_id),
                 "workflowId": workflow_id,
@@ -466,6 +485,8 @@ class WorkflowPollerManager:
         workflow_json: Dict[str, Any],
         config: Dict[str, Any],
     ) -> Dict[str, Any]:
+        if self._stopping_all:
+            return self.get_status(workflow_id)
         started_at_ms = _now_ms()
         started_at_s = time.time()
         cancel_event = threading.Event()
