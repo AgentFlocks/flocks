@@ -70,6 +70,10 @@ vi.mock('@/components/common/TokenPolicyNotice', () => ({ default: () => null })
 vi.mock('@/components/common/BackendStatusBanner', () => ({
   BackendStatusBanner: ({ inline }: { inline?: boolean }) => <div data-testid="backend-status-banner" data-inline={String(Boolean(inline))} />,
 }));
+// The default registry's own entry (the Flocks Pro page) is covered by
+// extensions/registry.test.ts and pages/FlocksproUpgrade; here it stays out of the way.
+vi.mock('@ext/registry', () => ({ default: { routes: [], navItems: [], settingsSections: [], slots: [], i18n: {} } }));
+
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, options?: Record<string, string>) => {

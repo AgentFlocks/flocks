@@ -1447,6 +1447,7 @@ from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
 from flocks.server.routes.device import router as device_router
 from flocks.server.routes.license import router as license_router
+from flocks.server.routes.enterprise_upgrade import router as enterprise_upgrade_router
 from flocks.server.routes.webui import router as webui_pages_router
 from flocks.server.routes.contracts import router as contracts_router
 # Original routes with /api/ prefix
@@ -1505,6 +1506,7 @@ app.include_router(create_knowledgebase_router(), prefix="/api")
 # Self-upgrade routes
 app.include_router(update_router, prefix="/api/update", tags=["Update"])
 app.include_router(license_router, prefix="/api/license", tags=["License"])
+app.include_router(enterprise_upgrade_router, prefix="/api/enterprise-upgrade", tags=["Enterprise upgrade"])
 # Log viewing routes
 app.include_router(logs_router, prefix="/api/logs", tags=["Logs"])
 app.include_router(stats_router, prefix="/api/stats", tags=["Stats"])

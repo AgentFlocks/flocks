@@ -1,0 +1,61 @@
+{
+  "description": "企业版：Go 核心、自带 PostgreSQL、审计日志、安全配置、用户管理、高可用。",
+  "loading": "加载中...",
+  "machine": {
+    "previousTitle": "这台机器装着老企业版",
+    "openTitle": "这台机器是开源版",
+    "version": "企业版",
+    "pythonEdition": "Python 版 {{version}}",
+    "licence": "授权",
+    "status": "授权状态",
+    "expires": "到期",
+    "previousNote": "企业版换成了单独的安装包，老企业版不再更新。开源部分照常用 flocks update 升级；老企业版的审计日志、安全配置、用户管理这些页面，升级到新企业版后回来。",
+    "openNote": "企业版是单独的安装包：装好后开源版的数据会迁过去（第一次启动迁进自带的 PostgreSQL），用法照旧。要授权和安装包，请联系我们。"
+  },
+  "licenceStatus": {
+    "commercial": "商业版",
+    "poc": "试用",
+    "expired": "已过期",
+    "revoked": "已吊销",
+    "unactivated": "未激活",
+    "invalid": "无效"
+  },
+  "upgrade": {
+    "title": "升级到新企业版",
+    "whatChanges": "升级后：程序在 {{root}}，数据还在原来的目录（第一次启动迁进自带的 PostgreSQL，原来的数据留着），授权沿用这台机器上的；之后照旧用 flocks start|stop|restart|status|logs|update。",
+    "systemd": "这台机器由 systemd 管（开源版离线包）：升级要以 root 运行安装包，这里可以把安装包下载好，再按给出的命令执行。",
+    "prepare": "{{account}} 还不能写 {{root}}：先用 root 执行一次（只要这一次），再回来升级。",
+    "recheck": "已执行，重新检查",
+    "check": "检查新企业版",
+    "loginConsole": "登录 Console",
+    "consoleAccount": "Console 账号：{{account}}",
+    "offer": "新企业版 {{version}}",
+    "start": "升级到 {{version}}",
+    "download": "下载安装包",
+    "manualTitle": "手动升级",
+    "manual": "把安装包（flockspro-<版本>-<平台>.run）拷到这台机器，以 {{account}} 执行："
+  },
+  "progress": {
+    "downloading": "正在下载新企业版 {{version}}",
+    "installing": "安装包在运行（{{version}}）：开源版会先停下，企业版第一次启动要迁移数据，可能要几分钟。装好后这个页面会自动刷新。",
+    "restarting": "开源版已经停下，企业版正在第一次启动（迁移数据）。它监听在这个地址时，页面会自动刷新；地址不同的话，装好后打开安装输出里的地址。",
+    "finished": "新企业版 {{version}} 装好了，刷新页面即可。",
+    "failed": "安装没有完成，开源版照常运行；原因看下面的安装输出。",
+    "failedCode": "安装没有完成（退出码 {{code}}），开源版照常运行；原因看下面的安装输出。",
+    "command": "安装包下载好了，以 root 执行：",
+    "commandPrepare": "安装包下载好了。先用 root 把安装目录交给这个账号，再执行安装包：",
+    "log": "安装输出"
+  },
+  "errors": {
+    "load": "读不到这台机器的情况",
+    "check": "检查失败",
+    "start": "升级失败",
+    "login": "发起 Console 登录失败"
+  },
+  "callback": {
+    "processing": "正在完成云账号登录，请稍候...",
+    "missingConsoleLoginId": "缺少 console_login_id，无法完成登录。",
+    "exchangeFailed": "登录回调处理失败",
+    "failedTitle": "登录失败"
+  }
+}

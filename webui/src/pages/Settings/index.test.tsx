@@ -21,6 +21,10 @@ const { changeLanguage, dataRetentionApi, setTheme, toolFailureConfigApi, useAut
   useAuth: vi.fn(),
 }));
 
+// The default registry's own entry (the Flocks Pro page) is covered by
+// extensions/registry.test.ts and pages/FlocksproUpgrade; here it stays out of the way.
+vi.mock('@ext/registry', () => ({ default: { routes: [], navItems: [], settingsSections: [], slots: [], i18n: {} } }));
+
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string) => key,

@@ -1,14 +1,18 @@
 import type { ComponentType } from 'react';
-import { type LucideIcon } from 'lucide-react';
+import { ArrowUpCircle, Crown, type LucideIcon } from 'lucide-react';
 
 /**
  * Build-time WebUI extension registry.
  *
- * This module is the default (empty) implementation. A private build points the
- * `@ext/registry` alias at its own implementation of {@link WebUIExtensionRegistry}
- * through the `WEBUI_EXTENSION_REGISTRY` environment variable (see
- * `vite.config.ts`). The application only ever reads the registry through the
- * alias, so it never knows which implementation it was built with.
+ * This module is the default implementation: the open edition's own entries,
+ * which are the way to the enterprise edition (the Flocks Pro page, where a
+ * machine with the Python enterprise package of before is moved to the new
+ * one). A private build points the `@ext/registry` alias at its own
+ * implementation of {@link WebUIExtensionRegistry} through the
+ * `WEBUI_EXTENSION_REGISTRY` environment variable (see `vite.config.ts`), and
+ * none of these entries is in that build. The application only ever reads the
+ * registry through the alias, so it never knows which implementation it was
+ * built with.
  */
 
 export type ExtensionModule = { default: ComponentType<any> };
@@ -158,11 +162,48 @@ export interface WebUIExtensionRegistry {
 }
 
 const registry: WebUIExtensionRegistry = {
-  routes: [],
-  navItems: [],
-  settingsSections: [],
+  routes: [
+    {
+      // The Console sign-in returns the browser here after the exchange.
+      path: 'flockspro-upgrade/callback',
+      load: () => import('../pages/FlocksproUpgrade/Callback'),
+      adminOnly: true,
+      i18nNamespaces: ['flockspro'],
+      area: 'settings',
+    },
+  ],
+  navItems: [
+    {
+      // Where it has always been: the account menu's framed row with the PRO tag.
+      id: 'flockspro-upgrade',
+      href: '/settings/flockspro',
+      labelKey: 'flocksproUpgrade',
+      icon: Crown,
+      adminOnly: true,
+      placement: 'accountMenu',
+      order: 0,
+      highlight: true,
+      badge: 'PRO',
+    },
+  ],
+  settingsSections: [
+    {
+      id: 'flockspro',
+      group: 'system',
+      labelKey: 'flocksproUpgrade',
+      icon: ArrowUpCircle,
+      adminOnly: true,
+      order: 40,
+      load: () => import('../pages/FlocksproUpgrade'),
+      i18nNamespaces: ['flockspro'],
+    },
+  ],
   slots: [],
-  i18n: {},
+  i18n: {
+    // The labels are drawn before any page chunk loads: plain objects into `nav`.
+    'en-US': { nav: { flocksproUpgrade: 'Flocks Pro' }, flockspro: () => import('../locales/en-US/flockspro.json') },
+    'zh-CN': { nav: { flocksproUpgrade: 'Flocks Pro' }, flockspro: () => import('../locales/zh-CN/flockspro.json') },
+  },
 };
 
 export default registry;

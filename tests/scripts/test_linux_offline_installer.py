@@ -3004,3 +3004,173 @@ def test_retained_copy_with_a_broken_venv_is_refused_by_location(tmp_path: Path,
         assert "不能直接执行" in completed.stderr, completed.stderr
         assert sorted(x.name for x in install_root.iterdir()) == before
         assert not any(x.name.startswith("flocks-offline-failed-") for x in install_root.iterdir())
+
+
+# Case list (编号 | 场景), the Python enterprise package of before on an offline install:
+#   OP1 its marker no longer stops the install: the dry run says it is kept (from the venv that runs,
+#       else the newest wheel of the bundle an earlier package carried); other components' markers
+#       still do
+#   OP2 kept for real, only once it and every plugin entry point it declares load on the new program:
+#       copied as installed from the parked venv (preferred: the version the machine runs), or from
+#       the bundle's wheel; one whose critical entry point fails leaves nothing behind in the venv
+#   OP3 on PostgreSQL (the old edition switched it): refused, with the way that keeps the data
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_op1_the_previous_enterprise_package_no_longer_stops_the_install(tmp_path: Path) -> None:
+    payload = _fake_payload(tmp_path)
+    data_home = _fake_existing_install(tmp_path)
+    (data_home / ".flocks" / "run" / "pro-bundle-installed.json").write_text('{"bundle_version": "2026.10.19"}', encoding="utf-8")
+
+    result = _dry_run(payload, data_home)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "这台机器装着老企业版（Python 版），升级后照旧保留" in result.stdout
+    assert "保留老企业版=是（原来的 Python 环境里的）" in result.stdout
+
+    wheels = tmp_path / "opt-flocks" / "bundle" / "wheels"
+    wheels.mkdir(parents=True)
+    for name in ("flockspro-2026.9.30-py3-none-any.whl", "flockspro-2026.10.19-py3-none-any.whl", "flockspro-2026.10.2-py3-none-any.whl"):
+        (wheels / name).write_bytes(b"wheel")
+    result = _dry_run(payload, data_home)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"保留老企业版=是（原来的 Python 环境里的，没有就用 {wheels / 'flockspro-2026.10.19-py3-none-any.whl'}）" in result.stdout
+
+    # another component's marker still stops it
+    (data_home / ".flocks" / "run" / "sample-bundle-installed.json").write_text("{}", encoding="utf-8")
+    result = _dry_run(payload, data_home)
+    assert result.returncode == 1 and "sample-bundle-installed.json" in result.stderr
+
+
+def _keep(tmp_path: Path, wheel: str, old_venv: Path, new_venv: Path, uv: str, extra: str = "") -> subprocess.CompletedProcess:
+    stub_uv = tmp_path / "uv"
+    stub_uv.write_text("#!/bin/sh\n" + uv + "\n")
+    stub_uv.chmod(0o755)
+    install_root = tmp_path / "install-root"
+    (install_root / "cache").mkdir(parents=True, exist_ok=True)
+    check = re.search(r"^PREVIOUS_PRO_CHECK='\n.*?^'\n", INSTALL_SCRIPT.read_text(encoding="utf-8"), re.MULTILINE | re.DOTALL)
+    assert check, "PREVIOUS_PRO_CHECK not found"
+    function = _bash_function_source(INSTALL_SCRIPT, "keep_previous_enterprise_package")
+    script = (
+        f"set -euo pipefail\nSERVICE_USER=stub\nUV_BIN=\"$1\"\nINSTALL_ROOT={install_root}\nPREVIOUS_PRO_PROBLEM=\n"
+        "run_as_service_user() { \"$@\"; }\nchown() { :; }\n" + extra
+        + check.group(0)
+        + function
+        + 'if keep_previous_enterprise_package "$2" "$3" "$4"; then echo kept; else echo "not kept: $PREVIOUS_PRO_PROBLEM"; fi\n'
+    )
+    return subprocess.run([BASH, "-c", script, "test", str(stub_uv), wheel, str(old_venv), str(new_venv)],
+                          capture_output=True, text=True, timeout=300)
+
+
+def _site(venv: Path) -> Path:
+    """A venv's layout: its site-packages, and a python that is the new open edition's (this test's)."""
+    site = venv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    site.mkdir(parents=True)
+    (venv / "bin").mkdir()
+    python = venv / "bin" / "python"
+    python.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    python.chmod(0o755)
+    return site
+
+
+def _previous_package(site: Path, *, plugins: str = "return {}", critical: str = "return {}", critical_imports: bool = True) -> None:
+    """The Python enterprise package as installed: its two entry points, the critical one among them."""
+    (site / "flockspro").mkdir()
+    (site / "flockspro" / "__init__.py").write_text("")
+    (site / "flockspro" / "entrypoint.py").write_text(
+        ("" if critical_imports else "raise ImportError('a module of the open edition that is gone')\n")
+        + f"def register_flockspro_plugins():\n    {plugins}\n"
+        + f"def register_critical_flockspro_ingress():\n    {critical}\n"
+    )
+    info = site / "flockspro-2026.10.19.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text("Metadata-Version: 2.1\nName: flockspro\nVersion: 2026.10.19\n")
+    (info / "entry_points.txt").write_text(
+        "[flocks.plugins]\nflockspro = flockspro.entrypoint:register_flockspro_plugins\n\n"
+        "[flocks.plugins.critical]\nflockspro_ingress = flockspro.entrypoint:register_critical_flockspro_ingress\n"
+    )
+
+
+def _has_previous(site: Path) -> bool:
+    return (site / "flockspro").exists() or any(site.glob("flockspro-*.dist-info"))
+
+
+def _cache_is_empty(tmp_path: Path) -> bool:
+    return list((tmp_path / "install-root" / "cache").iterdir()) == []
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_op2_the_previous_package_is_kept_only_when_the_loader_takes_it(tmp_path: Path) -> None:
+    old_site = _site(tmp_path / "old-venv")
+    _previous_package(old_site)
+    wheel = tmp_path / "flockspro-2026.9.30-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    calls = tmp_path / "uv-calls"
+
+    # The venv that runs has it: copied as installed, entry points with it; the bundle's older wheel unused.
+    new_site = _site(tmp_path / "new-venv")
+    result = _keep(tmp_path, str(wheel), tmp_path / "old-venv", tmp_path / "new-venv", f'echo "$*" > {calls}; exit 0')
+    assert result.stdout.strip() == "kept", result.stdout + result.stderr
+    assert (new_site / "flockspro" / "entrypoint.py").exists()
+    assert (new_site / "flockspro-2026.10.19.dist-info" / "entry_points.txt").exists()
+    assert not calls.exists(), "the bundle's wheel was installed over the version the machine runs"
+    assert _cache_is_empty(tmp_path)
+
+    # Only the bundle has it: uv installs the wheel into a directory of its own first, without dependencies.
+    from_wheel = _site(tmp_path / "wheel-venv")
+    install = (f'echo "$*" > {calls}; while [ "$1" != "--target" ]; do shift; done; '
+               f'cp -R {old_site}/flockspro {old_site}/flockspro-2026.10.19.dist-info "$2"/')
+    result = _keep(tmp_path, str(wheel), tmp_path / "nowhere", tmp_path / "wheel-venv", install)
+    assert result.stdout.strip() == "kept", result.stdout + result.stderr
+    args = calls.read_text().split()
+    assert args[:6] == ["pip", "install", "--offline", "--python", str(tmp_path / "wheel-venv" / "bin" / "python"), "--no-deps"]
+    assert args[6] == "--target" and args[8] == str(wheel)
+    assert _has_previous(from_wheel)
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+@pytest.mark.parametrize(
+    ("package", "says"),
+    [
+        # imports, but its function fails when the loader calls it (a bootstrap that needs what is gone)
+        ({"critical": "raise RuntimeError('flockspro.bootstrap needs a Core API this release removed')"}, "flockspro_ingress"),
+        ({"plugins": "raise RuntimeError('a router of the open edition that is gone')"}, "entry point flockspro:"),
+        ({"critical_imports": False}, "flockspro_ingress"),
+    ],
+    ids=["critical-function-fails", "ordinary-function-fails", "module-does-not-import"],
+)
+def test_op2_a_package_the_loader_does_not_take_leaves_nothing(tmp_path: Path, package: dict, says: str) -> None:
+    broken = _site(tmp_path / "broken-old")
+    _previous_package(broken, **package)
+    target = _site(tmp_path / "target-venv")
+    result = _keep(tmp_path, "", tmp_path / "broken-old", tmp_path / "target-venv", "exit 99")
+    assert result.stdout.startswith("not kept: 它在新版开源上加载不起来（老企业版包和这一版不配："), result.stdout + result.stderr
+    assert says in result.stdout
+    assert not _has_previous(target) and _cache_is_empty(tmp_path)
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_op2_a_move_that_fails_half_way_is_undone(tmp_path: Path) -> None:
+    old_site = _site(tmp_path / "old-venv")
+    _previous_package(old_site)
+    target = _site(tmp_path / "target-venv")
+    # the second entry will not go in
+    failing_mv = 'mv() { case "$1" in *.dist-info) return 1 ;; esac; command mv "$@"; }\n'
+    result = _keep(tmp_path, "", tmp_path / "old-venv", tmp_path / "target-venv", "exit 99", extra=failing_mv)
+    assert result.stdout.strip() == "not kept: flockspro-2026.10.19.dist-info 移不进新的 Python 环境", result.stdout + result.stderr
+    assert not _has_previous(target) and _cache_is_empty(tmp_path)
+
+    # Neither the venv nor the bundle has it.
+    empty = _site(tmp_path / "empty-venv")
+    result = _keep(tmp_path, "", tmp_path / "nowhere", tmp_path / "empty-venv", "exit 99")
+    assert result.stdout.startswith("not kept: 原来的 Python 环境里找不到它") and not _has_previous(empty)
+
+
+@pytest.mark.skipif(BASH is None or sys.platform == "win32", reason="requires bash")
+def test_op3_on_postgresql_the_way_that_keeps_the_data_is_given(tmp_path: Path) -> None:
+    data_home = tmp_path / "service-home" / ".flocks"
+    (data_home / "run").mkdir(parents=True)
+    (data_home / "run" / "pro-bundle-installed.json").write_text("{}", encoding="utf-8")
+    result, events = _install_over_existing(tmp_path, existing_env="FLOCKS_DB_BACKEND=postgres\n")
+    assert result.returncode != 0
+    assert "老企业版切过库" in result.stderr and "bash flockspro-<版本>-<平台>.run" in result.stderr
+    assert "本次未做任何改动" in result.stderr and "stop" not in events
