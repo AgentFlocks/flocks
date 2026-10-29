@@ -191,3 +191,76 @@ async def test_the_headless_runner_itself_refuses_in_a_managed_install(runtime_r
 
     assert result["success"] is False
     assert "managed install" in result["error"]
+
+
+# ------------------------------------------------------------- service commands
+@pytest.mark.parametrize(
+    "argv",
+    [["start", "--no-browser"], ["stop"], ["restart", "--server-only"], ["status"], ["logs", "--no-follow"]],
+)
+def test_service_commands_refuse_in_a_managed_install(runtime_root, monkeypatch, argv) -> None:
+    """The open runtime's supervisor does not run a managed install: starting it
+    would put a second service on the same data, its status would say nothing
+    runs. The install's own flocks command answers these instead."""
+    import flocks.cli.service_manager as service_manager
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError(f"the supervisor was asked: {argv}")
+
+    for name in ("start_all", "stop_all", "restart_all", "restart_server", "show_status", "show_logs"):
+        monkeypatch.setattr(cli_main, name, must_not_run)
+        monkeypatch.setattr(service_manager, name, must_not_run, raising=False)
+    _declare(runtime_root, "managed")
+
+    result = runner.invoke(cli_main.app, argv)
+
+    assert result.exit_code == 2, result.output
+    assert "外部管理进程托管" in result.output
+    assert f"`{argv[0]}`" in result.output
+
+
+def test_service_commands_run_as_before_on_an_open_install(runtime_root, monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(cli_main, "show_status", lambda console: calls.append("status"))
+    _declare(runtime_root, "source")
+
+    result = runner.invoke(cli_main.app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["status"]
+
+
+def test_service_commands_refuse_before_the_logger_touches_a_managed_install(runtime_root, monkeypatch) -> None:
+    """The refusal comes first: the logger would otherwise write into the managed
+    data directory, or fail there with a permissions error that hides why."""
+    initialised: list[bool] = []
+
+    async def unwritable_logs(*args, **kwargs):
+        initialised.append(True)
+        raise PermissionError(13, "Permission denied", str(runtime_root / "logs"))
+
+    monkeypatch.setattr(cli_main.Log, "init", unwritable_logs)
+    _declare(runtime_root, "managed")
+
+    result = runner.invoke(cli_main.app, ["restart", "--server-only"])
+
+    assert result.exit_code == 2, result.output
+    assert "外部管理进程托管" in result.output
+    assert initialised == []
+
+
+@pytest.mark.parametrize("command", ["start", "stop", "restart", "status", "logs"])
+def test_service_command_help_still_answers_in_a_managed_install(runtime_root, monkeypatch, command) -> None:
+    initialised: list[bool] = []
+
+    async def no_logs(*args, **kwargs):
+        initialised.append(True)
+
+    monkeypatch.setattr(cli_main.Log, "init", no_logs)
+    _declare(runtime_root, "managed")
+
+    result = runner.invoke(cli_main.app, [command, "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "Usage" in result.output
+    assert initialised == []

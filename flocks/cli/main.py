@@ -251,8 +251,13 @@ def logo() -> str:
     """
 
 
+# The open runtime's own supervisor commands (see _refuse_service_command_when_managed).
+_SERVICE_COMMANDS = frozenset({"start", "stop", "restart", "status", "logs"})
+
+
 @app.callback()
 def main_callback(
+    ctx: typer.Context,
     version: Optional[bool] = typer.Option(
         None,
         "--version",
@@ -275,6 +280,12 @@ def main_callback(
             f"{log_level!r} is not a valid log level. Choose from: {', '.join(_LOG_LEVELS)}.",
             param_hint="'--log-level'",
         )
+
+    # A managed install's service commands refuse in the command itself; the
+    # logger stays out of its data directory (where it would write, or fail as
+    # another account with an error that hides why), and `--help` still answers.
+    if ctx.invoked_subcommand in _SERVICE_COMMANDS and _service_commands_refused():
+        return
 
     # Initialize logging
     async def _init_logging() -> None:
@@ -377,6 +388,19 @@ def _restart_service_config(
     )
 
 
+def _refuse_service_command_when_managed(command: str) -> None:
+    """See :func:`flocks.cli.managed.refuse_service_command_when_managed`."""
+    from flocks.cli.managed import refuse_service_command_when_managed
+
+    refuse_service_command_when_managed(command)
+
+
+def _service_commands_refused() -> bool:
+    from flocks.cli.managed import local_runtime_refused
+
+    return local_runtime_refused()
+
+
 def _handle_service_error(error: Exception) -> None:
     """Print service errors consistently."""
     console.print(f"[red]\\[flocks] error: {rich_escape(str(error))}[/red]")
@@ -401,6 +425,7 @@ def start(
     """
     Start Flocks service in daemon mode.
     """
+    _refuse_service_command_when_managed("start")
     try:
         config = _service_config(
             no_browser=no_browser,
@@ -422,6 +447,7 @@ def stop():
     """
     Stop Flocks service.
     """
+    _refuse_service_command_when_managed("stop")
     try:
         stop_all(_service_console())
     except _service_error_types() as error:
@@ -452,6 +478,7 @@ def restart(
     Restart Flocks service. Agents must use `flocks restart --server-only`;
     bare restart stops the supervisor and terminates the running agent.
     """
+    _refuse_service_command_when_managed("restart")
     try:
         if server_only:
             restart_server(_service_console())
@@ -478,6 +505,7 @@ def status():
     """
     Show Flocks service status.
     """
+    _refuse_service_command_when_managed("status")
     try:
         show_status(_service_console())
     except _service_error_types() as error:
@@ -494,6 +522,7 @@ def logs(
     """
     Show Flocks service logs.
     """
+    _refuse_service_command_when_managed("logs")
     try:
         show_logs(_service_console(), backend=backend, webui=webui, follow=follow, lines=lines)
     except _service_error_types() as error:
