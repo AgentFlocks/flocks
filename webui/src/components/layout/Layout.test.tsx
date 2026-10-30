@@ -494,6 +494,53 @@ describe('Layout chrome', () => {
     await waitFor(() => expect(activeProbe().textContent).toBe(home));
   });
 
+  it('takes the project list entry from a project back to the list, while switching entries still reopens the project', async () => {
+    const page = (id: string, title: string) => ({
+      id, title, route: `/contracts/webui/${id}`, icon: 'ShieldCheck', order: 10, enabled: true,
+      placement: 'home.after', buildHash: 'r', buildStatus: 'ready', workspaceId: 'code_audit_ui',
+    });
+    useWebUIContractPages.mockReturnValue({
+      pages: [], loading: false, error: null, refetch: vi.fn(),
+      workspaces: [sceneWorkspace('code_audit_ui', '代码漏洞审计工作区', {
+        defaultPageId: 'audit-home',
+        pages: [page('audit-home', '代码审计首页')],
+        sections: [
+          { id: 'home', label: '首页', flat: true, pageIds: ['audit-home'], defaultPageId: 'audit-home' },
+          { id: 'audits', label: '任务列表', flat: true, pageIds: ['audit-home'], defaultPageId: 'audit-home', query: { view: 'audits' } },
+        ],
+      })],
+    });
+    const list = '/contracts/webui/workspaces/code_audit_ui/audit-home';
+    const project = `${list}?view=project&project_id=p1&scan_id=s1&mode=report`;
+    const tasks = `${list}?view=audits`;
+    renderAt(project);
+    await waitFor(() => expect(activeProbe().textContent).toBe(project));
+    const projects = () => screen.getByRole('link', { name: 'codeAuditProjects' });
+    expect(projects()).toHaveAttribute('aria-current', 'page');
+    expect(projects()).toHaveAttribute('href', list);
+
+    // Another entry and back: the project is still where it was left.
+    fireEvent.click(screen.getByRole('link', { name: '任务列表' }));
+    await waitFor(() => expect(activeProbe().textContent).toBe(tasks));
+    expect(projects()).toHaveAttribute('href', project);
+    fireEvent.click(projects());
+    await waitFor(() => expect(activeProbe().textContent).toBe(project));
+
+    // The entry already on screen: back to the project list.
+    fireEvent.click(projects());
+    await waitFor(() => expect(activeProbe().textContent).toBe(list));
+    expect(projects()).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('takes the entry on screen back to its own page from a page inside it', async () => {
+    renderAt('/workflows/w1');
+    const workflows = screen.getByRole('link', { name: 'workflows' });
+    expect(workflows).toHaveAttribute('aria-current', 'page');
+    expect(workflows).toHaveAttribute('href', '/workflows');
+    fireEvent.click(workflows);
+    await waitFor(() => expect(activeProbe().textContent).toBe('/workflows'));
+  });
+
   it.each(['disabled', 'locked', 'uninstalled'])('keeps the SOC page memory when an old link opens a %s audit suite', async (state) => {
     const socPage = '/contracts/webui/workspaces/soc_ui/soc_ui-overview?severity=high';
     localStorage.setItem('flocks_layout_workspace_paths', JSON.stringify({ 'scene:soc_ui': socPage }));

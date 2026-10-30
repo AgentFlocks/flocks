@@ -824,9 +824,14 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     for (const tab of openTabs) map.set(tab.href, tab.path);
     return map;
   }, [openTabs]);
+  // An entry reopens where it was left, but the entry on screen goes back to
+  // its own page (from a project in the project list to the list itself).
   const navItemPath = useCallback(
-    (href: string) => href === '/workspace' ? '/workspace?tab=files' : openTabPathByHref.get(href) ?? href,
-    [openTabPathByHref],
+    (href: string) => {
+      if (href === '/workspace') return '/workspace?tab=files';
+      return href === activeTabHref ? href : openTabPathByHref.get(href) ?? href;
+    },
+    [activeTabHref, openTabPathByHref],
   );
 
   // A scene whose workspace closed (uninstalled, disabled or locked by an
