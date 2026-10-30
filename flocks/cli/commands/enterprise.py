@@ -57,18 +57,15 @@ def upgrade_command(
 @enterprise_app.command("kept")
 def kept_command() -> None:
     """列出企业版每次降级回开源版时留下的数据（数据库、配置、密钥）和大小。只列，不删。"""
-    from rich.table import Table
-
     from flocks.updater import enterprise
 
     items = enterprise.kept_after_downgrades()
     if not items:
         console.print("没有降级留下的数据。")
         return
-    table = Table(show_header=True, box=None, padding=(0, 2))
-    table.add_column("留下的时间（UTC）")
-    table.add_column("路径")
-    table.add_column("大小", justify="right")
+    # One line each with the whole path, never a table cell cut short: the path is what the
+    # administrator copies to remove it.
+    typer.echo(f"{'留下的时间（UTC）':<18}{'大小':>10}  路径")
     total = 0
     for item in items:
         if item["present"] is False:
@@ -78,8 +75,7 @@ def kept_command() -> None:
         else:
             total += item["size"]
             size = _bytes(item["size"])
-        table.add_row(item["kept_at"] or "-", item["path"], size)
-    console.print(table)
+        typer.echo(f"{item['kept_at'] or '-':<18}{size:>10}  {item['path']}")
     console.print(f"合计 {_bytes(total)}（读得到的部分）")
     console.print(
         "这些是企业版运行期间的数据，降级时原样留着没删；开源版和以后再升级都不会用到它们。"

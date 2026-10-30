@@ -183,6 +183,8 @@ def test_kept_lists_what_downgrades_left_and_removes_nothing(tmp_path):
     result = runner.invoke(cli_main.app, ["enterprise", "kept"])
     assert result.exit_code == 0, result.output
     assert "20261030T133242Z" in result.output and "2.0 KB" in result.output and "手动删除" in result.output
+    # The whole path, whatever the terminal's width: it is what gets copied to remove it.
+    assert str(kept) in result.output
     assert kept.read_bytes() == b"y" * 2048
 
 
