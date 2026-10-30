@@ -433,6 +433,16 @@ def _installer_environment() -> dict[str, str]:
     return env
 
 
+def can_run_installer_here() -> bool:
+    """This account runs the installer itself: not a machine run by systemd unless root."""
+    return available() and (not run_by_systemd() or _euid() == 0) and install_root_ready()
+
+
+def run_installer(path: Path) -> int:
+    """Run the installer in the foreground (flocks enterprise upgrade): its exit status."""
+    return subprocess.call(["bash", str(path)], cwd=str(path.parent), env=_installer_environment())
+
+
 def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
     """Run the installer apart from this server: install-managed stops this open install's
     supervisor, and this process with it, before the enterprise edition starts."""
