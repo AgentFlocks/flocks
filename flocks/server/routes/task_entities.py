@@ -4,8 +4,9 @@ from enum import Enum
 import time
 from typing import List, Optional, Type
 
-from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from flocks.server.auth import require_admin
 from flocks.server.routes._timing import log_route_timing
 from flocks.utils.log import Log
 
@@ -14,10 +15,18 @@ router = APIRouter()
 log = Log.create(service="task-routes")
 
 
+def _require_non_blank_title(value: str) -> str:
+    # An empty or whitespace-only title is unusable in the task list and the
+    # execution prompt; reject it at the boundary instead of storing "".
+    if not value or not value.strip():
+        raise ValueError("title must not be blank")
+    return value
+
+
 class SchedulerCreateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    title: str
+    title: str = Field(..., min_length=1)
     description: str = ""
     type: str = Field("queued", description="queued | scheduled")
     priority: str = Field("normal", description="urgent | high | normal | low")
@@ -35,6 +44,11 @@ class SchedulerCreateRequest(BaseModel):
     workflow_id: Optional[str] = Field(None, alias="workflowID")
     skills: List[str] = Field(default_factory=list)
     category: Optional[str] = None
+
+    @field_validator("title")
+    @classmethod
+    def _validate_title(cls, value: str) -> str:
+        return _require_non_blank_title(value)
 
 
 class SchedulerUpdateRequest(BaseModel):
@@ -57,6 +71,11 @@ class SchedulerUpdateRequest(BaseModel):
     user_prompt: Optional[str] = Field(None, alias="userPrompt")
     context: Optional[dict] = None
     workspace_directory: Optional[str] = Field(None, alias="workspaceDirectory")
+
+    @field_validator("title")
+    @classmethod
+    def _validate_title(cls, value: Optional[str]) -> Optional[str]:
+        return value if value is None else _require_non_blank_title(value)
 
 
 class BatchRequest(BaseModel):
@@ -184,7 +203,7 @@ async def task_queue_status():
 
 
 @router.post("/task-system/queue/pause")
-async def pause_task_queue():
+async def pause_task_queue(_admin: object = Depends(require_admin)):
     from flocks.task.manager import TaskManager
 
     TaskManager.pause_queue()
@@ -192,7 +211,7 @@ async def pause_task_queue():
 
 
 @router.post("/task-system/queue/resume")
-async def resume_task_queue():
+async def resume_task_queue(_admin: object = Depends(require_admin)):
     from flocks.task.manager import TaskManager
 
     TaskManager.resume_queue()
@@ -397,6 +416,9 @@ async def list_executions(
     status_filter: Optional[str] = Query(None, alias="status"),
     priority: Optional[str] = Query(None),
     delivery_status: Optional[str] = Query(None, alias="deliveryStatus"),
+    title: Optional[str] = Query(None),
+    started_after: Optional[AwareDatetime] = Query(None, alias="startedAfter"),
+    started_before: Optional[AwareDatetime] = Query(None, alias="startedBefore"),
     sort_by: str = Query("queued_at", alias="sortBy"),
     sort_order: str = Query("desc", alias="sortOrder"),
     offset: int = Query(0, ge=0),
@@ -404,11 +426,24 @@ async def list_executions(
 ):
     from flocks.task.manager import TaskManager
 
+    if (
+        started_after is not None
+        and started_before is not None
+        and started_after > started_before
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="startedAfter must be before or equal to startedBefore",
+        )
+
     items, total = await TaskManager.list_executions(
         scheduler_id=scheduler_id,
         status=_parse_execution_status_filter(status_filter),
         priority=_parse_priority(priority),
         delivery_status=_parse_delivery_status(delivery_status),
+        title=title,
+        started_after=started_after,
+        started_before=started_before,
         sort_by=sort_by,
         sort_order=sort_order,
         offset=offset,
@@ -460,6 +495,16 @@ async def mark_execution_viewed(execution_id: str):
 async def cancel_execution(execution_id: str):
     from flocks.task.manager import TaskManager
 
+    current = await TaskManager.get_execution(execution_id)
+    if not current:
+        raise HTTPException(404, "Task execution not found")
+    if current.is_terminal:
+        # Silently returning the untouched record hid the no-op from callers;
+        # a finished execution cannot be cancelled, say so.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Task execution already finished (status={current.status.value})",
+        )
     execution = await TaskManager.cancel_execution(execution_id)
     if not execution:
         raise HTTPException(404, "Task execution not found")
@@ -468,8 +513,34 @@ async def cancel_execution(execution_id: str):
 @router.post("/task-executions/{execution_id}/retry")
 async def retry_execution(execution_id: str):
     from flocks.task.manager import TaskManager
+    from flocks.task.models import TaskStatus
 
+    current = await TaskManager.get_execution(execution_id)
+    if not current:
+        raise HTTPException(404, "Task execution not found")
+    if current.status != TaskStatus.FAILED:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Only failed executions can be retried (status={current.status.value})",
+        )
     execution = await TaskManager.retry_execution(execution_id)
+    if not execution:
+        raise HTTPException(404, "Task execution not found")
+    return execution.model_dump(mode="json", by_alias=True)
+
+
+@router.post("/task-executions/{execution_id}/continue")
+async def continue_execution(execution_id: str):
+    """Go on with a run held for verification, in the session it ran in.
+
+    Not the pause/resume of a running execution, which no longer exists.
+    """
+    from flocks.task.manager import TaskManager
+
+    try:
+        execution = await TaskManager.resume_execution(execution_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     if not execution:
         raise HTTPException(404, "Task execution not found")
     return execution.model_dump(mode="json", by_alias=True)
@@ -492,5 +563,4 @@ async def delete_execution(execution_id: str):
     if not await TaskManager.delete_execution(execution_id):
         raise HTTPException(404, "Task execution not found")
     return {"ok": True}
-
 

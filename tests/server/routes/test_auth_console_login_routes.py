@@ -104,7 +104,7 @@ async def test_remote_console_login_keeps_console_passport_url(monkeypatch: pyte
     monkeypatch.setenv("FLOCKS_PORTAL_BASE_URL", "http://127.0.0.1:3000")
     monkeypatch.setattr("flocks.console.login.httpx.AsyncClient", _Client)
 
-    result = await ConsoleLoginService.start_console_login("http://127.0.0.1:5173/flockspro-upgrade/callback")
+    result = await ConsoleLoginService.start_console_login("http://127.0.0.1:5173/extension-upgrade/callback")
 
     parsed = urlparse(result["passport_login_url"])
     assert parsed.scheme == "https"
@@ -374,3 +374,53 @@ async def test_console_login_session_without_account_name_treated_logged_out(
 
 
 
+
+
+@pytest.mark.parametrize("return_to", ["https://evil.test/phish", "//evil.test", "/ok\\evil", "javascript://x"])
+async def test_console_login_start_rejects_offsite_return_to(client: AsyncClient, monkeypatch: pytest.MonkeyPatch, return_to: str):
+    """``return_to`` is forwarded to the Console as the post-login target; only an
+    in-site path is allowed (open-redirect guard)."""
+    from flocks.server.routes import auth as auth_routes
+
+    monkeypatch.setattr(auth_routes, "require_admin", lambda _req: _mock_admin())
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example")
+
+    async def _must_not_run(**kwargs):
+        raise AssertionError("start_console_login must not be called for an off-site return_to")
+
+    monkeypatch.setattr(auth_routes.ConsoleLoginService, "start_console_login", _must_not_run)
+    resp = await client.get("/api/auth/console-login/start", params={"return_to": return_to})
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    assert "仅允许站内路径" in resp.text
+
+
+async def test_console_login_upstream_http_error_maps_to_502(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+    """A Console 5xx surfaces as 502 with a plain message, not a generic 500."""
+    import httpx
+
+    from flocks.server.routes import auth as auth_routes
+
+    monkeypatch.setattr(auth_routes, "require_admin", lambda _req: _mock_admin())
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example")
+
+    def _boom(**kwargs):
+        request = httpx.Request("POST", "https://console.example/v1/flocks/console-logins")
+        response = httpx.Response(500, request=request)
+        raise httpx.HTTPStatusError("upstream 500", request=request, response=response)
+
+    async def _start(**kwargs):
+        _boom(**kwargs)
+
+    async def _finish(**kwargs):
+        _boom(**kwargs)
+
+    monkeypatch.setattr(auth_routes.ConsoleLoginService, "start_console_login", _start)
+    monkeypatch.setattr(auth_routes.ConsoleLoginService, "finish_console_login", _finish)
+
+    resp = await client.get("/api/auth/console-login/start")
+    assert resp.status_code == status.HTTP_502_BAD_GATEWAY
+    assert resp.json()["message"] == "console 登录服务调用失败，请稍后重试"
+
+    resp = await client.post("/api/auth/console-login/finish", json={"console_login_id": "x"})
+    assert resp.status_code == status.HTTP_502_BAD_GATEWAY
+    assert resp.json()["message"] == "console 登录服务调用失败，请稍后重试"

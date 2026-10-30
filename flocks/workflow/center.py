@@ -32,6 +32,7 @@ from flocks.workflow.models import Workflow
 from flocks.workflow.requirements import resolve_python_package_index_url
 from flocks.workflow.service_port import collect_service_ports, resolve_service_port
 from flocks.workflow.visibility import is_hidden_workflow
+from flocks.config.config import get_flocks_root, get_user_plugins_root
 
 log = Log.create(service="workflow.center")
 
@@ -56,6 +57,18 @@ _PORT_RESERVATION_TTL_S = 30 * 60
 _DEFAULT_SERVICE_DRIVER = "local"
 _PORT_ALLOCATION_LOCK = asyncio.Lock()
 _IN_FLIGHT_PORT_RESERVATIONS: Dict[int, float] = {}
+# One publish/stop at a time per workflow: two overlapping publishes would each
+# stop "the previous runtime" and tear down the other's freshly started
+# service, leaving a running record with no process behind it.
+_WORKFLOW_LIFECYCLE_LOCKS: Dict[str, asyncio.Lock] = {}
+
+
+def _workflow_lifecycle_lock(workflow_id: str) -> asyncio.Lock:
+    lock = _WORKFLOW_LIFECYCLE_LOCKS.get(workflow_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _WORKFLOW_LIFECYCLE_LOCKS[workflow_id] = lock
+    return lock
 
 
 class WorkflowCenterError(Exception):
@@ -129,12 +142,12 @@ def _workflow_service_auth_headers(runtime: Dict[str, Any]) -> Optional[Dict[str
     return {"x-api-key": str(api_key)}
 
 
-GLOBAL_WORKFLOW_ROOT: Path = Path.home() / ".flocks" / "workflow"
+GLOBAL_WORKFLOW_ROOT: Path = get_flocks_root() / "workflow"
 
 
 def _resolve_global_workflow_root() -> Path:
-    """~/.flocks/plugins/workflows/ — canonical global (user-level) workflow storage."""
-    return Path.home() / ".flocks" / "plugins" / "workflows"
+    """<flocks root>/plugins/workflows/ — canonical global (user-level) workflow storage."""
+    return get_user_plugins_root() / "workflows"
 
 
 def resolve_global_workflow_roots() -> list[Path]:
@@ -143,7 +156,7 @@ def resolve_global_workflow_roots() -> list[Path]:
     Covers legacy paths for backward-read compatibility and the new canonical
     plugins/workflows/ path.
     """
-    home = Path.home() / ".flocks"
+    home = get_flocks_root()
     return [
         home / "plugins" / "workflow",  # legacy compat (read-only)
         home / "workflow",  # legacy compat (read-only)
@@ -282,7 +295,16 @@ async def _read_registry(workflow_id: str) -> Dict[str, Any]:
 
 
 def _load_discoverable_workflow(workflow_path: Path) -> Optional[Dict[str, Any]]:
-    """Load and validate a workflow, returning None when intentionally hidden."""
+    """Load and validate a workflow, returning None when intentionally hidden.
+
+    A local copy of a workflow the deployment manages is never discoverable
+    (flocks.content.managed): it cannot be registered, listed or published in
+    the managed one's place.
+    """
+    from flocks.workflow.fs_store import is_managed_workflow
+
+    if is_managed_workflow(_logical_workflow_id(workflow_path)):
+        return None
     raw = json.loads(workflow_path.read_text(encoding="utf-8"))
     meta_path = workflow_path.parent / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else None
@@ -290,6 +312,19 @@ def _load_discoverable_workflow(workflow_path: Path) -> Optional[Dict[str, Any]]
         return None
     Workflow.from_dict(raw)
     return raw
+
+
+def _meta_workflow_name(workflow_path: Path) -> Optional[str]:
+    """Display name from the sibling meta.json (API-created workflows keep it there)."""
+    meta_path = workflow_path.parent / "meta.json"
+    if not meta_path.is_file():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    name = meta.get("name") if isinstance(meta, dict) else None
+    return str(name).strip() or None if isinstance(name, str) else None
 
 
 async def _scan_workflow_dir(
@@ -326,7 +361,7 @@ async def _scan_workflow_dir(
         entry = {
             "workflowId": workflow_id,
             "logicalWorkflowId": logical_workflow_id,
-            "name": raw.get("name") or workflow_path.parent.name,
+            "name": raw.get("name") or _meta_workflow_name(workflow_path) or workflow_path.parent.name,
             "description": raw.get("description") or "",
             "sourceType": source_type,
             # native: project-level workflows are part of the project deployment;
@@ -364,7 +399,49 @@ async def scan_skill_workflows(base_dir: Optional[Path] = None) -> List[Dict[str
 
     entries = list(by_id.values())
     entries.sort(key=lambda item: item.get("updatedAt", 0), reverse=True)
+    return entries + _managed_center_entries()
+
+
+def _managed_center_entries() -> List[Dict[str, Any]]:
+    """Workflows the deployment manages, as center entries.
+
+    Listed so agents can name them; not registered, because publishing one
+    would write its definition to disk as a release snapshot (see
+    _refuse_managed_publish).
+    """
+    from flocks.content.managed import managed_location
+    from flocks.workflow.fs_store import MANAGED_WORKFLOW_SOURCE, overlay_managed_workflows
+
+    managed: Dict[str, Dict[str, Any]] = {}
+    overlay_managed_workflows(managed)
+    entries = []
+    for workflow_id, data in sorted(managed.items()):
+        entries.append({
+            "workflowId": workflow_id,
+            "logicalWorkflowId": workflow_id,
+            "name": data.get("name") or workflow_id,
+            "description": data.get("description") or "",
+            "sourceType": MANAGED_WORKFLOW_SOURCE,
+            "native": True,
+            "workflowPath": managed_location("workflow", workflow_id),
+            "publishStatus": "unpublished",
+            "updatedAt": 0,
+        })
     return entries
+
+
+def _refuse_managed_publish(workflow_path: Path) -> None:
+    """A managed workflow is not published as a standalone service.
+
+    The service runs from a release snapshot written to disk, which would put
+    the deployment's definition there in the clear.
+    """
+    from flocks.workflow.fs_store import is_managed_workflow
+
+    if is_managed_workflow(_logical_workflow_id(workflow_path)):
+        raise WorkflowCenterError(
+            f"Workflow {_logical_workflow_id(workflow_path)} is managed by the deployment and cannot be published as a service"
+        )
 
 
 def format_workflow_entries(
@@ -526,6 +603,12 @@ def _host_service_url(port: int) -> str:
     return f"http://127.0.0.1:{port}"
 
 
+# The workflow services live on this host: bypass HTTP_PROXY & co. regardless of
+# NO_PROXY (urllib only matches NO_PROXY by name, and the OS proxy settings on
+# macOS / Windows apply even when the environment is empty).
+_direct_opener = url_request.build_opener(url_request.ProxyHandler({}))
+
+
 def _json_post(
     url: str,
     payload: Dict[str, Any],
@@ -541,14 +624,14 @@ def _json_post(
         headers=request_headers,
         method="POST",
     )
-    with url_request.urlopen(request, timeout=timeout_s) as response:
+    with _direct_opener.open(request, timeout=timeout_s) as response:
         body = response.read().decode("utf-8")
     return json.loads(body) if body else {}
 
 
 def _json_get(url: str, timeout_s: float = 5.0) -> Dict[str, Any]:
     request = url_request.Request(url=url, method="GET")
-    with url_request.urlopen(request, timeout=timeout_s) as response:
+    with _direct_opener.open(request, timeout=timeout_s) as response:
         body = response.read().decode("utf-8")
     return json.loads(body) if body else {}
 
@@ -875,6 +958,7 @@ async def publish_workflow_local(
     registry = await _read_registry(workflow_id)
     previous_registry = dict(registry)
     workflow_path = Path(str(registry["workflowPath"]))
+    _refuse_managed_publish(workflow_path)
     if not workflow_path.exists():
         raise WorkflowCenterError(f"Workflow file not found: {workflow_path}")
 
@@ -888,10 +972,25 @@ async def publish_workflow_local(
         _active_release_key(workflow_id)
     )
     preferred_port, previous_port = _select_publish_port(port, registry, previous_runtime)
+    now_ms = _now_ms()
+    # Same release history shape as the docker driver so
+    # ``list_workflow_releases`` covers local publishes too.
+    release_record: Dict[str, Any] = {
+        "releaseId": release_id,
+        "workflowId": workflow_id,
+        "fingerprint": _fingerprint(workflow_path),
+        "driver": "local",
+        "status": "publishing",
+        "workflowSnapshotPath": None,
+        "createdAt": now_ms,
+        "activatedAt": None,
+        "deactivatedAt": None,
+    }
 
     host_port: Optional[int] = None
     proc: asyncio.subprocess.Process | None = None
     previous_runtime_stopped = False
+    release_recorded = False
     try:
         host_port = await _allocate_port(
             preferred_port,
@@ -899,9 +998,12 @@ async def publish_workflow_local(
             allow_bound_port=previous_port,
         )
         release_snapshot_file = await _write_release_snapshot(workflow_id, release_id, workflow_json)
+        release_record["workflowSnapshotPath"] = str(release_snapshot_file)
         registry["publishStatus"] = "publishing"
         registry["updatedAt"] = _now_ms()
         await WorkflowStore.kv_put(_registry_key(workflow_id), registry)
+        await WorkflowStore.kv_put(_release_key(workflow_id, release_id), release_record)
+        release_recorded = True
 
         previous_runtime_stopped = await _stop_existing_runtime_for_publish(workflow_id)
         if not _is_port_available(host_port):
@@ -951,6 +1053,11 @@ async def publish_workflow_local(
                 pass
             raise WorkflowCenterError("Local workflow service failed health check")
 
+        release_record["status"] = "active"
+        release_record["activatedAt"] = _now_ms()
+        release_record["hostPort"] = host_port
+        await WorkflowStore.kv_put(_release_key(workflow_id, release_id), release_record)
+
         active_record = {
             "releaseId": release_id,
             "workflowId": workflow_id,
@@ -986,6 +1093,10 @@ async def publish_workflow_local(
                 _signal_local_process(proc.pid, signal.SIGTERM, proc.pid)
                 await _wait_for_pid_exit(proc.pid, 1.0)
             await _remove_runtime_records_for_release(workflow_id, release_id)
+        if release_recorded:
+            release_record["status"] = "failed"
+            release_record["deactivatedAt"] = _now_ms()
+            await WorkflowStore.kv_put(_release_key(workflow_id, release_id), release_record)
         await _restore_registry_after_publish_failure(
             workflow_id,
             previous_registry,
@@ -1032,24 +1143,29 @@ async def publish_workflow(
 ) -> Dict[str, Any]:
     """Publish a workflow using the configured service driver (local or docker)."""
     resolved_driver = (driver or _service_driver()).strip().lower()
-    if resolved_driver == "docker":
-        return await _publish_workflow_docker(workflow_id, image=image, api_key=api_key, port=port)
-    if resolved_driver != "local":
+    if resolved_driver not in {"docker", "local"}:
         raise WorkflowCenterError(f"Unsupported workflow service driver: {resolved_driver}")
-    return await publish_workflow_local(workflow_id, api_key=api_key, port=port)
+    async with _workflow_lifecycle_lock(workflow_id):
+        if resolved_driver == "docker":
+            return await _publish_workflow_docker(workflow_id, image=image, api_key=api_key, port=port)
+        return await publish_workflow_local(workflow_id, api_key=api_key, port=port)
 
 
 async def stop_workflow_service(workflow_id: str) -> Dict[str, Any]:
     """Stop a published workflow service (driver-aware)."""
-    runtime = await WorkflowStore.kv_get(_runtime_key(workflow_id))
-    if isinstance(runtime, dict) and runtime:
-        return await _stop_runtime_record(workflow_id, runtime, update_registry=True)
-    active = await WorkflowStore.kv_get(_active_release_key(workflow_id))
-    if isinstance(active, dict) and active:
-        return await _stop_runtime_record(workflow_id, active, update_registry=True)
+    async with _workflow_lifecycle_lock(workflow_id):
+        runtime = await WorkflowStore.kv_get(_runtime_key(workflow_id))
+        if isinstance(runtime, dict) and runtime:
+            return await _stop_runtime_record(workflow_id, runtime, update_registry=True)
+        active = await WorkflowStore.kv_get(_active_release_key(workflow_id))
+        if isinstance(active, dict) and active:
+            return await _stop_runtime_record(workflow_id, active, update_registry=True)
 
-    # Fallback for legacy local records that predate workflow_runtime/.
-    return await stop_local_service(workflow_id)
+        # Fallback for legacy local records that predate workflow_runtime/.
+        await _read_registry(workflow_id)
+        if not await WorkflowStore.kv_get(_local_pid_key(workflow_id)):
+            raise WorkflowNotPublishedError(f"Workflow not published: {workflow_id}")
+        return await stop_local_service(workflow_id)
 
 
 async def _publish_workflow_docker(
@@ -1063,6 +1179,7 @@ async def _publish_workflow_docker(
     registry = await _read_registry(workflow_id)
     previous_registry = dict(registry)
     workflow_path = Path(str(registry["workflowPath"]))
+    _refuse_managed_publish(workflow_path)
     if not workflow_path.exists():
         raise WorkflowCenterError(f"Workflow file not found: {workflow_path}")
 

@@ -1,18 +1,24 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import UpdateModal from './UpdateModal';
 
-const { applyUpdate, checkUpdate } = vi.hoisted(() => ({
+const { applyUpdate, checkUpdate, checkRestartReadiness } = vi.hoisted(() => ({
   applyUpdate: vi.fn(),
   checkUpdate: vi.fn(),
+  checkRestartReadiness: vi.fn(),
 }));
 
 vi.mock('@/api/update', () => ({
   applyUpdate,
   checkUpdate,
+  DEFAULT_UPDATE_CHANNEL: 'default',
+  IncompleteUpdateError: class extends Error {},
+  UpdateStreamTimeoutError: class extends Error {},
 }));
+
+vi.mock('@/utils/restartPolling', () => ({ checkRestartReadiness }));
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -45,7 +51,7 @@ describe('UpdateModal update checks', () => {
     );
 
     await waitFor(() => {
-      expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flocks', true);
+      expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'default', true);
     });
   });
 
@@ -61,7 +67,7 @@ describe('UpdateModal update checks', () => {
     await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
 
     await waitFor(() => {
-      expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flocks', true);
+      expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'default', true);
     });
   });
 });
@@ -138,6 +144,110 @@ describe('UpdateModal deploy-mode notices', () => {
     expect(await screen.findByText('dockerModeTitle')).toBeInTheDocument();
     expect(screen.queryByText('offlineModeTitle')).not.toBeInTheDocument();
   });
+
+  const withUpdate = {
+    ...currentVersion,
+    latest_version: '2026.09.14',
+    has_update: true,
+    update_allowed: false,
+  };
+
+  it('shows the managed-package notice instead of Docker guidance on managed installs', () => {
+    render(<UpdateModal initialInfo={{ ...withUpdate, deploy_mode: 'managed' }} onClose={vi.fn()} />);
+    expect(screen.getByText('managedModeTitle')).toBeTruthy();
+    expect(screen.getByText('managedModeDesc')).toBeTruthy();
+    expect(screen.queryByText('dockerModeTitle')).toBeNull();
+    expect(screen.queryByText('dockerUpgradeHint')).toBeNull();
+  });
+
+  it('keeps the Docker guidance for docker installs', () => {
+    render(<UpdateModal initialInfo={{ ...withUpdate, deploy_mode: 'docker' }} onClose={vi.fn()} />);
+    expect(screen.getByText('dockerModeTitle')).toBeTruthy();
+    expect(screen.queryByText('managedModeTitle')).toBeNull();
+  });
+
+  it.each(['docker', 'managed'] as const)('does not offer an upgrade for %s', (deploy_mode) => {
+    render(<UpdateModal initialInfo={{ ...withUpdate, deploy_mode }} onClose={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: 'confirmAction' })).toBeNull();
+    expect(applyUpdate).not.toHaveBeenCalled();
+  });
+
+});
+
+describe('UpdateModal terminal states', () => {
+  // dev's progress card: the header X closes it once nothing runs, and an
+  // error adds the 「稍后」 button; the footer spinner only shows while upgrading.
+  const initialInfo = { ...currentVersion, latest_version: '2026.09.20', has_update: true };
+  const headerClose = () => document.querySelector<HTMLButtonElement>('button:has(svg.lucide-x)')!;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkRestartReadiness.mockResolvedValue({ ready: false, reason: 'still restarting' });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('stops the spinner and allows closing after done without restarting', async () => {
+    applyUpdate.mockImplementation(async (_version, progress) => progress({ stage: 'done', success: true, message: 'Complete' }));
+    const onClose = vi.fn();
+    render(<UpdateModal initialInfo={initialInfo} onClose={onClose} />);
+    fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await waitFor(() => expect(headerClose()).not.toBeDisabled());
+    expect(screen.queryByText('upgrading')).toBeNull();
+    fireEvent.click(headerClose());
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('cannot dismiss an in-progress upgrade using the backdrop or the close button', async () => {
+    applyUpdate.mockImplementationOnce(() => new Promise(() => {}));
+    const onClose = vi.fn();
+    render(<UpdateModal initialInfo={initialInfo} onClose={onClose} />);
+    fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
+    expect(headerClose()).toBeDisabled();
+    fireEvent.click(document.querySelector('div.fixed.inset-0')!);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('reports early EOF and releases the close controls', async () => {
+    const { IncompleteUpdateError } = await import('@/api/update');
+    applyUpdate.mockRejectedValue(new IncompleteUpdateError());
+    render(<UpdateModal initialInfo={initialInfo} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await screen.findByText('streamInterrupted');
+    expect(screen.queryByText('upgrading')).toBeNull();
+    expect(headerClose()).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
+  });
+
+  it('surfaces server errors without retaining the progress spinner', async () => {
+    applyUpdate.mockRejectedValue(new Error('Update refused'));
+    render(<UpdateModal initialInfo={initialInfo} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await screen.findByText('Update refused');
+    expect(screen.queryByText('upgrading')).toBeNull();
+  });
+
+  it('reports a silent connection timeout and allows closing', async () => {
+    const { UpdateStreamTimeoutError } = await import('@/api/update');
+    applyUpdate.mockRejectedValue(new UpdateStreamTimeoutError());
+    render(<UpdateModal initialInfo={initialInfo} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await screen.findByText('streamTimeout');
+    expect(screen.queryByText('upgrading')).toBeNull();
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
+  });
+
+  it('keeps restart polling after EOF then unlocks the dialog on restart timeout', async () => {
+    vi.useFakeTimers();
+    applyUpdate.mockImplementation(async (_version, progress) => progress({ stage: 'restarting', message: 'Restarting' }));
+    render(<UpdateModal initialInfo={initialInfo} onClose={vi.fn()} />);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'confirmAction' })); });
+    expect(headerClose()).toBeDisabled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(303_000); });
+    expect(checkRestartReadiness).toHaveBeenCalled();
+    expect(screen.getByText('restartTimeout')).toBeInTheDocument();
+    expect(document.querySelector('.animate-spin')).toBeNull();
+    expect(headerClose()).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
+  });
 });
 
 describe('UpdateModal upgrade results', () => {
@@ -153,8 +263,8 @@ describe('UpdateModal upgrade results', () => {
     applyUpdate.mockImplementation(async (_version: string, onProgress: (progress: unknown) => void) => {
       onProgress({
         stage: 'fetching',
-        message: 'Downloading Flocks Pro bundle',
-        bundle_filename: 'flockspro-bundle-v2026.10.13.zip',
+        message: 'Downloading bundle',
+        bundle_filename: 'bundle-v2026.10.13.zip',
         downloaded_bytes: 36 * 1024 * 1024,
         total_bytes: 36 * 1024 * 1024,
         percent: 100,
@@ -163,7 +273,7 @@ describe('UpdateModal upgrade results', () => {
       throw new Error(uvMissing);
     });
     const user = userEvent.setup();
-    render(<UpdateModal initialInfo={updatable} edition="flockspro" onClose={vi.fn()} />);
+    render(<UpdateModal initialInfo={updatable} channel="bundle" onClose={vi.fn()} />);
 
     await user.click(screen.getByRole('button', { name: 'confirmAction' }));
 
@@ -186,5 +296,129 @@ describe('UpdateModal upgrade results', () => {
     await waitFor(() => {
       expect(screen.queryByText('upgrading')).not.toBeInTheDocument();
     });
+  });
+});
+
+describe('UpdateModal restart stage', () => {
+  const updatable = { ...currentVersion, latest_version: '2026.10.20', has_update: true };
+  const step = (id: string, status: string) => ({ id, status });
+  const running = (current: string) => ({
+    phase: 'running',
+    step: current,
+    steps: ['stop', 'source_replace', 'build_webui', 'start'].map((id) => step(
+      id,
+      id === current ? 'running' : ['stop', 'source_replace', 'build_webui', 'start'].indexOf(id) < ['stop', 'source_replace', 'build_webui', 'start'].indexOf(current) ? 'done' : 'pending',
+    )),
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    checkUpdate.mockResolvedValue(updatable);
+    applyUpdate.mockImplementation(async (_version: string, onProgress: (progress: unknown) => void) => {
+      onProgress({ stage: 'applying', message: 'Staging v2026.10.20 for handoff...', success: null });
+      onProgress({ stage: 'restarting', message: 'Restarting service...', success: null, progress_token: 'tok-1' });
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('lists the restart steps and stops at a failed step with its reason', async () => {
+    checkRestartReadiness
+      .mockResolvedValueOnce({ ready: false, upgrade: running('build_webui') })
+      .mockResolvedValueOnce({
+        ready: false,
+        upgrade: {
+          phase: 'failed',
+          step: 'build_webui',
+          failed_step: 'build_webui',
+          error: 'npm run build exited with code 1',
+          steps: [step('stop', 'done'), step('source_replace', 'done'), step('build_webui', 'failed'), step('start', 'pending')],
+        },
+      });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    const list = await screen.findByRole('list', { name: 'handoff.title' });
+    expect(within(list).getAllByRole('listitem').map((item) => item.getAttribute('data-status')))
+      .toEqual(['done', 'done', 'running', 'pending']);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await screen.findByText('handoff.failed handoff.recoveryHint')).toBeInTheDocument();
+    expect(screen.getByText('upgradeFailed')).toBeInTheDocument();
+    expect(screen.queryByText('waitingRestart')).not.toBeInTheDocument();
+    expect(checkRestartReadiness).toHaveBeenCalledWith('tok-1');
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(checkRestartReadiness).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps waiting while the handoff answers, even when one step outlasts the restart timeout', async () => {
+    let polls = 0;
+    const failed = {
+      phase: 'failed',
+      step: 'build_webui',
+      failed_step: 'build_webui',
+      error: 'npm run build exited with code 1',
+      steps: [step('stop', 'done'), step('source_replace', 'done'), step('build_webui', 'failed'), step('start', 'pending')],
+    };
+    checkRestartReadiness.mockImplementation(async () => {
+      polls += 1;
+      // every poll costs a minute; the WebUI build runs for 12 of them
+      vi.setSystemTime(Date.now() + 60_000);
+      return { ready: false, upgrade: polls <= 12 ? running('build_webui') : failed };
+    });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    for (let poll = 0; poll < 12; poll += 1) {
+      await vi.advanceTimersByTimeAsync(2_100);
+    }
+    expect(polls).toBeGreaterThanOrEqual(12);
+    expect(screen.queryByText('restartTimeout')).not.toBeInTheDocument();
+    expect(screen.getByText('waitingRestart')).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(await screen.findByText('handoff.failed handoff.recoveryHint')).toBeInTheDocument();
+    expect(screen.queryByText('restartTimeout')).not.toBeInTheDocument();
+  });
+
+  it('gives up after half an hour even while the handoff keeps answering', async () => {
+    checkRestartReadiness.mockImplementation(async () => {
+      vi.setSystemTime(Date.now() + 10 * 60_000);
+      return { ready: false, reason: 'upgrade handoff running: build_webui', upgrade: running('build_webui') };
+    });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    for (let poll = 0; poll < 4; poll += 1) {
+      await vi.advanceTimersByTimeAsync(2_100);
+    }
+
+    expect(await screen.findByText('restartTimeout')).toBeInTheDocument();
+    expect(checkRestartReadiness).toHaveBeenCalledTimes(3);
+  });
+
+  it('times out when nothing answers for the restart timeout', async () => {
+    checkRestartReadiness.mockImplementation(async () => {
+      vi.setSystemTime(Date.now() + 60_000);
+      return { ready: false, reason: 'health check failed' };
+    });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    for (let poll = 0; poll < 7; poll += 1) {
+      await vi.advanceTimersByTimeAsync(2_100);
+    }
+
+    expect(await screen.findByText('restartTimeout')).toBeInTheDocument();
+    expect(checkRestartReadiness).toHaveBeenCalledTimes(5);
   });
 });

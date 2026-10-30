@@ -13,10 +13,18 @@ from difflib import unified_diff
 from pathlib import Path
 from typing import Optional
 
+from flocks.tool import nofollow
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.tool.path_utils import resolve_tool_path
+from flocks.tool.path_utils import (
+    changed_before_asking,
+    checked_error,
+    moved_since_resolved,
+    paths_changed,
+    resolve_tool_path,
+    resolved_identities,
+)
 from flocks.utils.id import Identifier
 from flocks.utils.log import Log
 
@@ -110,48 +118,34 @@ def trim_diff(diff: str) -> str:
     
     return "\n".join(trimmed_lines)
 
-def _looks_like_filename_only_intent(raw_path: str, resolved_path: str, base_dir: str) -> bool:
-    """
-    Best-effort detect "user gave only a filename (no directory)" intent.
-
-    Cases considered filename-only:
-    - Relative path without any directory separator (e.g. ``hello.txt``)
-    - Absolute path that points to the source root + basename
-      (common when model auto-expands a bare filename to cwd/source dir)
-    """
-    normalized = (raw_path or "").replace("\\", "/")
-    if not raw_path:
-        return False
-    if not os.path.isabs(raw_path):
-        return "/" not in normalized
-    try:
-        return os.path.realpath(os.path.dirname(resolved_path)) == os.path.realpath(base_dir)
-    except Exception:
-        return False
+def _is_filename_only(raw_path: str) -> bool:
+    """Only a bare filename opts into default outputs; never infer intent from cwd."""
+    normalized = (raw_path or "").strip().replace("\\", "/")
+    return bool(normalized) and not os.path.splitdrive(normalized)[0] and "/" not in normalized
 
 
-async def _resolve_owner_username(ctx: ToolContext) -> Optional[str]:
-    """Resolve owner username from auth context, then session ownership."""
+async def _resolve_output_owner(ctx: ToolContext) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a trusted output writer's username and immutable account id."""
     try:
         from flocks.auth.context import get_current_auth_user
         auth_user = get_current_auth_user()
         if auth_user and getattr(auth_user, "username", None):
-            return str(auth_user.username)
+            return str(auth_user.username), str(auth_user.id)
     except Exception:
         pass
 
     session_id = getattr(ctx, "session_id", None)
     if not session_id or session_id == "default":
-        return None
+        return None, None
     try:
         from flocks.session.session import Session
 
         session = await Session.get_by_id(session_id)
-        if session and getattr(session, "owner_username", None):
-            return str(session.owner_username)
+        if session:
+            return session.owner_username, session.owner_user_id
     except Exception:
         pass
-    return None
+    return None, None
 
 
 async def _build_output_attachment(
@@ -163,9 +157,9 @@ async def _build_output_attachment(
     try:
         from flocks.workspace.manager import WorkspaceManager
 
-        owner_username = await _resolve_owner_username(ctx)
+        owner_username, owner_user_id = await _resolve_output_owner(ctx)
         scope = WorkspaceManager.get_instance().resolve_output_scope(
-            filepath, username=owner_username,
+            filepath, username=owner_username, user_id=owner_user_id,
         )
         if scope is None or not scope.path.is_file():
             return None
@@ -187,6 +181,7 @@ async def _build_output_attachment(
                 "root": "workspace-output",
                 "path": scope.relative_path,
                 "username": scope.username,
+                "userID": scope.user_id,
             },
         }
     except (OSError, RuntimeError, ValueError) as exc:
@@ -199,30 +194,29 @@ async def _maybe_redirect_to_default_outputs(
     *,
     original_path: str,
     resolved_path: str,
-    base_dir: str,
 ) -> str:
     """
     For filename-only writes, force stable default output location.
 
-    This prevents nondeterministic writes to source root when user did not
-    specify a directory and model expanded filename against cwd.
+    Explicit paths (including absolute source-root paths and ``./name``)
+    retain the destination selected by shared path resolution.
     """
-    if not _looks_like_filename_only_intent(original_path, resolved_path, base_dir):
+    if not _is_filename_only(original_path):
         return resolved_path
     if os.path.exists(resolved_path):
         # Existing file writes should remain explicit and deterministic.
         return resolved_path
 
-    filename = os.path.basename(original_path) or os.path.basename(resolved_path)
+    filename = os.path.basename(original_path.strip()) or os.path.basename(resolved_path)
     if not filename:
         return resolved_path
 
     try:
         from flocks.workspace.manager import WorkspaceManager
 
-        owner_username = await _resolve_owner_username(ctx)
+        owner_username, owner_user_id = await _resolve_output_owner(ctx)
         outputs_dir = WorkspaceManager.get_instance().get_default_outputs_dir(
-            username=owner_username
+            username=owner_username, user_id=owner_user_id,
         )
         redirected = str((outputs_dir / filename).resolve())
         if redirected != resolved_path:
@@ -288,12 +282,17 @@ def _existing_memory_write_error(filepath: str) -> Optional[str]:
                 "The path to the file to write. It may be absolute, use `~`, or be relative to the current project directory.\n"
                 "\n"
                 "IMPORTANT:\n"
-                "- For Project source files (source code, tests, and configs), use the explicit Project path.\n"
+                "- Explicit paths keep their destination, including absolute paths, `~/name`, and `./name`.\n"
+                "- For Project source files (source code, tests, and configs), use the explicit Project path"
+                " (e.g. `./pyproject.toml` for a project-root file).\n"
                 "- For Agent-generated outputs requested by the user (reports, tables, examples, analysis, and drafts),"
                 " use a filename-only path unless the user specified a destination. The tool routes filename-only"
-                " writes to the current Session's dated Workspace outputs directory.\n"
+                " writes for new files on the host to the current Session's dated Workspace outputs directory."
+                " Existing project files stay in place; sandbox writes stay inside the sandbox.\n"
+                "- The result includes the actual path; use it for subsequent read or bash calls.\n"
                 "\n"
-                "NEVER write Agent-generated outputs into the Project source directory."
+                "Do not write Agent-generated outputs into the Project source directory unless the user"
+                " explicitly selected that destination."
             ),
             required=True
         ),
@@ -335,7 +334,6 @@ async def write_tool(
                 ctx,
                 original_path=filePath,
                 resolved_path=resolution.resolved_path,
-                base_dir=resolution.base_dir,
             )
             if redirected_path != resolution.resolved_path:
                 resolution = await resolve_tool_path(
@@ -389,20 +387,24 @@ async def write_tool(
     # Get relative title for display
     title = resolution.display_path
     
+    # Nothing is read through a path that moved since it was checked, nor
+    # through a link put on the way while it is read.
+    if moved_since_resolved(filepath):
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+
     # Check if file exists and get old content
-    exists = os.path.exists(filepath)
-    old_content = ""
-    
-    if exists:
-        try:
-            with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-                old_content = f.read()
-        except Exception as e:
-            return ToolResult(
-                success=False,
-                error=f"Failed to read existing file: {str(e)}",
-                title=title
-            )
+    try:
+        existing = nofollow.read_text(filepath)
+    except nofollow.LinkOnTheWay:
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+    except Exception as e:
+        return ToolResult(
+            success=False,
+            error=checked_error((filepath,), f"Failed to read existing file: {str(e)}"),
+            title=title
+        )
+    exists = existing is not None
+    old_content = existing.text if existing is not None else ""
 
     if (
         ctx.agent == "self-improve"
@@ -428,18 +430,31 @@ async def write_tool(
     diff = trim_diff(generate_diff(filepath, old_content, content))
 
     # Explicit edit/write rules (session, agent, delegating session) apply here.
+    # The request carries the diff: none read after the path moved.
+    if moved_since_resolved(filepath):
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+    identities = resolved_identities(filepath)
     await ctx.ask(
         permission="edit",
         patterns=[resolution.permission_pattern],
         always=["*"],
-        metadata={"tool": "write", "filepath": filepath, "diff": diff},
+        metadata={
+            "tool": "write", "filepath": filepath, "diff": diff,
+            "pattern_base": resolution.worktree,
+        },
     )
+    changed = f"{filepath} changed while waiting for permission; check it again and retry."
+    if paths_changed(identities):
+        return ToolResult(success=False, error=changed, title=title)
 
-    # Create parent directory if needed
+    # Create parent directory if needed, opening each one on the way without
+    # following a link.
     parent_dir = os.path.dirname(filepath)
     if parent_dir and not os.path.exists(parent_dir):
         try:
-            os.makedirs(parent_dir, exist_ok=True)
+            nofollow.makedirs(parent_dir)
+        except nofollow.LinkOnTheWay:
+            return ToolResult(success=False, error=changed, title=title)
         except Exception as e:
             return ToolResult(
                 success=False,
@@ -447,10 +462,11 @@ async def write_tool(
                 title=title
             )
     
-    # Write file
+    # Write the file the request was about: the one read above, or none.
     try:
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(content)
+        nofollow.write_text(filepath, content, expect=existing.identity if existing is not None else None)
+    except (nofollow.LinkOnTheWay, nofollow.StaleFile):
+        return ToolResult(success=False, error=changed, title=title)
     except Exception as e:
         return ToolResult(
             success=False,
@@ -459,7 +475,7 @@ async def write_tool(
         )
     
     # Build output
-    output = "Wrote file successfully."
+    output = f"Wrote file successfully.\nPath: {filepath}"
     output_attachment = await _build_output_attachment(ctx, filepath)
 
     # Note: LSP diagnostics integration would go here

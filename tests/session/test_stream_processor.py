@@ -84,6 +84,9 @@ def _make_processor(
             "run_workflow",
             "echo_tool",
             "ssh_host_cmd",
+            "echo",
+            "delegate",
+            "delegate_task",
         ],
         abort_event=abort_event,
         text_delta_callback=text_callback,
@@ -934,8 +937,12 @@ class TestToolCallExecution:
             )
 
         assert handler_calls == [{"text": "hi"}]
-        assert observed["before"] == [["operation", "tool_execution"]]
-        assert observed["after"] == [["operation", "outcome", "tool_execution"]]
+        # contract (with the caller it runs for) plus the flat legacy keys
+        # (sessionID / workspace / agent / tool)
+        assert observed["before"] == [[
+            "agent", "callerID", "callerType", "operation", "sessionID", "tool", "tool_execution", "workspace",
+        ]]
+        assert observed["after"] == [["callerID", "callerType", "operation", "outcome", "tool_execution"]]
         assert proc.tool_calls["tc_once"].status == "completed"
 
     @pytest.mark.asyncio
@@ -1005,6 +1012,52 @@ class TestToolCallExecution:
         state = proc.tool_calls["tc_rewrite"]
         assert state.input == restored
         assert state.raw_input == model_input
+
+    @pytest.mark.asyncio
+    async def test_tool_input_rewrite_precedes_policies_registered_ahead_of_it(self, registry_sandbox):
+        """Pro registers its policy before its redaction hook. Restoring in the
+        rewrite stage still lands before every tool.execute.before handler, so
+        the one gate pass judges the command that runs."""
+        from flocks.hooks.pipeline import HookBase, HookPipeline
+
+        policy_seen = []
+
+        class Policy(HookBase):
+            async def tool_before(self, ctx):
+                command = ctx.input["tool_execution"]["tool"]["validated_input"]["command"]
+                policy_seen.append(command)
+                if "10.0.0.8" in command:
+                    return {"decision": {"action": "deny", "reason": "internal host"}}
+                return None
+
+        class Restore(HookBase):
+            async def tool_input_rewrite(self, ctx):
+                tool_input = ctx.input["tool"]["input"]
+                tool_input["command"] = tool_input["command"].replace("[[V_IP_1]]", "10.0.0.8")
+
+        HookPipeline.register("policy", Policy(), order=50)
+        HookPipeline.register("restore", Restore(), order=120)
+        handler_calls = []
+
+        async def handler(_ctx, **kwargs):
+            handler_calls.append(kwargs)
+            return ToolResult(success=True, output="ok", title="bash", metadata={})
+
+        registry_sandbox.register("bash", handler, params=("command",))
+        proc = _make_processor(event_callback=AsyncMock())
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.parts", new=AsyncMock(return_value=[])),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_order", tool_name="bash"))
+            await proc.process_event(
+                ToolCallEvent(tool_call_id="tc_order", tool_name="bash", input={"command": "curl http://[[V_IP_1]]"})
+            )
+
+        assert policy_seen == ["curl http://10.0.0.8"]
+        assert handler_calls == []
+        assert proc.tool_calls["tc_order"].status == "error"
 
     @pytest.mark.asyncio
     async def test_tool_input_rewrite_isolated_hook_error_keeps_model_input(self, registry_sandbox):
@@ -1119,8 +1172,8 @@ class TestToolCallExecution:
         assert state.raw_input == {"nested": {"ip": "[IP_1]"}}
         assert model_input == {"nested": {"ip": "[IP_1]"}}
         assert state.input == {"nested": {"ip": "10.1.2.3"}}
-        # a "nested" object param is coerced to a JSON string by the registry
-        assert handler_calls == [{"nested": '{"ip": "10.1.2.3"}'}]
+        # a "nested" object param is coerced to a (pretty-printed) JSON string by the registry
+        assert handler_calls == [{"nested": '{\n  "ip": "10.1.2.3"\n}'}]
 
     @pytest.mark.asyncio
     async def test_tool_input_rewrite_cancellation_finalizes_interrupted_state(self, registry_sandbox):

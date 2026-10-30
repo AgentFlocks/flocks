@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from flocks.auth.context import AuthUser
 from flocks.project.project import (
+    DEFAULT_PROJECT_ID,
     PROJECT_SCOPE_PATTERN,
     WORKBENCH_PROJECT_SCOPE,
     Project,
@@ -130,6 +131,10 @@ async def list_projects(
     request: Request,
     search: Optional[str] = Query(None),
     scope: str = Query(WORKBENCH_PROJECT_SCOPE, pattern=PROJECT_SCOPE_PATTERN),
+    includeSessionStats: bool = Query(
+        True,
+        description="Include session counts and recent activity; false avoids loading sessions",
+    ),
 ):
     """List user-registered project folders.
 
@@ -139,7 +144,11 @@ async def list_projects(
 
     user = require_user(request)
     try:
-        projects = await _list_project_summaries(user, search)
+        projects = (
+            await _list_project_summaries(user, search)
+            if includeSessionStats
+            else await Project.list_visible(owner_id=user.id)
+        )
         return [project for project in projects if (project.scope or WORKBENCH_PROJECT_SCOPE) == scope]
     except Exception as exc:
         log.error("project.list.error", {"error": str(exc)})
@@ -191,6 +200,7 @@ async def get_current_project(request: Request, project_id: Optional[str] = Quer
 @router.get("/folders", response_model=FolderBrowserResponse, summary="Browse project folders")
 async def browse_project_folders(request: Request, path: Optional[str] = Query(None)):
     """List directories under configured roots without exposing file contents."""
+    from flocks.utils.http_file_read_guard import http_private_path_is_blocked, require_http_private_path_access
 
     require_user(request)
     roots = Project.allowed_roots()
@@ -217,6 +227,7 @@ async def browse_project_folders(request: Request, path: Optional[str] = Query(N
     )
     if containing_root is None:
         raise HTTPException(status_code=403, detail="Directory is outside the allowed roots")
+    require_http_private_path_access(current)
 
     entries: List[FolderEntry] = []
     try:
@@ -230,6 +241,8 @@ async def browse_project_folders(request: Request, path: Optional[str] = Query(N
             except (OSError, RuntimeError):
                 continue
             if not (resolved == containing_root or resolved.is_relative_to(containing_root)):
+                continue
+            if http_private_path_is_blocked(resolved, resolved=True):
                 continue
             if not os.access(resolved, os.R_OK | os.X_OK):
                 continue
@@ -254,6 +267,10 @@ async def browse_project_folders(request: Request, path: Optional[str] = Query(N
 @router.patch("/{project_id}", response_model=ProjectInfo, summary="Rename project")
 async def update_project(project_id: str, payload: ProjectUpdateRequest, request: Request):
     user = require_user(request)
+    if not payload.name or not payload.name.strip():
+        # Project.update raises a plain ValueError for this, which the handler
+        # below maps to 404; a blank name is a client error, not a missing project.
+        raise HTTPException(status_code=400, detail="Project name cannot be empty")
     try:
         return await Project.update(project_id, owner_id=user.id, name=payload.name)
     except ProjectNameConflictError as exc:
@@ -320,10 +337,17 @@ async def delete_project(
     """
 
     user = require_user(request)
+    if project_id == DEFAULT_PROJECT_ID:
+        # Not part of any user registry, so the lookup below would report 404;
+        # the default project is protected, not missing.
+        raise HTTPException(status_code=409, detail="The default project cannot be deleted")
     try:
         async with Project.lifecycle_guard(project_id):
             if await Project.get(project_id, owner_id=user.id) is None:
                 raise ValueError(f"Project {project_id} not found")
+            # Check before archiving sessions as well as in Project.delete:
+            # extension-owned tasks can run without any Flocks session.
+            await Project.require_deletion_allowed(project_id, owner_id=user.id)
             if keep_sessions:
                 return await Project.delete(project_id, owner_id=user.id)
 

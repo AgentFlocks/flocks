@@ -109,7 +109,6 @@ async def test_backfill_records_the_whole_prompt_and_the_cache_report(storage, m
     from flocks.session.message import (
         AssistantMessageInfo,
         MessagePath,
-        MessageWithParts,
         TokenCache,
         TokenUsage,
     )
@@ -139,11 +138,11 @@ async def test_backfill_records_the_whole_prompt_and_the_cache_report(storage, m
     async def fake_list_all():
         return [session]
 
-    async def fake_list_with_parts(session_id: str, include_archived: bool = False):
-        return [MessageWithParts(info=assistant, parts=[])]
+    async def fake_list_messages(session_id: str, include_archived: bool = False):
+        return [assistant]
 
     monkeypatch.setattr(usage_service.Session, "list_all", fake_list_all)
-    monkeypatch.setattr(usage_service.Message, "list_with_parts", fake_list_with_parts)
+    monkeypatch.setattr(usage_service.Message, "list", fake_list_messages)
     monkeypatch.setattr(
         usage_service, "resolve_usage_pricing",
         lambda *_: PriceConfig(input=2.0, output=12.0, cache_read=0.2, unit=1_000_000),
@@ -188,3 +187,89 @@ async def test_column_added_by_another_process_does_not_break_startup(storage, m
     await record_usage(_request(input_tokens=10, cache_reported=True, response_id="chatcmpl-x"))
     [record] = await get_usage_records()
     assert (record.cache_reported, record.response_id) == (True, "chatcmpl-x")
+
+
+async def test_summary_route_filters_records_by_real_time(storage):
+    """Bounds written with a space, an offset or as a bare end date select by time, not text."""
+    from datetime import datetime, timezone
+
+    from flocks.server.routes import usage as usage_routes
+
+    for hour, day, n in ((7, 20, 1), (9, 20, 2), (1, 21, 4)):
+        await record_usage(_request(
+            input_tokens=n,
+            created_at=datetime(2026, 10, day, hour, 0, 0, 123000, tzinfo=timezone.utc),
+        ))
+
+    async def total(**bounds) -> int:
+        stats = await usage_routes.api_get_usage_stats(
+            start_date=bounds.get("start"), end_date=bounds.get("end"), provider_id=None, model_id=None,
+        )
+        return stats.summary.total_input_tokens
+
+    # 08:00 written with a space used to compare as text and take in 07:00 too.
+    assert await total(start="2026-10-20 08:00") == 2 + 4
+    # 08:00+02:00 is 06:00 UTC: 07:00 belongs in, and text comparison left it out.
+    assert await total(start="2026-10-20T08:00:00+02:00") == 1 + 2 + 4
+    # A bare end date covers the day; as text it ended before the day began.
+    assert await total(end="2026-10-20") == 1 + 2
+    assert await total(start="2026-10-20", end="2026-10-20") == 1 + 2
+    assert await total(start="2026-10-21") == 4
+
+
+async def test_summary_filters_rows_stored_with_an_offset_by_their_instant(storage):
+    """Rows posted with another offset (or none) before writes were kept in UTC filter by time."""
+    from flocks.server.routes import usage as usage_routes
+
+    stored = {
+        # 09:00+02:00 is 07:00 UTC; as text it sorted after an 08:00 UTC bound.
+        "2026-10-20T09:00:00+02:00": 1,
+        # 02:00-08:00 is 10:00 UTC; as text it sorted before one.
+        "2026-10-20T02:00:00-08:00": 2,
+        # No offset: UTC.
+        "2026-10-20T08:30:00": 4,
+        # 08:00 UTC both, with offsets past the 14 hours of real zones (the
+        # request model takes up to 23:59) and past PostgreSQL's own 15:59.
+        "2026-10-19T17:00:00-15:00": 8,
+        "2026-10-21T04:00:00+20:00": 16,
+    }
+    for text, n in stored.items():
+        record = await record_usage(_request(input_tokens=n))
+        async with Storage.connect(Storage._db_path) as db:
+            await db.execute("UPDATE usage_records SET created_at = ? WHERE id = ?", (text, record.id))
+            await db.commit()
+
+    async def total(**bounds) -> int:
+        stats = await usage_routes.api_get_usage_stats(
+            start_date=bounds.get("start"), end_date=bounds.get("end"), provider_id=None, model_id=None,
+        )
+        return stats.summary.total_input_tokens
+
+    assert await total(start="2026-10-20T08:00:00Z") == 2 + 4 + 8 + 16
+    assert await total(end="2026-10-20T08:00:00Z") == 1 + 8 + 16
+    assert await total(start="2026-10-20T08:00:00Z", end="2026-10-20T08:00:00Z") == 8 + 16
+    assert await total(start="2026-10-20T07:00:00Z", end="2026-10-20T07:00:00Z") == 1
+    assert await total(start="2026-10-20T09:00:00Z") == 2
+    # Bounds at the ends of the calendar, where the widened text range does not exist.
+    assert await total(start="0001-01-01", end="9999-12-31") == 1 + 2 + 4 + 8 + 16
+    # Days are UTC days too, like the bounds: the -15:00 and +20:00 rows are
+    # written on 10-19 and 10-21.
+    stats = await usage_routes.api_get_usage_stats(
+        start_date=None, end_date=None, provider_id=None, model_id=None,
+    )
+    assert [(day.date, day.total_tokens) for day in stats.daily] == [("2026-10-20", 1 + 2 + 4 + 8 + 16)]
+
+
+async def test_recorded_time_is_stored_in_utc(storage):
+    from datetime import datetime, timedelta, timezone
+
+    record = await record_usage(_request(
+        input_tokens=1,
+        created_at=datetime(2026, 10, 20, 9, 0, tzinfo=timezone(timedelta(hours=2))),
+    ))
+
+    assert record.created_at == datetime(2026, 10, 20, 7, 0, tzinfo=timezone.utc)
+    async with Storage.connect(Storage._db_path) as db:
+        cursor = await db.execute("SELECT created_at FROM usage_records WHERE id = ?", (record.id,))
+        row = await cursor.fetchone()
+    assert row[0] == "2026-10-20T07:00:00+00:00"

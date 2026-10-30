@@ -406,6 +406,12 @@ async def _exercise_pipeline(
 ) -> None:
     """Common shape: create_message → channel downloader → FilePart stored."""
     from flocks.session.message import TextPart
+    from flocks.session.session import SessionInfo
+    from flocks.storage.storage import Storage
+
+    await Storage.set("session:channel-test:s1", SessionInfo(
+        id="s1", project_id="channel-test", directory=str(tmp_path),
+    ), "session")
 
     created = MagicMock(id="m1")
     store_part = AsyncMock()

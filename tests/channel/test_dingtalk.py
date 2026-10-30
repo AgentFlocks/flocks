@@ -1334,7 +1334,7 @@ class TestSessionBindingServiceBindSession:
 
         monkeypatch.setattr(
             "flocks.session.session.Session.get_by_id",
-            AsyncMock(return_value=SimpleNamespace(id="ses_42", agent="rex")),
+            AsyncMock(return_value=SimpleNamespace(id="ses_42", agent="rex", status="active")),
         )
 
         inserted = []

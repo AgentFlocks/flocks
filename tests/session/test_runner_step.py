@@ -2284,15 +2284,15 @@ async def test_to_chat_messages_skips_reasoning_only_aborted_assistant(monkeypat
     )
     monkeypatch.setattr(
         runner_mod.Message,
-        "parts",
-        AsyncMock(return_value=[
+        "parts_many",
+        AsyncMock(return_value={"msg_aborted_reasoning_only": [
             ReasoningPart(
                 sessionID=runner.session.id,
                 messageID="msg_aborted_reasoning_only",
                 text="This should not leak into replay history.",
                 time=PartTime(start=1),
             )
-        ]),
+        ]}),
     )
     monkeypatch.setattr(runner_mod.Message, "get_parts_revision", lambda *_args: 1)
 
@@ -3778,6 +3778,77 @@ async def test_process_step_does_not_retry_after_tool_execution_started(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "defer", "suppressed"),
+    [
+        (httpcore.ReadError(), False, True),
+        (httpcore.ReadError(), True, True),
+        (ValueError("invalid request body"), False, False),
+    ],
+    ids=["retryable", "retryable-deferred", "not-retryable"],
+)
+async def test_process_step_records_why_a_retryable_error_stopped_after_a_tool(
+    monkeypatch, error, defer, suppressed,
+):
+    # INC-BCFF390A: the stored error says the retry was held back because a
+    # tool had already run, so the WebUI can show why the turn stopped.
+    runner = _make_runner("ses_runner_tool_retry_suppressed")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner._defer_step_errors = defer
+
+    last_user = UserMessageInfo(
+        id="msg_user_tool_retry_suppressed",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "openai", "modelID": "gpt-5"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_tool_retry_suppressed")
+    update_mock = AsyncMock(return_value=None)
+
+    async def _call_llm(*_args, **_kwargs):
+        runner._attempt_state.tool_execution_started = True
+        raise error
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner_mod.SessionPrompt,
+        "build_system_prompt_blocks",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", _call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.action == "stop"
+    if defer:
+        stored = result.failure.error_data
+        assert result.failure.allow_fallback is False
+    else:
+        stored = update_mock.await_args.kwargs["error"]
+    if suppressed:
+        assert stored["data"]["retrySuppressed"] == "tool_execution_started"
+    else:
+        assert "retrySuppressed" not in stored["data"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("step", [1000, 1001, 100_000])
 @pytest.mark.parametrize("steps_missing", [True, False], ids=["missing", "none"])
 async def test_process_step_has_no_default_max_steps(monkeypatch, step, steps_missing):
@@ -4053,13 +4124,13 @@ async def test_to_chat_messages_expands_workflow_node_ref_marker(monkeypatch):
 
     monkeypatch.setattr(
         runner_mod.Message,
-        "parts",
-        AsyncMock(return_value=[
+        "parts_many",
+        AsyncMock(return_value={"msg_user_node_ref": [
             SimpleNamespace(
                 type="text",
                 text="@@node:query_fofa|python\n只修改这个节点的代码并保留其他节点不变",
             ),
-        ]),
+        ]}),
     )
 
     chat_messages = await runner._to_chat_messages([user_message], [])

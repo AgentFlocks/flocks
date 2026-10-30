@@ -28,8 +28,8 @@ from flocks.contracts.webui.models import (
     WebUIWorkspaceListItem,
 )
 from flocks.contracts.webui.store import WebUIPagesStore, webui_contract_page_route
-from flocks.hub.catalog import load_manifest, scene_suite_workspace_owners
-from flocks.license import is_pro_edition_status, license_status
+from flocks.hub import access as hub_access
+from flocks.hub.catalog import scene_suite_workspace_owners
 from flocks.server.routes.event import publish_event
 from flocks.utils.log import Log
 
@@ -47,6 +47,14 @@ _IMPORT_DIST_FILES = {"dist/page.js", "dist/meta.json", "dist/api-meta.json"}
 _store = WebUIPagesStore()
 _builder = WebUIPageBuilder(_store)
 _api_runtime = WebUIPageApiRuntime(_store)
+
+
+def _page_id_or_400(page_id: str) -> str:
+    """Validate a page id from the URL; a malformed id is a client error, not a 500."""
+    try:
+        return _store.validate_page_id(page_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 class WebUIPageCreateRequest(BaseModel):
@@ -151,40 +159,43 @@ def _normalize_import_manifest(extracted_root: Path, page_id: str) -> None:
     )
 
 
+async def _require_page_access(page_id: str) -> None:
+    """A registered hub access policy may refuse to serve a page: its source,
+    bundle, assets, data contracts and server code (flocks.hub.access)."""
+    refusal = await hub_access.page_refusal(page_id, _store)
+    if refusal is not None:
+        raise HTTPException(status_code=refusal.status_code, detail=refusal.detail)
+
+
 @router.get("/contracts/webui/pages", response_model=list[WebUIPageListItem])
 async def list_webui_pages(enabled_only: bool = Query(False, alias="enabledOnly")):
-    return _store.list_pages(enabled_only=enabled_only)
+    pages = await asyncio.to_thread(_store.list_pages, enabled_only=enabled_only)
+    hidden = await hub_access.hidden_pages(pages, _store)
+    return [page for page in pages if page.id not in hidden]
 
 
 @router.get("/contracts/webui/workspaces", response_model=list[WebUIWorkspaceListItem])
 async def list_webui_workspaces(enabled_only: bool = Query(False, alias="enabledOnly")):
-    try:
-        pro_active = is_pro_edition_status(await license_status())
-    except Exception as exc:
-        log.warning("webui.workspaces.license_status_failed", {"error": str(exc)})
-        pro_active = False
     # Directory scans plus the hub catalog signature: keep them off the event loop.
     workspaces = await asyncio.to_thread(
-        lambda: _attach_scene_suites(_store.list_workspaces(enabled_only=enabled_only), pro_active=pro_active)
+        lambda: _attach_scene_suites(_store.list_workspaces(enabled_only=enabled_only))
     )
-    return [workspace for workspace in workspaces if not (enabled_only and workspace.locked)]
+    locked = await hub_access.locked_workspaces(workspaces)
+    result = []
+    for workspace in workspaces:
+        if workspace.id in locked:
+            workspace = workspace.model_copy(update={"locked": True, "lockReason": locked[workspace.id]})
+        # The navigation (enabledOnly) leaves locked scenes out; the scene
+        # manager lists them, locked.
+        if enabled_only and workspace.locked:
+            continue
+        result.append(workspace)
+    return result
 
 
-def _suite_edition(suite_id: str) -> str:
-    try:
-        return getattr(load_manifest("component", suite_id), "edition", "oss")
-    except Exception:
-        return "oss"
-
-
-def _attach_scene_suites(
-    workspaces: list[WebUIWorkspaceListItem],
-    *,
-    pro_active: bool = False,
-) -> list[WebUIWorkspaceListItem]:
+def _attach_scene_suites(workspaces: list[WebUIWorkspaceListItem]) -> list[WebUIWorkspaceListItem]:
     """Tag each workspace with the scene suite that ships it and drop
-    user-root scene workspaces no suite knows about. A workspace whose suite
-    needs Pro is marked locked while no Pro license is active.
+    user-root scene workspaces no suite knows about.
 
     Scenes reach the user root (~/.flocks/plugins/contracts/webui) only through
     the suite manager, so a ``sceneWorkspace`` directory there without a suite
@@ -208,8 +219,7 @@ def _attach_scene_suites(
                 _hidden_scene_workspaces_logged.add(workspace.id)
                 log.info("webui.workspaces.unmanaged_scene_hidden", {"workspaceId": workspace.id})
             continue
-        locked = bool(suite_id) and not pro_active and _suite_edition(suite_id) == "pro"
-        result.append(workspace.model_copy(update={"suiteId": suite_id, "locked": locked}))
+        result.append(workspace.model_copy(update={"suiteId": suite_id}))
     return result
 
 
@@ -269,6 +279,8 @@ async def create_webui_page(req: WebUIPageCreateRequest, _admin: object = Depend
 
 @router.get("/contracts/webui/pages/{page_id}", response_model=WebUIPageDetail)
 async def get_webui_page(page_id: str):
+    page_id = _page_id_or_400(page_id)
+    await _require_page_access(page_id)
     try:
         return _store.get_page(page_id)
     except FileNotFoundError as exc:
@@ -277,6 +289,8 @@ async def get_webui_page(page_id: str):
 
 @router.put("/contracts/webui/pages/{page_id}", response_model=WebUIPageSaveResponse)
 async def save_webui_page(page_id: str, req: WebUIPageSaveRequest, _admin: object = Depends(require_admin)):
+    page_id = _page_id_or_400(page_id)
+    await _require_page_access(page_id)
     nav_changed = False
     try:
         if req.manifest is not None:
@@ -332,6 +346,8 @@ async def save_webui_page(page_id: str, req: WebUIPageSaveRequest, _admin: objec
 
 @router.post("/contracts/webui/pages/{page_id}/build", response_model=WebUIPageBuildMeta)
 async def build_webui_page(page_id: str, _admin: object = Depends(require_admin)):
+    page_id = _page_id_or_400(page_id)
+    await _require_page_access(page_id)
     try:
         build = _builder.build(page_id)
     except FileNotFoundError as exc:
@@ -352,8 +368,11 @@ async def build_webui_page(page_id: str, _admin: object = Depends(require_admin)
 
 @router.get("/contracts/webui/pages/{page_id}/bundle.js")
 async def get_webui_page_bundle(page_id: str, v: Optional[str] = Query(None)):
+    from flocks.utils.http_file_read_guard import require_http_private_path_access
+    await _require_page_access(_page_id_or_400(page_id))
     try:
         bundle_path = _store.bundle_path(page_id)
+        require_http_private_path_access(bundle_path)
         if not bundle_path.is_file():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="bundle not found")
         headers = {"Cache-Control": "no-cache"} if v else None
@@ -368,8 +387,11 @@ async def get_webui_page_bundle(page_id: str, v: Optional[str] = Query(None)):
 
 @router.get("/contracts/webui/pages/{page_id}/assets/{asset_path:path}")
 async def get_webui_page_asset(page_id: str, asset_path: str):
+    from flocks.utils.http_file_read_guard import require_http_private_path_access
+    await _require_page_access(_page_id_or_400(page_id))
     try:
         path = _store.asset_path(page_id, asset_path)
+        require_http_private_path_access(path)
         if not path.is_file():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="asset not found")
         return FileResponse(path=path)
@@ -379,11 +401,15 @@ async def get_webui_page_asset(page_id: str, asset_path: str):
 
 @router.get("/contracts/webui/pages/{page_id}/api")
 async def list_webui_page_api_routes(page_id: str):
+    page_id = _page_id_or_400(page_id)
+    await _require_page_access(page_id)
     return await _api_runtime.list_routes(page_id)
 
 
 @router.post("/contracts/webui/pages/{page_id}/api/reload")
 async def reload_webui_page_api(page_id: str, _admin: object = Depends(require_admin)):
+    page_id = _page_id_or_400(page_id)
+    await _require_page_access(page_id)
     routes = await _api_runtime.reload_page(page_id)
     await publish_event("contracts.webui.pages.api_changed", {"id": page_id, "routes": routes})
     return {"routes": routes}
@@ -395,12 +421,18 @@ async def reload_webui_page_api(page_id: str, _admin: object = Depends(require_a
 )
 async def dispatch_webui_page_api(page_id: str, api_path: str, request: Request):
     user = require_user(request)
+    page_id = _page_id_or_400(page_id)
+    await _require_page_access(page_id)
     return await _api_runtime.dispatch(page_id, api_path, request, user)
 
 
 @router.get("/contracts/webui/pages/{page_id}/export")
 async def export_webui_page(page_id: str, _admin: object = Depends(require_admin)):
+    from flocks.utils.http_file_read_guard import http_private_path_is_blocked, require_http_private_path_access
+    page_id = _page_id_or_400(page_id)
+    await _require_page_access(page_id)
     page_path = _store.page_dir(page_id)
+    require_http_private_path_access(page_path)
     if not page_path.is_dir():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"page not found: {page_id}")
 
@@ -411,7 +443,15 @@ async def export_webui_page(page_id: str, _admin: object = Depends(require_admin
             for file_path in page_path.rglob("*"):
                 if not file_path.is_file():
                     continue
-                arc_name = str(file_path.relative_to(page_path)).replace("\\", "/")
+                if http_private_path_is_blocked(file_path):
+                    continue
+                rel_parts = file_path.relative_to(page_path).parts
+                # Bytecode caches are produced when the page API is loaded and
+                # are not importable page content; shipping them would make the
+                # archive fail the import allow-list on the way back in.
+                if "__pycache__" in rel_parts or file_path.suffix == ".pyc" or any(part.startswith(".") for part in rel_parts):
+                    continue
+                arc_name = "/".join(rel_parts)
                 zf.write(file_path, arcname=f"{page_id}/{arc_name}")
     except Exception:
         if os.path.exists(archive_path):
@@ -450,7 +490,7 @@ async def import_webui_page(
                 root_parts = {name.split("/", 1)[0] for name in names}
                 if len(root_parts) != 1:
                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="archive must contain a single page root directory")
-                page_id = _store.validate_page_id(next(iter(root_parts)))
+                page_id = _page_id_or_400(next(iter(root_parts)))
                 extracted_root = temp_root / page_id
                 total_uncompressed = 0
                 for member, member_name in zip(members, names):
@@ -473,10 +513,14 @@ async def import_webui_page(
             _normalize_import_manifest(extracted_root, page_id)
             if _store.page_exists(page_id) and not overwrite:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"page already exists: {page_id}")
+            # A page imported again under an id a policy guards is replaced
+            # only where that page could be served.
+            await _require_page_access(page_id)
             target = _store.root_page_dir(page_id)
             if target.exists():
                 shutil.rmtree(target)
             shutil.move(str((temp_root / page_id).resolve()), str(target))
+        hub_access.contents_changed()
         try:
             build = _builder.build(page_id)
             if build.status == "ready":

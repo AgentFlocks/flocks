@@ -1,4 +1,5 @@
 from io import StringIO
+from pathlib import Path
 
 import pytest
 import typer
@@ -353,57 +354,120 @@ def test_update_reports_handoff_preparation_failure(monkeypatch, tmp_path) -> No
     assert "handoff preparation failed" in output.getvalue()
 
 
-def test_update_pro_bundle_option_installs_without_touching_core_update(monkeypatch, tmp_path) -> None:
+class _CliChannel:
+    """An update channel an installed extension would provide."""
+
+    name = "extension"
+
+    def __init__(self) -> None:
+        self.released: list[object] = []
+
+    async def check(self, *, locale=None, remote=True):
+        return VersionInfo(current_version="v2026.9.14", latest_version="v2026.9.20", has_update=True)
+
+    async def release(self, *, version=None):
+        from flocks.updater.channels import ChannelRelease, InstallPlan
+
+        self.released.append(version)
+        return ChannelRelease(
+            version="v2026.9.20",
+            plan=lambda root, current, work: InstallPlan(source_root=None, version=current),
+            archive_path=Path("/opt/flocks/bundle"),
+            label="extension bundle",
+        )
+
+
+@pytest.fixture
+def cli_channel():
+    from flocks.updater.channels import register_update_channel, unregister_update_channel
+
+    channel = _CliChannel()
+    register_update_channel(channel)
+    yield channel
+    unregister_update_channel(channel.name)
+
+
+def _capture_console(monkeypatch) -> StringIO:
+    output = StringIO()
+    monkeypatch.setattr(update_cmd, "console", Console(file=output, force_terminal=False, color_system=None, width=160))
+    return output
+
+
+def test_update_channel_option_installs_what_the_channel_releases(monkeypatch, tmp_path, cli_channel) -> None:
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
     monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
-    output = StringIO()
-    monkeypatch.setattr(
-        update_cmd,
-        "console",
-        Console(file=output, force_terminal=False, color_system=None, width=120),
-    )
+    output = _capture_console(monkeypatch)
 
     async def fail_update(**_: object) -> None:
-        raise AssertionError("core update must not run with --pro-bundle")
+        raise AssertionError("the project's own update must not run with --channel")
 
     monkeypatch.setattr(update_cmd, "_update", fail_update)
 
     captured: dict[str, object] = {}
 
-    async def fake_pro_install(*, restart: bool):
-        captured["restart"] = restart
-        yield UpdateProgress(stage="fetching", message="Using local Flocks Pro bundle /opt/flocks/bundle...")
-        yield UpdateProgress(stage="applying", message="Keeping local Flocks v2026.9.14 and installing the Pro component...")
+    async def fake_perform_update(version, *, release, restart):
+        captured.update(version=version, release=release, restart=restart)
+        yield UpdateProgress(stage="fetching", message="Using local extension bundle /opt/flocks/bundle...")
+        yield UpdateProgress(stage="applying", message="Keeping local Flocks v2026.9.14 and installing the extension bundle...")
         yield UpdateProgress(stage="done", message="Upgraded to v2026.9.14", success=True)
 
-    monkeypatch.setattr(updater_pkg, "perform_pro_bundle_install", fake_pro_install)
+    monkeypatch.setattr(updater_pkg, "perform_update", fake_perform_update)
 
-    result = runner.invoke(cli_main.app, ["update", "--pro-bundle", "--no-restart"])
+    result = runner.invoke(cli_main.app, ["update", "--channel", "extension", "--no-restart"])
 
-    assert result.exit_code == 0, result.stdout
-    assert captured == {"restart": False}
-    assert "Pro 组件已安装" in output.getvalue()
+    assert result.exit_code == 0, output.getvalue()
+    assert captured["version"] == "v2026.9.20" and captured["restart"] is False
+    assert captured["release"].label == "extension bundle"
+    assert cli_channel.released == [None]
+    assert "已安装 extension bundle v2026.9.20" in output.getvalue()
 
 
-def test_update_pro_bundle_option_reports_error_stage(monkeypatch, tmp_path) -> None:
+def test_update_channel_option_reports_error_stage(monkeypatch, tmp_path, cli_channel) -> None:
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
     monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
-    output = StringIO()
-    monkeypatch.setattr(
-        update_cmd,
-        "console",
-        Console(file=output, force_terminal=False, color_system=None, width=120),
-    )
+    output = _capture_console(monkeypatch)
 
-    async def fake_pro_install(*, restart: bool):
-        yield UpdateProgress(stage="error", message="Local Flocks Pro bundle is invalid: missing wheel", success=False)
+    async def fake_perform_update(version, *, release, restart):
+        yield UpdateProgress(stage="error", message="Cannot install this extension bundle: missing wheel", success=False)
 
-    monkeypatch.setattr(updater_pkg, "perform_pro_bundle_install", fake_pro_install)
+    monkeypatch.setattr(updater_pkg, "perform_update", fake_perform_update)
 
-    result = runner.invoke(cli_main.app, ["update", "--pro-bundle"])
+    result = runner.invoke(cli_main.app, ["update", "--channel", "extension"])
 
     assert result.exit_code == 1
     assert "missing wheel" in output.getvalue()
+
+
+def test_update_channel_option_reports_a_channel_that_cannot_release(monkeypatch, tmp_path, cli_channel) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = _capture_console(monkeypatch)
+
+    async def refuse(*, version=None):
+        raise RuntimeError("Console unreachable and no local bundle")
+
+    async def fail_perform_update(*_args, **_kwargs):
+        raise AssertionError("nothing to install without a release")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(cli_channel, "release", refuse)
+    monkeypatch.setattr(updater_pkg, "perform_update", fail_perform_update)
+
+    result = runner.invoke(cli_main.app, ["update", "--channel", "extension"])
+
+    assert result.exit_code == 1
+    assert "Console unreachable" in output.getvalue()
+
+
+def test_update_channel_option_names_the_channels_there_are(monkeypatch, tmp_path, cli_channel) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = _capture_console(monkeypatch)
+
+    result = runner.invoke(cli_main.app, ["update", "--channel", "nobody"])
+
+    assert result.exit_code == 1
+    assert "没有名为 nobody 的更新通道" in output.getvalue() and "extension" in output.getvalue()
 
 
 def test_update_cli_explains_offline_install(monkeypatch, tmp_path) -> None:
@@ -481,53 +545,104 @@ def test_update_cli_offline_install_gets_run_guidance_even_when_the_version_chec
         assert text.index("flocks-offline.run") < text.index("v2026.9.14")
 
 
-def test_update_check_with_pro_bundle_only_reports_and_never_installs(monkeypatch, tmp_path) -> None:
-    """`--check --pro-bundle` must describe the bundle and stop: no install, no restart, with or without --no-restart."""
+def test_update_check_with_channel_only_reports_and_never_installs(monkeypatch, tmp_path, cli_channel) -> None:
+    """`--check --channel` describes what the channel would install and stops: no install, no restart."""
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
     monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
-    output = StringIO()
-    monkeypatch.setattr(update_cmd, "console", Console(file=output, force_terminal=False, color_system=None, width=160))
+    output = _capture_console(monkeypatch)
 
-    async def fail_pro_install(**_: object):
-        raise AssertionError("--check must not install the Pro bundle")
+    async def fail_perform_update(*_args, **_kwargs):
+        raise AssertionError("--check must not install anything")
         yield  # pragma: no cover - makes this an async generator like the real one
 
     async def fail_update(**_: object) -> None:
-        raise AssertionError("core update must not run with --pro-bundle")
+        raise AssertionError("the project's own update must not run with --channel")
 
-    async def fake_describe(**_: object) -> dict:
-        return {
-            "source": "local", "location": "/opt/flocks/bundle", "bundle_version": "v2026.9.14",
-            "core_version": "v2026.9.14", "component_version": "2026.8.12", "release_id": "rel_offline_test_1",
-            "prebuilt": True, "current_core_version": "2026.9.14", "installed": False,
-            "installed_bundle_version": None, "installed_component_version": None,
-        }
+    async def describe():
+        return [("来源", "本地离线包 /opt/flocks/bundle"), ("组件版本", "2026.8.12"), ("release id", "rel_offline_test_1")]
 
-    monkeypatch.setattr(updater_pkg, "perform_pro_bundle_install", fail_pro_install)
-    monkeypatch.setattr(updater_pkg, "describe_pro_bundle", fake_describe)
+    monkeypatch.setattr(cli_channel, "describe", describe, raising=False)
+    monkeypatch.setattr(updater_pkg, "perform_update", fail_perform_update)
     monkeypatch.setattr(update_cmd, "_update", fail_update)
 
-    for args in (["update", "--check", "--pro-bundle"], ["update", "--check", "--pro-bundle", "--no-restart"]):
+    for args in (["update", "--check", "--channel", "extension"], ["update", "--check", "--channel", "extension", "--no-restart"]):
         output.seek(0)
         output.truncate(0)
         result = runner.invoke(cli_main.app, args)
         text = output.getvalue()
         assert result.exit_code == 0, text
         assert "/opt/flocks/bundle" in text and "2026.8.12" in text and "rel_offline_test_1" in text
-        assert "未安装" in text and "本次未安装任何东西" in text
+        assert "本次未安装任何东西" in text
+    assert cli_channel.released == []
 
 
-def test_update_check_with_pro_bundle_reports_lookup_failure(monkeypatch, tmp_path) -> None:
+def test_update_check_with_channel_reports_lookup_failure(monkeypatch, tmp_path, cli_channel) -> None:
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
     monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
-    output = StringIO()
-    monkeypatch.setattr(update_cmd, "console", Console(file=output, force_terminal=False, color_system=None, width=160))
+    output = _capture_console(monkeypatch)
 
-    async def no_bundle(**_: object) -> dict:
+    async def describe():
         raise RuntimeError("Console unreachable and no local bundle")
 
-    monkeypatch.setattr(updater_pkg, "describe_pro_bundle", no_bundle)
-    result = runner.invoke(cli_main.app, ["update", "--check", "--pro-bundle"])
+    monkeypatch.setattr(cli_channel, "describe", describe, raising=False)
+    result = runner.invoke(cli_main.app, ["update", "--check", "--channel", "extension"])
     assert result.exit_code == 1
     assert "检查失败" in output.getvalue() and "Console unreachable" in output.getvalue()
 
+
+def test_update_check_with_channel_falls_back_to_the_version_check(monkeypatch, tmp_path, cli_channel) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = _capture_console(monkeypatch)
+    asked: list[object] = []
+
+    async def fake_check_update(**kwargs):
+        asked.append(kwargs)
+        return VersionInfo(current_version="v2026.9.14", latest_version="v2026.9.20", has_update=True)
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    result = runner.invoke(cli_main.app, ["update", "--check", "--channel", "extension"])
+    assert result.exit_code == 0, output.getvalue()
+    assert asked == [{"channel": "extension"}]
+    assert "2026.9.20" in output.getvalue()
+
+
+def test_update_check_with_channel_reports_a_failed_version_check(monkeypatch, tmp_path, cli_channel) -> None:
+    """A channel without describe() whose check fails ends like the project's own check: error, exit 1."""
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = _capture_console(monkeypatch)
+
+    async def fake_check_update(**kwargs):
+        return VersionInfo(
+            current_version="v2026.9.14",
+            error="Failed to check for updates. Please check your network connection.",
+        )
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    result = runner.invoke(cli_main.app, ["update", "--check", "--channel", "extension"])
+    assert result.exit_code == 1, output.getvalue()
+    assert "检查失败" in output.getvalue() and "network connection" in output.getvalue()
+    assert cli_channel.released == []
+
+
+def test_update_says_where_the_previous_enterprise_edition_went(monkeypatch, tmp_path) -> None:
+    """A machine with the Python enterprise package of before: flocks update upgrades the open
+    part only, and says so, with the way to the new enterprise edition."""
+    from flocks.updater import enterprise
+
+    output = StringIO()
+    monkeypatch.setattr(update_cmd, "console", Console(file=output, force_terminal=False, width=200))
+    monkeypatch.setattr(enterprise, "previous_edition", lambda: {"version": "2026.10.19", "license_id": "lic-old-7"})
+    monkeypatch.setattr(enterprise, "situation", lambda: {"manual_command": "bash flockspro-<版本>-linux-arm64.run"})
+
+    update_cmd._print_previous_edition_notice()
+
+    text = output.getvalue()
+    assert "老企业版（Python 版 2026.10.19）" in text and "授权 lic-old-7" in text
+    assert "账号菜单 → Flocks Pro" in text and "bash flockspro-<版本>-linux-arm64.run" in text
+
+    output.truncate(0)
+    monkeypatch.setattr(enterprise, "previous_edition", lambda: None)
+    update_cmd._print_previous_edition_notice()
+    assert output.getvalue().strip() == ""

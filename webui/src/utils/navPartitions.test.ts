@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AGENT_WORKSPACE,
+  AGENT_WORKSHOP,
   isOpenSceneWorkspace,
   readCurrentWorkspace,
   readWorkspacePaths,
@@ -12,6 +13,18 @@ import {
   workspaceIdFromPath,
 } from './navPartitions';
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
+
+// An extension's sign-in callback counts as settings; the stock registry has none.
+vi.mock('@ext/registry', () => ({
+  __esModule: true,
+  default: {
+    routes: [{ path: 'reports-login/callback', area: 'settings', load: async () => ({ default: () => null }) }],
+    navItems: [],
+    settingsSections: [],
+    slots: [],
+    i18n: {},
+  },
+}));
 
 const scene = (over: Partial<WebUIContractWorkspaceListItem>): WebUIContractWorkspaceListItem => ({
   id: 'soc_ui',
@@ -40,19 +53,57 @@ describe('navPartitions', () => {
     expect(sceneWorkspaceIdOf(AGENT_WORKSPACE)).toBeNull();
   });
 
-  it('routes settings and the scene manager to their own kinds', () => {
+  it('keeps settings and scene management separate from workspaces', () => {
     expect(resolveNavRoute('/settings')).toEqual({ kind: 'settings' });
     expect(resolveNavRoute('/settings/audit-logs')).toEqual({ kind: 'settings' });
-    expect(resolveNavRoute('/scenes')).toEqual({ kind: 'scenes' });
-    expect(resolveNavRoute('/scenes/suites')).toEqual({ kind: 'scenes' });
+    for (const path of ['/scenes', '/scenes/suites', '/scenes/suites?workspace=code_audit_ui']) {
+      expect(resolveNavRoute(path)).toEqual({ kind: 'scenes' });
+    }
+  });
+
+  it('classifies an extension route registered under settings as settings', () => {
+    for (const path of ['/reports-login/callback', '/reports-login/callback?login_id=test-login', '/reports-login/callback/done']) {
+      expect(resolveNavRoute(path)).toEqual({ kind: 'settings' });
+    }
+    // Only that route: a sibling path is an ordinary page.
+    expect(resolveNavRoute('/reports-login')).toEqual({ kind: 'workspace', workspace: AGENT_WORKSPACE });
+    saveWorkspacePaths({ [AGENT_WORKSPACE]: '/reports-login/callback?login_id=test-login' });
+    expect(readWorkspacePaths()).toEqual({});
   });
 
   it('routes ordinary pages to the Agent workspace', () => {
-    for (const path of ['/', '/sessions', '/tasks', '/agents', '/hub', '/contracts/webui/dash-1']) {
+    for (const path of ['/', '/sessions', '/tasks', '/workspace', '/workspace?tab=files', '/contracts/webui/dash-1']) {
       expect(resolveNavRoute(path)).toEqual({ kind: 'workspace', workspace: AGENT_WORKSPACE });
     }
     // A path that merely starts with the same letters is not settings.
     expect(resolveNavRoute('/settings-export')).toEqual({ kind: 'workspace', workspace: AGENT_WORKSPACE });
+  });
+
+  it('routes capability pages and knowledge or memory tabs to the workshop', () => {
+    for (const path of ['/agents', '/agents/a', '/skills', '/workflows/w1', '/tools', '/devices', '/models', '/hub', '/workspace?tab=knowledge', '/workspace?tab=memory']) {
+      expect(resolveNavRoute(path)).toEqual({ kind: 'workspace', workspace: AGENT_WORKSHOP });
+    }
+    expect(resolveNavRoute('/agents-extra')).toEqual({ kind: 'workspace', workspace: AGENT_WORKSPACE });
+  });
+
+  it('routes the pages extensions list in the workshop menu to the workshop', () => {
+    const workshopPaths = ['/ext/agent-hub', '/ext/reports?view=all'];
+    for (const path of ['/ext/agent-hub', '/ext/agent-hub/item', '/ext/reports', '/ext/reports?view=mine']) {
+      expect(resolveNavRoute(path, null, workshopPaths)).toEqual({ kind: 'workspace', workspace: AGENT_WORKSHOP });
+    }
+    expect(resolveNavRoute('/ext/agent-hubs', null, workshopPaths)).toEqual({ kind: 'workspace', workspace: AGENT_WORKSPACE });
+    expect(resolveNavRoute('/ext/agent-hub')).toEqual({ kind: 'workspace', workspace: AGENT_WORKSPACE });
+    // The workshop's remembered page survives a reload when it is such a page.
+    saveWorkspacePaths({ [AGENT_WORKSHOP]: '/ext/agent-hub/item' });
+    expect(readWorkspacePaths(workshopPaths)).toEqual({ [AGENT_WORKSHOP]: '/ext/agent-hub/item' });
+    expect(readWorkspacePaths()).toEqual({});
+  });
+
+  it('drops stale workbench capability paths while retaining workshop query paths', () => {
+    saveWorkspacePaths({ [AGENT_WORKSPACE]: '/workflows', [AGENT_WORKSHOP]: '/workspace?tab=memory' });
+    expect(readWorkspacePaths()).toEqual({ [AGENT_WORKSHOP]: '/workspace?tab=memory' });
+    saveCurrentWorkspace(AGENT_WORKSHOP);
+    expect(readCurrentWorkspace()).toBe(AGENT_WORKSHOP);
   });
 
   it('routes a scene workspace page to its scene workspace', () => {
@@ -74,6 +125,33 @@ describe('navPartitions', () => {
     expect(isOpenSceneWorkspace(scene({ enabled: false }))).toBe(false);
     expect(isOpenSceneWorkspace(scene({ locked: true }))).toBe(false);
     expect(isOpenSceneWorkspace(scene({ placement: 'aiWorkbench' }))).toBe(false);
+  });
+
+  it('keeps code audit in its own workspace regardless of the alert suite state', () => {
+    const audit = scene({ id: 'code_audit_ui', route: '/contracts/webui/workspaces/code_audit_ui' });
+    const path = `${audit.route}/audit-home?view=audits`;
+    expect(resolveNavRoute(path, [scene({}), audit])).toEqual({ kind: 'workspace', workspace: sceneNavWorkspace('code_audit_ui') });
+    for (const workspaces of [
+      [audit],
+      [scene({ enabled: false }), audit],
+      [scene({ locked: true }), audit],
+      [scene({}), { ...audit, locked: true }],
+      [{ ...audit, enabled: false }],
+    ]) {
+      expect(resolveNavRoute(path, workspaces)).toEqual({ kind: 'workspace', workspace: sceneNavWorkspace('code_audit_ui') });
+    }
+  });
+
+  it('migrates legacy SOC navigation memory to the independent code audit workspace', () => {
+    const path = '/contracts/webui/workspaces/code_audit_ui/audit-home?view=audits';
+    const paths = { [sceneNavWorkspace('soc_ui')]: path };
+    saveWorkspacePaths(paths);
+    expect(readWorkspacePaths()).toEqual({ [sceneNavWorkspace('code_audit_ui')]: path });
+  });
+
+  it('drops the old SOC scene-catalog memory after moving scene management to the header', () => {
+    saveWorkspacePaths({ [sceneNavWorkspace('soc_ui')]: '/scenes/suites?workspace=soc_ui', [AGENT_WORKSPACE]: '/tasks' });
+    expect(readWorkspacePaths()).toEqual({ [AGENT_WORKSPACE]: '/tasks' });
   });
 
   it('remembers the current workspace', () => {

@@ -198,6 +198,40 @@ class TelegramChannel(ChannelPlugin):
     # Webhook
     # ------------------------------------------------------------------
 
+    def _webhook_secret_matches(self, headers: dict) -> bool:
+        try:
+            _, account = resolve_account_config(self._config)
+        except ValueError:
+            return False
+        expected_secret = coerce_str(account.get("webhookSecret"))
+        provided_secret = (
+            headers.get("x-telegram-bot-api-secret-token")
+            or headers.get("X-Telegram-Bot-Api-Secret-Token")
+            or ""
+        )
+        return bool(expected_secret) and hmac.compare_digest(provided_secret, expected_secret)
+
+    async def webhook_authentication_evidence(
+        self,
+        body: bytes,
+        headers: dict,
+    ) -> dict:
+        """Report the secret-token check as neutral evidence.
+
+        The generic webhook route asks for this before the handler runs;
+        without it the ingress gate sees an unauthenticated public call and
+        stops it, so webhook-mode Telegram never received a message.
+        """
+        del body
+        if not self._on_message or not self._webhook_secret_matches(headers):
+            return {"plugin_authenticated": False, "provider": "telegram"}
+        return {
+            "plugin_authenticated": True,
+            "provider": "telegram",
+            # Duplicate updates are dropped by the dispatcher's message-id dedup.
+            "replay_protection": "dispatcher_dedup",
+        }
+
     async def handle_webhook(
         self,
         body: bytes,
@@ -211,13 +245,7 @@ class TelegramChannel(ChannelPlugin):
         except ValueError as exc:
             return {"error": str(exc), "status_code": 500}
 
-        expected_secret = coerce_str(account.get("webhookSecret"))
-        provided_secret = (
-            headers.get("x-telegram-bot-api-secret-token")
-            or headers.get("X-Telegram-Bot-Api-Secret-Token")
-            or ""
-        )
-        if not expected_secret or not hmac.compare_digest(provided_secret, expected_secret):
+        if not self._webhook_secret_matches(headers):
             return {"error": "invalid webhook secret", "status_code": 401}
 
         try:

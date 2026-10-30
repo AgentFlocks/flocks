@@ -10,10 +10,10 @@ limits, pricing, and parameter rules.
 
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from flocks.config.config_writer import ConfigWriter
-from flocks.provider.provider import Provider
+from flocks.provider.provider import ModelInfo as ProviderModelInfo, Provider
 from flocks.provider.model_manager import get_model_manager
 from flocks.provider.types import (
     ModelDefinition,
@@ -32,6 +32,73 @@ log = Log.create(service="routes.model")
 def _connected_provider_ids() -> set[str]:
     """Return provider ids explicitly connected in flocks.json."""
     return set(ConfigWriter.list_provider_ids())
+
+
+async def _apply_provider_config(provider_id: Optional[str] = None) -> None:
+    """Load flocks.json models into the provider runtime (best effort)."""
+    from flocks.config.config import Config
+
+    Provider._ensure_initialized()
+    try:
+        config = await Config.get()
+        await Provider.apply_config(config, provider_id=provider_id)
+    except Exception:
+        pass
+
+
+def _definition_index(provider_id: str) -> Dict[str, ModelDefinition]:
+    """Catalog-enriched definitions of a provider, keyed by model id."""
+    provider = Provider.get(provider_id)
+    if provider is None:
+        return {}
+    try:
+        return {d.id: d for d in provider.get_model_definitions()}
+    except Exception:
+        return {}
+
+
+def _to_model_detail(
+    model: ProviderModelInfo,
+    provider_id: str,
+    definition: Optional[ModelDefinition] = None,
+) -> "ModelDetail":
+    """Convert a runtime ModelInfo into the V1 ModelDetail response.
+
+    Limits missing on the runtime ModelInfo (config-defined models carry none)
+    are filled from the catalog-enriched ModelDefinition when available.
+    """
+    caps = model.capabilities
+    limits = definition.limits if definition is not None else None
+    def_caps = definition.capabilities if definition is not None else None
+    pricing = model.pricing
+    if pricing is None and definition is not None and definition.pricing is not None:
+        pricing = definition.pricing.model_dump()
+    return ModelDetail(
+        id=model.id,
+        name=model.name or model.id.split("/")[-1],
+        provider=provider_id,
+        max_tokens=caps.max_tokens or (limits.max_output_tokens if limits else None),
+        context_window=caps.context_window or (limits.context_window if limits else None),
+        capabilities=ModelCapabilities(
+            streaming=caps.supports_streaming,
+            tools=caps.supports_tools,
+            vision=caps.supports_vision,
+            json_mode=bool(def_caps.supports_json_mode) if def_caps is not None else False,
+        ),
+        pricing=pricing,
+        metadata=caps.model_dump(),
+    )
+
+
+def _find_model(provider_id: str, model_id: str) -> Optional[ProviderModelInfo]:
+    """Exact-id lookup of a model inside one provider's runtime model list."""
+    try:
+        for model in Provider.list_models(provider_id):
+            if model.id == model_id:
+                return model
+    except Exception:
+        return None
+    return None
 
 
 # ==================== Response Models ====================
@@ -99,12 +166,26 @@ async def list_models(
     Returns:
         List of models with metadata
     """
+    return await _collect_models(provider=provider, streaming=streaming, tools=tools)
+
+
+async def _collect_models(
+    provider: Optional[str] = None,
+    streaming: Optional[bool] = None,
+    tools: Optional[bool] = None,
+) -> ModelListResponse:
+    """Shared implementation for the V1 list/filter/summary/compatible routes.
+
+    Internal callers must use this instead of ``list_models`` so the
+    ``Query(...)`` defaults of the route signature never leak in as values.
+    """
     try:
+        await _apply_provider_config(provider_id=provider)
         connected_provider_ids = _connected_provider_ids()
         if provider:
             provider_ids = [provider] if provider in connected_provider_ids else []
         else:
-            provider_ids = list(connected_provider_ids)
+            provider_ids = sorted(connected_provider_ids)
         
         all_models: List[ModelDetail] = []
         providers_with_models: set = set()
@@ -117,31 +198,18 @@ async def list_models(
             try:
                 # Get models for this provider
                 models = Provider.list_models(provider_id)
+                definitions = _definition_index(provider_id)
                 
                 for model in models:
                     # Apply capability filters
-                    if streaming is not None and model.capabilities.get("streaming") != streaming:
+                    if streaming is not None and model.capabilities.supports_streaming != streaming:
                         continue
-                    if tools is not None and model.capabilities.get("tools") != tools:
+                    if tools is not None and model.capabilities.supports_tools != tools:
                         continue
                     
-                    # Build model detail
-                    model_detail = ModelDetail(
-                        id=model.id,
-                        name=model.id.split("/")[-1],  # Simple name extraction
-                        provider=provider_id,
-                        max_tokens=model.capabilities.get("maxTokens"),
-                        context_window=model.capabilities.get("contextWindow"),
-                        capabilities=ModelCapabilities(
-                            streaming=model.capabilities.get("streaming", True),
-                            tools=model.capabilities.get("tools", True),
-                            vision=model.capabilities.get("vision", False),
-                            json_mode=model.capabilities.get("jsonMode", False),
-                        ),
-                        metadata=model.capabilities,
+                    all_models.append(
+                        _to_model_detail(model, provider_id, definitions.get(model.id))
                     )
-                    
-                    all_models.append(model_detail)
                     providers_with_models.add(provider_id)
             
             except Exception as e:
@@ -159,151 +227,6 @@ async def list_models(
     
     except Exception as e:
         log.error("Failed to list models", {"error": str(e)})
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get(
-    "/{model_id}",
-    response_model=ModelDetail,
-    summary="Get model details",
-    description="Get detailed information about a specific model"
-)
-async def get_model(model_id: str) -> ModelDetail:
-    """
-    Get model details
-    
-    Args:
-        model_id: Model ID (format: provider/model or just model)
-        
-    Returns:
-        Model details
-    """
-    try:
-        # Parse model ID (could be "openai/gpt-4" or just "gpt-4")
-        if "/" in model_id:
-            provider_id, actual_model_id = model_id.split("/", 1)
-        else:
-            # Search all providers
-            provider_id = None
-            actual_model_id = model_id
-        
-        # If provider specified, check it directly
-        if provider_id:
-            try:
-                model = Provider.get_model(provider_id, actual_model_id)
-                if model:
-                    return ModelDetail(
-                        id=model.id,
-                        name=model.id.split("/")[-1],
-                        provider=provider_id,
-                        max_tokens=model.capabilities.get("maxTokens"),
-                        context_window=model.capabilities.get("contextWindow"),
-                        capabilities=ModelCapabilities(
-                            streaming=model.capabilities.get("streaming", True),
-                            tools=model.capabilities.get("tools", True),
-                            vision=model.capabilities.get("vision", False),
-                            json_mode=model.capabilities.get("jsonMode", False),
-                        ),
-                        metadata=model.capabilities,
-                    )
-            except Exception:
-                pass
-        
-        # Search all providers
-        for pid in Provider.list_providers():
-            try:
-                model = Provider.get_model(pid, actual_model_id)
-                if model:
-                    return ModelDetail(
-                        id=model.id,
-                        name=model.id.split("/")[-1],
-                        provider=pid,
-                        max_tokens=model.capabilities.get("maxTokens"),
-                        context_window=model.capabilities.get("contextWindow"),
-                        capabilities=ModelCapabilities(
-                            streaming=model.capabilities.get("streaming", True),
-                            tools=model.capabilities.get("tools", True),
-                            vision=model.capabilities.get("vision", False),
-                            json_mode=model.capabilities.get("jsonMode", False),
-                        ),
-                        metadata=model.capabilities,
-                    )
-            except Exception:
-                continue
-        
-        # Not found
-        raise HTTPException(
-            status_code=404,
-            detail=f"Model {model_id} not found"
-        )
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error("Failed to get model", {"model_id": model_id, "error": str(e)})
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get(
-    "/{model_id}/compatible",
-    response_model=List[str],
-    summary="Find compatible models",
-    description="Find models with similar capabilities"
-)
-async def find_compatible_models(
-    model_id: str,
-    limit: int = Query(5, ge=1, le=20, description="Maximum number of results")
-) -> List[str]:
-    """
-    Find compatible models
-    
-    Finds models with similar capabilities to the specified model.
-    Useful for fallback or alternative suggestions.
-    
-    Args:
-        model_id: Source model ID
-        limit: Maximum results
-        
-    Returns:
-        List of compatible model IDs
-    """
-    try:
-        # Get the source model
-        source = await get_model(model_id)
-        
-        # Get all models
-        all_models_response = await list_models()
-        
-        # Find similar models (same provider first, then others)
-        compatible: List[str] = []
-        
-        # Same provider models
-        for model in all_models_response.models:
-            if model.id == source.id:
-                continue
-            if model.provider == source.provider:
-                if len(compatible) < limit:
-                    compatible.append(model.id)
-        
-        # Other provider models with similar capabilities
-        for model in all_models_response.models:
-            if model.id == source.id:
-                continue
-            if model.provider == source.provider:
-                continue
-            
-            # Check capability match
-            if (model.capabilities.streaming == source.capabilities.streaming and
-                model.capabilities.tools == source.capabilities.tools):
-                if len(compatible) < limit:
-                    compatible.append(model.id)
-        
-        return compatible[:limit]
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error("Failed to find compatible models", {"model_id": model_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -327,7 +250,7 @@ async def filter_models(filters: ModelFilterRequest) -> ModelListResponse:
     """
     try:
         # Get all models
-        all_models_response = await list_models(
+        all_models_response = await _collect_models(
             provider=filters.provider,
             streaming=filters.supports_streaming,
             tools=filters.supports_tools,
@@ -375,7 +298,7 @@ async def provider_model_counts() -> Dict[str, int]:
         Dict mapping provider ID to model count
     """
     try:
-        all_models_response = await list_models()
+        all_models_response = await _collect_models()
         
         counts: Dict[str, int] = {}
         for model in all_models_response.models:
@@ -399,7 +322,7 @@ class ModelDefinitionListResponse(BaseModel):
 
 class UpdateModelSettingRequest(BaseModel):
     """Request to update model settings"""
-    enabled: Optional[bool] = Field(None, description="Enable or disable model")
+    enabled: Optional[StrictBool] = Field(None, description="Enable or disable model")
     default_parameters: Optional[Dict[str, Any]] = Field(
         None, description="Default parameter overrides"
     )
@@ -507,11 +430,19 @@ async def get_model_settings(provider_id: str, model_id: str):
 )
 @serialized_config_mutation
 async def update_model_settings(
-    provider_id: str, model_id: str, body: UpdateModelSettingRequest,
+    provider_id: str,
+    model_id: str,
+    body: UpdateModelSettingRequest,
     _admin: object = Depends(require_admin),
 ) -> ModelSetting:
     """Update model settings (enable/disable, default parameters)."""
+    await _apply_provider_config(provider_id=provider_id)
     manager = get_model_manager()
+    if manager.get_model(provider_id, model_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{model_id}' not found for provider '{provider_id}'",
+        )
     setting = manager.update_setting(
         provider_id=provider_id,
         model_id=model_id,
@@ -519,6 +450,43 @@ async def update_model_settings(
         default_parameters=body.default_parameters,
     )
     return setting
+
+async def _delete_model_inventory(provider_id: str, model_id: str) -> bool:
+    """Shared explicit deletion semantics for the V2 and custom model routes.
+
+    Called under the global configuration mutation lock. Rebuild only model
+    metadata: unresolved raw credential references must not reconfigure a
+    live provider while updating its inventory.
+    """
+    if not ConfigWriter.remove_model(provider_id, model_id):
+        return False
+
+    from flocks.config.config import ProviderConfig as ProviderSettings
+    from flocks.server.routes.model_discovery import publish_provider_updated
+    from flocks.server.routes.provider import _ensure_provider_initialized
+
+    await _ensure_provider_initialized()
+    provider = Provider._providers.get(provider_id)
+    if provider is not None:
+        raw = ConfigWriter.get_provider_raw(provider_id) or {}
+        Provider.apply_provider_config(
+            provider,
+            ProviderSettings.model_validate({"models": raw.get("models", {}), "model_sync": "manual"}),
+        )
+        if hasattr(provider, "_custom_models"):
+            provider._custom_models = list(provider._config_models)
+        desired = {model.id: model for model in provider.get_models()}
+        for cached_id, model in list(Provider._models.items()):
+            if model.provider_id == provider_id and cached_id not in desired:
+                del Provider._models[cached_id]
+        for cached_id, model in desired.items():
+            existing = Provider._models.get(cached_id)
+            if existing is None or existing.provider_id == provider_id:
+                Provider._models[cached_id] = model
+
+    await publish_provider_updated(provider_id)
+    return True
+
 
 @router.delete(
     "/v2/definitions/{provider_id}/{model_id:path}",
@@ -528,27 +496,22 @@ async def update_model_settings(
 )
 @serialized_config_mutation
 async def delete_model_definition(
-    provider_id: str, model_id: str,
+    provider_id: str,
+    model_id: str,
     _admin: object = Depends(require_admin),
 ):
     """Delete a model from a provider.
 
-    Removes the model entry from flocks.json and the runtime cache.
-    flocks.json is the single source of truth for the model list, so a
-    simple removal is sufficient — catalog models do not reappear because
-    they are no longer loaded from catalog at runtime.
+    Removes the model and its routing/settings references atomically, opts
+    the inventory into manual management, and immediately refreshes runtime.
     """
     try:
-        removed = ConfigWriter.remove_model(provider_id, model_id)
+        removed = await _delete_model_inventory(provider_id, model_id)
         if not removed:
             raise HTTPException(
                 status_code=404,
                 detail=f"Model '{model_id}' not found for provider '{provider_id}'",
             )
-
-        Provider.remove_model_from_runtime(provider_id, model_id)
-
-        ConfigWriter.clear_default_models_for_model(provider_id, model_id)
 
         log.info("model_definition.deleted", {
             "provider_id": provider_id,
@@ -562,4 +525,130 @@ async def delete_model_definition(
             "model_id": model_id,
             "error": str(e)
         })
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== V1 model lookup (registered last) ====================
+#
+# ``{model_id:path}`` lets callers pass ``provider/model`` ids. These two routes
+# must be registered after every fixed path above (``/providers/summary``,
+# ``/v2/...``) so the catch-all does not shadow them.
+
+
+@router.get(
+    "/{model_id:path}/compatible",
+    response_model=List[str],
+    summary="Find compatible models",
+    description="Find models with similar capabilities"
+)
+async def find_compatible_models(
+    model_id: str,
+    limit: int = Query(5, ge=1, le=20, description="Maximum number of results")
+) -> List[str]:
+    """
+    Find compatible models
+    
+    Finds models with similar capabilities to the specified model.
+    Useful for fallback or alternative suggestions.
+    
+    Args:
+        model_id: Source model ID
+        limit: Maximum results
+        
+    Returns:
+        List of compatible model IDs
+    """
+    try:
+        # Get the source model
+        source = await get_model(model_id)
+        
+        # Get all models
+        all_models_response = await _collect_models()
+        
+        # Find similar models (same provider first, then others)
+        compatible: List[str] = []
+        
+        # Same provider models
+        for model in all_models_response.models:
+            if model.id == source.id:
+                continue
+            if model.provider == source.provider:
+                if len(compatible) < limit:
+                    compatible.append(model.id)
+        
+        # Other provider models with similar capabilities
+        for model in all_models_response.models:
+            if model.id == source.id:
+                continue
+            if model.provider == source.provider:
+                continue
+            
+            # Check capability match
+            if (model.capabilities.streaming == source.capabilities.streaming and
+                model.capabilities.tools == source.capabilities.tools):
+                if len(compatible) < limit:
+                    compatible.append(model.id)
+        
+        return compatible[:limit]
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Failed to find compatible models", {"model_id": model_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/{model_id:path}",
+    response_model=ModelDetail,
+    summary="Get model details",
+    description="Get detailed information about a specific model"
+)
+async def get_model(model_id: str) -> ModelDetail:
+    """
+    Get model details
+    
+    Args:
+        model_id: Model ID (format: provider/model or just model)
+        
+    Returns:
+        Model details
+    """
+    try:
+        await _apply_provider_config()
+        connected_provider_ids = _connected_provider_ids()
+
+        # Parse model ID (could be "openai/gpt-4" or just "gpt-4")
+        if "/" in model_id:
+            provider_id, actual_model_id = model_id.split("/", 1)
+        else:
+            # Search all providers
+            provider_id = None
+            actual_model_id = model_id
+        
+        # If provider specified, check it directly
+        if provider_id:
+            model = _find_model(provider_id, actual_model_id)
+            if model:
+                return _to_model_detail(
+                    model, provider_id, _definition_index(provider_id).get(model.id)
+                )
+        
+        # Search all connected providers (a model id may itself contain '/')
+        for pid in sorted(connected_provider_ids):
+            for candidate in (actual_model_id, model_id):
+                model = _find_model(pid, candidate)
+                if model:
+                    return _to_model_detail(model, pid, _definition_index(pid).get(model.id))
+        
+        # Not found
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model {model_id} not found"
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Failed to get model", {"model_id": model_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))

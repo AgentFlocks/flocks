@@ -164,6 +164,48 @@ class TestGenerateTitleAfterFirstMessage:
         assert result == "Debug Python Script"
 
     @pytest.mark.asyncio
+    async def test_skip_reasons_are_logged_at_info(self):
+        """跳过生成的原因要和 title.generation.start 一样落 INFO（默认日志级别看得到）。"""
+        from flocks.session.lifecycle import title as title_module
+        from flocks.session.lifecycle.title import SessionTitle
+
+        seen: list[str] = []
+
+        class _Spy:
+            def info(self, message=None, extra=None):
+                seen.append(f"INFO {message}")
+
+            def debug(self, message=None, extra=None):
+                seen.append(f"DEBUG {message}")
+
+            def warn(self, message=None, extra=None):
+                seen.append(f"WARN {message}")
+
+            warning = warn
+
+            def error(self, message=None, extra=None):
+                seen.append(f"ERROR {message}")
+
+        msg1, msg2 = MagicMock(), MagicMock()
+        msg1.role = msg2.role = "user"
+        with (
+            patch.object(title_module, "log", _Spy()),
+            patch("flocks.session.session.Session.get_by_id", new=AsyncMock(return_value=_make_session(title="Debug Python Script"))),
+            patch("flocks.session.session.Session.is_default_title", return_value=False),
+        ):
+            await SessionTitle.generate_title_after_first_message(session_id="sess-1", model_id="m", provider_id="p")
+        with (
+            patch.object(title_module, "log", _Spy()),
+            patch("flocks.session.session.Session.get_by_id", new=AsyncMock(return_value=_make_session())),
+            patch("flocks.session.session.Session.is_default_title", return_value=True),
+            patch("flocks.session.message.Message.list", new=AsyncMock(return_value=[msg1, msg2])),
+        ):
+            await SessionTitle.generate_title_after_first_message(session_id="sess-1", model_id="m", provider_id="p")
+
+        assert "INFO title.already_exists" in seen
+        assert "INFO title.not_first_message" in seen
+
+    @pytest.mark.asyncio
     async def test_falls_back_to_simple_title_when_llm_fails(self):
         """Uses _generate_simple_title and still saves to DB when LLM raises."""
         from flocks.session.lifecycle.title import SessionTitle
@@ -378,6 +420,7 @@ class TestProcessMessageTitleGeneration:
 
         mock_agent = MagicMock()
         mock_agent.name = "rex"
+        mock_agent.require_dedicated_session = False
         mock_provider_inst = MagicMock()
         mock_provider_inst.is_configured = MagicMock(return_value=True)
         title_generate_mock = AsyncMock(return_value="Test Title")
@@ -434,6 +477,7 @@ class TestProcessMessageTitleGeneration:
 
         mock_agent = MagicMock()
         mock_agent.name = "rex"
+        mock_agent.require_dedicated_session = False
         mock_provider_inst = MagicMock()
         mock_provider_inst.is_configured = MagicMock(return_value=True)
         title_generate_mock = AsyncMock(return_value=None)

@@ -29,6 +29,11 @@ const mocks = vi.hoisted(() => ({
   revealCredentials: vi.fn(),
   setCredentials: vi.fn(),
   testCredentials: vi.fn(),
+  discoverModels: vi.fn(),
+  importModels: vi.fn(),
+  getModelInventory: vi.fn(),
+  saveModelInventory: vi.fn(),
+  checkKey: vi.fn(),
   deleteDefault: vi.fn(),
   deleteDefinition: vi.fn(),
   sseOptions: null as null | { onReconnect?: () => void },
@@ -39,6 +44,9 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, params?: Record<string, unknown>) => {
       if (key === 'status.models') return `${params?.count ?? 0} models`;
+      if (key === 'configuration.modelCount') return `${params?.enabled}/${params?.total} enabled`;
+      if (key === 'wizard.saveAndAddModels') return `Save and add ${params?.count} models`;
+      if (key === 'compact.inventorySaveFailedAfterCredentials') return `Connection information was saved, but the model list was not saved: ${params?.error}. Check and retry.`;
       if (key === 'modelSelection.info') {
         return 'modelSelection.info';
       }
@@ -52,6 +60,7 @@ vi.mock('react-i18next', () => ({
         'providerList.addProvider': 'Add First Provider',
         'form.model': 'Model',
         'form.done': 'Done',
+        'wizard.saveProvider': 'Save Provider',
         'form.providerType': 'Provider Type',
         'form.selectProvider': 'Select Provider...',
         'form.baseUrlOptional': '(optional, leave empty for default)',
@@ -62,6 +71,11 @@ vi.mock('react-i18next', () => ({
         'form.searchProvider': 'Search providers...',
         'form.noResults': 'No results',
         'form.alreadyAdded': 'Already added',
+        'form.save': 'Save',
+        'form.configure': 'Configure',
+        'form.delete': 'Delete',
+        'form.providerName': 'Provider Name',
+        'form.retry': 'Retry',
       };
       return translations[key] ?? key;
     },
@@ -81,6 +95,17 @@ vi.mock('@/contexts/AuthContext', () => ({
 
 beforeEach(() => {
   mocks.authUser = { role: 'admin' };
+  mocks.getModelInventory.mockResolvedValue({ data: { models: [] } });
+  mocks.saveModelInventory.mockResolvedValue({ data: { added: [], skipped: [], failed: [] } });
+  mocks.checkKey.mockResolvedValue({ data: { status: 'valid', code: 'key_valid' } });
+  mocks.discoverModels.mockResolvedValue({ data: {
+    source: 'api', status: 'success', code: 'models_discovered', message: 'Ready',
+    fetched_at: '2026-10-21T08:00:00Z', truncated: false,
+    models: [{ id: 'remote/chat-model', name: 'Remote Chat', already_added: false, selectable: true }],
+  } });
+  mocks.importModels.mockResolvedValue({ data: { added: ['remote/chat-model'], skipped: [], failed: [] } });
+  mocks.getModelSettings.mockResolvedValue({ data: { enabled: true, default_parameters: {} } });
+  mocks.updateModelSettings.mockResolvedValue({ data: {} });
 });
 
 vi.mock('@/hooks/useSSE', () => ({
@@ -117,15 +142,18 @@ vi.mock('@/components/common/EntitySheet', () => ({
     submitDisabled,
     submitLabel,
     onSubmit,
+    onClose,
   }: {
     open?: boolean;
     children?: React.ReactNode;
     submitDisabled?: boolean;
     submitLabel?: React.ReactNode;
     onSubmit?: () => void;
+    onClose?: () => void;
   }) => open ? (
     <div data-testid="entity-sheet">
       <div>{children}</div>
+      <button type="button" aria-label="Close sheet" onClick={onClose}>Close</button>
       <button type="button" disabled={submitDisabled} onClick={onSubmit}>
         {submitLabel}
       </button>
@@ -139,6 +167,11 @@ vi.mock('@/api/provider', () => ({
     revealCredentials: mocks.revealCredentials,
     setCredentials: mocks.setCredentials,
     testCredentials: mocks.testCredentials,
+    discoverModels: mocks.discoverModels,
+    importModels: mocks.importModels,
+    getModelInventory: mocks.getModelInventory,
+    saveModelInventory: mocks.saveModelInventory,
+    checkKey: mocks.checkKey,
   },
   modelV2API: {
     listDefinitions: mocks.listDefinitions,
@@ -232,7 +265,7 @@ describe('ModelPage add provider dialog', () => {
               }],
             }],
             env_vars: [],
-            default_base_url: 'https://llm.threatbook.io/v1',
+            default_base_url: 'https://llm.threatbook.cn/v1',
             model_count: 1,
             models: [{
               id: 'deepseek-v4-flash-0731',
@@ -275,7 +308,6 @@ describe('ModelPage add provider dialog', () => {
     renderWithRouter(<ModelPage />);
 
     await user.click(screen.getByRole('button', { name: 'Add Provider' }));
-    await user.click(await screen.findByRole('button', { name: 'Select Provider...' }));
 
     expect(await screen.findByRole('button', { name: /ThreatBook-cn-llm/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /ThreatBook-io-llm/i })).toBeInTheDocument();
@@ -288,6 +320,42 @@ describe('ModelPage add provider dialog', () => {
     await user.click(screen.getByRole('button', { name: /ThreatBook-io-llm/i }));
     keyLink = screen.getByRole('link', { name: 'form.claimFreeKey' });
     expect(keyLink).toHaveAttribute('href', 'https://portal.agentflocks.com/');
+  });
+
+  it('shows searchable providers immediately and preserves a draft when returning to the same provider', async () => {
+    const user = userEvent.setup(); renderWithRouter(<ModelPage />);
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    expect(await screen.findByRole('button', { name: 'OpenAI Compatible', exact: true })).toBeVisible();
+    const search = screen.getByRole('searchbox', { name: 'Search providers...' });
+    await user.type(search, 'International');
+    expect(screen.queryByRole('button', { name: 'ThreatBook-cn-llm', exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'ThreatBook-io-llm', exact: true })).toBeVisible();
+    await user.clear(search);
+    await user.click(screen.getByRole('button', { name: 'ThreatBook-cn-llm', exact: true }));
+    await user.type(screen.getByPlaceholderText('Paste ThreatBook CN LLM API Key'), 'draft-key');
+    await user.click(screen.getByRole('button', { name: 'discovery.title' }));
+    expect(await screen.findByRole('switch', { name: 'compact.enableModel remote/chat-model' })).toBeChecked();
+    await user.click(screen.getByRole('button', { name: /ThreatBook-cn-llm/ }));
+    expect(screen.getByRole('button', { name: 'Save and add 1 models' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'providerPicker.back' }));
+    expect(screen.getByPlaceholderText('Paste ThreatBook CN LLM API Key')).toHaveValue('draft-key');
+    expect(screen.getByRole('switch', { name: 'compact.enableModel remote/chat-model' })).toBeChecked();
+    await user.click(screen.getByRole('button', { name: /ThreatBook-cn-llm/ }));
+    await user.click(screen.getByRole('button', { name: 'ThreatBook-cn-llm', exact: true }));
+    expect(screen.getByPlaceholderText('Paste ThreatBook CN LLM API Key')).toHaveValue('draft-key');
+    expect(screen.getByRole('switch', { name: 'compact.enableModel remote/chat-model' })).toBeChecked();
+    expect(mocks.setCredentials).not.toHaveBeenCalled();
+  });
+
+  it('recovers from a failed catalog request without leaving an empty selector', async () => {
+    mocks.catalogList.mockRejectedValueOnce(new Error('Catalog unavailable'));
+    const user = userEvent.setup(); renderWithRouter(<ModelPage />);
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('providerPicker.loadFailed');
+    await user.click(screen.getByRole('button', { name: 'providerList.retry' }));
+    expect(await screen.findByRole('button', { name: 'OpenAI Compatible', exact: true })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'OpenAI Compatible', exact: true }));
+    expect(screen.getByPlaceholderText('e.g. SiliconFlow, LM Studio, My API')).toBeVisible();
   });
 
   it('reloads providers after the event stream reconnects', async () => {
@@ -312,12 +380,11 @@ describe('ModelPage add provider dialog', () => {
     await user.click(screen.getByRole('button', { name: 'Add Provider' }));
     expect(await screen.findByTestId('entity-sheet')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Select Provider...' }));
     await user.click(await screen.findByRole('button', { name: /OpenAI Compatible/i }));
 
     expect(screen.queryByText('(optional, leave empty for default)')).not.toBeInTheDocument();
 
-    const saveButton = screen.getByRole('button', { name: 'Save' });
+    const saveButton = screen.getByRole('button', { name: 'Save Provider' });
     const baseUrlInput = screen.getByPlaceholderText('https://api.example.com/v1');
 
     await user.type(
@@ -343,8 +410,76 @@ describe('ModelPage add provider dialog', () => {
         base_url: 'https://gateway.example.com/v1',
         api_key: 'not-needed',
         description: 'Compatible endpoint',
+        skip_catalog_bootstrap: true,
       });
     });
+  });
+
+  async function openThreatBook(user: ReturnType<typeof userEvent.setup>) {
+    renderWithRouter(<ModelPage />);
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await user.click(await screen.findByRole('button', { name: /ThreatBook-cn-llm/ }));
+    await user.type(screen.getByPlaceholderText('Paste ThreatBook CN LLM API Key'), 'draft-key');
+  }
+
+  it('checks the key independently without fetching or saving any model', async () => {
+    const user = userEvent.setup(); await openThreatBook(user);
+    await user.click(screen.getByRole('button', { name: 'compact.check' }));
+    expect(await screen.findByText('compact.keyCodes.key_valid')).toBeInTheDocument();
+    expect(mocks.checkKey).toHaveBeenCalledWith('threatbook-cn-llm', { api_key: 'draft-key', base_url: 'https://llm.threatbook.cn/v1' });
+    expect(mocks.discoverModels).not.toHaveBeenCalled();
+    expect(mocks.setCredentials).not.toHaveBeenCalled();
+    expect(mocks.importModels).not.toHaveBeenCalled();
+  });
+
+  it('uses compact switches and saves an empty selection without importing models', async () => {
+    const user = userEvent.setup(); await openThreatBook(user);
+    await user.click(screen.getByRole('button', { name: 'discovery.title' }));
+    expect(await screen.findByRole('switch', { name: 'compact.enableModel remote/chat-model' })).toBeChecked();
+    expect(screen.queryByText('form.contextWindow')).not.toBeInTheDocument();
+    expect(screen.queryByText('discovery.filtersTitle')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'compact.selectNone' }));
+    await user.click(screen.getByRole('button', { name: 'Save Provider' }));
+    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
+    expect(mocks.importModels).not.toHaveBeenCalled();
+    expect(mocks.testCredentials).not.toHaveBeenCalled();
+  });
+
+  it('retries a hand-typed Azure deployment whose first import failed', async () => {
+    mocks.catalogList.mockResolvedValue({ data: { providers: [{
+      id: 'azure-openai', name: 'Azure OpenAI', description: 'Azure deployments',
+      credential_schemas: [{ auth_method: 'api_key', fields: [{
+        name: 'api_key', label: 'API Key', type: 'secret', required: true, placeholder: 'Paste Azure key',
+      }] }],
+      env_vars: [], default_base_url: '', model_count: 0, models: [], allow_multiple: false,
+    }] } });
+    mocks.importModels.mockRejectedValueOnce(new Error('upstream timeout'));
+    const user = userEvent.setup();
+    renderWithRouter(<ModelPage />);
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await user.click(await screen.findByRole('button', { name: /Azure OpenAI/ }));
+    await user.type(screen.getByPlaceholderText('Paste Azure key'), 'azure-key');
+    await user.type(screen.getByPlaceholderText('https://api.example.com/v1'), 'https://res.openai.azure.com');
+    await user.type(screen.getByPlaceholderText('form.azureDeploymentPlaceholder'), 'prod-gpt4');
+    await user.click(screen.getByRole('button', { name: 'Save and add 1 models' }));
+
+    await user.click(await screen.findByRole('button', { name: 'discovery.retryFailed' }));
+
+    await waitFor(() => expect(mocks.importModels).toHaveBeenCalledTimes(2));
+    expect(mocks.importModels).toHaveBeenLastCalledWith('azure-openai', [expect.objectContaining({ id: 'prod-gpt4' })]);
+  });
+
+  it('imports chosen models with Auto limits only after saving the provider', async () => {
+    const user = userEvent.setup(); await openThreatBook(user);
+    await user.click(screen.getByRole('button', { name: 'discovery.title' }));
+    await user.click(await screen.findByRole('button', { name: 'compact.editModel remote/chat-model' }));
+    const editor = within(screen.getByRole('group', { name: 'compact.editModel' }));
+    expect(editor.getAllByPlaceholderText('Auto')).toHaveLength(2);
+    await user.click(editor.getByRole('button', { name: 'compact.apply' }));
+    expect(mocks.importModels).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Save and add 1 models' }));
+    await waitFor(() => expect(mocks.importModels).toHaveBeenCalledWith('threatbook-cn-llm', [expect.objectContaining({ id: 'remote/chat-model', context_window: undefined, max_output_tokens: undefined })]));
+    expect(mocks.setCredentials.mock.invocationCallOrder[0]).toBeLessThan(mocks.importModels.mock.invocationCallOrder[0]);
   });
 });
 
@@ -413,6 +548,7 @@ describe('ModelPage configure provider dialog', () => {
         has_credential: true,
       },
     });
+    mocks.getModelInventory.mockResolvedValue({ data: { models: [{ id: 'gpt-4o', name: 'GPT-4o', enabled: true }] } });
     mocks.setCredentials.mockResolvedValue({ data: { success: true } });
     mocks.testCredentials.mockResolvedValue({
       data: {
@@ -433,113 +569,156 @@ describe('ModelPage configure provider dialog', () => {
     expect(mocks.revealCredentials).toHaveBeenCalledWith('openai');
   }
 
-  it('does not test provider credentials when the page loads', async () => {
-    renderWithRouter(<ModelPage />);
+  async function openAddModelDialog(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByRole('button', { name: 'addModel' }));
+    return within(await screen.findByTestId('entity-sheet'));
+  }
 
-    await waitFor(() => {
-      expect(mocks.getCredentials).toHaveBeenCalledWith('openai');
+  it('keeps key checking separate from fetching and never persists the draft during a check', async () => {
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' });
+    await user.clear(screen.getByLabelText('API Key')); await user.type(screen.getByLabelText('API Key'), 'draft-key');
+    await user.click(screen.getByRole('button', { name: 'compact.check' }));
+    expect(await screen.findByText('compact.keyCodes.key_valid')).toBeInTheDocument();
+    expect(mocks.checkKey).toHaveBeenCalledWith('openai', { api_key: 'draft-key', base_url: 'https://old.example.com/v1' });
+    expect(mocks.discoverModels).not.toHaveBeenCalled(); expect(mocks.setCredentials).not.toHaveBeenCalled();
+  });
+
+  it('lets saved models be selected and unselected together and persists off without deletion', async () => {
+    mocks.saveModelInventory.mockImplementation(async (_id: string, draft: { models: { enabled: boolean }[] }) => {
+      const enabled = draft.models[0].enabled;
+      mocks.getModelSettings.mockResolvedValue({ data: { enabled } });
+      mocks.getModelInventory.mockResolvedValue({ data: { models: [{ id: 'gpt-4o', name: 'GPT-4o', enabled }] } });
+      return { data: { added: [], skipped: [], failed: [] } };
     });
-    expect(mocks.testCredentials).not.toHaveBeenCalled();
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    expect(await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' })).toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'compact.selectNone' }));
+    expect(screen.getByRole('switch', { name: 'compact.enableModel gpt-4o' })).not.toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'compact.selectAll' }));
+    expect(screen.getByRole('switch', { name: 'compact.enableModel gpt-4o' })).toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'compact.selectNone' }));
+    expect(mocks.saveModelInventory).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledWith('openai', { models: [expect.objectContaining({ id: 'gpt-4o', enabled: false })], deleted: [] }));
+    expect(mocks.deleteDefinition).not.toHaveBeenCalled();
+    expect(await screen.findByText('detail.addModelHint')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'detail.modelList (0)' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'GPT-4o' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'detail.batchTest' })).toBeDisabled();
+
+    await user.click(screen.getByTitle('Configure'));
+    expect(await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' })).not.toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'compact.selectAll' }));
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    expect(await screen.findByRole('heading', { name: 'GPT-4o' })).toBeInTheDocument();
+    expect(screen.queryByText('detail.addModelHint')).not.toBeInTheDocument();
   });
 
-  it.each([
-    ['threatbook-cn-llm', 'ThreatBook-cn-llm'],
-    ['threatbook-io-llm', 'ThreatBook-io-llm'],
-  ])('shows the shared free key link when editing %s', async (providerId, providerName) => {
-    const user = userEvent.setup();
-    const threatbookProvider = { ...provider, id: providerId, name: providerName };
-    const threatbookModel = { ...model, provider_id: providerId };
-    mocks.useProviders.mockReturnValue({
-      providers: [threatbookProvider],
-      connectedIds: [providerId],
-      loading: false,
-      error: null,
-      refetch: mocks.refetch,
-    });
-    mocks.listDefinitions.mockResolvedValue({ data: { models: [threatbookModel], total: 1 } });
-    mocks.catalogList.mockResolvedValue({
-      data: {
-        providers: [{ id: providerId, models: [] }],
-      },
-    });
-
-    renderWithRouter(<ModelPage />);
-    await user.click(await screen.findByTitle('Configure'));
-
-    expect(await screen.findByTestId('entity-sheet')).toBeInTheDocument();
-    expect(mocks.revealCredentials).toHaveBeenCalledWith(providerId);
-    expect(screen.getByRole('link', { name: 'form.claimFreeKey' })).toHaveAttribute(
-      'href',
-      'https://portal.agentflocks.com/',
-    );
+  it('shows only enabled models and removes their test results when the last model is switched off', async () => {
+    const hiddenModel = { ...model, id: 'hidden-model', name: 'Hidden Model' };
+    mocks.listDefinitions.mockResolvedValue({ data: { models: [model, hiddenModel], total: 2 } });
+    mocks.getModelSettings.mockImplementation(async (_provider: string, id: string) => ({ data: { enabled: id !== 'hidden-model' } }));
+    const user = userEvent.setup(); renderWithRouter(<ModelPage />);
+    expect(await screen.findByRole('heading', { name: 'GPT-4o' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Hidden Model' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'detail.modelList (1)' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'detail.batchTest' }));
+    expect(await screen.findByText('10ms')).toBeInTheDocument();
+    expect(mocks.testCredentials).toHaveBeenCalledTimes(1);
+    expect(mocks.testCredentials).toHaveBeenCalledWith('openai', 'gpt-4o');
+    await user.click(screen.getByTitle('status.disabled'));
+    expect(await screen.findByText('detail.addModelHint')).toBeInTheDocument();
+    expect(screen.queryByText('10ms')).not.toBeInTheDocument();
+    expect(screen.queryByText(/detail\.success/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Hidden Model' })).not.toBeInTheDocument();
   });
 
-  it('does not show the ThreatBook free key link when editing another provider', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
-
-    expect(screen.queryByRole('link', { name: 'form.claimFreeKey' })).not.toBeInTheDocument();
+  it('applies Auto and explicit model edits on provider save and deletes only through trash', async () => {
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await user.click(await screen.findByRole('button', { name: 'compact.editModel gpt-4o' }));
+    const editor = within(screen.getByRole('group', { name: 'compact.editModel' }));
+    expect(screen.getByRole('button', { name: 'compact.save' })).toBeDisabled();
+    expect(editor.getAllByPlaceholderText('Auto')).toHaveLength(2);
+    await user.type(editor.getByRole('spinbutton', { name: 'form.maxOutput' }), '8192');
+    await user.click(editor.getByRole('button', { name: 'compact.apply' }));
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledWith('openai', { models: [expect.objectContaining({ id: 'gpt-4o', context_window: null, max_output_tokens: 8192, edited: true })], deleted: [] }));
   });
 
-  it('displays and preserves the existing API key when saving a new base URL', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
-
-    const apiKeyInput = screen.getByDisplayValue('sk-existing-secret-1234');
-    expect(apiKeyInput).toHaveAttribute('type', 'password');
-    expect(apiKeyInput).not.toHaveValue('sk-***1234');
-    await user.click(screen.getByTitle('form.show'));
-    expect(apiKeyInput).toHaveAttribute('type', 'text');
-
-    const baseUrlInput = screen.getByPlaceholderText('https://api.example.com/v1');
-    await user.clear(baseUrlInput);
-    await user.type(baseUrlInput, 'https://new.example.com/v1');
-    await user.click(screen.getByRole('button', { name: 'Save' }));
-
-    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
-    expect(mocks.testCredentials).not.toHaveBeenCalled();
-    const payload = mocks.setCredentials.mock.calls.at(-1)?.[1];
-    expect(payload).toEqual(expect.objectContaining({
-      base_url: 'https://new.example.com/v1',
-    }));
-    expect(payload).not.toHaveProperty('api_key');
+  it('saves without the key the dialog opened with, so a key rotated meanwhile is kept', async () => {
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' });
+    expect(screen.getByLabelText('API Key')).toHaveValue('sk-existing-secret-1234');
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalledTimes(1));
+    expect(mocks.setCredentials.mock.calls[0][1].api_key).toBeUndefined();
+    expect(mocks.setCredentials).toHaveBeenCalledWith('openai', expect.objectContaining({ base_url: 'https://old.example.com/v1' }));
   });
 
-  it('persists the displayed API key and a base URL change before testing the connection', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
-    mocks.setCredentials.mockClear();
-    mocks.testCredentials.mockClear();
-
-    const baseUrlInput = screen.getByPlaceholderText('https://api.example.com/v1');
-    await user.clear(baseUrlInput);
-    await user.type(baseUrlInput, 'https://test.example.com/v1');
-    await user.click(screen.getByRole('button', { name: 'form.testConnection2' }));
-
-    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
-    const payload = mocks.setCredentials.mock.calls[0]?.[1];
-    expect(payload).toEqual(expect.objectContaining({
-      base_url: 'https://test.example.com/v1',
-    }));
-    expect(payload).not.toHaveProperty('api_key');
-    await waitFor(() => {
-      expect(mocks.testCredentials).toHaveBeenCalledWith('openai', 'gpt-4o');
-    });
+  it('stages explicit deletion until save and keeps failures visible for retry', async () => {
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await user.click(await screen.findByRole('button', { name: 'compact.deleteModel gpt-4o' }));
+    expect(mocks.saveModelInventory).not.toHaveBeenCalled();
+    mocks.saveModelInventory.mockRejectedValueOnce(new Error('Inventory save failed'));
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Inventory save failed');
+    expect(mocks.saveModelInventory).toHaveBeenLastCalledWith('openai', { models: [], deleted: ['gpt-4o'] });
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledTimes(2));
   });
 
-  it('submits a replacement API key when the displayed value changes', async () => {
-    const user = userEvent.setup();
-    await openConfigureDialog(user);
+  it.each(['key', 'url'])('retains explicit model deletions after changing the %s before saving', async (field) => {
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await user.click(await screen.findByRole('button', { name: 'compact.deleteModel gpt-4o' }));
+    expect(screen.queryByRole('switch', { name: 'compact.enableModel gpt-4o' })).not.toBeInTheDocument();
+    if (field === 'key') {
+      await user.clear(screen.getByLabelText('API Key')); await user.type(screen.getByLabelText('API Key'), 'new-key');
+    } else {
+      await user.type(screen.getByPlaceholderText('https://api.example.com/v1'), '/');
+    }
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledWith('openai', { models: [], deleted: ['gpt-4o'] }));
+    expect(mocks.setCredentials).toHaveBeenCalledWith('openai', expect.objectContaining(field === 'key'
+      ? { api_key: 'new-key' } : { base_url: 'https://old.example.com/v1/' }));
+  });
 
-    const apiKeyInput = screen.getByDisplayValue('sk-existing-secret-1234');
-    await user.clear(apiKeyInput);
-    await user.type(apiKeyInput, 'sk-replacement-secret');
-    await user.click(screen.getByRole('button', { name: 'Save' }));
+  it('identifies the saved connection and failed inventory with the field error, then allows retry', async () => {
+    mocks.saveModelInventory.mockRejectedValueOnce({ response: { data: {
+      error: 'ValidationError', message: 'Request validation failed',
+      details: [{ loc: ['body', 'models', 0, 'name'], msg: 'Invalid model name' }],
+    } } });
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' });
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Connection information was saved, but the model list was not saved: models.0.name: Invalid model name');
+    expect(mocks.setCredentials).toHaveBeenCalledTimes(1);
+    expect(mocks.toast.success).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mocks.toast.success).toHaveBeenCalled());
+  });
 
-    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
-    expect(mocks.setCredentials.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({
-      api_key: 'sk-replacement-secret',
-    }));
+  it('offers an empty provider independent key checking and compact discovery', async () => {
+    mocks.getModelInventory.mockResolvedValue({ data: { models: [] } });
+    mocks.listDefinitions.mockResolvedValue({ data: { models: [], total: 0 } });
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'compact.save' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: 'discovery.title' }));
+    expect(await screen.findByRole('switch', { name: 'compact.enableModel remote/chat-model' })).toBeChecked();
+    expect(mocks.setCredentials).not.toHaveBeenCalled(); expect(mocks.saveModelInventory).not.toHaveBeenCalled();
+  });
+
+  it('keeps the automatic add-model list compact and manual fields available', async () => {
+    const user = userEvent.setup(); renderWithRouter(<ModelPage />);
+    expect(screen.queryByRole('button', { name: 'discovery.title' })).not.toBeInTheDocument();
+    const sheet = await openAddModelDialog(user);
+    await user.click(await sheet.findByRole('button', { name: 'compact.refresh' }));
+    expect(await sheet.findByRole('switch', { name: 'compact.enableModel remote/chat-model' })).toBeChecked();
+    expect(sheet.queryByText('discovery.filtersTitle')).not.toBeInTheDocument();
+    await user.click(sheet.getByRole('tab', { name: 'discovery.manual' }));
+    expect(sheet.getByText('form.modelId')).toBeVisible();
+    expect(mocks.setCredentials).not.toHaveBeenCalled();
   });
 });
 
@@ -615,6 +794,7 @@ describe('ModelPage member access', () => {
     expect(screen.queryByTitle('Configure')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Add Provider' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'addModel' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'discovery.checkAndFetch' })).not.toBeInTheDocument();
     expect(screen.queryByTitle('status.disabled')).not.toBeInTheDocument();
     expect(screen.queryByTitle('Delete')).not.toBeInTheDocument();
     expect(screen.queryByTitle('dashboard.setDefaultModel')).not.toBeInTheDocument();

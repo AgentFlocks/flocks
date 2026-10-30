@@ -17,7 +17,7 @@ from flocks.knowledgebase.errors import KnowledgebaseError
 from flocks.knowledgebase.retrieval import retrieve_for_session
 from flocks.knowledgebase.runtime import get_client, lease_client
 from flocks.knowledgebase.session_datasets import detach_dataset, get_selection, set_selection
-from flocks.server.auth import require_user
+from flocks.server.auth import require_admin, require_user
 
 
 class DatasetBody(BaseModel):
@@ -167,8 +167,10 @@ def create_router() -> APIRouter:
         except KnowledgebaseError as exc:
             return _error(exc)
 
+    # The engine connection and its API key are shared by every user, so changing
+    # them is global configuration: admins only, like provider and MCP credentials.
     @router.put("/connection")
-    async def set_connection(request: Request, _user=Depends(require_user)):
+    async def set_connection(request: Request, _admin=Depends(require_admin)):
         try:
             declared = request.headers.get("content-length")
             if declared is not None:

@@ -721,6 +721,7 @@ export default function WorkflowDetail() {
                 dirty={editDocDirty}
                 saving={editDocSaving}
                 saveDisabled={!editDocDirty || editDocSaving}
+                generateWorkflowDisabled={editDocSaving}
                 onModeChange={setEditDocMode}
                 onChange={(value) => {
                   setEditDocDraft(value);
@@ -772,7 +773,7 @@ export default function WorkflowDetail() {
         {/* 节点信息面板 — 并列在对话左侧，可关闭 */}
         {drawerNode && (
           <>
-            <div className="w-px flex-shrink-0 bg-gray-200" />
+            <div className="w-px flex-shrink-0 bg-gray-200 max-md:hidden" />
             <NodeInfoPanel
               node={drawerNode}
               workflow={workflow}
@@ -788,7 +789,7 @@ export default function WorkflowDetail() {
         {panelOpen && (
           <div
             onMouseDown={onDragStart}
-            className="relative z-20 w-1 flex-shrink-0 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 group"
+            className="relative z-20 w-1 flex-shrink-0 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 group max-md:hidden"
             title={t('detail.dragAdjust')}
           >
             <div className="absolute inset-y-0 -left-1.5 -right-1.5" />

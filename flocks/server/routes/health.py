@@ -8,6 +8,10 @@ from datetime import datetime
 
 
 router = APIRouter()
+# ``/health`` without the ``/api`` prefix: listed in ``server/auth.py``
+# PUBLIC_PATHS (and reserved by the static WebUI) for load balancers and
+# container probes configured without the prefix.
+public_router = APIRouter()
 
 
 class HealthResponse(BaseModel):
@@ -17,8 +21,9 @@ class HealthResponse(BaseModel):
     timestamp: str
 
 
-@router.get(
+@router.api_route(
     "/health",
+    methods=["GET", "HEAD"],  # HEAD for probes that only look at the status line
     response_model=HealthResponse,
     status_code=status.HTTP_200_OK,
     summary="Health check",
@@ -49,3 +54,8 @@ async def health_check() -> HealthResponse:
 async def ping() -> dict:
     """Simple ping endpoint"""
     return {"message": "pong"}
+
+
+@public_router.api_route("/health", methods=["GET", "HEAD"], response_model=HealthResponse, summary="Health check (unprefixed alias)")
+async def health_check_unprefixed() -> HealthResponse:
+    return await health_check()

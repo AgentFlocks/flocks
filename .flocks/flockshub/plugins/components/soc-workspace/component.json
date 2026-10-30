@@ -1,10 +1,10 @@
 {
   "schemaVersion": "hub.component.v1",
   "id": "soc-workspace",
-  "name": "SOC Workspace",
-  "nameCn": "SOC 工作区",
-  "description": "Composite package for the Flocks SOC workspace WebUI, query tool, and denoise/triage workflows.",
-  "descriptionCn": "Flocks SOC 工作区组件包，包含 WebUI 页面、查询工具、降噪工作流和研判工作流。",
+  "name": "Alert Operations Suite",
+  "nameCn": "告警运营套件",
+  "description": "Package for Flocks alert operations: WebUI pages, query tool, and denoise/triage workflows.",
+  "descriptionCn": "Flocks 告警运营套件，包含 WebUI 页面、查询工具、降噪工作流和研判工作流。",
   "components": [
     {
       "type": "webui",

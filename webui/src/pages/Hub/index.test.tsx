@@ -145,6 +145,7 @@ describe('HubPage catalog loading', () => {
     });
   });
 
+  // A plaza row shows its state twice (narrow-screen badge and the status column); jsdom renders both.
   it.each(['component', 'webui', 'workflow', 'tool'] as const)(
     'shows an updateable %s in the plaza and runs its update action', async (type) => {
       const user = userEvent.setup();
@@ -160,13 +161,13 @@ describe('HubPage catalog loading', () => {
 
       renderHub();
       expect(await screen.findByText('SOC Entry')).toBeInTheDocument();
-      expect(screen.getByText('Update available')).toBeInTheDocument();
+      expect(screen.getAllByText('Update available').length).toBeGreaterThan(0);
       await user.click(screen.getByRole('button', { name: 'Update' }));
       await screen.findByRole('dialog');
       expect(hubAPI.update).not.toHaveBeenCalled();
       await user.click(screen.getByRole('button', { name: 'Back up and overwrite' }));
       await waitFor(() => expect(hubAPI.update).toHaveBeenCalledWith(type, 'soc-entry', 'global', { confirmationToken: 'preview-token', confirmChanges: true }));
-      expect(await screen.findByText('Installed')).toBeInTheDocument();
+      expect((await screen.findAllByText('Installed')).length).toBeGreaterThan(0);
       expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument();
     },
   );
@@ -611,7 +612,7 @@ describe('HubPage catalog loading', () => {
     } });
 
     renderHub();
-    expect(await screen.findByText('Incomplete')).toBeInTheDocument();
+    expect((await screen.findAllByText('Incomplete')).length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: 'Uninstall' })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Complete installation' }));
     await screen.findByRole('dialog');
@@ -623,7 +624,7 @@ describe('HubPage catalog loading', () => {
     await waitFor(() => expect(hubAPI.update).toHaveBeenCalledWith('component', entry.id, 'global', {
       confirmationToken: 'repair-token', confirmChanges: true,
     }));
-    expect(await screen.findByText('Installed')).toBeInTheDocument();
+    expect((await screen.findAllByText('Installed')).length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: 'Complete installation' })).not.toBeInTheDocument();
   });
 
@@ -973,5 +974,20 @@ describe('HubPage catalog loading', () => {
     expect(screen.queryByRole('button', { name: 'tree-action' })).not.toBeInTheDocument();
     expect(hubAPI.catalogPage).toHaveBeenCalledTimes(2);
     expect(hubAPI.catalog.mock.calls.filter(([params]) => params?.q === undefined)).toHaveLength(1);
+  });
+
+  it('leads with the localized label when a workflow plugin ships a broken workflow.json (TOL-1210)', async () => {
+    const user = userEvent.setup();
+    const wf = { ...catalogEntry('broken-wf', 'Broken WF'), type: 'workflow' as const };
+    hubAPI.catalogPage.mockResolvedValue(catalogPage([wf]));
+    hubAPI.get.mockResolvedValue({ data: wf });
+    hubAPI.fileContent.mockResolvedValue({ data: { path: 'workflow.json', content: '{"nodes": [ ', language: 'json' } });
+
+    renderHub();
+    await user.click(await screen.findByText('Broken WF'));
+
+    const error = await screen.findByText(/^Failed to parse workflow\.json: /);
+    expect(error).toBeInTheDocument();
+    expect(hubAPI.fileContent).toHaveBeenCalledWith('workflow', 'broken-wf', 'workflow.json');
   });
 });

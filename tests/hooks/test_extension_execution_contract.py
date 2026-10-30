@@ -400,6 +400,69 @@ async def test_main_server_critical_loader_result_stops_channel_without_a_hook(
         server_app_module.app.state.critical_plugin_entrypoint_failures = ()
 
 
+def test_main_server_aborted_plugin_load_cannot_start_serving(monkeypatch) -> None:
+    from flocks.plugin.loader import CriticalPluginEntrypointFailure
+
+    def unavailable(**_kwargs):
+        raise OSError("plugin directory unavailable")
+
+    monkeypatch.setattr(PluginLoader, "load_all", unavailable)
+    monkeypatch.setattr(PluginLoader, "critical_entrypoints_declared", classmethod(lambda cls: True))
+    monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", False)
+    monkeypatch.setattr(server_app_module.app.state, "critical_plugin_entrypoint_failure", False)
+    monkeypatch.setattr(server_app_module.app.state, "critical_plugin_entrypoint_failures", ())
+
+    with pytest.raises(CriticalPluginEntrypointFailure, match="plugin loading did not complete"):
+        server_app_module._load_installed_package_plugins()
+
+    assert server_app_module.app.state.critical_plugin_entrypoint_failure is True
+    assert server_app_module.app.state.critical_plugin_entrypoint_failures == ("plugin_loader",)
+
+
+def _interrupt_real_load_all(monkeypatch, error: Exception) -> None:
+    """Drive the real ``load_all`` with one extension point whose scan fails."""
+
+    def interrupted(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(PluginLoader, "_extension_points", {
+        "TOOLS": ExtensionPoint(attr_name="TOOLS", subdir="tools", consumer=lambda *_args: None),
+    })
+    monkeypatch.setattr(PluginLoader, "_load_extension_point", interrupted)
+    monkeypatch.setattr(PluginLoader, "critical_entrypoints_declared", classmethod(lambda cls: False))
+    monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", False)
+    monkeypatch.setattr(server_app_module.app.state, "critical_plugin_entrypoint_failure", False)
+    monkeypatch.setattr(server_app_module.app.state, "critical_plugin_entrypoint_failures", ())
+
+
+def test_main_server_aborted_plugin_load_without_critical_plugins_keeps_serving(monkeypatch) -> None:
+    """With no fail-closed plugin installed, an unreadable plugin directory is
+    skipped with a warning; it must neither stop startup nor set the runtime
+    failure signal (which would answer every request with 503)."""
+    _interrupt_real_load_all(monkeypatch, OSError("plugin directory unavailable"))
+
+    server_app_module._load_installed_package_plugins()
+
+    assert server_app_module.app.state.critical_plugin_entrypoint_failure is False
+    assert server_app_module.app.state.critical_plugin_entrypoint_failures == ()
+    assert not PluginLoader.has_runtime_critical_entrypoint_failure()
+
+
+def test_main_server_explicit_critical_failure_stops_startup_without_declared_plugins(
+    monkeypatch,
+) -> None:
+    from flocks.plugin.loader import CriticalPluginEntrypointFailure
+
+    _interrupt_real_load_all(monkeypatch, CriticalPluginEntrypointFailure("security registration failed"))
+
+    with pytest.raises(CriticalPluginEntrypointFailure, match="plugin loading did not complete"):
+        server_app_module._load_installed_package_plugins()
+
+    assert server_app_module.app.state.critical_plugin_entrypoint_failure is True
+    assert server_app_module.app.state.critical_plugin_entrypoint_failures == ("plugin_loader",)
+    assert PluginLoader.has_runtime_critical_entrypoint_failure()
+
+
 @pytest.mark.asyncio
 async def test_execution_context_can_be_cleared_at_ownership_boundary() -> None:
     with execution_context_scope({"workflow_transfer": "opaque-transfer"}):

@@ -116,6 +116,8 @@ def test_the_service_is_started_with_npx_and_the_pinned_version(fake_toolchain):
         "command": [npx, "-y", "rea-agents@6.4.0", "--mcp"],
         "enabled": True,
         "timeout": 60,
+        # One connection per conversation: REA keeps an evidence ledger per connection.
+        "isolation": "session",
     }
     assert "environment" not in light  # the light tier writes no environment
 

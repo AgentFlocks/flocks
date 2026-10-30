@@ -14,7 +14,7 @@ export default function FlocksproUpgradeCallbackPage() {
   useEffect(() => {
     const consoleLoginId = searchParams.get('console_login_id');
     const state = searchParams.get('state') ?? undefined;
-    const passportUid = searchParams.get('passport_uid') ?? undefined;
+    const passportUid = searchParams.get('passport_uid') ?? undefined; // secret-guard: allow (an account id from the callback URL)
     const loginStatus = searchParams.get('console_login_status');
     const callbackMessage = searchParams.get('message') || searchParams.get('error_code');
     if (loginStatus === 'error') {
@@ -31,7 +31,7 @@ export default function FlocksproUpgradeCallbackPage() {
       try {
         await authApi.finishConsoleLogin(consoleLoginId, state, passportUid);
         if (!cancelled) {
-          navigate('/flockspro-upgrade?login=success', { replace: true });
+          navigate('/settings/flockspro?login=success', { replace: true });
         }
       } catch (err) {
         if (!cancelled) {
@@ -63,4 +63,3 @@ export default function FlocksproUpgradeCallbackPage() {
     </div>
   );
 }
-

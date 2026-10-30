@@ -19,6 +19,7 @@ Source scheme routing:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import io
 import os
 import platform
@@ -35,6 +36,7 @@ from typing import Any, List, Optional
 
 from flocks.skill.skill import Skill, SkillInfo, SkillInstallSpec
 from flocks.utils.log import Log
+from flocks.config.config import get_user_plugins_root
 
 
 log = Log.create(service="skill.installer")
@@ -42,6 +44,8 @@ log = Log.create(service="skill.installer")
 _NETWORK_TIMEOUT_SEC = 20
 _SKILLS_SH_CLI_TIMEOUT_SEC = 45
 _INSTALL_TIMEOUT_SEC = 90
+# Set per install_from_source() call; read by _save_skill_content().
+_OVERWRITE_ALLOWED: contextvars.ContextVar[bool] = contextvars.ContextVar("skill_install_overwrite", default=False)
 
 # ---------------------------------------------------------------------------
 # Result Types
@@ -73,7 +77,7 @@ class DepInstallResult:
 # ---------------------------------------------------------------------------
 
 def _user_skills_root() -> Path:
-    return Path.home() / ".flocks" / "plugins" / "skills"
+    return get_user_plugins_root() / "skills"
 
 
 def _resolve_install_root(scope: str) -> Path:
@@ -292,6 +296,7 @@ class SkillInstaller:
         source: str,
         scope: str = "global",
         yes: bool = False,
+        overwrite: bool = False,
     ) -> SkillInstallResult:
         """
         Install a skill from an external source.
@@ -311,6 +316,9 @@ class SkillInstaller:
         value = resolved["value"]
 
         log.info("skill.install.start", {"source": source, "kind": kind, "scope": scope, "yes": yes})
+        # ``_save_skill_content`` consults this flag so an existing skill is not
+        # silently replaced unless the caller explicitly asked for it.
+        token = _OVERWRITE_ALLOWED.set(bool(overwrite))
 
         async def _install() -> SkillInstallResult:
             if kind == "skills_sh":
@@ -341,6 +349,8 @@ class SkillInstaller:
             # Native metadata/readonly preflight failures are install failures,
             # not server errors or a reason to try a different shadowing source.
             return SkillInstallResult(success=False, error=str(exc))
+        finally:
+            _OVERWRITE_ALLOWED.reset(token)
 
     @classmethod
     async def _install_from_skills_sh(
@@ -1152,6 +1162,21 @@ class SkillInstaller:
                 error="httpx is required to download skills. Run: uv add httpx",
             )
 
+        # Only https (plain http is allowed just for hosts explicitly allow-listed
+        # for local testing) and never internal / link-local / metadata targets.
+        from urllib.parse import urlparse
+        from flocks.tool.web.webfetch import _internal_allowlist, _ssrf_error
+
+        parsed = urlparse(url)
+        if parsed.scheme.lower() != "https" and (parsed.hostname or "").lower() not in _internal_allowlist():
+            return SkillInstallResult(
+                success=False,
+                error=f"Skill source URL must use https:// (got {parsed.scheme}://): {url}",
+            )
+        ssrf_error = _ssrf_error(url)
+        if ssrf_error:
+            return SkillInstallResult(success=False, error=ssrf_error)
+
         try:
             async with httpx.AsyncClient(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
                 resp = await client.get(url)
@@ -1174,6 +1199,12 @@ class SkillInstaller:
                         error=f"URL returned an HTML page instead of a SKILL.md file: {url}",
                     )
                 content = resp.text
+        except httpx.TimeoutException:
+            # httpx timeout exceptions carry an empty message.
+            return SkillInstallResult(
+                success=False,
+                error=f"Download timed out after {_NETWORK_TIMEOUT_SEC}s: {url}",
+            )
         except Exception as exc:
             return SkillInstallResult(success=False, error=f"Download failed: {exc}")
 
@@ -1236,8 +1267,22 @@ class SkillInstaller:
                 error=f"Invalid skill name: {name!r}. Must match [a-z0-9]+(-[a-z0-9]+)*",
             )
 
+        from flocks.content.managed import managed_ids
+
+        if name in managed_ids("skill"):
+            # The deployment serves this name (flocks.content.managed); a local
+            # copy would never load, so installing one would only mislead.
+            return SkillInstallResult(
+                success=False,
+                error=f"Skill already exists: {name} is managed by the deployment and cannot be replaced.",
+            )
         skill_dir = _resolve_install_root(scope) / name
         skill_path = skill_dir / "SKILL.md"
+        if skill_path.exists() and not _OVERWRITE_ALLOWED.get():
+            return SkillInstallResult(
+                success=False,
+                error=f"Skill already exists: {name}. Pass overwrite=true to replace it.",
+            )
         try:
             content = Skill.preserve_install_group(skill_path, content, scope=scope, name=name)
         except ValueError as exc:
@@ -1315,6 +1360,20 @@ class SkillInstaller:
         timeout_sec: float,
     ) -> DepInstallResult:
         """Build and execute an install command for one SkillInstallSpec."""
+        if spec.kind == "pip" and spec.package:
+            # pip installs into this runtime's own interpreter; a managed install ships it as
+            # the release's verified tree, so what the release lacks is refused, not installed.
+            from flocks.workflow.requirements import refuse_unmet_when_managed
+
+            try:
+                if refuse_unmet_when_managed([spec.package]):
+                    return DepInstallResult(
+                        success=True,
+                        spec_id=spec.id,
+                        message=f"{spec.package} is provided by this release",
+                    )
+            except RuntimeError as exc:
+                return DepInstallResult(success=False, spec_id=spec.id, error=str(exc))
         cmd = cls._build_install_command(spec)
         if not cmd:
             return DepInstallResult(

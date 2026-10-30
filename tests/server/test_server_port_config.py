@@ -461,7 +461,8 @@ class TestCommandLinePortConfiguration:
         result = CliRunner().invoke(app, ["--help"])
 
         assert result.exit_code == 0
-        for command in ("agent", "acp", "debug", "run", "serve", "auth", "models"):
+        # ``agent`` is back as the Agent CLI group (flocks/cli/commands/agent.py), so it is not listed.
+        for command in ("acp", "debug", "run", "serve", "auth", "models"):
             pattern = rf"^\s*│\s+{re.escape(command)}\s{{2,}}"
             assert re.search(pattern, result.stdout, re.MULTILINE) is None
 

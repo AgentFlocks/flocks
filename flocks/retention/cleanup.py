@@ -338,7 +338,7 @@ async def apply_policy(
     checked before each destructive delete so no further data goes under the
     old, now-superseded policy.
     """
-    from flocks.session.message import Message
+    from flocks.session.message import Message, UploadSweep
     from flocks.session.recorder import Recorder
     from flocks.session.session import Session
 
@@ -416,24 +416,35 @@ async def apply_policy(
             stop_at = session.revert.message_id if session is not None and session.revert else None
             return expired_turn_prefix(stored, cutoff_ms, stop_at_message_id=stop_at)
 
-        for session_id in targets.messages:
-            if _superseded():
-                break
+        # The uploads of the deleted messages are recorded as candidates with
+        # each delete and swept once for the whole run: whether any message
+        # anywhere still names them takes a pass over every session's parts.
+        try:
+            for session_id in targets.messages:
+                if _superseded():
+                    break
+                try:
+                    deleted = await Message.delete_selected(
+                        session_id, _expired_selector, is_busy=_session_is_busy, sweep_uploads=False,
+                    )
+                except Exception as exc:
+                    log.warning("retention.message_delete_failed", {
+                        "session_id": session_id,
+                        "error": str(exc),
+                    })
+                    report.errors += 1
+                    continue
+                if deleted < 0:
+                    report.skipped_busy += 1  # session was running
+                else:
+                    report.messages += deleted
+        finally:
             try:
-                deleted = await Message.delete_selected(
-                    session_id, _expired_selector, is_busy=_session_is_busy,
-                )
+                await UploadSweep().run()
             except Exception as exc:
-                log.warning("retention.message_delete_failed", {
-                    "session_id": session_id,
-                    "error": str(exc),
-                })
+                # The candidates stay recorded; a later sweep takes them.
+                log.warning("retention.upload_sweep_failed", {"error": str(exc)})
                 report.errors += 1
-                continue
-            if deleted < 0:
-                report.skipped_busy += 1  # session was running
-            else:
-                report.messages += deleted
 
     cutoff_s = now - policy.log_days * 86_400 if policy.log_days else None
     for record in targets.records:

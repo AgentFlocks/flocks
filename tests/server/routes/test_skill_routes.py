@@ -40,6 +40,8 @@ def native_group_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     home.mkdir()
     source = tmp_path / "source"
     monkeypatch.setenv("HOME", str(home))
+    # User plugins live under the runtime root, which the server conftest pins elsewhere.
+    monkeypatch.setenv("FLOCKS_ROOT", str(home / ".flocks"))
     monkeypatch.setenv("TMPDIR", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(Skill, "_source_root", lambda: source)
@@ -242,7 +244,8 @@ async def test_native_group_skill_rejects_noncanonical_write_names(client, nativ
     response = await client.put("/api/skills/user-skill", json={
         "name": name, "description": "Changed", "content": "Changed",
     })
-    assert response.status_code == 422, response.text
+    # Unsafe names are a 400 and an empty one a 422 (see test_skill_hardening_g3b).
+    assert response.status_code == (422 if name == "" else 400), response.text
     assert path.read_bytes() == before
     prompt_refresh.assert_not_awaited()
 
@@ -272,6 +275,24 @@ async def test_skill_group_readonly_is_computed_and_keeps_project_definition_rul
     blocked = await client.patch("/api/skills/custom-project", json={"group": "Changed"})
     assert blocked.status_code == 403
     assert custom_project.read_text() == original
+
+
+async def test_skill_group_patch_keeps_the_user_skill_write_boundary(client, native_group_skills, tmp_path):
+    # Discovered for compatibility, but the file belongs to Claude Code's directory.
+    claude_path = tmp_path / "home" / ".claude" / "skills" / "claude-skill" / "SKILL.md"
+    claude_path.parent.mkdir(parents=True)
+    original = "---\nname: claude-skill\ndescription: Claude\ngroup: Claude group\n---\nBody\n"
+    claude_path.write_text(original)
+    Skill.clear_cache()
+    detail = (await client.get("/api/skills/claude-skill")).json()
+    assert detail["source"] == "claude" and detail["group_readonly"] is True
+    rows = {row["name"]: row for row in (await client.get("/api/skills")).json()}
+    assert rows["claude-skill"]["group_readonly"] is True
+    assert rows["user-skill"]["group_readonly"] is False
+    blocked = await client.patch("/api/skills/claude-skill", json={"group": "Changed"})
+    assert blocked.status_code == 403
+    assert (await client.delete("/api/skills/claude-skill")).status_code == 403
+    assert claude_path.read_text() == original
 
 
 async def test_install_api_cannot_shadow_shipped_skill(client, native_group_skills, tmp_path):

@@ -119,6 +119,18 @@ _FACT_COLUMNS = (
     "triage_ms",
     "triage_attack_success",
 )
+# How a fact column an older layout lacks is added; any other is TEXT. A facts
+# table of an older schema version is brought up to date in place and
+# recomputed from alert_records rather than dropped and made again.
+_FACT_COLUMN_DEFINITIONS = {
+    "row_key": "TEXT NOT NULL DEFAULT ''",
+    "asset_date": "TEXT NOT NULL DEFAULT ''",
+    "event_time": "INTEGER",
+    "is_duplicate": "INTEGER NOT NULL DEFAULT 0",
+    "has_triage": "INTEGER NOT NULL DEFAULT 0",
+    "triage_ms": "INTEGER NOT NULL DEFAULT 0",
+    "triage_attack_success": "TEXT NOT NULL DEFAULT 'unknown'",
+}
 
 
 def _json_value(prefix, path):
@@ -371,6 +383,10 @@ def _ensure_sqlite_schema():
             ).fetchone()
             if not exists:
                 return False
+            # One write transaction from dropping the projection triggers to
+            # creating them again: a writer that slipped in between would add
+            # an alert no trigger projects into the facts.
+            conn.execute("BEGIN IMMEDIATE")
             _drop_dashboard_triggers(conn)
             _ensure_alert_record_columns(conn)
             conn.execute(
@@ -409,8 +425,6 @@ def _ensure_sqlite_schema():
                 f"SELECT meta_value FROM {META_TABLE} WHERE meta_key='schema_version'"
             ).fetchone()
             needs_rebuild = not version_row or str(version_row[0]) != SCHEMA_VERSION
-            if needs_rebuild:
-                conn.execute(f"DROP TABLE IF EXISTS {FACTS_TABLE}")
             conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {FACTS_TABLE} (
@@ -440,6 +454,14 @@ def _ensure_sqlite_schema():
                 )
                 """
             )
+            if needs_rebuild:
+                for column_name in _FACT_COLUMNS[1:]:
+                    _add_column_if_missing(
+                        conn,
+                        FACTS_TABLE,
+                        column_name,
+                        _FACT_COLUMN_DEFINITIONS.get(column_name, "TEXT"),
+                    )
             conn.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_soc_dashboard_facts_asset_event "
                 f"ON {FACTS_TABLE}(asset_date, event_time)"
@@ -479,6 +501,12 @@ def _ensure_sqlite_schema():
             )
             if needs_rebuild:
                 conn.execute(_fact_backfill_sql())
+                # Facts of alert rows that are gone (the rest were just recomputed).
+                conn.execute(
+                    f"DELETE FROM {FACTS_TABLE} WHERE NOT EXISTS ("
+                    f"SELECT 1 FROM {DEFAULT_SQLITE_TABLE} AS source "
+                    f"WHERE source.rowid = {FACTS_TABLE}.alert_row_id)"
+                )
                 persisted = _json_value("source", "_triage_persisted_at")
                 status_value = _json_value("source", "triage_status")
                 conn.execute(
@@ -1341,17 +1369,23 @@ def _triage_attack_verdict_value(record):
 
 
 def _triage_attack_success_value(record):
-    raw_verdict = _norm(record.get("triage_attack_verdict") or "unknown")
-    verdict = _triage_attack_verdict_value(record)
-    result = _norm(record.get("triage_attack_success") or "unknown")
-    if verdict == "attack" and result in {"success", "failed", "unknown"}:
-        return result
-    if verdict != "attack":
+    # Same precedence as the SQL projection (normalized_triage_success): an
+    # explicit result string wins; older records carry the outcome in the
+    # verdict ("attack_success" / "attack_failed") or as a boolean result.
+    # A missing result is not an explicit "unknown".
+    if _triage_attack_verdict_value(record) != "attack":
         return "unknown"
-    if raw_verdict == "attack_success" or record.get("triage_attack_success") is True:
+    raw_result = record.get("triage_attack_success")
+    result = str(raw_result).strip().lower() if raw_result is not None else ""
+    if result in {"success", "failed", "unknown"}:
+        return result
+    raw_verdict = _norm(record.get("triage_attack_verdict"))
+    if raw_verdict == "attack_success":
         return "success"
     if raw_verdict == "attack_failed":
         return "failed"
+    if result in {"1", "true"}:
+        return "success"
     return "unknown"
 
 

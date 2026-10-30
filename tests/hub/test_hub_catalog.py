@@ -87,7 +87,7 @@ def test_workflow_catalog_exposes_chinese_names():
 def test_soc_workspace_component_exposes_chinese_name():
     entries = {entry.id: entry for entry in list_catalog(plugin_type="component")}
 
-    assert entries["soc-workspace"].nameCn == "SOC 工作区场景套件"
+    assert entries["soc-workspace"].nameCn == "告警运营套件"
 
 
 async def test_chaitin_safeline_repair_release_replaces_broken_handler(
@@ -1833,3 +1833,59 @@ def test_hub_routes_legacy_removed_plugins_return_gone(isolated_hub_env):
     response = client.get("/api/hub/plugins/agent/alert-triage-agent")
     assert response.status_code == 410
     assert "removed" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------- G3b 回归（TOL-1111/1113）
+
+def test_index_entry_respects_manifest_os_compatibility(tmp_path, monkeypatch):
+    """索引条目也要按 manifest.compatibility.os 标记 incompatible（此前只有 manifest 路径检查）。"""
+    import json
+    from flocks.hub import catalog as hub_catalog
+
+    root = tmp_path / "hub"
+    (root / "plugins" / "skills" / "win-only").mkdir(parents=True)
+    (root / "plugins" / "skills" / "win-only" / "SKILL.md").write_text("---\nname: win-only\ndescription: d\n---\nx")
+    manifest = {
+        "schemaVersion": "hub.plugin.v1", "id": "win-only", "type": "skill", "name": "Win Only", "version": "2.0.0",
+        "category": "default", "compatibility": {"flocks": ">=0.8.0", "os": ["windows"]}, "entrypoints": ["SKILL.md"],
+        "source": {"kind": "bundled", "path": "plugins/skills/win-only"},
+    }
+    (root / "plugins" / "skills" / "win-only" / "manifest.json").write_text(json.dumps(manifest))
+    (root / "index.json").write_text(json.dumps({"schemaVersion": "hub.index.v1", "plugins": [
+        {"id": "win-only", "type": "skill", "name": "Win Only", "version": "1.0.0", "manifestPath": "plugins/skills/win-only/manifest.json"}]}))
+    (root / "taxonomy.json").write_text(json.dumps({"schemaVersion": "hub.taxonomy.v1", "categories": []}))
+    monkeypatch.setenv("FLOCKS_HUB_ROOT", str(root))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "root"))
+    hub_catalog.clear_catalog_caches()
+    entries = {e.id: e for e in hub_catalog.list_catalog()}
+    assert entries["win-only"].state == "incompatible"
+    # 版本以 manifest 为准（索引可能滞后）
+    assert entries["win-only"].version == "2.0.0"
+
+
+def test_index_edit_is_picked_up_without_refresh(tmp_path, monkeypatch):
+    import json, os, time
+    from flocks.hub import catalog as hub_catalog
+
+    root = tmp_path / "hub"
+    (root / "plugins" / "skills" / "a").mkdir(parents=True)
+    (root / "plugins" / "skills" / "a" / "SKILL.md").write_text("---\nname: a\ndescription: d\n---\nx")
+    mf = {"schemaVersion": "hub.plugin.v1", "id": "a", "type": "skill", "name": "A", "version": "1.0.0", "category": "default",
+          "entrypoints": ["SKILL.md"], "source": {"kind": "bundled", "path": "plugins/skills/a"}}
+    (root / "plugins" / "skills" / "a" / "manifest.json").write_text(json.dumps(mf))
+    idx = {"schemaVersion": "hub.index.v1", "plugins": [{"id": "a", "type": "skill", "name": "A", "version": "1.0.0", "manifestPath": "plugins/skills/a/manifest.json"}]}
+    (root / "index.json").write_text(json.dumps(idx))
+    (root / "taxonomy.json").write_text(json.dumps({"schemaVersion": "hub.taxonomy.v1", "categories": []}))
+    monkeypatch.setenv("FLOCKS_HUB_ROOT", str(root)); monkeypatch.setenv("HOME", str(tmp_path)); monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "root"))
+    hub_catalog.clear_catalog_caches()
+    ids = {e.id for e in hub_catalog.list_catalog()}
+    assert "a" in ids and "b" not in ids
+    mf["version"] = "1.5.0"
+    (root / "plugins" / "skills" / "a" / "manifest.json").write_text(json.dumps(mf))
+    idx["plugins"].append({"id": "b", "type": "skill", "name": "B", "version": "1.0.0", "manifestPath": "plugins/skills/b/manifest.json"})
+    time.sleep(0.01)
+    (root / "index.json").write_text(json.dumps(idx))
+    os.utime(root / "index.json", None)
+    entries = {e.id: e for e in hub_catalog.list_catalog()}
+    assert "b" in entries and entries["a"].version == "1.5.0"

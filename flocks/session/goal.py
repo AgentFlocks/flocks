@@ -11,7 +11,9 @@ from pydantic import BaseModel, Field
 
 from flocks.provider.options import build_provider_options
 from flocks.provider.provider import ChatMessage, Provider
+from flocks.session.response_rewriter import transform_complete_response
 from flocks.session.llm_hook_utils import (
+    model_call_hook_metadata,
     apply_hook_request_output,
     restore_text_with_replacements,
     serialize_chat_message,
@@ -202,18 +204,23 @@ async def judge_goal_with_model(
         ),
     ]
     replacements: list[tuple[str, str]] = []
+    # Defined on every path: the response transform below reads it whether or
+    # not the hook block ran.
+    hook_metadata: dict = {
+        "sessionID": session_id,
+        "agent": "goal_judge",
+        "model": {"providerID": provider_id, "modelID": model_id},
+    }
     if session_id:
         from flocks.hooks.pipeline import HookPipeline, HookStage
 
-        hook_metadata = {
-            "sessionID": session_id,
-            "agent": "goal_judge",
-            "model": {
-                "providerID": provider_id,
-                "modelID": model_id,
-            },
-            "purpose": "goal_judge",
-        }
+        hook_metadata = await model_call_hook_metadata(
+            session_id=session_id,
+            agent="goal_judge",
+            purpose="goal_judge",
+            provider_id=provider_id,
+            model_id=model_id,
+        )
         try:
             llm_before_enabled = await HookPipeline.has_stage_handlers(
                 HookStage.LLM_BEFORE,
@@ -265,7 +272,11 @@ async def judge_goal_with_model(
         max_tokens=JUDGE_MAX_TOKENS,
     )
 
-    response_content = restore_text_with_replacements(response.content, replacements)
+    response_content = await transform_complete_response(
+        response.content,
+        hook_metadata,
+        legacy_replacements=replacements,
+    )
     payload = _extract_json_object(response_content)
     verdict = str(payload.get("verdict") or "").strip().lower()
     reason = _trim_reason(str(payload.get("reason") or ""))

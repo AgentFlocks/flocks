@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import KnowledgeTab from './KnowledgeTab';
 import {
   FolderOpen, Upload, Download, Trash2, Edit3, Save,
@@ -16,6 +16,7 @@ import {
 } from '@/api/workspace';
 import { FilePreviewRenderer, PreviewModal, type PreviewFileAccess } from '@/components/common/FilePreview';
 import { WorkspaceFileSplit, FileListTable, FileListRow, FileListActions, PreviewPanelHeader, fileActionClass, previewActionClass } from '@/components/common/WorkspaceFileView';
+import { extractErrorMessage } from '@/utils/error';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -80,7 +81,18 @@ function panelReducer(state: PanelState, action: PanelAction): PanelState {
     case 'save_start':
       return { ...state, saving: true };
     case 'save_done':
-      return { ...state, saving: false, editing: false, editContent: null, content: action.content };
+      return {
+        ...state,
+        saving: false,
+        editing: false,
+        editContent: null,
+        content: action.content,
+        // Keep the header metadata in sync with what was just written; the
+        // directory reload below preserves the panel instead of closing it.
+        node: state.node
+          ? { ...state.node, size: new TextEncoder().encode(action.content).length, modified_at: Date.now() / 1000 }
+          : state.node,
+      };
     case 'cancel_edit':
       return { ...state, editing: false, editContent: null };
     case 'close':
@@ -94,21 +106,26 @@ function panelReducer(state: PanelState, action: PanelAction): PanelState {
 
 export default function WorkspacePage() {
   const location = useLocation();
-  const [activeTab, setActiveTab] = useState<Tab>(() => new URLSearchParams(location.search).get('tab') === 'knowledge' ? 'knowledge' : 'files');
+  const navigate = useNavigate();
+  const params = new URLSearchParams(location.search);
+  const tab = params.get('tab');
+  const activeTab: Tab = tab === 'knowledge' || tab === 'memory' ? tab : 'files';
+  const setActiveTab = (next: Tab) => {
+    const search = new URLSearchParams(location.search);
+    search.set('tab', next);
+    navigate({ pathname: location.pathname, search: search.toString() });
+  };
   const { t } = useTranslation('workspace');
-  useEffect(() => {
-    setActiveTab(new URLSearchParams(location.search).get('tab') === 'knowledge' ? 'knowledge' : 'files');
-  }, [location.key, location.search]);
 
   return (
     <div className="flex h-[calc(100vh-3rem)] min-h-[560px] flex-col">
       <PageHeader
-        title="Workspace"
+        title={activeTab === 'files' ? t('title') : t(`tabs.${activeTab}`)}
         description={t('description')}
         icon={<FolderOpen className="w-8 h-8" />}
       />
 
-      <div className="flex gap-1 px-1 mb-4 border-b border-gray-200">
+      <div className="flex gap-1 px-1 mb-4 border-b border-gray-200 max-md:overflow-x-auto">
         <TabButton active={activeTab === 'files'} onClick={() => setActiveTab('files')} icon={<FolderOpen className="w-4 h-4" />} label={t('tabs.files')} />
         <TabButton active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} icon={<Brain className="w-4 h-4" />} label={t('tabs.memory')} />
         <TabButton active={activeTab === 'knowledge'} onClick={() => setActiveTab('knowledge')} icon={<Database className="w-4 h-4" />} label={t('tabs.knowledge')} />
@@ -128,7 +145,7 @@ function TabButton({ active, onClick, icon, label }: {
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px ${
+      className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px max-md:shrink-0 max-md:whitespace-nowrap max-md:px-3 ${
         active ? 'border-slate-700 text-slate-800' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
       }`}
     >
@@ -222,7 +239,7 @@ function FilesTab() {
       if (requestId !== latestDirRequestIdRef.current) {
         return;
       }
-      toastError(t('files.toast.loadDirFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('files.toast.loadDirFailed'), extractErrorMessage(e));
     } finally {
       if (requestId === latestDirRequestIdRef.current) {
         setLoading(false);
@@ -254,7 +271,7 @@ function FilesTab() {
       try {
         await loadFileContent(node.path);
       } catch (e: any) {
-        toastError(t('files.toast.readFileFailed'), e?.response?.data?.detail ?? e.message);
+        toastError(t('files.toast.readFileFailed'), extractErrorMessage(e));
       }
     }
   }, [loadDir, loadFileContent, toastError, t]);
@@ -266,7 +283,7 @@ function FilesTab() {
       try {
         await loadFileContent(panel.node.path);
       } catch (e: any) {
-        toastError(t('files.toast.readFileFailed'), e?.response?.data?.detail ?? e.message);
+        toastError(t('files.toast.readFileFailed'), extractErrorMessage(e));
       }
     }
   }, [currentPath, loadDir, loadFileContent, panel.node, toastError, t]);
@@ -278,10 +295,11 @@ function FilesTab() {
       await workspaceAPI.writeFile(panel.node.path, panel.editContent);
       dispatchPanel({ type: 'save_done', content: panel.editContent });
       toastSuccess(t('files.toast.saveSuccess'));
-      loadDir(currentPath);
+      // Reload sizes/mtimes in the listing without closing the file the user just saved.
+      loadDir(currentPath, { preservePanel: true });
     } catch (e: any) {
       dispatchPanel({ type: 'cancel_edit' });
-      toastError(t('files.toast.saveFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('files.toast.saveFailed'), extractErrorMessage(e));
     }
   }, [panel.node, panel.editContent, currentPath, loadDir, toastError, toastSuccess, t]);
 
@@ -303,7 +321,7 @@ function FilesTab() {
       if (panel.node?.path === node.path) dispatchPanel({ type: 'close' });
       loadDir(currentPath);
     } catch (e: any) {
-      toastError(t('files.toast.deleteFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('files.toast.deleteFailed'), extractErrorMessage(e));
     }
   }, [confirm, panel.node, currentPath, loadDir, toastError, toastSuccess, t]);
 
@@ -319,7 +337,7 @@ function FilesTab() {
       if (errors.length > 0) toastError(t('files.toast.uploadPartialFail', { count: errors.length }), errors.map((e) => e.error).join('; '));
       loadDir(currentPath);
     } catch (e: any) {
-      toastError(t('files.toast.uploadFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('files.toast.uploadFailed'), extractErrorMessage(e));
     } finally {
       setUploading(false);
     }
@@ -334,7 +352,7 @@ function FilesTab() {
       setNewDir({ show: false, name: '' });
       loadDir(currentPath);
     } catch (e: any) {
-      toastError(t('files.toast.createDirFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('files.toast.createDirFailed'), extractErrorMessage(e));
     }
   }, [newDir.name, currentPath, loadDir, toastError, t]);
 
@@ -343,7 +361,7 @@ function FilesTab() {
       await workspaceAPI.reveal(node.path);
       toastSuccess(t('files.toast.revealSuccess'));
     } catch (e: any) {
-      toastError(t('files.toast.revealFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('files.toast.revealFailed'), extractErrorMessage(e));
     }
   }, [toastError, toastSuccess, t]);
 
@@ -805,7 +823,7 @@ function MemoryTab() {
       setLoadState('idle');
     } catch (e: any) {
       setLoadState('error');
-      toastError(t('memory.loadMemoryFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('memory.loadMemoryFailed'), extractErrorMessage(e));
     }
   }, [toastError, t]);
 
@@ -842,7 +860,7 @@ function MemoryTab() {
         return;
       }
       setContentState('error');
-      toastError(t('memory.readFileFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('memory.readFileFailed'), extractErrorMessage(e));
     }
   };
 
@@ -863,7 +881,7 @@ function MemoryTab() {
       toastSuccess(t('files.toast.saveSuccess'));
       await load();
     } catch (e: any) {
-      toastError(t('files.toast.saveFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('files.toast.saveFailed'), extractErrorMessage(e));
     } finally {
       setSaving(false);
     }

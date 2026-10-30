@@ -1,9 +1,17 @@
 import { Link, useLocation, useNavigate, type RouteObject } from 'react-router-dom';
 import {
   Home,
+  Bot,
+  Blocks,
+  Brain,
+  Database,
+  FolderOpen,
+  ServerCog,
+  Wrench,
   MessageSquarePlus,
   Workflow,
   ListTodo,
+  Radio,
   ChevronLeft,
   ChevronRight,
   Layers,
@@ -13,7 +21,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
-import type { ComponentType } from 'react';
+import type { ComponentType, CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { onboardingAPI } from '@/api/onboarding';
 import { useTokenPolicyNotice } from '@/hooks/useTokenPolicyNotice';
@@ -43,19 +51,19 @@ const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/On
 const UpdateModal = lazyLayoutComponent(() => import('@/components/common/UpdateModal'), ['update']);
 const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
 const TokenPolicyNotice = lazyLayoutComponent(() => import('@/components/common/TokenPolicyNotice'), ['notification']);
-import { checkUpdate, getCurrentRelease, type VersionInfo } from '@/api/update';
-import { consoleUpgradeApi } from '@/api/consoleUpgrade';
+import { DEFAULT_UPDATE_CHANNEL, checkUpdate, getCurrentRelease, type VersionInfo } from '@/api/update';
 import {
   ackNotification,
   getActiveNotifications,
   getNotificationAckStatus,
   type UserNotification,
 } from '@/api/notifications';
-import { flocksproUsersApi } from '@/api/flocksproUsers';
+import registry, { type ExtensionNavItem } from '@ext/registry';
 import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import { BackendStatusBanner } from '@/components/common/BackendStatusBanner';
+import { InstallationResultBanner } from '@/components/common/InstallationResultBanner';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
@@ -71,10 +79,15 @@ import {
 } from '@/utils/webuiContractWorkspaceSections';
 import { useWorkspacePageOrders } from '@/hooks/useWorkspacePageOrders';
 import { useLayoutOpenTabs } from '@/hooks/useLayoutOpenTabs';
+import { useSidebarResize } from '@/hooks/useSidebarResize';
 import { findActiveTabHref, resolveOpenTabs } from '@/utils/layoutTabs';
 import {
   AGENT_WORKSPACE,
+  AGENT_WORKSHOP,
+  AGENT_WORKSHOP_DEFAULT_PATH,
   AGENT_WORKSPACE_DEFAULT_PATH,
+  CODE_AUDIT_WORKSPACE_ID,
+  SOC_WORKSPACE_ID,
   SCENE_SUITES_PATH,
   isOpenSceneWorkspace,
   readCurrentWorkspace,
@@ -84,12 +97,15 @@ import {
   saveWorkspacePaths,
   sceneNavWorkspace,
   sceneWorkspaceIdOf,
+  workspaceIdFromPath,
   type NavWorkspaceId,
   type NavWorkspacePaths,
 } from '@/utils/navPartitions';
 import WorkspaceHeader, { type HeaderWorkspace } from './WorkspaceHeader';
-import AccountMenu from './AccountMenu';
+import AccountMenu, { type AccountMenuExtraItem } from './AccountMenu';
+import { useSettingsSectionGroups } from '@/utils/settingsSections';
 import SessionHistoryPanel from './SessionHistoryPanel';
+import SidebarHistorySplit from './SidebarHistorySplit';
 import KeepAlivePanes from './KeepAlivePanes';
 import { contentRoutes as appContentRoutes } from '@/routes/contentRoutes';
 import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
@@ -124,56 +140,56 @@ interface LayoutProps {
   contentRoutes?: RouteObject[];
 }
 
-function formatProVersion(version?: string | null): string | null {
-  const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
-  return normalized ? `v${normalized}` : null;
-}
-
 function formatUpdateVersion(version?: string | null): string | null {
   const raw = (version || '').trim();
   if (!raw) return null;
-  return /^(pro-)?v/i.test(raw) ? raw : `v${raw}`;
+  return /^([a-z]+-)?v/i.test(raw) ? raw : `v${raw}`;
 }
 
-function currentProductVersion(info: VersionInfo, isFlocksproActive: boolean): string | null {
-  if (isFlocksproActive || info.edition === 'flockspro') {
-    return info.current_bundle_version || info.current_version || null;
-  }
+function currentProductVersion(info: VersionInfo): string | null {
   return info.current_version || null;
 }
 
-function latestProductVersion(info: VersionInfo, isFlocksproActive: boolean): string | null {
-  if (isFlocksproActive || info.edition === 'flockspro') {
-    return info.latest_bundle_version || info.latest_version || null;
-  }
+function latestProductVersion(info: VersionInfo): string | null {
   return info.latest_version || null;
 }
 
-function buildUpdateNotification(info: VersionInfo | null, language: string): UserNotification | null {
+/** A bundle version written as `v<number>` (installers may record it as `<edition>-v<number>`). */
+function formatBundleVersion(version?: string | null): string | null {
+  const normalized = (version || '').trim().replace(/^[a-z]+-v(?=\d)/i, '').replace(/^v/i, '');
+  return normalized ? `v${normalized}` : null;
+}
+
+function buildUpdateNotification(
+  info: VersionInfo | null,
+  language: string,
+  productName: string,
+): UserNotification | null {
   const releaseNotes = getLocalizedReleaseNotes(info?.release_notes, language);
   if (!info || info.error || !releaseNotes) return null;
   const isZh = language.toLowerCase().startsWith('zh');
   const summary = isZh ? '这里是本次版本值得关注的新功能和变化。' : 'Here are the highlights from this version.';
-  if (info.edition === 'flockspro') {
-    const proVersion = formatProVersion(info.current_bundle_version || info.latest_version || info.current_version);
-    if (!proVersion) return null;
-    // Own prefix: a Pro bundle may share its number with a Core release. Core and component versions,
-    // as in the Pro update dismissal key: a component-only update keeps the bundle number.
-    const coreVersion = formatProVersion(info.current_core_version);
-    const componentVersion = formatProVersion(info.current_pro_component_version);
+  if (info.channel && info.channel !== 'flocks' && info.channel !== DEFAULT_UPDATE_CHANNEL) {
+    // A release an update channel installed announces itself, under the name the install shows.
+    const bundleVersion = formatBundleVersion(info.current_bundle_version || info.latest_version || info.current_version);
+    if (!bundleVersion) return null;
+    // Own prefix: a bundle may share its number with a Core release. Core and component versions
+    // are part of the key: a component-only update keeps the bundle number.
+    const coreVersion = formatBundleVersion(info.current_core_version);
+    const componentVersion = formatBundleVersion(info.current_component_version);
     const releaseKey = [
-      proVersion,
+      bundleVersion,
       coreVersion && `core-${coreVersion}`,
-      componentVersion && `pro-${componentVersion}`,
+      componentVersion && `component-${componentVersion}`,
     ].filter(Boolean).join('-');
     return {
-      id: `whats-new-flockspro-${releaseKey}`,
+      id: `whats-new-${info.channel}-${releaseKey}`,
       kind: 'whats_new',
-      title: isZh ? `Flocks Pro ${proVersion} 更新内容` : `What's new in Flocks Pro ${proVersion}`,
+      title: isZh ? `${productName} ${bundleVersion} 更新内容` : `What's new in ${productName} ${bundleVersion}`,
       summary,
       body: releaseNotes,
       highlights: [],
-      version: proVersion,
+      version: bundleVersion,
       priority: 20,
     };
   }
@@ -206,21 +222,35 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const confirm = useConfirm();
   const { t, i18n } = useTranslation('nav');
   const { t: tAuth } = useTranslation('auth');
-  const { productName, proProductName, logoUrl } = useProductName();
+  const { productName, logoUrl } = useProductName();
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(readSidebarCollapsed);
+  const sidebarResize = useSidebarResize(!collapsed);
   const isHome = location.pathname === '/';
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const onboardingCheckGeneration = useRef(0);
+  // Onboarding writes model credentials and the default model, so only admins get it
+  // (and a session that drops to member does not keep the dialog).
+  const canOnboard = user?.role === 'admin';
+  const onboardingOpen = showOnboarding && canOnboard;
   const [updateState, setUpdateState] = useState<'idle' | 'pending' | 'visible'>('idle');
-  const tokenPolicy = useTokenPolicyNotice(user?.id, showOnboarding || updateState === 'visible');
+  // Whether the open dialog was asked for explicitly. Inferring it from
+  // "we have no cached version info" was fragile: a background refresh landing
+  // while the dialog was open filled the cache and silently turned the forced
+  // check off under it.
+  const [updateCheckForced, setUpdateCheckForced] = useState(false);
+  const tokenPolicy = useTokenPolicyNotice(user?.id, onboardingOpen || updateState === 'visible');
   const handleUpdatePresented = useCallback(() => {
     if (document.visibilityState === 'visible') setUpdateState('visible');
   }, []);
   const requestUpdate = useCallback(() => {
     setUpdateState((state) => (state === 'visible' ? state : 'pending'));
   }, []);
-  const closeUpdate = useCallback(() => setUpdateState('idle'), []);
+  const closeUpdate = useCallback(() => {
+    setUpdateState('idle');
+    setUpdateCheckForced(false);
+  }, []);
 
   const [hasUpdate, setHasUpdate] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
@@ -237,12 +267,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const [updateNotificationReady, setUpdateNotificationReady] = useState(false);
   const [acknowledgingNotificationIds, setAcknowledgingNotificationIds] = useState<string[]>([]);
   const lastNotificationFetchKeyRef = useRef<string | null>(null);
-  const [isFlocksproActive, setIsFlocksproActive] = useState(false);
-  const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
-  const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
-  const isAdmin = user?.role === 'admin';
-  const notificationGateReady = flocksproStatusReady && (!canManageUpdates || hasCompletedUpdateCheck);
+  const notificationGateReady = !canManageUpdates || hasCompletedUpdateCheck;
   const currentReleaseReady = !!user?.id && currentRelease?.userId === user.id;
 
   const {
@@ -262,6 +288,33 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, [openTabRecords]);
   const [collapsedNavSectionIds, setCollapsedNavSectionIds] = useState<Set<string>>(new Set());
 
+  // Entries an extension registered, admin-only ones dropped for members, in
+  // registry order. Empty in a stock build.
+  const extensionNavItems = useMemo(() => {
+    const label = (item: ExtensionNavItem) => {
+      const ns = item.ns || 'nav';
+      return i18n.exists?.(item.labelKey, { ns }) === false
+        ? item.labelKey
+        : t(item.labelKey, { ns, productName });
+    };
+    const toItem = (item: ExtensionNavItem): AccountMenuExtraItem => ({
+      id: item.id,
+      name: label(item),
+      href: item.href,
+      icon: item.icon,
+      highlight: item.highlight,
+      badge: item.badge,
+    });
+    const visible = registry.navItems
+      .filter((item) => !item.adminOnly || user?.role === 'admin')
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    return {
+      accountMenu: visible.filter((item) => item.placement === 'accountMenu').map(toItem),
+      // Sidebar entries join the Agent workshop's tools and models group.
+      workshop: visible.filter((item) => (item.placement ?? 'sidebar') === 'sidebar').map(toItem),
+    };
+  }, [i18n, productName, t, user?.role]);
+
   const toggleCollapsed = useCallback(() => {
     setCollapsed((value) => {
       const next = !value;
@@ -275,21 +328,34 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, []);
 
   useEffect(() => {
-    if (!isHome) return undefined;
+    if (!isHome || !canOnboard) return undefined;
     let cancelled = false;
+    const generation = ++onboardingCheckGeneration.current;
     onboardingAPI.getStatus()
       .then((res) => {
-        if (!cancelled && !res.data.completed) setShowOnboarding(true);
+        if (!cancelled && generation === onboardingCheckGeneration.current
+          && !res.data.completed && !res.data.dismissed) setShowOnboarding(true);
       })
       .catch(() => {
-        if (!cancelled) setShowOnboarding(true);
+        // Only open automatically when the server confirms setup is needed.
+        // An unavailable status must not bypass a saved dismissal preference.
       });
     return () => {
       cancelled = true;
     };
-  }, [isHome]);
+  }, [isHome, canOnboard, user?.id]);
 
-  const handleOpenOnboarding = useCallback(() => setShowOnboarding(true), []);
+  const handleOpenOnboarding = useCallback(() => {
+    if (canOnboard) {
+      onboardingCheckGeneration.current += 1;
+      setShowOnboarding(true);
+    }
+  }, [canOnboard]);
+
+  const handleCloseOnboarding = useCallback(() => {
+    onboardingCheckGeneration.current += 1;
+    setShowOnboarding(false);
+  }, []);
 
   useEffect(() => {
     window.addEventListener('flocks:open-onboarding', handleOpenOnboarding);
@@ -297,7 +363,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, [handleOpenOnboarding]);
 
   const refreshUpdateStatus = useCallback(async (bypassMinGap = false) => {
-    if (!flocksproStatusReady || !canManageUpdates) return;
+    if (!canManageUpdates) return;
 
     const now = Date.now();
     if (checkingUpdateRef.current) return;
@@ -307,12 +373,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     lastUpdateCheckAtRef.current = now;
 
     try {
-      const edition = isFlocksproActive ? 'flockspro' : 'flocks';
-      const info = await checkUpdate(i18n.language, edition);
+      const info = await checkUpdate(i18n.language, registry.updateChannel);
       setUpdateInfo(info);
 
-      const displayCurrentVersion = currentProductVersion(info, edition === 'flockspro');
-      const displayLatestVersion = latestProductVersion(info, edition === 'flockspro');
+      const displayCurrentVersion = currentProductVersion(info);
+      const displayLatestVersion = latestProductVersion(info);
 
       if (displayCurrentVersion) {
         setCurrentVersion(displayCurrentVersion);
@@ -345,10 +410,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       checkingUpdateRef.current = false;
       setHasCompletedUpdateCheck(true);
     }
-  }, [canManageUpdates, flocksproStatusReady, i18n.language, isFlocksproActive, requestUpdate]);
+  }, [canManageUpdates, i18n.language, requestUpdate]);
 
   useEffect(() => {
-    if (!flocksproStatusReady || !canManageUpdates) return undefined;
+    if (!canManageUpdates) return undefined;
 
     const initialCheckTimerId = window.setTimeout(() => {
       refreshUpdateStatus(true);
@@ -379,57 +444,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleWindowFocus);
     };
-  }, [canManageUpdates, flocksproStatusReady, refreshUpdateStatus]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setFlocksproStatusReady(false);
-    if (!user?.id) {
-      setIsFlocksproActive(false);
-      setFlocksproVersion(null);
-      setFlocksproStatusReady(true);
-      return () => {
-        cancelled = true;
-      };
-    }
-    const refreshFlocksproStatus = () => {
-      setFlocksproStatusReady(false);
-      void Promise.all([
-        flocksproUsersApi.getLicenseStatus().catch(() => null),
-        consoleUpgradeApi.getProPackageStatus().catch(() => null),
-      ])
-        .then(([licenseStatus, packageStatus]) => {
-          if (cancelled) return;
-          const active = licenseStatus?.pro_enabled === true || packageStatus?.pro_enabled === true;
-          setIsFlocksproActive(active);
-          const version = active
-            ? formatProVersion(
-                packageStatus?.bundle_version ||
-                  packageStatus?.installed_version ||
-                  packageStatus?.flockspro_component_version,
-              )
-            : null;
-          setFlocksproVersion(version);
-        })
-        .catch(() => {
-          if (!cancelled) {
-            setIsFlocksproActive(false);
-            setFlocksproVersion(null);
-          }
-        })
-        .finally(() => {
-          if (!cancelled) {
-            setFlocksproStatusReady(true);
-          }
-        });
-    };
-    refreshFlocksproStatus();
-    window.addEventListener('flockspro-license-status-changed', refreshFlocksproStatus);
-    return () => {
-      cancelled = true;
-      window.removeEventListener('flockspro-license-status-changed', refreshFlocksproStatus);
-    };
-  }, [user?.id]);
+  }, [canManageUpdates, refreshUpdateStatus]);
 
   useEffect(() => {
     if (!user?.id) {
@@ -505,7 +520,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     if (!notificationGateReady || !currentReleaseReady) return;
 
     setUpdateNotificationReady(false);
-    const notification = buildUpdateNotification(currentRelease?.info ?? null, i18n.language);
+    const notification = buildUpdateNotification(currentRelease?.info ?? null, i18n.language, productName);
     if (!notification) {
       setUpdateNotification(null);
       setUpdateNotificationReady(true);
@@ -528,12 +543,12 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     return () => {
       cancelled = true;
     };
-  }, [currentRelease, currentReleaseReady, i18n.language, notificationGateReady, user?.id]);
+  }, [currentRelease, currentReleaseReady, i18n.language, notificationGateReady, productName, user?.id]);
 
   const allNotifications = updateNotification
     ? [...notifications, updateNotification].sort((a, b) => a.priority - b.priority)
     : notifications;
-  const visibleNotifications = tokenPolicy.ready && !tokenPolicy.notice && backendNotificationsReady && currentReleaseReady && updateNotificationReady && !showOnboarding && updateState === 'idle' && allNotifications.length > 0
+  const visibleNotifications = tokenPolicy.ready && !tokenPolicy.notice && backendNotificationsReady && currentReleaseReady && updateNotificationReady && !onboardingOpen && updateState === 'idle' && allNotifications.length > 0
     ? allNotifications
     : [];
 
@@ -571,42 +586,60 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     () => sceneWorkspaces.filter(isOpenSceneWorkspace),
     [sceneWorkspaces],
   );
-  const headerWorkspaces = useMemo<HeaderWorkspace[]>(() => [
-    { id: AGENT_WORKSPACE, name: t('agentWorkspace'), icon: Sparkles },
-    ...openSceneWorkspaces.map((workspace) => ({
-      id: sceneNavWorkspace(workspace.id),
-      name: getLocalizedWebUIContractTitle(workspace, i18n.language),
-      icon: sceneHeaderIcon(workspace),
-    })),
-  ], [i18n.language, openSceneWorkspaces, t]);
+  const headerWorkspaces = useMemo<HeaderWorkspace[]>(() => {
+    // Scene modules, SOC included, are shown only while their suite is installed, enabled
+    // and unlocked; SOC defaults to the position after the workbench.
+    // WorkspaceModuleNav applies the browser's custom header order.
+    const socWorkspaces = openSceneWorkspaces.filter((workspace) => workspace.id === SOC_WORKSPACE_ID);
+    const otherSceneWorkspaces = openSceneWorkspaces.filter((workspace) => workspace.id !== SOC_WORKSPACE_ID);
+    return [
+      { id: AGENT_WORKSPACE, name: t('workbench'), icon: Home },
+      ...[...socWorkspaces, ...otherSceneWorkspaces].map((workspace) => ({
+        id: sceneNavWorkspace(workspace.id),
+        name: getLocalizedWebUIContractTitle(workspace, i18n.language),
+        icon: sceneHeaderIcon(workspace),
+      })),
+      { id: AGENT_WORKSHOP, name: t('agentWorkshop'), icon: Bot, separated: true },
+    ];
+  }, [i18n.language, openSceneWorkspaces, t]);
 
   const navStateReady = !webuiContractNavLoading
     || webuiContractWorkspaces.length > 0
     || webuiContractPages.length > 0;
 
-  // The workspace whose menu the sidebar shows. Settings and the scene manager
-  // keep the workspace they were opened from.
-  const routeNav = resolveNavRoute(location.pathname, navStateReady ? webuiContractWorkspaces : null);
+  // Last path visited inside each workspace, so switching back lands there.
+  // Extension pages listed in the workshop's menu belong to the workshop.
+  const workshopPaths = useMemo(() => extensionNavItems.workshop.map((item) => item.href), [extensionNavItems]);
+  const workspacePathsRef = useRef<NavWorkspacePaths>(readWorkspacePaths(workshopPaths));
+  // Validate remembered paths against the workspace's current placement.
+  const pathNavigation = useCallback((path: string | undefined): NavWorkspaceId | null => {
+    if (!path) return null;
+    const route = resolveNavRoute(path, webuiContractWorkspaces, workshopPaths);
+    return route.kind === 'workspace' ? route.workspace : null;
+  }, [webuiContractWorkspaces, workshopPaths]);
+
+  // Remember the module to return to when leaving settings or scene management.
+  const routeNav = resolveNavRoute(`${location.pathname}${location.search}`, navStateReady ? webuiContractWorkspaces : null, workshopPaths);
   const [rememberedWorkspace, setRememberedWorkspace] = useState<NavWorkspaceId>(readCurrentWorkspace);
   const routeWorkspace = routeNav.kind === 'workspace' ? routeNav.workspace : null;
-  const currentWorkspace = routeWorkspace ?? rememberedWorkspace;
+  const inHeader = (workspaceId: NavWorkspaceId | null) => headerWorkspaces.some((workspace) => workspace.id === workspaceId);
+  const currentWorkspace = routeWorkspace ?? (inHeader(rememberedWorkspace) ? rememberedWorkspace : AGENT_WORKSPACE);
   useEffect(() => {
     if (!routeWorkspace || !navStateReady) return;
-    // A scene route only "counts" once we know that scene is still open.
+    // Only remember scene modules that are open.
     const sceneId = sceneWorkspaceIdOf(routeWorkspace);
     if (sceneId && !openSceneWorkspaces.some((workspace) => workspace.id === sceneId)) return;
     setRememberedWorkspace(routeWorkspace);
     saveCurrentWorkspace(routeWorkspace);
   }, [navStateReady, openSceneWorkspaces, routeWorkspace]);
 
-  // Last path visited inside each workspace, so switching back lands there.
-  const workspacePathsRef = useRef<NavWorkspacePaths>(readWorkspacePaths());
   useEffect(() => {
-    if (!routeWorkspace || !navStateReady || viewingScenes) return;
-    const next = { ...workspacePathsRef.current, [routeWorkspace]: `${location.pathname}${location.search}` };
+    if (!routeWorkspace || !navStateReady) return;
+    const path = `${location.pathname}${location.search}`;
+    const next = { ...workspacePathsRef.current, [routeWorkspace]: path };
     workspacePathsRef.current = next;
     saveWorkspacePaths(next);
-  }, [location.pathname, location.search, navStateReady, routeWorkspace, viewingScenes]);
+  }, [location.pathname, location.search, navStateReady, routeWorkspace]);
 
   const newChat = useCallback(() => {
     setSidebarOpen(false);
@@ -614,11 +647,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, [navigate]);
 
   // ── Sidebar sections for the current workspace ───────────────────────────
-  const agentSection = useMemo<NavSection>(() => {
-    const workbenchPages = openSceneWorkspaces
-      .filter((workspace) => workspace.placement === 'aiWorkbench');
+  const workbenchSection = useMemo<NavSection>(() => {
     const workbenchItems: NavItem[] = webuiContractWorkspaces
-      .filter((workspace) => workspace.placement === 'aiWorkbench' && workspace.enabled)
+      .filter((workspace) => workspace.placement === 'aiWorkbench' && workspace.enabled && !workspace.locked)
       .flatMap((workspace) => workspacePageOrders
         .apply(workspace.id, buildWebUIContractWorkspacePageList(workspace, i18n.language)
           .filter((page) => page.enabled && page.buildStatus === 'ready'))
@@ -635,19 +666,38 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         href: page.route,
         icon: resolveWebUIContractPageIcon(page.icon),
       }));
-    void workbenchPages;
     return {
       id: 'agent',
       items: [
         { name: t('flocksHome'), href: '/', icon: Home },
         { name: t('newChat'), href: '/sessions', icon: MessageSquarePlus, action: 'new-chat', accent: true },
         { name: t('tasks'), href: '/tasks', icon: ListTodo, count: taskCounts ? (taskCounts.running ?? 0) + (taskCounts.queued ?? 0) : undefined },
-        { name: t('workflows'), href: '/workflows', icon: Workflow },
+        { name: t('workspace'), href: '/workspace', icon: FolderOpen },
         ...workbenchItems,
         ...customItems,
       ],
     };
-  }, [i18n.language, openSceneWorkspaces, taskCounts, t, webuiContractPages, webuiContractWorkspaces, workspacePageOrders]);
+  }, [i18n.language, taskCounts, t, webuiContractPages, webuiContractWorkspaces, workspacePageOrders]);
+
+  const workshopSections = useMemo<NavSection[]>(() => [
+    { id: 'orchestration', name: t('capabilityOrchestration'), items: [
+      { name: t('agents'), href: '/agents', icon: Bot },
+      { name: t('skills'), href: '/skills', icon: Sparkles },
+      { name: t('workflows'), href: '/workflows', icon: Workflow },
+    ] },
+    { id: 'knowledge-memory', name: t('knowledgeAndMemory'), items: [
+      { name: t('knowledgeBase'), href: '/workspace?tab=knowledge', icon: Database },
+      { name: t('memory'), href: '/workspace?tab=memory', icon: Brain },
+    ] },
+    { id: 'tools-models', name: t('toolsAndModels'), items: [
+      { name: t('tools'), href: '/tools', icon: Wrench },
+      { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
+      { name: t('models'), href: '/models', icon: Brain },
+      { name: t('channels'), href: '/channels', icon: Radio },
+      { name: t('hub', { productName }), href: '/hub', icon: Blocks },
+      ...extensionNavItems.workshop,
+    ] },
+  ], [extensionNavItems, productName, t]);
 
   const sceneSections = useMemo(() => {
     const map = new Map<string, NavSection[]>();
@@ -662,7 +712,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
             if (!page) return result;
             const item: NavItem = {
               pageId: page.id,
-              name: section.label,
+              name: workspace.id === CODE_AUDIT_WORKSPACE_ID && section.id === 'home' ? t('codeAuditProjects') : section.label,
               href: workspaceSectionHref(workspace.route, section, page.id),
               icon: resolveWebUIContractPageIcon(section.icon || page.icon),
             };
@@ -698,26 +748,35 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       map.set(sceneNavWorkspace(workspace.id), groups.filter((group) => group.items.length > 0));
     }
     return map;
-  }, [i18n.language, openSceneWorkspaces, workspacePageOrders]);
+  }, [i18n.language, openSceneWorkspaces, workspacePageOrders, t]);
+
+  const { groups: settingsGroups } = useSettingsSectionGroups();
+  const settingsSection = useMemo<NavSection>(() => ({
+    id: 'settings',
+    name: t('systemConfiguration'),
+    items: settingsGroups.flatMap((group) => group.items)
+      .map((item) => ({ name: item.name, href: `/settings/${item.id}`, icon: item.icon })),
+  }), [settingsGroups, t]);
+  const viewingConfiguration = routeNav.kind === 'settings';
+  const showSessionHistory = !viewingConfiguration && currentWorkspace === AGENT_WORKSPACE;
 
   const visibleSections = useMemo<NavSection[]>(() => {
-    if (currentWorkspace === AGENT_WORKSPACE) return [agentSection];
+    if (viewingConfiguration) return [settingsSection];
+    if (currentWorkspace === AGENT_WORKSPACE) return [workbenchSection];
+    if (currentWorkspace === AGENT_WORKSHOP) return workshopSections;
     return sceneSections.get(currentWorkspace) ?? [];
-  }, [agentSection, currentWorkspace, sceneSections]);
+  }, [viewingConfiguration, settingsSection, workbenchSection, workshopSections, currentWorkspace, sceneSections]);
 
   // ── Keep-alive panes: every visited nav href stays mounted ────────────────
   const allNavItems = useMemo<NavItem[]>(() => {
-    const items = [...agentSection.items];
+    const items = [...workbenchSection.items, ...workshopSections.flatMap((section) => section.items)];
     for (const groups of sceneSections.values()) for (const group of groups) items.push(...group.items);
     return items;
-  }, [agentSection, sceneSections]);
+  }, [workbenchSection, workshopSections, sceneSections]);
   const navItemsFlat = useMemo(() => {
-    // Account-menu destinations keep their pane alive too, though they are not
-    // in the sidebar.
-    const accountHrefs = ['/agents', '/skills', '/tools', '/workspace', '/devices', '/hub', '/models', '/channels'];
     const seen = new Set<string>();
     const items: NavItem[] = [];
-    for (const item of [...allNavItems, ...accountHrefs.map((href) => ({ name: href, href, icon: Home }))]) {
+    for (const item of allNavItems) {
       if (seen.has(item.href)) continue;
       seen.add(item.href);
       items.push(item);
@@ -726,6 +785,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   }, [allNavItems]);
 
   const isNavItemActive = useCallback((href: string) => {
+    if (href.startsWith('/settings/')) return location.pathname === href;
     const active = findActiveTabHref(navItemsFlat.map((item) => item.href), location.pathname, location.search);
     return active === href;
   }, [location.pathname, location.search, navItemsFlat]);
@@ -764,14 +824,20 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     for (const tab of openTabs) map.set(tab.href, tab.path);
     return map;
   }, [openTabs]);
+  // An entry reopens where it was left, but the entry on screen goes back to
+  // its own page (from a project in the project list to the list itself).
   const navItemPath = useCallback(
-    (href: string) => href === '/workspace' ? '/workspace?tab=files' : openTabPathByHref.get(href) ?? href,
-    [openTabPathByHref],
+    (href: string) => {
+      if (href === '/workspace') return '/workspace?tab=files';
+      return href === activeTabHref ? href : openTabPathByHref.get(href) ?? href;
+    },
+    [activeTabHref, openTabPathByHref],
   );
 
-  // A scene whose workspace closed (uninstalled, disabled or license lapsed)
-  // cannot stay on screen: fall back to its suite manager.
-  const routeSceneId = routeWorkspace ? sceneWorkspaceIdOf(routeWorkspace) : null;
+  // A scene whose workspace closed (uninstalled, disabled or locked by an
+  // extension) cannot stay on screen: fall back to its suite manager.
+  const routeSceneId = routeWorkspace && sceneWorkspaceIdOf(routeWorkspace)
+    ? workspaceIdFromPath(location.pathname) : null;
   useEffect(() => {
     if (!navStateReady || webuiContractNavError || viewingScenes || !routeSceneId) return;
     if (!openSceneWorkspaces.some((workspace) => workspace.id === routeSceneId)) {
@@ -781,9 +847,14 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   const selectWorkspace = useCallback((workspaceId: NavWorkspaceId) => {
     setSidebarOpen(false);
-    if (workspaceId === currentWorkspace && !viewingScenes) return;
-    const stored = workspacePathsRef.current[workspaceId];
-    if (stored) {
+    if (workspaceId === AGENT_WORKSPACE && routeNav.kind === 'settings') {
+      navigate(AGENT_WORKSPACE_DEFAULT_PATH);
+      return;
+    }
+    if (workspaceId === currentWorkspace && routeNav.kind === 'workspace') return;
+    const paths = workspacePathsRef.current;
+    const stored = paths[workspaceId];
+    if (stored && pathNavigation(stored) === workspaceId) {
       navigate(stored);
       return;
     }
@@ -791,10 +862,14 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       navigate(AGENT_WORKSPACE_DEFAULT_PATH);
       return;
     }
+    if (workspaceId === AGENT_WORKSHOP) {
+      navigate(AGENT_WORKSHOP_DEFAULT_PATH);
+      return;
+    }
     const sceneId = sceneWorkspaceIdOf(workspaceId);
     const workspace = openSceneWorkspaces.find((item) => item.id === sceneId);
     if (workspace) navigate(workspace.route);
-  }, [currentWorkspace, navigate, openSceneWorkspaces, viewingScenes]);
+  }, [currentWorkspace, navigate, openSceneWorkspaces, pathNavigation, routeNav.kind]);
 
   const toggleNavSection = useCallback((sectionId: string) => {
     setCollapsedNavSectionIds((current) => {
@@ -807,6 +882,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
 
   const openManualUpdateCheck = useCallback(() => {
     setUpdateInfo(null);
+    setUpdateCheckForced(true);
     requestUpdate();
   }, [requestUpdate]);
 
@@ -828,28 +904,24 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     });
   }, [confirm, t]);
 
-  const displayVersion = isFlocksproActive
-    ? updateInfo?.edition === 'flockspro'
-      ? formatProVersion(currentProductVersion(updateInfo, true))
-      : flocksproVersion || (currentVersion ? formatProVersion(currentVersion) : null)
-    : formatUpdateVersion(currentVersion);
+  const displayVersion = formatUpdateVersion(currentVersion);
   const accountInitial = (user?.username || productName || 'F').trim().charAt(0).toUpperCase();
   const accountRoleLabel = user?.role === 'admin' ? tAuth('admin.roleAdmin') : tAuth('admin.roleMember');
   const hasVisibleUpdate = hasUpdate && canManageUpdates;
-  const headerUpdate = hasVisibleUpdate
+  const versionUpdate = hasVisibleUpdate
     ? { title: t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' }), onClick: requestUpdate }
     : null;
 
-  const navLinkClass = (active: boolean) => `flex items-center rounded-lg transition-colors ${collapsed ? 'justify-center p-2.5' : 'gap-3 px-3 py-2 text-sm font-medium'} ${
+  const navLinkClass = (active: boolean) => `flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus ${collapsed ? 'justify-center p-2.5' : 'gap-3 px-3 py-2 text-sm'} ${
     active
-      ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-50'
-      : 'text-zinc-600 hover:bg-white/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-50'
+      ? 'bg-ui-selected font-medium text-ui-text'
+      : 'font-normal text-ui-text hover:bg-ui-hover hover:text-ui-text'
   }`;
 
   const renderNavItem = (item: NavItem) => {
     const active = isNavItemActive(item.href);
-    const iconClass = `h-5 w-5 shrink-0 ${
-      item.accent ? 'text-red-500' : active ? 'text-zinc-700 dark:text-zinc-100' : 'text-zinc-400 dark:text-zinc-500'
+    const iconClass = `h-5 w-5 shrink-0 stroke-[1.75] ${
+      item.accent ? 'text-red-500' : 'text-ui-text'
     }`;
     if (item.action === 'new-chat') {
       return (
@@ -861,7 +933,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           data-tip={collapsed ? item.name : undefined}
           className={`w-full ${navLinkClass(false)} ${item.accent ? 'text-red-600 dark:text-red-400' : ''}`}
         >
-          <item.icon className={iconClass} />
+          <item.icon aria-hidden="true" className={iconClass} />
           {!collapsed && <span className="min-w-0 flex-1 truncate text-left">{item.name}</span>}
         </button>
       );
@@ -876,31 +948,30 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         data-tip={collapsed ? item.name : undefined}
         className={navLinkClass(active)}
       >
-        <item.icon className={iconClass} />
+        <item.icon aria-hidden="true" className={iconClass} />
         {!collapsed && (
           <>
             <span className="min-w-0 flex-1 truncate">{item.name}</span>
-            {item.count ? <span className="shrink-0 rounded-full bg-zinc-200 px-1.5 text-xs text-zinc-500 dark:bg-zinc-700 dark:text-zinc-300">{item.count}</span> : null}
+            {item.count ? <span className="shrink-0 rounded-full bg-ui-subtle px-1.5 text-xs font-normal text-ui-secondary">{item.count}</span> : null}
           </>
         )}
       </Link>
     );
   };
 
-  const sidebar = (
-    <div className="flex h-full flex-col overflow-hidden">
-      <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-3 ${collapsed ? 'px-2' : 'px-3'}`}>
+  const navigation = (
+      <nav aria-label={t('moduleNavigation')} className={`min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-3 ${collapsed ? 'px-2' : 'px-3'}`}>
         {visibleSections.map((section) => {
           const sectionCollapsed = !collapsed && Boolean(section.collapsible) && collapsedNavSectionIds.has(section.id);
           return (
             <div key={section.id} className="mb-4">
               {!collapsed && section.name && (
-                <h3 className="mb-1 px-3 text-xs font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
+                <h3 className="mb-1 px-3 text-xs font-medium uppercase tracking-wide text-ui-secondary">
                   {section.collapsible ? (
                     <button type="button" onClick={() => toggleNavSection(section.id)} aria-expanded={!sectionCollapsed}
-                      className="flex h-6 w-full items-center justify-between hover:text-zinc-600 dark:hover:text-zinc-300">
+                      className="flex h-6 w-full items-center justify-between rounded transition-colors hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus">
                       <span className="min-w-0 truncate">{section.name}</span>
-                      <ChevronRight className={`ml-2 h-3.5 w-3.5 shrink-0 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
+                      <ChevronRight aria-hidden="true" className={`ml-2 h-3.5 w-3.5 shrink-0 transition-transform ${sectionCollapsed ? '' : 'rotate-90'}`} />
                     </button>
                   ) : section.name}
                 </h3>
@@ -910,45 +981,68 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           );
         })}
       </nav>
-      {currentWorkspace === AGENT_WORKSPACE && (
-        <SessionHistoryPanel collapsed={collapsed} onExpandSidebar={() => setCollapsed(false)} onNavigate={() => setSidebarOpen(false)} />
-      )}
-      <AccountMenu
-        collapsed={collapsed}
-        username={user?.username || productName}
-        roleLabel={accountRoleLabel}
-        initial={accountInitial}
-        version={displayVersion}
-        isAdmin={isAdmin}
-        isPro={isFlocksproActive}
-        proProductName={proProductName}
-        hubName={t('hub', { productName })}
-        onNavigate={() => setSidebarOpen(false)}
-        onCheckUpdate={openManualUpdateCheck}
-        onLogout={() => void handleLogout()}
+  );
+
+  const sidebar = (
+    <div className="flex h-full flex-col overflow-hidden">
+      <SidebarHistorySplit
+        enabled={showSessionHistory && !collapsed}
+        navigation={navigation}
+        history={showSessionHistory ? (
+          <SessionHistoryPanel collapsed={collapsed} onExpandSidebar={() => setCollapsed(false)} onNavigate={() => setSidebarOpen(false)} />
+        ) : null}
       />
+      <div className={`shrink-0 border-t border-ui-border ${collapsed ? 'p-2' : 'p-3'}`}>
+        <AccountMenu
+          collapsed={collapsed}
+          username={user?.username || productName}
+          roleLabel={accountRoleLabel}
+          initial={accountInitial}
+          version={displayVersion}
+          update={versionUpdate}
+          extensionItems={extensionNavItems.accountMenu}
+          onCheckUpdate={openManualUpdateCheck}
+          onNavigate={() => setSidebarOpen(false)}
+          onLogout={() => void handleLogout()}
+        />
+      </div>
     </div>
   );
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
+    <div
+      className="min-h-screen bg-ui-canvas text-ui-text"
+      style={{
+        '--sidebar-width': `${collapsed ? 64 : sidebarResize.width}px`,
+        '--sidebar-expanded-width': `${sidebarResize.width}px`,
+      } as CSSProperties}
+    >
       <LazyLoadErrorBoundary mode="overlay">
         <Suspense fallback={null}>
-          {showOnboarding && <OnboardingModal onClose={() => setShowOnboarding(false)} />}
-          {tokenPolicy.notice && !showOnboarding && updateState !== 'visible' && (
+          {onboardingOpen && <OnboardingModal onClose={handleCloseOnboarding} />}
+          {tokenPolicy.notice && !onboardingOpen && updateState !== 'visible' && (
             <TokenPolicyNotice onClose={tokenPolicy.close} onPresented={tokenPolicy.onPresented} />
           )}
-          {updateState !== 'idle' && (updateState === 'visible' || (tokenPolicy.ready && !tokenPolicy.notice && !showOnboarding)) && (
+        </Suspense>
+        {/* One boundary per modal. Sharing a single Suspense meant that whenever
+            one of these chunks started loading, the fallback replaced the others
+            -- so a notification arriving while the update dialog was open blanked
+            the dialog out from under the reader. */}
+        <Suspense fallback={null}>
+          {updateState !== 'idle' && (updateState === 'visible' || (tokenPolicy.ready && !tokenPolicy.notice && !onboardingOpen)) && (
             <UpdateModal
               initialInfo={updateInfo}
-              forceInitialCheck={updateInfo === null}
-              edition={isFlocksproActive ? 'flockspro' : 'flocks'}
+              forceInitialCheck={updateCheckForced || updateInfo === null}
+              // The channel the reminder checked; a stock build leaves it to the server.
+              {...(registry.updateChannel ? { channel: registry.updateChannel } : {})}
               canUpgrade={canManageUpdates}
               onPresented={handleUpdatePresented}
               onClose={closeUpdate}
               onDismiss={closeUpdate}
             />
           )}
+        </Suspense>
+        <Suspense fallback={null}>
           {visibleNotifications.length > 0 && (
             <NotificationModal
               notifications={visibleNotifications}
@@ -964,11 +1058,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       <WorkspaceHeader
         productName={productName}
         logoUrl={logoUrl}
-        update={headerUpdate}
         workspaces={headerWorkspaces}
-        currentWorkspace={navStateReady ? currentWorkspace : null}
+        currentWorkspace={navStateReady && routeNav.kind === 'workspace' ? currentWorkspace : null}
         onSelectWorkspace={selectWorkspace}
-        sceneManager={{ href: SCENE_SUITES_PATH, hasNew: hasUnseenSuites, active: viewingScenes }}
+        hasUnseenSuites={hasUnseenSuites}
+        onOpenSceneManager={() => setSidebarOpen(false)}
         notifications={notifications}
         onOpenNotification={(notification) => {
           setUpdateNotification(notification.id === updateNotification?.id ? notification : updateNotification);
@@ -979,28 +1073,45 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         onOpenMobileNav={() => setSidebarOpen(true)}
       />
 
-      {sidebarOpen && <div className="fixed inset-0 top-14 z-30 bg-zinc-900/40 lg:hidden" onClick={() => setSidebarOpen(false)} />}
+      {sidebarOpen && <div className="fixed inset-0 top-14 z-30 bg-black/40 lg:hidden" onClick={() => setSidebarOpen(false)} />}
 
       <aside
-        className={`fixed bottom-0 left-0 top-14 z-40 border-r border-zinc-200 bg-zinc-100 transition-transform dark:border-zinc-800 dark:bg-zinc-950 lg:translate-x-0 ${collapsed ? 'w-16' : 'w-64'} ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
+        id="layout-sidebar"
+        className={`fixed bottom-0 left-0 top-14 z-40 w-[var(--sidebar-width)] border-r border-ui-border bg-ui-sidebar transition-transform lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
       >
         {sidebar}
+        {!collapsed && (
+          <div
+            role="separator"
+            tabIndex={0}
+            aria-label={t('resizeNav')}
+            aria-orientation="vertical"
+            aria-controls="layout-sidebar"
+            aria-valuemin={sidebarResize.minimum}
+            aria-valuemax={sidebarResize.maximum}
+            aria-valuenow={sidebarResize.width}
+            className="absolute inset-y-0 -right-1 z-10 hidden w-2 touch-none cursor-col-resize outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ui-focus lg:block"
+            {...sidebarResize.handleProps}
+          />
+        )}
         <button
           type="button"
           onClick={toggleCollapsed}
-          // Same handle in both states, centred on the sidebar edge so it stays put while pages scroll.
-          className="absolute -right-3 top-1/2 hidden h-9 w-6 -translate-y-1/2 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 shadow-sm transition-colors hover:text-zinc-800 lg:flex dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+          // A soft, borderless handle stays flush with the sidebar edge in both states.
+          className="absolute -right-px top-1/2 z-20 hidden h-24 w-[18px] -translate-y-1/2 items-center justify-center rounded-l-xl border-0 bg-black/[0.06] text-ui-muted transition-colors hover:bg-black/10 hover:text-ui-text dark:bg-white/[0.08] dark:hover:bg-white/[0.12] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus lg:flex"
+          aria-expanded={!collapsed}
           aria-label={collapsed ? t('expandNav') : t('collapseNav')}
           title={collapsed ? t('expandNav') : t('collapseNav')}
         >
-          {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+          {collapsed ? <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0" /> : <ChevronLeft aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />}
         </button>
       </aside>
 
-      <div className={`flex h-screen flex-col pt-14 transition-[padding] ${collapsed ? 'lg:pl-16' : 'lg:pl-64'}`}>
+      <div className={`flex h-screen flex-col pt-14 max-md:h-[100dvh] lg:pl-[var(--sidebar-width)] ${sidebarResize.dragging ? '' : 'transition-[padding]'}`}>
         {/* In the flow under the fixed header: a fixed banner would either hide under it or cover it. */}
         <BackendStatusBanner inline />
-        <main className="relative flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
+        <InstallationResultBanner />
+        <main className="relative flex-1 overflow-hidden bg-ui-canvas">
           <KeepAlivePanes panes={keepAlivePanes} activeHref={activePaneHref} location={location} routes={contentRoutes} />
         </main>
       </div>

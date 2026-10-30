@@ -334,4 +334,15 @@ describe('SkillPage', () => {
 
     expect(screen.queryByText('workflow-config-guide')).not.toBeInTheDocument();
   });
+
+  it('says a Claude Code skill is regrouped outside Flocks, not that it is built in', async () => {
+    statusMock.mockResolvedValue({ data: [{ ...makeSkill('claude-skill'), source: 'claude', group: 'Claude', group_readonly: true }] });
+    render(<SkillPage />);
+    await screen.findByText('claude-skill');
+    const row = screen.getByText('claude-skill').closest('tr')!;
+    fireEvent.click(within(row).getByRole('button', { name: 'editGroup' }));
+    expect(toastWarningMock).toHaveBeenLastCalledWith('pluginGroups:readOnly.externalSkill');
+    expect(updateGroupMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
 });

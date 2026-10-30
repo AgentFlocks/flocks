@@ -12,6 +12,70 @@ from flocks.workflow.runner import RunWorkflowResult
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stop_all", [False, True])
+async def test_stop_serializes_with_restart_waiting_for_configuration(monkeypatch, stop_all):
+    manager = poller_manager.WorkflowPollerManager()
+    entered, release = asyncio.Event(), asyncio.Event()
+    loops = []
+    async def config(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return {"enabled": True, "intervalSeconds": 30}
+    async def loop(*args):
+        loops.append(1)
+        await asyncio.Event().wait()
+    monkeypatch.setattr(poller_manager.WorkflowStore, "get_config", config)
+    monkeypatch.setattr(poller_manager, "read_workflow_from_fs", lambda _: {"workflowJson": {
+        "name": "lifecycle", "start": "n1", "nodes": [{"id": "n1", "type": "python", "code": "pass"}], "edges": []}})
+    monkeypatch.setattr(manager, "_poller_loop", loop)
+    restarting = asyncio.create_task(manager.restart_workflow("lifecycle"))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    stopping = asyncio.create_task(manager.stop_all() if stop_all else manager.stop_workflow("lifecycle"))
+    try:
+        await asyncio.sleep(0.02)
+        assert not stopping.done(), "stop returned before the pending restart was fenced"
+    finally:
+        release.set()
+        await asyncio.gather(restarting, stopping, return_exceptions=True)
+        await manager.stop_workflow("lifecycle")
+    assert not manager._tasks
+    assert manager.get_status("lifecycle")["state"] == "stopped"
+    if stop_all:
+        assert not loops
+
+
+@pytest.mark.asyncio
+async def test_stop_all_cancels_manual_run_without_a_scheduled_loop(monkeypatch):
+    manager = poller_manager.WorkflowPollerManager()
+    cancel = threading.Event()
+    async def manual_run():
+        while not cancel.is_set():
+            await asyncio.sleep(0.001)
+    task = asyncio.create_task(manual_run())
+    manager._run_cancel_events["manual"] = {cancel}
+    manager._register_run_task("manual", task)
+    try:
+        await manager.stop_all()
+        assert cancel.is_set(), "shutdown ignored a manual run because no schedule task was registered"
+        await asyncio.wait_for(task, timeout=1)
+    finally:
+        cancel.set()
+        await task
+
+
+@pytest.mark.asyncio
+async def test_global_shutdown_fences_late_manual_execution(monkeypatch):
+    manager = poller_manager.WorkflowPollerManager()
+    async def unexpected_record(*args, **kwargs):
+        raise AssertionError("business execution started after global shutdown")
+    monkeypatch.setattr(poller_manager, "create_execution_record", unexpected_record)
+    await manager.stop_all()
+    result = await manager._execute_run("late-manual", {}, {})
+    assert result["state"] == "stopped"
+    assert not manager._run_cancel_events
+
+
+@pytest.mark.asyncio
 async def test_restart_disabled_config_reports_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = poller_manager.WorkflowPollerManager()
 
@@ -113,11 +177,14 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
             },
         ),
     )
-    monkeypatch.setattr(
-        poller_manager,
-        "record_execution_result",
-        lambda workflow_id, exec_id, exec_data: asyncio.sleep(0),
-    )
+    recorded: list[tuple[str, str]] = []
+
+    async def _record_execution_result(workflow_id, exec_id, exec_data, *, steps=None):
+        # Takes what the manager passes (steps included): a mock that did not
+        # failed with a TypeError the manager swallows, and nothing was recorded.
+        recorded.append((workflow_id, exec_data.get("status")))
+
+    monkeypatch.setattr(poller_manager, "record_execution_result", _record_execution_result)
     monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
 
     status = await manager.run_once("wf-run-once")
@@ -131,6 +198,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
     assert captured_inputs["input_date"]
     assert captured_inputs["_trigger"] == "poller"
     assert captured_inputs["_poller_run_id"].startswith("poller-")
+    assert recorded == [("wf-run-once", "success")]
 
 
 @pytest.mark.asyncio
@@ -316,11 +384,14 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
             },
         ),
     )
-    monkeypatch.setattr(
-        poller_manager,
-        "record_execution_result",
-        lambda workflow_id, exec_id, exec_data: asyncio.sleep(0),
-    )
+    recorded: list[tuple[str, str]] = []
+
+    async def _record_execution_result(workflow_id, exec_id, exec_data, *, steps=None):
+        # Takes what the manager passes (steps included): a mock that did not
+        # failed with a TypeError the manager swallows, and nothing was recorded.
+        recorded.append((workflow_id, exec_data.get("status")))
+
+    monkeypatch.setattr(poller_manager, "record_execution_result", _record_execution_result)
     monkeypatch.setattr(
         poller_manager,
         "read_workflow_from_fs",
@@ -343,6 +414,11 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
 
     assert status["lastStatus"] == "skipped"
     assert status["lastError"] == "previous_run_still_active"
+    for _ in range(100):  # the first run records its end once its thread is done
+        if recorded:
+            break
+        await asyncio.sleep(0.02)
+    assert [workflow_id for workflow_id, _ in recorded] == ["wf-overlap"], "the first run, recorded once"
 
 
 @pytest.mark.asyncio

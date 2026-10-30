@@ -361,12 +361,12 @@ class TestUpload:
         client = _client(workspace_client)
         r = client.post(
             "/api/workspace/upload?purpose=chat",
-            files=[("files", ("archive.zip", b"\x50\x4b\x03\x04", "application/zip"))],
+            files=[("files", ("archive.rar", b"\x50\x4b\x03\x04", "application/vnd.rar"))],
         )
         assert r.status_code == 200
         result = r.json()["uploaded"][0]
         assert "Unsupported file type" in result["error"]
-        assert not (_ws(workspace_client) / "archive.zip").exists()
+        assert not (_ws(workspace_client) / "archive.rar").exists()
 
     @pytest.mark.parametrize("filename", ["sample.exe", "libfoo.so", "rea_demo", "app.apk"])
     def test_chat_upload_takes_reverse_samples_only_once_rea_is_ready(
@@ -1415,6 +1415,24 @@ class TestMemoryView:
             "written": True,
         }
         assert target.read_text() == "new content"
+
+    def test_write_memory_file_the_stored_notes_did_not_take_is_503(self, workspace_client, monkeypatch):
+        from flocks.memory.sync import mirror
+
+        answers = iter([True, False])
+
+        async def _reconcile_note(root, note, *, attempts=1):
+            return next(answers)
+
+        monkeypatch.setattr(mirror, "reconcile_note", _reconcile_note)
+        r = _client(workspace_client).put(
+            "/api/workspace/memory/file",
+            json={"path": "daily/2026-03-14.md", "content": "new content"},
+        )
+
+        assert r.status_code == 503
+        assert r.json()["detail"] == mirror.MemoryNotShared.SAVED_UNSETTLED
+        assert (_mem(workspace_client) / "daily" / "2026-03-14.md").read_text() == "new content"
 
     def test_write_non_editable_memory_file_returns_403(self, workspace_client):
         mem = _mem(workspace_client)

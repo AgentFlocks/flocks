@@ -673,6 +673,8 @@
       "llm": "LLM 节点",
       "http_request": "HTTP 请求节点",
       "subworkflow": "子工作流节点"
-    }
+    },
+    "unsavedLeaveConfirm": "画布有未保存的修改，离开后这些修改会丢失。确定离开吗？",
+    "restoreDraftConfirm": "这个工作流有上次未保存的修改，要恢复吗？选“取消”将丢弃这些修改。"
   }
 }

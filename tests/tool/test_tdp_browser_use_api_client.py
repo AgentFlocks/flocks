@@ -7,7 +7,7 @@ from typing import Any, Dict
 import pytest
 
 
-SCRIPTS_DIR = Path(__file__).resolve().parents[2] / ".flocks" / "skills" / "tdp-browser-use" / "scripts"
+SCRIPTS_DIR = Path(__file__).resolve().parents[2] / ".flocks" / "plugins" / "skills" / "tdp-use" / "scripts"
 
 
 @pytest.fixture

@@ -673,6 +673,8 @@
       "llm": "LLM Node",
       "http_request": "HTTP Request Node",
       "subworkflow": "Sub-Workflow Node"
-    }
+    },
+    "unsavedLeaveConfirm": "The canvas has unsaved changes that will be lost if you leave. Leave anyway?",
+    "restoreDraftConfirm": "This workflow has unsaved changes from before. Restore them? Cancel discards them."
   }
 }

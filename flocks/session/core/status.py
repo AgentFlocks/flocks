@@ -117,7 +117,16 @@ class SessionStatus:
             Session status (defaults to idle if not found)
         """
         state = cls._get_state()
-        return state.get(session_id, SessionStatusIdle())
+        found = state.get(session_id)
+        if found is not None:
+            return found
+        # A loop runs under its session's project directory while HTTP
+        # callers read from the request context; session IDs are global, so
+        # fall back to every project directory's state before reporting idle.
+        for _inst_id, statuses in list(cls._state.items()):
+            if session_id in statuses:
+                return statuses[session_id]
+        return SessionStatusIdle()
 
     @classmethod
     def get_for_session(

@@ -26,10 +26,10 @@
     "delete": "删除",
     "edit": "编辑",
     "nativeDeleteDisabled": "内置 Agent 不支持删除",
-    "protected": "Pro 内置",
-    "protectedDeleteDisabled": "Flocks Pro 内置的 Agent 不支持删除",
-    "protectedDelegateDisabled": "Flocks Pro 内置的 Agent 不能修改委托设置",
-    "protectedEditDisabled": "Flocks Pro 内置的 Agent，提示词受保护，不能查看或编辑"
+    "protected": "扩展内置",
+    "protectedDeleteDisabled": "扩展内置的 Agent 不支持删除",
+    "protectedDelegateDisabled": "扩展内置的 Agent 不能修改委托设置",
+    "protectedEditDisabled": "扩展内置的 Agent，提示词受保护，不能查看或编辑"
   },
   "filter": {
     "all": "全部",

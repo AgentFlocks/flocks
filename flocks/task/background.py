@@ -116,6 +116,28 @@ class BackgroundManager:
     def get_task(self, task_id: str) -> Optional[BackgroundTask]:
         return self._tasks.get(task_id)
 
+    def _track_handle(self, task: BackgroundTask, handle: asyncio.Task) -> None:
+        self._task_handles[task.id] = handle
+
+        def _finished(done: asyncio.Task) -> None:
+            # Keep the public history, but not the Task's ContextVars or an
+            # unexpected exception traceback after execution has ended.
+            if self._task_handles.get(task.id) is done:
+                self._task_handles.pop(task.id)
+            if done.cancelled():
+                if task.status in {"pending", "running"}:
+                    task.status = "cancelled"
+                    task.completed_at = int(datetime.now().timestamp() * 1000)
+                return
+            error = done.exception()
+            if error is not None:
+                task.status = "error"
+                task.error = str(error)
+                task.completed_at = int(datetime.now().timestamp() * 1000)
+                log.error("background.task.unhandled_error", {"task_id": task.id, "error": str(error)})
+
+        handle.add_done_callback(_finished)
+
     async def launch(self, input_data: LaunchInput) -> BackgroundTask:
         task_id = _new_task_id()
         task = BackgroundTask(
@@ -134,7 +156,7 @@ class BackgroundManager:
         )
         self._tasks[task_id] = task
         handle = asyncio.create_task(self._run_task(task, input_data))
-        self._task_handles[task_id] = handle
+        self._track_handle(task, handle)
         return task
 
     async def resume(self, input_data: ResumeInput) -> BackgroundTask:
@@ -154,7 +176,7 @@ class BackgroundManager:
         )
         self._tasks[task_id] = task
         handle = asyncio.create_task(self._run_resume(task, input_data))
-        self._task_handles[task_id] = handle
+        self._track_handle(task, handle)
         return task
 
     async def run_existing_session(
@@ -213,7 +235,7 @@ class BackgroundManager:
         handle = asyncio.create_task(
             self._run_existing_session(task, session_id, start_gate=start_gate)
         )
-        self._task_handles[task_id] = handle
+        self._track_handle(task, handle)
         return task
 
     @staticmethod
@@ -476,9 +498,16 @@ class BackgroundManager:
             return self._tasks.get(task_id)
         timeout = None if timeout_ms is None else timeout_ms / 1000
         try:
-            await asyncio.wait_for(handle, timeout=timeout)
+            # A wait deadline is not the execution deadline. Callers such as
+            # TaskExecutor explicitly cancel when their absolute limit expires.
+            await asyncio.wait_for(asyncio.shield(handle), timeout=timeout)
         except asyncio.TimeoutError:
             return None
+        except asyncio.CancelledError:
+            # Preserve owner cancellation (e.g. a task lease was lost).
+            handle.cancel()
+            await asyncio.gather(handle, return_exceptions=True)
+            raise
         return self._tasks.get(task_id)
 
     def cancel(self, task_id: Optional[str] = None, all_tasks: bool = False) -> int:
@@ -796,17 +825,17 @@ def get_background_manager() -> BackgroundManager:
 
 
 def all_background_managers() -> List[BackgroundManager]:
-    """Managers of every instance.
+    """Managers of every project directory (``Instance``).
 
-    A task lives in the manager of the instance that launched it: scheduled
-    tasks run outside any request's instance, so a request only reaching its
-    own manager would not see them.
+    A task lives in the manager of the project directory that launched it:
+    scheduled tasks run outside any request's directory, so a request only
+    reaching its own manager would not see them.
     """
     return _manager_state.all_values()
 
 
 def cancel_background_runs_for_session(session_id: str) -> int:
-    """Cancel the background runs of a session, whichever instance started them."""
+    """Cancel the background runs of a session, whichever project directory started them."""
     return sum(manager.cancel_by_session_id(session_id) for manager in all_background_managers())
 
 

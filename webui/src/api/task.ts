@@ -33,6 +33,10 @@ export interface RetryConfig {
   retryCount: number;
   retryDelaySeconds: number;
   retryAfter?: string;
+  /** Set when the run is not retried automatically: what it started may have taken effect. */
+  blockedReason?: string | null;
+  /** The calls whose effects were not confirmed, as "tool:callID". */
+  unverifiedEffects?: string[];
 }
 
 export interface TaskScheduler {
@@ -96,6 +100,9 @@ export interface PaginatedResponse<T> {
 export interface TaskListParams {
   status?: TaskStatus;
   priority?: TaskPriority;
+  title?: string;
+  startedAfter?: string;
+  startedBefore?: string;
   deliveryStatus?: DeliveryStatus;
   sortBy?: string;
   sortOrder?: 'asc' | 'desc';
@@ -103,7 +110,7 @@ export interface TaskListParams {
   limit?: number;
 }
 
-export interface SchedulerListParams extends Omit<TaskListParams, 'deliveryStatus' | 'status'> {
+export interface SchedulerListParams extends Omit<TaskListParams, 'deliveryStatus' | 'status' | 'title' | 'startedAfter' | 'startedBefore'> {
   status?: TaskSchedulerStatus;
   scheduledOnly?: boolean;
 }
@@ -220,6 +227,10 @@ export const taskAPI = {
 
   rerunExecution: (executionId: string) =>
     client.post<TaskExecution>(`/api/task-executions/${executionId}/rerun`),
+
+  /** Go on with a run held for verification, in the session it ran in. */
+  continueExecution: (executionId: string) =>
+    client.post<TaskExecution>(`/api/task-executions/${executionId}/continue`),
 
   deleteExecution: (executionId: string) =>
     client.delete(`/api/task-executions/${executionId}`),

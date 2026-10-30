@@ -11,10 +11,12 @@ import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 from flocks.project.instance import Instance
+from flocks.tool import nofollow
 from flocks.tool.registry import ToolContext
+from flocks.config.config import get_user_plugins_root
 
 
 @dataclass(frozen=True)
@@ -80,65 +82,104 @@ def safe_relpath(path: str, start: Optional[str]) -> str:
         return path
 
 
-class DirectoryLinkLoop(ValueError):
-    """A directory link points back at one of its own ancestors."""
+class TreeChanged(ValueError):
+    """A directory was replaced (by a link, say) while the tree was being listed."""
 
 
-def tree_entries(root: str, *, follow_links: bool = False) -> list[str]:
+def tree_entries(root: str) -> list[str]:
     """Relative paths of ``root`` ("") and of every entry below it.
 
     Deleting, copying or moving a directory changes every file under it, so
-    path rules written for any of them must see the request.
-    ``follow_links`` mirrors ``copytree(symlinks=False)``, which copies what a
-    directory link points at, once for every link that reaches it; ``rmtree``
-    and renames keep links as links. A link back into its own ancestors would
-    make that copy endless, so it raises :class:`DirectoryLinkLoop`.
+    path rules written for any of them must see the request. The tree is
+    listed the way those operations go through it: each directory through
+    its own descriptor, links as links. A link where ``root`` or a directory
+    listed in it was -- someone else's files put on the way -- raises
+    :class:`TreeChanged`: what would be read there is not this tree.
     """
-    entries = [""]
-    if not os.path.isdir(root) or (os.path.islink(root) and not follow_links):
-        return entries
-    pending = [(root, "", (os.path.realpath(root),))]
-    while pending:
-        directory, prefix, ancestors = pending.pop()
-        try:
-            names = sorted(os.listdir(directory))
-        except OSError:
-            continue
-        for name in names:
-            path = os.path.join(directory, name)
-            relative = os.path.join(prefix, name) if prefix else name
-            entries.append(relative)
-            if not os.path.isdir(path) or (os.path.islink(path) and not follow_links):
-                continue
-            real = os.path.realpath(path)
-            if real in ancestors:
-                raise DirectoryLinkLoop(f"{path} links back to {real}")
-            pending.append((path, relative, ancestors + (real,)))
-    return entries
+    try:
+        return nofollow.tree(root)
+    except nofollow.LinkOnTheWay as exc:
+        raise TreeChanged(str(exc)) from None
 
 
-def tree_permission_patterns(
-    base_pattern: str,
-    base_path: str,
-    entries: list[str],
-    *,
-    worktree: Optional[str] = None,
-) -> list[str]:
-    """Permission patterns for ``entries`` taken from or landing at ``base_path``.
+def tree_permission_patterns(base_pattern: str, entries: list[str]) -> list[str]:
+    """Permission patterns for ``entries`` taken from or landing at ``base_pattern``.
 
-    With ``worktree`` (where the tree lands), an entry whose real location
-    differs because a symlink is on the way is also named by that location:
-    the write goes there.
+    The operations never go through a link (see :mod:`flocks.tool.nofollow`),
+    so where an entry is written or removed is its own path.
     """
-    patterns: list[str] = []
-    for relative in entries:
-        patterns.append(os.path.join(base_pattern, relative) if relative else base_pattern)
-        if worktree is not None:
-            logical = os.path.normpath(os.path.join(base_path, relative) if relative else base_path)
-            real = os.path.realpath(logical)
-            if real != logical:
-                patterns.append(safe_relpath(real, worktree))
-    return list(dict.fromkeys(patterns))
+    return list(dict.fromkeys(
+        os.path.join(base_pattern, relative) if relative else base_pattern for relative in entries
+    ))
+
+
+PathIdentity = tuple[str, str, Optional[tuple[int, int]]]
+
+
+def path_identities(*paths: str) -> tuple[PathIdentity, ...]:
+    """Where resolved tool paths lead now, to compare after a permission wait."""
+    return tuple(
+        (path, os.path.realpath(path), _entry_identity(path))
+        for path in dict.fromkeys(paths)
+    )
+
+
+def moved_since_resolved(*paths: str) -> list[str]:
+    """The paths, as ``resolve_tool_path`` returned them, that no longer lead to themselves.
+
+    Checked before an operation reads or lists anything through them and again
+    before it asks for approval: through a link put on the way, the request
+    (its diff, its patterns) would show another user's file contents or names.
+    """
+    return [path for path in dict.fromkeys(paths) if os.path.realpath(path) != path]
+
+
+def changed_before_asking(path: str) -> str:
+    return nofollow.changed_message(path)
+
+
+def checked_error(paths: Sequence[str], message: str) -> str:
+    """``message``, unless one of ``paths`` moved since it was checked.
+
+    An error raised through a path that now leads elsewhere may quote what it
+    found there (file contents, names), so it is replaced by a generic one.
+    """
+    moved = moved_since_resolved(*paths)
+    return changed_before_asking(moved[0]) if moved else message
+
+
+def resolved_identities(*paths: str) -> tuple[PathIdentity, ...]:
+    """Snapshot paths as ``resolve_tool_path`` returned them and the policy checked them.
+
+    Such a path is canonical, so where it should lead is the path itself, not
+    wherever it leads by the time of the snapshot: a link put on the way at
+    any point after it was resolved -- before the snapshot as much as during
+    a permission wait -- shows as a change.
+    """
+    return tuple((path, path, _entry_identity(path)) for path in dict.fromkeys(paths))
+
+
+def paths_changed(identities: Sequence[PathIdentity]) -> list[str]:
+    """The paths that no longer lead where they did when snapshotted.
+
+    Paths are checked against the workspace, sandbox and policy bindings when
+    they are resolved; a link put on the way during a permission wait would
+    send the approved operation to another user's files, and so would a hard
+    link or another file put in place of the one the request was about.
+    """
+    return [
+        path
+        for path, realpath, identity in identities
+        if os.path.realpath(path) != realpath or _entry_identity(path) != identity
+    ]
+
+
+def _entry_identity(path: str) -> Optional[tuple[int, int]]:
+    try:
+        status = os.lstat(path)
+    except OSError:
+        return None
+    return (status.st_dev, status.st_ino)
 
 
 async def ask_edit_permission(
@@ -146,25 +187,60 @@ async def ask_edit_permission(
     tool: str,
     planned_patterns: Callable[[], list[str]],
     metadata: dict,
+    *,
+    planned_paths: Optional[Callable[[], Sequence[str]]] = None,
+    resolved_paths: Sequence[str] = (),
 ) -> bool:
     """Ask for ``edit`` on the paths an operation will change.
 
     The paths are listed again once the (possibly long) permission wait is
     over; False means they changed meanwhile (new files, a target that became
-    a directory, a new link) and the approval no longer covers the operation.
-    Walking a large tree takes a while, so the first listing runs off the
-    event loop. The last one stays on it, with no await between it and the
-    caller's operation, so nothing else in the process can change the tree in
-    between.
+    a directory, a new link, one of ``planned_paths`` -- every path the
+    operation reads or writes -- now leading elsewhere, or one of
+    ``resolved_paths``, as resolve_tool_path returned them, no longer leading
+    to itself) and the approval no longer covers the operation. Walking a
+    large tree takes a while, so the first listing runs off the event loop.
+    The last one stays on it, with no await between it and the caller's
+    operation, so nothing else in the process can change the tree in between.
     """
-    patterns = await asyncio.to_thread(planned_patterns)
+    # Taken before the first await, against the paths the policy checked
+    # rather than what the listing will find there.
+    if moved_since_resolved(*resolved_paths):
+        return False
+    resolved = resolved_identities(*resolved_paths)
+
+    def first_listing() -> Optional[tuple[list[str], tuple[PathIdentity, ...]]]:
+        # Nothing listed through a path that moved goes into the request.
+        if moved_since_resolved(*resolved_paths):
+            return None
+        try:
+            patterns = planned_patterns()
+            paths = planned_paths() if planned_paths is not None else ()
+        except TreeChanged:
+            return None
+        if moved_since_resolved(*resolved_paths):
+            return None
+        return patterns, path_identities(*paths)
+
+    listing = await asyncio.to_thread(first_listing)
+    if listing is None or moved_since_resolved(*resolved_paths):
+        return False
+    patterns, identities = listing
     await ctx.ask(
         permission="edit",
         patterns=patterns,
         always=["*"],
         metadata={"tool": tool, **metadata},
     )
-    return set(planned_patterns()) == set(patterns)
+    try:
+        listed_again = planned_patterns()
+    except TreeChanged:
+        return False
+    return (
+        set(listed_again) == set(patterns)
+        and not paths_changed(resolved)
+        and not paths_changed(identities)
+    )
 
 
 def landing_location(source: str, target: str, target_pattern: str) -> tuple[str, str]:
@@ -228,9 +304,7 @@ def _resolve_host_skill_path(
 
     from flocks.memory.paths import path_is_within
 
-    skill_root = (
-        Path.home() / ".flocks" / "plugins" / "skills"
-    ).resolve(strict=False)
+    skill_root = (get_user_plugins_root() / "skills").resolve(strict=False)
     candidate = expanded.resolve(strict=False)
     if not path_is_within(skill_root, candidate):
         return None

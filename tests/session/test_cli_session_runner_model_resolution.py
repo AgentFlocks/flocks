@@ -78,6 +78,7 @@ class TestModelResolutionFromConfig:
 
             mock_agent = MagicMock()
             mock_agent.name = "rex"
+            mock_agent.require_dedicated_session = False
             mock_agent_get.return_value = mock_agent
 
             mock_loop_run.return_value = MagicMock(action="stop", last_message=None)
@@ -109,6 +110,7 @@ class TestModelResolutionFromConfig:
 
             mock_agent = MagicMock()
             mock_agent.name = "rex"
+            mock_agent.require_dedicated_session = False
             mock_agent_get.return_value = mock_agent
 
             mock_loop_run.return_value = MagicMock(action="stop", last_message=None)

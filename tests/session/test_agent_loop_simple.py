@@ -9,12 +9,24 @@ from flocks.session.agent_inbox import AgentInbox, AgentMessage, authorize_messa
 from flocks.session.delegated_execution import start_child
 from flocks.session.interaction_queue import InteractionQueue
 from flocks.session.message import Message, MessageRole, ToolPart, ToolStateCompleted
+from flocks.session.ownership import SessionExecutionLease
 from flocks.session.runner import StepResult
 from flocks.session.session import Session
 from flocks.session.session_loop import SessionLoop, LoopCallbacks, LoopResult
 from flocks.tool.agent.communication import send_to_session, sleep
 from flocks.tool.agent.delegate_task import delegate_task_tool
 from flocks.tool.registry import ToolContext, ToolResult
+
+
+@pytest.fixture(autouse=True)
+def no_turn_diff_snapshots(monkeypatch):
+    # arch_v2 records each turn's file diffs through git snapshots (0.5-2 s per turn
+    # here); these delegation tests touch no files and their 2-3 s budgets are for
+    # message delivery, so skip the snapshot work.
+    async def _skip(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(SessionLoop, "_record_turn_diffs", _skip)
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +54,9 @@ async def sessions(tmp_path):
 
 
 async def until(predicate):
-    async with asyncio.timeout(2):
+    # Polling only: a generous ceiling keeps a loaded CI box (PostgreSQL-backed
+    # loop turns) from failing a condition that does arrive.
+    async with asyncio.timeout(10):
         while not predicate():
             await asyncio.sleep(0.001)
 
@@ -116,6 +130,69 @@ async def test_messages_enter_real_loop_after_batch_and_before_next_decision(tmp
     assert parts[0].metadata["communication"]["source_agent"] == "rex"
     assert parts[0].metadata["displayText"] == "Also investigate Y"
     assert any(c.args[0] == "message.part.updated" for c in published.await_args_list)
+
+
+def stub_real_loop_turn(monkeypatch, session_id, seen):
+    """Run the real SessionLoop with one recorded model turn per step."""
+    monkeypatch.setattr("flocks.session.session_loop.Provider.resolve_model_info", lambda *a: (0, 0, None))
+    monkeypatch.setattr("flocks.session.lifecycle.title.SessionTitle.ensure_title", lambda *a, **k: None)
+    monkeypatch.setattr(SessionLoop, "_prepare_auto_turn", AsyncMock(return_value=False))
+    monkeypatch.setattr(SessionLoop, "_run_turn_after_hook", AsyncMock(return_value=False))
+
+    async def step(ctx, callbacks, messages, last_user):
+        seen.append([await Message.get_text_content(m) for m in messages])
+        await Message.create(session_id, MessageRole.ASSISTANT, "done", parentID=last_user.id, finish="stop")
+        return StepResult(action="stop")
+
+    monkeypatch.setattr(SessionLoop, "_process_step_with_failover", step)
+
+
+async def test_input_left_by_a_finishing_execution_starts_the_next_after_its_lease(tmp_path, monkeypatch):
+    parent, child = await sessions(tmp_path)
+    await Message.create(child.id, MessageRole.USER, "Finish original task")
+    seen = []
+    stub_real_loop_turn(monkeypatch, child.id, seen)
+    # No retries: only a wake issued after the lease row is released can start it.
+    monkeypatch.setattr(AgentInbox, "_QUEUED_RETRY_DELAYS", ())
+    publish_status = SessionLoop._publish_session_status
+
+    async def post_when_idle(callbacks, session_id, status, *args, **kwargs):
+        # After the last inbox check, while the execution still holds its lease.
+        if session_id == child.id and status == "idle" and len(seen) == 1:
+            AgentInbox.post(child.id, AgentMessage(parent.id, "rex", "Also investigate Y"))
+        return await publish_status(callbacks, session_id, status, *args, **kwargs)
+
+    monkeypatch.setattr(SessionLoop, "_publish_session_status", post_when_idle)
+    release = SessionExecutionLease.release
+
+    async def slow_release(self):
+        await asyncio.sleep(0.2)  # a slow PostgreSQL round trip
+        await release(self)
+
+    monkeypatch.setattr(SessionExecutionLease, "release", slow_release)
+    result = await SessionLoop.run(child.id, provider_id="p", model_id="m")
+    assert result.action == "stop"
+    await until(lambda: len(seen) == 2 and child.id not in AgentInbox._wakes)
+    assert any("Also investigate Y" in text for text in seen[1])
+    assert not AgentInbox.get(child.id).messages
+
+
+async def test_wake_retries_while_another_execution_holds_the_lease(tmp_path, monkeypatch):
+    parent, child = await sessions(tmp_path)
+    await Message.create(child.id, MessageRole.USER, "Finish original task")
+    seen = []
+    stub_real_loop_turn(monkeypatch, child.id, seen)
+    monkeypatch.setattr(AgentInbox, "_QUEUED_RETRY_DELAYS", (0.02,) * 100)
+    # For example a runner in another process sharing PostgreSQL.
+    held = await SessionExecutionLease.acquire(child.id)
+    assert held is not None
+    AgentInbox.post(child.id, AgentMessage(parent.id, "rex", "Also investigate Y"))
+    await asyncio.sleep(0.1)
+    assert not seen and AgentInbox.get(child.id).messages
+    await held.release()
+    await until(lambda: len(seen) == 1 and child.id not in AgentInbox._wakes)
+    assert any("Also investigate Y" in text for text in seen[0])
+    assert not AgentInbox.get(child.id).messages
 
 
 async def test_progress_wakes_sleep_but_human_queue_does_not(tmp_path, monkeypatch):
@@ -217,6 +294,36 @@ async def test_result_updates_completed_receipt_without_polling(tmp_path, monkey
     assert updated.state.status == "completed"
     assert updated.state.metadata["status"] == "completed"
     assert updated.state.metadata["result"] == "actual result"
+    publisher.assert_awaited_once()
+
+
+async def test_result_updates_receipt_after_parent_execution_released_its_lease(tmp_path, monkeypatch):
+    parent, child = await sessions(tmp_path)
+    monkeypatch.setattr(AgentInbox, "wake", lambda *args: None)
+    message = await Message.create(parent.id, MessageRole.ASSISTANT, "")
+    part = ToolPart(sessionID=parent.id, messageID=message.id, callID="call", tool="delegate_task",
+        state=ToolStateCompleted(input={}, output="submitted", title="task",
+                                 metadata={"sessionId": child.id, "submitted": True, "status": "running"},
+                                 time={"start": 1, "end": 2}))
+    await Message.store_part(parent.id, message.id, part)
+    publisher = AsyncMock()
+    child_done = asyncio.Event()
+
+    async def execute():
+        await child_done.wait()
+        return ToolResult(success=True, output="actual result")
+
+    # delegate_task submits from inside the parent's execution, which ends first.
+    lease = await SessionExecutionLease.acquire(parent.id)
+    async with lease:
+        start_child(ToolContext(parent.id, message.id, call_id="call", event_publish_callback=publisher),
+                    child.id, "explore", execute)
+    child_done.set()
+    await until(lambda: bool(AgentInbox.get(parent.id).messages))
+    Message.invalidate_cache(parent.id)
+    stored = next(p for p in await Message.parts(message.id, parent.id) if p.type == "tool")
+    assert stored.state.metadata["status"] == "completed"
+    assert stored.state.metadata["result"] == "actual result"
     publisher.assert_awaited_once()
 
 

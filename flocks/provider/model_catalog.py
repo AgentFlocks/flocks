@@ -153,13 +153,7 @@ def _parse_model_definitions(
 
         pricing = None
         if pricing_raw:
-            pricing = PriceConfig(
-                input=pricing_raw.get("input", 0.0),
-                output=pricing_raw.get("output", 0.0),
-                cache_read=pricing_raw.get("cache_read"),
-                cache_write=pricing_raw.get("cache_write"),
-                currency=pricing_raw.get("currency", "USD"),
-            )
+            pricing = PriceConfig.model_validate(pricing_raw)
 
         model_type_str = m.get("model_type", "llm")
         try:
@@ -309,10 +303,13 @@ def _remove_retired_model_config(data: Dict[str, Any]) -> bool:
     retired_keys = {
         f"{provider_id}/{model_id}"
         for provider_id in list_catalog_provider_ids()
+        if (data.get("provider") or {}).get(provider_id, {}).get("model_sync") != "manual"
         for model_id in get_retired_model_ids(provider_id)
     }
     dirty = False
     for provider_id, pconfig in (data.get("provider") or {}).items():
+        if pconfig.get("model_sync") == "manual":
+            continue
         models = pconfig.get("models")
         if isinstance(models, dict):
             for model_id in get_retired_model_ids(provider_id):
@@ -377,7 +374,7 @@ def sync_catalog_models_to_config() -> int:
     total_added = 0
 
     for provider_id, pconfig in providers.items():
-        if provider_id not in catalog_provider_ids:
+        if provider_id not in catalog_provider_ids or pconfig.get("model_sync") == "manual":
             continue
 
         existing_models = pconfig.get("models")

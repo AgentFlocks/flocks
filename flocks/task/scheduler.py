@@ -77,22 +77,23 @@ class TaskScheduler:
                 if scheduler.mode == SchedulerMode.ONCE
                 else ExecutionTriggerType.SCHEDULED
             )
-            await TaskManager.create_execution_from_scheduler(
-                scheduler,
-                trigger_type=trigger_type,
-                enqueue=True,
-            )
-
-            if scheduler.mode == SchedulerMode.CRON and scheduler.trigger.cron:
-                scheduler.trigger.next_run = self._compute_next(
-                    scheduler.trigger,
-                    after=now,
-                )
-                await TaskStore.update_scheduler(scheduler)
+            trigger = scheduler.trigger.model_copy(deep=True)
+            status = scheduler.status
+            if scheduler.mode == SchedulerMode.CRON and trigger.cron:
+                trigger.next_run = self._compute_next(trigger, after=now)
             if scheduler.mode == SchedulerMode.ONCE:
-                scheduler.status = SchedulerStatus.DISABLED
-                scheduler.trigger.next_run = None
-                await TaskStore.update_scheduler(scheduler)
+                status = SchedulerStatus.DISABLED
+                trigger.next_run = None
+            # Started only if nobody changed the scheduler since it was read
+            # here: writing this copy back used to undo an edit or a disable.
+            fired = await TaskStore.fire_scheduler(
+                scheduler,
+                TaskManager.build_execution_from_scheduler(scheduler, trigger_type=trigger_type),
+                trigger=trigger,
+                status=status,
+            )
+            if not fired:
+                log.info("scheduler.changed_before_run", {"scheduler_id": scheduler.id})
 
     @staticmethod
     def _parse_next_run(trigger: TaskTrigger) -> Optional[datetime]:

@@ -4,7 +4,9 @@ File operation routes
 Routes for file reading, searching, and listing
 """
 
+import asyncio
 import mimetypes
+import os
 from pathlib import Path
 from typing import List, Optional, Dict
 from fastapi import APIRouter, HTTPException, Query
@@ -13,11 +15,44 @@ from pydantic import BaseModel
 
 from flocks.config.config import Config
 from flocks.utils.file import File, FileNode, FileContent, FileInfo
-from flocks.utils.http_file_read_guard import resolve_path_for_http_file_access
+from flocks.utils.http_file_read_guard import (
+    assert_http_workspace_path_access,
+    resolve_path_for_http_file_access,
+)
 from flocks.utils.log import Log
 
 router = APIRouter()
 log = Log.create(service="routes.file")
+
+# ``/api/file/content`` returns the whole file in one JSON body (base64 for
+# binary, +33%), so it is capped; larger files go through ``/download``.
+_CONTENT_MAX_BYTES = int(os.environ.get("FLOCKS_HTTP_FILE_CONTENT_MAX_BYTES", str(50 * 1024 * 1024)))
+
+
+def _workspace_hit_checker():
+    """Return a per-request readability check for file and search hits.
+
+    The workspace root is resolved once per request and each path is decided
+    once (``find`` reports many lines of the same file). A hit that cannot be
+    resolved -- a symlink loop, an entry removed meanwhile -- is skipped
+    instead of failing the whole listing.
+    """
+    from flocks.workspace.manager import WorkspaceManager
+
+    manager = WorkspaceManager.get_instance()
+    workspace = manager.get_workspace_dir().resolve()
+    decided: Dict[str, bool] = {}
+
+    def readable(path: str) -> bool:
+        if path not in decided:
+            try:
+                assert_http_workspace_path_access(path, manager=manager, workspace=workspace)
+                decided[path] = True
+            except (OSError, RuntimeError, ValueError):  # PermissionError is an OSError
+                decided[path] = False
+        return decided[path]
+
+    return readable
 
 
 @router.get("/list", response_model=List[FileNode], summary="List files")
@@ -31,13 +66,18 @@ async def list_files(path: str = Query(..., description="Directory path")):
         cfg = await Config.get()
         safe_path = await resolve_path_for_http_file_access(path, cfg)
         nodes = await File.list(safe_path)
-        return nodes
+        readable = _workspace_hit_checker()
+        # One policy check per entry: keep large directories off the event loop.
+        return await asyncio.to_thread(lambda: [node for node in nodes if readable(node.absolute)])
+    except HTTPException:
+        raise
     except PermissionError:
         log.warning("http_file.list.denied", {"path": path})
         raise HTTPException(status_code=403, detail="Access denied")
     except Exception as e:
+        # Internal error text (paths, driver messages) stays in the log.
         log.error("file.list.error", {"error": str(e), "path": path})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/content", response_model=FileContent, summary="Read file")
@@ -50,21 +90,55 @@ async def read_file(path: str = Query(..., description="File path")):
     try:
         cfg = await Config.get()
         safe_path = await resolve_path_for_http_file_access(path, cfg)
+        try:
+            size = os.stat(safe_path).st_size
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"File not found: {path}")
+        if size > _CONTENT_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large for inline read ({size} bytes > {_CONTENT_MAX_BYTES}); use /api/file/download",
+            )
         content = await File.read(safe_path)
         return content
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except FileNotFoundError:
+        # Echo the path as the caller wrote it, not the resolved server path.
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    except IsADirectoryError:
+        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+    except ValueError as e:
+        if "Not a file" in str(e):
+            raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+        log.error("file.read.error", {"error": str(e), "path": path})
+        raise HTTPException(status_code=500, detail="Internal server error")
     except PermissionError:
         log.warning("http_file.read.denied", {"path": path})
         raise HTTPException(status_code=403, detail="Access denied")
     except Exception as e:
         log.error("file.read.error", {"error": str(e), "path": path})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/download", summary="Download file")
 async def download_file(path: str = Query(..., description="File path")):
     try:
+        # Channel media missing from the local disk is brought back first;
+        # the access check below still decides.
+        from flocks.session.files import restore_channel_media
+        from flocks.session.utils.file_extractor import file_url_to_path
+        from flocks.storage.file_mirror import readable_url
+
+        requested = Path(path).expanduser()
+        if requested.is_absolute():
+            readable = readable_url(requested.as_uri())
+            if readable != requested.as_uri():
+                path = file_url_to_path(readable)
+            try:
+                await restore_channel_media([Path(path).resolve(strict=False)])
+            except Exception as exc:
+                log.warning("http_file.download.restore_failed", {"error_type": type(exc).__name__})
         cfg = await Config.get()
         safe_path = await resolve_path_for_http_file_access(path, cfg)
         target = Path(safe_path)
@@ -77,14 +151,14 @@ async def download_file(path: str = Query(..., description="File path")):
         )
     except HTTPException:
         raise
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
     except PermissionError:
         log.warning("http_file.download.denied", {"path": path})
         raise HTTPException(status_code=403, detail="Access denied")
     except Exception as e:
         log.error("file.download.error", {"error": str(e), "path": path})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/search", response_model=List[str], summary="Search files")
@@ -109,10 +183,13 @@ async def search_files(
         raise HTTPException(status_code=400, detail="Invalid search query")
     try:
         results = await File.search(query=query, limit=limit, dirs=dirs, type=type)
-        return results
+        readable = _workspace_hit_checker()
+        return await asyncio.to_thread(
+            lambda: [path for path in results if readable(os.path.abspath(path))]
+        )
     except Exception as e:
         log.error("file.search.error", {"error": str(e), "query": query})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/status", response_model=List[FileInfo], summary="Get file status")
@@ -124,10 +201,13 @@ async def get_file_status():
     """
     try:
         status = await File.status()
-        return status
+        readable = _workspace_hit_checker()
+        return await asyncio.to_thread(
+            lambda: [item for item in status if readable(os.path.abspath(item.path))]
+        )
     except Exception as e:
         log.error("file.status.error", {"error": str(e)})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # Additional route for text search (ripgrep-like functionality)
@@ -197,24 +277,35 @@ async def find_text(pattern: str = Query(..., description="Search pattern")):
             ".",
         ]
         
-        result = subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        try:
+            # Off the event loop: grep over a project tree can run for seconds.
+            result = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            # Same contract as ``/find``: a search that does not finish in
+            # time is an empty result, not a server error.
+            log.warning("text.search.timeout", {"pattern": pattern, "cwd": cwd})
+            return []
         
         matches = []
-        
+
         if result.returncode == 0:
+            readable = _workspace_hit_checker()
             for line in result.stdout.split("\n")[:100]:
                 if not line.strip():
                     continue
-                
+
                 parts = line.split(":", 2)
                 if len(parts) >= 3:
-                    file_path = parts[0].lstrip("./")
+                    file_path = parts[0].removeprefix("./")
+                    if not readable(str(project_root / file_path)):
+                        continue
                     line_num = parts[1]
                     text = parts[2]
                     
@@ -229,4 +320,4 @@ async def find_text(pattern: str = Query(..., description="Search pattern")):
         raise
     except Exception as e:
         log.error("text.search.error", {"error": str(e), "pattern": pattern})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")

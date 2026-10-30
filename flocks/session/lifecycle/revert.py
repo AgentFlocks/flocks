@@ -123,11 +123,14 @@ class SessionRevert:
         if not session:
             raise ValueError(f"Session {session_id} not found")
         
-        return await SessionRevertManager.unrevert(
-            project_id=session.project_id,
-            session_id=session_id,
-            worktree=session.directory,
-        )
+        # Restoring the snapshot takes a while and the revert state clears only at
+        # the end, so like revert it holds the session (no runner, no retention).
+        async with Session.active_operation(session_id) as active_session:
+            return await SessionRevertManager.unrevert(
+                project_id=active_session.project_id,
+                session_id=session_id,
+                worktree=active_session.directory,
+            )
     
     @classmethod
     async def cleanup(cls, session: SessionInfo) -> None:
@@ -196,11 +199,12 @@ class SessionRevertManager:
             
             for part in msg_parts:
                 if revert_info:
-                    # After revert point, collect patches
-                    if isinstance(part, dict) and part.get("type") == "patch":
+                    # After revert point, collect patches（part 可能是对象也可能是 dict）
+                    part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
+                    if part_type == "patch":
                         patches.append(SnapshotPatch(
-                            hash=part.get("hash", ""),
-                            files=part.get("files", [])
+                            hash=(part.get("hash") if isinstance(part, dict) else getattr(part, "hash", "")) or "",
+                            files=list((part.get("files") if isinstance(part, dict) else getattr(part, "files", None)) or []),
                         ))
                     continue
                 

@@ -160,4 +160,9 @@ describe('NotificationModal', () => {
     expect(screen.getByText('危险链接')).not.toHaveAttribute('href', 'javascript:alert(1)');
     expect(document.querySelector('script')).toBeNull();
   });
+
+  it('does not mount or lock focus when there are no notifications', () => {
+    render(<NotificationModal notifications={[]} onAcknowledge={vi.fn()} onDismissForever={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
 });

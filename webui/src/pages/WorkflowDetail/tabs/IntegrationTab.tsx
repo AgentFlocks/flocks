@@ -586,6 +586,16 @@ function TextArea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   );
 }
 
+// Syslog 监听端口：1~65535 的整数。字段与保存流程共用同一校验，越界/非整数时字段内报错、保存按钮禁用
+export const SYSLOG_PORT_RANGE_ERROR = '端口范围错误（1-65535）';
+
+export function validateSyslogPort(raw: unknown): string {
+  const text = String(raw ?? '').trim();
+  if (!/^\d+$/.test(text)) return SYSLOG_PORT_RANGE_ERROR;
+  const port = Number(text);
+  return port >= 1 && port <= 65535 ? '' : SYSLOG_PORT_RANGE_ERROR;
+}
+
 function SyslogTriggerFields({
   source,
   inputKey,
@@ -597,6 +607,7 @@ function SyslogTriggerFields({
   onSourceChange: (patch: JsonObject) => void;
   onInputKeyChange: (key: string) => void;
 }) {
+  const portError = validateSyslogPort(source.port ?? 5140);
   return (
     <div className="grid grid-cols-1 gap-3">
       <div className="grid grid-cols-2 gap-3">
@@ -623,9 +634,17 @@ function SyslogTriggerFields({
           <Input
             type="number"
             min={1}
+            aria-label="Port"
+            aria-invalid={portError ? true : undefined}
             value={String(source.port ?? 5140)}
-            onChange={(e) => onSourceChange({ port: Math.max(1, Number.parseInt(e.target.value || '5140', 10)) })}
+            onChange={(e) => {
+              const raw = e.target.value;
+              // 合法时存数字（后端契约），非法时保留原文让用户看到所填内容，由 validateSyslogPort 统一判定
+              onSourceChange({ port: validateSyslogPort(raw) ? raw : Number(raw) });
+            }}
+            className={portError ? 'border-red-500' : ''}
           />
+          {portError ? <p className="text-xs text-red-600">{portError}</p> : null}
         </Field>
       </div>
       <Field label="Input Key">
@@ -1365,6 +1384,8 @@ function TriggerEditor({
 
   const source = draft.source ?? {};
   const runtime = draft.runtime ?? {};
+  // Syslog 端口越界/非整数 → 表单无效：保存按钮禁用，共享保存流程 syncJsonEditors 也拦截
+  const portError = draft.type === 'syslog' ? validateSyslogPort(source.port ?? 5140) : '';
   const auth = draft.auth ?? { type: 'none' };
   const isWebhook = draft.type === 'webhook' || draft.type === 'custom_webhook';
   const isSchedule = draft.type === 'schedule';
@@ -1413,6 +1434,10 @@ function TriggerEditor({
   };
 
   const syncJsonEditors = (): WorkflowTrigger | null => {
+    if (portError) {
+      setJsonError(portError);
+      return null;
+    }
     const inputsParsed = parseJsonObject(inputsText, 'Inputs');
     if (!inputsParsed.ok) {
       setJsonError(inputsParsed.error);
@@ -1615,7 +1640,8 @@ function TriggerEditor({
           onClick={() => {
             void persistCurrentDraft();
           }}
-          disabled={saving}
+          disabled={saving || !!portError}
+          title={portError || undefined}
           className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
         >
           {saving ? '保存中...' : '保存'}

@@ -57,6 +57,13 @@ import SubworkflowNode from './nodes/SubworkflowNode';
 import PropertyPanel from './components/PropertyPanel';
 import EdgePropertyPanel from './components/EdgePropertyPanel';
 import NodeToolbar from './components/NodeToolbar';
+import { isTextEditingTarget, removeNodesWithEdges } from './graphEditing';
+import {
+  clearWorkflowDraft,
+  readWorkflowDraft,
+  useConfirmBeforeUnload,
+  writeWorkflowDraft,
+} from './unsavedChanges';
 import ExecutionPanel from './components/ExecutionPanel';
 import ExecuteDialog from './components/ExecuteDialog';
 
@@ -381,6 +388,36 @@ export default function WorkflowEditor() {
   const [currentExecution, setCurrentExecution] = useState<WorkflowExecution | null>(null);
   const [showExecutionPanel, setShowExecutionPanel] = useState(false);
   const [executionStopping, setExecutionStopping] = useState(false);
+  // What the canvas would save (node positions are not part of it) and the
+  // same for the last loaded or saved version: unequal means unsaved edits.
+  const [savedSnapshot, setSavedSnapshot] = useState<string | null>(null);
+  const editedJson = useMemo(
+    () => (workflow ? convertToWorkflowJSON(nodes, edges, workflow) : null),
+    [nodes, edges, workflow],
+  );
+  const editedSnapshot = useMemo(() => (editedJson ? JSON.stringify(editedJson) : null), [editedJson]);
+  const hasUnsavedChanges = savedSnapshot !== null && editedSnapshot !== null && editedSnapshot !== savedSnapshot;
+
+  useConfirmBeforeUnload(hasUnsavedChanges);
+
+  // Keep unsaved edits for this tab: a reload, or a route change that unmounts
+  // the editor, offers them back; saved or unchanged canvases drop the copy.
+  // Keyed on the snapshot string, not editedJson: dragging a node makes a new
+  // object with the same content.
+  useEffect(() => {
+    if (!workflow || savedSnapshot === null || editedSnapshot === null) return;
+    if (editedSnapshot !== savedSnapshot && editedJson) {
+      writeWorkflowDraft(workflow.id, { baseUpdatedAt: workflow.updatedAt, workflowJson: editedJson });
+    } else {
+      clearWorkflowDraft(workflow.id);
+    }
+  }, [workflow, savedSnapshot, editedSnapshot]);
+
+  const leaveEditor = () => {
+    if (hasUnsavedChanges && !window.confirm(t('editor.unsavedLeaveConfirm'))) return;
+    if (workflow) clearWorkflowDraft(workflow.id);
+    navigate('/workflows');
+  };
 
   // 加载工作流数据
   useEffect(() => {
@@ -438,9 +475,27 @@ export default function WorkflowEditor() {
     try {
       setLoading(true);
       const response = await workflowAPI.get(id!);
-      setWorkflow(response.data);
-      
-      const { nodes: flowNodes, edges: flowEdges } = convertToReactFlowFormat(response.data.workflowJson, edgeTheme);
+      const loaded = response.data;
+      setWorkflow(loaded);
+
+      const { nodes: flowNodes, edges: flowEdges } = convertToReactFlowFormat(loaded.workflowJson, edgeTheme);
+      const loadedSnapshot = JSON.stringify(convertToWorkflowJSON(flowNodes, flowEdges, loaded));
+      setSavedSnapshot(loadedSnapshot);
+      // Edits left unsaved in this tab, on top of the version just loaded.
+      const draft = readWorkflowDraft(loaded.id);
+      if (draft && draft.baseUpdatedAt === loaded.updatedAt) {
+        const draftFlow = convertToReactFlowFormat(
+          { ...loaded.workflowJson, start: draft.workflowJson.start, nodes: draft.workflowJson.nodes, edges: draft.workflowJson.edges },
+          edgeTheme,
+        );
+        const draftSnapshot = JSON.stringify(convertToWorkflowJSON(draftFlow.nodes, draftFlow.edges, loaded));
+        if (draftSnapshot !== loadedSnapshot && window.confirm(t('editor.restoreDraftConfirm'))) {
+          setNodes(draftFlow.nodes);
+          setEdges(draftFlow.edges);
+          return;
+        }
+      }
+      clearWorkflowDraft(loaded.id);
       setNodes(flowNodes);
       setEdges(flowEdges);
     } catch (error: any) {
@@ -602,12 +657,31 @@ export default function WorkflowEditor() {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Delete' || event.key === 'Backspace') {
-        // 删除选中的节点
+        // 在属性面板的输入框里退格是在改文字，不是删节点
+        if (isTextEditingTarget(event.target)) {
+          return;
+        }
+        // 删除选中的节点，连带删掉挂在它上面的边（否则保存时会带上指向已删节点的悬空边）
         const selectedNodes = nodes.filter((node) => node.selected);
         if (selectedNodes.length > 0) {
-          setNodes((nds) => nds.filter((node) => !node.selected));
+          const { nodes: remainingNodes, edges: remainingEdges } = removeNodesWithEdges(
+            nodes,
+            edges,
+            selectedNodes.map((node) => node.id),
+          );
+          if (workflow) {
+            const refreshed = applyGraphSemantics(remainingNodes, remainingEdges, workflow, edgeTheme);
+            setNodes(refreshed.nodes);
+            setEdges(refreshed.edges);
+          } else {
+            setNodes(remainingNodes);
+            setEdges(remainingEdges);
+          }
           setShowPropertyPanel(false);
           setSelectedNode(null);
+          setShowEdgePropertyPanel(false);
+          setSelectedEdge(null);
+          return;
         }
 
         // 删除选中的边
@@ -682,11 +756,15 @@ export default function WorkflowEditor() {
         },
       };
       const workflowJson = convertToWorkflowJSON(nodes, edges, workflowForSave);
-      await workflowAPI.update(id!, { workflowJson });
-      setWorkflow({
+      const saved = (await workflowAPI.update(id!, { workflowJson })).data;
+      const savedWorkflow: Workflow = {
         ...latestWorkflow,
         workflowJson,
-      });
+        // The version a later draft builds on is the one just written.
+        updatedAt: saved?.updatedAt ?? latestWorkflow.updatedAt,
+      };
+      setWorkflow(savedWorkflow);
+      setSavedSnapshot(JSON.stringify(convertToWorkflowJSON(nodes, edges, savedWorkflow)));
       alert(t('editor.saveSuccess'));
     } catch (error: any) {
       console.error('Failed to save workflow:', error);
@@ -803,19 +881,20 @@ export default function WorkflowEditor() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-gray-50 dark:bg-zinc-950">
-      {/* 顶部工具栏 */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between dark:border-zinc-800 dark:bg-zinc-950">
-        <div className="flex items-center gap-4">
+    <div className="h-screen flex flex-col bg-gray-50 dark:bg-zinc-950 max-md:h-full">
+      {/* 顶部工具栏（手机：操作按钮单独一行，可左右滑动） */}
+      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between dark:border-zinc-800 dark:bg-zinc-950 max-md:flex-wrap max-md:gap-2 max-md:px-4 max-md:py-3">
+        <div className="flex items-center gap-4 max-md:min-w-0 max-md:gap-2">
           <button
-            onClick={() => navigate('/workflows')}
+            onClick={leaveEditor}
+            aria-label={t('editor.backToList')}
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors dark:text-zinc-300 dark:hover:bg-zinc-800"
           >
             <ArrowLeft className="w-5 h-5" />
           </button>
-          <div>
-            <h1 className="text-xl font-semibold text-gray-900 dark:text-zinc-100">{getWorkflowDisplayName(workflow, i18n.language)}</h1>
-            <p className="text-sm text-gray-500 dark:text-zinc-400">{workflow.description || t('editor.noDescription')}</p>
+          <div className="max-md:min-w-0">
+            <h1 className="text-xl font-semibold text-gray-900 dark:text-zinc-100 max-md:truncate max-md:text-base">{getWorkflowDisplayName(workflow, i18n.language)}</h1>
+            <p className="text-sm text-gray-500 dark:text-zinc-400 max-md:truncate max-md:text-xs">{workflow.description || t('editor.noDescription')}</p>
           </div>
           {validationResult && (
             <div className="flex items-center gap-2">
@@ -831,7 +910,7 @@ export default function WorkflowEditor() {
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 max-md:w-full max-md:gap-2 max-md:overflow-x-auto max-md:[&>button]:shrink-0 max-md:[&>button]:whitespace-nowrap max-md:[&>button]:px-3">
           <button
             onClick={() => setShowNodeToolbar(!showNodeToolbar)}
             className={`flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg transition-colors ${
@@ -953,6 +1032,7 @@ export default function WorkflowEditor() {
           <Background variant={BackgroundVariant.Dots} gap={12} size={1} color={isDark ? '#5a6573' : '#e2e8f0'} />
           <Controls />
           <MiniMap
+            className="max-md:!hidden"
             nodeColor={(node) => {
               return nodeMiniMapColors[node.type as keyof typeof nodeMiniMapColors] ?? '#94a3b8';
             }}
@@ -960,21 +1040,23 @@ export default function WorkflowEditor() {
             style={{ backgroundColor: isDark ? '#303842' : '#f9fafb' }}
           />
           
-          {/* 图例 */}
-          <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
-            <h3 className="text-sm font-semibold text-gray-900 mb-3 dark:text-zinc-100">{t('editor.nodeTypesLabel')}</h3>
-            <div className="space-y-2">
-              {Object.entries(nodeColors).map(([type, colors]) => (
-                <div key={type} className="flex items-center gap-2">
-                  <div className={`w-4 h-4 rounded border-2 ${colors.border} ${colors.bg}`} />
-                  <span className="text-xs text-gray-700 capitalize dark:text-zinc-300">{type}</span>
-                </div>
-              ))}
-            </div>
-          </Panel>
+          {/* 图例：节点工具栏打开时它占着左上角，按钮本身已按类型配色 */}
+          {!showNodeToolbar && (
+            <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30 max-md:hidden">
+              <h3 className="text-sm font-semibold text-gray-900 mb-3 dark:text-zinc-100">{t('editor.nodeTypesLabel')}</h3>
+              <div className="space-y-2">
+                {Object.entries(nodeColors).map(([type, colors]) => (
+                  <div key={type} className="flex items-center gap-2">
+                    <div className={`w-4 h-4 rounded border-2 ${colors.border} ${colors.bg}`} />
+                    <span className="text-xs text-gray-700 capitalize dark:text-zinc-300">{type}</span>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+          )}
 
           {/* 统计信息 */}
-          <Panel position="top-right" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+          <Panel position="top-right" className="bg-white rounded-lg shadow-lg p-4 dark:border dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30 max-md:hidden">
             <h3 className="text-sm font-semibold text-gray-900 mb-3 dark:text-zinc-100">{t('editor.statsLabel')}</h3>
             <div className="space-y-2 text-xs text-gray-600 dark:text-zinc-300">
               <div className="flex justify-between gap-4">

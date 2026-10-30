@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import json
 from unittest.mock import AsyncMock
 
 import pytest
 from httpx import AsyncClient
 
 from flocks.mcp.types import McpStatus, McpStatusInfo
+from flocks.security.secrets import SecretManager
 from flocks.server.routes import mcp as mcp_routes
 from flocks.tool import tool_loader
 
@@ -312,6 +315,7 @@ class TestMcpRoutes:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ):
         persisted_names: list[str] = []
+        removed_names: list[str] = []
 
         async def fake_connect(name: str, config: dict) -> bool:
             return False
@@ -325,7 +329,10 @@ class TestMcpRoutes:
             }
 
         async def fake_remove(name: str) -> bool:
-            raise AssertionError("remove should not be called for non-auth failures")
+            # The rejected add must purge its transient FAILED runtime entry
+            # (so it does not linger in GET /api/mcp) without persisting anything.
+            removed_names.append(name)
+            return True
 
         monkeypatch.setattr(mcp_routes.MCP, "connect", fake_connect)
         monkeypatch.setattr(mcp_routes.MCP, "status", fake_status)
@@ -354,6 +361,7 @@ class TestMcpRoutes:
         assert resp.status_code == 400, resp.text
         assert "Connection refused" in resp.text
         assert persisted_names == []
+        assert removed_names == ["broken-mcp"]
 
     @pytest.mark.asyncio
     async def test_add_mcp_server_allows_missing_header_credentials(
@@ -1424,13 +1432,6 @@ class TestMcpRoutes:
         connected_configs: list[dict] = []
 
         class FakeSecrets:
-            def _load(self):
-                return dict(secret_state)
-
-            def _save(self, data):
-                secret_state.clear()
-                secret_state.update(data)
-
             def set(self, secret_id: str, value: str):
                 secret_state[secret_id] = value
 
@@ -1592,7 +1593,7 @@ class TestMcpRoutes:
 
     @pytest.mark.asyncio
     async def test_configure_threatbook_mcp_restores_previous_state_when_apply_fails(
-        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
         old_config = {
             "type": "remote",
@@ -1600,19 +1601,10 @@ class TestMcpRoutes:
             "enabled": True,
         }
         raw_state = {"mcp": {"threatbook_mcp": dict(old_config)}}
-        secret_state = {"threatbook_mcp_key": "old-key"}
+        store_path = tmp_path / ".secret.json"
+        store_path.write_text(json.dumps({"threatbook_mcp_key": "old-key"}))
+        manager = SecretManager(store_path)
         connect_attempts: list[str] = []
-
-        class FakeSecrets:
-            def _load(self):
-                return dict(secret_state)
-
-            def _save(self, data):
-                secret_state.clear()
-                secret_state.update(data)
-
-            def set(self, secret_id: str, value: str):
-                secret_state[secret_id] = value
 
         async def fake_test(request):
             return {"success": True, "message": "ok"}
@@ -1630,6 +1622,9 @@ class TestMcpRoutes:
 
         async def fake_connect(name: str, config: dict):
             connect_attempts.append(config["url"])
+            if len(connect_attempts) == 1:
+                # Another request or the CLI saves a key while this apply is under way.
+                contextvars.Context().run(SecretManager(store_path).set, "virustotal_api_key", "saved meanwhile")
             return len(connect_attempts) > 1
 
         def fake_write_raw(data: dict):
@@ -1639,7 +1634,7 @@ class TestMcpRoutes:
         def fake_persist(name: str, config: dict):
             raw_state["mcp"][name] = dict(config)
 
-        monkeypatch.setattr(mcp_routes, "get_secret_manager", lambda: FakeSecrets())
+        monkeypatch.setattr(mcp_routes, "get_secret_manager", lambda: manager)
         monkeypatch.setattr(mcp_routes, "test_mcp_connection", fake_test)
         monkeypatch.setattr(mcp_routes, "_load_mcp_server_config", fake_load)
         monkeypatch.setattr(mcp_routes, "_load_raw_mcp_server_config", lambda name: raw_state["mcp"].get(name))
@@ -1659,7 +1654,9 @@ class TestMcpRoutes:
 
         assert resp.status_code == 500, resp.text
         assert raw_state["mcp"]["threatbook_mcp"] == old_config
-        assert secret_state["threatbook_mcp_key"] == "old-key"
+        assert json.loads(store_path.read_text()) == {
+            "threatbook_mcp_key": "old-key", "virustotal_api_key": "saved meanwhile",
+        }
         assert connect_attempts[-1] == old_config["url"]
 
 

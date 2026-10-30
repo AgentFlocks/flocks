@@ -14,10 +14,11 @@ from datetime import UTC, datetime
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.provider.base_url import BaseURLValidationError, validate_provider_base_url
 from flocks.provider.credential import get_api_key
 from flocks.provider.provider import (
     BaseProvider,
@@ -115,6 +116,7 @@ class CreateProviderReq(BaseModel):
     base_url: str = Field(..., min_length=1)
     api_key: Optional[str] = Field(None)
     description: Optional[str] = Field(None)
+    skip_catalog_bootstrap: bool = False
 
 
 class ProviderResp(BaseModel):
@@ -130,10 +132,10 @@ class CreateModelReq(BaseModel):
     name: str = Field(..., min_length=1)
     context_window: Optional[int] = Field(None, ge=1024)
     max_output_tokens: Optional[int] = Field(None, ge=1)
-    supports_vision: bool = False
-    supports_tools: bool = True
-    supports_streaming: bool = True
-    supports_reasoning: bool = True
+    supports_vision: StrictBool = False
+    supports_tools: StrictBool = True
+    supports_streaming: StrictBool = True
+    supports_reasoning: StrictBool = True
     input_price: float = Field(0.0, ge=0)
     output_price: float = Field(0.0, ge=0)
     cache_read_price: Optional[float] = Field(None, ge=0)
@@ -179,11 +181,27 @@ async def list_providers():
     return results
 
 
+def _validate_custom_provider_id(pid: str) -> None:
+    """Reject ids that cannot be routed or that look like path traversal."""
+    if (
+        "/" in pid
+        or "\\" in pid
+        or ".." in pid
+        or any(ch.isspace() or ord(ch) < 32 for ch in pid)
+    ):
+        raise HTTPException(422, "Provider name must not contain '/', '\\', '..' or whitespace")
+
+
 @router.post("/providers", response_model=ProviderResp, status_code=201)
 @serialized_config_mutation
 async def create_provider(body: CreateProviderReq, _admin: object = Depends(require_admin)):
     """Create a custom OpenAI-compatible provider in flocks.json."""
     pid = "custom-" + body.name.lower().replace(" ", "-").replace("_", "-")
+    _validate_custom_provider_id(pid)
+    try:
+        base_url = validate_provider_base_url(body.base_url)
+    except BaseURLValidationError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
     # Check if already exists
     if ConfigWriter.get_provider_raw(pid) is not None:
@@ -195,7 +213,7 @@ async def create_provider(body: CreateProviderReq, _admin: object = Depends(requ
     config_dict = ConfigWriter.build_provider_config(
         pid,
         npm="@ai-sdk/openai-compatible",
-        base_url=body.base_url,
+        base_url=base_url,
     )
     config_dict["name"] = body.name
     if body.description:
@@ -203,6 +221,8 @@ async def create_provider(body: CreateProviderReq, _admin: object = Depends(requ
     config_dict["created_at"] = now
 
     # Write to flocks.json
+    if body.skip_catalog_bootstrap:
+        config_dict["model_sync"] = "manual"
     ConfigWriter.add_provider(pid, config_dict)
 
     # Save API key to .secret.json using the LLM provider convention (_llm_key)
@@ -215,11 +235,11 @@ async def create_provider(body: CreateProviderReq, _admin: object = Depends(requ
         log.warning("custom_provider.secret_save_failed", {"id": pid, "error": str(e)})
 
     # Register in runtime
-    _register_provider(pid, body.name, body.base_url, body.api_key)
+    _register_provider(pid, body.name, base_url, body.api_key)
 
     log.info("custom_provider.created", {"id": pid})
     return ProviderResp(
-        id=pid, name=body.name, base_url=body.base_url,
+        id=pid, name=body.name, base_url=base_url,
         description=body.description, created_at=now,
     )
 
@@ -228,6 +248,9 @@ async def create_provider(body: CreateProviderReq, _admin: object = Depends(requ
 @serialized_config_mutation
 async def delete_provider(provider_id: str, _admin: object = Depends(require_admin)):
     """Delete a custom provider from flocks.json."""
+    if not provider_id.startswith("custom-"):
+        # Built-in providers are removed via DELETE /api/provider/{id}/credentials.
+        raise HTTPException(400, "Only custom-* providers can be deleted here")
     raw = ConfigWriter.get_provider_raw(provider_id)
     if raw is None:
         raise HTTPException(404, "Not found")
@@ -295,12 +318,23 @@ async def create_model(provider_id: str, body: CreateModelReq, _admin: object = 
     models = raw.get("models", {})
     existing_model = models.get(body.model_id)
     limits = await _resolve_model_limits(provider_id, body, raw)
-    cache_read_price = body.cache_read_price
-    if existing_model and "cache_read_price" not in body.model_fields_set:
-        cache_read_price = existing_model.get("cache_read_price")
+    price_fields = ("input_price", "output_price", "cache_read_price", "currency")
+    if existing_model is not None:
+        # Omission preserves both explicit overrides and the absence of an
+        # override, so editing a name does not replace catalog tiers with zero.
+        pricing_config = {key: existing_model[key] for key in price_fields if key in existing_model}
+        pricing_config.update({
+            key: getattr(body, key) for key in price_fields if key in body.model_fields_set
+        })
+    else:
+        # New custom models retain the existing zero-price defaults.
+        pricing_config = {key: getattr(body, key) for key in price_fields}
 
     now = datetime.now(UTC).isoformat()
     model_config = {
+        # Editing the common form fields must retain provider-specific metadata
+        # which this form cannot represent (reasoning replay, input limits, etc.).
+        **(existing_model or {}),
         "name": body.name,
         "context_window": limits.context_window,
         "max_output_tokens": limits.max_output_tokens,
@@ -308,10 +342,7 @@ async def create_model(provider_id: str, body: CreateModelReq, _admin: object = 
         "supports_tools": body.supports_tools,
         "supports_streaming": body.supports_streaming,
         "supports_reasoning": body.supports_reasoning,
-        "input_price": body.input_price,
-        "output_price": body.output_price,
-        "cache_read_price": cache_read_price,
-        "currency": body.currency,
+        **pricing_config,
         "created_at": existing_model.get("created_at", now) if existing_model else now,
     }
 
@@ -321,9 +352,10 @@ async def create_model(provider_id: str, body: CreateModelReq, _admin: object = 
     # Add/update runtime
     _add_model_to_runtime(
         provider_id,
-        body.model_copy(update={"cache_read_price": cache_read_price}),
+        body,
         context_window=limits.context_window,
         max_output_tokens=limits.max_output_tokens,
+        model_config=model_config,
     )
 
     # Capture first-model eligibility from the config before the upsert.
@@ -342,9 +374,10 @@ async def create_model(provider_id: str, body: CreateModelReq, _admin: object = 
         unique_name=f"{provider_id}/{body.model_id}", name=body.name,
         context_window=limits.context_window,
         max_output_tokens=limits.max_output_tokens,
-        input_price=body.input_price, output_price=body.output_price,
-        cache_read_price=cache_read_price,
-        currency=body.currency, created_at=now,
+        input_price=pricing_config.get("input_price") or 0.0,
+        output_price=pricing_config.get("output_price") or 0.0,
+        cache_read_price=pricing_config.get("cache_read_price"),
+        currency=pricing_config.get("currency") or "USD", created_at=now,
     )
 
 
@@ -352,17 +385,14 @@ async def create_model(provider_id: str, body: CreateModelReq, _admin: object = 
 @serialized_config_mutation
 async def delete_model(provider_id: str, model_id: str, _admin: object = Depends(require_admin)):
     """Remove a model from a provider in flocks.json."""
-    removed = ConfigWriter.remove_model(provider_id, model_id)
+    from flocks.server.routes.model import _delete_model_inventory
+
+    removed = await _delete_model_inventory(provider_id, model_id)
     if not removed:
         raw = ConfigWriter.get_provider_raw(provider_id)
         if raw is None:
             raise HTTPException(404, f"Provider '{provider_id}' not found")
         raise HTTPException(404, f"Model '{model_id}' not found for provider '{provider_id}'")
-
-    # Remove from runtime
-    Provider.remove_model_from_runtime(provider_id, model_id)
-
-    ConfigWriter.clear_default_models_for_model(provider_id, model_id)
 
     log.info("custom_model.deleted", {"unique": f"{provider_id}/{model_id}"})
 
@@ -505,11 +535,18 @@ async def _fetch_models_dev() -> Optional[dict[str, Any]]:
 
     try:
         import httpx
+        import asyncio
 
-        async with httpx.AsyncClient(timeout=MODELS_DEV_TIMEOUT_SEC) as client:
-            response = await client.get(MODELS_DEV_URL)
-            response.raise_for_status()
-            data = response.json()
+        async def _get() -> Any:
+            async with httpx.AsyncClient(timeout=MODELS_DEV_TIMEOUT_SEC) as client:
+                response = await client.get(MODELS_DEV_URL)
+                response.raise_for_status()
+                return response.json()
+
+        # httpx's timeout is per phase (connect/read/...); bound the whole
+        # request so model creation never waits longer than the advertised
+        # MODELS_DEV_TIMEOUT_SEC.
+        data = await asyncio.wait_for(_get(), timeout=MODELS_DEV_TIMEOUT_SEC)
     except Exception as exc:
         log.warning("custom_model.models_dev_fetch_failed", {"error": str(exc)})
         return _models_dev_cache
@@ -653,25 +690,28 @@ def _add_model_to_runtime(
     *,
     context_window: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
+    model_config: Optional[dict[str, Any]] = None,
 ):
     """Add (or upsert) a model in the runtime Provider registry.
 
     Works for both CustomProvider (_custom_models) and DynamicOpenAIProvider
     / OpenAICompatibleProvider (_config_models).
     """
+    price_fields = ("input_price", "output_price", "cache_read_price", "currency")
+    pricing_config = (
+        {key: getattr(body, key) for key in price_fields}
+        if model_config is None
+        else {key: model_config[key] for key in price_fields if key in model_config}
+    )
     _pricing = None
-    if (
-        body.input_price is not None
-        or body.output_price is not None
-        or body.cache_read_price is not None
-    ):
+    if any(pricing_config.get(key) is not None for key in price_fields[:3]):
         _pricing = {
-            "input": float(body.input_price or 0.0),
-            "output": float(body.output_price or 0.0),
-            "currency": body.currency,
+            "input": float(pricing_config.get("input_price") or 0.0),
+            "output": float(pricing_config.get("output_price") or 0.0),
+            "currency": pricing_config.get("currency") or "USD",
         }
-        if body.cache_read_price is not None:
-            _pricing["cache_read"] = float(body.cache_read_price)
+        if pricing_config.get("cache_read_price") is not None:
+            _pricing["cache_read"] = float(pricing_config["cache_read_price"])
     mi = ModelInfo(
         id=body.model_id,
         name=body.name,
@@ -697,8 +737,8 @@ def _add_model_to_runtime(
     mi._explicit_keys = {
         "name", "context_window", "max_output_tokens",
         "supports_streaming", "supports_tools", "supports_vision",
-        "supports_reasoning", "input_price", "output_price",
-        "cache_read_price", "currency",
+        "supports_reasoning",
+        *pricing_config.keys(),
     }
     Provider._models[body.model_id] = mi
     p = Provider.get(provider_id)

@@ -16,11 +16,42 @@
  * - Support optional copy actions, timestamps, and related affordances
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, Download, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, Plus, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, Eye, ListTree, BookOpen, Workflow as WorkflowIcon } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, memo, type RefObject } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import {
+  AlertCircle,
+  ArrowUp,
+  BookOpen,
+  Bot,
+  Brain,
+  CheckCircle2,
+  ChevronDown,
+  Clock,
+  Copy,
+  Download,
+  Eye,
+  FileText,
+  ImageIcon,
+  ListTree,
+  Loader2,
+  Paperclip,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Save,
+  Send,
+  Square,
+  Trash2,
+  User,
+  Workflow as WorkflowIcon,
+  X,
+  XCircle,
+} from 'lucide-react';
 import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
+import ExtensionSlot from '@/components/extensions/ExtensionSlot';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
 import DelegateTaskCard, { extractDelegateInfo, isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
@@ -47,6 +78,8 @@ import { useToast } from './Toast';
 import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
 import { getFileOperationDisplayName, redactToolInput, resolveToolPresentation } from './toolPresentation';
 import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
+import SessionCacheUsage from './SessionCacheUsage';
+import { areCacheUsageCallsEqual, getMessageCacheUsageCall, type CacheUsageCall } from '@/features/session-chat/cacheUsage';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
@@ -100,7 +133,13 @@ export {
 // Types
 // ============================================================================
 
-export type MergedMessage = Message & { _merged?: boolean };
+export type MergedMessage = Message & { _merged?: boolean; _cacheUsageCalls?: CacheUsageCall[] };
+
+function getChatCacheUsageCalls(message: MergedMessage): CacheUsageCall[] {
+  if (message._cacheUsageCalls) return message._cacheUsageCalls;
+  const call = getMessageCacheUsageCall(message);
+  return call ? [call] : [];
+}
 
 /**
  * Whether a permission request belongs in this chat: its own, or one from a
@@ -142,6 +181,12 @@ export interface ConversationBottomSlotActions {
   sessionId?: string | null;
   hasMessages: boolean;
 }
+
+/** Sends a shortcut through the current chat; false means no prompt was accepted. */
+export type SendWelcomePrompt = (
+  text: string,
+  options?: PromptDisplayOptions & { agent?: string; executionMode?: SessionExecutionMode },
+) => Promise<boolean>;
 
 export interface ComposerAddMenuActions {
   closeMenu: () => void;
@@ -253,8 +298,8 @@ export interface SessionChatProps {
   mentionAgents?: Agent[];
   /** Display configuration (compact, showActions, showTimestamp) */
   display?: SessionChatDisplay;
-  /** Custom welcome content when no messages. Can be a render prop receiving setInput. */
-  welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
+  /** Custom welcome content with composer input and current-session sending actions. */
+  welcomeContent?: React.ReactNode | ((setInput: (text: string) => void, sendPrompt: SendWelcomePrompt) => React.ReactNode);
   /** Extra content rendered below the conversation area and above the composer. */
   conversationBottomSlot?: React.ReactNode | ((actions: ConversationBottomSlotActions) => React.ReactNode);
   /** Content above the messages that scrolls with them, e.g. the run a follow-up chat is about. */
@@ -277,6 +322,8 @@ export interface SessionChatProps {
   composerTextareaMaxHeight?: number;
   /** Extra content injected between left toolbar controls and right actions */
   centerToolbarSlot?: React.ReactNode;
+  /** Render live cache usage in the context panel. Null hides it while the panel is closed. */
+  cacheUsageContainer?: HTMLElement | null;
   /** Context window size for the current model; enables composer usage ring. */
   contextWindowTokens?: number | null;
   /**
@@ -420,29 +467,6 @@ function getProcessPartInterval(part: MessagePart, activeNowMs?: number): Proces
   return { start: time.start, end };
 }
 
-function sumMergedProcessIntervals(intervals: ProcessTimeInterval[]): number {
-  if (intervals.length === 0) return 0;
-
-  const sorted = [...intervals].sort((a, b) => a.start - b.start);
-  let total = 0;
-  let currentStart = sorted[0].start;
-  let currentEnd = sorted[0].end;
-
-  for (let index = 1; index < sorted.length; index += 1) {
-    const interval = sorted[index];
-    if (interval.start <= currentEnd) {
-      currentEnd = Math.max(currentEnd, interval.end);
-      continue;
-    }
-
-    total += currentEnd - currentStart;
-    currentStart = interval.start;
-    currentEnd = interval.end;
-  }
-
-  return total + currentEnd - currentStart;
-}
-
 function isModelActivityPart(part: MessagePart): boolean {
   return part.type === 'step-start' && !!part.time && Number.isFinite(part.time.start);
 }
@@ -450,36 +474,16 @@ function isModelActivityPart(part: MessagePart): boolean {
 export function getProcessGroupDurationMs(
   parts: readonly MessagePart[],
   activeNowMs?: number,
-  activePartId?: string,
-  activeScope?: { messageId?: string; modelPartId?: string },
+  startedAtMs?: number,
 ): number | null {
-  const belongsToActiveMessage = (part: MessagePart) => (
-    !activeScope?.messageId || part.messageID === activeScope.messageId
-  );
-  const canExtend = (part: MessagePart) => {
-    const time = getProcessPartTime(part);
-    return activeNowMs !== undefined && belongsToActiveMessage(part)
-      && !!time && Number.isFinite(time.start) && !Number.isFinite(time.end)
-      && time.start <= activeNowMs;
-  };
-  // Only the latest model marker may be open. A lost close event on an older
-  // attempt must not extend it through a retry/backoff or a later model call.
-  const modelPart = [...parts].reverse().find(isModelActivityPart);
-  const activePart = activePartId
-    ? parts.find((part) => part.id === activePartId)
-    : [...parts].reverse().find((part) => canExtend(part)
-      && (part.type !== 'tool' || isActiveToolPart(part)));
-  const intervals = parts.map((part) => {
-    const active = canExtend(part) && (
-      part.type === 'tool' ? isActiveToolPart(part)
-        : isModelActivityPart(part) ? part.id === (activeScope?.modelPartId ?? modelPart?.id)
-          : !modelPart && part === activePart
-    );
-    return getProcessPartInterval(part, active ? activeNowMs : undefined);
-  }).filter((interval): interval is ProcessTimeInterval => interval !== null);
-
-  if (intervals.length === 0) return null;
-  return sumMergedProcessIntervals(intervals);
+  const intervals = parts.map((part) => getProcessPartInterval(part, activeNowMs))
+    .filter((interval): interval is ProcessTimeInterval => interval !== null);
+  // Measure the user's elapsed wait, including gaps and retry backoff.
+  const start = typeof startedAtMs === 'number' && Number.isFinite(startedAtMs) && startedAtMs > 0
+    ? startedAtMs
+    : Math.min(...intervals.map((interval) => interval.start));
+  const end = Math.max(activeNowMs ?? -Infinity, ...intervals.map((interval) => interval.end));
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
 }
 
 export function formatProcessDuration(durationMs: number): string {
@@ -489,17 +493,36 @@ export function formatProcessDuration(durationMs: number): string {
   return `${minutes}m${totalSeconds % 60}s`;
 }
 
-function useProcessElapsedClock(enabled: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
+function readObservedProcessEnd(storageKey: string): number | undefined {
+  try {
+    const value = Number(window.sessionStorage.getItem(storageKey));
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function useProcessElapsedClock(enabled: boolean, storageKey: string): number | undefined {
+  const [clock, setClock] = useState(() => ({
+    key: storageKey,
+    value: enabled ? Date.now() : readObservedProcessEnd(storageKey),
+  }));
 
   useEffect(() => {
     if (!enabled) return undefined;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    const tick = () => {
+      const value = Date.now();
+      setClock({ key: storageKey, value });
+      // Keep the last displayed end across Stop, timeline remounts and tab reloads.
+      // This is only a local lower bound; later recorded part ends still win.
+      try { window.sessionStorage.setItem(storageKey, String(value)); } catch { /* Storage may be disabled. */ }
+    };
+    tick();
+    const timer = window.setInterval(tick, 1_000);
     return () => window.clearInterval(timer);
-  }, [enabled]);
+  }, [enabled, storageKey]);
 
-  return now;
+  return clock.key === storageKey ? clock.value : readObservedProcessEnd(storageKey);
 }
 
 const StreamingReasoningText = memo(function StreamingReasoningText({
@@ -1004,23 +1027,30 @@ function ContextUsageRing({
         setOpen(false);
       }
     };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setOpen(false);
-      }
-    };
-
     document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('keydown', handleKeyDown);
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('keydown', handleKeyDown);
     };
   }, [open]);
 
   return (
     <div
       ref={wrapperRef}
+      onKeyDown={(event) => {
+        if (open && event.key === 'Escape') {
+          // Consume the nested menu action before the containing modal's
+          // document listener sees it, and return focus to this trigger.
+          event.preventDefault();
+          event.stopPropagation();
+          setOpen(false);
+          wrapperRef.current?.querySelector('button')?.focus();
+        }
+      }}
+      onBlur={(event) => {
+        if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) {
+          setOpen(false);
+        }
+      }}
       className="relative inline-flex h-6 shrink-0 items-center justify-center"
     >
       <button
@@ -1053,24 +1083,24 @@ function ContextUsageRing({
         <div
           role="menu"
           aria-label={t('chat.contextUsage.title')}
-          className="absolute bottom-full right-0 z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white text-zinc-800 shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:shadow-xl dark:shadow-black/30"
+          className="absolute bottom-full right-0 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white text-zinc-800 shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:shadow-xl dark:shadow-black/30 z-50"
         >
           <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <div className="truncate text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('chat.contextUsage.title')}</div>
-                <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">
+                <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100 truncate">{t('chat.contextUsage.title')}</div>
+                <div className="text-[10px] text-zinc-400 dark:text-zinc-500 truncate">
                   {t('chat.contextUsage.tokens', {
                     used: formatTokenCount(usedTokens),
                     total: formatTokenCount(totalTokens),
                   })}
                 </div>
               </div>
-              <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-300">
+              <span className="rounded bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-300 shrink-0">
                 {t('chat.contextUsage.full', { percent: clamped })}
               </span>
             </div>
-            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+            <div className="mt-1.5 h-1 rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
               <div
                 className="flex h-full overflow-hidden rounded-full"
                 style={{ width: `${clamped}%` }}
@@ -1094,15 +1124,15 @@ function ContextUsageRing({
               <div
                 key={segment.key}
                 role="menuitem"
-                className="flex min-w-0 items-center justify-between gap-3 rounded-md px-2 py-1.5 text-xs text-zinc-700 dark:text-zinc-300"
+                className="flex items-center justify-between gap-3 rounded-md px-2 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 min-w-0"
               >
                 <div className="flex min-w-0 items-center gap-2">
-                  <span className={`h-3 w-3 shrink-0 rounded-[3px] ${segment.colorClass}`} />
-                  <span className="truncate font-medium text-zinc-800 dark:text-zinc-100">
+                  <span className={`h-3 w-3 rounded-[3px] shrink-0 ${segment.colorClass}`} />
+                  <span className="font-medium text-zinc-800 dark:text-zinc-100 truncate">
                     {getContextUsageLabel(t, segment.key)}
                   </span>
                 </div>
-                <span className={segment.included ? 'shrink-0 text-zinc-600 dark:text-zinc-300' : 'shrink-0 text-zinc-400 dark:text-zinc-500'}>
+                <span className={segment.included ? 'text-zinc-600 dark:text-zinc-300 shrink-0' : 'text-zinc-400 dark:text-zinc-500 shrink-0'}>
                   {formatTokenCount(segment.included ? segment.tokens : 0)}
                 </span>
               </div>
@@ -1207,19 +1237,24 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
     }
 
     const last = result[result.length - 1];
+    const cacheUsageCalls = getChatCacheUsageCalls(msg);
     if (
       last &&
       last.role === 'assistant' &&
       !getAgentSender(last.parts) &&
       last._merged &&
       last.finish !== 'summary' &&
+      last.parentID === msg.parentID &&
       !!last.compacted === !!msg.compacted
     ) {
       last.parts = [...last.parts, ...msg.parts];
-      // The last constituent message owns the live state, including an unset finish.
+      last._cacheUsageCalls = [...(last._cacheUsageCalls || []), ...cacheUsageCalls];
+      // The last constituent message owns the live state, including an unset
+      // finish and the error that stopped the turn.
       last.finish = msg.finish;
+      last.error = msg.error;
     } else {
-      result.push({ ...msg, parts: [...msg.parts], _merged: true });
+      result.push({ ...msg, parts: [...msg.parts], _merged: true, _cacheUsageCalls: cacheUsageCalls });
     }
   }
 
@@ -1236,20 +1271,20 @@ export function getMessageBubbleClassName({
   isEditing: boolean;
 }): string {
   if (!isUser) {
-    const typographyClass = compact ? 'text-sm' : 'text-[15px]';
+    const typographyClass = compact ? 'text-sm' : 'text-base';
 
-    return `w-full max-w-full min-w-0 bg-transparent py-1 ${typographyClass} text-[#34393e] break-words dark:text-zinc-100`;
+    return `w-full max-w-full min-w-0 bg-transparent py-1 ${typographyClass} text-ui-text break-words`;
   }
 
   if (compact) {
     const widthClass = isEditing ? 'w-full max-w-full' : 'max-w-full';
 
-    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm border border-black/[0.07] bg-zinc-50 text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
+    return `${widthClass} min-w-0 px-4 py-3 rounded-[18px] text-sm break-words border border-ui-border/60 bg-ui-subtle text-ui-text`;
   }
 
   const widthClass = isEditing ? 'w-full' : 'w-auto';
 
-  return `${widthClass} min-w-0 max-w-full px-5 py-3 rounded-[18px] text-sm break-words shadow-sm border border-black/[0.09] bg-zinc-50 text-[#30343a] dark:border-white/[0.10] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
+  return `${widthClass} min-w-0 max-w-full px-5 py-3 rounded-[18px] text-base break-words border border-ui-border/60 bg-ui-subtle text-ui-text`;
 }
 
 export function getInstructionDisplayBubbleClassName(compact: boolean): string {
@@ -1484,6 +1519,7 @@ export function areChatTimelineItemsRenderEqual(
     if (prevMessage.agent !== nextMessage.agent) return false;
     if (prevMessage.timestamp !== nextMessage.timestamp) return false;
     if (prevMessage.compacted !== nextMessage.compacted) return false;
+    if (!areCacheUsageCallsEqual(getChatCacheUsageCalls(prevMessage), getChatCacheUsageCalls(nextMessage))) return false;
     if (!areChatMessagePartsRenderEqual(prevMessage.parts, nextMessage.parts)) return false;
   }
 
@@ -1535,6 +1571,13 @@ export function getMessageErrorText(message: Pick<Message, 'error'>): string {
   return 'Message failed';
 }
 
+/** Translation key explaining why a retryable error still stopped the turn, if recorded. */
+export function getMessageErrorNoteKey(message: Pick<Message, 'error'>): string | null {
+  const error = message.error as any;
+  if (error?.data?.retrySuppressed === 'tool_execution_started') return 'chat.stopReason.toolExecuted';
+  return null;
+}
+
 export function getUserAvatarContainerClassName(compact: boolean): string {
   return `pointer-events-none flex flex-shrink-0 items-start justify-center pt-1 ${
     compact ? 'h-7' : 'h-8'
@@ -1554,11 +1597,11 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 const FALLBACK_POLL_MS = 5_000;
 const PENDING_QUESTION_RECONCILE_MS = 2_000;
 const WORKSPACE_UPLOAD_DEST = 'uploads';
-const FILE_INPUT_ACCEPT_DOCS = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx,.html,.htm,.ppt,.pptx,.xls,.xlsx';
+const FILE_INPUT_ACCEPT_DOCS = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx,.html,.htm,.ppt,.pptx,.xls,.xlsx,.zip';
 const FILE_INPUT_ACCEPT_ALL = `${FILE_INPUT_ACCEPT_DOCS},${FILE_INPUT_ACCEPT_IMAGES}`;
 const ALLOWED_UPLOAD_EXTENSIONS = new Set([
   'txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'pdf', 'doc', 'docx',
-  'html', 'htm', 'ppt', 'pptx', 'xls', 'xlsx',
+  'html', 'htm', 'ppt', 'pptx', 'xls', 'xlsx', 'zip',
 ]);
 
 function isAllowedUploadFile(file: File): boolean {
@@ -1669,27 +1712,27 @@ function getGoalBannerTone(status: GoalBannerStatus): {
     return {
       root: 'border-emerald-200 bg-emerald-50 text-emerald-900',
       dot: 'bg-emerald-500',
-      icon: <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />,
+      icon: <CheckCircle2 aria-hidden="true" className="h-3.5 w-3.5 text-emerald-600" />,
     };
   }
   if (status === 'blocked') {
     return {
       root: 'border-red-200 bg-red-50 text-red-900',
       dot: 'bg-red-500',
-      icon: <AlertCircle className="h-3.5 w-3.5 text-red-600" />,
+      icon: <AlertCircle aria-hidden="true" className="h-3.5 w-3.5 text-red-600" />,
     };
   }
   if (status === 'paused') {
     return {
       root: 'border-amber-200 bg-amber-50 text-amber-900',
       dot: 'bg-amber-500',
-      icon: <Clock className="h-3.5 w-3.5 text-amber-600" />,
+      icon: <Clock aria-hidden="true" className="h-3.5 w-3.5 text-amber-600" />,
     };
   }
   return {
     root: 'border-sky-200 bg-sky-50 text-sky-950',
     dot: 'bg-sky-500',
-    icon: <ListTree className="h-3.5 w-3.5 text-sky-600" />,
+    icon: <ListTree aria-hidden="true" className="h-3.5 w-3.5 text-sky-600" />,
   };
 }
 
@@ -1711,18 +1754,18 @@ function GoalBanner({
       <span className="shrink-0 font-semibold">{statusLabel}</span>
       <span className="min-w-0 flex-1 truncate font-medium">{goal.objective}</span>
       {goal.reason && goal.status !== 'active' && (
-        <span className="hidden min-w-0 max-w-[35%] truncate text-[11px] opacity-70 sm:inline">
+        <span className="text-[11px] opacity-70 hidden min-w-0 max-w-[35%] truncate sm:inline">
           {goal.reason}
         </span>
       )}
       <button
         type="button"
         onClick={onDismiss}
-        className="ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-current opacity-60 transition hover:bg-black/5 hover:opacity-100"
+        className="ml-1 inline-flex h-6 w-6 items-center justify-center rounded-md text-current opacity-60 transition hover:bg-black/5 hover:opacity-100 shrink-0"
         title={t('chat.goal.dismiss')}
         aria-label={t('chat.goal.dismiss')}
       >
-        <X className="h-3.5 w-3.5" />
+        <X aria-hidden="true" className="h-3.5 w-3.5" />
       </button>
     </div>
   );
@@ -1762,17 +1805,17 @@ function QueuedPromptPanel({
   if (items.length === 0) return null;
 
   return (
-    <div className="mb-2 overflow-hidden rounded-xl border border-zinc-200 bg-zinc-950/[0.02] dark:border-zinc-800 dark:bg-zinc-900/60">
+    <div className="mb-2 rounded-xl border border-zinc-200 bg-zinc-950/[0.02] dark:border-zinc-800 dark:bg-zinc-900/60 overflow-hidden">
       <button
         type="button"
         onClick={onToggle}
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100/70 dark:text-zinc-300 dark:hover:bg-zinc-800"
       >
-        <ChevronDown className={`h-3.5 w-3.5 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+        <ChevronDown aria-hidden="true" className={`h-3.5 w-3.5 transition-transform ${expanded ? '' : '-rotate-90'}`} />
         <span>{t('chat.queue.count', { count: items.length })}</span>
       </button>
       {expanded && (
-        <div className="max-h-40 overflow-y-auto border-t border-zinc-200 dark:border-zinc-800">
+        <div className="max-h-40 border-t border-zinc-200 dark:border-zinc-800 overflow-y-auto">
           {items.map((item) => {
             const isEditing = editingId === item.id;
             const isBusy = actionId === item.id || item.status === 'executing';
@@ -1780,7 +1823,7 @@ function QueuedPromptPanel({
             const instructionLabel = parseInstructionDisplayText(text);
             return (
               <div key={item.id} className="flex items-start gap-2 border-b border-zinc-100 px-3 py-2 last:border-b-0 dark:border-zinc-800">
-                <div className="mt-1 h-2 w-2 flex-shrink-0 rounded-full border border-zinc-400 dark:border-zinc-500" />
+                <div className="mt-1 h-2 w-2 rounded-full border border-zinc-400 dark:border-zinc-500 flex-shrink-0" />
                 <div className="min-w-0 flex-1">
                   {isEditing ? (
                     <textarea
@@ -1791,11 +1834,11 @@ function QueuedPromptPanel({
                     />
                   ) : (
                     instructionLabel ? (
-                      <span className="inline-flex max-w-full items-center truncate rounded-md border border-rose-100 bg-rose-50 px-2 py-1 text-xs font-semibold leading-none text-rose-700 dark:border-rose-500/30 dark:bg-rose-950/30 dark:text-rose-200">
+                      <span className="inline-flex items-center rounded-md border border-rose-100 bg-rose-50 px-2 py-1 text-xs font-semibold leading-none text-rose-700 dark:border-rose-500/30 dark:bg-rose-950/30 dark:text-rose-200 max-w-full truncate">
                         {instructionLabel}
                       </span>
                     ) : (
-                      <div className="line-clamp-2 text-xs text-zinc-700 dark:text-zinc-300">{text || t('chat.queue.attachmentOnly')}</div>
+                      <div className="text-xs text-zinc-700 dark:text-zinc-300 line-clamp-2">{text || t('chat.queue.attachmentOnly')}</div>
                     )
                   )}
                 </div>
@@ -1809,7 +1852,7 @@ function QueuedPromptPanel({
                         className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.save')}
                       >
-                        <Save className="h-3.5 w-3.5" />
+                        <Save aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                       <button
                         type="button"
@@ -1818,7 +1861,7 @@ function QueuedPromptPanel({
                         className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.cancel')}
                       >
-                        <X className="h-3.5 w-3.5" />
+                        <X aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                     </>
                   ) : (
@@ -1830,7 +1873,7 @@ function QueuedPromptPanel({
                         className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.queue.edit')}
                       >
-                        <Pencil className="h-3.5 w-3.5" />
+                        <Pencil aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                       <button
                         type="button"
@@ -1839,7 +1882,7 @@ function QueuedPromptPanel({
                         className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                         title={t('chat.queue.runNow')}
                       >
-                        <ArrowUp className="h-3.5 w-3.5" />
+                        <ArrowUp aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                       <button
                         type="button"
@@ -1848,7 +1891,7 @@ function QueuedPromptPanel({
                         className="rounded p-1 text-zinc-500 hover:bg-red-50 hover:text-red-600 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-red-950/40 dark:hover:text-red-300"
                         title={t('chat.queue.remove')}
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
+                        <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
                       </button>
                     </>
                   )}
@@ -1943,6 +1986,7 @@ export default function SessionChat({
   composerTextareaMaxHeight,
   centerToolbarSlot,
   contextWindowTokens,
+  cacheUsageContainer,
   mentionAgents = [],
 }: SessionChatProps) {
   const { t, i18n } = useTranslation('session');
@@ -1975,6 +2019,13 @@ export default function SessionChat({
   // sidebar → Agents → back to Sessions) doesn't wipe the user's half-typed
   // message. Subsequent session changes are re-hydrated by the effect below.
   const [input, setInput] = useState<string>(() => readChatDraft(draftKey ?? sessionId));
+  const composerBusyOwners = useRef(new Set<string>());
+  const [composerBusy, setComposerBusy] = useState(false);
+  const setComposerExtensionBusy = useCallback((owner: string, busy: boolean) => {
+    if (busy) composerBusyOwners.current.add(owner);
+    else composerBusyOwners.current.delete(owner);
+    setComposerBusy(composerBusyOwners.current.size > 0);
+  }, []);
   const [submittedModelPromptSessionId, setSubmittedModelPromptSessionId] = useState<string | null>(null);
   const [pendingContextUsage, setPendingContextUsage] = useState<PendingContextUsageState>({
     sessionId: null,
@@ -2306,14 +2357,15 @@ export default function SessionChat({
     fetchPendingQuestions,
     clearAll: clearPendingQuestions,
   } = usePendingQuestions();
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const focusedMessageRef = useRef('');
   const isAtBottomRef = useRef(true);
+  const historyScrollLockRef = useRef(false);
   const scrollToBottomRafRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const composerAddMenuButtonRef = useRef<HTMLButtonElement>(null);
   const isComposingRef = useRef(false);
 
   const closeComposerAddMenu = useCallback(() => {
@@ -2340,14 +2392,9 @@ export default function SessionChat({
       const target = event.target as HTMLElement;
       if (!target.closest('[data-composer-add-menu]')) closeComposerAddMenu();
     };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closeComposerAddMenu();
-    };
     document.addEventListener('mousedown', handlePointerDown);
-    document.addEventListener('keydown', handleKeyDown);
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
-      document.removeEventListener('keydown', handleKeyDown);
     };
   }, [closeComposerAddMenu, showComposerAddMenu]);
 
@@ -2395,11 +2442,16 @@ export default function SessionChat({
   }, [mentionAgents, mentionQuery]);
 
   const scrollToBottom = useCallback(() => {
-    if (!isAtBottomRef.current) return;
+    if (!isAtBottomRef.current || historyScrollLockRef.current) return;
     if (scrollToBottomRafRef.current !== null) return;
     scrollToBottomRafRef.current = requestAnimationFrame(() => {
       scrollToBottomRafRef.current = null;
-      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+      if (!isAtBottomRef.current || historyScrollLockRef.current) return;
+      // Scroll the message list only. scrollIntoView would also scroll every
+      // scrollable ancestor, so a page that embeds this chat (the code audit
+      // project page) would be pushed down past its own header.
+      const el = scrollContainerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
     });
   }, []);
 
@@ -2416,12 +2468,13 @@ export default function SessionChat({
     rafScheduledRef.current = true;
     requestAnimationFrame(() => {
       const el = scrollContainerRef.current;
-      if (el) {
+      if (el && !historyScrollLockRef.current) {
         isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
       }
       rafScheduledRef.current = false;
     });
   }, []);
+
 
   const {
     messages: sessionMessages,
@@ -2436,9 +2489,32 @@ export default function SessionChat({
     replaceMessageText,
     markMessageStopped,
     truncateAfterMessage,
+    hasOlder = false,
+    hasNewer = false,
+    loadingOlder = false,
+    loadingNewer = false,
+    loadOlder,
+    loadNewer,
+    loadLatest,
+    focusMessage,
   } =
     useSessionMessages(sessionId || undefined);
   const messages = transport?.messages ?? sessionMessages;
+
+  const loadHistoryPage = useCallback(async (direction: 'older' | 'newer') => {
+    historyScrollLockRef.current = true;
+    isAtBottomRef.current = false;
+    try {
+      await (direction === 'older' ? loadOlder?.() : loadNewer?.());
+    } finally {
+      // Keep the scroll listener from re-enabling tail-follow while React and
+      // the virtualizer measure the newly appended/prepended rows.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        historyScrollLockRef.current = false;
+      }));
+    }
+  }, [loadOlder, loadNewer]);
+
 
   // A historical receipt describes the submission, not the child's *current*
   // activity. Receipts identify direct children; runtime ancestry also includes
@@ -2540,14 +2616,31 @@ export default function SessionChat({
 
   useEffect(() => {
     const targetId = String(focusMessageId || '').trim();
-    if (!targetId || focusedMessageRef.current === targetId) return;
+    if (!targetId) {
+      focusedMessageRef.current = '';
+      return;
+    }
+    if (focusedMessageRef.current === targetId) return;
     if (loading) return;
+    isAtBottomRef.current = false;
+    const loadedMessage = messages.find(message => message.id === targetId || message.parts.some(part => part.messageID === targetId));
     const target = messagesContentRef.current?.querySelector<HTMLElement>(
-      `[data-message-id="${CSS.escape(targetId)}"]`,
+      `[data-message-id="${CSS.escape(loadedMessage?.id || targetId)}"]`,
     );
     if (!target) {
-      focusedMessageRef.current = targetId;
-      onFocusMessageConsumed?.();
+      // A virtualized row can be loaded without having a DOM node. Its
+      // timeline scrolls it into the viewport; only fetch if it is absent.
+      if (loadedMessage) return;
+      if (focusMessage) {
+        focusedMessageRef.current = targetId;
+        void focusMessage(targetId).then(success => {
+          focusedMessageRef.current = '';
+          if (success === false) onFocusMessageConsumed?.();
+        });
+      } else {
+        focusedMessageRef.current = targetId;
+        onFocusMessageConsumed?.();
+      }
       return;
     }
     focusedMessageRef.current = targetId;
@@ -2557,11 +2650,15 @@ export default function SessionChat({
       target.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
     }, 1800);
     onFocusMessageConsumed?.();
-  }, [focusMessageId, loading, messages.length, onFocusMessageConsumed]);
+  }, [focusMessageId, loading, messages, focusMessage, onFocusMessageConsumed]);
 
   const sessionMessagesForContextUsage = useMemo(
     () => messages.filter((message) => !message.sessionID || message.sessionID === sessionId),
     [messages, sessionId],
+  );
+  const sessionCacheUsageCalls = useMemo(
+    () => !cacheUsageContainer ? [] : sessionMessagesForContextUsage.flatMap(getChatCacheUsageCalls),
+    [sessionMessagesForContextUsage, cacheUsageContainer],
   );
   const hasUserMessage = useMemo(
     () => sessionMessagesForContextUsage.some((message) => message.role === 'user'),
@@ -2757,11 +2854,11 @@ export default function SessionChat({
         return;
       }
       const message = error instanceof Error ? error.message : String(error);
-      setPermissionError(message || '提交确认失败，请重试。');
+      setPermissionError(message || t('chat.permission.replyFailed'));
     } finally {
       setPermissionSubmitting(false);
     }
-  }, [pendingPermissions, permissionSubmitting, fetchPendingPermissions, settlePendingPermission]);
+  }, [pendingPermissions, permissionSubmitting, fetchPendingPermissions, settlePendingPermission, t]);
 
   const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
 
@@ -2947,6 +3044,7 @@ export default function SessionChat({
           }
           return;
         case 'message-updated': {
+          sessionStatusRevisionRef.current += 1;
           const { info } = action;
           updateMessage(info);
           if (
@@ -2989,6 +3087,7 @@ export default function SessionChat({
           return;
         }
         case 'message-removed': {
+          sessionStatusRevisionRef.current += 1;
           const removedMessage = messagesRef.current.find((message) => message.id === action.messageID);
           removedMessage?.parts.forEach((part) => {
             if (part.id) activeToolPartIdsRef.current.delete(part.id);
@@ -3002,6 +3101,7 @@ export default function SessionChat({
           return;
         }
         case 'message-part-updated': {
+          sessionStatusRevisionRef.current += 1;
           const part = action.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
           // A finished tool part can be a sub-agent's late receipt while this
           // session is still backing off; only fresh output ends the retry.
@@ -3702,6 +3802,7 @@ export default function SessionChat({
    */
   const sendCommand = async (command: string, args: string) => {
     if (!sessionId) return;
+    sessionStatusRevisionRef.current += 1;
 
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
@@ -3756,9 +3857,11 @@ export default function SessionChat({
     agentOverride?: string,
     options?: PromptDisplayOptions,
     uploadSubmission?: UploadSubmission,
+    promptExecutionMode = executionMode,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
+    sessionStatusRevisionRef.current += 1;
     // Clear abort state immediately so SSE events for the new stream are not suppressed
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
@@ -3811,18 +3914,18 @@ export default function SessionChat({
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (model) payload.model = model;
       if (options?.displayText) payload.displayText = options.displayText;
-      payload.executionMode = executionMode;
+      payload.executionMode = promptExecutionMode;
 
       uploadSubmission?.start();
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
       uploadSubmission?.accept();
-      if (executionMode === 'goal' && text.trim()) {
+      if (promptExecutionMode === 'goal' && text.trim()) {
         goalHydrationVersionRef.current += 1;
         writeDismissedGoalKey(sessionId, '');
         setGoalBanner({ objective: text.trim(), status: 'active' });
         setDismissedGoalKey('');
       }
-      onExecutionModeAccepted?.(executionMode);
+      onExecutionModeAccepted?.(promptExecutionMode);
     } catch (err: unknown) {
       setIsStreaming(false);
       removeMessage(messageId);
@@ -3836,7 +3939,13 @@ export default function SessionChat({
       if (axiosErr?.response?.status === 404) {
         onError?.(`Session not found. Please start a new session.`);
       } else {
-        alert(`Send failed: ${err instanceof Error ? err.message : String(err)}`);
+        // Same surface as the new-session path in pages/Session (toast with the
+        // backend message); a blocking alert() hid the composer draft the user
+        // needs to retry.
+        toast.error(
+          t('chat.sendFailed'),
+          axiosErr?.response?.data?.message || axiosErr?.response?.data?.detail || (err instanceof Error ? err.message : String(err)),
+        );
       }
       throw err;
     } finally {
@@ -3850,6 +3959,7 @@ export default function SessionChat({
     agentOverride?: string,
     options?: PromptDisplayOptions,
     uploadSubmission?: UploadSubmission,
+    promptExecutionMode = executionMode,
   ) => {
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
@@ -3861,14 +3971,14 @@ export default function SessionChat({
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
         ...(model ? { model } : {}),
         ...(options?.displayText ? { displayText: options.displayText } : {}),
-        executionMode,
+        executionMode: promptExecutionMode,
       });
       // Acceptance transfers ownership before the queue refresh or a parent
       // callback can switch/unmount this composer.
       uploadSubmission?.accept();
       await fetchPromptQueue();
       setQueueExpanded(true);
-      onExecutionModeAccepted?.(executionMode);
+      onExecutionModeAccepted?.(promptExecutionMode);
     } catch (err: any) {
       const statusCode = err?.response?.status;
       const detail = err?.response?.data?.detail;
@@ -3879,6 +3989,23 @@ export default function SessionChat({
       throw err;
     }
   };
+
+  // A shortcut may await an installation/status lookup before sending. Read the
+  // latest chat state so a prompt started meanwhile is queued, not interrupted.
+  const welcomeSendingRef = useRef(false);
+  const welcomeSendRef = useRef<SendWelcomePrompt>(async () => false);
+  welcomeSendRef.current = async (text, options) => {
+    if (!attachmentsMountedRef.current || !sessionId || hideInput || transport || sending || welcomeSendingRef.current) return false;
+    welcomeSendingRef.current = true;
+    try {
+      const send = isStreaming ? enqueueText : sendText;
+      await send(text, [], options?.agent, options, undefined, options?.executionMode ?? executionMode);
+      return true;
+    } finally {
+      welcomeSendingRef.current = false;
+    }
+  };
+  const sendWelcomePrompt = useCallback<SendWelcomePrompt>((...args) => welcomeSendRef.current(...args), []);
 
   const handleComposerPrompt = async (text: string, options?: PromptDisplayOptions) => {
     const trimmed = text.trim();
@@ -3940,7 +4067,7 @@ export default function SessionChat({
   };
 
   const handleSend = async () => {
-    if (!canSend) return;
+    if (!canSend || composerBusyOwners.current.size > 0) return;
     if (transport) {
       const text = input.trim();
       if (!text) return;
@@ -4229,6 +4356,7 @@ export default function SessionChat({
 
   const handleAbort = useCallback(async () => {
     if (!sessionId) return;
+    sessionStatusRevisionRef.current += 1;
     // Record the ID of the message being aborted so we can ignore its finish event later.
     const lastAsstMsg = isStreaming ? [...messagesRef.current].reverse().find(
       (m) => m.role === 'assistant' && !m.finish,
@@ -4283,6 +4411,7 @@ export default function SessionChat({
   }, [removeQueuedPrompt, t, toast]);
 
   const handleQueuedRunNow = useCallback(async (item: QueuedPrompt) => {
+    sessionStatusRevisionRef.current += 1;
     try {
       const didRun = await runQueuedPromptNow(item);
       if (!didRun) return;
@@ -4306,12 +4435,20 @@ export default function SessionChat({
   // Fallback polling to detect completion when SSE events are missed
   useEffect(() => {
     if (!isStreaming || !sessionId) return;
-    let questionRecoveryInFlight = false;
+    const controller = new AbortController();
+    let pollInFlight = false;
     const timer = setInterval(async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
+      const statusRevision = sessionStatusRevisionRef.current;
+      const isCurrentPoll = () => !controller.signal.aborted
+        && statusRevision === sessionStatusRevisionRef.current;
       try {
         const res = await client.get(`/api/session/${sessionId}/message`, {
           params: { page: true, limit: 50, include_archived: true },
+          signal: controller.signal,
         });
+        if (!isCurrentPoll()) return;
         const msgs: FetchedMessageWithParts[] = Array.isArray(res.data)
           ? res.data
           : (res.data?.items || []);
@@ -4350,13 +4487,9 @@ export default function SessionChat({
               )
             ))
           ));
-          if (hasMissingFetchedQuestion && !questionRecoveryInFlight) {
-            questionRecoveryInFlight = true;
-            try {
-              await refetch();
-            } finally {
-              questionRecoveryInFlight = false;
-            }
+          if (hasMissingFetchedQuestion) {
+            await refetch();
+            if (!isCurrentPoll()) return;
           }
         }
 
@@ -4376,17 +4509,22 @@ export default function SessionChat({
           ));
           if (hasFetchedActiveTool) return;
 
-          activeToolPartIdsRef.current.clear();
-          const statusRes = await client.get('/api/session/status');
+          const statusRes = await client.get('/api/session/status', { signal: controller.signal });
+          if (!isCurrentPoll()) return;
           const status = statusRes.data?.[sessionId];
           if (isActiveSessionStatus(status)) return;
 
+          activeToolPartIdsRef.current.clear();
           refetch();
           setIsStreaming(false);
         }
-      } catch { /* ignore */ }
+      } catch { /* retry on the next interval while this effect remains active */ }
+      finally { pollInFlight = false; }
     }, FALLBACK_POLL_MS);
-    return () => clearInterval(timer);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+    };
   }, [isStreaming, sessionId, refetch]);
 
   // Copy text to clipboard
@@ -4497,6 +4635,7 @@ export default function SessionChat({
       localTokenDeltas,
     );
     replaceMessageText(editingMessageId, editingPartId, text);
+    sessionStatusRevisionRef.current += 1;
     try {
       await sessionApi.resendMessage(sessionId, editingMessageId, editingPartId, text);
       truncateAfterMessage(editingMessageId);
@@ -4533,6 +4672,7 @@ export default function SessionChat({
 
   const handleRegenerateMessage = useCallback(async (messageId: string) => {
     if (!sessionId) return;
+    sessionStatusRevisionRef.current += 1;
 
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
@@ -4589,17 +4729,20 @@ export default function SessionChat({
 
   // ── Styling based on compact mode ──
   const msgAreaClass = compact
-    ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 dark:bg-zinc-950'
+    ? 'relative flex flex-col flex-1 bg-gray-50 px-4 py-4 dark:bg-zinc-950 min-h-0 overflow-y-auto'
     : pageCanvas
       ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-transparent py-5'
-      : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 dark:bg-zinc-950';
+      : 'relative flex flex-col flex-1 bg-gray-50 py-6 dark:bg-zinc-950 min-h-0 overflow-y-auto';
 
+  // A 760px reading column plus 48px avatar gutters aligns with the composer's
+  // 760px text area, 16px inner padding and 32px outer gutters.
   const msgListClass = compact
     ? fullWidth ? 'space-y-3 w-full px-4' : 'space-y-3'
     : fullWidth
       ? 'space-y-5 w-full px-12'
       : pageCanvas
-        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-7'
+        // Phones hide the avatars and keep 16px.
+        ? 'space-y-7 w-full max-w-[856px] mx-auto px-12 max-md:px-4'
         : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
   const visibleGoalBanner = goalBanner && getGoalBannerKey(goalBanner) !== dismissedGoalKey
     ? goalBanner
@@ -4654,14 +4797,24 @@ export default function SessionChat({
     <button
       onClick={handleAbort}
       title={t('chat.stopTitle')}
-      className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+      className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-ui-action text-ui-on-action hover:bg-ui-action/90 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus focus-visible:ring-offset-2"
     >
-      <Square className="w-3 h-3 fill-current" />
+      <Square aria-hidden="true" className="w-3 h-3 fill-current" />
     </button>
   );
 
   return (
     <ReaChatContext.Provider value={reaChatContext}>
+    {cacheUsageContainer && createPortal(
+      <div className="border-b border-ui-border">
+        {loading && sessionCacheUsageCalls.length === 0 ? <LoadingSpinner className="py-3" /> : (
+          messagesError && sessionCacheUsageCalls.length === 0
+            ? <p role="alert" className="px-3 py-2 text-xs text-ui-muted">{t('chat.loadFailed')}</p>
+            : <SessionCacheUsage calls={sessionCacheUsageCalls} isActive={isStreaming} scope="session" />
+        )}
+      </div>,
+      cacheUsageContainer,
+    )}
     <div className={`flex flex-col min-h-0 ${className}`}>
       {/* Messages area */}
       <div
@@ -4702,7 +4855,7 @@ export default function SessionChat({
               style={conversationTopSlot ? undefined : { minHeight: '100%' }}
             >
               {typeof welcomeContent === 'function'
-                ? welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); })
+                ? welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); }, sendWelcomePrompt)
                 : welcomeContent}
             </div>
           ) : conversationTopSlot ? null : (
@@ -4710,14 +4863,26 @@ export default function SessionChat({
           )
         ) : (
           <div ref={messagesContentRef} className={msgListClass}>
+            {hasOlder && (
+              <div className="flex justify-center py-2">
+                <button type="button" disabled={loadingOlder} onClick={() => void loadHistoryPage('older')}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800">
+                  {loadingOlder ? t('chat.history.loading') : t('chat.history.older')}
+                </button>
+              </div>
+            )}
             <ChatMessageTimeline
               renderMessageFooter={renderMessageFooter}
               items={historyItems}
+              scrollContainerRef={scrollContainerRef}
+              focusMessageId={focusMessageId}
+              onFocusMessageConsumed={onFocusMessageConsumed}
               pendingQuestions={pendingQuestions}
               onQuestionAnswer={handleQuestionAnswer}
               onQuestionReject={handleQuestionReject}
               showActions={showActions}
               showTimestamp={showTimestamp}
+              showCacheUsage={cacheUsageContainer === undefined}
               collapseIntermediateSteps={collapseIntermediateSteps}
               processGroupsDefaultOpen={processGroupsDefaultOpen}
               processGroupsOpenWhileActive={processGroupsOpenWhileActive}
@@ -4746,6 +4911,7 @@ export default function SessionChat({
               onQuestionReject={handleQuestionReject}
               showActions={showActions}
               showTimestamp={showTimestamp}
+              showCacheUsage={cacheUsageContainer === undefined}
               collapseIntermediateSteps={collapseIntermediateSteps}
               processGroupsDefaultOpen={processGroupsDefaultOpen}
               processGroupsOpenWhileActive={processGroupsOpenWhileActive}
@@ -4767,14 +4933,27 @@ export default function SessionChat({
               onOpenContext={onOpenContext}
             />
 
+            {hasNewer && (
+              <div className="flex flex-wrap justify-center gap-2 py-2">
+                <button type="button" disabled={loadingNewer} onClick={() => void loadHistoryPage('newer')}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800">
+                  {loadingNewer ? t('chat.history.loading') : t('chat.history.newer')}
+                </button>
+                <button type="button" onClick={() => { isAtBottomRef.current = true; void loadLatest?.(); }}
+                  className="rounded-lg bg-slate-800 px-3 py-2 text-sm text-white transition-colors hover:bg-slate-900">
+                  {t('chat.history.latest')}
+                </button>
+              </div>
+            )}
+
             {/* Compacting indicator with live progress stages */}
             {isCompacting && (
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white dark:ring-zinc-950 flex-shrink-0 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
-                    } ${compact ? '' : 'absolute -left-10 top-1'}`}
+                    } ${compact ? '' : 'absolute -left-10 top-1 max-md:hidden'}`}
                   >
                     {formatAgentName(pendingAgentName).charAt(0).toUpperCase()}
                   </span>
@@ -4783,9 +4962,9 @@ export default function SessionChat({
                       <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
-                      <div className={`${compact ? 'w-full max-w-full px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200 dark:border-amber-500/35 dark:bg-amber-950/30 dark:shadow-none`}>
+                      <div className={`${compact ? 'w-full px-4 py-3 rounded-[20px] max-w-full' : 'w-full px-5 py-4 rounded-[24px]'} text-sm shadow-sm bg-amber-50 border border-amber-200 dark:border-amber-500/35 dark:bg-amber-950/30 dark:shadow-none break-words`}>
                         <div className="flex items-center gap-2 text-sm text-amber-700">
-                          <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+                          <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin text-amber-500" />
                           <span>{compactingMessage || t('chat.compacting')}</span>
                         </div>
                         {compactionPercent !== null && (
@@ -4834,7 +5013,7 @@ export default function SessionChat({
               >
                 <div className={compact ? 'w-full' : 'flex w-full min-w-0'}>
                   <div className="flex w-full items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-500/35 dark:bg-amber-950/30 dark:text-amber-300">
-                    <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin text-amber-500" />
+                    <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin text-amber-500 flex-shrink-0" />
                     <span className="min-w-0 break-words">{retryNoticeText}</span>
                   </div>
                 </div>
@@ -4846,9 +5025,9 @@ export default function SessionChat({
               <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
                 <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
                   <span
-                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${
+                    className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(pendingAgentName)} text-white font-bold shadow-sm ring-2 ring-white dark:ring-zinc-950 flex-shrink-0 ${
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
-                    } ${compact ? '' : 'absolute -left-10 top-1'}`}
+                    } ${compact ? '' : 'absolute -left-10 top-1 max-md:hidden'}`}
                   >
                     {formatAgentName(pendingAgentName).charAt(0).toUpperCase()}
                   </span>
@@ -4860,7 +5039,7 @@ export default function SessionChat({
                       <div className={getStandaloneThinkingBubbleClassName(compact)}>
                         {isDreaming ? (
                           <div className="flex items-center gap-2 text-sm text-violet-600 dark:text-violet-300">
-                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
                             <span>{dreamingMessage || t('chat.dreaming')}</span>
                           </div>
                         ) : (
@@ -4880,12 +5059,11 @@ export default function SessionChat({
             )}
           </div>
         )}
-        <div ref={messagesEndRef} className="h-0 flex-shrink-0" />
       </div>
 
       {/* Suggestions — shown before user sends any message */}
       {suggestions && suggestions.length > 0 && !hasUserMessage && !hideInput && (
-        <div className="flex-shrink-0 px-3 pt-2.5 pb-2 border-t border-gray-100 bg-white dark:border-zinc-800 dark:bg-zinc-950">
+        <div className="px-3 pt-2.5 pb-2 border-t border-gray-100 bg-white dark:border-zinc-800 dark:bg-zinc-950 flex-shrink-0">
           <div className="flex items-center gap-1.5 mb-2">
             <span className="text-xs font-medium text-gray-400">{t('chat.suggestions')}</span>
           </div>
@@ -4895,7 +5073,7 @@ export default function SessionChat({
                 key={i}
                 onClick={() => setInput(q)}
                 disabled={sending}
-                className="text-left text-xs text-gray-600 bg-gray-50 hover:bg-gray-100 hover:text-gray-900 border border-gray-200 hover:border-gray-300 rounded-lg px-2.5 py-2 transition-colors line-clamp-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="text-left text-xs text-gray-600 bg-gray-50 hover:bg-gray-100 hover:text-gray-900 border border-gray-200 hover:border-gray-300 rounded-lg px-2.5 py-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed line-clamp-2"
               >
                 {q}
               </button>
@@ -4913,7 +5091,7 @@ export default function SessionChat({
 
       {/* Follow-up input */}
       {hideInput && (pendingPermissions[0] || permissionError) && (
-        <div className="flex-shrink-0 border-t border-amber-200/60 bg-white px-3 py-2 dark:border-amber-500/35 dark:bg-zinc-950">
+        <div className="border-t border-amber-200/60 bg-white px-3 py-2 dark:border-amber-500/35 dark:bg-zinc-950 flex-shrink-0">
           <div className={!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto px-6') : ''}>
             <PermissionApprovalDialog
               request={pendingPermissions[0] ?? null}
@@ -4931,7 +5109,7 @@ export default function SessionChat({
             compact
               ? 'bg-white px-4 py-3 dark:bg-zinc-950'
               : pageCanvas
-                ? 'bg-transparent px-7 pb-6 pt-2'
+                ? 'bg-transparent px-8 pb-5 pt-3 max-md:px-4 max-md:pb-4'
                 : 'bg-white py-4 dark:bg-zinc-950'
           }`}
         >
@@ -4941,7 +5119,7 @@ export default function SessionChat({
                 ? fullWidth
                   ? 'w-full px-5'
                   : pageCanvas
-                    ? 'mx-auto w-full max-w-[760px]'
+                    ? 'mx-auto w-full max-w-[792px]'
                     : 'w-[min(76%,64rem)] mx-auto px-6'
                 : ''
             }`}
@@ -5025,25 +5203,35 @@ export default function SessionChat({
               onDragOver={transport ? undefined : handleComposerDragOver}
               onDragLeave={handleComposerDragLeave}
               onDrop={transport ? undefined : handleComposerDrop}
-              className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-[20px] shadow-[0_3px_12px_rgba(22,27,34,0.045)]' : 'rounded-2xl'} border transition-all ${
+              onKeyDown={(event) => {
+                if (showComposerAddMenu && event.key === 'Escape' && !event.defaultPrevented) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeComposerAddMenu();
+                  // @ opens this menu from the textarea; preserve that focus
+                  // instead of moving the user away from their draft.
+                  if (event.target !== textareaRef.current) composerAddMenuButtonRef.current?.focus();
+                }
+              }}
+              className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-[18px] shadow-ui-input' : 'rounded-2xl'} border transition-colors ${
                 isCompacting
                   ? 'border-amber-200 bg-amber-50/30 dark:border-amber-500/35 dark:bg-amber-950/25'
                   : isDragOver
                     ? 'border-sky-300 bg-sky-50/60 ring-4 ring-sky-100 dark:border-sky-500/50 dark:bg-sky-950/35 dark:ring-sky-500/10'
                     : isStreaming
-                      ? 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/70'
+                      ? 'border-ui-border bg-ui-surface'
                       : pageCanvas && !compact
-                        // Focus is one red border, no second ring (REA V30 / Flocks UI); it also wins over hover.
-                        ? 'border-black/[0.09] bg-zinc-50 hover:border-black/[0.14] focus-within:!border-[#DC2626] focus-within:bg-white dark:border-white/[0.10] dark:bg-[#303842] dark:hover:border-white/[0.16] dark:focus-within:!border-[#DC2626] dark:focus-within:bg-[#343d48]'
-                        : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
+                        // Focus changes the border only, keeping the composer geometry stable.
+                        ? 'border-ui-border bg-ui-surface hover:border-ui-control focus-within:border-ui-focus'
+                        : 'border-ui-border bg-ui-surface hover:border-ui-control focus-within:border-ui-focus focus-within:ring-2 focus-within:ring-ui-focus/15'
               }`}
             >
                 {/* Node reference chip */}
                 {nodeRef && (
                   <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1">
                     <span className="w-1.5 h-1.5 rounded-full bg-slate-400 flex-shrink-0" />
-                    <code className="text-[11px] font-mono font-semibold text-slate-700 truncate flex-1 dark:text-slate-200">{nodeRef.id}</code>
-                    <span className="text-[10px] text-slate-400 flex-shrink-0 dark:text-slate-500">{nodeRef.type}</span>
+                    <code className="text-[11px] font-mono font-semibold text-slate-700 flex-1 dark:text-slate-200 truncate">{nodeRef.id}</code>
+                    <span className="text-[10px] text-slate-400 dark:text-slate-500 flex-shrink-0">{nodeRef.type}</span>
                     {onNodeRefDismiss && (
                       <button
                         onClick={onNodeRefDismiss}
@@ -5068,13 +5256,13 @@ export default function SessionChat({
                         return (
                           <div
                             key={attachment.id}
-                            className={`relative flex-shrink-0 rounded-lg border overflow-hidden ${
+                            className={`relative rounded-lg border flex-shrink-0 overflow-hidden ${
                               isUploading ? 'border-sky-200 bg-sky-50 dark:border-sky-500/35 dark:bg-sky-950/30' : 'border-gray-200 bg-gray-50 dark:border-zinc-800 dark:bg-zinc-900'
                             }`}
                           >
                             {isUploading ? (
                               <div className="w-16 h-16 flex items-center justify-center">
-                                <Loader2 className="w-5 h-5 animate-spin text-sky-500" />
+                                <Loader2 aria-hidden="true" className="w-5 h-5 animate-spin text-sky-500" />
                               </div>
                             ) : (
                               <img
@@ -5093,7 +5281,7 @@ export default function SessionChat({
                               className="absolute top-0.5 right-0.5 rounded-full bg-black/50 p-0.5 text-white hover:bg-black/70 transition-colors"
                               title={t('chat.upload.remove')}
                             >
-                              <X className="w-3 h-3" />
+                              <X aria-hidden="true" className="w-3 h-3" />
                             </button>
                           </div>
                         );
@@ -5102,7 +5290,7 @@ export default function SessionChat({
                       return (
                         <div
                           key={attachment.id}
-                          className={`inline-flex max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${
+                          className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs max-w-full ${
                             isError
                               ? 'border-red-200 bg-red-50 text-red-700'
                               : isUploading
@@ -5111,18 +5299,18 @@ export default function SessionChat({
                           }`}
                         >
                           {isUploading ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
+                            <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
                           ) : isError ? (
-                            <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                            <AlertCircle aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
                           ) : attachment.isImage ? (
-                            <ImageIcon className="w-3.5 h-3.5 flex-shrink-0" />
+                            <ImageIcon aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
                           ) : (
-                            <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                            <FileText aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
                           )}
                           <div className="min-w-0">
                             <div className="truncate font-medium">{attachment.name}</div>
                             {attachment.error && (
-                              <div className="truncate text-[11px]">{attachment.error}</div>
+                              <div className="text-[11px] truncate">{attachment.error}</div>
                             )}
                           </div>
                           {isError && !attachment.isImage && (
@@ -5132,7 +5320,7 @@ export default function SessionChat({
                               className="rounded p-0.5 hover:bg-white/70 transition-colors"
                               title={t('chat.upload.retry')}
                             >
-                              <RefreshCw className="w-3.5 h-3.5" />
+                              <RefreshCw aria-hidden="true" className="w-3.5 h-3.5" />
                             </button>
                           )}
                           <button
@@ -5141,7 +5329,7 @@ export default function SessionChat({
                             className="rounded p-0.5 hover:bg-white/70 transition-colors"
                             title={t('chat.upload.remove')}
                           >
-                            <X className="w-3.5 h-3.5" />
+                            <X aria-hidden="true" className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       );
@@ -5172,9 +5360,9 @@ export default function SessionChat({
                       return (
                         <span
                           key={`${reference.kind}:${reference.value}`}
-                          className={`inline-flex h-7 max-w-full items-center gap-1.5 rounded-lg border px-2 text-[11px] font-medium shadow-[0_1px_2px_rgba(22,27,34,0.03)] ${referenceStyle}`}
+                          className={`inline-flex h-7 items-center gap-1.5 rounded-lg border px-2 text-[11px] font-medium shadow-[0_1px_2px_rgba(22,27,34,0.03)] max-w-full ${referenceStyle}`}
                         >
-                          <ReferenceIcon className="h-3 w-3 shrink-0" />
+                          <ReferenceIcon aria-hidden="true" className="h-3 w-3 shrink-0" />
                           <span className="shrink-0 opacity-65">
                             {t(`chat.references.${reference.kind}`)}
                           </span>
@@ -5190,13 +5378,13 @@ export default function SessionChat({
                               ));
                               textareaRef.current?.focus();
                             }}
-                            className="-mr-1 grid h-5 w-5 shrink-0 place-items-center rounded-md opacity-55 transition hover:bg-black/[0.06] hover:opacity-100 dark:hover:bg-white/[0.08]"
+                            className="-mr-1 grid h-5 w-5 place-items-center rounded-md opacity-55 transition hover:bg-black/[0.06] hover:opacity-100 dark:hover:bg-white/[0.08] shrink-0"
                             aria-label={t('chat.references.remove', {
                               type: t(`chat.references.${reference.kind}`),
                               name: reference.value,
                             })}
                           >
-                            <X className="h-3 w-3" />
+                            <X aria-hidden="true" className="h-3 w-3" />
                           </button>
                         </span>
                       );
@@ -5207,6 +5395,7 @@ export default function SessionChat({
                   <textarea
                     ref={textareaRef}
                     value={input}
+                    readOnly={composerBusy}
                     onChange={(e) => {
                       const val = e.target.value;
                       const cursor = e.target.selectionStart ?? val.length;
@@ -5262,8 +5451,8 @@ export default function SessionChat({
                             ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
                             : effectivePlaceholder
                     }
-                    className={`w-full resize-none bg-transparent text-sm outline-none placeholder:text-[#7b838e] dark:placeholder:text-[#9aa7b4] ${
-                      sending ? 'text-zinc-400 cursor-not-allowed dark:text-zinc-500' : 'text-zinc-900 dark:text-zinc-100'
+                    className={`w-full resize-none bg-transparent leading-[1.8] outline-none placeholder:text-ui-muted ${pageCanvas && !compact ? 'text-base' : 'text-sm'} ${
+                      sending ? 'text-ui-muted cursor-not-allowed' : 'text-ui-text'
                     }`}
                     style={{
                       minHeight: `${effectiveComposerTextareaMinHeight}px`,
@@ -5279,6 +5468,7 @@ export default function SessionChat({
                 <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
                   <div className="relative" data-composer-add-menu hidden={!!transport}>
                     <button
+                      ref={composerAddMenuButtonRef}
                       type="button"
                       onClick={toggleComposerAddMenu}
                       disabled={sending || transport?.disabled}
@@ -5288,18 +5478,18 @@ export default function SessionChat({
                       aria-expanded={showComposerAddMenu}
                       className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
                         showComposerAddMenu
-                          ? 'bg-zinc-100 text-zinc-900 dark:bg-white/[0.09] dark:text-white'
-                          : 'text-zinc-500 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.07] dark:hover:text-white'
+                          ? 'bg-ui-selected text-ui-text'
+                          : 'text-ui-secondary hover:bg-ui-hover hover:text-ui-text'
                       }`}
                     >
-                      <Plus className="h-[17px] w-[17px]" strokeWidth={2} />
+                      <Plus aria-hidden="true" className="h-[17px] w-[17px]" strokeWidth={2} />
                     </button>
 
                     {showComposerAddMenu && (
                       <div
                         role="menu"
                         aria-label={t('chat.addMenu.title')}
-                        className="absolute bottom-full left-0 z-50 mb-2 w-[228px] max-w-[calc(100vw-2rem)] overflow-visible rounded-[14px] border border-black/[0.09] bg-white/95 p-1.5 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]"
+                        className="absolute bottom-full left-0 mb-2 w-[228px] max-w-[calc(100vw-2rem)] rounded-[14px] border border-black/[0.09] bg-white/95 p-1.5 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)] z-50 overflow-visible"
                       >
                         <div className="px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-zinc-400 dark:text-zinc-500">
                           {t('chat.addMenu.title')}
@@ -5313,8 +5503,8 @@ export default function SessionChat({
                           }}
                           className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
                         >
-                          <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
-                            <Paperclip className="h-3.5 w-3.5" />
+                          <span className="grid h-7 w-7 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white shrink-0">
+                            <Paperclip aria-hidden="true" className="h-3.5 w-3.5" />
                           </span>
                           <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.files')}</span>
                         </button>
@@ -5333,9 +5523,20 @@ export default function SessionChat({
                     )}
                   </div>
 
-                  <div className="mx-1 h-4 w-px shrink-0 bg-zinc-200 dark:bg-zinc-800" />
+                  <div className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-800 shrink-0" />
 
                   {toolbarSlot}
+
+                  <ExtensionSlot
+                    name="chat.composer"
+                    context={{
+                      sessionId,
+                      input,
+                      setInput,
+                      disabled: sending || isCompacting,
+                      setBusy: setComposerExtensionBusy,
+                    }}
+                  />
 
                   {centerToolbarSlot && (
                     // Starts from its narrowest usable width (a shortened model name), so the row
@@ -5358,27 +5559,28 @@ export default function SessionChat({
                     )}
 
                     {isStreaming ? (
-                      canSend && (
+                      canSend && !composerBusy && (
                         <button
                           onClick={handleSend}
                           title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-ui-action text-ui-on-action transition-colors hover:bg-ui-action/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus focus-visible:ring-offset-2"
                         >
-                          {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
+                          {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2.5} />}
                         </button>
                       )
                     ) : (
                       <button
                         onClick={handleSend}
-                        disabled={!canSend}
+                        disabled={!canSend || composerBusy}
+                        aria-label={t('chat.sendTitle')}
                         title={hasUploadingFiles ? t('chat.upload.waiting') : undefined}
-                        className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
-                          canSend
-                            ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
-                            : 'cursor-not-allowed border border-zinc-300 bg-zinc-200 text-zinc-400 dark:border-[#5a6573] dark:bg-[#46515e] dark:text-[#b8c2cc]'
+                        className={`inline-flex h-8 w-8 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus focus-visible:ring-offset-2 ${
+                          canSend && !composerBusy
+                            ? 'bg-ui-action text-ui-on-action hover:bg-ui-action/90'
+                            : 'cursor-not-allowed border border-ui-border bg-ui-subtle text-ui-muted'
                         }`}
                       >
-                        {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
+                        {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2.5} />}
                       </button>
                     )}
                     {stopButton}
@@ -5425,7 +5627,7 @@ function AgentMentionDropdown({
 
   return (
     <div
-      className="absolute bottom-full left-0 right-0 z-50 mb-1 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30"
+      className="absolute bottom-full left-0 right-0 mb-1 rounded-lg border border-gray-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30 z-50 overflow-hidden"
       onMouseDown={(e) => e.preventDefault()}
     >
       <div className="border-b border-gray-100 bg-gray-50 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-500">
@@ -5440,13 +5642,13 @@ function AgentMentionDropdown({
               type="button"
               onClick={() => onSelect(agent)}
               onMouseDown={(e) => e.preventDefault()}
-              className={`flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${
+              className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors w-full min-w-0 ${
                 idx === selectedIndex ? 'bg-sky-50 text-sky-800 dark:bg-sky-950/45 dark:text-sky-100' : 'text-gray-800 hover:bg-gray-50 dark:text-zinc-200 dark:hover:bg-zinc-800'
               }`}
             >
-              <Bot className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-zinc-500" />
+              <Bot aria-hidden="true" className="h-3.5 w-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
               <span className="shrink-0 font-mono text-sm font-semibold">@{agent.name}</span>
-              <span className="min-w-0 truncate text-xs text-gray-500 dark:text-zinc-400">{desc}</span>
+              <span className="text-xs text-gray-500 dark:text-zinc-400 min-w-0 truncate">{desc}</span>
             </button>
           );
         })}
@@ -5482,18 +5684,18 @@ function ContextFileCard({
   const label = mime?.split('/').pop()?.toUpperCase();
   const content = (
     <>
-      <FileText className="h-4 w-4 flex-shrink-0 text-slate-500" />
+      <FileText aria-hidden="true" className="h-4 w-4 text-slate-500 flex-shrink-0" />
       <span className="min-w-0 flex-1 truncate font-medium">{filename}</span>
-      {label && <span className="shrink-0 text-[10px] text-slate-400">{label}</span>}
+      {label && <span className="text-[10px] text-slate-400 shrink-0">{label}</span>}
     </>
   );
   return (
-    <div className="flex min-w-0 max-w-full items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+    <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 min-w-0 max-w-full">
       {onOpen && resourceId ? (
         <button
           type="button"
           onClick={() => onOpen(resourceId)}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-slate-900 dark:hover:text-white"
+          className="flex flex-1 items-center gap-2 text-left hover:text-slate-900 dark:hover:text-white min-w-0"
           title={t('context.preview', 'Preview')}
         >
           {content}
@@ -5503,7 +5705,7 @@ function ContextFileCard({
           href={previewUrl}
           target="_blank"
           rel="noreferrer"
-          className="flex min-w-0 flex-1 items-center gap-2 hover:text-slate-900 dark:hover:text-white"
+          className="flex flex-1 items-center gap-2 hover:text-slate-900 dark:hover:text-white min-w-0"
         >
           {content}
         </a>
@@ -5518,7 +5720,7 @@ function ContextFileCard({
           className="rounded p-1 text-slate-400 hover:bg-white hover:text-slate-700 dark:hover:bg-zinc-800 dark:hover:text-white"
           title={t('context.download', 'Download')}
         >
-          <Download className="h-3.5 w-3.5" />
+          <Download aria-hidden="true" className="h-3.5 w-3.5" />
         </a>
       )}
     </div>
@@ -5533,6 +5735,7 @@ export interface ChatMessageBubbleProps {
   onQuestionReject?: (callID: string, requestId: string) => Promise<void>;
   showActions?: boolean;
   showTimestamp?: boolean;
+  showCacheUsage?: boolean;
   collapseIntermediateSteps?: boolean;
   processGroupsDefaultOpen?: boolean;
   processGroupsOpenWhileActive?: boolean;
@@ -5558,17 +5761,24 @@ export interface ChatMessageBubbleProps {
 
 interface ChatMessageTimelineProps extends Omit<ChatMessageBubbleProps, 'message' | 'isActive'> {
   items: ChatTimelineItem[];
+  scrollContainerRef?: RefObject<HTMLDivElement | null>;
+  focusMessageId?: string | null;
+  onFocusMessageConsumed?: () => void;
   renderMessageFooter?: (message: Message) => React.ReactNode;
 }
 
 function ChatMessageTimelineInner({
   items,
+  scrollContainerRef,
+  focusMessageId,
+  onFocusMessageConsumed,
   renderMessageFooter,
   pendingQuestions,
   onQuestionAnswer,
   onQuestionReject,
   showActions,
   showTimestamp,
+  showCacheUsage,
   collapseIntermediateSteps,
   processGroupsDefaultOpen,
   processGroupsOpenWhileActive,
@@ -5590,10 +5800,77 @@ function ChatMessageTimelineInner({
   onOpenContextFile,
   onOpenContext,
 }: ChatMessageTimelineProps) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
+  const virtual = !!scrollContainerRef && items.length > 30;
+  const getItemKey = useCallback((index: number) => items[index].message.id, [items]);
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => scrollContainerRef?.current ?? null,
+    getItemKey,
+    estimateSize: () => 180,
+    overscan: 5,
+    gap: compact ? 12 : 20,
+    scrollMargin,
+    anchorTo: 'end',
+    followOnAppend: false,
+    enabled: virtual,
+  });
+  useLayoutEffect(() => {
+    if (!virtual || !listRef.current || !scrollContainerRef?.current) return;
+    const measure = () => {
+      const list = listRef.current;
+      const scroll = scrollContainerRef.current;
+      if (list && scroll) setScrollMargin(list.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop);
+    };
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(scrollContainerRef.current);
+    return () => observer?.disconnect();
+  }, [virtual, scrollContainerRef, items[0]?.message.id]);
+  const focusedRef = useRef('');
+  const focusHighlightRef = useRef<{ row: HTMLElement; timer: number } | null>(null);
+  useEffect(() => () => {
+    const highlight = focusHighlightRef.current;
+    if (highlight) {
+      window.clearTimeout(highlight.timer);
+      highlight.row.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+    }
+  }, []);
+  useEffect(() => { if (!focusMessageId) focusedRef.current = ''; }, [focusMessageId]);
+  const focusIndex = focusMessageId ? items.findIndex(({message}) => message.id === focusMessageId || message.parts.some(part => part.messageID === focusMessageId)) : -1;
+  useLayoutEffect(() => {
+    if (!virtual || focusIndex < 0 || !focusMessageId || focusedRef.current === focusMessageId) return;
+    virtualizer.scrollToIndex(focusIndex, { align: 'center' });
+  }, [virtual, focusIndex, focusMessageId, virtualizer]);
+  const virtualItems = virtualizer.getVirtualItems();
+  useEffect(() => {
+    if (!virtual || focusIndex < 0 || !focusMessageId || focusedRef.current === focusMessageId) return;
+    const row = listRef.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(items[focusIndex].message.id)}"]`);
+    if (!row) return;
+    focusedRef.current = focusMessageId;
+    const previous = focusHighlightRef.current;
+    if (previous) {
+      window.clearTimeout(previous.timer);
+      previous.row.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+    }
+    row.classList.add('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+    const timer = window.setTimeout(() => {
+      row.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+      focusHighlightRef.current = null;
+    }, 1800);
+    focusHighlightRef.current = { row, timer };
+    onFocusMessageConsumed?.();
+  }, [virtual, focusIndex, focusMessageId, items, virtualItems, onFocusMessageConsumed]);
+  const rendered = virtual ? virtualItems.map(row => ({ ...row, item: items[row.index] })) : items.map((item, index) => ({ item, index, key: item.message.id, start: 0 }));
   return (
-    <>
-      {items.map(({ message, isActive }) => (
-        <div key={message.id} data-message-id={message.id} className="rounded-md transition-shadow duration-300">
+    <div ref={listRef} data-chat-virtual={virtual ? 'true' : undefined}
+      className={virtual ? 'relative w-full' : compact ? 'space-y-3' : 'space-y-5'}
+      style={virtual ? { height: virtualizer.getTotalSize() } : undefined}>
+      {rendered.map(({ item: {message, isActive}, index, start }) => (
+        <div key={message.id} data-index={index} ref={virtual ? virtualizer.measureElement : undefined}
+          data-message-id={message.id} className="rounded-md transition-shadow duration-300"
+          style={virtual ? { position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${start - scrollMargin}px)` } : undefined}>
           <ChatMessageBubble
             message={message}
             isActive={isActive}
@@ -5602,6 +5879,7 @@ function ChatMessageTimelineInner({
             onQuestionReject={onQuestionReject}
             showActions={showActions}
             showTimestamp={showTimestamp}
+            showCacheUsage={showCacheUsage}
             collapseIntermediateSteps={collapseIntermediateSteps}
             processGroupsDefaultOpen={processGroupsDefaultOpen}
             processGroupsOpenWhileActive={processGroupsOpenWhileActive}
@@ -5626,7 +5904,7 @@ function ChatMessageTimelineInner({
           {renderMessageFooter?.(message)}
         </div>
       ))}
-    </>
+    </div>
   );
 }
 
@@ -5672,10 +5950,10 @@ function ProcessGroupDetails({
     >
       <summary
         onClick={handleSummaryClick}
-        className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium transition-colors hover:text-zinc-900 dark:hover:text-zinc-100 [&::-webkit-details-marker]:hidden"
+        className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium transition-colors hover:text-zinc-900 dark:hover:text-zinc-100 [&::-webkit-details-marker]:hidden min-h-7"
       >
         {summary}
-        <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/process:rotate-180 dark:text-zinc-500" />
+        <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/process:rotate-180 dark:text-zinc-500 flex-shrink-0" />
       </summary>
       {children}
     </details>
@@ -5690,6 +5968,7 @@ function ChatMessageBubbleInner({
   onQuestionReject,
   showActions = false,
   showTimestamp = false,
+  showCacheUsage = true,
   collapseIntermediateSteps = false,
   processGroupsDefaultOpen = false,
   processGroupsOpenWhileActive = false,
@@ -5715,7 +5994,13 @@ function ChatMessageBubbleInner({
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
   const sender = getAgentSender(parts);
   const isUser = message.role === 'user' && !sender;
-  const processElapsedClock = useProcessElapsedClock(isActive && collapseIntermediateSteps);
+  const processElapsedClock = useProcessElapsedClock(
+    isActive && (collapseIntermediateSteps || showTimestamp),
+    `flocks:session:${message.sessionID}:message:${message.id}:observedEnd`,
+  );
+  const processStartedAt = Number.isFinite(message.timestamp) && message.timestamp > 0
+    ? message.timestamp
+    : Math.min(...parts.map((part) => getProcessPartInterval(part, processElapsedClock)?.start ?? Infinity));
   const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
   // Lightbox state for inline image previews. Browsers block top-level
   // navigation to ``data:`` URLs (the format we send for chat images), so a
@@ -5726,7 +6011,7 @@ function ChatMessageBubbleInner({
     return (
       <div className={getCompactionDividerClassName(compact, !bare)}>
         <span className="h-px flex-1 bg-zinc-200" />
-        <span className="shrink-0 px-1.5 font-medium text-zinc-500">
+        <span className="px-1.5 font-medium text-zinc-500 shrink-0">
           {t('chat.contextCompressed')}
         </span>
         <span className="h-px flex-1 bg-zinc-200" />
@@ -5773,7 +6058,7 @@ function ChatMessageBubbleInner({
   const actionBarClass = `flex items-center gap-1.5`;
   const editingActionBarClass = getEditingActionBarClassName();
   const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent bg-transparent text-[#8b929d] transition-colors duration-150 hover:bg-white hover:text-[#4f5660] active:bg-white focus-visible:bg-white focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-zinc-100 dark:active:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]';
-  const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
+  const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 mb-1.5 -translate-x-1/2 rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100 z-10 whitespace-nowrap';
   const messageErrorText = isUser ? '' : getMessageErrorText(message);
   const visiblePartCount = parts.filter((part) => !isModelActivityPart(part)).length;
   const hasOnlyBlankTextParts = parts.length > 0 && parts.every((part) =>
@@ -5783,6 +6068,24 @@ function ChatMessageBubbleInner({
   const shouldRenderAssistantErrorState = !isUser && !!messageErrorText && (
     parts.length === 0 || hasOnlyBlankTextParts
   );
+  const showErrorInEmptyState = visiblePartCount === 0 || shouldRenderAssistantErrorState;
+  // Why the turn stopped stays on the reply, below whatever it produced. When the
+  // reply had nothing else to say, the backend also stores the same text as a part.
+  const messageErrorNoteKey = messageErrorText ? getMessageErrorNoteKey(message) : null;
+  const errorEchoText = messageErrorText.trim();
+  const isErrorEchoPart = (part: MessagePart): boolean => (
+    !!errorEchoText && part.type === 'text' && String(part.text || '').trim() === errorEchoText
+  );
+  const messageErrorAlert = messageErrorText ? (
+    <div className="flex items-start gap-2 py-1 text-sm text-red-700 dark:text-red-300" role="alert">
+      <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500 dark:text-red-400" />
+      <div className="min-w-0">
+        <p className="font-medium">{t('chat.stopReason.title')}</p>
+        <p className="whitespace-pre-wrap break-words">{messageErrorText}</p>
+        {messageErrorNoteKey && <p className="mt-0.5 text-xs">{t(messageErrorNoteKey)}</p>}
+      </div>
+    </div>
+  ) : null;
   const outputAttachments = isUser ? [] : parts.flatMap((part) => {
     if (part.type !== 'tool' || part.tool !== 'write' || part.state?.status !== 'completed') return [];
     return (part.state.attachments || []).filter(
@@ -5792,11 +6095,11 @@ function ChatMessageBubbleInner({
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
   const avatar = isUser ? (
-    <span className={`inline-flex items-center justify-center rounded-full bg-gradient-to-b from-sky-400 to-blue-500 text-white shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
-      <User className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+    <span className={`inline-flex items-center justify-center rounded-full bg-gradient-to-b from-sky-400 to-blue-500 text-white shadow-sm ring-2 ring-white dark:ring-zinc-950 flex-shrink-0 ${avatarSize}`}>
+      <User aria-hidden="true" className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
     </span>
   ) : (
-    <span className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(rawAgentName)} text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 dark:ring-zinc-950 ${avatarSize}`}>
+    <span className={`inline-flex items-center justify-center rounded-full ${getAgentAvatarColor(rawAgentName)} text-white font-bold shadow-sm ring-2 ring-white dark:ring-zinc-950 flex-shrink-0 ${avatarSize}`}>
       {agentName.charAt(0).toUpperCase()}
     </span>
   );
@@ -5810,19 +6113,14 @@ function ChatMessageBubbleInner({
     >
 
       {/* Empty / loading state */}
-      {(visiblePartCount === 0 || shouldRenderAssistantErrorState) && (
+      {showErrorInEmptyState && (
         isUser ? (
           <div className="flex items-center gap-2 opacity-60">
             <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
             {t('chat.sending')}
           </div>
         ) : (
-          messageErrorText ? (
-            <div className="flex items-start gap-2 py-1 text-sm text-red-700" role="alert">
-              <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500" />
-              <span className="whitespace-pre-wrap break-words">{messageErrorText}</span>
-            </div>
-          ) : (
+          messageErrorAlert ?? (
             <div className="flex items-center gap-1 py-1" aria-label={t('chat.thinking')}>
               <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
               <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
@@ -5835,6 +6133,11 @@ function ChatMessageBubbleInner({
       {/* Parts */}
       {isEditing ? (
         <div className="space-y-3">
+          {/* The editor shows the stored markdown/raw text, not the rendered
+              bubble; say so, since saving overwrites that text directly. */}
+          <p className="text-xs text-sky-600 dark:text-sky-300" data-testid="chat-edit-raw-hint">
+            {t('chat.editRawHint')}
+          </p>
           <textarea
             value={editingText}
             onChange={(event) => onEditChange?.(event.target.value)}
@@ -5848,7 +6151,8 @@ function ChatMessageBubbleInner({
           // image previews above the textual prompt — matches typical chat
           // UX for "look at this image and …" style messages.
           const fileParts = parts.filter((p) => p.type === 'file');
-          const displayParts = parts.filter((p) => p.type !== 'file');
+          // The error alert below already says it.
+          const displayParts = parts.filter((p) => p.type !== 'file' && !isErrorEchoPart(p));
           const isQuestionToolPart = (part: MessagePart): boolean => {
             if (part.type !== 'tool') return false;
             return isQuestionToolName(part.tool || '');
@@ -5880,12 +6184,6 @@ function ChatMessageBubbleInner({
           const activeTailPart = isActive
             ? [...displayParts].reverse().find(isRenderableDisplayPart)
             : undefined;
-          const activeMessageId = displayParts[displayParts.length - 1]?.messageID;
-          const latestModelPart = [...displayParts].reverse().find(isModelActivityPart);
-          const activeOutputPart = [...displayParts].reverse().find((part) => (
-            ['text', 'reasoning', 'thinking'].includes(part.type)
-            && (!activeMessageId || part.messageID === activeMessageId)
-          ));
           const renderPart = (part: MessagePart, i: number, isVisible = true, processStep = false) => (
             // Spacing between consecutive parts is owned by this wrapper,
             // not by individual part components. Each part used to set its
@@ -5906,7 +6204,7 @@ function ChatMessageBubbleInner({
                 const instructionLabel = isUser ? parseInstructionDisplayText(displayText) : null;
                 if (instructionLabel) {
                   return (
-                    <span className="inline-flex max-w-full items-center truncate text-sm font-semibold leading-none text-rose-700">
+                    <span className="inline-flex items-center text-sm font-semibold leading-none text-rose-700 max-w-full truncate">
                       {instructionLabel}
                     </span>
                   );
@@ -5923,7 +6221,7 @@ function ChatMessageBubbleInner({
                     {processStep ? (
                       <div
                         data-testid="chat-process-text-step"
-                        className="min-w-0 py-1 text-sm leading-7 text-[#686e6c] dark:text-zinc-400"
+                        className="py-1 text-sm leading-7 text-[#686e6c] dark:text-zinc-400 min-w-0"
                       >
                         <StreamingMarkdown
                           content={displayText}
@@ -5970,28 +6268,28 @@ function ChatMessageBubbleInner({
                         aria-expanded={isExpanded}
                         onClick={() => togglePart(partKey)}
                         disabled={isThinking}
-                        className="flex min-h-7 w-full cursor-pointer items-center gap-2 text-left text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 disabled:cursor-default dark:text-zinc-400 dark:hover:text-zinc-200"
+                        className="flex w-full cursor-pointer items-center gap-2 text-left text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 disabled:cursor-default dark:text-zinc-400 dark:hover:text-zinc-200 min-h-7"
                       >
                         <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-violet-500">
                           {isThinking ? (
-                            <Loader2 className="h-[15px] w-[15px] animate-spin" />
+                            <Loader2 aria-hidden="true" className="h-[15px] w-[15px] animate-spin" />
                           ) : (
-                            <Brain className="h-[15px] w-[15px]" />
+                            <Brain aria-hidden="true" className="h-[15px] w-[15px]" />
                           )}
                         </span>
                         <span className="shrink-0">{t('chat.process.deepThinking')}</span>
                         {!isExpanded && (
                           <span
                             data-testid="chat-process-reasoning-preview"
-                            className="min-w-0 truncate font-normal text-[#9da29f] dark:text-zinc-500"
+                            className="font-normal text-[#9da29f] dark:text-zinc-500 min-w-0 truncate"
                           >
                             {getThinkingFirstSentence(thinkingText)}
                           </span>
                         )}
-                        <ChevronDown className={`ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform dark:text-zinc-500 ${isExpanded ? 'rotate-180' : ''}`} />
+                        <ChevronDown aria-hidden="true" className={`ml-0.5 h-3 w-3 text-[#9da29f] transition-transform dark:text-zinc-500 flex-shrink-0 ${isExpanded ? 'rotate-180' : ''}`} />
                       </button>
                       {isExpanded && isVisible && (
-                        <div className="mb-[9px] ml-2 mt-[3px] max-h-52 overflow-y-auto whitespace-pre-wrap border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+                        <div className="mb-[9px] ml-2 mt-[3px] max-h-52 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400 overflow-y-auto whitespace-pre-wrap">
                           <StreamingReasoningText
                             content={thinkingText}
                             isStreaming={isThinking}
@@ -6019,22 +6317,22 @@ function ChatMessageBubbleInner({
                       }`}>
                         {isThinking ? (
                           <>
-                            <Brain className="w-3.5 h-3.5 flex-shrink-0 text-violet-500" />
+                            <Brain aria-hidden="true" className="w-3.5 h-3.5 text-violet-500 flex-shrink-0" />
                             <span className="text-violet-600">{t('chat.thinking')}</span>
                           </>
                         ) : (
                           <>
-                            <Brain className="w-3.5 h-3.5 flex-shrink-0 text-violet-500" />
+                            <Brain aria-hidden="true" className="w-3.5 h-3.5 text-violet-500 flex-shrink-0" />
                             <span className="text-zinc-500 truncate min-w-0">
                               {thinkingText.slice(0, 80)}{thinkingText.length > 80 ? '…' : ''}
                             </span>
-                            <ChevronDown className={`w-3 h-3 ml-auto text-zinc-400 flex-shrink-0 transition-transform ${isExpanded ? '' : '-rotate-90'}`} />
+                            <ChevronDown aria-hidden="true" className={`w-3 h-3 text-zinc-400 transition-transform ml-auto flex-shrink-0 ${isExpanded ? '' : '-rotate-90'}`} />
                           </>
                         )}
                       </div>
                     </button>
                     {isExpanded && isVisible && (
-                      <div className="mt-1 px-2.5 py-2 bg-zinc-50 rounded-md border border-zinc-200 text-[11px] text-zinc-500 whitespace-pre-wrap font-mono leading-relaxed max-h-52 overflow-y-auto">
+                      <div className="mt-1 px-2.5 py-2 bg-zinc-50 rounded-md border border-zinc-200 text-[11px] text-zinc-500 font-mono leading-relaxed max-h-52 whitespace-pre-wrap overflow-y-auto">
                         <StreamingReasoningText
                           content={thinkingText}
                           isStreaming={isThinking}
@@ -6050,15 +6348,16 @@ function ChatMessageBubbleInner({
             group: Array<{ part: MessagePart; index: number }>,
             groupIndex: number,
             timingParts: MessagePart[],
+            isLastGroup: boolean,
           ) => {
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
             const processGroupKey = `${message.id}:process:${groupIndex}`;
             const durationParts = [...group.map(({ part }) => part), ...timingParts];
+            // Summaries show elapsed time since the reply began; only the last one ticks.
             const processDurationMs = getProcessGroupDurationMs(
               durationParts,
-              isActive ? processElapsedClock : undefined,
-              activeOutputPart?.id,
-              { messageId: activeMessageId, modelPartId: latestModelPart?.id },
+              isLastGroup ? processElapsedClock : undefined,
+              processStartedAt,
             );
             const hasStoredOpenState = !!processGroupOpenState
               && Object.prototype.hasOwnProperty.call(processGroupOpenState, processGroupKey);
@@ -6074,7 +6373,7 @@ function ChatMessageBubbleInner({
                 summary={(
                   <>
                     <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-[#8d9a95] dark:text-zinc-500">
-                      <Eye className="h-4 w-4" />
+                      <Eye aria-hidden="true" className="h-4 w-4" />
                     </span>
                     <span className="min-w-0">
                       {t('chat.process.title', { count: group.length })}
@@ -6082,7 +6381,7 @@ function ChatMessageBubbleInner({
                     {processDurationMs !== null && (
                       <span
                         data-testid="chat-process-duration"
-                        className="shrink-0 text-xs font-normal text-[#9da29f] dark:text-zinc-500"
+                        className="text-xs font-normal text-[#9da29f] dark:text-zinc-500 shrink-0"
                       >
                         · {t('chat.process.duration', { duration: formatProcessDuration(processDurationMs) })}
                       </span>
@@ -6118,7 +6417,9 @@ function ChatMessageBubbleInner({
             const flushProcessGroup = () => {
               if (!processGroup) return;
               const group = processGroup;
-              nodes.push(() => renderProcessGroup(group.steps, group.index, group.timing));
+              nodes.push(() => renderProcessGroup(
+                group.steps, group.index, group.timing, group.index === processGroupIndex - 1,
+              ));
               lastGroup = group;
               processGroup = undefined;
             };
@@ -6138,7 +6439,7 @@ function ChatMessageBubbleInner({
                 return;
               }
               // Empty output is still timed, but never adds a visible step.
-              if ((isActive || latestModelPart) && ['text', 'reasoning', 'thinking'].includes(part.type)) {
+              if (['text', 'reasoning', 'thinking'].includes(part.type)) {
                 const group = processGroup || lastGroup;
                 if (group) group.timing.push(part);
                 else pendingTiming.push(part);
@@ -6183,10 +6484,10 @@ function ChatMessageBubbleInner({
                             <a
                               href={sessionApi.contextFileDownloadUrl(messageSessionId, resourceId)}
                               download={part.filename || 'image'}
-                              className="absolute bottom-1 right-1 rounded bg-black/55 p-1 text-white opacity-0 transition-opacity hover:bg-black/75 group-hover/image:opacity-100"
+                              className="absolute bottom-1 right-1 rounded bg-black/55 p-1 text-white opacity-0 transition-opacity hover:bg-black/75 group-hover/image:opacity-100 max-md:opacity-100"
                               title={t('context.download', 'Download')}
                             >
-                              <Download className="h-3.5 w-3.5" />
+                              <Download aria-hidden="true" className="h-3.5 w-3.5" />
                             </a>
                           )}
                         </div>
@@ -6202,7 +6503,7 @@ function ChatMessageBubbleInner({
                       const chipClassName = 'inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700';
                       const chipBody = (
                         <>
-                          <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                          <FileText aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
                           <span className="truncate max-w-[240px]">{part.filename || 'file'}</span>
                         </>
                       );
@@ -6261,6 +6562,11 @@ function ChatMessageBubbleInner({
         })()
       )}
 
+      {/* Why the turn stopped, after what it already produced */}
+      {messageErrorAlert && !showErrorInEmptyState && (
+        <div className="mt-2 first:mt-0" data-testid="chat-message-stop-reason">{messageErrorAlert}</div>
+      )}
+
       {/* Streaming indicator */}
       {isActive && !isUser && visiblePartCount > 0 && (() => {
         return (
@@ -6276,6 +6582,8 @@ function ChatMessageBubbleInner({
       })()}
 
 
+      {showCacheUsage && !isUser && !sender && <SessionCacheUsage calls={getChatCacheUsageCalls(message)} isActive={isActive} />}
+
       {/* Actions — rendered inside bubble only while editing */}
       {showActions && parts.length > 0 && isEditing && (
         <div className={editingActionBarClass}>
@@ -6286,7 +6594,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.save')}
             >
-              <Save className="w-3 h-3" />
+              <Save aria-hidden="true" className="w-3 h-3" />
               <span className={tooltipClass}>{t('chat.save')}</span>
             </button>
             {isUser && (
@@ -6296,7 +6604,7 @@ function ChatMessageBubbleInner({
                 className={iconButtonClass}
                 aria-label={t('chat.sendEdited')}
               >
-                <Send className="w-3 h-3" />
+                <Send aria-hidden="true" className="w-3 h-3" />
                 <span className={tooltipClass}>{t('chat.sendEdited')}</span>
               </button>
             )}
@@ -6306,7 +6614,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.cancel')}
             >
-              <X className="w-3 h-3" />
+              <X aria-hidden="true" className="w-3 h-3" />
               <span className={tooltipClass}>{t('chat.cancel')}</span>
             </button>
           </>
@@ -6314,8 +6622,14 @@ function ChatMessageBubbleInner({
       )}
     </div>
   );
+  // Use the same elapsed time as the process summary, including the final output.
+  const displayTimestamp = message.timestamp + (
+    message.role === 'assistant'
+      ? (getProcessGroupDurationMs(parts, processElapsedClock, message.timestamp) ?? 0)
+      : 0
+  );
   const footerTimestamp = showTimestamp && message.timestamp
-    ? <span className="select-none text-[11px] text-[#8b929d] dark:text-[#9aa7b4]">{formatSmartTime(message.timestamp, i18n.language)}</span>
+    ? <span className="select-none text-[11px] text-[#8b929d] dark:text-[#9aa7b4]">{formatSmartTime(displayTimestamp, i18n.language)}</span>
     : null;
   const footer = !compact && showActions && visiblePartCount > 0 && !isEditing ? (
     <div className={`mt-1.5 flex items-center ${
@@ -6332,7 +6646,7 @@ function ChatMessageBubbleInner({
                 className={iconButtonClass}
                 aria-label={t('chat.edit')}
               >
-                <Pencil className="w-3 h-3" />
+                <Pencil aria-hidden="true" className="w-3 h-3" />
                 <span className={tooltipClass}>{t('chat.edit')}</span>
               </button>
             )}
@@ -6342,7 +6656,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.copy')}
             >
-              <Copy className="w-3 h-3" />
+              <Copy aria-hidden="true" className="w-3 h-3" />
               <span className={tooltipClass}>{t('chat.copy')}</span>
             </button>
           </>
@@ -6354,7 +6668,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.regenerate')}
             >
-              <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
+              <RefreshCw aria-hidden="true" className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
               <span className={tooltipClass}>{t('chat.regenerate')}</span>
             </button>}
             <button
@@ -6363,7 +6677,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.copy')}
             >
-              <Copy className="w-3 h-3" />
+              <Copy aria-hidden="true" className="w-3 h-3" />
               <span className={tooltipClass}>{t('chat.copy')}</span>
             </button>
           </>
@@ -6401,7 +6715,9 @@ function ChatMessageBubbleInner({
             {bubble}
             {footer}
           </div>
-          <div className="absolute -right-10 top-1">
+          {/* Hidden on phones like the assistant's: 40px outside the column it
+              made the whole chat scroll sideways. */}
+          <div className="absolute -right-10 top-1 max-md:hidden">
             {avatar}
           </div>
           {previewImage && (
@@ -6440,12 +6756,12 @@ function ChatMessageBubbleInner({
   if (!compact) {
     return (
       <div className="group relative flex w-full min-w-0">
-        <div className="absolute -left-10 top-1">
+        <div className="absolute -left-10 top-1 max-md:hidden">
           {avatar}
         </div>
         <div className="flex w-full min-w-0 flex-col items-start">
           <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-base font-semibold text-[#3f444a] dark:text-[#d7dee8]">
+            <span className="text-base font-medium text-ui-text">
               {agentName}
             </span>
           </div>
@@ -6649,17 +6965,22 @@ function ChatQuestionResult({
   if (processStep) {
     return (
       <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
-        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
-          <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${statusIconColor}`}>
+        <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden min-h-7">
+          <span
+            className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${statusIconColor}`}
+            title={statusLabel}
+            aria-label={statusLabel}
+            role="img"
+          >
             {statusIcon}
           </span>
           <span className="min-w-0 flex-shrink-0">{actionLabel}</span>
           {firstQuestion && (
-            <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
+            <span className="ml-0.5 font-normal text-[#9a9f9c] dark:text-zinc-500 min-w-0 truncate">
               {firstQuestion}
             </span>
           )}
-          <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
+          <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500 flex-shrink-0" />
         </summary>
         <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
           {questionDetails}
@@ -6670,7 +6991,7 @@ function ChatQuestionResult({
 
   return (
     <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
-      <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none hover:bg-zinc-50 transition-colors">
+      <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 select-none hover:bg-zinc-50 transition-colors min-w-0">
         <span className={`${statusIconColor} flex-shrink-0 mt-0.5`}>{statusIcon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
@@ -6686,7 +7007,7 @@ function ChatQuestionResult({
           <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${statusPillClass}`}>
             {displayStatus}
           </span>
-          <ChevronDown className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
+          <ChevronDown aria-hidden="true" className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
         </div>
       </summary>
       <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
@@ -6836,13 +7157,13 @@ function ChatBashPayload({
       {command && (
         <div className="space-y-1">
           <div className="text-[11px] font-medium text-zinc-500">{t('chat.bash.command')}</div>
-          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-zinc-100 overflow-x-auto max-h-64 overflow-y-auto font-mono">
+          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-zinc-100 max-h-64 font-mono overflow-x-auto overflow-y-auto">
             <span className="text-zinc-500">$ </span>{command}
           </pre>
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+      <div className="flex items-center gap-1.5 text-[11px] flex-wrap">
         {workdir && (
           <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-500">
             {t('chat.bash.workdir')} <span className="font-mono text-zinc-600">{workdir}</span>
@@ -6885,7 +7206,7 @@ function ChatBashPayload({
       {output.stdout && (
         <div className="space-y-1">
           <div className="text-[11px] font-medium text-zinc-500">{t('chat.bash.stdout')}</div>
-          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-emerald-300 overflow-x-auto max-h-64 overflow-y-auto font-mono">
+          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-emerald-300 max-h-64 font-mono overflow-x-auto overflow-y-auto">
             {output.stdout}
           </pre>
         </div>
@@ -6894,7 +7215,7 @@ function ChatBashPayload({
       {output.output && (
         <div className="space-y-1">
           <div className="text-[11px] font-medium text-zinc-500">{t('chat.bash.output')}</div>
-          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-emerald-300 overflow-x-auto max-h-64 overflow-y-auto font-mono">
+          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-emerald-300 max-h-64 font-mono overflow-x-auto overflow-y-auto">
             {output.output}
           </pre>
         </div>
@@ -6903,7 +7224,7 @@ function ChatBashPayload({
       {output.stderr && (
         <div className="space-y-1">
           <div className="text-[11px] font-medium text-red-500">{t('chat.bash.stderr')}</div>
-          <pre className="rounded-md bg-red-950 p-2 text-[11px] leading-relaxed text-red-100 overflow-x-auto max-h-64 overflow-y-auto font-mono">
+          <pre className="rounded-md bg-red-950 p-2 text-[11px] leading-relaxed text-red-100 max-h-64 font-mono overflow-x-auto overflow-y-auto">
             {output.stderr}
           </pre>
         </div>
@@ -6960,25 +7281,25 @@ export function ChatToolPart({
   };
   const statusConfig: Record<string, StatusCfg> = {
     pending:   {
-      icon: <Clock className="w-3.5 h-3.5 flex-shrink-0" />,
+      icon: <Clock aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
       iconColor: 'text-zinc-400',
       pill: 'bg-zinc-100 text-zinc-500',
       label: t('chat.tool.pending'),
     },
     running:   {
-      icon: <Loader2 className="w-3.5 h-3.5 flex-shrink-0 animate-spin" />,
+      icon: <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin flex-shrink-0" />,
       iconColor: 'text-sky-500',
       pill: 'bg-sky-50 text-sky-600',
       label: t('chat.tool.running'),
     },
     completed: {
-      icon: <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" />,
+      icon: <CheckCircle2 aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
       iconColor: 'text-green-500',
       pill: 'bg-green-50 text-green-600',
       label: t('chat.tool.completed'),
     },
     error:     {
-      icon: <XCircle className="w-3.5 h-3.5 flex-shrink-0" />,
+      icon: <XCircle aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
       iconColor: 'text-red-400',
       pill: 'bg-red-50 text-red-500',
       label: t('chat.tool.error'),
@@ -7038,7 +7359,7 @@ export function ChatToolPart({
     || inputSummary
     || displayTitle;
   const processStepIcon = isTodoTool
-    ? <ListTree className="h-[15px] w-[15px]" />
+    ? <ListTree aria-hidden="true" className="h-[15px] w-[15px]" />
     : config.icon;
   const processStepIconColor = isTodoTool ? 'text-slate-500' : config.iconColor;
   const statusBadgeClass = isTodoTool
@@ -7092,7 +7413,7 @@ export function ChatToolPart({
       {showActionProgress && (
         <div
           data-testid="chat-tool-action-progress"
-          className="flex min-h-6 items-center gap-2 py-0.5 text-xs text-[#8d9390] dark:text-zinc-500"
+          className="flex items-center gap-2 py-0.5 text-xs text-[#8d9390] dark:text-zinc-500 min-h-6"
         >
           <span className="inline-flex items-center gap-0.5" aria-hidden="true">
             <span className="h-1 w-1 animate-pulse rounded-full bg-current" />
@@ -7108,7 +7429,7 @@ export function ChatToolPart({
           <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
             {t('chat.tool.inputParams')}
           </summary>
-          <pre className="overflow-x-auto rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-300">
+          <pre className="rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-300 overflow-x-auto">
             {JSON.stringify(safeToolInput, null, 2)}
           </pre>
         </details>
@@ -7119,7 +7440,7 @@ export function ChatToolPart({
           <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
             {t('chat.tool.outputResult')}
           </summary>
-          <pre className="max-h-48 overflow-x-auto overflow-y-auto rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-green-400">
+          <pre className="max-h-48 rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-green-400 overflow-x-auto overflow-y-auto">
             {formatToolPayload(state.output)}
           </pre>
         </details>
@@ -7142,18 +7463,26 @@ export function ChatToolPart({
   if (processStep) {
     return (
       <>
-        <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
-          <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
-            <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}>
+        <details data-testid="chat-process-tool-step" data-tool-status={status} className="group/tool min-w-0">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden min-h-7">
+            {/* The timeline shows the status as an icon only; keep the text for
+                assistive tech (and hover) so pending/running/completed/error stay
+                distinguishable without colour. */}
+            <span
+              className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}
+              title={config.label}
+              aria-label={config.label}
+              role="img"
+            >
               {processStepIcon}
             </span>
             <span className="min-w-0 flex-shrink-0">{processStepLabel}</span>
             {processStepDetail && (
-              <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
+              <span className="ml-0.5 font-normal text-[#9a9f9c] dark:text-zinc-500 min-w-0 truncate">
                 {processStepDetail}
               </span>
             )}
-            <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
+            <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500 flex-shrink-0" />
           </summary>
           <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
             {toolDetails}
@@ -7167,7 +7496,7 @@ export function ChatToolPart({
     <>
       {/* The part wrapper owns vertical spacing between process rows. */}
       <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
-        <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none hover:bg-zinc-50 transition-colors">
+        <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 select-none hover:bg-zinc-50 transition-colors min-w-0">
         <span className={`${config.iconColor} flex-shrink-0 mt-0.5`}>{config.icon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
@@ -7187,7 +7516,7 @@ export function ChatToolPart({
           <span className={statusBadgeClass}>
             {config.label}
           </span>
-          <ChevronDown className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
+          <ChevronDown aria-hidden="true" className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
         </div>
       </summary>
 
@@ -7213,6 +7542,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.isActive !== next.isActive) return false;
   if (prev.bare !== next.bare) return false;
   if (prev.showActions !== next.showActions) return false;
+  if (prev.showCacheUsage !== next.showCacheUsage) return false;
   if (prev.collapseIntermediateSteps !== next.collapseIntermediateSteps) return false;
   if (prev.processGroupsDefaultOpen !== next.processGroupsDefaultOpen) return false;
   if (prev.processGroupsOpenWhileActive !== next.processGroupsOpenWhileActive) return false;
@@ -7224,7 +7554,11 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.onOpenContextFile !== next.onOpenContextFile) return false;
   if (prev.onOpenContext !== next.onOpenContext) return false;
   if (prev.message.finish !== next.message.finish) return false;
+  if (prev.message.error !== next.message.error) return false;
+  if (prev.message.id !== next.message.id || prev.message.sessionID !== next.message.sessionID) return false;
+  if (prev.message.timestamp !== next.message.timestamp) return false;
   if (prev.message.role !== next.message.role || prev.message.agent !== next.message.agent) return false;
+  if (!areCacheUsageCallsEqual(getChatCacheUsageCalls(prev.message), getChatCacheUsageCalls(next.message))) return false;
   const prevParts = prev.message.parts as any[] | undefined;
   const nextParts = next.message.parts as any[] | undefined;
   if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;

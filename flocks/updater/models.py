@@ -24,13 +24,17 @@ UpdateStage = Literal[
 class VersionInfo(BaseModel):
     current_version: str
     latest_version: str | None = None
+    # A release an extension's update channel ships can carry the core and a
+    # component of its own, each versioned apart from the release itself.
     current_core_version: str | None = None
     latest_core_version: str | None = None
     current_bundle_version: str | None = None
     latest_bundle_version: str | None = None
-    current_pro_component_version: str | None = None
-    latest_pro_component_version: str | None = None
-    edition: Literal["flocks", "flockspro"] = "flocks"
+    current_component_version: str | None = None
+    latest_component_version: str | None = None
+    # ``flocks`` is this project's own releases; anything else is an update
+    # channel an extension registered (flocks.updater.channels).
+    channel: str = "flocks"
     has_update: bool = False
     release_notes: str | None = None
     release_url: str | None = None
@@ -48,7 +52,9 @@ class UpdateProgress(BaseModel):
     message: str
     success: bool | None = None
     bundle_filename: str | None = None
-    pro_component_filename: str | None = None
+    component_filename: str | None = None
     downloaded_bytes: int | None = None
     total_bytes: int | None = None
     percent: int | None = None
+    # Restart stage only: lets the upgrade dialog read error details from the handoff.
+    progress_token: str | None = None

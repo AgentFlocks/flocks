@@ -94,7 +94,7 @@ describe('Home create WebUI contract page entry', () => {
     );
   });
 
-  it('keeps setup guidance available while hiding custom-page creation from members', () => {
+  it('hides onboarding and custom-page creation from members', () => {
     useAuthMock.mockReturnValue({
       user: {
         id: 'user-2',
@@ -114,12 +114,12 @@ describe('Home create WebUI contract page entry', () => {
     expect(
       screen.queryByRole('button', { name: 'createWebUIContractPage' }),
     ).not.toBeInTheDocument();
-    // Onboarding is available to members; custom-page management is admin-only.
-    expect(screen.getByRole('button', { name: 'getStarted' })).toBeEnabled();
+    // Onboarding writes model settings and custom-page management is admin-only too.
+    expect(screen.queryByRole('button', { name: 'getStarted' })).not.toBeInTheDocument();
     expect(createMock).not.toHaveBeenCalled();
   });
 
-  it.each(['admin', 'member'])('opens onboarding for %s without creating or navigating to a custom-page session', async (role) => {
+  it.each(['admin'])('opens onboarding for %s without creating or navigating to a custom-page session', async (role) => {
     const user = userEvent.setup();
     useAuthMock.mockReturnValue({
       user: {
@@ -152,7 +152,7 @@ describe('Home create WebUI contract page entry', () => {
     }
   });
 
-  it('removes only custom-page creation when the current user changes from admin to member', () => {
+  it('removes onboarding and custom-page creation when the current user changes from admin to member', () => {
     const { rerender } = render(
       <MemoryRouter>
         <Home />
@@ -176,7 +176,7 @@ describe('Home create WebUI contract page entry', () => {
     );
 
     expect(screen.queryByRole('button', { name: 'createWebUIContractPage' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'getStarted' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'getStarted' })).not.toBeInTheDocument();
     expect(createMock).not.toHaveBeenCalled();
   });
 

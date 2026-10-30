@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
+# Re-exec under a real bash: dash/sh (no BASH_VERSION) and bash running as "sh" (POSIX mode).
+[ -n "${BASH_VERSION:-}" ] && ! shopt -oq posix 2>/dev/null || exec bash "$0" "$@"
 
 set -euo pipefail
 
@@ -8,12 +9,13 @@ REPO_SLUG="${FLOCKS_REPO_SLUG:-AgentFlocks/Flocks}"
 DEFAULT_BRANCH="${FLOCKS_DEFAULT_BRANCH:-main}"
 VERSION="${VERSION:-$DEFAULT_BRANCH}"
 INSTALL_TUI=0
+FORCE_INSTALL="${FLOCKS_INSTALL_FORCE:-0}"
 TMP_DIR=""
 DEFAULT_INSTALL_DIR="${PWD%/}/flocks"
 INSTALL_DIR="${FLOCKS_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
 
 info() {
-  printf '[flocks-bootstrap] %s\n' "$1"
+  printf '[flocks-bootstrap] %s\n' "$1" >&2
 }
 
 fail() {
@@ -33,7 +35,7 @@ cleanup() {
 
 print_usage() {
   cat <<EOF
-Usage: install.sh [--with-tui] [--version <tag-or-branch>]
+Usage: install.sh [--with-tui] [--version <tag-or-branch>] [--force]
 
 Bootstrap installer for Flocks.
 This script downloads the GitHub source archive, extracts it to a temporary
@@ -44,11 +46,14 @@ subdirectory under the current working directory.
 Options:
   --with-tui, -t         Also install TUI dependencies.
   --version <value>      Install from a Git tag or branch. Defaults to: $DEFAULT_BRANCH
+  --force                Continue when the install directory already exists: the existing
+                         directory is moved aside as <dir>.bak-<timestamp> (never deleted).
   --help, -h             Show this help message.
 
 Environment variables:
   VERSION                Same as --version.
   FLOCKS_INSTALL_DIR     Override the persistent install location. Defaults to: $INSTALL_DIR
+  FLOCKS_INSTALL_FORCE   Set to 1 to behave like --force (useful for curl | bash).
   FLOCKS_REPO_SLUG       Override GitHub repo, e.g. owner/repo.
   FLOCKS_DEFAULT_BRANCH  Override default branch. Defaults to: $DEFAULT_BRANCH
 EOF
@@ -65,6 +70,9 @@ parse_args() {
         VERSION="$2"
         shift
         ;;
+      --force)
+        FORCE_INSTALL=1
+        ;;
       --help|-h)
         print_usage
         exit 0
@@ -76,6 +84,30 @@ parse_args() {
     esac
     shift
   done
+}
+
+prepare_install_dir() {
+  local backup_dir
+
+  if [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]]; then
+    return 0
+  fi
+
+  if [[ -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" && -z "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]]; then
+    rmdir "$INSTALL_DIR"
+    return 0
+  fi
+
+  if [[ "$FORCE_INSTALL" != "1" ]]; then
+    fail "Install directory already exists: $INSTALL_DIR. Re-run with --force to move it aside (kept as ${INSTALL_DIR}.bak-<timestamp>), or choose another location with FLOCKS_INSTALL_DIR."
+  fi
+
+  backup_dir="${INSTALL_DIR}.bak-$(date +%Y%m%d%H%M%S)"
+  while [[ -e "$backup_dir" || -L "$backup_dir" ]]; do
+    backup_dir="${backup_dir}-$RANDOM"
+  done
+  info "Existing install directory moved aside (not deleted): $backup_dir"
+  mv "$INSTALL_DIR" "$backup_dir"
 }
 
 ensure_dependencies() {
@@ -101,7 +133,9 @@ download_archive() {
   local last_error=""
   local url=""
 
-  while IFS= read -r url; do
+  # Candidate URLs contain no whitespace; a plain word loop keeps this POSIX-mode safe
+  # (process substitution is unavailable when bash runs as sh).
+  for url in $(build_candidate_urls); do
     [[ -n "$url" ]] || continue
     info "Trying source archive URL: $url"
     if curl -fsSL "$url" -o "$archive_path"; then
@@ -109,7 +143,7 @@ download_archive() {
       return 0
     fi
     last_error="$url"
-  done < <(build_candidate_urls)
+  done
 
   fail "Failed to download source archive for version \"$VERSION\" from GitHub. Last attempted URL: ${last_error:-<none>}"
 }
@@ -149,7 +183,7 @@ main() {
 
   install_parent="$(dirname "$INSTALL_DIR")"
   mkdir -p "$install_parent"
-  rm -rf "$INSTALL_DIR"
+  prepare_install_dir
   cp -R "$project_dir" "$INSTALL_DIR"
 
   info "Downloaded from: $download_url"

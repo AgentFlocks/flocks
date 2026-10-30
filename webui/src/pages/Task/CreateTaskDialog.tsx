@@ -10,6 +10,7 @@ import {
   ExecutionMode,
 } from '@/api/task';
 import { describeCron, CRON_PRESETS } from './helpers';
+import { extractErrorMessage } from '@/utils/error';
 
 export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [form, setForm] = useState<TaskCreateParams>({
@@ -44,7 +45,7 @@ export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () =
       await taskAPI.createScheduler(params);
       onCreated();
     } catch (err: unknown) {
-      toast.error(t('taskSheet.createFailed'), err instanceof Error ? err.message : String(err));
+      toast.error(t('taskSheet.createFailed'), extractErrorMessage(err));
     } finally {
       setSubmitting(false);
     }

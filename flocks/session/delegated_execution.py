@@ -6,6 +6,7 @@ from flocks.session.agent_inbox import AgentInbox, AgentMessage
 from flocks.session.background_tasks import track_background_task
 from flocks.session.core.task_utils import fire_and_forget
 from flocks.session.message import Message
+from flocks.session.ownership import outside_execution
 from flocks.session.session import Session, SessionInactiveError, SessionNotFoundError
 from flocks.tool.registry import ToolResult
 from flocks.tool.subagent_result import format_sync_subagent_result
@@ -103,7 +104,11 @@ def start_child(ctx, child_id, child_agent, execute):
             result = ToolResult(success=False, error="Sub-agent stopped")
         except Exception as exc:
             result = ToolResult(success=False, error=str(exc))
-        await deliver(result)
+        # The parent execution that submitted the child has usually ended and
+        # released its lease by now; the receipt update stays bound to the
+        # parent's lifecycle generation instead.
+        with outside_execution():
+            await deliver(result)
 
     def track(task):
         track_background_task(task, session_id=ctx.session_id)

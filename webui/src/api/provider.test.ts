@@ -152,6 +152,13 @@ describe('providerAPI.revealCredentials', () => {
     expect(mockPost).toHaveBeenCalledWith('/api/provider/openai/credentials/reveal');
   });
 
+  it('allows bounded authentication probes to finish and keeps credentials in the request body', async () => {
+    mockPost.mockResolvedValue({ data: { status: 'valid', code: 'key_valid' } });
+    const { providerAPI } = await import('./provider');
+    await providerAPI.checkKey('custom-供应商', { api_key: 'draft-key', base_url: 'https://api.example.com/v1' });
+    expect(mockPost).toHaveBeenCalledWith(`/api/provider/${encodeURIComponent('custom-供应商')}/check-key`, { api_key: 'draft-key', base_url: 'https://api.example.com/v1' }, { timeout: 60_000 });
+  });
+
   it('uses the explicit API service credential reveal endpoint', async () => {
     mockPost.mockResolvedValue({ data: { api_key: 'service-key', has_credential: true } });
 
@@ -173,5 +180,31 @@ describe('providerAPI.revealCredentials', () => {
       '/api/provider/threatbook-cn/service-credentials/configure',
       { api_key: 'new-key' },
     );
+  });
+});
+
+describe('model IDs in provider API paths', () => {
+  afterEach(() => {
+    mockGet.mockReset();
+    mockPost.mockReset();
+    mockDelete.mockReset();
+    mockPut.mockReset();
+  });
+
+  it('keeps namespaced IDs and reserved URL characters in the model path', async () => {
+    const { modelV2API, modelSettingsAPI, customAPI } = await import('./provider');
+    const providerId = 'custom-gateway';
+    const modelId = 'vendor/model?revision=1#fast%variant';
+    const encoded = 'vendor%2Fmodel%3Frevision%3D1%23fast%25variant';
+    modelV2API.getDefinition(providerId, modelId);
+    modelV2API.deleteDefinition(providerId, modelId);
+    modelSettingsAPI.get(providerId, modelId);
+    modelSettingsAPI.update(providerId, modelId, { enabled: false });
+    customAPI.deleteModel(providerId, modelId);
+    expect(mockGet).toHaveBeenCalledWith(`/api/model/v2/definitions/custom-gateway/${encoded}`);
+    expect(mockDelete).toHaveBeenCalledWith(`/api/model/v2/definitions/custom-gateway/${encoded}`);
+    expect(mockGet).toHaveBeenCalledWith(`/api/model/v2/settings/custom-gateway/${encoded}`);
+    expect(mockPut).toHaveBeenCalledWith(`/api/model/v2/settings/custom-gateway/${encoded}`, { enabled: false });
+    expect(mockDelete).toHaveBeenCalledWith(`/api/custom/models/custom-gateway/${encoded}`);
   });
 });

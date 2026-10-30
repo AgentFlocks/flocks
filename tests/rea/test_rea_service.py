@@ -351,3 +351,67 @@ def test_the_plugin_square_gets_what_failed_calls_returned(fake_toolchain, fake_
     assert native["hiddenDetails"] == 1
     member = service.verification_summary(admin=False)["capabilities"]["native"]
     assert member["calls"] == [] and member["hiddenDetails"] == 0
+
+
+@pytest.mark.asyncio
+async def test_each_process_follows_the_registration_another_one_changed(fake_toolchain, fake_mcp):
+    # An install or uninstall in another Flocks process writes flocks.json but
+    # connects or removes the service only there.
+    from flocks.config.config_writer import ConfigWriter
+
+    _configure()
+    await service.reconcile_service()
+    assert fake_mcp.connects and fake_mcp.connects[-1][1] == ConfigWriter.get_mcp_server("rea")
+
+    await service.reconcile_service()  # in line already: nothing to do
+    assert len(fake_mcp.connects) == 1
+
+    ConfigWriter.add_mcp_server("rea", runtime.mcp_server_config("full"))  # reinstalled with the full tier
+    await service.reconcile_service()
+    assert len(fake_mcp.connects) == 2 and fake_mcp.connects[-1][1]["environment"]
+
+    ConfigWriter.remove_mcp_server("rea")  # uninstalled
+    await service.reconcile_service()
+    assert fake_mcp.removed == ["rea"] and "rea" not in fake_mcp.statuses
+
+
+@pytest.mark.asyncio
+async def test_calls_of_reas_tools_first_follow_the_registration(monkeypatch):
+    from flocks.hooks.pipeline import HookContext
+    from flocks.rea.service_guard import ReaServiceGuard
+
+    calls = []
+
+    async def sync(*, strict=False):
+        calls.append(strict)
+
+    monkeypatch.setattr(service, "sync_with_host", sync)
+    guard = ReaServiceGuard()
+
+    def context(name):
+        return HookContext(stage="tool.execute.before", input={"tool_execution": {"tool": {"name": name}}})
+
+    for name in ("rea_open_binary", "rea_analysis", "bash"):
+        ctx = context(name)
+        await guard.tool_before(ctx)
+        assert "execution" not in ctx.output
+    assert calls == [True]  # only the service's own tools
+
+    # Not knowing whether REA is still there, or while it is being uninstalled: the call is stopped.
+    async def unreadable(*, strict=False):
+        raise OSError("flocks.json could not be read")
+
+    monkeypatch.setattr(service, "sync_with_host", unreadable)
+    ctx = context("rea_open_binary")
+    await guard.tool_before(ctx)
+    assert ctx.output["execution"]["stop"] is True and "could not be checked" in ctx.output["execution"]["detail"]
+
+    monkeypatch.setattr(service, "sync_with_host", sync)
+    ReaUninstaller._job = ReaUninstallJob(id="reauninst_x", status="running", startedAt=1)
+    ReaUninstaller._starting = True
+    try:
+        ctx = context("rea_open_binary")
+        await guard.tool_before(ctx)
+        assert ctx.output["execution"]["stop"] is True and "uninstalled" in ctx.output["execution"]["detail"]
+    finally:
+        ReaUninstaller._starting = False

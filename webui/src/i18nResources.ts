@@ -1,4 +1,5 @@
 import type { ReadCallback, ResourceKey, i18n as I18nInstance } from 'i18next';
+import registry, { type ExtensionI18nResource } from '@ext/registry';
 
 import enCommon from './locales/en-US/common.json';
 import enNav from './locales/en-US/nav.json';
@@ -18,7 +19,6 @@ const LAZY_NAMESPACES = [
   'channel',
   'config',
   'device',
-  'flockspro',
   'mcp',
   'model',
   'monitoring',
@@ -37,11 +37,43 @@ const LAZY_NAMESPACES = [
 export const I18N_NAMESPACES = [...INITIAL_NAMESPACES, ...LAZY_NAMESPACES] as const;
 
 type SupportedLanguage = 'en-US' | 'zh-CN';
+type InitialNamespace = (typeof INITIAL_NAMESPACES)[number];
 type LazyNamespace = (typeof LAZY_NAMESPACES)[number];
 type LocaleModule = { default: ResourceKey };
 type LocaleLoader = () => Promise<LocaleModule>;
+type ResourceObject = Record<string, unknown>;
 
-export const initialI18nResources = {
+const SUPPORTED_LANGUAGES: readonly SupportedLanguage[] = ['en-US', 'zh-CN'];
+
+function isPlainObject(value: unknown): value is ResourceObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Recursively merges `override` into a copy of `base`; objects merge, everything else is replaced. */
+export function mergeLocaleResources(base: unknown, override: unknown): ResourceObject {
+  const result: ResourceObject = isPlainObject(base) ? { ...base } : {};
+  if (!isPlainObject(override)) return result;
+  for (const [key, value] of Object.entries(override)) {
+    const existing = result[key];
+    result[key] = isPlainObject(existing) && isPlainObject(value)
+      ? mergeLocaleResources(existing, value)
+      : value;
+  }
+  return result;
+}
+
+function isInitialNamespace(namespace: string): namespace is InitialNamespace {
+  return (INITIAL_NAMESPACES as readonly string[]).includes(namespace);
+}
+
+function toLocaleLoader(resource: ExtensionI18nResource): LocaleLoader {
+  if (typeof resource === 'function') {
+    return resource as LocaleLoader;
+  }
+  return () => Promise.resolve({ default: resource as ResourceKey });
+}
+
+const builtinInitialResources: Record<SupportedLanguage, Record<InitialNamespace, ResourceKey>> = {
   'en-US': {
     common: enCommon,
     nav: enNav,
@@ -58,13 +90,12 @@ export const initialI18nResources = {
   },
 };
 
-const lazyLocaleLoaders: Record<SupportedLanguage, Record<LazyNamespace, LocaleLoader>> = {
+const builtinLazyLoaders: Record<SupportedLanguage, Record<LazyNamespace, LocaleLoader>> = {
   'en-US': {
     agent: () => import('./locales/en-US/agent.json'),
     channel: () => import('./locales/en-US/channel.json'),
     config: () => import('./locales/en-US/config.json'),
     device: () => import('./locales/en-US/device.json'),
-    flockspro: () => import('./locales/en-US/flockspro.json'),
     mcp: () => import('./locales/en-US/mcp.json'),
     model: () => import('./locales/en-US/model.json'),
     monitoring: () => import('./locales/en-US/monitoring.json'),
@@ -84,7 +115,6 @@ const lazyLocaleLoaders: Record<SupportedLanguage, Record<LazyNamespace, LocaleL
     channel: () => import('./locales/zh-CN/channel.json'),
     config: () => import('./locales/zh-CN/config.json'),
     device: () => import('./locales/zh-CN/device.json'),
-    flockspro: () => import('./locales/zh-CN/flockspro.json'),
     mcp: () => import('./locales/zh-CN/mcp.json'),
     model: () => import('./locales/zh-CN/model.json'),
     monitoring: () => import('./locales/zh-CN/monitoring.json'),
@@ -101,11 +131,61 @@ const lazyLocaleLoaders: Record<SupportedLanguage, Record<LazyNamespace, LocaleL
   },
 };
 
+// ---------------------------------------------------------------------------
+// Extension resources (from the build-time registry), split once at module load:
+//  - static objects for bundled namespaces merge into the initial resources;
+//  - everything else becomes a lazy loader merged over the built-in bundle.
+// ---------------------------------------------------------------------------
+
+const extensionLazyLoaders: Record<SupportedLanguage, Record<string, LocaleLoader>> = { 'en-US': {}, 'zh-CN': {} };
+const extensionInitialLoaders: Record<SupportedLanguage, Partial<Record<InitialNamespace, LocaleLoader>>> = { 'en-US': {}, 'zh-CN': {} };
+
+function buildInitialResources() {
+  const merged: Record<SupportedLanguage, Record<string, ResourceKey>> = {
+    'en-US': { ...builtinInitialResources['en-US'] },
+    'zh-CN': { ...builtinInitialResources['zh-CN'] },
+  };
+  for (const language of SUPPORTED_LANGUAGES) {
+    const namespaces = registry.i18n?.[language];
+    if (!namespaces) continue;
+    for (const [namespace, resource] of Object.entries(namespaces)) {
+      if (isInitialNamespace(namespace)) {
+        if (typeof resource === 'function') {
+          extensionInitialLoaders[language][namespace] = resource as LocaleLoader;
+        } else {
+          merged[language][namespace] = mergeLocaleResources(merged[language][namespace], resource);
+        }
+      } else {
+        extensionLazyLoaders[language][namespace] = toLocaleLoader(resource);
+      }
+    }
+  }
+  return merged;
+}
+
+export const initialI18nResources = buildInitialResources();
+
 const loadingLocaleBundles = new Map<string, Promise<void>>();
 let registeredI18n: I18nInstance | null = null;
 
+function applyExtensionInitialResources(i18n: I18nInstance) {
+  for (const language of SUPPORTED_LANGUAGES) {
+    for (const [namespace, loader] of Object.entries(extensionInitialLoaders[language])) {
+      if (!loader) continue;
+      void loader()
+        .then((module) => {
+          i18n.addResourceBundle(language, namespace, module.default, true, true);
+        })
+        .catch(() => {
+          // A missing extension bundle must not break the built-in translations.
+        });
+    }
+  }
+}
+
 export function registerI18nInstance(i18n: I18nInstance) {
   registeredI18n = i18n;
+  applyExtensionInitialResources(i18n);
 }
 
 function normalizeLanguage(language: string): SupportedLanguage {
@@ -113,7 +193,14 @@ function normalizeLanguage(language: string): SupportedLanguage {
 }
 
 function getLazyLoader(language: string, namespace: string): LocaleLoader | undefined {
-  return lazyLocaleLoaders[normalizeLanguage(language)][namespace as LazyNamespace];
+  const normalizedLanguage = normalizeLanguage(language);
+  const builtin = builtinLazyLoaders[normalizedLanguage][namespace as LazyNamespace];
+  const extension = extensionLazyLoaders[normalizedLanguage][namespace];
+  if (!extension) return builtin;
+  if (!builtin) return extension;
+  return () => Promise.all([builtin(), extension()]).then(([base, override]) => ({
+    default: mergeLocaleResources(base.default, override.default),
+  }));
 }
 
 async function loadLazyLocaleBundle(

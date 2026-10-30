@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, List, Optional, Dict, Any, Tuple
 from pathlib import Path
 import json
 import math
+import re
 from datetime import datetime
 
 from flocks.storage.storage import Storage
@@ -98,6 +99,52 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
 """
 
 
+_INDEX_STATEMENT = re.compile(r"CREATE INDEX IF NOT EXISTS (\w+)\s+ON (\w+)\(", re.IGNORECASE)
+
+
+async def _set_aside_pre_scope_tables(db: Any) -> List[str]:
+    """Rename the memory index tables made before scopes existed, rows kept.
+
+    The index is rebuilt from the memory files under the current schema; the
+    old rows stay readable as ``<table>_bak_<date>`` until someone removes them.
+    """
+    stamp = datetime.now().strftime("%Y%m%d")
+    moved: List[str] = []
+    for table in ("memory_fts", "memory_chunks", "memory_files"):
+        cursor = await db.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (table,))
+        if await cursor.fetchone() is None:
+            continue
+        backup, attempt = f"{table}_bak_{stamp}", 1
+        while True:
+            cursor = await db.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (backup,))
+            if await cursor.fetchone() is None:
+                break
+            attempt += 1
+            backup = f"{table}_bak_{stamp}_{attempt}"
+        await db.execute(f'ALTER TABLE "{table}" RENAME TO "{backup}"')
+        moved.append(backup)
+    return moved
+
+
+async def _create_indexes_held_by_backups(db: Any) -> None:
+    """Indexes of the schema whose names a set-aside table still holds, under a name of their own.
+
+    A renamed table keeps its indexes and their names, so ``CREATE INDEX IF
+    NOT EXISTS`` would leave the new table without them.
+    """
+    for statement in VECTOR_SCHEMA_SQL.split(";"):
+        match = _INDEX_STATEMENT.search(statement)
+        if match is None:
+            continue
+        name, table = match.groups()
+        cursor = await db.execute(
+            "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?", (name,),
+        )
+        row = await cursor.fetchone()
+        if row is not None and row[0] != table:
+            await db.execute(statement[:match.start(1)] + f"{name}_scoped" + statement[match.end(1):])
+
+
 async def ensure_vector_tables(db_path: Path) -> Dict[str, Any]:
     """
     Ensure vector storage tables exist
@@ -127,16 +174,16 @@ async def ensure_vector_tables(db_path: Path) -> Dict[str, Any]:
             if old_scope_schema:
                 await db.execute("BEGIN IMMEDIATE")
                 try:
-                    await db.execute("DROP TABLE IF EXISTS memory_fts")
-                    await db.execute("DROP TABLE IF EXISTS memory_chunks")
-                    await db.execute("DROP TABLE IF EXISTS memory_files")
+                    moved = await _set_aside_pre_scope_tables(db)
                     await db.commit()
-                    log.info("vector.memory_scope_schema.rebuilt")
+                    log.info("vector.memory_scope_schema.rebuilt", {"kept_as": moved})
                 except BaseException:
                     await db.rollback()
                     raise
             # Create vector tables
             await db.executescript(VECTOR_SCHEMA_SQL)
+            if old_scope_schema:
+                await _create_indexes_held_by_backups(db)
             await db.commit()
             status["vector_tables"] = True
             log.info("vector.tables.created")

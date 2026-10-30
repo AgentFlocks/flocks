@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -6,6 +5,8 @@ import pytest
 from flocks.tool.registry import ToolContext, ToolRegistry, ToolResult
 import flocks.tool.system.session_manage  # noqa: F401 - ensure tool registration
 from flocks.tool.system.session_manage import _session_archive_impl, session_manage
+from flocks.session.session import SessionInfo
+from flocks.storage.storage import Storage
 
 
 def make_ctx() -> ToolContext:
@@ -96,16 +97,16 @@ async def test_session_manage_delete_requests_confirmation():
 async def test_session_manage_rejects_archiving_the_current_running_session():
     ctx = make_ctx()
     ctx.session_id = "ses_current"
-    session = SimpleNamespace(
+    session = SessionInfo(
         id="ses_current",
         project_id="project",
+        directory="/tmp",
         title="Current",
         status="active",
     )
+    await Storage.set(f"session:{session.project_id}:{session.id}", session)
 
     with (
-        patch("flocks.storage.storage.Storage.list_keys", AsyncMock(return_value=["session:project:ses_current"])),
-        patch("flocks.storage.storage.Storage.get", AsyncMock(return_value=session)),
         patch("flocks.session.session.Session.archive", AsyncMock()) as archive,
     ):
         result = await _session_archive_impl(ctx, "ses_current", True)
@@ -119,20 +120,17 @@ async def test_session_manage_rejects_archiving_the_current_running_session():
 async def test_session_manage_restore_revives_removed_project_first():
     ctx = make_ctx()
     ctx.session_id = "ses_operator"
-    session = SimpleNamespace(
+    session = SessionInfo(
         id="ses_archived",
         project_id="project_removed",
+        directory="/tmp",
         title="Archived",
         status="archived",
         owner_user_id="usr_owner",
     )
+    await Storage.set(f"session:{session.project_id}:{session.id}", session)
 
     with (
-        patch(
-            "flocks.storage.storage.Storage.list_keys",
-            AsyncMock(return_value=["session:project_removed:ses_archived"]),
-        ),
-        patch("flocks.storage.storage.Storage.get", AsyncMock(return_value=session)),
         patch("flocks.session.session.Session.restore", AsyncMock(return_value=True)) as restore_session,
     ):
         result = await _session_archive_impl(ctx, session.id, False)

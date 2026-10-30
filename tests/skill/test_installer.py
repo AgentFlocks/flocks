@@ -961,6 +961,111 @@ class TestInstallDeps:
         mock_proc.kill.assert_called_once()
 
 
+class TestManagedPipDeps:
+    """A managed install runs the release's verified tree: pip never installs into it."""
+
+    @pytest.fixture(autouse=True)
+    def _managed(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "root"))
+        monkeypatch.setenv("FLOCKS_DEPLOY_MODE", "managed")
+
+    @pytest.mark.asyncio
+    async def test_a_package_the_release_lacks_is_refused_without_running_pip(self):
+        skill = make_skill_info(
+            "pip-skill",
+            install_specs=[{"kind": "pip", "id": "pip-x", "package": "flocks-surely-not-installed-xyz"}],
+        )
+        with (
+            patch.object(Skill, "get", return_value=skill),
+            patch("asyncio.create_subprocess_exec") as spawn,
+        ):
+            results = await SkillInstaller.install_deps("pip-skill")
+
+        spawn.assert_not_called()
+        assert results[0].success is False
+        assert results[0].spec_id == "pip-x"
+        assert "managed install" in (results[0].error or "")
+        assert "flocks-surely-not-installed-xyz" in (results[0].error or "")
+
+    @pytest.mark.asyncio
+    async def test_a_package_the_release_has_counts_as_installed(self):
+        skill = make_skill_info("pip-skill", install_specs=[{"kind": "pip", "package": "packaging>=1"}])
+        with (
+            patch.object(Skill, "get", return_value=skill),
+            patch("asyncio.create_subprocess_exec") as spawn,
+        ):
+            results = await SkillInstaller.install_deps("pip-skill")
+
+        spawn.assert_not_called()
+        assert results[0].success is True
+        assert "provided by this release" in results[0].message
+
+    @pytest.mark.asyncio
+    async def test_an_extra_the_release_lacks_and_an_unreadable_version_are_refused(self, monkeypatch, tmp_path):
+        site = tmp_path / "site"
+        for name, version, requires in (
+            ("flocks-fake-extras", "1.0", [f'flocks-surely-not-installed-xyz; extra == "more"']),
+            ("flocks-fake-badver", "not-a-version", []),
+        ):
+            info = site / f"{name.replace('-', '_')}-0.dist-info"
+            info.mkdir(parents=True)
+            lines = ["Metadata-Version: 2.1", f"Name: {name}", f"Version: {version}"]
+            lines += [f"Requires-Dist: {req}" for req in requires]
+            (info / "METADATA").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        monkeypatch.syspath_prepend(str(site))
+        skill = make_skill_info(
+            "pip-skill",
+            install_specs=[
+                {"kind": "pip", "id": "extra", "package": "flocks-fake-extras[more]"},
+                {"kind": "pip", "id": "badver", "package": "flocks-fake-badver>=1"},
+            ],
+        )
+        with (
+            patch.object(Skill, "get", return_value=skill),
+            patch("asyncio.create_subprocess_exec") as spawn,
+        ):
+            results = await SkillInstaller.install_deps("pip-skill")
+
+        spawn.assert_not_called()
+        assert [(r.spec_id, r.success) for r in results] == [("extra", False), ("badver", False)]
+        assert "flocks-fake-extras[more]" in (results[0].error or "")
+        assert "flocks-fake-badver>=1" in (results[1].error or "")
+
+    @pytest.mark.asyncio
+    async def test_other_kinds_still_run_in_a_managed_install(self):
+        skill = make_skill_info("brew-skill", install_specs=[{"kind": "brew", "formula": "gh"}])
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        with (
+            patch.object(Skill, "get", return_value=skill),
+            patch("asyncio.create_subprocess_exec", return_value=mock_proc) as spawn,
+        ):
+            results = await SkillInstaller.install_deps("brew-skill")
+
+        spawn.assert_called_once()
+        assert results[0].success is True
+
+
+@pytest.mark.asyncio
+async def test_pip_deps_still_install_outside_a_managed_install(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "root"))
+    monkeypatch.delenv("FLOCKS_DEPLOY_MODE", raising=False)
+    skill = make_skill_info("pip-skill", install_specs=[{"kind": "pip", "package": "packaging"}])
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    with (
+        patch.object(Skill, "get", return_value=skill),
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc) as spawn,
+    ):
+        results = await SkillInstaller.install_deps("pip-skill")
+
+    spawn.assert_called_once()
+    assert spawn.call_args.args[1:4] == ("-m", "pip", "install")
+    assert results[0].success is True
+
+
 # ---------------------------------------------------------------------------
 # SkillInstaller._build_install_command — pip and go-module fallback
 # ---------------------------------------------------------------------------
@@ -994,6 +1099,17 @@ INSTALL_GROUP_FAMILIES = [
 
 
 async def _install_group_package(family, content, tmp_path, monkeypatch, *, scope="global"):
+    """Replace through each installer family; v2 only replaces a skill after an explicit overwrite."""
+    from flocks.skill import installer as installer_module
+
+    token = installer_module._OVERWRITE_ALLOWED.set(True)
+    try:
+        return await _install_group_package_once(family, content, tmp_path, monkeypatch, scope=scope)
+    finally:
+        installer_module._OVERWRITE_ALLOWED.reset(token)
+
+
+async def _install_group_package_once(family, content, tmp_path, monkeypatch, *, scope="global"):
     """Exercise each real replacement boundary with offline download responses."""
     import httpx
 

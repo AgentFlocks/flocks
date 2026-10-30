@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { monitoringAPI, SystemStatus, MetricsSnapshot, PerformanceData } from '@/api/monitoring';
+import PerformanceTrend, { appendTrendPoint, type TrendPoint } from './PerformanceTrend';
 
 export default function MonitoringPage() {
   const { t } = useTranslation('monitoring');
@@ -11,6 +12,7 @@ export default function MonitoringPage() {
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
   const [llmPerformance, setLlmPerformance] = useState<PerformanceData[]>([]);
   const [toolPerformance, setToolPerformance] = useState<PerformanceData[]>([]);
+  const [trend, setTrend] = useState<TrendPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const latestRequestIdRef = useRef(0);
@@ -49,6 +51,7 @@ export default function MonitoringPage() {
         if (!mountedRef.current || latestRequestIdRef.current !== requestId) return;
         setStatus(statusResult.value.data);
         setMetrics(metricsResult.value.data);
+        setTrend((points) => appendTrendPoint(points, metricsResult.value.data));
         setLlmPerformance(llmPerfResult.value.data);
         setToolPerformance(toolPerfResult.value.data);
       } catch (err: any) {
@@ -311,16 +314,11 @@ export default function MonitoringPage() {
         </div>
       </div>
 
-      {/* Chart Placeholder */}
+      {/* Performance trend: sampled from the metrics this page polls */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">{t('performanceTrend')}</h3>
-        <div className="h-64 flex items-center justify-center border-2 border-dashed border-gray-300 rounded-lg">
-          <div className="text-center text-gray-500">
-            <BarChart3 className="w-12 h-12 mx-auto mb-2 text-gray-400" />
-            <p>{t('chartHint')}</p>
-            <p className="text-sm mt-1">{t('chartInstall')}</p>
-          </div>
-        </div>
+        <h3 className="text-lg font-semibold text-gray-900">{t('performanceTrend')}</h3>
+        <p className="text-sm text-gray-600 mt-1 mb-4">{t('trendDescription')}</p>
+        <PerformanceTrend points={trend} />
       </div>
     </div>
   );

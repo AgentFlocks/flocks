@@ -13,6 +13,8 @@ import { taskAPI, TaskExecution, TaskListParams } from '@/api/task';
 import { copyText } from '@/utils/clipboard';
 import { StatusBadge, PriorityBadge, SourceBadge, ModeBadge, ActionButton } from './components';
 import { formatTime, formatDuration, PAGE_SIZE } from './helpers';
+import { extractErrorMessage } from '@/utils/error';
+import ExecutionFilters, { type ExecutionSearchParams } from './ExecutionFilters';
 
 const DETAIL_POLL_INTERVAL_MS = 30000;
 const LazySessionChat = lazy(() => import('@/components/common/SessionChat'));
@@ -28,6 +30,7 @@ function SessionChatFallback() {
 export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: () => void }) {
   const { t } = useTranslation('task');
   const [filterKey, setFilterKey] = useState('all');
+  const [searchFilters, setSearchFilters] = useState<ExecutionSearchParams>({});
   const [page, setPage] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
@@ -42,7 +45,8 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
   ];
 
   const currentFilter = QUEUED_FILTERS.find(f => f.key === filterKey)?.filter ?? {};
-  const listParams = { ...currentFilter, offset: page * PAGE_SIZE, limit: PAGE_SIZE };
+  const listParams = { ...searchFilters, ...currentFilter, offset: page * PAGE_SIZE, limit: PAGE_SIZE };
+  const hasFilters = filterKey !== 'all' || Object.values(searchFilters).some(Boolean);
 
   const { tasks, total, loading, error, refetch } = useTaskExecutions(listParams, { pollInterval: 5000 });
   const effectiveTasks = useMemo(() => {
@@ -153,6 +157,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
           await taskAPI.cancelExecution(taskId);
           break;
         case 'retry':  await taskAPI.retryExecution(taskId);  break;
+        case 'continue': await taskAPI.continueExecution(taskId); break;
         case 'rerun':
           await taskAPI.rerunExecution(taskId);
           break;
@@ -173,7 +178,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
         fetchDetailTask(taskId);
       }
     } catch (err: unknown) {
-      toast.error(t('queued.actionFailed'), err instanceof Error ? err.message : String(err));
+      toast.error(t('queued.actionFailed'), extractErrorMessage(err));
     }
   };
 
@@ -194,7 +199,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
       setSelectedTasks(new Set());
       refresh();
     } catch (err: unknown) {
-      toast.error(t('queued.actionFailed'), err instanceof Error ? err.message : String(err));
+      toast.error(t('queued.actionFailed'), extractErrorMessage(err));
     }
   };
 
@@ -213,7 +218,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
       if (selectedId && selectedTasks.has(selectedId)) closeDetail();
       refresh();
     } catch (err: unknown) {
-      toast.error(t('queued.actionFailed'), err instanceof Error ? err.message : String(err));
+      toast.error(t('queued.actionFailed'), extractErrorMessage(err));
     }
   };
 
@@ -241,18 +246,26 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     setSelectedTasks(new Set());
   };
 
-  if (loading && effectiveTasks.length === 0) return <div className="flex justify-center py-12"><LoadingSpinner delayMs={180} /></div>;
-  if (error) return <div className="text-center py-12 text-red-500">{error}</div>;
+  const handleSearch = (filters: ExecutionSearchParams) => {
+    setSearchFilters(filters);
+    setPage(0);
+    setSelectedTasks(new Set());
+    closeDetail();
+  };
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
+      <ExecutionFilters
+        onSearch={handleSearch}
+        onReset={() => { setFilterKey('all'); handleSearch({}); }}
+      />
+      <div className="flex items-center justify-between max-md:flex-wrap max-md:gap-2">
+        <div className="flex gap-1 bg-gray-100 rounded-lg p-1 max-md:max-w-full max-md:overflow-x-auto">
           {QUEUED_FILTERS.map(f => (
             <button
               key={f.key}
               onClick={() => handleFilterChange(f.key)}
-              className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+              className={`px-3 py-1.5 text-sm rounded-md transition-colors max-md:shrink-0 max-md:whitespace-nowrap ${
                 filterKey === f.key ? 'bg-white text-slate-800 shadow-sm font-medium' : 'text-gray-600 hover:text-gray-900'
               }`}
             >
@@ -261,7 +274,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
           ))}
         </div>
         {hasVisibleSelection && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 max-md:flex-wrap">
             <span className="text-sm text-gray-500">{t('queued.selectedCount', { count: visibleSelectedIds.length })}</span>
             <button onClick={handleBatchCancel} className="px-3 py-1.5 text-sm bg-yellow-50 text-yellow-700 rounded-md hover:bg-yellow-100">{t('queued.batchCancel')}</button>
             <button onClick={handleBatchDelete} className="px-3 py-1.5 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100">{t('queued.batchDelete')}</button>
@@ -269,16 +282,20 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
         )}
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        {effectiveTasks.length === 0 ? (
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden max-md:overflow-x-auto">
+        {loading && effectiveTasks.length === 0 ? (
+          <div className="flex justify-center py-12"><LoadingSpinner delayMs={180} /></div>
+        ) : error ? (
+          <div role="alert" className="text-center py-12 text-red-500">{error}</div>
+        ) : effectiveTasks.length === 0 ? (
           <EmptyState
             icon={<ListTodo className="w-8 h-8" />}
-            title={t('queued.emptyTitle')}
-            description={t('queued.emptyDescription')}
+            title={t(hasFilters ? 'queued.filterEmptyTitle' : 'queued.emptyTitle')}
+            description={t(hasFilters ? 'queued.filterEmptyDescription' : 'queued.emptyDescription')}
           />
         ) : (
           <>
-            <table className="w-full text-sm">
+            <table className="w-full text-sm max-md:min-w-[44rem]">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="w-10 px-3 py-3">
@@ -401,12 +418,12 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
     <>
       <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
       <div
-        className="fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl transition-colors"
+        className="fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl transition-colors max-md:!w-full"
         style={{ width: drawerWidth, maxWidth: '100%' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div
-          className={`absolute -left-1 top-0 bottom-0 z-10 w-3 cursor-ew-resize transition-colors ${
+          className={`absolute -left-1 top-0 bottom-0 z-10 w-3 cursor-ew-resize transition-colors max-md:hidden ${
             isDragging ? 'bg-red-500/10' : 'hover:bg-red-400/10'
           }`}
           onMouseDown={handleDragStart}
@@ -418,7 +435,7 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
             <GripVertical className={`w-3 h-6 ${isDragging ? 'text-red-500' : 'text-gray-300 hover:text-gray-500'}`} />
           </div>
         </div>
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 flex-shrink-0">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 flex-shrink-0 max-md:px-4">
           <h3 className="font-semibold text-gray-900 truncate pr-2">{task.title}</h3>
           <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 flex-shrink-0">
             <X className="w-4 h-4 text-gray-400" />
@@ -445,9 +462,21 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
             </div>
           )}
 
+          {task.status === 'failed' && task.retry?.blockedReason === 'unverified_effects' && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+              <p>{t('queued.heldForVerification')}</p>
+              {(task.retry.unverifiedEffects?.length ?? 0) > 0 && (
+                <p className="mt-1 break-all font-mono">{task.retry.unverifiedEffects!.join(', ')}</p>
+              )}
+            </div>
+          )}
+
           <div className="flex flex-wrap gap-1.5">
             {!['completed', 'cancelled', 'failed'].includes(task.status) && (
               <ActionButton icon={<XCircle className="w-3 h-3" />} label={t('queued.actionCancel')} onClick={() => onAction('cancel', task.id)} color="gray" />
+            )}
+            {task.status === 'failed' && task.retry?.blockedReason === 'unverified_effects' && task.sessionID && (
+              <ActionButton icon={<Play className="w-3 h-3" />} label={t('queued.actionResume')} onClick={() => onAction('continue', task.id)} color="blue" />
             )}
             {task.status === 'failed' && (
               <ActionButton icon={<RotateCcw className="w-3 h-3" />} label={t('queued.actionRetry')} onClick={() => onAction('retry', task.id)} color="blue" />

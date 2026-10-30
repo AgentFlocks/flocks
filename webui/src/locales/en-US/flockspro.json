@@ -1,294 +1,61 @@
 {
-  "title": "{{productName}}",
-  "description": "Complete console account login, upgrade application, and upgrade execution locally.",
-  "actions": {
-    "refresh": "Refresh",
-    "cancel": "Cancel",
-    "confirm": "OK",
-    "submit": "Submit Request",
-    "submitting": "Submitting..."
+  "description": "The enterprise edition: a Go core, its own PostgreSQL, audit logs, security configuration, user management, high availability.",
+  "loading": "Loading...",
+  "machine": {
+    "previousTitle": "This machine has the previous enterprise edition",
+    "openTitle": "This machine runs the open edition",
+    "version": "Enterprise edition",
+    "pythonEdition": "Python edition {{version}}",
+    "licence": "Licence",
+    "status": "Licence status",
+    "expires": "Expires",
+    "previousNote": "The enterprise edition is a separate installer now, and the previous one gets no more releases. The open part keeps upgrading with flocks update; the previous edition's audit logs, security configuration and user management pages come back with the new enterprise edition.",
+    "openNote": "The enterprise edition is a separate installer: it takes this install's data over (moved into its own PostgreSQL on its first start) and is used the same way. Contact us for a licence and the installer."
   },
-  "errors": {
-    "fetchConsoleLoginStatus": "Failed to load login status",
-    "startConsoleLogin": "Failed to start console account login",
-    "finishConsoleLogin": "Failed to complete console login callback",
-    "logoutConsoleLogin": "Failed to log out console account",
-    "fetchRequests": "Failed to load upgrade requests",
-    "createRequest": "Failed to create upgrade request",
-    "refreshRequest": "Failed to refresh request status",
-    "cancelRequest": "Failed to cancel request",
-    "startUpgrade": "Failed to start upgrade",
-    "downgradeProPackage": "Failed to downgrade to OSS edition"
-  },
-  "consoleLogin": {
-    "title": "Console Account Login",
-    "description": "Start login locally, sign in on console, and return to local confirmation.",
-    "accountLabel": "Console account: ",
-    "loading": "Loading...",
-    "bound": "Console account logged in",
-    "unbound": "Not logged in",
-    "unknownAccount": "Unknown account",
-    "missingAccountHint": "Current session does not include account name, please log out and log in again.",
-    "loginAction": "Console Login",
-    "logoutAction": "Log Out"
+  "licenceStatus": {
+    "commercial": "Commercial",
+    "poc": "Trial",
+    "expired": "Expired",
+    "revoked": "Revoked",
+    "unactivated": "Not activated",
+    "invalid": "Invalid"
   },
   "upgrade": {
-    "title": "Upgrade to {{productName}}",
-    "description": "Review the current license information, submit applications, and track approval status.",
-    "installedTitle": "{{productName}} {{version}}",
-    "installedDescription": "{{productName}} is installed and the license is activated.",
-    "installedVersion": "{{productName}} Version",
-    "licenseStatus": "License Status",
-    "licenseId": "License ID",
-    "expiresAt": "License Expires At",
-    "remainingDays": "License Remaining",
-    "remainingDaysValue": "{{count}} days",
-    "daysUnit": "days",
-    "quota": "Quota",
-    "adminQuotaValue": "{{count}} admin",
-    "memberQuotaValue": "{{count}} members",
-    "lastSyncedAt": "License Synced At",
-    "licenseDetails": "License Details",
-    "showLicenseDetails": "Show License Details",
-    "hideLicenseDetails": "Hide License Details",
-    "licenseFieldLabels": {
-      "license_id": "License ID",
-      "install_id": "Install ID",
-      "fingerprint": "Machine Fingerprint"
-    },
-    "refreshing": "Refreshing...",
-    "syncLicenseAction": "Sync License Info",
-    "syncingLicense": "Syncing...",
-    "consoleSyncWarning": "Console license sync is temporarily unavailable. Local license status was refreshed. {{message}}",
-    "downgradeToOssAction": "Downgrade to OSS",
-    "downgradeDialogTitle": "Confirm Downgrade to OSS",
-    "downgradeDialogDescription": "This removes the local {{productName}} component and restarts the service. Existing upgrade requests and Licenses will not be withdrawn or revoked.",
-    "downgradeConsoleSyncHint": "After the local Pro component is removed, Console will be synced to record this installation as returned to OSS. If sync fails, the local downgrade marker is kept so sync can be retried after the issue is fixed.",
-    "confirmDowngradeAction": "Downgrade",
-    "downgradeTitle": "Downgrade to OSS",
-    "downgradingHint": "Removing the local {{productName}} component. Console will be synced after removal succeeds.",
-    "waitingDowngradeRestart": "Pro component removed. Waiting for service to restart as OSS...",
-    "applyAction": "Apply for Upgrade",
-    "applyNewLicenseAction": "Apply for New License",
-    "revokedOrExpiredHint": "The current license is no longer valid. You can submit a new {{productName}} application.",
-    "loginFirst": "Log in console account before applying for upgrade.",
-    "pendingRequestExists": "An upgrade request is already active. Refresh status or cancel it before creating a new one.",
-    "currentRequest": "Current Request",
-    "status": "Status",
-    "statusLabels": {
-      "pending": "Pending Review",
-      "reviewing": "In Review",
-      "approved": "Approved",
-      "activated": "Activated",
-      "rejected": "Rejected",
-      "cancelled": "Withdrawn",
-      "expired_unactivated": "Activation Expired"
-    },
-    "licenseStatusLabels": {
-      "poc": "POC License",
-      "commercial": "Commercial",
-      "revoked": "Revoked",
-      "expired": "Expired",
-      "superseded": "Superseded",
-      "active": "Active"
-    },
-    "licenseTypeLabels": {
-      "poc": "POC License",
-      "commercial": "Commercial"
-    },
-    "updatedAt": "Approval Status Updated At",
-    "manualRefresh": "Refresh Approval Status",
-    "cancel": "Cancel Request",
-    "rejectedTitle": "Request rejected",
-    "dismissRejected": "Dismiss rejection feedback",
-    "startUpgrade": "Start Upgrade",
-    "inDevelopment": "{{productName}} upgrade is under development",
-    "installingHint": "Downloading and installing the {{productName}} component. OSS core will not be upgraded.",
-    "waitingRestart": "Upgrade is installed. Waiting for service restart...",
-    "restartTimeout": "Service restart timed out. Refresh later to confirm status.",
-    "afterUpgradeHint": "Starting upgrade will download the Pro bundle, install only the flockspro wheel, and restart automatically.",
-    "bundleFilename": "Bundle File",
-    "proComponentFilename": "Pro Component File",
-    "downloadProgressLabel": "{{percent}}% · {{downloaded}} / {{total}}",
-    "downloadProgressUnknown": "Downloaded {{downloaded}}",
-    "stageLabels": {
-      "checking": "Check local state",
-      "reporting": "Sync Console",
-      "fetching": "Download Pro bundle",
-      "backing_up": "Backup",
-      "applying": "Apply",
-      "syncing": "Install {{productName}}",
-      "downgrading": "Remove {{productName}}",
-      "building": "Build",
-      "restarting": "Restart service",
-      "done": "Done",
-      "error": "Failed"
-    },
-    "noRequest": "No upgrade request yet.",
-    "history": "Request History",
-    "licenseHistory": "License History",
-    "historyColumns": {
-      "licenseId": "lic-id",
-      "licenseType": "License Type",
-      "status": "Status",
-      "appliedAt": "Applied At",
-      "expiresAt": "Expires At",
-      "durationDays": "Duration Days",
-      "account": "Cloud Account"
-    },
-    "applyDialogTitle": "{{productName}} Upgrade Application",
-    "productLabel": "Requested Version",
-    "licenseTypeLabel": "Requested License Type",
-    "licenseTypePoc": "POC License",
-    "licenseTypeCommercial": "Formal License",
-    "companyPlaceholderRequired": "Company (required)",
-    "applicantNamePlaceholderRequired": "Applicant Name (required)",
-    "salesRepNamePlaceholder": "Sales Representative Name (optional)",
-    "salesRepHintPrefix": "If you do not have a sales representative, please visit",
-    "salesRepHintLinkText": "the ThreatBook trial page",
-    "salesRepHintSuffix": "to leave your contact information.",
-    "applicantEmailPlaceholder": "Applicant Email (required)",
-    "applicantPhonePlaceholder": "Applicant Phone (required)",
-    "notesPlaceholder": "Notes (optional, e.g. main use cases, scheduled tasks, daily token consumption)",
-    "formRequiredError": "Company, applicant name, applicant email, and applicant phone are required",
-    "invalidEmailError": "Please enter a valid applicant email.",
-    "invalidPhoneError": "Please enter a valid applicant phone number (international numbers supported)."
+    "title": "Upgrade to the new enterprise edition",
+    "whatChanges": "After the upgrade the program is in {{root}}, the data stays where it is (moved into the bundled PostgreSQL on the first start; the original is kept) and the machine's licence is carried over; flocks start|stop|restart|status|logs|update work as before.",
+    "systemd": "systemd runs this machine (the open edition's offline package): the installer runs as root. The page can download it; then run the command it gives.",
+    "prepare": "{{account}} cannot write {{root}} yet: run this once as root, then come back.",
+    "recheck": "Done, check again",
+    "check": "Check for the new enterprise edition",
+    "loginConsole": "Sign in to Console",
+    "consoleAccount": "Console account: {{account}}",
+    "offer": "New enterprise edition {{version}}",
+    "start": "Upgrade to {{version}}",
+    "download": "Download the installer",
+    "manualTitle": "Upgrade by hand",
+    "manual": "Copy the installer (flockspro-<version>-<platform>.run) to this machine and run, as {{account}}:"
   },
-  "sensitiveDetection": {
-    "title": "Prompt Redaction",
-    "description": "When enabled, sensitive values in user, assistant, and tool messages are replaced before model input.",
-    "enabledLabel": "Enable prompt redaction",
-    "placeholderFormat": "Placeholder Format",
-    "verbosePreview": "Example: [[V_EMAIL_1]]",
-    "compactPreview": "Example: [EMAIL_1]",
-    "promptHint": "Model Value Passing Hint",
-    "promptHintDescription": "Add guidance for passing replaced values to tools. Recommended on; disabling it may make models treat values as template variables.",
-    "loading": "Loading prompt redaction settings...",
-    "saving": "Saving prompt redaction settings...",
-    "placeholderFormats": {
-      "verbose": "Stable",
-      "compact": "Compact"
-    },
-    "errors": {
-      "fetch": "Failed to load prompt redaction settings",
-      "save": "Failed to save prompt redaction settings",
-      "fetchSettings": "Failed to load sensitive detection settings",
-      "updateSettings": "Failed to save sensitive detection settings"
-    }
+  "progress": {
+    "downloading": "Downloading the new enterprise edition {{version}}",
+    "installing": "The installer runs ({{version}}): the open edition stops first, and the enterprise edition's first start moves the data, which can take a few minutes. This page reloads once it is done.",
+    "restarting": "The open edition has stopped and the enterprise edition is starting for the first time (moving the data). The page reloads if it listens on this address; otherwise open the address the installer printed.",
+    "finished": "The new enterprise edition {{version}} is installed; reload the page.",
+    "failed": "The install did not finish and the open edition keeps running; the installer output below says why.",
+    "failedCode": "The install did not finish (exit code {{code}}) and the open edition keeps running; the installer output below says why.",
+    "command": "The installer is downloaded. Run, as root:",
+    "commandPrepare": "The installer is downloaded. First let this account have the install directory (as root), then run the installer:",
+    "log": "Installer output"
+  },
+  "errors": {
+    "load": "Could not read this machine's state",
+    "check": "Check failed",
+    "start": "Upgrade failed",
+    "login": "Could not start the Console sign-in"
   },
   "callback": {
-    "processing": "Completing console login, please wait...",
-    "missingConsoleLoginId": "Missing console_login_id in callback URL.",
-    "exchangeFailed": "Failed to complete login exchange",
-    "failedTitle": "Login Failed"
-  },
-  "audit": {
-    "title": "Audit Logs",
-    "description": "Review Pro audit events with filters for event type, actor, and time range.",
-    "loading": "Loading...",
-    "empty": "No audit events",
-    "total": "Total {{total}}",
-    "page": "Page {{page}} / {{pageCount}}",
-    "actions": {
-      "search": "Search",
-      "exportExcel": "Download Excel",
-      "exporting": "Downloading...",
-      "reset": "Reset",
-      "prev": "Prev",
-      "next": "Next"
-    },
-    "filters": {
-      "eventType": "Event type (event_type)",
-      "allEventTypes": "All event types",
-      "actor": "Actor username (username)",
-      "allResults": "All results"
-    },
-    "result": {
-      "success": "Success",
-      "failed": "Failed"
-    },
-    "table": {
-      "time": "Time",
-      "eventType": "Event",
-      "actor": "Actor",
-      "resource": "Resource",
-      "result": "Result",
-      "payload": "Details"
-    },
-    "errors": {
-      "fetch": "Failed to fetch audit logs",
-      "export": "Failed to export audit logs",
-      "forbidden": "Only admins can view audit logs",
-      "unavailable": "Audit logs are not available in this edition"
-    }
-  },
-  "security": {
-    "title": "Security Config",
-    "description": "Manage the enterprise security path: identity ingress → tool visibility → policy/command enforcement.",
-    "loading": "Loading security configuration...",
-    "actions": {
-      "viewAudit": "View Audit Logs",
-      "saveRollout": "Save Rollout",
-      "viewDetails": "View details"
-    },
-    "sections": {
-      "rollout": "Rollout Modes",
-      "rolloutDescription": "Unified controls for tool policy, command execution, identity ingress, and tool visibility. Audit-only records decisions without blocking; enforcement confirms, denies, or hides by policy. Changes take effect immediately after saving.",
-      "permissionBaseline": "Permission Baseline",
-      "permissionBaselineDescription": "Default permission modes for sessions created from different entry points. Fixed by the system and not editable here.",
-      "baseline": "System Baseline",
-      "baselineDescription": "System hard-deny rules and the readonly capability ceiling. View-only; administrators cannot relax them."
-    },
-    "labels": {
-      "policyRollout": "Tool Enforcement",
-      "commandRollout": "Command Enforcement",
-      "ingressRollout": "Identity Ingress",
-      "visibilityRollout": "Tool Visibility",
-      "channelDefaultMode": "Channel-created sessions",
-      "uiDefaultMode": "UI-created sessions",
-      "hardDeny": "Commands always denied by the system",
-      "readonlyCeiling": "Tools hidden in readonly mode",
-      "pathRegion": "Path region",
-      "operation": "Operation",
-      "developmentMode": "Development mode (dev-mode)",
-      "executionMode": "Execution mode (exe-mode)",
-      "filesystemRollout": "Filesystem controls",
-      "filesystemHardDenies": "Filesystem hard-deny rules",
-      "networkHardDeny": "hard-deny baseline (always deny access, not editable)",
-      "filesystemManagedScope": "In scope",
-      "filesystemExcludedScope": "Out of scope",
-      "networkPersonalAllowlist": "Personal always-allow domains (editable)",
-      "whitelistCategory": "Whitelist category",
-      "blacklistCategory": "Blacklist category",
-      "networkPersonalTrustedTools": "Personal trusted tool network access list (one per line: tool_name or tool_name,tool_source)",
-      "networkRulesValidation": "Rule format validation",
-      "networkTrustedTools": "Global trusted tool network access list (one per line: tool_name or tool_name,tool_source)"
-    },
-    "hints": {
-      "policyRollout": "Controls whether general policy decisions (file I/O, workflow actions, high-risk tools, etc.) actually block requests. Audit only: evaluate and audit without blocking. Enforce: deny/confirm decisions stop execution.",
-      "commandRollout": "Controls shell/command tools only (bash, shell, cmd, PowerShell, SSH commands, etc.). Can be enabled separately from policy enforcement—for example, enforce commands first while leaving other tools in audit-only mode.",
-      "ingressRollout": "Controls whether Channel, HTTP, and workflow entry points require a valid identity. Off: skip ingress identity checks. Audit only: resolve identity but do not block. Enforce: reject entry when no valid identity is available.",
-      "visibilityRollout": "Controls which tools the AI can use under the current security policy. For example, in readonly mode, the agent cannot see hidden tools. Audit only: still show all tools, and only record which ones would be hidden. Enforce: actually hide those tools.",
-      "filesystemRollout": "Controls whether file tools run in audit-only or enforcement mode.",
-      "networkPersonalAllowlist": "This list is maintained separately from the global allowlist. You can add/remove entries manually, and it is also populated by choosing \"always allow this domain\" in network confirmations.",
-      "networkPersonalTrustedTools": "Matches skip per-request confirmation for that user and tool, but hard-deny and blocklist targets are still blocked.",
-      "networkRulesValidation": "Domain/IP rules apply to allowlist and blocklist; tool_name[,tool_source] applies to trusted tool lists.",
-      "networkTrustedTools": "This is a global policy affecting all users; hard-deny and blocklist targets are still blocked."
-    },
-    "modes": {
-      "disabled": "Off",
-      "shadow": "Audit only",
-      "enforce": "Enforce"
-    },
-    "messages": {
-      "rolloutSaved": "Rollout saved and applied immediately"
-    },
-    "errors": {
-      "loadFailed": "Failed to load security config",
-      "rolloutSaveFailed": "Failed to save rollout"
-    },
-    "placeholders": {
-      "networkPersonalAllowlistEmpty": "No personal always-allow records yet"
-    }
+    "processing": "Finishing the Console sign-in...",
+    "missingConsoleLoginId": "console_login_id is missing; the sign-in cannot be finished.",
+    "exchangeFailed": "The sign-in callback failed",
+    "failedTitle": "Sign-in failed"
   }
 }

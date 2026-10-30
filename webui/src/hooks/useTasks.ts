@@ -76,6 +76,9 @@ function normalizeExecutionFilters(filters?: TaskListParams & { schedulerID?: st
   return {
     status: filters?.status,
     priority: filters?.priority,
+    title: filters?.title?.trim() || undefined,
+    startedAfter: filters?.startedAfter,
+    startedBefore: filters?.startedBefore,
     deliveryStatus: filters?.deliveryStatus,
     schedulerID: filters?.schedulerID,
     sortBy: filters?.sortBy,
@@ -231,14 +234,19 @@ function useAdaptiveTaskPolling<T extends { status: string }>(
       return hasActive ? Math.min(pollInterval, 4000) : pollInterval;
     };
 
+    let cancelled = false;
     let timerId: number;
     const tick = async () => {
       await resource.fetch({ silent: true });
+      if (cancelled) return;
       timerId = window.setTimeout(tick, scheduleDelay());
     };
 
     timerId = window.setTimeout(tick, scheduleDelay());
-    return () => window.clearTimeout(timerId);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerId);
+    };
   }, [activeStatuses, pollInterval, resource]);
 }
 
@@ -294,6 +302,9 @@ export function useTaskExecutions(
       filters?.status,
       filters?.priority,
       filters?.deliveryStatus,
+      filters?.title,
+      filters?.startedAfter,
+      filters?.startedBefore,
       filters?.schedulerID,
       filters?.sortBy,
       filters?.sortOrder,

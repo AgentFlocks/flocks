@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -19,9 +19,9 @@ from flocks.hub.catalog import (
     load_taxonomy,
 )
 from flocks.hub.files import file_tree, read_file_content
-from flocks.license import is_pro_edition_status, license_status
-from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
-from flocks.hub.update_protection import UpdateConfirmationRequired, build_plan, public_plan
+from flocks.hub import access as hub_access
+from flocks.hub.installer import install_plugin, preview_plan, uninstall_plugin, update_plugin
+from flocks.hub.update_protection import UpdateConfirmationRequired, public_plan
 from flocks.hub.models import (
     HubCatalogEntry,
     HubFileContent,
@@ -84,6 +84,7 @@ def _guard_legacy_removed_plugin(plugin_type: PluginType, plugin_id: str) -> Non
 
 
 def _clear_hub_runtime_caches() -> None:
+    hub_access.contents_changed()
     clear_catalog_caches()
     try:
         from flocks.tool.device.plugin_index import clear_device_template_cache
@@ -247,6 +248,12 @@ class SceneSuiteEntry(BaseModel):
     # there while the suite version itself has not moved.
     workspaceVersion: Optional[str] = None
     workspaceLatestVersion: Optional[str] = None
+    # Filled in by a hub access policy (flocks.hub.access), when one is
+    # registered: a locked suite is listed but does not install; what else
+    # the policy knows about it is for its own part of the page.
+    locked: Optional[bool] = None
+    lockReason: Optional[str] = None
+    annotations: dict[str, Any] = Field(default_factory=dict)
 
 
 def _suite_workspace_id(plugin_id: str) -> Optional[str]:
@@ -263,7 +270,8 @@ def _suite_workspace_id(plugin_id: str) -> Optional[str]:
 @router.get("/hub/scene-suites", response_model=list[SceneSuiteEntry])
 async def hub_scene_suites(_user: object = Depends(require_user)):
     """Scene suites with the same install state exposed in the Hub catalog."""
-    return await asyncio.to_thread(_load_scene_suites)
+    suites = await asyncio.to_thread(_load_scene_suites)
+    return await hub_access.decorate_scene_suites(suites)
 
 
 def _load_scene_suites() -> list[SceneSuiteEntry]:
@@ -308,6 +316,8 @@ def _load_scene_suites() -> list[SceneSuiteEntry]:
 async def _publish_scene_suites_changed(plugin_type: PluginType, plugin_id: str, action: str) -> None:
     from flocks.server.routes.event import publish_event
 
+    # What a hub access policy decided about this content may have changed with this action.
+    hub_access.contents_changed()
     try:
         suite_ids = [plugin_id] if plugin_type == "component" else []
         if plugin_type != "component":
@@ -345,23 +355,11 @@ def _guard_guided_install(plugin_type: PluginType, plugin_id: str) -> None:
     )
 
 
-async def _assert_edition_allowed(plugin_type: PluginType, plugin_id: str) -> None:
-    """Pro-only suites stay listed in the catalog but only install under Pro."""
-    try:
-        manifest = load_manifest(plugin_type, plugin_id)
-    except Exception:
-        return
-    if getattr(manifest, "edition", "oss") != "pro":
-        return
-    try:
-        status_payload = await license_status()
-    except Exception:
-        status_payload = {}
-    if not is_pro_edition_status(status_payload):
-        raise HTTPException(
-            status_code=403,
-            detail="该套件需要 Flocks Pro 授权后才能安装，请先在系统设置中升级。",
-        )
+async def _assert_install_allowed(plugin_type: PluginType, plugin_id: str) -> None:
+    """A registered hub access policy may refuse an install or update (flocks.hub.access)."""
+    refusal = await hub_access.install_refusal(plugin_type, plugin_id)
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
 
 
 @router.post("/hub/plugins/{plugin_type}/{plugin_id}/install", response_model=InstalledPluginRecord)
@@ -373,7 +371,7 @@ async def hub_install_plugin(
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
     _guard_guided_install(plugin_type, plugin_id)
-    await _assert_edition_allowed(plugin_type, plugin_id)
+    await _assert_install_allowed(plugin_type, plugin_id)
     try:
         return await install_plugin(plugin_type, plugin_id, scope=req.scope)
     except UpdateConfirmationRequired as exc:
@@ -394,7 +392,7 @@ async def hub_install_plugin_stream(
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
     _guard_guided_install(plugin_type, plugin_id)
-    await _assert_edition_allowed(plugin_type, plugin_id)
+    await _assert_install_allowed(plugin_type, plugin_id)
     if plugin_type != "component":
         raise HTTPException(status_code=400, detail="Streaming install progress is only supported for components.")
     try:
@@ -450,9 +448,9 @@ async def hub_preview_update(
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
     _guard_guided_install(plugin_type, plugin_id)
-    await _assert_edition_allowed(plugin_type, plugin_id)
+    await _assert_install_allowed(plugin_type, plugin_id)
     try:
-        return public_plan(await asyncio.to_thread(build_plan, plugin_type, plugin_id, req.scope))
+        return public_plan(await preview_plan(plugin_type, plugin_id, req.scope))
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -466,7 +464,7 @@ async def hub_update_plugin(
 ):
     _guard_legacy_removed_plugin(plugin_type, plugin_id)
     _guard_guided_install(plugin_type, plugin_id)
-    await _assert_edition_allowed(plugin_type, plugin_id)
+    await _assert_install_allowed(plugin_type, plugin_id)
     try:
         return await update_plugin(plugin_type, plugin_id, scope=req.scope,
                                    confirmation_token=req.confirmationToken, confirm_changes=req.confirmChanges)

@@ -107,6 +107,8 @@ export interface TokenUsage {
   cache?: {
     read: number;
     write: number;
+    /** False means unknown; null/absent identifies historical records. */
+    reported?: boolean | null;
   };
 }
 
@@ -460,6 +462,51 @@ export interface ProviderCredentialInput {
   username?: string;
   fields?: Record<string, string | undefined>;
   provider_name?: string;
+  skip_catalog_bootstrap?: boolean;
+}
+
+export interface DiscoveredModel {
+  id: string;
+  name: string;
+  already_added: boolean;
+  selectable: boolean;
+  unavailable_reason?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  supports_vision?: boolean;
+  supports_tools?: boolean;
+  supports_reasoning?: boolean;
+  supports_streaming?: boolean;
+}
+
+export interface ModelDiscoveryResult {
+  source: 'api' | 'catalog' | 'none';
+  status: 'success' | 'fallback' | 'error';
+  code: string;
+  message: string;
+  fetched_at: string;
+  truncated: boolean;
+  models: DiscoveredModel[];
+}
+
+export type ModelImportInput = Pick<DiscoveredModel, 'id' | 'name' | 'context_window' | 'max_output_tokens' | 'supports_vision' | 'supports_tools' | 'supports_reasoning' | 'supports_streaming'>;
+
+export interface ModelImportResult {
+  added: string[];
+  skipped: string[];
+  failed: { id: string; error: string }[];
+}
+
+export interface InventoryModelInput extends Omit<ModelImportInput, 'context_window' | 'max_output_tokens'> {
+  context_window?: number | null;
+  max_output_tokens?: number | null;
+  enabled: boolean;
+  edited?: boolean;
+}
+
+export interface ModelInventoryDraft {
+  models: InventoryModelInput[];
+  deleted: string[];
 }
 
 // ==================== Model Management V2 Types ====================
@@ -529,13 +576,23 @@ export interface ModelLimitsV2 {
   max_output_tokens: number;
 }
 
+export interface PriceTierV2 {
+  max_input_tokens: number | null;
+  input: number;
+  output: number;
+  cache_read?: number | null;
+  cache_write?: number | null;
+}
+
 export interface PriceConfigV2 {
   input: number;
   output: number;
-  cache_read?: number;
-  cache_write?: number;
+  cache_read?: number | null;
+  cache_write?: number | null;
   unit: number;
   currency: string;
+  tiers?: PriceTierV2[];
+  price_version?: string | null;
 }
 
 export interface ParameterRuleV2 {
@@ -616,6 +673,7 @@ export interface CustomProviderCreate {
   base_url: string;
   api_key?: string;
   description?: string;
+  skip_catalog_bootstrap?: boolean;
 }
 
 export interface CustomProviderInfo {
@@ -716,13 +774,7 @@ export interface CatalogModel {
     max_input_tokens?: number;
     max_output_tokens: number;
   };
-  pricing?: {
-    input: number;
-    output: number;
-    cache_read?: number;
-    cache_write?: number;
-    currency: string;
-  };
+  pricing?: Omit<PriceConfigV2, 'unit'> & { unit?: number };
 }
 
 export interface Config {

@@ -4,6 +4,9 @@ CLI Commands module
 Exports all CLI command groups for registration in main.py
 """
 
+from flocks.cli.commands.acp import acp_app
+from flocks.cli.commands.agent import agent_app
+from flocks.cli.commands.debug import debug_app
 from flocks.cli.commands.export import export_app
 from flocks.cli.commands.import_ import import_app
 from flocks.cli.commands.mcp import mcp_app
@@ -14,8 +17,6 @@ from flocks.cli.commands.skill import skill_app
 from flocks.cli.commands.stats import stats_app
 from flocks.cli.commands.task import task_app
 from flocks.cli.commands.admin import admin_app
-
-from flocks.cli.commands.agent import agent_app
 from flocks.cli.commands.exec import exec_command
 from flocks.cli.commands.workflow import workflow_app
 from flocks.cli.commands.device import device_app
@@ -23,7 +24,9 @@ from flocks.cli.commands.model import model_app
 from flocks.cli.commands.plugin import plugin_app
 
 __all__ = [
+    "acp_app",
     "agent_app",
+    "debug_app",
     "exec_command",
     "workflow_app",
     "device_app",

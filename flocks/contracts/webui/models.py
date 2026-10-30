@@ -141,9 +141,10 @@ class WebUIWorkspaceListItem(BaseModel):
     # Checked into the project (<project>/.flocks/plugins/contracts/webui)
     # rather than installed into the user root.
     native: bool = False
-    # Its suite needs the Pro edition, which is not active: the workspace stays
-    # installed but must not open until a license is active again.
+    # A hub access policy locked it (flocks.hub.access): the workspace stays
+    # installed but must not open; the reason is the policy's own.
     locked: bool = False
+    lockReason: Optional[str] = Field(None, alias="lockReason")
 
 
 class WebUIPageDetail(BaseModel):
