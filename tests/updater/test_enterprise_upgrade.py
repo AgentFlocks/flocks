@@ -267,6 +267,24 @@ def test_eu5_the_installer_runs_apart_and_says_how_it_ended(machine: Path, monke
     assert ended["phase"] == "finished" and ended["exit_code"] == 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the installer is a shell one")
+def test_eu5_the_installer_is_no_part_of_this_servers_process_tree(machine: Path):
+    """install-managed stops the open edition, and `flocks stop` takes the server's whole process
+    tree (by parent pid, sessions or not): the installer must not be in it, or it stops itself."""
+    from flocks.cli.service_manager import collect_process_tree_pids
+
+    installer = fake_installer(machine, "sleep 2\necho done\nexit 0\n")
+    offer = enterprise.InstallerOffer(url="https://x/r.run", sha256="0" * 64, release_id="r1", version="2026.11.5")
+
+    state = enterprise.start_installer(installer, offer)
+
+    tree = collect_process_tree_pids(os.getpid())
+    assert enterprise._pid_alive(state["pid"])
+    assert state["pid"] not in tree
+    ended = wait_for(lambda: (s := enterprise.read_state()) and s["phase"] != "installing" and s)
+    assert ended["phase"] == "finished" and "done" in ended["log_tail"]
+
+
 def test_eu5_a_run_whose_process_is_gone_without_a_word_failed(machine: Path):
     enterprise._write_state({"phase": "installing", "pid": 2**22 + 12345, "log": ""})
     assert enterprise.read_state()["phase"] == "failed"

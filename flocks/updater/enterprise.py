@@ -509,21 +509,29 @@ def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
     with log_file.open("ab") as out:
         os.chmod(log_file, 0o600)
         out.write(f"\n== {time.strftime('%Y-%m-%dT%H:%M:%S%z')} bash {path.name}\n".encode())
-        out.flush()
-        # The exit status is written by a shell of the installer's own session, which outlives this one.
-        process = subprocess.Popen(
-            ["/bin/sh", "-c", 'bash "$1"; echo "$?" > "$2"', "sh", str(path), str(exit_file)],
-            cwd=str(work),
-            env=_installer_environment(),
-            stdin=subprocess.DEVNULL,
-            stdout=out,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-        )
+    # The exit status is written by a shell of the installer's own session, which outlives this one.
+    # The shell started here puts it in the background and exits at once, so it is no child of this
+    # server: `flocks stop` takes the server's whole process tree, and install-managed stops the open
+    # edition before the enterprise edition starts.
+    launcher = subprocess.Popen(
+        ["/bin/sh", "-c", '(bash "$1"; echo "$?" > "$2") </dev/null >>"$3" 2>&1 & echo "$!"',
+         "sh", str(path), str(exit_file), str(log_file)],
+        cwd=str(work),
+        env=_installer_environment(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    started, _ = launcher.communicate(timeout=30)
+    try:
+        pid = int(started.strip())
+    except ValueError:
+        raise EnterpriseUpgradeError(f"安装包没有起来，看 {log_file}") from None
     state = {
         "phase": "installing",
-        "pid": process.pid,
+        "pid": pid,
         "release_id": offer.release_id,
         "version": offer.version,
         "installer": str(path),
@@ -531,7 +539,7 @@ def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     _write_state(state)
-    log.info("enterprise.installer_started", {"pid": process.pid, "release_id": offer.release_id})
+    log.info("enterprise.installer_started", {"pid": pid, "release_id": offer.release_id})
     return state
 
 
