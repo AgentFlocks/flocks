@@ -1,7 +1,54 @@
 import pytest
+from types import SimpleNamespace
 
+from flocks.contracts.webui import builder as builder_module
 from flocks.contracts.webui.builder import WebUIPageBuilder, resolve_esbuild_bin
 from flocks.contracts.webui.store import WebUIPagesStore
+
+
+@pytest.mark.parametrize("os_name,machine,relative", [
+    ("linux", "x86_64", "@esbuild/linux-x64/bin/esbuild"),
+    ("linux", "aarch64", "@esbuild/linux-arm64/bin/esbuild"),
+    ("darwin", "arm64", "@esbuild/darwin-arm64/bin/esbuild"),
+    ("darwin", "x86_64", "@esbuild/darwin-x64/bin/esbuild"),
+    ("win32", "AMD64", "@esbuild/win32-x64/esbuild.exe"),
+    ("win32", "ARM64", "@esbuild/win32-arm64/esbuild.exe"),
+])
+def test_resolves_native_npm_compiler_without_a_launcher(tmp_path, monkeypatch, os_name, machine, relative):
+    monkeypatch.setattr(builder_module, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(builder_module, "sys", SimpleNamespace(platform=os_name))
+    monkeypatch.setattr(builder_module.platform, "machine", lambda: machine)
+    executable = tmp_path / "webui/node_modules" / relative
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    executable.chmod(0o755)
+    # Windows' npm launcher can exist too; prefer the .exe, which needs no Node.
+    if os_name == "win32":
+        launcher = tmp_path / "webui/node_modules/.bin/esbuild.cmd"
+        launcher.parent.mkdir()
+        launcher.touch()
+        launcher.chmod(0o755)
+    assert resolve_esbuild_bin() == executable
+
+
+@pytest.mark.parametrize("os_name,name", [("linux", "esbuild"), ("win32", "esbuild.exe")])
+def test_resolves_packaged_standalone_compiler(tmp_path, monkeypatch, os_name, name):
+    monkeypatch.setattr(builder_module, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(builder_module, "sys", SimpleNamespace(platform=os_name))
+    executable = tmp_path / "webui/node_modules/.bin" / name
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    executable.chmod(0o755)
+    assert resolve_esbuild_bin() == executable
+
+
+def test_missing_compiler_does_not_use_an_unrelated_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(builder_module, "_repo_root", lambda: tmp_path / "runtime")
+    executable = tmp_path / "esbuild"
+    executable.write_text("unrelated executable")
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert resolve_esbuild_bin() is None
 
 
 @pytest.fixture

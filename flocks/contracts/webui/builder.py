@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import platform
 import subprocess
 import sys
 import time
@@ -30,15 +31,26 @@ def _repo_root() -> Path:
 
 
 def resolve_esbuild_bin() -> Optional[Path]:
-    """Locate esbuild from the bundled webui toolchain."""
-    webui_bin = _repo_root() / "webui" / "node_modules" / ".bin"
+    """Locate the packaged compiler or the native binary installed by npm.
+
+    Keep this within the runtime tree. In particular, Windows can execute the
+    native .exe without relying on an npm .cmd launcher and Node's PATH.
+    """
+    modules = _repo_root() / "webui" / "node_modules"
+    webui_bin = modules / ".bin"
+    machine = platform.machine().lower()
+    arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64"}.get(machine, machine)
+    candidates = []
     if sys.platform == "win32":
-        candidate = webui_bin / "esbuild.cmd"
-        if candidate.is_file():
+        candidates.append(webui_bin / "esbuild.exe")
+        candidates.append(modules / "@esbuild" / f"win32-{arch}" / "esbuild.exe")
+        candidates.append(webui_bin / "esbuild.cmd")
+    else:
+        candidates.append(webui_bin / "esbuild")
+        candidates.append(modules / "@esbuild" / f"{sys.platform}-{arch}" / "bin" / "esbuild")
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
-    candidate = webui_bin / "esbuild"
-    if candidate.is_file():
-        return candidate
     return None
 
 
@@ -94,7 +106,11 @@ class WebUIPageBuilder:
 
         esbuild = resolve_esbuild_bin()
         if esbuild is None:
-            raise RuntimeError("esbuild is not available; install webui dependencies first")
+            raise RuntimeError(
+                "esbuild is not available in this runtime. "
+                "For a source installation, reinstall the locked WebUI dependencies (npm ci in webui). "
+                "For a packaged installation, install a complete runtime package containing the WebUI compiler."
+            )
 
         dist_dir = page_dir / "dist"
         dist_dir.mkdir(parents=True, exist_ok=True)

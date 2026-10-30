@@ -1151,6 +1151,12 @@ main() {
     "$NPM_CMD" run build
   )
 
+  info "Checking the WebUI plugin compiler..."
+  (
+    cd "$ROOT_DIR"
+    uv run --no-sync python -I -B scripts/check_webui_runtime.py
+  )
+
   if [[ "$INSTALL_TUI" -eq 1 ]]; then
     install_bun
     if is_zh_install; then

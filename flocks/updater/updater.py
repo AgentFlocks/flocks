@@ -301,10 +301,23 @@ def _upgrade_python_path(install_root: Path) -> Path:
 async def _validate_restart_runtime(
     install_root: Path,
 ) -> str | None:
-    """Validate that the project runtime path exists for restart."""
+    """Validate the target interpreter and plugin compiler before finalizing."""
     python_exe = _upgrade_python_path(install_root)
     if not python_exe.exists():
         return f"Restart runtime is missing: {python_exe}"
+    check = install_root / "scripts" / "check_webui_runtime.py"
+    # Older releases did not ship this check; keep upgrades/downgrades to those
+    # releases compatible. New source and prebuilt deliveries both run it.
+    if check.is_file():
+        try:
+            code, out, err = await _run_async(
+                [str(python_exe), "-I", "-B", str(check), "--expected-root", str(install_root)],
+                cwd=install_root, timeout=90,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"WebUI plugin runtime check failed: {exc}"
+        if code != 0:
+            return f"WebUI plugin runtime check failed: {(err or out).strip()}"
     return None
 
 

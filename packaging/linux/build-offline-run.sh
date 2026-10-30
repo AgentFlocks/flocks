@@ -28,6 +28,7 @@
 #   FLOCKS_MAKESELF_URL   makeself source tarball URL
 #   FLOCKS_UV_DEFAULT_INDEX  PyPI index used while building the venv
 #   FLOCKS_NPM_REGISTRY      npm registry used while building the WebUI
+#   FLOCKS_ESBUILD_ARCHIVE   pre-downloaded target esbuild npm tarball (integrity is still checked)
 
 set -euo pipefail
 
@@ -262,7 +263,7 @@ esac
 (cd / && "$INSTALL_ROOT/flocks/.venv/bin/flocks" --version >/dev/null)
 
 # ---------------------------------------------------------------------------
-# WebUI bundle (built in a scratch copy so node_modules never enters the payload)
+# WebUI bundle (built in a scratch copy so development dependencies do not enter the payload)
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_WEBUI_BUILD" -eq 1 && -f "$REPO_ROOT/webui/dist/index.html" ]]; then
   info "reusing existing webui/dist"
@@ -296,6 +297,24 @@ fi
 # make sure the dist is newer than every source file so `flocks start` never tries to rebuild
 find "$INSTALL_ROOT/flocks/webui/dist" -exec touch {} +
 fi  # REPACK build guard
+
+# Hub WebUI pages are built on install/update. Ship just the locked native compiler,
+# including when --skip-webui-build or --repack bypasses the frontend build.
+case "$ARCH" in
+  x86_64) ESBUILD_PLATFORM=linux-amd64 ;;
+  aarch64) ESBUILD_PLATFORM=linux-arm64 ;;
+esac
+ESBUILD_OUTPUT="$INSTALL_ROOT/flocks/webui/node_modules/.bin/esbuild"
+ESBUILD_ARCHIVE_ARGS=()
+if [[ -n "${FLOCKS_ESBUILD_ARCHIVE:-}" ]]; then
+  ESBUILD_ARCHIVE_ARGS=(--archive "$FLOCKS_ESBUILD_ARCHIVE")
+fi
+"$PYTHON_BIN" "$INSTALL_ROOT/flocks/scripts/package_webui_esbuild.py" \
+  --lock "$INSTALL_ROOT/flocks/webui/package-lock.json" --platform "$ESBUILD_PLATFORM" \
+  --output "$ESBUILD_OUTPUT" ${ESBUILD_ARCHIVE_ARGS[@]+"${ESBUILD_ARCHIVE_ARGS[@]}"}
+"$ESBUILD_OUTPUT" --version
+"$INSTALL_ROOT/flocks/.venv/bin/python" -I -B \
+  "$INSTALL_ROOT/flocks/scripts/check_webui_runtime.py" --expected-root "$INSTALL_ROOT/flocks"
 
 # every binary that ships (toolchain, venv wheels) must load on the oldest supported glibc /
 # libstdc++; a wheel picked for a newer build host only fails on the customer's machine
