@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -91,6 +92,44 @@ async def test_install_or_repair_source_prebuilt_skips_sync_and_frontend(
     assert version_writes == ["2026.9.14"]
     # What the channel staged is put in place once the install succeeded.
     assert json.loads(marker_destination.read_text(encoding="utf-8")) == {"installed": True}
+
+
+@pytest.mark.parametrize("compiler_result", ["missing", "timeout", "ok"])
+async def test_prebuilt_release_checks_plugins_before_publishing_success(monkeypatch, tmp_path, compiler_result):
+    install_root = _prepare_install_root(tmp_path)
+    _stub_install_side_effects(monkeypatch, tmp_path, install_root)
+    check = install_root / "scripts/check_webui_runtime.py"
+    check.parent.mkdir()
+    check.write_text("# supplied by the release\n")
+    seen = []
+    versions = []
+
+    async def run(cmd, **kwargs):
+        seen.append(cmd)
+        assert cmd[1:3] == ["-I", "-B"]
+        assert str(check) in cmd
+        assert cmd[-2:] == ["--expected-root", str(install_root)]
+        if compiler_result == "timeout":
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+        return (0, "passed", "") if compiler_result == "ok" else (1, "", "missing esbuild")
+
+    monkeypatch.setattr(updater, "_run_async", run)
+    monkeypatch.setattr(updater, "_write_version_marker", versions.append)
+    staged = tmp_path / "staged.json"
+    staged.write_text("success")
+    published = tmp_path / "published.json"
+    if compiler_result == "ok":
+        await updater.install_or_repair_source(install_root, version="v1.0", uv_path="uv", prebuilt=True,
+                                               success_files=[(staged, published)])
+        assert versions == ["1.0"]
+        assert published.read_text() == "success"
+    else:
+        reason = "missing esbuild" if compiler_result == "missing" else "timed out"
+        with pytest.raises(RuntimeError, match=f"WebUI plugin runtime check failed.*{reason}"):
+            await updater.install_or_repair_source(install_root, version="v1.0", uv_path="uv", prebuilt=True,
+                                                   success_files=[(staged, published)])
+        assert versions == [] and not published.exists()
+    assert len(seen) == 1
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@
     "axios": "^1.6.7",
     "clsx": "^2.1.0",
     "date-fns": "^3.3.1",
+    "esbuild": "0.27.2",
     "i18next": "^25.8.14",
     "i18next-browser-languagedetector": "^8.2.1",
     "katex": "^0.18.1",
