@@ -4,13 +4,15 @@
   "machine": {
     "previousTitle": "这台机器装着老企业版",
     "openTitle": "这台机器是开源版",
+    "licensedTitle": "这台机器有企业版授权",
     "version": "企业版",
     "pythonEdition": "Python 版 {{version}}",
     "licence": "授权",
     "status": "授权状态",
     "expires": "到期",
     "previousNote": "企业版换成了单独的安装包，老企业版不再更新。开源部分照常用 flocks update 升级；老企业版的审计日志、安全配置、用户管理这些页面，升级到新企业版后回来。",
-    "openNote": "企业版是单独的安装包：装好后开源版的数据会迁过去（第一次启动迁进自带的 PostgreSQL），用法照旧。要授权和安装包，请联系我们。"
+    "licensedNote": "授权已经保存在这台机器上，升级到新企业版时会沿用它。",
+    "openNote": "企业版是单独的安装包：装好后开源版的数据会迁过去（第一次启动迁进自带的 PostgreSQL），用法照旧。还没有授权的话，可以在下面在线申请。"
   },
   "licenceStatus": {
     "commercial": "商业版",
@@ -19,6 +21,52 @@
     "revoked": "已吊销",
     "unactivated": "未激活",
     "invalid": "无效"
+  },
+  "apply": {
+    "title": "申请企业版授权",
+    "intro": "填好后交给 Console 审核。审核通过后在这里启用授权，再升级到企业版。",
+    "signInFirst": "申请要先登录 Console（用你的云账号）。",
+    "listLabel": "这台机器发过的申请",
+    "fields": {
+      "company": "企业名称",
+      "licenseType": "授权类型",
+      "applicantName": "申请人",
+      "email": "邮箱",
+      "phone": "手机",
+      "salesRep": "对接销售（选填）",
+      "notes": "备注（选填）"
+    },
+    "problems": {
+      "required": "必填",
+      "email": "邮箱格式不对",
+      "phone": "手机号格式不对：6–15 位数字，国家码用 + 开头"
+    },
+    "submit": "提交申请",
+    "submitNeedsSignIn": "登录 Console 后才能提交",
+    "pendingSubmission": "上次提交没有收到 Console 的回答，申请可能已经交上去了。再提交一次会先把它找回来，不会重复。",
+    "status": {
+      "pending": "待审核",
+      "reviewing": "审核中",
+      "approved": "已通过",
+      "activated": "已启用",
+      "rejected": "未通过",
+      "cancelled": "已撤回",
+      "expired_unactivated": "过期未启用"
+    },
+    "sentOn": "{{date}} 提交",
+    "issued": "授权 {{id}}",
+    "issuedUntil": "授权 {{id}}，到期 {{date}}",
+    "reason": "审核意见：{{text}}",
+    "suggestion": "建议：{{text}}",
+    "take": "启用授权",
+    "withdraw": "撤回",
+    "withdrawConfirm": "撤回这份申请？撤回后要重新申请。",
+    "errors": {
+      "load": "读不到申请记录",
+      "submit": "提交失败",
+      "withdraw": "撤回失败",
+      "take": "启用授权失败"
+    }
   },
   "upgrade": {
     "title": "升级到新企业版",

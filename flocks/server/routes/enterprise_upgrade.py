@@ -1,20 +1,23 @@
 """
-Routes of the Flocks Pro page: where this open install stands, and the move to the enterprise
-edition (flocks.updater.enterprise).
+Routes of the Flocks Pro page: where this open install stands, the application for a licence when
+it has none (flocks.updater.enterprise_application), and the move to the enterprise edition
+(flocks.updater.enterprise).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
-from typing import Any
+from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, field_validator
 
 from flocks.server.auth import require_admin
-from flocks.updater import enterprise
+from flocks.updater import enterprise, enterprise_application
 
 router = APIRouter()
 
@@ -83,6 +86,96 @@ async def start_upgrade(request: Request) -> StreamingResponse:
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+class ApplicationForm(BaseModel):
+    """The application form, checked as the open edition's page of 2026.10.19 checked it."""
+
+    license_type: Literal["poc", "commercial"]
+    company: str = Field(min_length=1, max_length=200)
+    applicant_name: str = Field(min_length=1, max_length=100)
+    applicant_email: str = Field(min_length=1, max_length=200)
+    applicant_phone: str = Field(min_length=1, max_length=40)
+    sales_rep_name: Optional[str] = Field(default=None, max_length=100)
+    notes: Optional[str] = Field(default=None, max_length=2000)
+
+    @field_validator("company", "applicant_name", "applicant_email", "applicant_phone", "sales_rep_name", "notes")
+    @classmethod
+    def strip(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("company", "applicant_name")
+    @classmethod
+    def not_blank(cls, value: str) -> str:
+        if not value:
+            raise ValueError("required")
+        return value
+
+    @field_validator("applicant_email")
+    @classmethod
+    def email(cls, value: str) -> str:
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
+            raise ValueError("invalid email")
+        return value
+
+    @field_validator("applicant_phone")
+    @classmethod
+    def phone(cls, value: str) -> str:
+        digits = len(re.sub(r"\D", "", value))
+        if (
+            not re.fullmatch(r"[+\d\s()-]+", value)
+            or value.count("+") > 1
+            or ("+" in value and not value.startswith("+"))
+            or not 6 <= digits <= 15
+        ):
+            raise ValueError("invalid phone")
+        return value
+
+
+# Console's application ids (req_..., or a uuid from before).
+_REQUEST_ID = Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _administrator(request: Request):
+    """require_admin, run before the form is read: others learn nothing of what it checks."""
+    return require_admin(request)
+
+
+def _refused(exc: enterprise.EnterpriseUpgradeError) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+
+
+@router.get("/applications", summary="这台机器发过的企业版授权申请（审核中的向 Console 刷新）")
+async def list_applications(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    return await enterprise_application.applications()
+
+
+@router.post("/applications", summary="申请企业版授权，交给 Console 审核")
+async def submit_application(form: ApplicationForm, user=Depends(_administrator)) -> dict[str, Any]:
+    try:
+        return {"application": await enterprise_application.apply(form.model_dump(), user.username)}
+    except enterprise.EnterpriseUpgradeError as exc:
+        raise _refused(exc) from exc
+
+
+@router.post("/applications/{request_id}/withdraw", summary="撤回还没启用的申请")
+async def withdraw_application(request: Request, request_id: str = _REQUEST_ID) -> dict[str, Any]:
+    require_admin(request)
+    try:
+        return {"application": await enterprise_application.withdraw(request_id)}
+    except enterprise.EnterpriseUpgradeError as exc:
+        raise _refused(exc) from exc
+
+
+@router.post("/applications/{request_id}/take", summary="启用审核通过的授权：写进这台机器，之后可以升级到企业版")
+async def take_licence(request: Request, request_id: str = _REQUEST_ID) -> dict[str, Any]:
+    require_admin(request)
+    try:
+        application = await enterprise_application.take(request_id)
+    except enterprise.EnterpriseUpgradeError as exc:
+        raise _refused(exc) from exc
+    return {"application": application, "situation": await asyncio.to_thread(enterprise.situation)}
 
 
 @router.get("/progress", summary="上一次从页面启动的升级现在到哪了")

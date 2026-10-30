@@ -11,24 +11,12 @@ import {
   type InstallerOffer,
 } from '@/api/enterpriseUpgrade';
 import { extractErrorMessage } from '@/utils/error';
+import LicenceApplicationSection from './Application';
+import { CARD, ERROR, NOTE, PRIMARY, SECONDARY, formatDate } from './styles';
 
-// The open edition's Flocks Pro page: where this machine stands with the enterprise edition, and
-// the move to it (flocks/updater/enterprise.py). The enterprise build has its own page here.
-
-const NOTE = 'rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800';
-const ERROR = 'rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700';
-// The product's own call-to-action red, which keeps its fill in dark mode (a slate fill turns into the card's).
-const PRIMARY =
-  'inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40';
-const SECONDARY =
-  'inline-flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60';
-const CARD = 'rounded-xl border border-gray-200 bg-white p-5 space-y-4';
-
-function formatExpiry(value: string | number | null | undefined): string | null {
-  if (value === null || value === undefined || value === '') return null;
-  const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString();
-}
+// The open edition's Flocks Pro page: where this machine stands with the enterprise edition, the
+// application for a licence when it has none (./Application), and the move to the enterprise
+// edition (flocks/updater/enterprise.py). The enterprise build has its own page here.
 
 function Command({ text }: { text: string }) {
   return (
@@ -176,7 +164,7 @@ export default function FlocksproUpgradePage() {
 
   const previous = situation.previous;
   const busy = running || phase === 'installing' || phase === 'downloading';
-  const expiry = formatExpiry(previous?.expires_at);
+  const expiry = formatDate(previous?.expires_at);
   const canDownload = Boolean(previous?.license_id) && situation.available;
 
   return (
@@ -185,7 +173,8 @@ export default function FlocksproUpgradePage() {
 
       <section className={CARD} aria-labelledby="flockspro-machine">
         <h2 id="flockspro-machine" className="text-lg font-semibold text-gray-900">
-          {previous ? t('machine.previousTitle') : t('machine.openTitle')}
+          {/* A licence taken from an application here, with no Python package: not the old edition. */}
+          {previous ? t(previous.version ? 'machine.previousTitle' : 'machine.licensedTitle') : t('machine.openTitle')}
         </h2>
         {previous ? (
           <>
@@ -203,12 +192,25 @@ export default function FlocksproUpgradePage() {
                 <div><dt className="text-xs text-gray-500">{t('machine.expires')}</dt><dd className="font-medium text-gray-900">{expiry}</dd></div>
               )}
             </dl>
-            <div className={NOTE}>{t('machine.previousNote')}</div>
+            <div className={NOTE}>{t(previous.version ? 'machine.previousNote' : 'machine.licensedNote')}</div>
           </>
         ) : (
           <p className="text-sm text-gray-600">{t('machine.openNote')}</p>
         )}
       </section>
+
+      {/* No licence: none at all, or the Python package without one. */}
+      {!previous?.license_id && situation.available && (
+        <LicenceApplicationSection
+          consoleLogin={consoleLogin}
+          loginError={canDownload ? null : checkError}
+          onLogin={() => void loginConsole()}
+          onTaken={(next) => {
+            setSituation(next);
+            setUpgrade(next.upgrade);
+          }}
+        />
+      )}
 
       <section className={CARD} aria-labelledby="flockspro-upgrade">
         <div className="flex items-center gap-2">
