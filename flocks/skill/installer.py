@@ -1360,6 +1360,20 @@ class SkillInstaller:
         timeout_sec: float,
     ) -> DepInstallResult:
         """Build and execute an install command for one SkillInstallSpec."""
+        if spec.kind == "pip" and spec.package:
+            # pip installs into this runtime's own interpreter; a managed install ships it as
+            # the release's verified tree, so what the release lacks is refused, not installed.
+            from flocks.workflow.requirements import refuse_unmet_when_managed
+
+            try:
+                if refuse_unmet_when_managed([spec.package]):
+                    return DepInstallResult(
+                        success=True,
+                        spec_id=spec.id,
+                        message=f"{spec.package} is provided by this release",
+                    )
+            except RuntimeError as exc:
+                return DepInstallResult(success=False, spec_id=spec.id, error=str(exc))
         cmd = cls._build_install_command(spec)
         if not cmd:
             return DepInstallResult(
