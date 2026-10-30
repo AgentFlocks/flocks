@@ -54,6 +54,47 @@ def upgrade_command(
     raise typer.Exit(code)
 
 
+@enterprise_app.command("kept")
+def kept_command() -> None:
+    """列出企业版每次降级回开源版时留下的数据（数据库、配置、密钥）和大小。只列，不删。"""
+    from rich.table import Table
+
+    from flocks.updater import enterprise
+
+    items = enterprise.kept_after_downgrades()
+    if not items:
+        console.print("没有降级留下的数据。")
+        return
+    table = Table(show_header=True, box=None, padding=(0, 2))
+    table.add_column("留下的时间（UTC）")
+    table.add_column("路径")
+    table.add_column("大小", justify="right")
+    total = 0
+    for item in items:
+        if not item["present"]:
+            size = "已不在"
+        elif item["size"] is None:
+            size = "读不到"
+        else:
+            total += item["size"]
+            size = _bytes(item["size"])
+        table.add_row(item["kept_at"] or "-", item["path"], size)
+    console.print(table)
+    console.print(f"合计 {_bytes(total)}（读得到的部分）")
+    console.print(
+        "这些是企业版运行期间的数据，降级时原样留着没删；开源版和以后再升级都不会用到它们。"
+        "确认不要了，由管理员手动删除。"
+    )
+
+
+def _bytes(size: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
 def _offer_or_exit(enterprise):
     try:
         return asyncio.run(enterprise.fetch_offer())

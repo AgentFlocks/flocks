@@ -405,6 +405,58 @@ def _downgraded_since(*marks: Path) -> bool:
     return False
 
 
+_KEPT_STAMP = re.compile(r"\.managed-(\d{8}T\d{6}Z)-")
+
+
+def _tree_size(path: Path) -> int | None:
+    """Bytes under *path* (links not followed); None when it cannot be read whole."""
+    try:
+        if not path.is_dir() or path.is_symlink():
+            return path.lstat().st_size
+        total = 0
+        for folder, _dirs, files in os.walk(path, onerror=_raise):
+            for name in files:
+                total += os.lstat(os.path.join(folder, name)).st_size
+        return total
+    except OSError:
+        return None
+
+
+def _raise(error: OSError) -> None:
+    raise error
+
+
+def kept_after_downgrades() -> list[dict[str, Any]]:
+    """What the enterprise edition's downgrades kept aside, from its record in the runtime root:
+    each path, when it was kept, whether it is still there and its size.
+
+    Nothing is removed here. They hold what the enterprise edition wrote while it ran (its database,
+    settings, keys); neither this edition nor a later upgrade uses them, and only the administrator
+    can say they are not wanted.
+    """
+    try:
+        record = json.loads((runtime_root() / DOWNGRADE_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    paths = record.get("kept") if isinstance(record, dict) else None
+    if not isinstance(paths, list):
+        return []
+    items = []
+    for raw in paths:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        path = Path(raw)
+        stamp = _KEPT_STAMP.search(path.name)
+        present = path.exists() or path.is_symlink()
+        items.append({
+            "path": raw,
+            "kept_at": stamp.group(1) if stamp else None,
+            "present": present,
+            "size": _tree_size(path) if present else None,
+        })
+    return items
+
+
 def read_state() -> dict[str, Any] | None:
     """The last upgrade started from the page or the terminal: where it is now (None once the
     enterprise edition it installed has gone back to this one)."""

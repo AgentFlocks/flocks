@@ -172,3 +172,21 @@ def test_a_download_in_another_process_is_not_taken_for_a_dead_one(tmp_path):
     with enterprise.upgrade_lock():
         assert enterprise.read_state()["phase"] == "downloading"
     assert enterprise.read_state()["phase"] == "failed"
+
+
+def test_kept_lists_what_downgrades_left_and_removes_nothing(tmp_path):
+    root = tmp_path / "home" / ".flocks"
+    kept = root / "data" / "flockspro-database.json.managed-20261030T133242Z-3b8009"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"y" * 2048)
+    (root / enterprise.DOWNGRADE_RECORD).write_text(f'{{"version": 1, "kept": ["{kept}"]}}', encoding="utf-8")
+    result = runner.invoke(cli_main.app, ["enterprise", "kept"])
+    assert result.exit_code == 0, result.output
+    assert "20261030T133242Z" in result.output and "2.0 KB" in result.output and "手动删除" in result.output
+    assert kept.read_bytes() == b"y" * 2048
+
+
+def test_kept_says_so_when_nothing_was_left(tmp_path):
+    result = runner.invoke(cli_main.app, ["enterprise", "kept"])
+    assert result.exit_code == 0, result.output
+    assert "没有降级留下的数据" in result.output

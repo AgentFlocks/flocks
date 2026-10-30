@@ -17,6 +17,8 @@ Case list (编号 | 场景):
        newer) is no upgrade any more: the page does not say it is installed
   EU6 the whole of it: a systemd machine ends with root's command for the downloaded file, an
       account's own install with the installer running; one at a time
+  EU7 what the enterprise edition's downgrades kept aside is listed from its record (when, still
+      there, size), and nothing of it is removed
 """
 
 from __future__ import annotations
@@ -350,3 +352,26 @@ async def test_eu6_an_accounts_own_install_runs_the_installer_once(machine: Path
         await enterprise.upgrade(progress)
     ended = wait_for(lambda: (s := enterprise.read_state()) and s["phase"] != "installing" and s)
     assert ended["phase"] == "finished"
+
+
+def test_eu7_what_downgrades_kept_is_listed_and_left_alone(machine: Path, tmp_path: Path):
+    database = tmp_path / "var" / "flockspro-pg.managed-20261030T133242Z-4d9e3c"
+    (database / "base").mkdir(parents=True)
+    (database / "base" / "1").write_bytes(b"x" * 3000)
+    (database / "PG_VERSION").write_bytes(b"16\n")
+    config = machine / "config" / "database.json.managed-20261030T145208Z-00607d"
+    config.parent.mkdir(parents=True)
+    config.write_text('{"backend": "postgres"}', encoding="utf-8")
+    gone = machine / "data" / "storage-backend.json.managed-20261030T140501Z-9ebc72"
+    (machine / enterprise.DOWNGRADE_RECORD).write_text(json.dumps(
+        {"version": 1, "kept": [str(database), str(config), str(gone), ""], "updated_at": "2026-10-30T14:52:08Z"}))
+
+    items = enterprise.kept_after_downgrades()
+    assert [(i["path"], i["kept_at"], i["present"], i["size"]) for i in items] == [
+        (str(database), "20261030T133242Z", True, 3003),
+        (str(config), "20261030T145208Z", True, len('{"backend": "postgres"}')),
+        (str(gone), "20261030T140501Z", False, None),
+    ]
+    assert database.is_dir() and config.is_file()  # listed, not touched
+    (machine / enterprise.DOWNGRADE_RECORD).unlink()
+    assert enterprise.kept_after_downgrades() == []
