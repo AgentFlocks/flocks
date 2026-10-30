@@ -1597,11 +1597,11 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 const FALLBACK_POLL_MS = 5_000;
 const PENDING_QUESTION_RECONCILE_MS = 2_000;
 const WORKSPACE_UPLOAD_DEST = 'uploads';
-const FILE_INPUT_ACCEPT_DOCS = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx,.html,.htm,.ppt,.pptx,.xls,.xlsx';
+const FILE_INPUT_ACCEPT_DOCS = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx,.html,.htm,.ppt,.pptx,.xls,.xlsx,.zip';
 const FILE_INPUT_ACCEPT_ALL = `${FILE_INPUT_ACCEPT_DOCS},${FILE_INPUT_ACCEPT_IMAGES}`;
 const ALLOWED_UPLOAD_EXTENSIONS = new Set([
   'txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'pdf', 'doc', 'docx',
-  'html', 'htm', 'ppt', 'pptx', 'xls', 'xlsx',
+  'html', 'htm', 'ppt', 'pptx', 'xls', 'xlsx', 'zip',
 ]);
 
 function isAllowedUploadFile(file: File): boolean {

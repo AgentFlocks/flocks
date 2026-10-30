@@ -74,10 +74,10 @@ _DEFAULT_MAX_UPLOAD_MB = 100
 _DEFAULT_MAX_READ_BYTES = 2 * 1024 * 1024
 _ALLOWED_UPLOAD_EXTENSIONS = {
     ".txt", ".md", ".json", ".yaml", ".yml", ".xml", ".csv",
-    ".pdf", ".doc", ".docx", ".html", ".htm", ".ppt", ".pptx", ".xls", ".xlsx",
+    ".pdf", ".doc", ".docx", ".html", ".htm", ".ppt", ".pptx", ".xls", ".xlsx", ".zip",
 }
 _ALLOWED_UPLOAD_LABEL = (
-    "txt, md, json, yaml, yml, xml, csv, pdf, doc, docx, html, htm, ppt, pptx, xls, xlsx"
+    "txt, md, json, yaml, yml, xml, csv, pdf, doc, docx, html, htm, ppt, pptx, xls, xlsx, zip"
 )
 _ALLOWED_PREVIEW_MEDIA_TYPES = {
     "application/pdf",

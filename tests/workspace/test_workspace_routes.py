@@ -361,12 +361,12 @@ class TestUpload:
         client = _client(workspace_client)
         r = client.post(
             "/api/workspace/upload?purpose=chat",
-            files=[("files", ("archive.zip", b"\x50\x4b\x03\x04", "application/zip"))],
+            files=[("files", ("archive.rar", b"\x50\x4b\x03\x04", "application/vnd.rar"))],
         )
         assert r.status_code == 200
         result = r.json()["uploaded"][0]
         assert "Unsupported file type" in result["error"]
-        assert not (_ws(workspace_client) / "archive.zip").exists()
+        assert not (_ws(workspace_client) / "archive.rar").exists()
 
     @pytest.mark.parametrize("filename", ["sample.exe", "libfoo.so", "rea_demo", "app.apk"])
     def test_chat_upload_takes_reverse_samples_only_once_rea_is_ready(
