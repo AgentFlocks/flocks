@@ -308,6 +308,13 @@ class ConsoleLoginService:
         return refreshed_session
 
     @classmethod
+    async def forget_console_session(cls) -> None:
+        """Drop this install's sign-in without asking Console: Console has already refused it
+        (revoked by a sign-out elsewhere, say), so the page offers to sign in again."""
+        await Storage.delete("console:session")
+        _delete_shared_console_session()
+
+    @classmethod
     async def logout_console_session(cls) -> None:
         session = await cls.get_console_session()
         console_base = cls.console_base_url()

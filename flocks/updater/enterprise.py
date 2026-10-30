@@ -252,6 +252,15 @@ async def _console_session_token() -> str:
     return str((session or {}).get("console_session_token") or "").strip()
 
 
+async def _forget_console_session() -> None:
+    try:
+        from flocks.console.login import ConsoleLoginService
+
+        await ConsoleLoginService.forget_console_session()
+    except Exception as exc:  # the refusal is said all the same
+        log.warning("enterprise.console_session_not_forgotten", {"error": str(exc)})
+
+
 def offered_installer(manifest: dict[str, Any], base_url: str) -> InstallerOffer | None:
     """This platform's entry of the manifest's ``installers``; None when it has none."""
     entries = manifest.get("installers")
@@ -301,6 +310,9 @@ async def fetch_offer() -> InstallerOffer:
     except httpx.HTTPError as exc:
         raise EnterpriseUpgradeError(f"连不上 Console：{exc}") from exc
     if resp.status_code in (401, 403):
+        if token:
+            # Console no longer takes this sign-in: forget it, so the page offers to sign in again.
+            await _forget_console_session()
         raise EnterpriseUpgradeError("Console 要先登录才给安装包：点「登录 Console」后再检查")
     if resp.status_code >= 400:
         raise EnterpriseUpgradeError(f"Console 回答 HTTP {resp.status_code}")

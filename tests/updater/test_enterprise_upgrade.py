@@ -200,6 +200,27 @@ async def test_eu3_what_console_says_is_said_as_it_is(machine: Path, monkeypatch
         await enterprise.fetch_offer()
 
 
+async def test_eu3_a_sign_in_console_refuses_is_forgotten(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    """Console revoked the sign-in (a sign-out in the enterprise edition, say): the page must offer a new one."""
+    write_licence(machine)
+    console(monkeypatch, lambda request: httpx.Response(401))
+    forgotten: list[int] = []
+
+    async def forget() -> None:
+        forgotten.append(1)
+
+    monkeypatch.setattr(enterprise, "_forget_console_session", forget)
+    monkeypatch.setattr(enterprise, "_console_session_token", _token("revoked-token"))
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="要先登录"):
+        await enterprise.fetch_offer()
+    assert forgotten == [1]
+    # Asked with no sign-in at all: nothing to forget.
+    monkeypatch.setattr(enterprise, "_console_session_token", _token(""))
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="要先登录"):
+        await enterprise.fetch_offer()
+    assert forgotten == [1]
+
+
 async def test_eu3_without_console_or_licence_there_is_nothing_to_ask(machine: Path, monkeypatch: pytest.MonkeyPatch):
     with pytest.raises(enterprise.EnterpriseUpgradeError, match="没有配置 Console"):
         await enterprise.fetch_offer()

@@ -356,3 +356,22 @@ async def test_ea6_one_at_a_time_and_a_lost_index(machine: Path, monkeypatch: py
     listing = await application.applications()
     assert {item["request_id"] for item in listing["items"]} == {"req_1", "req_lost"}
     assert "req_lost" in await Storage.get("console:upgrade_request_ids")
+
+
+async def test_ea7_a_sign_in_console_refuses_is_forgotten(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    """Console answers 401 (the sign-in was revoked): this install forgets it, so the page offers a
+    new one; another refusal (a 5xx) forgets nothing."""
+    forgotten: list[int] = []
+
+    async def forget() -> None:
+        forgotten.append(1)
+
+    monkeypatch.setattr(enterprise, "_forget_console_session", forget)
+    console(monkeypatch, lambda r: httpx.Response(401, json={"detail": "session revoked"}))
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="登录已失效"):
+        await application.apply(dict(FORM), "admin")
+    assert forgotten == [1]
+    console(monkeypatch, lambda r: httpx.Response(503))
+    with pytest.raises((enterprise.EnterpriseUpgradeError, OSError)):
+        await application.apply(dict(FORM), "admin")
+    assert forgotten == [1]

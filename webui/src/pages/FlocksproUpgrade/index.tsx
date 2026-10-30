@@ -46,6 +46,14 @@ export default function FlocksproUpgradePage() {
   const [serverGone, setServerGone] = useState(false);
   const mounted = useRef(true);
 
+  // Also after Console refused something: the server forgets a sign-in Console no longer takes,
+  // and the page then offers a new one.
+  const refreshConsoleLogin = useCallback(() => {
+    authApi.consoleLoginSession()
+      .then((status) => { if (mounted.current) setConsoleLogin(status); })
+      .catch(() => { if (mounted.current) setConsoleLogin(null); });
+  }, []);
+
   const load = useCallback(async () => {
     try {
       const data = await enterpriseUpgradeApi.situation();
@@ -56,10 +64,8 @@ export default function FlocksproUpgradePage() {
     } catch (err) {
       if (mounted.current) setLoadError(extractErrorMessage(err, t('errors.load')));
     }
-    authApi.consoleLoginSession()
-      .then((status) => { if (mounted.current) setConsoleLogin(status); })
-      .catch(() => { if (mounted.current) setConsoleLogin(null); });
-  }, [t]);
+    refreshConsoleLogin();
+  }, [t, refreshConsoleLogin]);
 
   useEffect(() => {
     mounted.current = true;
@@ -103,6 +109,7 @@ export default function FlocksproUpgradePage() {
       setOffer(await enterpriseUpgradeApi.check());
     } catch (err) {
       setCheckError(extractErrorMessage(err, t('errors.check')));
+      refreshConsoleLogin();
     } finally {
       setChecking(false);
     }
@@ -205,6 +212,7 @@ export default function FlocksproUpgradePage() {
           consoleLogin={consoleLogin}
           loginError={canDownload ? null : checkError}
           onLogin={() => void loginConsole()}
+          onConsoleRefused={refreshConsoleLogin}
           onTaken={(next) => {
             setSituation(next);
             setUpgrade(next.upgrade);

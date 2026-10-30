@@ -152,6 +152,22 @@ describe('Flocks Pro page of the open edition', () => {
     expect(start).not.toHaveBeenCalled();
   });
 
+  it('FP5b offers to sign in again once Console refused the sign-in it had', async () => {
+    // Revoked by a sign-out in the enterprise edition, say: the server forgets it, the page reads it again.
+    situation.mockResolvedValue(base);
+    consoleLoginSession
+      .mockResolvedValueOnce({ logged_in: true, account_name: 'ops@example.com' })
+      .mockResolvedValue({ logged_in: false });
+    check.mockRejectedValue({ response: { data: { detail: 'Console 要先登录才给安装包：点「登录 Console」后再检查' } } });
+    render(<FlocksproUpgradePage />);
+
+    expect(await screen.findByText(/ops@example\.com/)).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: /upgrade\.check/ }));
+    expect(await screen.findByText(/要先登录才给安装包/)).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /upgrade\.loginConsole/ })).toBeInTheDocument();
+    expect(consoleLoginSession).toHaveBeenCalledTimes(2);
+  });
+
   it('FP6 follows a download it did not start until it ends', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

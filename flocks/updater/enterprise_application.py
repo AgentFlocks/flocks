@@ -119,6 +119,13 @@ def _console_error(exc: httpx.HTTPError, doing: str) -> EnterpriseUpgradeError:
     return EnterpriseUpgradeError(f"{doing}：连不上 Console（{exc}）")
 
 
+async def _console_failure(exc: httpx.HTTPError, doing: str) -> EnterpriseUpgradeError:
+    """:func:`_console_error`, after forgetting a sign-in Console refused (so the page offers a new one)."""
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403):
+        await enterprise._forget_console_session()
+    return _console_error(exc, doing)
+
+
 def _status(record: dict[str, Any]) -> str:
     return str(record.get("status") or "").strip().lower()
 
@@ -195,7 +202,7 @@ async def applications() -> dict[str, Any]:
                     if isinstance(answer, BaseException):
                         if note is None:
                             failure = answer if isinstance(answer, EnterpriseUpgradeError) else (
-                                _console_error(answer, "刷新申请状态失败") if isinstance(answer, httpx.HTTPError) else answer)
+                                await _console_failure(answer, "刷新申请状态失败") if isinstance(answer, httpx.HTTPError) else answer)
                             note = str(failure)
                         continue
                     if not answer.get("not_modified"):
@@ -281,7 +288,7 @@ async def _apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise _console_error(exc, "提交申请失败") from exc
+            raise await _console_failure(exc, "提交申请失败") from exc
     # Anything else that is not a readable application (a 5xx from a proxy in front of Console, a
     # body that does not read) may still have been made there: the key stays.
     if resp.status_code >= 300:
@@ -325,7 +332,7 @@ async def _withdraw(request_id: str) -> dict[str, Any]:
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPError as exc:
-        raise _console_error(exc, "撤回失败") from exc
+        raise await _console_failure(exc, "撤回失败") from exc
     record = _merge(record, data if isinstance(data, dict) else {})
     await _remember(record)
     return public(record, enterprise.previous_licence_id())
@@ -365,7 +372,7 @@ async def _take(request_id: str) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=15) as client:
             data = await _fetch(client, base, session, request_id)
     except httpx.HTTPError as exc:
-        raise _console_error(exc, "取授权失败") from exc
+        raise await _console_failure(exc, "取授权失败") from exc
     record = _merge(record, data)
     await _remember(record)
     token = str(record.get("activate_key") or "").strip()  # secret-guard: allow 误报：变量名，取值来自 Console 的审批结果

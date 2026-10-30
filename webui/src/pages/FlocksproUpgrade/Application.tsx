@@ -66,9 +66,11 @@ interface Props {
   loginError?: string | null;
   onLogin: () => void;
   onTaken: (situation: EnterpriseSituation) => void;
+  /** After a Console call failed: the sign-in may be gone, the page reads it again. */
+  onConsoleRefused?: () => void;
 }
 
-export default function LicenceApplicationSection({ consoleLogin, loginError, onLogin, onTaken }: Props) {
+export default function LicenceApplicationSection({ consoleLogin, loginError, onLogin, onTaken, onConsoleRefused }: Props) {
   const { t } = useTranslation('flockspro');
   const [applications, setApplications] = useState<LicenceApplications | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -84,8 +86,9 @@ export default function LicenceApplicationSection({ consoleLogin, loginError, on
       setLoadError(null);
     } catch (err) {
       setLoadError(extractErrorMessage(err, t('apply.errors.load')));
+      onConsoleRefused?.();
     }
-  }, [t]);
+  }, [t, onConsoleRefused]);
 
   useEffect(() => {
     void load();
@@ -118,6 +121,7 @@ export default function LicenceApplicationSection({ consoleLogin, loginError, on
       await load();
     } catch (err) {
       setActionError(extractErrorMessage(err, t('apply.errors.submit')));
+      onConsoleRefused?.();
     } finally {
       setSubmitting(false);
     }
@@ -132,6 +136,7 @@ export default function LicenceApplicationSection({ consoleLogin, loginError, on
       await load();
     } catch (err) {
       setActionError(extractErrorMessage(err, t('apply.errors.withdraw')));
+      onConsoleRefused?.();
     } finally {
       setActing(null);
     }
@@ -145,6 +150,7 @@ export default function LicenceApplicationSection({ consoleLogin, loginError, on
       onTaken(result.situation);
     } catch (err) {
       setActionError(extractErrorMessage(err, t('apply.errors.take')));
+      onConsoleRefused?.();
       await load();
     } finally {
       setActing(null);
