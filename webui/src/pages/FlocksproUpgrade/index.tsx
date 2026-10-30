@@ -135,6 +135,7 @@ export default function FlocksproUpgradePage() {
     } catch (err) {
       if (mounted.current) {
         setRunError(extractErrorMessage(err, t('errors.start')));
+        refreshConsoleLogin();
         setUpgrade(await enterpriseUpgradeApi.progress().catch(() => null));
       }
     } finally {

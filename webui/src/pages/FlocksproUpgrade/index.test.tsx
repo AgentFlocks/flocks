@@ -168,6 +168,36 @@ describe('Flocks Pro page of the open edition', () => {
     expect(consoleLoginSession).toHaveBeenCalledTimes(2);
   });
 
+  it('FP5c reads the sign-in again when starting the upgrade fails', async () => {
+    situation.mockResolvedValue(base);
+    check.mockResolvedValue(offer);
+    consoleLoginSession
+      .mockResolvedValueOnce({ logged_in: true, account_name: 'ops@example.com' })
+      .mockResolvedValue({ logged_in: false });
+    start.mockRejectedValue(new Error('Console 要先登录才给安装包：点「登录 Console」后再检查'));
+    progress.mockResolvedValue(null);
+    render(<FlocksproUpgradePage />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /upgrade\.check/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'upgrade.start 2026.11.5' }));
+    expect(await screen.findByRole('button', { name: /upgrade\.loginConsole/ })).toBeInTheDocument();
+    expect(consoleLoginSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('FP5d reads the sign-in again when Console could not answer for the applications', async () => {
+    // A refusal while listing comes back as the listing's note, not as an error.
+    situation.mockResolvedValue({ ...base, previous: null });
+    consoleLoginSession
+      .mockResolvedValueOnce({ logged_in: true, account_name: 'ops@example.com' })
+      .mockResolvedValue({ logged_in: false });
+    applications.mockResolvedValue({ items: [pending], note: 'Console 登录已失效：点「登录 Console」后再试' });
+    render(<FlocksproUpgradePage />);
+
+    expect(await screen.findByText(/Console 登录已失效/)).toBeInTheDocument();
+    await waitFor(() => expect(consoleLoginSession).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('apply.signInFirst')).toBeInTheDocument();
+  });
+
   it('FP6 follows a download it did not start until it ends', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

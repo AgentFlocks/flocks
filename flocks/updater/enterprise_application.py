@@ -109,7 +109,7 @@ def _headers(session: dict[str, Any]) -> dict[str, str]:
 def _console_error(exc: httpx.HTTPError, doing: str) -> EnterpriseUpgradeError:
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
-        if code in (401, 403):
+        if code == 401:
             return EnterpriseUpgradeError("Console 登录已失效：点「登录 Console」后再试")
         try:
             detail = exc.response.json().get("detail")
@@ -119,10 +119,11 @@ def _console_error(exc: httpx.HTTPError, doing: str) -> EnterpriseUpgradeError:
     return EnterpriseUpgradeError(f"{doing}：连不上 Console（{exc}）")
 
 
-async def _console_failure(exc: httpx.HTTPError, doing: str) -> EnterpriseUpgradeError:
-    """:func:`_console_error`, after forgetting a sign-in Console refused (so the page offers a new one)."""
-    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403):
-        await enterprise._forget_console_session()
+async def _console_failure(exc: httpx.HTTPError, doing: str, session: dict[str, Any]) -> EnterpriseUpgradeError:
+    """:func:`_console_error`, after forgetting the sign-in Console refused as not valid (401), so the
+    page offers a new one. A 403 is a refusal of a sign-in Console takes: it stays."""
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
+        await enterprise._forget_console_session(str(session.get("console_session_token") or ""))
     return _console_error(exc, doing)
 
 
@@ -200,9 +201,12 @@ async def applications() -> dict[str, Any]:
                     ), timeout=_REFRESH_SECONDS)
                 for index, answer in zip(open_ones, answers):
                     if isinstance(answer, BaseException):
+                        # Each refusal is looked at (a 401 among them forgets the sign-in);
+                        # the first one is what the page says.
+                        failure = answer if isinstance(answer, EnterpriseUpgradeError) else (
+                            await _console_failure(answer, "刷新申请状态失败", session)
+                            if isinstance(answer, httpx.HTTPError) else answer)
                         if note is None:
-                            failure = answer if isinstance(answer, EnterpriseUpgradeError) else (
-                                await _console_failure(answer, "刷新申请状态失败") if isinstance(answer, httpx.HTTPError) else answer)
                             note = str(failure)
                         continue
                     if not answer.get("not_modified"):
@@ -288,7 +292,7 @@ async def _apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise await _console_failure(exc, "提交申请失败") from exc
+            raise await _console_failure(exc, "提交申请失败", session) from exc
     # Anything else that is not a readable application (a 5xx from a proxy in front of Console, a
     # body that does not read) may still have been made there: the key stays.
     if resp.status_code >= 300:
@@ -332,7 +336,7 @@ async def _withdraw(request_id: str) -> dict[str, Any]:
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPError as exc:
-        raise await _console_failure(exc, "撤回失败") from exc
+        raise await _console_failure(exc, "撤回失败", session) from exc
     record = _merge(record, data if isinstance(data, dict) else {})
     await _remember(record)
     return public(record, enterprise.previous_licence_id())
@@ -372,7 +376,7 @@ async def _take(request_id: str) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=15) as client:
             data = await _fetch(client, base, session, request_id)
     except httpx.HTTPError as exc:
-        raise await _console_failure(exc, "取授权失败") from exc
+        raise await _console_failure(exc, "取授权失败", session) from exc
     record = _merge(record, data)
     await _remember(record)
     token = str(record.get("activate_key") or "").strip()  # secret-guard: allow 误报：变量名，取值来自 Console 的审批结果

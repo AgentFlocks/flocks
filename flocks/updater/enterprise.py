@@ -252,13 +252,22 @@ async def _console_session_token() -> str:
     return str((session or {}).get("console_session_token") or "").strip()
 
 
-async def _forget_console_session() -> None:
+async def _forget_console_session(refused_token: str) -> None:
     try:
         from flocks.console.login import ConsoleLoginService
 
-        await ConsoleLoginService.forget_console_session()
+        await ConsoleLoginService.forget_console_session(refused_token)
     except Exception as exc:  # the refusal is said all the same
         log.warning("enterprise.console_session_not_forgotten", {"error": str(exc)})
+
+
+def _detail(resp: httpx.Response) -> str:
+    """What Console said about a refusal (its ``detail``), when it said anything readable."""
+    try:
+        detail = resp.json().get("detail")
+    except (ValueError, AttributeError):
+        return ""
+    return str(detail).strip() if detail else ""
 
 
 def offered_installer(manifest: dict[str, Any], base_url: str) -> InstallerOffer | None:
@@ -309,11 +318,14 @@ async def fetch_offer() -> InstallerOffer:
             resp = await client.get(url, headers=headers, follow_redirects=True)
     except httpx.HTTPError as exc:
         raise EnterpriseUpgradeError(f"连不上 Console：{exc}") from exc
-    if resp.status_code in (401, 403):
+    if resp.status_code == 401:
         if token:
             # Console no longer takes this sign-in: forget it, so the page offers to sign in again.
-            await _forget_console_session()
+            await _forget_console_session(token)
         raise EnterpriseUpgradeError("Console 要先登录才给安装包：点「登录 Console」后再检查")
+    if resp.status_code == 403:
+        # A sign-in Console takes, refused this (a licence of another account, say): it stays.
+        raise EnterpriseUpgradeError(f"Console 不给这台机器安装包：{_detail(resp) or 'HTTP 403'}")
     if resp.status_code >= 400:
         raise EnterpriseUpgradeError(f"Console 回答 HTTP {resp.status_code}")
     try:

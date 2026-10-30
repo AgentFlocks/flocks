@@ -54,3 +54,24 @@ async def test_finish_console_login_rejects_replay(monkeypatch: pytest.MonkeyPat
         await ConsoleLoginService.finish_console_login(console_login_id="cl-1", state="S1")
     # No second exchange was sent to the console.
     assert calls["exchange"] == 1
+
+
+
+async def test_forget_drops_only_the_sign_in_that_was_refused(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """A refusal that arrives after another tab signed in again leaves the new sign-in alone."""
+    import json as _json
+
+    from flocks.console import login as login_mod
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "root"))
+    await Storage.init()
+    newer = {"console_session_token": "tok-new", "fingerprint": "fp", "install_id": "inst", "passport_uid": "u1"}
+    await Storage.set("console:session", newer, "json")
+    login_mod._write_shared_console_session(newer)
+    assert await ConsoleLoginService.forget_console_session("tok-old") is False
+    assert (await Storage.get("console:session"))["console_session_token"] == "tok-new"
+    shared = _json.loads(login_mod._shared_console_session_path().read_text(encoding="utf-8"))
+    assert shared["console_session_token"] == "tok-new"
+    assert await ConsoleLoginService.forget_console_session("tok-new") is True
+    assert await Storage.get("console:session") is None
+    assert not login_mod._shared_console_session_path().exists()

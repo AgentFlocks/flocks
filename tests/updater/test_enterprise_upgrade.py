@@ -201,24 +201,31 @@ async def test_eu3_what_console_says_is_said_as_it_is(machine: Path, monkeypatch
 
 
 async def test_eu3_a_sign_in_console_refuses_is_forgotten(machine: Path, monkeypatch: pytest.MonkeyPatch):
-    """Console revoked the sign-in (a sign-out in the enterprise edition, say): the page must offer a new one."""
+    """Console revoked the sign-in (401: a sign-out in the enterprise edition, say): the page must offer a
+    new one. A 403 refuses a sign-in Console takes (a licence of another account): that one stays."""
     write_licence(machine)
-    console(monkeypatch, lambda request: httpx.Response(401))
-    forgotten: list[int] = []
+    forgotten: list[str] = []
 
-    async def forget() -> None:
-        forgotten.append(1)
+    async def forget(token: str) -> None:
+        forgotten.append(token)
 
     monkeypatch.setattr(enterprise, "_forget_console_session", forget)
     monkeypatch.setattr(enterprise, "_console_session_token", _token("revoked-token"))
+    answer = [httpx.Response(401)]
+    console(monkeypatch, lambda request: answer[0])
     with pytest.raises(enterprise.EnterpriseUpgradeError, match="要先登录"):
         await enterprise.fetch_offer()
-    assert forgotten == [1]
+    assert forgotten == ["revoked-token"]
+    answer[0] = httpx.Response(403, json={"detail": "license_id 不属于当前账号"})
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="不属于当前账号"):
+        await enterprise.fetch_offer()
+    assert forgotten == ["revoked-token"]
     # Asked with no sign-in at all: nothing to forget.
     monkeypatch.setattr(enterprise, "_console_session_token", _token(""))
+    answer[0] = httpx.Response(401)
     with pytest.raises(enterprise.EnterpriseUpgradeError, match="要先登录"):
         await enterprise.fetch_offer()
-    assert forgotten == [1]
+    assert forgotten == ["revoked-token"]
 
 
 async def test_eu3_without_console_or_licence_there_is_nothing_to_ask(machine: Path, monkeypatch: pytest.MonkeyPatch):

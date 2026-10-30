@@ -359,19 +359,40 @@ async def test_ea6_one_at_a_time_and_a_lost_index(machine: Path, monkeypatch: py
 
 
 async def test_ea7_a_sign_in_console_refuses_is_forgotten(machine: Path, monkeypatch: pytest.MonkeyPatch):
-    """Console answers 401 (the sign-in was revoked): this install forgets it, so the page offers a
-    new one; another refusal (a 5xx) forgets nothing."""
-    forgotten: list[int] = []
+    """Console answers 401 (the sign-in was revoked): this install forgets that sign-in, so the page offers
+    a new one. A 403 (a refusal of a sign-in Console takes) or a 5xx forgets nothing."""
+    forgotten: list[str] = []
 
-    async def forget() -> None:
-        forgotten.append(1)
+    async def forget(token: str) -> None:
+        forgotten.append(token)
 
     monkeypatch.setattr(enterprise, "_forget_console_session", forget)
     console(monkeypatch, lambda r: httpx.Response(401, json={"detail": "session revoked"}))
     with pytest.raises(enterprise.EnterpriseUpgradeError, match="登录已失效"):
         await application.apply(dict(FORM), "admin")
-    assert forgotten == [1]
+    assert forgotten == ["tok-1"]
+    console(monkeypatch, lambda r: httpx.Response(403, json={"detail": "scope missing"}))
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="HTTP 403"):
+        await application.apply(dict(FORM), "admin")
     console(monkeypatch, lambda r: httpx.Response(503))
     with pytest.raises((enterprise.EnterpriseUpgradeError, OSError)):
         await application.apply(dict(FORM), "admin")
-    assert forgotten == [1]
+    assert forgotten == ["tok-1"]
+
+
+async def test_ea7_every_refusal_of_a_listing_is_looked_at(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    """Two open applications, Console unavailable for one and refusing the sign-in for the other: the
+    sign-in is forgotten even though the first trouble is what the page says."""
+    forgotten: list[str] = []
+
+    async def forget(token: str) -> None:
+        forgotten.append(token)
+
+    monkeypatch.setattr(enterprise, "_forget_console_session", forget)
+    for request_id in ("req_a", "req_b"):
+        await Storage.set(f"console:upgrade_request:{request_id}", {"request_id": request_id, "status": "pending",
+                                                                    "details": {}}, "json")
+    await Storage.set("console:upgrade_request_ids", ["req_a", "req_b"], "json")
+    console(monkeypatch, lambda r: httpx.Response(503) if r.url.path.endswith("req_b") else httpx.Response(401))
+    listing = await application.applications()
+    assert listing["note"] and forgotten == ["tok-1"]

@@ -82,8 +82,11 @@ export default function LicenceApplicationSection({ consoleLogin, loginError, on
 
   const load = useCallback(async () => {
     try {
-      setApplications(await enterpriseUpgradeApi.applications());
+      const listed = await enterpriseUpgradeApi.applications();
+      setApplications(listed);
       setLoadError(null);
+      // Console could not answer for them (its note): the sign-in may be the reason.
+      if (listed.note) onConsoleRefused?.();
     } catch (err) {
       setLoadError(extractErrorMessage(err, t('apply.errors.load')));
       onConsoleRefused?.();
