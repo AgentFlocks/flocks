@@ -18,6 +18,7 @@ open edition's offline package) is switched by root; the page gives the command.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import importlib.metadata
 import json
@@ -354,15 +355,46 @@ def _log_tail(path: Path) -> list[str]:
     return text.splitlines()[-_LOG_TAIL_LINES:]
 
 
+@contextlib.contextmanager
+def upgrade_lock():
+    """One upgrade of this machine at a time, from the page or the terminal: an exclusive lock on
+    work_dir()/upgrade.lock held while Console is asked, the installer downloaded and started."""
+    import fcntl
+
+    work = work_dir()
+    work.mkdir(parents=True, exist_ok=True)
+    os.chmod(work, 0o700)
+    fd = os.open(work / "upgrade.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise EnterpriseUpgradeError("已经在升级了：另一个页面或终端正在给这台机器换装企业版") from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def _upgrade_lock_held() -> bool:
+    """Someone holds upgrade_lock: an upgrade is under way, here or in another process."""
+    try:
+        with upgrade_lock():
+            return False
+    except EnterpriseUpgradeError:
+        return True
+    except OSError:
+        return False
+
+
 def read_state() -> dict[str, Any] | None:
-    """The last upgrade started from the page: where it is now."""
+    """The last upgrade started from the page or the terminal: where it is now."""
     try:
         state = json.loads(_state_file().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(state, dict):
         return None
-    if state.get("phase") == "downloading" and not _run_lock.locked():
+    if state.get("phase") == "downloading" and not _run_lock.locked() and not _upgrade_lock_held():
         # The process that downloaded it is gone (the server restarted under it).
         state["phase"] = "failed"
         state["message"] = "下载没有完成（服务中途重启了），请重新点升级"
@@ -438,9 +470,25 @@ def can_run_installer_here() -> bool:
     return available() and (not run_by_systemd() or _euid() == 0) and install_root_ready()
 
 
-def run_installer(path: Path) -> int:
-    """Run the installer in the foreground (flocks enterprise upgrade): its exit status."""
-    return subprocess.call(["bash", str(path)], cwd=str(path.parent), env=_installer_environment())
+def run_installer(path: Path, offer: InstallerOffer) -> int:
+    """Run the installer in the foreground (flocks enterprise upgrade), its output the terminal's;
+    recorded as the page records the run it starts (state.json, exit-status), so the page sees it
+    too. Its exit status."""
+    exit_file = work_dir() / "exit-status"
+    exit_file.unlink(missing_ok=True)
+    process = subprocess.Popen(["bash", str(path)], cwd=str(path.parent), env=_installer_environment())
+    _write_state({
+        "phase": "installing",
+        "pid": process.pid,
+        "release_id": offer.release_id,
+        "version": offer.version,
+        "installer": str(path),
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "from": "terminal",
+    })
+    code = process.wait()
+    exit_file.write_text(f"{code}\n", encoding="utf-8")
+    return code
 
 
 def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
@@ -495,42 +543,48 @@ async def upgrade(progress: Callable[[dict[str, Any]], Awaitable[None]]) -> dict
     if _run_lock.locked():
         raise EnterpriseUpgradeError("已经在升级了")
     async with _run_lock:
-        current = read_state()
-        if current is not None and current.get("phase") == "installing":
-            raise EnterpriseUpgradeError("安装包已经在运行了")
-        offer = await fetch_offer()
-        base = {"release_id": offer.release_id, "version": offer.version, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
-        _write_state({**base, "phase": "downloading", "received": 0, "total": offer.size})
-        await progress({"stage": "downloading", "version": offer.version, "release_id": offer.release_id})
-        recorded = 0.0
+        with upgrade_lock():
+            return await _upgrade(progress)
 
-        async def downloaded(received: int, total: int | None) -> None:
-            nonlocal recorded
-            await progress({"stage": "downloading", "received": received, "total": total})
-            if time.monotonic() - recorded >= 1.0:
-                recorded = time.monotonic()
-                _write_state({**base, "phase": "downloading", "received": received, "total": total})
 
-        try:
-            path = await download(offer, downloaded)
-        except BaseException as exc:
-            _write_state({**base, "phase": "failed", "message": str(exc) or "下载没有完成"})
-            raise
-        await progress({"stage": "downloaded", "installer": str(path)})
-        if run_by_systemd() or not install_root_ready():
-            state = {
-                "phase": "command",
-                "release_id": offer.release_id,
-                "version": offer.version,
-                "installer": str(path),
-                "command": installer_command(str(path)),
-                "prepare_command": prepare_command(),
-            }
-            _write_state(state)
-            return state
-        state = start_installer(path, offer)
-        await progress({"stage": "installing", **state})
+async def _upgrade(progress: Callable[[dict[str, Any]], Awaitable[None]]) -> dict[str, Any]:
+    """upgrade() with the locks held."""
+    current = read_state()
+    if current is not None and current.get("phase") == "installing":
+        raise EnterpriseUpgradeError("安装包已经在运行了")
+    offer = await fetch_offer()
+    base = {"release_id": offer.release_id, "version": offer.version, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    _write_state({**base, "phase": "downloading", "received": 0, "total": offer.size})
+    await progress({"stage": "downloading", "version": offer.version, "release_id": offer.release_id})
+    recorded = 0.0
+
+    async def downloaded(received: int, total: int | None) -> None:
+        nonlocal recorded
+        await progress({"stage": "downloading", "received": received, "total": total})
+        if time.monotonic() - recorded >= 1.0:
+            recorded = time.monotonic()
+            _write_state({**base, "phase": "downloading", "received": received, "total": total})
+
+    try:
+        path = await download(offer, downloaded)
+    except BaseException as exc:
+        _write_state({**base, "phase": "failed", "message": str(exc) or "下载没有完成"})
+        raise
+    await progress({"stage": "downloaded", "installer": str(path)})
+    if run_by_systemd() or not install_root_ready():
+        state = {
+            "phase": "command",
+            "release_id": offer.release_id,
+            "version": offer.version,
+            "installer": str(path),
+            "command": installer_command(str(path)),
+            "prepare_command": prepare_command(),
+        }
+        _write_state(state)
         return state
+    state = start_installer(path, offer)
+    await progress({"stage": "installing", **state})
+    return state
 
 
 def offer_dict(offer: InstallerOffer) -> dict[str, Any]:
