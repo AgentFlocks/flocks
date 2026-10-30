@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,10 @@ from typer.testing import CliRunner
 
 import flocks.cli.main as cli_main
 from flocks.updater import enterprise
+
+# The installer is a shell one and the lock between the page and the terminal is fcntl's:
+# the way to the enterprise edition is Linux's and macOS's (enterprise.available()).
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="换装企业版只在 Linux/macOS 上")
 
 runner = CliRunner()
 
