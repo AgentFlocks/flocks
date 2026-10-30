@@ -210,7 +210,10 @@ def _console_return_url(request: Request, value: str) -> str:
     another host goes through (open-redirect guard)."""
     host = request.url.netloc
     if "://" in value:
-        target = urlsplit(value)
+        try:
+            target = urlsplit(value)
+        except ValueError:  # e.g. an unclosed [ of an IPv6 host
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="return_to 仅允许站内路径") from None
         if target.scheme not in ("http", "https") or target.netloc.lower() != host.lower() or not target.path:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="return_to 仅允许站内路径")
         return urlunsplit((target.scheme, target.netloc, target.path, target.query, ""))

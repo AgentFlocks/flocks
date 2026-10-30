@@ -407,7 +407,8 @@ async def test_console_login_start_hands_the_console_an_absolute_url_on_this_sit
 
 
 @pytest.mark.parametrize(
-    "return_to", ["https://evil.test/phish", "//evil.test", "/ok\\evil", "javascript://x", "https://test@evil.test/x", "https://test"]
+    "return_to",
+    ["https://evil.test/phish", "//evil.test", "/ok\\evil", "javascript://x", "https://test@evil.test/x", "https://test", "https://[bad/flockspro-upgrade/callback"],
 )
 async def test_console_login_start_rejects_offsite_return_to(client: AsyncClient, monkeypatch: pytest.MonkeyPatch, return_to: str):
     """``return_to`` is forwarded to the Console as the post-login target; only an
