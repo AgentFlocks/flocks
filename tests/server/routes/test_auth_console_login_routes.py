@@ -376,7 +376,39 @@ async def test_console_login_session_without_account_name_treated_logged_out(
 
 
 
-@pytest.mark.parametrize("return_to", ["https://evil.test/phish", "//evil.test", "/ok\\evil", "javascript://x"])
+@pytest.mark.parametrize(
+    ("return_to", "headers", "expected"),
+    [
+        # The Console only takes an absolute URL to send the browser back to.
+        ("/flockspro-upgrade/callback", {}, "http://test/flockspro-upgrade/callback"),
+        ("/flockspro-upgrade/callback", {"X-Forwarded-Proto": "https"}, "https://test/flockspro-upgrade/callback"),
+        (None, {}, "http://test/flockspro-upgrade/callback"),
+        # The page's own origin is taken as it is, without a fragment.
+        ("https://test/flockspro-upgrade/callback?a=1#x", {}, "https://test/flockspro-upgrade/callback?a=1"),
+    ],
+)
+async def test_console_login_start_hands_the_console_an_absolute_url_on_this_site(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, return_to: str | None, headers: dict, expected: str
+):
+    from flocks.server.routes import auth as auth_routes
+
+    monkeypatch.setattr(auth_routes, "require_admin", lambda _req: _mock_admin())
+    seen: dict = {}
+
+    async def _start(*, return_to: str):
+        seen["return_to"] = return_to
+        return {"console_login_id": "login_1", "passport_login_url": "https://passport.example/login"}
+
+    monkeypatch.setattr(auth_routes.ConsoleLoginService, "start_console_login", _start)
+    params = {"return_to": return_to} if return_to is not None else {}
+    resp = await client.get("/api/auth/console-login/start", params=params, headers=headers)
+    assert resp.status_code == status.HTTP_200_OK
+    assert seen["return_to"] == expected
+
+
+@pytest.mark.parametrize(
+    "return_to", ["https://evil.test/phish", "//evil.test", "/ok\\evil", "javascript://x", "https://test@evil.test/x", "https://test"]
+)
 async def test_console_login_start_rejects_offsite_return_to(client: AsyncClient, monkeypatch: pytest.MonkeyPatch, return_to: str):
     """``return_to`` is forwarded to the Console as the post-login target; only an
     in-site path is allowed (open-redirect guard)."""
