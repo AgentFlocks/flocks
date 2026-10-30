@@ -13,6 +13,8 @@ Case list (编号 | 场景):
   EU4 the download is checked against Console's digest: a mismatch leaves nothing to run
   EU5 the installer runs apart, without this runtime's Python settings, and the page reads how it
       ended (exit status, log), also after this server is gone
+  EU5b a finished install the enterprise edition has since gone back from (its downgrade record is
+       newer) is no upgrade any more: the page does not say it is installed
   EU6 the whole of it: a systemd machine ends with root's command for the downloaded file, an
       account's own install with the installer running; one at a time
 """
@@ -291,6 +293,23 @@ def test_eu5_a_run_whose_process_is_gone_without_a_word_failed(machine: Path):
     enterprise._write_state({"phase": "downloading", "received": 10})
     state = enterprise.read_state()
     assert state["phase"] == "failed" and "重新点升级" in state["message"]
+
+
+def test_eu5b_a_finished_install_that_went_back_is_no_upgrade_any_more(machine: Path):
+    enterprise._write_state({"phase": "installing", "pid": 2**22 + 12345, "version": "2026.11.29", "log": ""})
+    exit_file = enterprise.work_dir() / "exit-status"
+    exit_file.write_text("0\n", encoding="utf-8")
+    finished = time.time() - 100
+    os.utime(exit_file, (finished, finished))
+    assert enterprise.read_state()["phase"] == "finished"
+    # The enterprise edition's downgrade writes its record into the runtime root each time.
+    record = machine / enterprise.DOWNGRADE_RECORD
+    record.write_text('{"version": 1, "kept": []}', encoding="utf-8")
+    os.utime(record, (finished - 50, finished - 50))  # a downgrade before this install
+    assert enterprise.read_state()["phase"] == "finished"
+    os.utime(record, (finished + 50, finished + 50))  # and one after it
+    assert enterprise.read_state() is None
+    assert enterprise.situation()["upgrade"] is None
 
 
 async def test_eu6_a_systemd_machine_ends_with_roots_command(machine: Path, monkeypatch: pytest.MonkeyPatch):

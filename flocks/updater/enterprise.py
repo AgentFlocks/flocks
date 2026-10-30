@@ -386,8 +386,28 @@ def _upgrade_lock_held() -> bool:
         return False
 
 
+#: What the enterprise edition's downgrade (flockspro-go) writes into the runtime root each time
+#: it goes back to this edition: the list of what it kept aside.
+DOWNGRADE_RECORD = "flockspro-downgrade.json"
+
+
+def _downgraded_since(*marks: Path) -> bool:
+    """Whether the enterprise edition went back to this one after the first of *marks* there is."""
+    for mark in marks:
+        try:
+            written = mark.stat().st_mtime
+        except OSError:
+            continue
+        try:
+            return (runtime_root() / DOWNGRADE_RECORD).stat().st_mtime > written
+        except OSError:
+            return False
+    return False
+
+
 def read_state() -> dict[str, Any] | None:
-    """The last upgrade started from the page or the terminal: where it is now."""
+    """The last upgrade started from the page or the terminal: where it is now (None once the
+    enterprise edition it installed has gone back to this one)."""
     try:
         state = json.loads(_state_file().read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -410,6 +430,10 @@ def read_state() -> dict[str, Any] | None:
         elif not _pid_alive(int(state.get("pid") or 0)):
             # Gone without saying how it ended (the machine restarted under it).
             state["phase"] = "failed"
+    if state.get("phase") == "finished" and _downgraded_since(work_dir() / "exit-status", _state_file()):
+        # The enterprise edition it installed went back to this one since: nothing is installed
+        # to refresh the page into any more.
+        return None
     log_file = state.get("log")
     if isinstance(log_file, str) and log_file:
         state["log_tail"] = _log_tail(Path(log_file))
