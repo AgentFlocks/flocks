@@ -375,3 +375,21 @@ def test_eu7_what_downgrades_kept_is_listed_and_left_alone(machine: Path, tmp_pa
     assert database.is_dir() and config.is_file()  # listed, not touched
     (machine / enterprise.DOWNGRADE_RECORD).unlink()
     assert enterprise.kept_after_downgrades() == []
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a directory this account may not enter")
+def test_eu7_a_path_this_account_cannot_look_at_does_not_stop_the_list(machine: Path, tmp_path: Path):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    hidden = locked / "flockspro-pg.managed-20261030T133242Z-4d9e3c"
+    hidden.mkdir()
+    visible = machine / "config" / "deployment.json.managed-20261030T133242Z-d6588e"
+    visible.parent.mkdir(parents=True)
+    visible.write_text("{}", encoding="utf-8")
+    (machine / enterprise.DOWNGRADE_RECORD).write_text(json.dumps({"kept": [str(hidden), str(visible)]}))
+    locked.chmod(0)
+    try:
+        items = enterprise.kept_after_downgrades()
+    finally:
+        locked.chmod(0o755)
+    assert [(i["path"], i["present"], i["size"]) for i in items] == [(str(hidden), None, None), (str(visible), True, 2)]

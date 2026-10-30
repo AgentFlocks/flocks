@@ -447,7 +447,13 @@ def kept_after_downgrades() -> list[dict[str, Any]]:
             continue
         path = Path(raw)
         stamp = _KEPT_STAMP.search(path.name)
-        present = path.exists() or path.is_symlink()
+        try:
+            os.lstat(path)
+            present: bool | None = True
+        except FileNotFoundError:
+            present = False
+        except OSError:
+            present = None  # cannot tell from this account (a directory on the way it may not enter)
         items.append({
             "path": raw,
             "kept_at": stamp.group(1) if stamp else None,

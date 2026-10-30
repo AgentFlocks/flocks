@@ -71,7 +71,7 @@ def kept_command() -> None:
     table.add_column("大小", justify="right")
     total = 0
     for item in items:
-        if not item["present"]:
+        if item["present"] is False:
             size = "已不在"
         elif item["size"] is None:
             size = "读不到"
