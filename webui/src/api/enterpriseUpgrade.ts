@@ -50,6 +50,44 @@ export interface InstallerOffer {
   filename: string;
 }
 
+/** An application for a licence this machine sent to Console (flocks.updater.enterprise_application). */
+export interface LicenceApplication {
+  request_id: string;
+  /** pending, reviewing, approved, activated, rejected, cancelled, expired_unactivated */
+  status: string;
+  license_type: 'poc' | 'commercial' | null;
+  company: string | null;
+  applicant_name: string | null;
+  applicant_email: string | null;
+  reason: string | null;
+  suggestion: string | null;
+  license_id: string | null;
+  license_status: string | null;
+  expires_at: string | number | null;
+  created_at: string | null;
+  updated_at: string | null;
+  can_withdraw: boolean;
+  can_take: boolean;
+}
+
+export interface LicenceApplications {
+  items: LicenceApplication[];
+  /** Why the open ones could not be asked of Console just now; null when they were. */
+  note: string | null;
+  /** A submission went out and Console's answer never came: sending again gets it back. */
+  pending_submission?: boolean;
+}
+
+export interface LicenceApplicationForm {
+  license_type: 'poc' | 'commercial';
+  company: string;
+  applicant_name: string;
+  applicant_email: string;
+  applicant_phone: string;
+  sales_rep_name?: string | null;
+  notes?: string | null;
+}
+
 export interface EnterpriseUpgradeEvent {
   stage: 'downloading' | 'downloaded' | 'installing' | 'done' | 'error';
   version?: string;
@@ -68,6 +106,19 @@ export const enterpriseUpgradeApi = {
 
   progress: async (): Promise<EnterpriseUpgradeState | null> =>
     (await client.get('/api/enterprise-upgrade/progress')).data.upgrade,
+
+  applications: async (): Promise<LicenceApplications> =>
+    (await client.get('/api/enterprise-upgrade/applications')).data,
+
+  apply: async (form: LicenceApplicationForm): Promise<LicenceApplication> =>
+    (await client.post('/api/enterprise-upgrade/applications', form)).data.application,
+
+  withdraw: async (requestId: string): Promise<LicenceApplication> =>
+    (await client.post(`/api/enterprise-upgrade/applications/${encodeURIComponent(requestId)}/withdraw`)).data.application,
+
+  /** Writes the approved licence on this machine; the machine's situation after it. */
+  take: async (requestId: string): Promise<{ application: LicenceApplication; situation: EnterpriseSituation }> =>
+    (await client.post(`/api/enterprise-upgrade/applications/${encodeURIComponent(requestId)}/take`)).data,
 
   /** Downloads, checks and starts the installer; each event of the stream goes to onEvent. */
   start: async (onEvent: (event: EnterpriseUpgradeEvent) => void): Promise<EnterpriseUpgradeState> => {

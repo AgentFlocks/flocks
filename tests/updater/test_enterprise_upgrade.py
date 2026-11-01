@@ -13,8 +13,12 @@ Case list (编号 | 场景):
   EU4 the download is checked against Console's digest: a mismatch leaves nothing to run
   EU5 the installer runs apart, without this runtime's Python settings, and the page reads how it
       ended (exit status, log), also after this server is gone
+  EU5b a finished install the enterprise edition has since gone back from (its downgrade record is
+       newer) is no upgrade any more: the page does not say it is installed
   EU6 the whole of it: a systemd machine ends with root's command for the downloaded file, an
       account's own install with the installer running; one at a time
+  EU7 what the enterprise edition's downgrades kept aside is listed from its record (when, still
+      there, size), and nothing of it is removed
 """
 
 from __future__ import annotations
@@ -196,6 +200,34 @@ async def test_eu3_what_console_says_is_said_as_it_is(machine: Path, monkeypatch
         await enterprise.fetch_offer()
 
 
+async def test_eu3_a_sign_in_console_refuses_is_forgotten(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    """Console revoked the sign-in (401: a sign-out in the enterprise edition, say): the page must offer a
+    new one. A 403 refuses a sign-in Console takes (a licence of another account): that one stays."""
+    write_licence(machine)
+    forgotten: list[str] = []
+
+    async def forget(token: str) -> None:
+        forgotten.append(token)
+
+    monkeypatch.setattr(enterprise, "_forget_console_session", forget)
+    monkeypatch.setattr(enterprise, "_console_session_token", _token("revoked-token"))
+    answer = [httpx.Response(401)]
+    console(monkeypatch, lambda request: answer[0])
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="要先登录"):
+        await enterprise.fetch_offer()
+    assert forgotten == ["revoked-token"]
+    answer[0] = httpx.Response(403, json={"detail": "license_id 不属于当前账号"})
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="不属于当前账号"):
+        await enterprise.fetch_offer()
+    assert forgotten == ["revoked-token"]
+    # Asked with no sign-in at all: nothing to forget.
+    monkeypatch.setattr(enterprise, "_console_session_token", _token(""))
+    answer[0] = httpx.Response(401)
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="要先登录"):
+        await enterprise.fetch_offer()
+    assert forgotten == ["revoked-token"]
+
+
 async def test_eu3_without_console_or_licence_there_is_nothing_to_ask(machine: Path, monkeypatch: pytest.MonkeyPatch):
     with pytest.raises(enterprise.EnterpriseUpgradeError, match="没有配置 Console"):
         await enterprise.fetch_offer()
@@ -267,12 +299,47 @@ def test_eu5_the_installer_runs_apart_and_says_how_it_ended(machine: Path, monke
     assert ended["phase"] == "finished" and ended["exit_code"] == 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the installer is a shell one")
+def test_eu5_the_installer_is_no_part_of_this_servers_process_tree(machine: Path):
+    """install-managed stops the open edition, and `flocks stop` takes the server's whole process
+    tree (by parent pid, sessions or not): the installer must not be in it, or it stops itself."""
+    from flocks.cli.service_manager import collect_process_tree_pids
+
+    installer = fake_installer(machine, "sleep 2\necho done\nexit 0\n")
+    offer = enterprise.InstallerOffer(url="https://x/r.run", sha256="0" * 64, release_id="r1", version="2026.11.5")
+
+    state = enterprise.start_installer(installer, offer)
+
+    tree = collect_process_tree_pids(os.getpid())
+    assert enterprise._pid_alive(state["pid"])
+    assert state["pid"] not in tree
+    ended = wait_for(lambda: (s := enterprise.read_state()) and s["phase"] != "installing" and s)
+    assert ended["phase"] == "finished" and "done" in ended["log_tail"]
+
+
 def test_eu5_a_run_whose_process_is_gone_without_a_word_failed(machine: Path):
     enterprise._write_state({"phase": "installing", "pid": 2**22 + 12345, "log": ""})
     assert enterprise.read_state()["phase"] == "failed"
     enterprise._write_state({"phase": "downloading", "received": 10})
     state = enterprise.read_state()
     assert state["phase"] == "failed" and "重新点升级" in state["message"]
+
+
+def test_eu5b_a_finished_install_that_went_back_is_no_upgrade_any_more(machine: Path):
+    enterprise._write_state({"phase": "installing", "pid": 2**22 + 12345, "version": "2026.11.29", "log": ""})
+    exit_file = enterprise.work_dir() / "exit-status"
+    exit_file.write_text("0\n", encoding="utf-8")
+    finished = time.time() - 100
+    os.utime(exit_file, (finished, finished))
+    assert enterprise.read_state()["phase"] == "finished"
+    # The enterprise edition's downgrade writes its record into the runtime root each time.
+    record = machine / enterprise.DOWNGRADE_RECORD
+    record.write_text('{"version": 1, "kept": []}', encoding="utf-8")
+    os.utime(record, (finished - 50, finished - 50))  # a downgrade before this install
+    assert enterprise.read_state()["phase"] == "finished"
+    os.utime(record, (finished + 50, finished + 50))  # and one after it
+    assert enterprise.read_state() is None
+    assert enterprise.situation()["upgrade"] is None
 
 
 async def test_eu6_a_systemd_machine_ends_with_roots_command(machine: Path, monkeypatch: pytest.MonkeyPatch):
@@ -313,3 +380,44 @@ async def test_eu6_an_accounts_own_install_runs_the_installer_once(machine: Path
         await enterprise.upgrade(progress)
     ended = wait_for(lambda: (s := enterprise.read_state()) and s["phase"] != "installing" and s)
     assert ended["phase"] == "finished"
+
+
+def test_eu7_what_downgrades_kept_is_listed_and_left_alone(machine: Path, tmp_path: Path):
+    database = tmp_path / "var" / "flockspro-pg.managed-20261030T133242Z-4d9e3c"
+    (database / "base").mkdir(parents=True)
+    (database / "base" / "1").write_bytes(b"x" * 3000)
+    (database / "PG_VERSION").write_bytes(b"16\n")
+    config = machine / "config" / "database.json.managed-20261030T145208Z-00607d"
+    config.parent.mkdir(parents=True)
+    config.write_text('{"backend": "postgres"}', encoding="utf-8")
+    gone = machine / "data" / "storage-backend.json.managed-20261030T140501Z-9ebc72"
+    (machine / enterprise.DOWNGRADE_RECORD).write_text(json.dumps(
+        {"version": 1, "kept": [str(database), str(config), str(gone), ""], "updated_at": "2026-10-30T14:52:08Z"}))
+
+    items = enterprise.kept_after_downgrades()
+    assert [(i["path"], i["kept_at"], i["present"], i["size"]) for i in items] == [
+        (str(database), "20261030T133242Z", True, 3003),
+        (str(config), "20261030T145208Z", True, len('{"backend": "postgres"}')),
+        (str(gone), "20261030T140501Z", False, None),
+    ]
+    assert database.is_dir() and config.is_file()  # listed, not touched
+    (machine / enterprise.DOWNGRADE_RECORD).unlink()
+    assert enterprise.kept_after_downgrades() == []
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a directory this account may not enter")
+def test_eu7_a_path_this_account_cannot_look_at_does_not_stop_the_list(machine: Path, tmp_path: Path):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    hidden = locked / "flockspro-pg.managed-20261030T133242Z-4d9e3c"
+    hidden.mkdir()
+    visible = machine / "config" / "deployment.json.managed-20261030T133242Z-d6588e"
+    visible.parent.mkdir(parents=True)
+    visible.write_text("{}", encoding="utf-8")
+    (machine / enterprise.DOWNGRADE_RECORD).write_text(json.dumps({"kept": [str(hidden), str(visible)]}))
+    locked.chmod(0)
+    try:
+        items = enterprise.kept_after_downgrades()
+    finally:
+        locked.chmod(0o755)
+    assert [(i["path"], i["present"], i["size"]) for i in items] == [(str(hidden), None, None), (str(visible), True, 2)]

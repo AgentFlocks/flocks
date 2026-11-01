@@ -18,6 +18,7 @@ open edition's offline package) is switched by root; the page gives the command.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import importlib.metadata
 import json
@@ -251,6 +252,24 @@ async def _console_session_token() -> str:
     return str((session or {}).get("console_session_token") or "").strip()
 
 
+async def _forget_console_session(refused_token: str) -> None:
+    try:
+        from flocks.console.login import ConsoleLoginService
+
+        await ConsoleLoginService.forget_console_session(refused_token)
+    except Exception as exc:  # the refusal is said all the same
+        log.warning("enterprise.console_session_not_forgotten", {"error": str(exc)})
+
+
+def _detail(resp: httpx.Response) -> str:
+    """What Console said about a refusal (its ``detail``), when it said anything readable."""
+    try:
+        detail = resp.json().get("detail")
+    except (ValueError, AttributeError):
+        return ""
+    return str(detail).strip() if detail else ""
+
+
 def offered_installer(manifest: dict[str, Any], base_url: str) -> InstallerOffer | None:
     """This platform's entry of the manifest's ``installers``; None when it has none."""
     entries = manifest.get("installers")
@@ -299,8 +318,14 @@ async def fetch_offer() -> InstallerOffer:
             resp = await client.get(url, headers=headers, follow_redirects=True)
     except httpx.HTTPError as exc:
         raise EnterpriseUpgradeError(f"连不上 Console：{exc}") from exc
-    if resp.status_code in (401, 403):
+    if resp.status_code == 401:
+        if token:
+            # Console no longer takes this sign-in: forget it, so the page offers to sign in again.
+            await _forget_console_session(token)
         raise EnterpriseUpgradeError("Console 要先登录才给安装包：点「登录 Console」后再检查")
+    if resp.status_code == 403:
+        # A sign-in Console takes, refused this (a licence of another account, say): it stays.
+        raise EnterpriseUpgradeError(f"Console 不给这台机器安装包：{_detail(resp) or 'HTTP 403'}")
     if resp.status_code >= 400:
         raise EnterpriseUpgradeError(f"Console 回答 HTTP {resp.status_code}")
     try:
@@ -354,15 +379,124 @@ def _log_tail(path: Path) -> list[str]:
     return text.splitlines()[-_LOG_TAIL_LINES:]
 
 
+@contextlib.contextmanager
+def upgrade_lock():
+    """One upgrade of this machine at a time, from the page or the terminal: an exclusive lock on
+    work_dir()/upgrade.lock held while Console is asked, the installer downloaded and started."""
+    import fcntl
+
+    work = work_dir()
+    work.mkdir(parents=True, exist_ok=True)
+    os.chmod(work, 0o700)
+    fd = os.open(work / "upgrade.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise EnterpriseUpgradeError("已经在升级了：另一个页面或终端正在给这台机器换装企业版") from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def _upgrade_lock_held() -> bool:
+    """Someone holds upgrade_lock: an upgrade is under way, here or in another process."""
+    try:
+        with upgrade_lock():
+            return False
+    except EnterpriseUpgradeError:
+        return True
+    except OSError:
+        return False
+
+
+#: What the enterprise edition's downgrade (flockspro-go) writes into the runtime root each time
+#: it goes back to this edition: the list of what it kept aside.
+DOWNGRADE_RECORD = "flockspro-downgrade.json"
+
+
+def _downgraded_since(*marks: Path) -> bool:
+    """Whether the enterprise edition went back to this one after the first of *marks* there is."""
+    for mark in marks:
+        try:
+            written = mark.stat().st_mtime
+        except OSError:
+            continue
+        try:
+            return (runtime_root() / DOWNGRADE_RECORD).stat().st_mtime > written
+        except OSError:
+            return False
+    return False
+
+
+_KEPT_STAMP = re.compile(r"\.managed-(\d{8}T\d{6}Z)-")
+
+
+def _tree_size(path: Path) -> int | None:
+    """Bytes under *path* (links not followed); None when it cannot be read whole."""
+    try:
+        if not path.is_dir() or path.is_symlink():
+            return path.lstat().st_size
+        total = 0
+        for folder, _dirs, files in os.walk(path, onerror=_raise):
+            for name in files:
+                total += os.lstat(os.path.join(folder, name)).st_size
+        return total
+    except OSError:
+        return None
+
+
+def _raise(error: OSError) -> None:
+    raise error
+
+
+def kept_after_downgrades() -> list[dict[str, Any]]:
+    """What the enterprise edition's downgrades kept aside, from its record in the runtime root:
+    each path, when it was kept, whether it is still there and its size.
+
+    Nothing is removed here. They hold what the enterprise edition wrote while it ran (its database,
+    settings, keys); neither this edition nor a later upgrade uses them, and only the administrator
+    can say they are not wanted.
+    """
+    try:
+        record = json.loads((runtime_root() / DOWNGRADE_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    paths = record.get("kept") if isinstance(record, dict) else None
+    if not isinstance(paths, list):
+        return []
+    items = []
+    for raw in paths:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        path = Path(raw)
+        stamp = _KEPT_STAMP.search(path.name)
+        try:
+            os.lstat(path)
+            present: bool | None = True
+        except FileNotFoundError:
+            present = False
+        except OSError:
+            present = None  # cannot tell from this account (a directory on the way it may not enter)
+        items.append({
+            "path": raw,
+            "kept_at": stamp.group(1) if stamp else None,
+            "present": present,
+            "size": _tree_size(path) if present else None,
+        })
+    return items
+
+
 def read_state() -> dict[str, Any] | None:
-    """The last upgrade started from the page: where it is now."""
+    """The last upgrade started from the page or the terminal: where it is now (None once the
+    enterprise edition it installed has gone back to this one)."""
     try:
         state = json.loads(_state_file().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(state, dict):
         return None
-    if state.get("phase") == "downloading" and not _run_lock.locked():
+    if state.get("phase") == "downloading" and not _run_lock.locked() and not _upgrade_lock_held():
         # The process that downloaded it is gone (the server restarted under it).
         state["phase"] = "failed"
         state["message"] = "下载没有完成（服务中途重启了），请重新点升级"
@@ -378,6 +512,10 @@ def read_state() -> dict[str, Any] | None:
         elif not _pid_alive(int(state.get("pid") or 0)):
             # Gone without saying how it ended (the machine restarted under it).
             state["phase"] = "failed"
+    if state.get("phase") == "finished" and _downgraded_since(work_dir() / "exit-status", _state_file()):
+        # The enterprise edition it installed went back to this one since: nothing is installed
+        # to refresh the page into any more.
+        return None
     log_file = state.get("log")
     if isinstance(log_file, str) and log_file:
         state["log_tail"] = _log_tail(Path(log_file))
@@ -433,6 +571,32 @@ def _installer_environment() -> dict[str, str]:
     return env
 
 
+def can_run_installer_here() -> bool:
+    """This account runs the installer itself: not a machine run by systemd unless root."""
+    return available() and (not run_by_systemd() or _euid() == 0) and install_root_ready()
+
+
+def run_installer(path: Path, offer: InstallerOffer) -> int:
+    """Run the installer in the foreground (flocks enterprise upgrade), its output the terminal's;
+    recorded as the page records the run it starts (state.json, exit-status), so the page sees it
+    too. Its exit status."""
+    exit_file = work_dir() / "exit-status"
+    exit_file.unlink(missing_ok=True)
+    process = subprocess.Popen(["bash", str(path)], cwd=str(path.parent), env=_installer_environment())
+    _write_state({
+        "phase": "installing",
+        "pid": process.pid,
+        "release_id": offer.release_id,
+        "version": offer.version,
+        "installer": str(path),
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "from": "terminal",
+    })
+    code = process.wait()
+    exit_file.write_text(f"{code}\n", encoding="utf-8")
+    return code
+
+
 def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
     """Run the installer apart from this server: install-managed stops this open install's
     supervisor, and this process with it, before the enterprise edition starts."""
@@ -451,21 +615,29 @@ def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
     with log_file.open("ab") as out:
         os.chmod(log_file, 0o600)
         out.write(f"\n== {time.strftime('%Y-%m-%dT%H:%M:%S%z')} bash {path.name}\n".encode())
-        out.flush()
-        # The exit status is written by a shell of the installer's own session, which outlives this one.
-        process = subprocess.Popen(
-            ["/bin/sh", "-c", 'bash "$1"; echo "$?" > "$2"', "sh", str(path), str(exit_file)],
-            cwd=str(work),
-            env=_installer_environment(),
-            stdin=subprocess.DEVNULL,
-            stdout=out,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
-        )
+    # The exit status is written by a shell of the installer's own session, which outlives this one.
+    # The shell started here puts it in the background and exits at once, so it is no child of this
+    # server: `flocks stop` takes the server's whole process tree, and install-managed stops the open
+    # edition before the enterprise edition starts.
+    launcher = subprocess.Popen(
+        ["/bin/sh", "-c", '(bash "$1"; echo "$?" > "$2") </dev/null >>"$3" 2>&1 & echo "$!"',
+         "sh", str(path), str(exit_file), str(log_file)],
+        cwd=str(work),
+        env=_installer_environment(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    started, _ = launcher.communicate(timeout=30)
+    try:
+        pid = int(started.strip())
+    except ValueError:
+        raise EnterpriseUpgradeError(f"安装包没有起来，看 {log_file}") from None
     state = {
         "phase": "installing",
-        "pid": process.pid,
+        "pid": pid,
         "release_id": offer.release_id,
         "version": offer.version,
         "installer": str(path),
@@ -473,7 +645,7 @@ def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     _write_state(state)
-    log.info("enterprise.installer_started", {"pid": process.pid, "release_id": offer.release_id})
+    log.info("enterprise.installer_started", {"pid": pid, "release_id": offer.release_id})
     return state
 
 
@@ -485,42 +657,48 @@ async def upgrade(progress: Callable[[dict[str, Any]], Awaitable[None]]) -> dict
     if _run_lock.locked():
         raise EnterpriseUpgradeError("已经在升级了")
     async with _run_lock:
-        current = read_state()
-        if current is not None and current.get("phase") == "installing":
-            raise EnterpriseUpgradeError("安装包已经在运行了")
-        offer = await fetch_offer()
-        base = {"release_id": offer.release_id, "version": offer.version, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
-        _write_state({**base, "phase": "downloading", "received": 0, "total": offer.size})
-        await progress({"stage": "downloading", "version": offer.version, "release_id": offer.release_id})
-        recorded = 0.0
+        with upgrade_lock():
+            return await _upgrade(progress)
 
-        async def downloaded(received: int, total: int | None) -> None:
-            nonlocal recorded
-            await progress({"stage": "downloading", "received": received, "total": total})
-            if time.monotonic() - recorded >= 1.0:
-                recorded = time.monotonic()
-                _write_state({**base, "phase": "downloading", "received": received, "total": total})
 
-        try:
-            path = await download(offer, downloaded)
-        except BaseException as exc:
-            _write_state({**base, "phase": "failed", "message": str(exc) or "下载没有完成"})
-            raise
-        await progress({"stage": "downloaded", "installer": str(path)})
-        if run_by_systemd() or not install_root_ready():
-            state = {
-                "phase": "command",
-                "release_id": offer.release_id,
-                "version": offer.version,
-                "installer": str(path),
-                "command": installer_command(str(path)),
-                "prepare_command": prepare_command(),
-            }
-            _write_state(state)
-            return state
-        state = start_installer(path, offer)
-        await progress({"stage": "installing", **state})
+async def _upgrade(progress: Callable[[dict[str, Any]], Awaitable[None]]) -> dict[str, Any]:
+    """upgrade() with the locks held."""
+    current = read_state()
+    if current is not None and current.get("phase") == "installing":
+        raise EnterpriseUpgradeError("安装包已经在运行了")
+    offer = await fetch_offer()
+    base = {"release_id": offer.release_id, "version": offer.version, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    _write_state({**base, "phase": "downloading", "received": 0, "total": offer.size})
+    await progress({"stage": "downloading", "version": offer.version, "release_id": offer.release_id})
+    recorded = 0.0
+
+    async def downloaded(received: int, total: int | None) -> None:
+        nonlocal recorded
+        await progress({"stage": "downloading", "received": received, "total": total})
+        if time.monotonic() - recorded >= 1.0:
+            recorded = time.monotonic()
+            _write_state({**base, "phase": "downloading", "received": received, "total": total})
+
+    try:
+        path = await download(offer, downloaded)
+    except BaseException as exc:
+        _write_state({**base, "phase": "failed", "message": str(exc) or "下载没有完成"})
+        raise
+    await progress({"stage": "downloaded", "installer": str(path)})
+    if run_by_systemd() or not install_root_ready():
+        state = {
+            "phase": "command",
+            "release_id": offer.release_id,
+            "version": offer.version,
+            "installer": str(path),
+            "command": installer_command(str(path)),
+            "prepare_command": prepare_command(),
+        }
+        _write_state(state)
         return state
+    state = start_installer(path, offer)
+    await progress({"stage": "installing", **state})
+    return state
 
 
 def offer_dict(offer: InstallerOffer) -> dict[str, Any]:

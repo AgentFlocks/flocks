@@ -4,13 +4,15 @@
   "machine": {
     "previousTitle": "This machine has the previous enterprise edition",
     "openTitle": "This machine runs the open edition",
+    "licensedTitle": "This machine has an enterprise licence",
     "version": "Enterprise edition",
     "pythonEdition": "Python edition {{version}}",
     "licence": "Licence",
     "status": "Licence status",
     "expires": "Expires",
     "previousNote": "The enterprise edition is a separate installer now, and the previous one gets no more releases. The open part keeps upgrading with flocks update; the previous edition's audit logs, security configuration and user management pages come back with the new enterprise edition.",
-    "openNote": "The enterprise edition is a separate installer: it takes this install's data over (moved into its own PostgreSQL on its first start) and is used the same way. Contact us for a licence and the installer."
+    "licensedNote": "The licence is kept on this machine; the new enterprise edition takes it over when you upgrade.",
+    "openNote": "The enterprise edition is a separate installer: it takes this install's data over (moved into its own PostgreSQL on its first start) and is used the same way. Without a licence yet, apply for one below."
   },
   "licenceStatus": {
     "commercial": "Commercial",
@@ -19,6 +21,52 @@
     "revoked": "Revoked",
     "unactivated": "Not activated",
     "invalid": "Invalid"
+  },
+  "apply": {
+    "title": "Apply for an enterprise licence",
+    "intro": "The application goes to Console for review. Once it is approved, take the licence here, then upgrade to the enterprise edition.",
+    "signInFirst": "Sign in to Console (with your cloud account) to apply.",
+    "listLabel": "Applications sent from this machine",
+    "fields": {
+      "company": "Company",
+      "licenseType": "Licence type",
+      "applicantName": "Applicant",
+      "email": "Email",
+      "phone": "Phone",
+      "salesRep": "Sales contact (optional)",
+      "notes": "Notes (optional)"
+    },
+    "problems": {
+      "required": "Required",
+      "email": "Not an email address",
+      "phone": "Not a phone number: 6 to 15 digits, a country code starting with +"
+    },
+    "submit": "Send application",
+    "submitNeedsSignIn": "Sign in to Console to send it",
+    "pendingSubmission": "The last submission got no answer from Console, so it may have arrived. Sending again gets it back first; nothing is sent twice.",
+    "status": {
+      "pending": "Waiting for review",
+      "reviewing": "In review",
+      "approved": "Approved",
+      "activated": "Taken",
+      "rejected": "Rejected",
+      "cancelled": "Withdrawn",
+      "expired_unactivated": "Expired, not taken"
+    },
+    "sentOn": "Sent {{date}}",
+    "issued": "Licence {{id}}",
+    "issuedUntil": "Licence {{id}}, expires {{date}}",
+    "reason": "Review: {{text}}",
+    "suggestion": "Suggestion: {{text}}",
+    "take": "Take the licence",
+    "withdraw": "Withdraw",
+    "withdrawConfirm": "Withdraw this application? You would have to apply again.",
+    "errors": {
+      "load": "Could not read the applications",
+      "submit": "Could not send the application",
+      "withdraw": "Could not withdraw it",
+      "take": "Could not take the licence"
+    }
   },
   "upgrade": {
     "title": "Upgrade to the new enterprise edition",

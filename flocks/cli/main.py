@@ -31,6 +31,7 @@ from flocks.cli.commands import (
     browser_command,
     debug_app,
     doctor_command,
+    enterprise_app,
     export_app,
     import_app,
     mcp_app,
@@ -91,6 +92,7 @@ app.add_typer(stats_app, name="stats")
 app.add_typer(task_app, name="task")
 app.add_typer(skill_app, name="skills")
 app.add_typer(admin_app, name="admin")
+app.add_typer(enterprise_app, name="enterprise")
 # Developer/editor-integration groups: invocable, but kept out of `flocks --help`.
 # (`agent` is registered above as part of the Agent CLI panel.)
 app.add_typer(acp_app, name="acp", hidden=True)

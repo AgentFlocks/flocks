@@ -308,6 +308,31 @@ class ConsoleLoginService:
         return refreshed_session
 
     @classmethod
+    async def forget_console_session(cls, refused_token: str) -> bool:
+        """Drop this install's sign-in Console refused as not valid (401: revoked by a sign-out
+        elsewhere, say), so the page offers to sign in again; whether it was dropped.
+
+        Only the sign-in whose token was refused: one made since (another tab signed in while the
+        refused request was on its way) stays, in the store and in the shared file alike.
+        """
+        refused_token = str(refused_token or "").strip()
+        if not refused_token:
+            return False
+        current = await Storage.get("console:session")
+        dropped = False
+        if isinstance(current, dict) and str(current.get("console_session_token") or "").strip() == refused_token:
+            await Storage.delete("console:session")
+            dropped = True
+        try:
+            shared = json.loads(_shared_console_session_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            shared = None
+        if isinstance(shared, dict) and str(shared.get("console_session_token") or "").strip() == refused_token:
+            _delete_shared_console_session()
+            dropped = True
+        return dropped
+
+    @classmethod
     async def logout_console_session(cls) -> None:
         session = await cls.get_console_session()
         console_base = cls.console_base_url()

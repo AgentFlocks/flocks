@@ -22,9 +22,11 @@ from flocks.cli.commands.workflow import workflow_app
 from flocks.cli.commands.device import device_app
 from flocks.cli.commands.model import model_app
 from flocks.cli.commands.plugin import plugin_app
+from flocks.cli.commands.enterprise import enterprise_app
 
 __all__ = [
     "acp_app",
+    "enterprise_app",
     "agent_app",
     "debug_app",
     "exec_command",
