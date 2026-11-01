@@ -2,8 +2,9 @@
 
 Case list (编号 | 场景):
   EA1 an application goes to Console with the signed-in account's identity and this machine's,
-      and its id is kept; none while the machine has a licence or another one is still open, none
-      without Console's address or a sign-in
+      the host's fingerprint as the enterprise core computes it among them, and its id is kept;
+      none while the machine has a licence or another one is still open, none without Console's
+      address or a sign-in, none while the host's identifier cannot be read
   EA2 the listing: newest first, the open ones as Console has them now, the closed ones as kept;
       the licence token never leaves the server; ids kept by the page of 2026.10.19 come back;
       Console out of reach leaves the kept ones and says why
@@ -119,6 +120,7 @@ def approved(request_id: str = "req_1", license_id: str = "lic_1") -> dict:
 
 async def test_ea1_an_application_goes_to_console_and_its_id_is_kept(machine: Path, monkeypatch: pytest.MonkeyPatch):
     seen = console(monkeypatch, lambda r: httpx.Response(200, json={"request_id": "req_1", "status": "pending"}))
+    monkeypatch.setattr(application, "machine_fingerprint", lambda: "0123456789abcdef0123456789abcdef")
     sent = await application.apply(dict(FORM), "admin")
     assert sent["request_id"] == "req_1" and sent["status"] == "pending" and sent["company"] == "Acme"
     body = json.loads(seen[0].content)
@@ -127,6 +129,8 @@ async def test_ea1_an_application_goes_to_console_and_its_id_is_kept(machine: Pa
     # The machine is the node: Console holds one open application per node.
     assert (body["node_id"], body["fingerprint"], body["install_id"], body["passport_uid"]) == ("inst-1", "fp-1", "inst-1", "pp-1")
     assert body["form_data"]["applied_by"] == "admin" and body["idempotency_key"] == body["form_data"]["idempotency_key"]
+    # Console binds the licence it issues to the host the application came from.
+    assert body["form_data"]["machine"] == "0123456789abcdef0123456789abcdef"
     assert await Storage.get("console:upgrade_request_pending") is None
     assert body["company_name"] == "Acme" and body["contact_email"] == "li@acme.example"
     assert body["form_data"]["license_type"] == "poc" and body["form_data"]["applicant_phone"] == "+86 138 0000 0000"
@@ -161,6 +165,24 @@ async def test_ea1_an_application_goes_to_console_and_its_id_is_kept(machine: Pa
     with pytest.raises(enterprise.EnterpriseUpgradeError, match="登录 Console"):
         await application.apply(dict(FORM), "admin")
     assert len(seen) == 1
+
+
+async def test_ea1b_none_while_the_hosts_identifier_cannot_be_read(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    seen = console(monkeypatch, lambda r: httpx.Response(200, json={"request_id": "req_1", "status": "pending"}))
+    from flocks.updater.machine_fingerprint import MachineIdUnreadable
+
+    def unreadable() -> str:
+        raise MachineIdUnreadable("ioreg 没有给出 IOPlatformUUID（退出码 1）")
+
+    monkeypatch.setattr(application, "machine_fingerprint", unreadable)
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="读不到这台机器的标识"):
+        await application.apply(dict(FORM), "admin")
+    assert seen == [] and await Storage.get("console:upgrade_request_pending") is None
+
+    # A host that keeps none (a container without /etc/machine-id) applies, and Console shows it.
+    monkeypatch.setattr(application, "machine_fingerprint", lambda: "")
+    await application.apply(dict(FORM), "admin")
+    assert json.loads(seen[0].content)["form_data"]["machine"] is None
 
 
 async def test_ea2_the_listing(machine: Path, monkeypatch: pytest.MonkeyPatch):
