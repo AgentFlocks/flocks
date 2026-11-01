@@ -36,6 +36,7 @@ import httpx
 from flocks.storage.storage import Storage
 from flocks.updater import enterprise
 from flocks.updater.enterprise import EnterpriseUpgradeError
+from flocks.updater.machine_fingerprint import MachineIdUnreadable, machine_fingerprint
 from flocks.utils.log import Log
 
 log = Log.create(service="updater.enterprise_application")
@@ -235,6 +236,11 @@ async def _apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
         if isinstance(kept, dict) and _status(kept) in OPEN_STATES:
             raise EnterpriseUpgradeError("已经有一份申请在审核或等着启用，处理完再申请")
     base, session = _console_base(), await _console_session()
+    try:
+        machine = await asyncio.to_thread(machine_fingerprint)
+    except MachineIdUnreadable as exc:
+        # Sent without it, the licence would not be bound to this machine although it could be.
+        raise EnterpriseUpgradeError(f"读不到这台机器的标识，先处理好再申请：{exc}") from exc
     # A submission whose answer never came may be at Console already: the same key gets it back.
     pending = await Storage.get(_PENDING_KEY)
     kept_key = str(pending.get("idempotency_key") or "") if isinstance(pending, dict) else ""
@@ -256,6 +262,10 @@ async def _apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
         "cloud_account": account,
         "passport_uid": session.get("passport_uid"),
         "applied_by": applied_by,
+        # The host as the enterprise core names it: Console binds the licence it issues to it, and the
+        # core runs on that licence on this machine only. None for a host that keeps no identifier,
+        # which Console shows the operator.
+        "machine": machine or None,
     }
     payload = {
         # The machine, as Console knows it from the sign-in: Console holds one open application
