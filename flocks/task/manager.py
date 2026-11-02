@@ -8,12 +8,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel as _BaseModel
+from filelock import FileLock, Timeout as FileLockTimeout
 
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
 from .executor import _TASK_ABSOLUTE_TIMEOUT_S, TaskExecutor, TaskResultPersistenceError
 from .health import ComponentHealth
+from .receipts import CompletionReceipts, atomic_json, disk_operation, ensure_private_directory
 from .models import (
     DeliveryStatus,
     ExecutionMode,
@@ -78,6 +80,14 @@ class TaskManager:
         # bounds the pending results by concurrency and prevents a second run.
         self._pending_completions: dict[str, TaskExecution] = {}
         self._execution_tasks: set[asyncio.Task] = set()
+        self._execution_workers: dict[str, tuple[TaskExecution, asyncio.Task]] = {}
+        self._receipts = CompletionReceipts.for_store()
+        self._leadership = None
+        self._is_leader = False
+        self._reconciling = False
+        self._recovery_counts: dict[str, int] = {}
+        self._leader_health: dict | None = None
+        self._receipt_admission_failed = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -101,19 +111,19 @@ class TaskManager:
             poll_interval=poll_interval,
             scheduler_interval=scheduler_interval,
         )
-        recovered = await mgr._recover_orphaned_executions()
-        if recovered:
-            log.info("manager.orphan_recovery", {"count": recovered})
-        recovered_queued = await mgr._recover_orphaned_queued_executions()
-        if recovered_queued:
-            log.info("manager.orphaned_queue_recovery", {"count": recovered_queued})
-
         mgr._running = True
         mgr._health.started()
-        mgr._loop_task = asyncio.create_task(mgr._execution_loop())
-        mgr._cleanup_task = asyncio.create_task(mgr._cleanup_loop())
-        await mgr.scheduler.start()
         cls._instance = mgr
+        # Elect before any startup recovery or scheduler starts. Other servers
+        # sharing the same data directory remain API-capable standby instances.
+        await mgr._try_become_leader()
+        if mgr._is_leader:
+            try:
+                await mgr._activate_leader()
+            except Exception as exc:
+                mgr._health.failed(exc, operation="startup_reconciliation")
+        await mgr._exchange_runtime_health()
+        mgr._loop_task = asyncio.create_task(mgr._leadership_loop())
         log.info("manager.started")
         return mgr
 
@@ -139,6 +149,11 @@ class TaskManager:
         if workers:
             await asyncio.gather(*workers, return_exceptions=True)
         mgr._execution_tasks.clear()
+        mgr._execution_workers.clear()
+        if mgr._leadership is not None:
+            mgr._leadership.release()
+            mgr._leadership = None
+        mgr._is_leader = False
         cls._instance = None
         log.info("manager.stopped")
 
@@ -174,14 +189,34 @@ class TaskManager:
         storage = TaskStore.health_snapshot()
         if mgr is None or not mgr._running:
             return {"status": "unavailable", "storage": storage, "pending_results": 0}
-        executor = mgr._health.snapshot(max_silence=max(60, mgr._poll_interval * 3))
-        scheduler = mgr.scheduler.health_snapshot()
-        degraded = (bool(mgr._pending_completions) or not mgr.scheduler.is_running or
-                    (mgr._loop_task is not None and mgr._loop_task.done()) or
+        return mgr._local_health(storage)
+
+    def _local_health(self, storage: dict | None = None) -> dict:
+        storage = storage if storage is not None else TaskStore.health_snapshot()
+        if not self._is_leader and self._leader_health is not None:
+            state = dict(self._leader_health)
+            stamp = datetime.fromisoformat(state.pop("recorded_at"))
+            if (datetime.now(timezone.utc) - stamp).total_seconds() > 60:
+                state["status"] = "degraded"
+                state["leader_stalled"] = True
+            state["role"] = "standby"
+            return state
+        executor = self._health.snapshot(max_silence=max(60, self._poll_interval * 3))
+        scheduler = self.scheduler.health_snapshot()
+        degraded = (bool(self._pending_completions) or self._receipt_admission_failed or self._reconciling or
+                    (self._is_leader and not self.scheduler.is_running) or
+                    (self._loop_task is not None and self._loop_task.done()) or
                     any(item["status"] == "degraded" for item in (storage, executor, scheduler)))
+        # A standby without a readable leader heartbeat cannot certify that
+        # the shared task system is healthy.
+        if not self._is_leader:
+            degraded = True
         return {"status": "degraded" if degraded else "healthy", "storage": storage,
                 "executor": executor, "scheduler": scheduler,
-                "pending_results": len(mgr._pending_completions)}
+                "role": "leader" if self._is_leader else "standby",
+                "reconciling": self._reconciling, "recovery": dict(self._recovery_counts),
+                "receipt_admission_failed": self._receipt_admission_failed,
+                "pending_results": len(self._pending_completions)}
 
     # ------------------------------------------------------------------
     # Scheduler APIs
@@ -311,9 +346,15 @@ class TaskManager:
         if user_prompt is not None:
             scheduler.source.user_prompt = user_prompt
         for key, value in fields.items():
-            if hasattr(scheduler, key):
+            if key in ("misfire_policy", "misfire_grace_seconds", "max_catch_up"):
+                setattr(scheduler.trigger, key, value)
+                scheduler.trigger.catch_up_remaining = None
+                scheduler.trigger.catch_up_until = None
+            elif hasattr(scheduler, key):
                 setattr(scheduler, key, value)
         if any(v is not None for v in [cron, timezone, cron_description, run_once, run_at]):
+            scheduler.trigger.catch_up_remaining = None
+            scheduler.trigger.catch_up_until = None
             tz = validate_timezone(timezone) if timezone else scheduler.trigger.timezone
             normalized_cron = validate_cron_expression(cron) if cron else None
             if run_once is None:
@@ -339,6 +380,7 @@ class TaskManager:
                 scheduler.trigger.timezone = tz
                 scheduler.trigger.cron_description = cron_description or scheduler.trigger.cron_description
                 scheduler.trigger.next_run = SchedulerLoop.compute_next_run(normalized_cron, tz)
+        scheduler.trigger = TaskTrigger.model_validate(scheduler.trigger.model_dump())
         scheduler = await TaskStore.update_scheduler(scheduler)
         return scheduler
 
@@ -360,6 +402,8 @@ class TaskManager:
         if not scheduler:
             return None
         scheduler.status = SchedulerStatus.ACTIVE
+        scheduler.trigger.catch_up_remaining = None
+        scheduler.trigger.catch_up_until = None
         if scheduler.mode == SchedulerMode.CRON and scheduler.trigger.cron:
             scheduler.trigger.next_run = SchedulerLoop.compute_next_run(
                 scheduler.trigger.cron,
@@ -625,6 +669,8 @@ class TaskManager:
     async def dashboard(cls) -> Dict[str, Any]:
         counts = await TaskStore.dashboard_counts()
         mgr = cls._instance
+        if mgr:
+            await mgr._read_queue_control()
         counts["queue_paused"] = mgr.queue.paused if mgr else False
         return counts
 
@@ -640,6 +686,7 @@ class TaskManager:
                 "stale_running": 0,
                 "oldest_running_seconds": None,
             }
+        await mgr._read_queue_control()
         status = await mgr.queue.status()
         running = await TaskStore.list_executions_by_status(TaskStatus.RUNNING)
         stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=_RUNNING_RECOVERY_TIMEOUT_S)
@@ -697,19 +744,167 @@ class TaskManager:
 
     @classmethod
     def pause_queue(cls) -> None:
+        cls._write_queue_control(True)
         mgr = cls._instance
         if mgr:
             mgr.queue.pause()
 
     @classmethod
     def resume_queue(cls) -> None:
+        cls._write_queue_control(False)
         mgr = cls._instance
         if mgr:
             mgr.queue.resume()
 
+    @staticmethod
+    def _write_queue_control(paused: bool) -> None:
+        path = TaskStore.get_db_path().with_name("task-runtime") / "queue-control.json"
+        atomic_json(path, {"paused": paused})
+
+    @classmethod
+    async def set_queue_paused(cls, paused: bool) -> None:
+        await disk_operation(cls._write_queue_control, paused)
+        mgr = cls._instance
+        if mgr:
+            mgr.queue.pause() if paused else mgr.queue.resume()
+
+    async def _read_queue_control(self) -> None:
+        path = TaskStore.get_db_path().with_name("task-runtime") / "queue-control.json"
+        def read():
+            try:
+                if path.stat().st_size > 1024:
+                    raise ValueError("Oversized queue control")
+                value = json.loads(path.read_text(encoding="utf-8"))["paused"]
+                if not isinstance(value, bool):
+                    raise ValueError("Invalid queue control")
+                return value
+            except FileNotFoundError:
+                return None
+        try:
+            paused = await disk_operation(read)
+        except Exception:
+            self.queue.pause()  # Fail closed if a durable pause cannot be read.
+            raise
+        if paused is not None and paused != self.queue.paused:
+            self.queue.pause() if paused else self.queue.resume()
+
+    async def _sync_runtime_controls(self) -> None:
+        await self._read_queue_control()
+        # Cancellation can arrive through a standby API process. The database
+        # already says cancelled; signal the runtime in the owning process too.
+        for execution_id, (execution, worker) in list(self._execution_workers.items()):
+            if worker.done():
+                continue
+            current = await TaskStore.get_execution(execution_id)
+            if current is None or current.is_terminal or current.started_at != execution.started_at:
+                await self._cancel_execution_runtime(execution)
+                worker.cancel()
+
     # ------------------------------------------------------------------
     # Background loops
     # ------------------------------------------------------------------
+
+    async def _try_become_leader(self) -> None:
+        root = TaskStore.get_db_path().with_name("task-runtime")
+        await disk_operation(ensure_private_directory, root)
+        lock = FileLock(str(root / "manager.lock"), thread_local=False, mode=0o600)
+        try:
+            lock.acquire(timeout=0)
+        except FileLockTimeout:
+            return
+        self._leadership = lock
+        self._is_leader = True
+        self._reconciling = True
+
+    async def _leadership_loop(self) -> None:
+        while self._running:
+            self._health.started()
+            try:
+                if not self._is_leader:
+                    await self._try_become_leader()
+                if self._is_leader:
+                    if self._reconciling:
+                        await self._activate_leader()
+                    await self._execution_loop()
+                    return
+                self._health.succeeded()
+            except Exception as exc:
+                self._health.failed(exc, operation="startup_reconciliation")
+                log.error("manager.reconciliation_failed", {"exception_type": type(exc).__name__})
+            if not self._running:
+                return
+            await self._exchange_runtime_health()
+            if self._running:
+                await asyncio.sleep(self._poll_interval)
+
+    async def _exchange_runtime_health(self) -> None:
+        path = TaskStore.get_db_path().with_name("task-runtime") / "health.json"
+        try:
+            if self._is_leader:
+                await disk_operation(atomic_json, path, {
+                    **self._local_health(), "recorded_at": datetime.now(timezone.utc).isoformat(),
+                })
+            else:
+                def read():
+                    if path.stat().st_size > 32768:
+                        raise ValueError("Oversized task runtime health")
+                    state = json.loads(path.read_text(encoding="utf-8"))
+                    stamp = datetime.fromisoformat(state["recorded_at"])
+                    if stamp.tzinfo is None or state["status"] not in ("healthy", "degraded", "unavailable"):
+                        raise ValueError("Invalid task runtime health")
+                    return state
+                self._leader_health = await disk_operation(read)
+        except Exception as exc:
+            if not self._is_leader:
+                self._leader_health = None
+            self._health.failed(exc, operation="runtime_health")
+
+    async def _activate_leader(self) -> None:
+        # Keep the lock and pause dispatch if a receipt cannot be reconciled.
+        await self._reconcile_receipts()
+        while await TaskStore.reconcile_queue_refs():
+            await asyncio.sleep(0)
+        while await self._recover_orphaned_executions():
+            await asyncio.sleep(0)
+        await self._recover_orphaned_queued_executions()
+        await self._sync_runtime_controls()
+        self._reconciling = False
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+        await self.scheduler.start()
+
+    async def _reconcile_receipts(self) -> None:
+        from .outcome import NEEDS_VERIFICATION, RunOutcome
+
+        counts = {"finished_unsynced": 0, "interrupted": 0, "superseded": 0}
+        await disk_operation(self._receipts.cleanup_temporary)
+        paths = await disk_operation(self._receipts.paths)
+        # Validate all receipts first. A corrupt file can conceal a completion;
+        # keep dispatch paused, preserve the evidence, and report degraded health.
+        for path in paths:
+            await disk_operation(self._receipts.read, path)
+        for path in paths:
+            phase, execution = await disk_operation(self._receipts.read, path)
+            current = await TaskStore.get_execution(execution.id)
+            if (current is None or current.is_terminal or current.started_at != execution.started_at):
+                counts["superseded"] += 1
+            elif phase == "completed":
+                await TaskStore.update_active_execution(execution)
+                counts["finished_unsynced"] += 1
+                if execution.status == TaskStatus.FAILED:
+                    await self._handle_failure(execution)
+            else:
+                # Even a missing session cannot prove that a custom executor
+                # did nothing after the durable dispatch intent was written.
+                await self._mark_execution_failed(
+                    current, self._interrupted_unverified_message(),
+                    hold=RunOutcome(NEEDS_VERIFICATION, ("execution:interrupted_without_completion",)),
+                )
+                counts["interrupted"] += 1
+            if (current and current.status == TaskStatus.FAILED and current.started_at == execution.started_at
+                    and not current.retry.retry_after and not current.retry.blocked_reason):
+                await self._handle_failure(current)
+            await self._receipts.acknowledge(execution)
+        self._recovery_counts = counts
 
     async def _execution_loop(self) -> None:
         import time
@@ -718,7 +913,7 @@ class TaskManager:
             self._health.started()
             errors = []
             now = time.monotonic()
-            phases = [("results", self._flush_pending_completions)]
+            phases = [("controls", self._sync_runtime_controls), ("results", self._flush_pending_completions)]
             for attribute, interval, operation in (
                 ("_last_retry_check", _RETRY_CHECK_INTERVAL_S, self._process_retry_queue),
                 ("_last_stale_recovery_check", _STALE_RECOVERY_INTERVAL_S, self._recover_stale_active_executions),
@@ -730,17 +925,26 @@ class TaskManager:
                     phases.append((operation.__name__, operation))
             for name, operation in phases:
                 try:
-                    await operation()
+                    async with asyncio.timeout(10):
+                        await operation()
                 except Exception as exc:
                     errors.append((name, exc))
                     log.error("manager.maintenance_error", {"phase": name, "error": str(exc)})
+            if not self._running:
+                return
             try:
-                while True:
+                while self._running:
                     execution = await self.queue.dequeue()
                     if not execution:
                         break
                     task = asyncio.create_task(self._run_execution(execution))
                     self._execution_tasks.add(task)
+                    self._execution_workers[execution.id] = (execution, task)
+                    def forget_worker(done, execution_id=execution.id):
+                        record = self._execution_workers.get(execution_id)
+                        if record is not None and record[1] is done:
+                            self._execution_workers.pop(execution_id, None)
+                    task.add_done_callback(forget_worker)
                     task.add_done_callback(self._execution_tasks.discard)
                     task.add_done_callback(self._on_task_done)
             except Exception as exc:
@@ -750,14 +954,26 @@ class TaskManager:
                 self._health.failed(errors[0][1], operation=errors[0][0])
             else:
                 self._health.succeeded()
-            await asyncio.sleep(self._poll_interval)
+            if not self._running:
+                return
+            await self._exchange_runtime_health()
+            if self._running:
+                await asyncio.sleep(self._poll_interval)
 
     async def _flush_pending_completions(self) -> None:
         error = None
         for execution_id, execution in list(self._pending_completions.items()):
             try:
+                try:
+                    await self._receipts.completed(execution)
+                except OSError:
+                    pass  # Still try the database as the durable final record.
                 saved = await TaskStore.update_active_execution(execution)
                 current = execution if saved else await TaskStore.get_execution(execution_id)
+                if current and current.status == TaskStatus.FAILED and current.started_at == execution.started_at:
+                    if not current.retry.retry_after and not current.retry.blocked_reason:
+                        await self._handle_failure(current)
+                await self._receipts.acknowledge(execution)
             except Exception as exc:
                 error = exc
                 continue
@@ -768,8 +984,6 @@ class TaskManager:
                 self.queue.mark_finished(execution_id, expected_started_at=execution.started_at)
             if saved:
                 await self._publish_execution_update(execution)
-                if execution.status == TaskStatus.FAILED:
-                    await self._handle_failure(execution)
         if error is not None:
             raise error
 
@@ -783,6 +997,9 @@ class TaskManager:
 
     async def _run_execution(self, execution: TaskExecution) -> None:
         claimed_started_at = execution.started_at
+        if execution.started_at is None:
+            execution.started_at = datetime.now(timezone.utc)
+        receipt_execution = execution.model_copy(deep=True)
         scheduler = await TaskStore.get_scheduler(execution.scheduler_id)
         if not scheduler:
             execution.status = TaskStatus.FAILED
@@ -791,11 +1008,33 @@ class TaskManager:
             await TaskStore.update_execution(execution)
             return
         should_finish_queue_ref = True
+        dispatched = False
         try:
+            # Fail before business work if its durable dispatch intent cannot
+            # be recorded (disk full, permissions, or receipt backlog limit).
+            await self._receipts.started(execution)
+            self._receipt_admission_failed = False
+            dispatched = True
             execution = await asyncio.wait_for(
                 TaskExecutor.dispatch(execution, scheduler),
                 timeout=_DISPATCH_GUARD_TIMEOUT_S,
             )
+            # Extensions may implement dispatch themselves. Persist their final
+            # fact as well, before releasing the dispatch intent.
+            if (execution.is_terminal and not execution._completion_persisted
+                    and execution.started_at == receipt_execution.started_at):
+                async def finalize_extension():
+                    try:
+                        await self._receipts.completed(execution)
+                    except OSError:
+                        pass
+                    await TaskStore.update_active_execution(execution)
+                try:
+                    cancelled = await TaskStore._finish_cleanup(finalize_extension())
+                except Exception as exc:
+                    raise TaskResultPersistenceError(execution) from exc
+                if cancelled:
+                    raise asyncio.CancelledError
         except TaskResultPersistenceError as exc:
             self._pending_completions[execution.id] = exc.execution
             self._health.failed(exc.__cause__ or exc, operation="save_result")
@@ -805,7 +1044,11 @@ class TaskManager:
             current = await TaskStore.get_execution(execution.id)
             if current is not None:
                 execution = current
-            if not execution.is_terminal:
+            if not dispatched and not execution.is_terminal:
+                execution = await self._requeue_execution(execution, keep_session=True)
+                should_finish_queue_ref = execution.status != TaskStatus.QUEUED
+                await self._receipts.acknowledge(receipt_execution)
+            elif not execution.is_terminal:
                 from flocks.task.outcome import run_outcome
 
                 outcome = await run_outcome(execution)
@@ -832,10 +1075,22 @@ class TaskManager:
                 self._dispatch_timeout_message(),
             )
         except Exception as exc:
+            if not dispatched:
+                self._receipt_admission_failed = True
+                self._health.failed(exc, operation="receipt_admission")
+                # No business work started: leave it queued for the next poll,
+                # without consuming a business retry or claiming unknown effects.
+                execution = await self._requeue_execution(execution, keep_session=True)
+                should_finish_queue_ref = execution.status != TaskStatus.QUEUED
+                return
             # Compatibility with task extensions that save their own terminal
             # result before returning from dispatch.
-            if isinstance(exc, sqlite3.Error) and execution.is_terminal:
+            if execution.is_terminal:
                 self._pending_completions[execution.id] = execution.model_copy(deep=True)
+                try:
+                    await self._receipts.completed(execution)
+                except Exception:
+                    pass  # Keep the dispatch intent and in-memory result.
                 self._health.failed(exc, operation="save_result")
                 log.warn("manager.result_pending", {"id": execution.id})
                 return
@@ -850,6 +1105,8 @@ class TaskManager:
         await self._publish_execution_update(execution)
         if execution.status == TaskStatus.FAILED:
             await self._handle_failure(execution)
+        if execution.is_terminal:
+            await self._receipts.acknowledge(receipt_execution)
 
     async def _handle_failure(self, execution: TaskExecution) -> None:
         from flocks.task.outcome import hold_for_verification, run_outcome
@@ -917,7 +1174,6 @@ class TaskManager:
         from flocks.task.outcome import run_outcome
 
         orphans = await TaskStore.list_executions_by_status(TaskStatus.RUNNING)
-        await TaskStore.requeue_running_refs()
         for execution in orphans:
             outcome = await run_outcome(execution)
             TaskExecutor.forget_workflow_started(execution.id)
@@ -945,11 +1201,15 @@ class TaskManager:
         return len(orphans)
 
     async def _cleanup_loop(self) -> None:
+        delay = _CLEANUP_INTERVAL_S
         while self._running:
-            await asyncio.sleep(_CLEANUP_INTERVAL_S)
+            await asyncio.sleep(delay)
             try:
-                await self._expire_stale_executions()
+                async with asyncio.timeout(10):
+                    expired = await self._expire_stale_executions()
+                delay = 1 if expired >= 100 else _CLEANUP_INTERVAL_S
             except Exception as exc:
+                delay = 30
                 log.error("manager.cleanup_loop_error", {"error": str(exc)})
 
     async def _expire_stale_executions(self) -> int:
@@ -1181,9 +1441,12 @@ class TaskManager:
         """Fail the run; *hold* (a flocks.task.outcome.RunOutcome) keeps it from automatic retries."""
         current = await TaskStore.get_execution(execution.id)
         if current is not None:
+            if execution.started_at is not None and current.started_at != execution.started_at:
+                return current
             execution = current
             if execution.is_terminal:
                 return execution
+        version = execution.updated_at
         if hold is not None:
             from flocks.task.outcome import hold_for_verification
 
@@ -1197,7 +1460,7 @@ class TaskManager:
             execution.duration_ms = int(
                 (completed_at - execution.started_at).total_seconds() * 1000
             )
-        if await TaskStore.update_active_execution(execution):
+        if await TaskStore.update_execution_if_unchanged(execution, expected_updated_at=version):
             return execution
         # It ended (or was cancelled) after it was read: that end stands.
         return await TaskStore.get_execution(execution.id) or execution

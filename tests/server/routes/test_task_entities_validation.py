@@ -114,3 +114,28 @@ async def test_retry_non_failed_execution_returns_409(client):
     response = await client.post(f"/api/task-executions/{execution.id}/retry")
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "queued"
+
+
+@pytest.mark.parametrize("field,value", [("misfirePolicy", "invalid"), ("maxCatchUp", 0),
+                                         ("maxCatchUp", 101), ("misfireGraceSeconds", -1)])
+async def test_invalid_backlog_policy_rejected_at_create_and_update(client, field, value):
+    payload = {"title": "policy validation", "type": "scheduled", "cron": "* * * * *", field: value}
+    assert (await client.post("/api/task-schedulers", json=payload)).status_code == 422
+    scheduler = await _cron_scheduler()
+    assert (await client.put(f"/api/task-schedulers/{scheduler.id}", json={field: value})).status_code == 422
+
+
+async def test_backlog_policy_create_update_round_trip(client):
+    response = await client.post("/api/task-schedulers", json={
+        "title": "bounded catch up", "type": "scheduled", "cron": "* * * * *",
+        "misfirePolicy": "catch_up", "misfireGraceSeconds": 120, "maxCatchUp": 2,
+    })
+    assert response.status_code == 201
+    scheduler = response.json()
+    assert scheduler["trigger"]["misfirePolicy"] == "catch_up"
+    assert scheduler["trigger"]["maxCatchUp"] == 2
+    response = await client.put(f"/api/task-schedulers/{scheduler['id']}", json={"misfirePolicy": "skip"})
+    assert response.status_code == 200
+    trigger = response.json()["trigger"]
+    assert trigger["misfirePolicy"] == "skip" and trigger["maxCatchUp"] == 2
+    assert trigger["misfireGraceSeconds"] == 120

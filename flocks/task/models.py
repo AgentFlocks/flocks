@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 try:
     from croniter import croniter  # type: ignore[import-untyped]
@@ -38,6 +38,12 @@ class SchedulerStatus(str, Enum):
 class SchedulerMode(str, Enum):
     ONCE = "once"
     CRON = "cron"
+
+
+class MisfirePolicy(str, Enum):
+    COALESCE = "coalesce"
+    CATCH_UP = "catch_up"
+    SKIP = "skip"
 
 
 class ExecutionTriggerType(str, Enum):
@@ -94,6 +100,14 @@ class TaskTrigger(BaseModel):
     timezone: str = "Asia/Shanghai"
     next_run: Optional[datetime] = Field(None, alias="nextRun")
     cron_description: Optional[str] = Field(None, alias="cronDescription")
+    misfire_policy: MisfirePolicy = Field(MisfirePolicy.COALESCE, alias="misfirePolicy")
+    misfire_grace_seconds: int = Field(60, ge=0, le=86400, alias="misfireGraceSeconds")
+    max_catch_up: int = Field(3, ge=1, le=100, alias="maxCatchUp")
+    # Persistent, bounded catch-up window and the last atomic schedule decision.
+    catch_up_remaining: Optional[int] = Field(None, alias="catchUpRemaining", ge=0, le=100)
+    catch_up_until: Optional[datetime] = Field(None, alias="catchUpUntil")
+    last_decision: Dict[str, Any] = Field(default_factory=dict, alias="lastDecision")
+    schedule_audit: List[Dict[str, Any]] = Field(default_factory=list, alias="scheduleAudit", max_length=32)
 
 
 class RetryConfig(BaseModel):
@@ -156,6 +170,9 @@ class TaskScheduler(BaseModel):
 
 class TaskExecution(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
+    # Process-local acknowledgement from the core executor to its manager;
+    # never serialized into task rows, API responses, or durable receipts.
+    _completion_persisted: bool = PrivateAttr(default=False)
 
     id: str = Field(default_factory=lambda: Identifier.descending("texec"))
     scheduler_id: str = Field(..., alias="schedulerID")

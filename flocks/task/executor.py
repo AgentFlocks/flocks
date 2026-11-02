@@ -20,6 +20,7 @@ from .models import (
     TaskStatus,
 )
 from .store import TaskStore
+from .receipts import CompletionReceipts
 
 log = Log.create(service="task.executor")
 
@@ -161,10 +162,30 @@ class TaskExecutor:
             execution.duration_ms = int(
                 (completed_at - execution.started_at).total_seconds() * 1000
             )
-        try:
+        saved = False
+
+        async def finalize():
+            nonlocal saved
+            receipts = CompletionReceipts.for_store()
+            try:
+                await receipts.completed(execution)
+            except OSError as exc:
+                # A healthy database is itself a durable completion fact. If
+                # the spool disk/size limit rejects the result, still try that
+                # commit; on double failure the started intent remains unknown.
+                log.warn("task.receipt.write_failed", {"exception_type": type(exc).__name__})
             saved = await TaskStore.update_active_execution(execution)
+            execution._completion_persisted = saved
+            # The manager acknowledges after failure/retry policy is settled.
+
+        try:
+            # Once work has ended, drain its durable finalization even during
+            # shutdown. Cancellation must not reinterpret it as unfinished work.
+            cancelled = await TaskStore._finish_cleanup(finalize())
         except Exception as exc:
             raise TaskResultPersistenceError(execution) from exc
+        if cancelled:
+            raise asyncio.CancelledError
         if not saved:
             # Cancelled (or otherwise finished) while it ran: keep that outcome.
             return await TaskStore.get_execution(execution.id) or execution

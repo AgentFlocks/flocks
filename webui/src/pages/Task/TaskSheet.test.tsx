@@ -356,6 +356,9 @@ describe('TaskSheet', () => {
     await user.type(screen.getByPlaceholderText('0 9 * * 1-5'), '0 8 * * *');
     await user.selectOptions(timezoneSelect as HTMLSelectElement, 'UTC');
     await user.type(screen.getByPlaceholderText('cron:0 8 * * *'), '每天 UTC 08:00');
+    await user.selectOptions(screen.getByLabelText('form.misfireLabel'), 'catch_up');
+    fireEvent.change(screen.getByLabelText('form.misfireGrace'), { target: { value: '120' } });
+    fireEvent.change(screen.getByLabelText('form.maxCatchUp'), { target: { value: '2' } });
 
     await user.click(screen.getByRole('button', { name: '提交' }));
 
@@ -370,6 +373,9 @@ describe('TaskSheet', () => {
           cron: '0 8 * * *',
           timezone: 'UTC',
           cronDescription: '每天 UTC 08:00',
+          misfirePolicy: 'catch_up',
+          misfireGraceSeconds: 120,
+          maxCatchUp: 2,
         }),
       );
     });

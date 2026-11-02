@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from functools import wraps
@@ -18,6 +19,8 @@ from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
 from .health import ComponentHealth
+from .evidence import FailureEvidence
+from .receipts import initialization_lock
 
 from .models import (
     DeliveryStatus,
@@ -118,15 +121,20 @@ def _write_operation(operation: Callable[..., Awaitable[Any]]) -> Callable[..., 
         async def run():
             restore()
             return await operation(cls, *args, **kwargs)
+        commit_state = {"committed": False}
         try:
             async with asyncio.timeout(cls._write_timeout_s):
-                return await cls._run_write_transaction(run, action=operation.__name__)
+                return await cls._run_write_transaction(run, action=operation.__name__, commit_state=commit_state)
         except TimeoutError as exc:
             cls._health.failed(exc, operation=operation.__name__)
-            restore()
+            if cls._evidence is not None:
+                await cls._evidence.failed(exc, operation=operation.__name__, phase="budget")
+            if not commit_state["committed"]:
+                restore()
             raise
         except BaseException:
-            restore()
+            if not commit_state["committed"]:
+                restore()
             raise
     return wrapped
 
@@ -146,6 +154,10 @@ class TaskStore:
     _write_retry_base_delay_s = 0.05
     _write_timeout_s = 20.0
     _health = ComponentHealth()
+    _evidence: Optional[FailureEvidence] = None
+    _dashboard_cache: Optional[tuple[float, dict]] = None
+    _dashboard_lock: Optional[asyncio.Lock] = None
+    _write_epoch = 0
 
     @classmethod
     def get_db_path(cls) -> Path:
@@ -204,6 +216,9 @@ class TaskStore:
         cls._write_lock = asyncio.Lock()
         cls._writer_open_lock = asyncio.Lock()
         cls._health = ComponentHealth()
+        cls._evidence = FailureEvidence(db_path.with_name("task-runtime") / "failures.json")
+        cls._dashboard_cache = None
+        cls._dashboard_lock = asyncio.Lock()
 
         async def open_and_migrate() -> None:
             cls._conn = await cls._open_connection()
@@ -218,8 +233,12 @@ class TaskStore:
             cls._db_path = db_path
             await cls._normalize_legacy_paused_executions()
 
+        async def serialized_open_and_migrate():
+            async with initialization_lock(db_path.with_suffix(".init.lock")):
+                await open_and_migrate()
+
         try:
-            await open_and_migrate()
+            await serialized_open_and_migrate()
             log.info("task.store.initialized")
         except BaseException as exc:
             for db in (cls._conn, cls._write_conn):
@@ -231,7 +250,7 @@ class TaskStore:
             cls._db_path = None
             if isinstance(exc, Exception) and Storage._is_db_corruption_error(exc):
                 await Storage.recover_corrupt_db(
-                    db_path, action="task.store.init", exc=exc, reinitialize=open_and_migrate,
+                    db_path, action="task.store.init", exc=exc, reinitialize=serialized_open_and_migrate,
                 )
                 return
             raise
@@ -335,7 +354,9 @@ class TaskStore:
             lock.release()
 
     @classmethod
-    async def _run_write_transaction(cls, operation: Callable[[], Awaitable[Any]], *, action: str) -> Any:
+    async def _run_write_transaction(
+        cls, operation: Callable[[], Awaitable[Any]], *, action: str, commit_state: Optional[dict] = None,
+    ) -> Any:
         owner = _write_context.get()
         if owner is not None and owner[0] is cls and owner[1] is asyncio.current_task():
             return await operation()
@@ -344,25 +365,44 @@ class TaskStore:
             attempts = max(1, cls._write_retry_attempts)
             for attempt in range(1, attempts + 1):
                 phase = "begin"
+                began_at = time.monotonic()
                 token = None
+                committed = False
                 try:
                     await db.execute("BEGIN IMMEDIATE")
                     token = _write_context.set((cls, asyncio.current_task(), db))
                     phase = "execute"
                     result = await operation()
                     phase = "commit"
-                    await db.commit()
+                    cancelled = await cls._finish_cleanup(db.commit())
+                    committed = True
+                    if commit_state is not None:
+                        commit_state["committed"] = True
                     cls._health.succeeded()
+                    cls._write_epoch += 1
+                    cls._dashboard_cache = None
+                    if cls._evidence is not None:
+                        cancelled |= await cls._finish_cleanup(cls._evidence.recovered())
+                    if cancelled:
+                        raise asyncio.CancelledError
                     return result
                 except BaseException as exc:
+                    if committed:
+                        # Never replay or restore an operation that committed
+                        # while shutdown/timeout waited for durable cleanup.
+                        raise
                     fields = {"action": action, "phase": phase, "attempt": attempt,
                               "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None),
                               "sqlite_errorname": getattr(exc, "sqlite_errorname", None)}
+                    transaction_was_open = db.in_transaction
                     try:
                         cancelled = await cls._finish_cleanup(db.rollback())
                     except BaseException as rollback_exc:
                         cls._write_conn = None
                         cls._health.failed(rollback_exc, operation=action)
+                        if cls._evidence is not None:
+                            await cls._evidence.failed(rollback_exc, operation=action,
+                                                       phase=phase, attempt=attempt, rollback="failed")
                         log.error("task.store.rollback_failed", fields)
                         await cls._finish_cleanup(db.close())
                         raise
@@ -371,12 +411,22 @@ class TaskStore:
                     if isinstance(exc, asyncio.CancelledError):
                         raise
                     cls._health.failed(exc, operation=action)
+                    first_failure = True
+                    if cls._evidence is not None:
+                        first_failure = await cls._evidence.failed(
+                            exc, operation=action, phase=phase, attempt=attempt,
+                            in_transaction=transaction_was_open, rollback="succeeded",
+                            duration_ms=round((time.monotonic() - began_at) * 1000),
+                            connection_id=hex(id(db)),
+                        )
                     code = getattr(exc, "sqlite_errorcode", 0) or 0
                     busy = (code & 0xFF) == sqlite3.SQLITE_BUSY or Storage._is_sqlite_busy_error(exc)
                     if not busy or attempt == attempts:
-                        log.warn("task.store.transaction_failed", fields)
+                        if first_failure:
+                            log.warn("task.store.transaction_failed", fields)
                         raise
-                    log.warn("task.store.transaction_retry", fields)
+                    if first_failure:
+                        log.warn("task.store.transaction_retry", fields)
                     await asyncio.sleep(cls._write_retry_base_delay_s * 2 ** (attempt - 1))
                 finally:
                     if token is not None:
@@ -384,7 +434,11 @@ class TaskStore:
 
     @classmethod
     def health_snapshot(cls) -> dict:
-        return cls._health.snapshot()
+        state = cls._health.snapshot()
+        state["evidence"] = cls._evidence.snapshot() if cls._evidence else {"write_error": False}
+        if state["evidence"]["write_error"]:
+            state["status"] = "degraded"
+        return state
 
     @staticmethod
     def _decode_legacy_text(value: bytes) -> str:
@@ -672,8 +726,12 @@ class TaskStore:
             """
             SELECT * FROM task_schedulers
             WHERE status = 'active'
-            ORDER BY created_at ASC
-            """
+              AND NOT EXISTS (SELECT 1 FROM task_executions e
+                WHERE e.scheduler_id=task_schedulers.id AND e.status IN ('pending','queued','running'))
+              AND task_timestamp_us(COALESCE(json_extract(trigger,'$.nextRun'),json_extract(trigger,'$.runAt'))) <= ?
+            ORDER BY task_timestamp_us(COALESCE(json_extract(trigger,'$.nextRun'),json_extract(trigger,'$.runAt'))), id
+            LIMIT 100
+            """, (_timestamp_microseconds(datetime.now(timezone.utc).isoformat()),)
         ) as cur:
             rows = await cur.fetchall()
         return [cls._row_to_scheduler(row) for row in rows]
@@ -1221,6 +1279,7 @@ class TaskStore:
             WHERE e.status = 'queued'
               AND q.id IS NULL
             ORDER BY COALESCE(e.queued_at, e.created_at) ASC
+            LIMIT 100
             """
         ) as cur:
             rows = await cur.fetchall()
@@ -1364,6 +1423,27 @@ class TaskStore:
 
     @classmethod
     @_write_operation
+    async def reconcile_queue_refs(cls) -> int:
+        """Repair obsolete/inconsistent queue references in bounded transactions."""
+        db = await cls._writer_db()
+        removed = await db.execute(
+            """DELETE FROM task_execution_queue_refs WHERE id IN (
+                SELECT q.id FROM task_execution_queue_refs q
+                LEFT JOIN task_executions e ON e.id=q.execution_id
+                WHERE e.id IS NULL OR e.status IN ('completed','failed','cancelled')
+                ORDER BY q.id LIMIT 100)""",
+        )
+        aligned = await db.execute(
+            """UPDATE task_execution_queue_refs SET status='queued', started_at=NULL
+                WHERE id IN (SELECT q.id FROM task_execution_queue_refs q
+                  JOIN task_executions e ON e.id=q.execution_id
+                  WHERE q.status='running' AND e.status IN ('pending','queued')
+                  ORDER BY q.id LIMIT 100)""",
+        )
+        return removed.rowcount + aligned.rowcount
+
+    @classmethod
+    @_write_operation
     async def requeue_running_refs(cls) -> int:
         db = await cls._writer_db()
         cur = await db.execute(
@@ -1429,60 +1509,58 @@ class TaskStore:
             scheduler.trigger, scheduler.status, scheduler.updated_at = trigger, status, now
         return True
 
+    @classmethod
+    @_write_operation
+    async def advance_scheduler(cls, scheduler: TaskScheduler, *, trigger: TaskTrigger) -> bool:
+        """Atomically audit a skipped slot without creating business work."""
+        db = await cls._writer_db()
+        now = datetime.now(timezone.utc)
+        cur = await db.execute(
+            "UPDATE task_schedulers SET trigger=?, updated_at=? "
+            "WHERE id=? AND status='active' AND task_timestamp_us(updated_at)=?",
+            (_json(trigger), now.isoformat(), scheduler.id,
+             _timestamp_microseconds(scheduler.updated_at.isoformat())),
+        )
+        if cur.rowcount:
+            scheduler.trigger, scheduler.updated_at = trigger, now
+        return cur.rowcount > 0
+
     # ------------------------------------------------------------------
     # Dashboard / delivery
     # ------------------------------------------------------------------
 
     @classmethod
     async def dashboard_counts(cls) -> Dict[str, Any]:
-        week_start = (
-            datetime.now(timezone.utc) - timedelta(days=7)
-        ).isoformat()
-        db = await cls._db()
-        db.row_factory = aiosqlite.Row
-
-        async def _count(sql: str, params: tuple = ()) -> int:
-            async with db.execute(sql, params) as cur:
-                return (await cur.fetchone())["c"]
-
-        return {
-            "running": await _count(
-                "SELECT COUNT(*) AS c FROM task_executions WHERE status = 'running'"
-            ),
-            "queued": await _count(
-                "SELECT COUNT(*) AS c FROM task_execution_queue_refs WHERE status = 'queued'"
-            ),
-            "scheduled_active": await _count(
+        await cls._db()
+        # Shared short-lived cache and single-flight query. Other processes or
+        # suite SQL writers become visible within two seconds, even without
+        # core invalidation. All six counts come from one statement/snapshot.
+        assert cls._dashboard_lock is not None
+        async with cls._dashboard_lock:
+            if cls._dashboard_cache and time.monotonic() - cls._dashboard_cache[0] < 2:
+                return dict(cls._dashboard_cache[1])
+            epoch = cls._write_epoch
+            db = await cls._db()
+            week_start = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            async with db.execute(
                 """
-                SELECT COUNT(*) AS c
-                FROM task_schedulers
-                WHERE status = 'active'
-                  AND NOT (mode = 'once' AND COALESCE(json_extract(trigger, '$.runImmediately'), 0) = 1)
-                """
-            ),
-            "completed_week": await _count(
-                """
-                SELECT COUNT(*) AS c FROM task_executions
-                WHERE status = 'completed'
-                  AND COALESCE(completed_at, started_at, queued_at, created_at) >= ?
-                """,
-                (week_start,),
-            ),
-            "completed_unviewed": await _count(
-                """
-                SELECT COUNT(*) AS c FROM task_executions
-                WHERE status = 'completed' AND delivery_status != 'viewed'
-                """
-            ),
-            "failed_week": await _count(
-                """
-                SELECT COUNT(*) AS c FROM task_executions
-                WHERE status = 'failed'
-                  AND COALESCE(completed_at, started_at, queued_at, created_at) >= ?
-                """,
-                (week_start,),
-            ),
-        }
+                SELECT
+                  (SELECT COUNT(*) FROM task_executions WHERE status='running') AS running,
+                  (SELECT COUNT(*) FROM task_execution_queue_refs WHERE status='queued') AS queued,
+                  (SELECT COUNT(*) FROM task_schedulers WHERE status='active'
+                    AND NOT (mode='once' AND COALESCE(json_extract(trigger, '$.runImmediately'),0)=1)) AS scheduled_active,
+                  (SELECT COUNT(*) FROM task_executions WHERE status='completed'
+                    AND COALESCE(completed_at, started_at, queued_at, created_at)>=?) AS completed_week,
+                  (SELECT COUNT(*) FROM task_executions WHERE status='completed'
+                    AND delivery_status!='viewed') AS completed_unviewed,
+                  (SELECT COUNT(*) FROM task_executions WHERE status='failed'
+                    AND COALESCE(completed_at, started_at, queued_at, created_at)>=?) AS failed_week
+                """, (week_start, week_start),
+            ) as cursor:
+                result = dict(await cursor.fetchone())
+            if epoch == cls._write_epoch:
+                cls._dashboard_cache = (time.monotonic(), result)
+            return dict(result)
 
     @classmethod
     async def get_unviewed_results(cls) -> List[TaskExecution]:
@@ -1551,6 +1629,7 @@ class TaskStore:
               AND json_extract(retry, '$.retryAfter') IS NOT NULL
               AND json_extract(retry, '$.retryAfter') <= ?
               AND json_extract(retry, '$.retryCount') < json_extract(retry, '$.maxRetries')
+            ORDER BY json_extract(retry, '$.retryAfter'), id LIMIT 100
             """,
             (now_iso,),
         ) as cur:
@@ -1568,6 +1647,7 @@ class TaskStore:
             SELECT * FROM task_executions
             WHERE status IN ('pending', 'queued')
               AND updated_at < ?
+            ORDER BY updated_at, id LIMIT 100
             """,
             (before.isoformat(),),
         ) as cur:
@@ -1585,6 +1665,7 @@ class TaskStore:
             SELECT * FROM task_executions
             WHERE status = 'running'
               AND COALESCE(started_at, queued_at, created_at, updated_at) < ?
+            ORDER BY updated_at, id LIMIT 100
             """,
             (before.isoformat(),),
         ) as cur:

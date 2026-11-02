@@ -10,6 +10,7 @@ export type TaskPriority = 'urgent' | 'high' | 'normal' | 'low';
 export type DeliveryStatus = 'unread' | 'notified' | 'viewed';
 export type ExecutionMode = 'agent' | 'workflow';
 export type SchedulerMode = 'once' | 'cron';
+export type MisfirePolicy = 'coalesce' | 'catch_up' | 'skip';
 export type TaskSchedulerStatus = 'active' | 'disabled' | 'archived';
 export type ExecutionTriggerType = 'run_once' | 'scheduled' | 'rerun';
 
@@ -19,6 +20,15 @@ export interface TaskSource {
   userPrompt?: string;
 }
 
+export interface ScheduleDecision {
+  policy: MisfirePolicy;
+  reason: 'on_time' | 'missed_deadline' | 'coalesced' | 'catch_up' | 'catch_up_limit';
+  scheduledAt: string;
+  decidedAt: string;
+  nextRun?: string | null;
+  discardedThrough?: string;
+}
+
 export interface TaskTrigger {
   runImmediately: boolean;
   runAt?: string;
@@ -26,6 +36,11 @@ export interface TaskTrigger {
   timezone: string;
   nextRun?: string;
   cronDescription?: string;
+  misfirePolicy?: MisfirePolicy;
+  misfireGraceSeconds?: number;
+  maxCatchUp?: number;
+  lastDecision?: ScheduleDecision;
+  scheduleAudit?: ScheduleDecision[];
 }
 
 export interface RetryConfig {
@@ -124,6 +139,9 @@ export interface TaskCreateParams {
   runAt?: string;
   cron?: string;
   cronDescription?: string;
+  misfirePolicy?: MisfirePolicy;
+  misfireGraceSeconds?: number;
+  maxCatchUp?: number;
   timezone?: string;
   userPrompt?: string;
   workspaceDirectory?: string;
@@ -151,6 +169,9 @@ export interface TaskUpdateParams {
   runAt?: string;
   cron?: string;
   cronDescription?: string;
+  misfirePolicy?: MisfirePolicy;
+  misfireGraceSeconds?: number;
+  maxCatchUp?: number;
   timezone?: string;
   userPrompt?: string;
   workspaceDirectory?: string;

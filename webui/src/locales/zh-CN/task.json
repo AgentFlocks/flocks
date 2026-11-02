@@ -216,7 +216,14 @@
     "normalLabel": "普通",
     "lowLabel": "低",
     "timezoneShanghai": "Asia/Shanghai（北京时间 UTC+8）",
-    "workflowIdPlaceholder": "输入 Workflow ID"
+    "workflowIdPlaceholder": "输入 Workflow ID",
+    "misfireLabel": "错过执行时间时",
+    "misfireCoalesce": "合并补执行一次（默认）",
+    "misfireCatchUp": "按顺序补执行，限制次数",
+    "misfireSkip": "跳过过期任务",
+    "misfireHint": "仅适用于循环任务。补执行会重新运行任务，请根据业务选择。",
+    "misfireGrace": "允许延迟（秒）",
+    "maxCatchUp": "每次积压最多补执行"
   },
   "taskSheet": {
     "entityType": "任务",
