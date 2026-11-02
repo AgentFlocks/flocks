@@ -19,6 +19,7 @@ from flocks.contracts.webui.models import (
     WebUIWorkspaceListItem,
     WebUIWorkspaceManifest,
 )
+from flocks.utils.file_modes import ensure_owner_writable
 from flocks.utils.log import Log
 from flocks.config.config import get_user_plugins_root
 
@@ -198,6 +199,9 @@ class WebUIPagesStore:
                 pass
         if source is not None and source != target:
             shutil.copytree(source, target)
+            # The copy keeps a read-only source's permission bits; it is the
+            # user's own page now and gets written to right after.
+            ensure_owner_writable(target)
             self._normalize_migrated_page(target, page_id)
             log.info("webui_pages.materialized", {"pageId": page_id, "source": str(source), "target": str(target)})
         return target
@@ -618,6 +622,7 @@ class WebUIPagesStore:
                 continue
             try:
                 shutil.copytree(child, target)
+                ensure_owner_writable(target)
                 self._normalize_migrated_page(target, page_id)
                 log.info("webui_pages.legacy_migrated", {"pageId": page_id, "source": str(child), "target": str(target)})
             except Exception as exc:

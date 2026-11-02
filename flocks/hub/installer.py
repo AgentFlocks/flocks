@@ -37,6 +37,7 @@ from flocks.hub.update_protection import (
     public_plan,
     tree_hashes,
 )
+from flocks.utils.file_modes import ensure_owner_writable, remove_tree
 
 
 _TOOL_TYPE_DIRS = {"api", "device", "python", "mcp", "generated"}
@@ -150,7 +151,9 @@ def _resolve_install_destination(
 
 def _remove_path(path: Path) -> None:
     if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
+        # Installs made before staged copies were opened up can still carry a
+        # read-only source's modes.
+        remove_tree(path)
     elif path.exists() or path.is_symlink():
         path.unlink()
 
@@ -183,7 +186,9 @@ def _purge_stale_scratch(parent: Path, name: str) -> None:
             continue
         try:
             if entry.is_dir() and not entry.is_symlink():
-                shutil.rmtree(entry, ignore_errors=True)
+                # Scratch left by a failed copy of a read-only source holds
+                # read-only directories, which a plain rmtree cannot empty.
+                remove_tree(entry, ignore_errors=True)
             else:
                 entry.unlink()
         except OSError:
@@ -199,6 +204,14 @@ def _replace_with_retry(src: Path, dst: Path) -> None:
     fail with ``PermissionError`` (WinError 5 / 32). Elsewhere the rename
     is atomic and never needs retrying.
     """
+    if src.is_dir() and not src.is_symlink():
+        # Moving a directory under another parent rewrites its "..", which
+        # takes write access to the directory itself. An install copied from
+        # a read-only source before staged copies were opened up lacks it.
+        try:
+            ensure_owner_writable(src, recursive=False)
+        except OSError:
+            pass  # The rename reports what is really wrong.
     if sys.platform != "win32":
         src.replace(dst)
         return
@@ -316,7 +329,7 @@ def _copy_package(
         return backup
     except Exception:
         if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
+            remove_tree(tmp, ignore_errors=True)
         raise
 
 
@@ -329,6 +342,11 @@ def _copy_package_contents(src: Path, dst: Path) -> None:
             _copytree_skip_caches(item, target)
         else:
             shutil.copy2(item, target)
+    # The copies carry the source's permission bits, and a hub root can be
+    # read-only (an installed extension package, say). The staged copy is the
+    # installation's own: pages are built into it, metadata is patched in it,
+    # and later updates move it and uninstalls delete it.
+    ensure_owner_writable(dst)
 
 
 def _preserve_native_group_metadata(
@@ -526,7 +544,7 @@ def _remove_attached_access_contracts(
     if recovery_root is not None and (access_dst.exists() or access_dst.is_symlink()):
         _rollback_replacement(access_dst, None, recovery_root=recovery_root / "access")
     elif access_dst.is_dir():
-        shutil.rmtree(access_dst)
+        remove_tree(access_dst)
     elif access_dst.exists():
         access_dst.unlink()
     else:
@@ -594,7 +612,7 @@ def _copy_webui_package_with_build(
         return backup
     except Exception:
         if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
+            remove_tree(tmp, ignore_errors=True)
         raise
 
 
@@ -1324,7 +1342,7 @@ async def _uninstall_plugin(
     if recovery_root is not None:
         _rollback_replacement(install_path, None, recovery_root=recovery_root / "package")
     elif install_path.is_dir():
-        shutil.rmtree(install_path)
+        remove_tree(install_path)
     else:
         install_path.unlink()
     _remove_attached_access_contracts(

@@ -23,6 +23,7 @@ from pydantic import ValidationError
 from flocks.contracts.webui.models import WebUIWorkspaceManifest
 from flocks.contracts.webui.store import WORKSPACE_MANIFEST_FILE, WebUIPagesStore
 from flocks.hub.security import SKIP_NAMES
+from flocks.utils.file_modes import ensure_owner_writable
 from flocks.utils.log import Log
 
 log = Log.create(service="hub.custom_pages")
@@ -113,6 +114,9 @@ def carry_over(installed: Path, staged: Path, pages: Iterable[Mapping[str, Any]]
                 name for name in names if name in SKIP_NAMES or Path(directory) / name in left_out
             ],
         )
+        # Like the release copied next to it, the kept page is written to
+        # (stale builds below) and moved by later updates.
+        ensure_owner_writable(target)
     for relative in kept_paths:
         _mark_stale_build(staged / relative)
     _merge_workspace_file(installed, staged, [str(page["id"]) for page in kept])
