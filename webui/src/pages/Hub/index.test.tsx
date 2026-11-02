@@ -990,4 +990,20 @@ describe('HubPage catalog loading', () => {
     expect(error).toBeInTheDocument();
     expect(hubAPI.fileContent).toHaveBeenCalledWith('workflow', 'broken-wf', 'workflow.json');
   });
+
+  it('opens the plugin detail below the fixed workspace header, keeping its title and close button reachable (INC-D5A1458C)', async () => {
+    const user = userEvent.setup();
+    const entry = catalogEntry('soc-workspace', 'Alert Operations Suite');
+    hubAPI.catalogPage.mockResolvedValue(catalogPage([entry]));
+    hubAPI.get.mockResolvedValue({ data: entry });
+
+    renderHub();
+    await user.click(await screen.findByText('Alert Operations Suite'));
+
+    const heading = await screen.findByRole('heading', { name: 'Alert Operations Suite' });
+    const drawer = heading.closest('.fixed') as HTMLElement;
+    // The workspace header is fixed at the top (h-14, z-50): the drawer starts under it.
+    expect(drawer.className.split(/\s+/)).toContain('top-14');
+    expect(drawer.className).not.toMatch(/(^|\s)inset-y-0(\s|$)/);
+  });
 });
