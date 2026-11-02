@@ -1111,7 +1111,9 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
   };
 
   return (
-    <div className="fixed inset-y-0 right-0 z-40 w-[860px] max-w-[95vw] bg-white border-l border-gray-200 shadow-xl flex flex-col max-md:top-14 max-md:max-w-full">
+    // Below the fixed workspace header (h-14, z-50): starting at the top of
+    // the viewport put the title and the close button under it.
+    <div className="fixed top-14 bottom-0 right-0 z-40 w-[860px] max-w-[95vw] bg-white border-l border-gray-200 shadow-xl flex flex-col max-md:max-w-full">
       <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between max-md:gap-3 max-md:px-4">
         <div className="max-md:min-w-0">
           <div className="flex items-center gap-2 max-md:flex-wrap">
