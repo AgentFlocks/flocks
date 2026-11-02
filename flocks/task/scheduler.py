@@ -6,7 +6,7 @@ from typing import Optional
 
 from flocks.utils.log import Log
 
-from .models import MisfirePolicy, ExecutionTriggerType, SchedulerMode, SchedulerStatus, TaskTrigger
+from .models import ExecutionTriggerType, SchedulerMode, SchedulerStatus, TaskTrigger
 from .store import TaskStore
 from .health import ComponentHealth
 
@@ -62,8 +62,7 @@ class TaskScheduler:
             except Exception as exc:
                 self._health.failed(exc, operation="tick")
                 log.error("scheduler.tick_error", {"error": str(exc)})
-            if self._running:
-                await asyncio.sleep(self._check_interval)
+            await asyncio.sleep(self._check_interval)
 
     async def _tick(self) -> None:
         now = datetime.now(timezone.utc)
@@ -103,53 +102,19 @@ class TaskScheduler:
         )
         trigger = scheduler.trigger.model_copy(deep=True)
         status = scheduler.status
-        reason = "on_time"
-        late = (now - next_run).total_seconds() > trigger.misfire_grace_seconds
-        skip = False
         if scheduler.mode == SchedulerMode.CRON and trigger.cron:
-            if trigger.misfire_policy == MisfirePolicy.SKIP and late:
-                skip = True
-                reason = "missed_deadline"
-                trigger.next_run = self._compute_next(trigger, after=now)
-            elif trigger.misfire_policy == MisfirePolicy.CATCH_UP and (late or trigger.catch_up_until):
-                if trigger.catch_up_until is None:
-                    trigger.catch_up_until = now
-                    trigger.catch_up_remaining = trigger.max_catch_up
-                reason = "catch_up"
-                trigger.catch_up_remaining = max(0, (trigger.catch_up_remaining or 0) - 1)
-                trigger.next_run = self._compute_next(trigger, after=next_run)
-                if trigger.next_run and trigger.next_run <= trigger.catch_up_until:
-                    if trigger.catch_up_remaining == 0:
-                        reason = "catch_up_limit"
-                        trigger.next_run = self._compute_next(trigger, after=now)
-                else:
-                    trigger.catch_up_remaining = 0
-                if trigger.catch_up_remaining == 0:
-                    trigger.catch_up_until = None
-                    trigger.catch_up_remaining = None
-            else:
-                reason = "coalesced" if late else "on_time"
-                trigger.next_run = self._compute_next(trigger, after=now)
+            trigger.next_run = self._compute_next(trigger, after=now)
         if scheduler.mode == SchedulerMode.ONCE:
             status = SchedulerStatus.DISABLED
             trigger.next_run = None
-        trigger.last_decision = {
-            "policy": trigger.misfire_policy.value, "reason": reason,
-            "scheduledAt": next_run.isoformat(), "decidedAt": now.isoformat(),
-            "nextRun": trigger.next_run.isoformat() if trigger.next_run else None,
-        }
-        if reason in ("missed_deadline", "coalesced", "catch_up_limit"):
-            trigger.last_decision["discardedThrough"] = now.isoformat()
-        if reason != "on_time":
-            trigger.schedule_audit = (trigger.schedule_audit + [dict(trigger.last_decision)])[-32:]
-        if skip:
-            fired = await TaskStore.advance_scheduler(scheduler, trigger=trigger)
-        else:
-            execution = TaskManager.build_execution_from_scheduler(scheduler, trigger_type=trigger_type)
-            execution.execution_input_snapshot["scheduleDecision"] = dict(trigger.last_decision)
-            fired = await TaskStore.fire_scheduler(
-                scheduler, execution, trigger=trigger, status=status,
-            )
+        # Started only if nobody changed the scheduler since it was read
+        # here: writing this copy back used to undo an edit or a disable.
+        fired = await TaskStore.fire_scheduler(
+            scheduler,
+            TaskManager.build_execution_from_scheduler(scheduler, trigger_type=trigger_type),
+            trigger=trigger,
+            status=status,
+        )
         if not fired:
             log.info("scheduler.changed_before_run", {"scheduler_id": scheduler.id})
 

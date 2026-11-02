@@ -7,7 +7,6 @@ from typing import List, Optional, Type
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 from flocks.server.auth import require_admin
-from flocks.task.models import MisfirePolicy
 from flocks.server.routes._timing import log_route_timing
 from flocks.utils.log import Log
 
@@ -36,9 +35,6 @@ class SchedulerCreateRequest(BaseModel):
     cron: Optional[str] = None
     cron_description: Optional[str] = Field(None, alias="cronDescription")
     timezone: str = "Asia/Shanghai"
-    misfire_policy: MisfirePolicy = Field(MisfirePolicy.COALESCE, alias="misfirePolicy")
-    misfire_grace_seconds: int = Field(60, ge=0, le=86400, alias="misfireGraceSeconds")
-    max_catch_up: int = Field(3, ge=1, le=100, alias="maxCatchUp")
     user_prompt: Optional[str] = Field(None, alias="userPrompt")
     workspace_directory: Optional[str] = Field(None, alias="workspaceDirectory")
     tags: List[str] = Field(default_factory=list)
@@ -72,9 +68,6 @@ class SchedulerUpdateRequest(BaseModel):
     cron: Optional[str] = None
     cron_description: Optional[str] = Field(None, alias="cronDescription")
     timezone: Optional[str] = None
-    misfire_policy: Optional[MisfirePolicy] = Field(None, alias="misfirePolicy")
-    misfire_grace_seconds: Optional[int] = Field(None, ge=0, le=86400, alias="misfireGraceSeconds")
-    max_catch_up: Optional[int] = Field(None, ge=1, le=100, alias="maxCatchUp")
     user_prompt: Optional[str] = Field(None, alias="userPrompt")
     context: Optional[dict] = None
     workspace_directory: Optional[str] = Field(None, alias="workspaceDirectory")
@@ -221,7 +214,7 @@ async def task_queue_status():
 async def pause_task_queue(_admin: object = Depends(require_admin)):
     from flocks.task.manager import TaskManager
 
-    await TaskManager.set_queue_paused(True)
+    TaskManager.pause_queue()
     return {"paused": True}
 
 
@@ -229,7 +222,7 @@ async def pause_task_queue(_admin: object = Depends(require_admin)):
 async def resume_task_queue(_admin: object = Depends(require_admin)):
     from flocks.task.manager import TaskManager
 
-    await TaskManager.set_queue_paused(False)
+    TaskManager.resume_queue()
     return {"paused": False}
 
 
@@ -302,9 +295,6 @@ async def create_scheduler(req: SchedulerCreateRequest):
             detail=str(exc),
         ) from exc
 
-    trigger.misfire_policy = req.misfire_policy
-    trigger.misfire_grace_seconds = req.misfire_grace_seconds
-    trigger.max_catch_up = req.max_catch_up
     scheduler = await TaskManager.create_scheduler(
         title=req.title,
         description=req.description,

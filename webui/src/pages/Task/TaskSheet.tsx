@@ -43,9 +43,6 @@ interface TaskFormData {
   runAt: string;
   timezone: string;
   cronDescription: string;
-  misfirePolicy: 'coalesce' | 'catch_up' | 'skip';
-  misfireGraceSeconds: number;
-  maxCatchUp: number;
 }
 
 // ─── TaskSheet ────────────────────────────────────────────────────────────────
@@ -89,9 +86,6 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
         })(),
         timezone: task.trigger?.timezone ?? 'Asia/Shanghai',
         cronDescription: task.trigger?.cronDescription ?? '',
-        misfirePolicy: task.trigger?.misfirePolicy ?? 'coalesce',
-        misfireGraceSeconds: task.trigger?.misfireGraceSeconds ?? 60,
-        maxCatchUp: task.trigger?.maxCatchUp ?? 3,
       };
     }
     return {
@@ -108,9 +102,6 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
       runAt: '',
       timezone: 'Asia/Shanghai',
       cronDescription: '',
-      misfirePolicy: 'coalesce',
-      misfireGraceSeconds: 60,
-      maxCatchUp: 3,
     };
   });
 
@@ -191,9 +182,6 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
             cron: effectiveCron.trim(),
             cronDescription: formData.cronDescription.trim() || undefined,
             timezone: formData.timezone,
-            misfirePolicy: formData.misfirePolicy,
-            misfireGraceSeconds: formData.misfireGraceSeconds,
-            maxCatchUp: formData.maxCatchUp,
             executionMode: formData.executionMode,
             agentName: formData.executionMode === 'agent' ? formData.agentName : undefined,
             workflowID: formData.executionMode === 'workflow' ? formData.workflowID : undefined,
@@ -219,9 +207,6 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
         } else if (isRecurring) {
           params.cron = effectiveCron.trim();
           params.timezone = formData.timezone;
-          params.misfirePolicy = formData.misfirePolicy;
-          params.misfireGraceSeconds = formData.misfireGraceSeconds;
-          params.maxCatchUp = formData.maxCatchUp;
           params.cronDescription = formData.cronDescription.trim() || undefined;
         }
         await taskAPI.createScheduler(params);
@@ -522,27 +507,6 @@ function TaskFormContent({
                 <p className="text-xs text-purple-600 font-medium">{describeCron(effectiveCron)}</p>
               )}
 
-              <div className="space-y-2">
-                <label className="block text-xs font-medium text-gray-600" htmlFor="misfire-policy">{t('form.misfireLabel')}</label>
-                <select id="misfire-policy" value={formData.misfirePolicy}
-                  onChange={e => update({ misfirePolicy: e.target.value as TaskFormData['misfirePolicy'] })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white">
-                  <option value="coalesce">{t('form.misfireCoalesce')}</option>
-                  <option value="catch_up">{t('form.misfireCatchUp')}</option>
-                  <option value="skip">{t('form.misfireSkip')}</option>
-                </select>
-                <p className="text-xs text-gray-500">{t('form.misfireHint')}</p>
-                <label className="block text-xs text-gray-600">{t('form.misfireGrace')}
-                  <input type="number" min={0} max={86400} required value={formData.misfireGraceSeconds}
-                    onChange={e => update({ misfireGraceSeconds: Number(e.target.value) })}
-                    className="ml-2 w-24 px-2 py-1 border rounded" />
-                </label>
-                {formData.misfirePolicy === 'catch_up' && <label className="block text-xs text-gray-600">{t('form.maxCatchUp')}
-                  <input type="number" min={1} max={100} required value={formData.maxCatchUp}
-                    onChange={e => update({ maxCatchUp: Number(e.target.value) })}
-                    className="ml-2 w-24 px-2 py-1 border rounded" />
-                </label>}
-              </div>
               {/* Timezone + custom description */}
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">{t('form.timezoneLabel')}</label>

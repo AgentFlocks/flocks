@@ -216,14 +216,7 @@
     "highLabel": "High",
     "normalLabel": "Normal",
     "lowLabel": "Low",
-    "workflowIdPlaceholder": "Enter Workflow ID",
-    "misfireLabel": "When a scheduled time is missed",
-    "misfireCoalesce": "Run once for missed times (default)",
-    "misfireCatchUp": "Catch up in order, with a limit",
-    "misfireSkip": "Skip overdue times",
-    "misfireHint": "For recurring tasks. Catching up runs the task again; choose according to its business effects.",
-    "misfireGrace": "Grace period (seconds)",
-    "maxCatchUp": "Maximum catch-up runs per backlog"
+    "workflowIdPlaceholder": "Enter Workflow ID"
   },
   "taskSheet": {
     "entityType": "Task",
