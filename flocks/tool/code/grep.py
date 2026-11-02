@@ -13,10 +13,10 @@ import asyncio
 import contextlib
 import shutil
 import re
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 from datetime import datetime
 
-from flocks.tool import nofollow
+from flocks.tool import nofollow, search_walk
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
@@ -63,7 +63,9 @@ def find_ripgrep() -> Optional[str]:
 def fallback_grep(
     pattern: str,
     search_path: str,
-    include: Optional[str] = None
+    include: Optional[str] = None,
+    *,
+    stop: Callable[[], bool] = lambda: False,
 ) -> List[Dict[str, Any]]:
     """
     Fallback grep implementation using Python's re module
@@ -74,6 +76,7 @@ def fallback_grep(
         pattern: Regex pattern to search
         search_path: Directory to search
         include: File pattern to include
+        stop: Checked as the search goes; once true, the matches so far are returned
         
     Returns:
         List of matches
@@ -101,7 +104,7 @@ def fallback_grep(
         return name.startswith('.') or name in SKIPPED_DIRECTORIES
 
     with root:
-        for relative, holder, filename in nofollow.walk_files(root, skip_directory=skipped):
+        for relative, holder, filename in nofollow.walk_files(root, skip_directory=skipped, stop=stop):
             # Apply include filter
             if include:
                 # Handle glob patterns like "*.js" or "*.{ts,tsx}"
@@ -138,6 +141,9 @@ def fallback_grep(
                             
                             if len(matches) >= MAX_MATCHES * 10:
                                 return matches
+                        # A big file takes a while to read through.
+                        if not line_num % 1000 and stop():
+                            return matches
                                 
             except (IOError, OSError):
                 continue
@@ -467,13 +473,18 @@ async def grep_tool(
 
     # Find ripgrep
     rg_path = find_ripgrep()
+    cut_short = False
     
     try:
         if rg_path:
             final_matches, truncated = await _ripgrep_matches(rg_path, pattern, search_path, include)
         else:
             log.warn("grep.ripgrep_not_found", {"fallback": "python_regex"})
-            matches = fallback_grep(pattern, search_path, include)
+            # Off the event loop: reading through a big tree takes minutes,
+            # and every other request would wait for it.
+            matches, cut_short = await search_walk.run_in_thread(
+                lambda stop: fallback_grep(pattern, search_path, include, stop=stop)
+            )
             # Sort by modification time (most recent first)
             matches.sort(key=lambda x: x['modTime'], reverse=True)
             # Truncate results
@@ -491,9 +502,10 @@ async def grep_tool(
     if not final_matches:
         return ToolResult(
             success=True,
-            output="No files found",
+            output="No files found" + (f"\n\n{search_walk.stopped_note()}" if cut_short else ""),
             title=pattern,
-            metadata={"matches": 0, "truncated": False}
+            truncated=cut_short,
+            metadata={"matches": 0, "truncated": cut_short, "timed_out": cut_short}
         )
     
     # Build output
@@ -518,6 +530,11 @@ async def grep_tool(
         output_lines.append("")
         output_lines.append("(Results are truncated. Consider using a more specific path or pattern.)")
     
+    if cut_short:
+        output_lines.append("")
+        output_lines.append(search_walk.stopped_note())
+        truncated = True
+
     return ToolResult(
         success=True,
         output="\n".join(output_lines),
@@ -525,6 +542,7 @@ async def grep_tool(
         truncated=truncated,
         metadata={
             "matches": len(final_matches),
-            "truncated": truncated
+            "truncated": truncated,
+            "timed_out": cut_short,
         }
     )
