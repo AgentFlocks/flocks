@@ -504,3 +504,105 @@ class TestProcessMessageTitleGeneration:
             await runner._process_message("test message")
 
         title_generate_mock.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Output budget: a model that thinks first (INC-F0EC905C)
+# ---------------------------------------------------------------------------
+
+_SCREENSHOT_QUESTION = "主agent和子agent是怎么协作的 如何避免上下文过长导致的记忆问题 重复执行同个动作问题"
+_FULL_TITLE = "主 Agent 与子 Agent 的协作与记忆问题"
+
+
+def _thinking_provider(thinking_tokens: int, budgets: list):
+    """A reasoning model whose thinking counts toward max_tokens, one token per reasoning chunk or title character."""
+    from flocks.provider.provider import StreamChunk
+
+    provider = MagicMock()
+
+    async def chat_stream(model_id, messages, **kwargs):
+        budget = kwargs.get("max_tokens")
+        budgets.append(budget)
+        chunks = [StreamChunk(event_type="reasoning", reasoning="想")] * thinking_tokens
+        chunks += [StreamChunk(delta=char) for char in _FULL_TITLE]
+        for used, chunk in enumerate(chunks):
+            if budget is not None and used >= budget:
+                yield StreamChunk(delta="", finish_reason="length")
+                return
+            yield chunk
+        yield StreamChunk(delta="", finish_reason="stop")
+
+    provider.chat_stream = chat_stream
+    return provider
+
+
+async def _title_with(provider) -> str:
+    from flocks.session.lifecycle.title import SessionTitle
+
+    msg, part = _make_user_msg(_SCREENSHOT_QUESTION)
+    patches = _patch_title_deps(_make_session(), [msg], [part], provider, AsyncMock())
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        return await SessionTitle.generate_title_after_first_message(
+            session_id="sess-1",
+            model_id="deepseek-v4.1-flash",
+            provider_id="threatbook-cn-llm",
+        )
+
+
+class TestTitleOutputBudget:
+    @pytest.mark.asyncio
+    async def test_a_model_that_thinks_first_still_gets_its_whole_title_out(self):
+        # 49 tokens of thinking: at the old budget of 50 only "主" was left.
+        budgets: list = []
+
+        title = await _title_with(_thinking_provider(49, budgets))
+
+        assert title == _FULL_TITLE
+        assert budgets and budgets[0] >= 49 + len(_FULL_TITLE)
+
+    @pytest.mark.asyncio
+    async def test_a_title_cut_off_by_the_budget_falls_back_to_the_question(self):
+        from flocks.provider.provider import StreamChunk
+        from flocks.session.lifecycle.title import SessionTitle
+
+        provider = MagicMock()
+
+        async def cut_off(*args, **kwargs):
+            yield StreamChunk(event_type="reasoning", reasoning="thinking...")
+            yield StreamChunk(delta="主")
+            yield StreamChunk(delta="", finish_reason="length")
+
+        provider.chat_stream = cut_off
+
+        title = await _title_with(provider)
+
+        assert title == SessionTitle._generate_simple_title(_SCREENSHOT_QUESTION)
+        assert title != "主"
+
+    @pytest.mark.asyncio
+    async def test_a_title_that_ends_normally_is_kept(self):
+        budgets: list = []
+
+        assert await _title_with(_thinking_provider(0, budgets)) == _FULL_TITLE
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("after_length", ["stop", "error"])
+    async def test_a_cut_off_stays_cut_off_whatever_follows(self, after_length):
+        # Some adapters close with "stop" after passing "length" on; a stream
+        # may also fail once it was cut off.
+        from flocks.provider.provider import StreamChunk
+        from flocks.session.lifecycle.title import SessionTitle
+
+        provider = MagicMock()
+
+        async def cut_off(*args, **kwargs):
+            yield StreamChunk(delta="主")
+            yield StreamChunk(delta="", finish_reason="length")
+            if after_length == "stop":
+                yield StreamChunk(delta="", finish_reason="stop")
+            else:
+                raise RuntimeError("stream closed")
+
+        provider.chat_stream = cut_off
+
+        assert await _title_with(provider) == SessionTitle._generate_simple_title(_SCREENSHOT_QUESTION)
