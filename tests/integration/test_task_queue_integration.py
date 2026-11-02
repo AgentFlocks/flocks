@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from unittest.mock import AsyncMock
 
 import flocks.task.manager as task_manager_module
 from flocks.task.models import ExecutionMode
@@ -304,7 +305,9 @@ async def test_dispatch_timeout_releases_queue_for_following_execution(
 
 
 @pytest.mark.asyncio
-async def test_delete_scheduler_releases_claimed_queue_slot(tmp_path: Path):
+async def test_delete_scheduler_releases_claimed_queue_slot(tmp_path: Path, monkeypatch):
+    # This test claims manually; an actual dispatcher would race that claim.
+    monkeypatch.setattr(TaskManager, "_execution_loop", AsyncMock())
     await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
 
     scheduler = await TaskManager.create_scheduler(
@@ -362,6 +365,7 @@ async def test_cancelled_worker_requeues_execution_instead_of_losing_queue_ref(
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(TaskExecutor, "dispatch", fake_dispatch)
+    monkeypatch.setattr(TaskManager, "_execution_loop", AsyncMock())
     await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
 
     scheduler = await TaskManager.create_scheduler(

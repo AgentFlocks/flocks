@@ -178,11 +178,17 @@ export interface TaskSystemNotice {
   displayCount: number;
 }
 
+export interface TaskSystemHealth {
+  status: 'healthy' | 'degraded' | 'unavailable';
+  pending_results: number;
+}
+
 // ======================================================================
 // API
 // ======================================================================
 
 export const taskAPI = {
+  health: () => client.get<TaskSystemHealth>('/api/task-system/health', { timeout: 5000 }),
   listSchedulers: (params?: SchedulerListParams) =>
     client.get<PaginatedResponse<TaskScheduler>>('/api/task-schedulers', { params }),
 

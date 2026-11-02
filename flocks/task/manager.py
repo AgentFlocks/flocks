@@ -12,7 +12,8 @@ from pydantic import BaseModel as _BaseModel
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
-from .executor import _TASK_ABSOLUTE_TIMEOUT_S, TaskExecutor
+from .executor import _TASK_ABSOLUTE_TIMEOUT_S, TaskExecutor, TaskResultPersistenceError
+from .health import ComponentHealth
 from .models import (
     DeliveryStatus,
     ExecutionMode,
@@ -72,6 +73,11 @@ class TaskManager:
         self._last_retry_check: float = 0.0
         self._last_stale_recovery_check: float = 0.0
         self._last_orphaned_queue_recovery_check: float = 0.0
+        self._health = ComponentHealth()
+        # Occupy their original queue slots until finalization succeeds. This
+        # bounds the pending results by concurrency and prevents a second run.
+        self._pending_completions: dict[str, TaskExecution] = {}
+        self._execution_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -103,6 +109,7 @@ class TaskManager:
             log.info("manager.orphaned_queue_recovery", {"count": recovered_queued})
 
         mgr._running = True
+        mgr._health.started()
         mgr._loop_task = asyncio.create_task(mgr._execution_loop())
         mgr._cleanup_task = asyncio.create_task(mgr._cleanup_loop())
         await mgr.scheduler.start()
@@ -125,6 +132,13 @@ class TaskManager:
                 except asyncio.CancelledError:
                     pass
         await mgr.scheduler.stop()
+        # Do not let workers reopen storage after shutdown has closed it.
+        workers = list(mgr._execution_tasks)
+        for worker in workers:
+            worker.cancel()
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
+        mgr._execution_tasks.clear()
         cls._instance = None
         log.info("manager.stopped")
 
@@ -152,6 +166,22 @@ class TaskManager:
             "task_scheduler_available": mgr.scheduler.is_available,
             "task_manager_error": cls._startup_error,
         }
+
+    @classmethod
+    def health_snapshot(cls) -> Dict[str, Any]:
+        """No database I/O: still responds when storage or dispatch is blocked."""
+        mgr = cls._instance
+        storage = TaskStore.health_snapshot()
+        if mgr is None or not mgr._running:
+            return {"status": "unavailable", "storage": storage, "pending_results": 0}
+        executor = mgr._health.snapshot(max_silence=max(60, mgr._poll_interval * 3))
+        scheduler = mgr.scheduler.health_snapshot()
+        degraded = (bool(mgr._pending_completions) or not mgr.scheduler.is_running or
+                    (mgr._loop_task is not None and mgr._loop_task.done()) or
+                    any(item["status"] == "degraded" for item in (storage, executor, scheduler)))
+        return {"status": "degraded" if degraded else "healthy", "storage": storage,
+                "executor": executor, "scheduler": scheduler,
+                "pending_results": len(mgr._pending_completions)}
 
     # ------------------------------------------------------------------
     # Scheduler APIs
@@ -360,9 +390,7 @@ class TaskManager:
         enqueue: bool = True,
     ) -> TaskExecution:
         execution = cls.build_execution_from_scheduler(scheduler, trigger_type=trigger_type)
-        await TaskStore.create_execution(execution)
-        if enqueue:
-            await cls._enqueue_execution(execution)
+        await TaskStore.create_execution(execution, enqueue=enqueue)
         return execution
 
     @classmethod
@@ -687,32 +715,63 @@ class TaskManager:
         import time
 
         while self._running:
+            self._health.started()
+            errors = []
+            now = time.monotonic()
+            phases = [("results", self._flush_pending_completions)]
+            for attribute, interval, operation in (
+                ("_last_retry_check", _RETRY_CHECK_INTERVAL_S, self._process_retry_queue),
+                ("_last_stale_recovery_check", _STALE_RECOVERY_INTERVAL_S, self._recover_stale_active_executions),
+                ("_last_orphaned_queue_recovery_check", _ORPHANED_QUEUE_RECOVERY_INTERVAL_S,
+                 self._recover_orphaned_queued_executions),
+            ):
+                if now - getattr(self, attribute) >= interval:
+                    setattr(self, attribute, now)
+                    phases.append((operation.__name__, operation))
+            for name, operation in phases:
+                try:
+                    await operation()
+                except Exception as exc:
+                    errors.append((name, exc))
+                    log.error("manager.maintenance_error", {"phase": name, "error": str(exc)})
             try:
-                now = time.monotonic()
-                if now - self._last_retry_check >= _RETRY_CHECK_INTERVAL_S:
-                    self._last_retry_check = now
-                    await self._process_retry_queue()
-                if now - self._last_stale_recovery_check >= _STALE_RECOVERY_INTERVAL_S:
-                    self._last_stale_recovery_check = now
-                    await self._recover_stale_active_executions()
-                if (
-                    now - self._last_orphaned_queue_recovery_check
-                    >= _ORPHANED_QUEUE_RECOVERY_INTERVAL_S
-                ):
-                    self._last_orphaned_queue_recovery_check = now
-                    await self._recover_orphaned_queued_executions()
-                # Fill every free slot in one pass: one execution per poll kept
-                # the rest of a burst queued for up to
-                # (max_concurrent - 1) * poll_interval seconds.
                 while True:
                     execution = await self.queue.dequeue()
                     if not execution:
                         break
                     task = asyncio.create_task(self._run_execution(execution))
+                    self._execution_tasks.add(task)
+                    task.add_done_callback(self._execution_tasks.discard)
                     task.add_done_callback(self._on_task_done)
             except Exception as exc:
+                errors.append(("dequeue", exc))
                 log.error("manager.loop_error", {"error": str(exc)})
+            if errors:
+                self._health.failed(errors[0][1], operation=errors[0][0])
+            else:
+                self._health.succeeded()
             await asyncio.sleep(self._poll_interval)
+
+    async def _flush_pending_completions(self) -> None:
+        error = None
+        for execution_id, execution in list(self._pending_completions.items()):
+            try:
+                saved = await TaskStore.update_active_execution(execution)
+                current = execution if saved else await TaskStore.get_execution(execution_id)
+            except Exception as exc:
+                error = exc
+                continue
+            self._pending_completions.pop(execution_id, None)
+            # A person may have cancelled and retried this id meanwhile. An
+            # older result must neither overwrite nor release the newer run.
+            if current is None or current.is_terminal:
+                self.queue.mark_finished(execution_id, expected_started_at=execution.started_at)
+            if saved:
+                await self._publish_execution_update(execution)
+                if execution.status == TaskStatus.FAILED:
+                    await self._handle_failure(execution)
+        if error is not None:
+            raise error
 
     @staticmethod
     def _on_task_done(fut: asyncio.Task) -> None:
@@ -723,6 +782,7 @@ class TaskManager:
             log.error("manager.task_unhandled", {"error": str(exc)})
 
     async def _run_execution(self, execution: TaskExecution) -> None:
+        claimed_started_at = execution.started_at
         scheduler = await TaskStore.get_scheduler(execution.scheduler_id)
         if not scheduler:
             execution.status = TaskStatus.FAILED
@@ -736,6 +796,11 @@ class TaskManager:
                 TaskExecutor.dispatch(execution, scheduler),
                 timeout=_DISPATCH_GUARD_TIMEOUT_S,
             )
+        except TaskResultPersistenceError as exc:
+            self._pending_completions[execution.id] = exc.execution
+            self._health.failed(exc.__cause__ or exc, operation="save_result")
+            log.warn("manager.result_pending", {"id": execution.id})
+            return
         except asyncio.CancelledError:
             current = await TaskStore.get_execution(execution.id)
             if current is not None:
@@ -767,12 +832,20 @@ class TaskManager:
                 self._dispatch_timeout_message(),
             )
         except Exception as exc:
+            # Compatibility with task extensions that save their own terminal
+            # result before returning from dispatch.
+            if isinstance(exc, sqlite3.Error) and execution.is_terminal:
+                self._pending_completions[execution.id] = execution.model_copy(deep=True)
+                self._health.failed(exc, operation="save_result")
+                log.warn("manager.result_pending", {"id": execution.id})
+                return
             log.error("manager.execution_error", {"id": execution.id, "error": str(exc)})
             execution = await self._mark_execution_failed(execution, str(exc))
         finally:
-            self.queue.mark_finished(execution.id)
-            if should_finish_queue_ref:
-                await TaskStore.finish_queue_ref(execution.id)
+            if execution.id not in self._pending_completions:
+                self.queue.mark_finished(execution.id, expected_started_at=claimed_started_at)
+                if should_finish_queue_ref:
+                    await TaskStore.finish_queue_ref(execution.id, expected_started_at=claimed_started_at)
 
         await self._publish_execution_update(execution)
         if execution.status == TaskStatus.FAILED:
@@ -816,15 +889,23 @@ class TaskManager:
 
     async def _process_retry_queue(self) -> None:
         retryable = await TaskStore.list_retryable_failed_executions()
+        failure = None
         for execution in retryable:
-            execution.retry.retry_after = None
-            execution.status = TaskStatus.QUEUED
-            execution.queued_at = datetime.now(timezone.utc)
-            execution.started_at = None
-            execution.completed_at = None
-            execution.duration_ms = None
-            execution.session_id = None
-            await self._enqueue_execution(execution, expected_status=TaskStatus.FAILED)
+            try:
+                execution.retry.retry_after = None
+                execution.status = TaskStatus.QUEUED
+                execution.queued_at = datetime.now(timezone.utc)
+                execution.started_at = None
+                execution.completed_at = None
+                execution.duration_ms = None
+                execution.session_id = None
+                await self._enqueue_execution(execution, expected_status=TaskStatus.FAILED)
+            except Exception as exc:
+                failure = exc
+                log.error("manager.record_recovery_error", {"id": execution.id,
+                                                           "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None)})
+        if failure is not None:
+            raise failure
 
     async def _recover_orphaned_executions(self) -> int:
         """Settle the runs a previous process left running.
@@ -851,8 +932,16 @@ class TaskManager:
 
     async def _recover_orphaned_queued_executions(self) -> int:
         orphans = await TaskStore.list_orphaned_queued_executions()
+        failure = None
         for execution in orphans:
-            await self._requeue_execution(execution)
+            try:
+                await self._requeue_execution(execution)
+            except Exception as exc:
+                failure = exc
+                log.error("manager.record_recovery_error", {"id": execution.id,
+                                                           "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None)})
+        if failure is not None:
+            raise failure
         return len(orphans)
 
     async def _cleanup_loop(self) -> None:
@@ -867,34 +956,52 @@ class TaskManager:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=_TASK_EXPIRY_HOURS)
         stale = await TaskStore.list_stale_queued_executions(before=cutoff)
         expired = 0
+        failure = None
         for execution in stale:
-            # Only while it still waits: one claimed since it was read runs on.
-            if await TaskStore.expire_queued_execution(
-                execution.id,
-                completed_at=datetime.now(timezone.utc),
-                error=f"任务创建后超过 {_TASK_EXPIRY_HOURS} 小时未能执行，已自动取消。",
-            ):
-                expired += 1
+            try:
+                # Only while it still waits: one claimed since it was read runs on.
+                if await TaskStore.expire_queued_execution(
+                    execution.id,
+                    completed_at=datetime.now(timezone.utc),
+                    error=f"任务创建后超过 {_TASK_EXPIRY_HOURS} 小时未能执行，已自动取消。",
+                ):
+                    expired += 1
+            except Exception as exc:
+                failure = exc
+                log.error("manager.record_recovery_error", {"id": execution.id,
+                                                           "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None)})
+        if failure is not None:
+            raise failure
         return expired
 
     async def _recover_stale_active_executions(self) -> int:
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=_RUNNING_RECOVERY_TIMEOUT_S)
         stale = await TaskStore.list_stale_running_executions(before=cutoff)
         recovered = 0
+        failure = None
         for execution in stale:
-            from flocks.task.outcome import run_outcome
+            try:
+                if execution.id in self._pending_completions:
+                    continue
+                from flocks.task.outcome import run_outcome
 
-            await self._cancel_execution_runtime(execution)
-            outcome = await run_outcome(execution)
-            TaskExecutor.forget_workflow_started(execution.id)
-            execution = await self._mark_execution_failed(
-                execution,
-                self._stale_execution_message(),
-                hold=None if outcome.safe_to_retry else outcome,
-            )
-            self.queue.mark_finished(execution.id)
-            await TaskStore.finish_queue_ref(execution.id)
-            recovered += 1
+                await self._cancel_execution_runtime(execution)
+                outcome = await run_outcome(execution)
+                TaskExecutor.forget_workflow_started(execution.id)
+                execution = await self._mark_execution_failed(
+                    execution,
+                    self._stale_execution_message(),
+                    hold=None if outcome.safe_to_retry else outcome,
+                )
+                self.queue.mark_finished(execution.id)
+                await TaskStore.finish_queue_ref(execution.id)
+                recovered += 1
+            except Exception as exc:
+                failure = exc
+                log.error("manager.record_recovery_error", {"id": execution.id,
+                                                           "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None)})
+        if failure is not None:
+            raise failure
         if recovered:
             log.warn(
                 "manager.stale_active_recovered",

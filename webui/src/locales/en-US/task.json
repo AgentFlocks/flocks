@@ -1,6 +1,12 @@
 {
   "pageTitle": "Tasks",
   "pageDescription": "Manage task queues, scheduled tasks, and published API services",
+  "health": {
+    "degraded": "The task service is experiencing errors and is retrying. The list may be out of date; avoid submitting duplicates.",
+    "unavailable": "The task service is not ready. Please try again shortly.",
+    "unknown": "Task service status could not be checked. Retrying.",
+    "pendingResults": "{{count}} finished tasks are waiting for their results to be saved."
+  },
   "createTask": "Create Task",
   "tabs": {
     "queued": "Task Queue",

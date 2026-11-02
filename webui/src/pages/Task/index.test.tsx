@@ -7,9 +7,12 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
+const healthState = vi.hoisted(() => ({ health: { status: 'healthy', pending_results: 0 } as { status: string; pending_results: number }, error: null as string | null }));
+
 vi.mock('@/hooks/useTasks', () => ({
   useTaskDashboard: () => ({ counts: { queued: 2, scheduled_active: 1 }, refetch: vi.fn() }),
   useTaskSystemNotice: () => ({ notice: null }),
+  useTaskSystemHealth: () => healthState,
 }));
 
 vi.mock('./components', () => ({ DashboardCards: () => <div>dashboard</div> }));
@@ -27,5 +30,25 @@ describe('TaskPage tabs', () => {
     await user.click(screen.getByRole('button', { name: /tabs\.scheduled/ }));
     expect(screen.getByText('scheduled-section')).toBeInTheDocument();
     expect(screen.queryByText('queued-section')).not.toBeInTheDocument();
+  });
+});
+
+
+describe('TaskPage health', () => {
+  it('reports storage degradation and pending results, then clears after recovery', () => {
+    healthState.health = { status: 'degraded', pending_results: 2 };
+    const view = render(<TaskPage />);
+    expect(screen.getByRole('status')).toHaveTextContent('health.degraded');
+    expect(screen.getByRole('status')).toHaveTextContent('health.pendingResults');
+    healthState.health = { status: 'healthy', pending_results: 0 };
+    view.rerender(<TaskPage />);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+  it('does not display stale healthy state when the health request fails', () => {
+    healthState.error = 'offline';
+    const view = render(<TaskPage />);
+    expect(screen.getByRole('status')).toHaveTextContent('health.unknown');
+    healthState.error = null;
+    view.unmount();
   });
 });

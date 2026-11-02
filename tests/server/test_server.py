@@ -100,7 +100,7 @@ async def test_security_headers_present(anonymous_client):
 
 @pytest.mark.asyncio
 async def test_protected_routes_require_login(anonymous_client):
-    for path in ("/api/session", "/api/task-system/queue/status", "/api/provider"):
+    for path in ("/api/session", "/api/task-system/queue/status", "/api/task-system/health", "/api/provider"):
         response = await anonymous_client.get(path)
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
@@ -115,6 +115,17 @@ async def test_task_queue_status_includes_diagnostics(client):
     assert "queued" in data
     assert "stale_running" in data
     assert "oldest_running_seconds" in data
+
+
+@pytest.mark.asyncio
+async def test_task_health_remains_available_when_task_database_is_unavailable(client, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(TaskStore, "_db", AsyncMock(side_effect=RuntimeError("task database unavailable")))
+    response = await client.get("/api/task-system/health")
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["status"] == "unavailable"
+    assert "data_dir" not in response.json()
 
 
 @pytest.mark.asyncio
