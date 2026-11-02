@@ -26,6 +26,11 @@ log = Log.create(service="session.title")
 # Reuse the canonical title prompt from prompt_strings (single source of truth)
 from flocks.session.prompt_strings import PROMPT_TITLE as _CANONICAL_TITLE_PROMPT
 
+# Output budget of the title call. A model that thinks before it answers
+# spends this budget on its thinking too: at 50 tokens a reasoning model got
+# through one word of the title before it was cut off.
+TITLE_MAX_TOKENS = 1024
+
 
 class SessionTitle:
     """Session title generation"""
@@ -137,12 +142,13 @@ class SessionTitle:
             
             # Send PROMPT_TITLE as system instruction, user question as user message
             title = ""
+            cut_off = False
             try:
                 title_messages = [
                     ChatMessage(role="system", content=_CANONICAL_TITLE_PROMPT),
                     ChatMessage(role="user", content=question),
                 ]
-                provider_options: Dict[str, Any] = {"max_tokens": 50}
+                provider_options: Dict[str, Any] = {"max_tokens": TITLE_MAX_TOKENS}
                 llm_hook_metadata = await model_call_hook_metadata(
                     session_id=session_id,
                     agent="session.title",
@@ -163,7 +169,7 @@ class SessionTitle:
                     })
                     raise RuntimeError("title llm_before hook failed; request was not sent") from hook_err
 
-                provider_options.setdefault("max_tokens", 50)
+                provider_options.setdefault("max_tokens", TITLE_MAX_TOKENS)
                 async for chunk in provider.chat_stream(
                     model_id,
                     title_messages,
@@ -171,6 +177,9 @@ class SessionTitle:
                 ):
                     if hasattr(chunk, 'delta') and chunk.delta:
                         title += chunk.delta
+                    # Some adapters end with "stop" after passing "length" on.
+                    if getattr(chunk, 'finish_reason', None) == "length":
+                        cut_off = True
                 title = await transform_complete_response(
                     title,
                     llm_hook_metadata,
@@ -181,6 +190,15 @@ class SessionTitle:
                     "session_id": session_id,
                     "error": str(llm_err),
                 })
+
+            if cut_off:
+                # Cut off by the budget: a title broken off mid-word is worse
+                # than the one made from the question below.
+                log.warn("title.truncated", {
+                    "session_id": session_id,
+                    "model_id": model_id,
+                })
+                title = ""
             
             title = cls._sanitize_generated_title(title)
 
