@@ -38,6 +38,14 @@ class TaskExecutionStopped(RuntimeError):
     """The task's agent run was stopped before it finished."""
 
 
+class TaskResultPersistenceError(RuntimeError):
+    """Business work ended; only its final state needs to be saved again."""
+
+    def __init__(self, execution: TaskExecution):
+        super().__init__("Task finished, but its result could not be saved")
+        self.execution = execution.model_copy(deep=True)
+
+
 def _release_workflow_run(
     execution_id: str,
     cancel_event: threading.Event,
@@ -153,7 +161,11 @@ class TaskExecutor:
             execution.duration_ms = int(
                 (completed_at - execution.started_at).total_seconds() * 1000
             )
-        if not await TaskStore.update_active_execution(execution):
+        try:
+            saved = await TaskStore.update_active_execution(execution)
+        except Exception as exc:
+            raise TaskResultPersistenceError(execution) from exc
+        if not saved:
             # Cancelled (or otherwise finished) while it ran: keep that outcome.
             return await TaskStore.get_execution(execution.id) or execution
         return execution

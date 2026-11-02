@@ -188,6 +188,14 @@ async def task_dashboard():
     return payload
 
 
+@router.get("/task-system/health")
+async def task_system_health():
+    """Authenticated operational state; intentionally never queries SQLite."""
+    from flocks.task.manager import TaskManager
+
+    return TaskManager.health_snapshot()
+
+
 @router.get("/task-system/queue/status")
 async def task_queue_status():
     from flocks.task.manager import TaskManager

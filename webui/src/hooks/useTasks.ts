@@ -8,6 +8,7 @@ import {
   DashboardCounts,
   QueueStatus,
   TaskSystemNotice,
+  TaskSystemHealth,
   PaginatedResponse,
 } from '@/api/task';
 import { createSharedResource, useSharedResource, type SharedResource } from './useSharedResource';
@@ -58,6 +59,14 @@ const taskSystemNoticeResource = createSharedResource<TaskSystemNotice | null>({
     return response.data ?? null;
   },
   getErrorMessage: (err) => (err instanceof Error && err.message ? err.message : 'Failed to fetch system notice'),
+});
+
+const taskSystemHealthResource = createSharedResource<TaskSystemHealth | null>({
+  initialData: null,
+  staleTimeMs: TASK_LIST_STALE_TIME_MS,
+  minFetchIntervalMs: TASK_LIST_MIN_FETCH_INTERVAL_MS,
+  fetcher: async () => (await taskAPI.health()).data,
+  getErrorMessage: () => 'Task health unavailable',
 });
 
 function normalizeSchedulerFilters(filters?: SchedulerListParams): SchedulerListParams {
@@ -259,6 +268,7 @@ export function __resetTaskResourcesForTesting(): void {
   schedulerExecutionResources.clear();
   taskDashboardResource.resetForTesting();
   queueStatusResource.resetForTesting();
+  taskSystemHealthResource.resetForTesting();
   taskSystemNoticeResource.resetForTesting();
 }
 
@@ -401,4 +411,10 @@ export function useTaskSystemNotice() {
   } = useSharedResource(taskSystemNoticeResource);
 
   return { notice, loading, error, refetch };
+}
+
+export function useTaskSystemHealth() {
+  const { data: health, error } = useSharedResource(taskSystemHealthResource);
+  usePollSharedResource(taskSystemHealthResource, 5000);
+  return { health, error };
 }

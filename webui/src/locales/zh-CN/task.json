@@ -1,6 +1,12 @@
 {
   "pageTitle": "任务中心",
   "pageDescription": "管理任务队列、定时任务和已发布的 API 服务",
+  "health": {
+    "degraded": "任务服务异常，系统正在重试。任务列表可能尚未更新，请避免重复提交。",
+    "unavailable": "任务服务尚未就绪，请稍后重试。",
+    "unknown": "暂时无法确认任务服务状态，正在重试。",
+    "pendingResults": "有 {{count}} 个任务已执行结束，正在保存结果。"
+  },
   "createTask": "创建任务",
   "tabs": {
     "queued": "任务队列",
