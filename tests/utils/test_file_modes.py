@@ -65,6 +65,24 @@ def test_symlinks_are_not_followed(tmp_path):
         outside.chmod(0o755)
 
 
+def test_junctions_are_not_followed(tmp_path, monkeypatch):
+    """lstat takes a Windows junction for a plain directory, and os.walk goes through it."""
+    root = tmp_path / "copy"
+    junction = root / "linked"
+    junction.mkdir(parents=True)
+    (junction / "file.txt").write_text("not ours", encoding="utf-8")
+    (junction / "file.txt").chmod(0o444)
+    junction.chmod(0o555)
+    monkeypatch.setattr(os.path, "isjunction", lambda path: os.fspath(path) == os.fspath(junction))
+    try:
+        ensure_owner_writable(root)
+        ensure_owner_writable(junction)
+        assert _mode(junction) == 0o555
+        assert _mode(junction / "file.txt") == 0o444
+    finally:
+        junction.chmod(0o755)
+
+
 def test_a_single_file_is_handled(tmp_path):
     path = tmp_path / "file.txt"
     path.write_text("x", encoding="utf-8")
