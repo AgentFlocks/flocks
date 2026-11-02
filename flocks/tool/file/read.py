@@ -320,12 +320,12 @@ def find_similar_files(directory: str, filename: str, max_suggestions: int = 3) 
         ),
         ToolParameter(
             name="columnOffset", type=ParameterType.INTEGER,
-            description="Optional zero-based character offset within the line selected by offset; enables single-line column mode.",
+            description="Optional zero-based character offset within the line selected by offset; enables single-line column mode (limit 1 or left out). Leave it out, or 0, when reading several lines.",
             required=False,
         ),
         ToolParameter(
             name="columnLimit", type=ParameterType.INTEGER,
-            description="Optional character count in column mode; defaults to the configured line length limit.",
+            description="Optional character count in column mode; defaults to the configured line length limit. When reading several lines, it caps the length of each line.",
             required=False,
         ),
     ]
@@ -541,10 +541,31 @@ def _read_open_file(ctx, fd, filepath, title, offset, limit, columnOffset, colum
     read_limit = min(limit if limit is not None else effective_max_lines, effective_max_lines)
     read_offset = offset if offset is not None else 0
 
-    if columnOffset is not None or columnLimit is not None:
+    column_mode = columnOffset is not None or columnLimit is not None
+    line_length_asked = False
+    if column_mode and limit not in (None, 1, DEFAULT_READ_LIMIT):
+        # Column values sent along with a read of several lines. From the
+        # start of each line they only cap its length, as an ordinary read
+        # does, so the lines are read that way; further in, they cannot
+        # apply to several lines at once.
+        if columnOffset:
+            return ToolResult(
+                success=False,
+                error="columnOffset reads part of one line: set limit to 1 for that, or leave out columnOffset and columnLimit to read several lines.",
+                title=title,
+            )
+        if columnLimit is not None:
+            if columnLimit < 1:
+                return ToolResult(success=False, error="columnLimit must be positive.", title=title)
+            if columnLimit < effective_max_line_length:
+                effective_max_line_length = columnLimit
+                line_length_asked = True
+        column_mode = False
+
+    if column_mode:
         column_start = columnOffset if columnOffset is not None else 0
         column_count = columnLimit if columnLimit is not None else effective_max_line_length
-        if read_offset < 0 or column_start < 0 or column_count < 1 or limit not in (None, 1, DEFAULT_READ_LIMIT):
+        if read_offset < 0 or column_start < 0 or column_count < 1:
             return ToolResult(success=False, error="Column mode requires nonnegative offset/columnOffset, positive columnLimit and a single line.", title=title)
         try:
             found = _read_line_slice(
@@ -597,7 +618,10 @@ def _read_open_file(ctx, fd, filepath, title, offset, limit, columnOffset, colum
     else:
         output += f"\n\n(End of file — total {total_lines} lines)"
     if long_lines:
-        output += "\n(Long lines were shortened to fit the configured output limit.)"
+        if line_length_asked:
+            output += f"\n(Long lines were shortened to {effective_max_line_length} characters, as columnLimit asked.)"
+        else:
+            output += "\n(Long lines were shortened to fit the configured output limit.)"
 
     output += "\n</file>"
     
