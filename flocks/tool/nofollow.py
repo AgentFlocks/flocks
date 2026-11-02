@@ -818,19 +818,25 @@ def walk_files(
     root: Directory,
     *,
     skip_directory: Callable[[str], bool] = lambda _name: False,
+    stop: Callable[[], bool] = lambda: False,
     prefix: str = "",
 ) -> Iterator[tuple[str, Directory, str]]:
     """(relative path, directory holding it, name) of each regular file below ``root``.
 
     Links are skipped, not followed; so are directories ``skip_directory``
-    names, and those that cannot be read. The directory yielded stays open
-    until the next item.
+    names, and those that cannot be read. Once ``stop()`` is true nothing
+    more is listed or yielded. The directory yielded stays open until the
+    next item.
     """
+    if stop():
+        return
     try:
         listed = root.scan()
     except OSError:
         return
     for name, kind in listed:
+        if stop():
+            return
         relative = os.path.join(prefix, name) if prefix else name
         if kind == "file":
             yield relative, root, name
@@ -840,7 +846,7 @@ def walk_files(
             except OSError:
                 continue
             with below:
-                yield from walk_files(below, skip_directory=skip_directory, prefix=relative)
+                yield from walk_files(below, skip_directory=skip_directory, stop=stop, prefix=relative)
 
 
 def file_status(root: Directory, relative: str) -> Optional[os.stat_result]:

@@ -13,9 +13,9 @@ import contextlib
 import fnmatch
 import functools
 import shutil
-from typing import Optional, List, Dict, Any, AsyncIterator
+from typing import Optional, List, Dict, Any, AsyncIterator, Callable, Iterator, Tuple
 
-from flocks.tool import nofollow
+from flocks.tool import nofollow, search_walk
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
@@ -101,7 +101,9 @@ async def ripgrep_files(
 
 def fallback_glob(
     cwd: str,
-    pattern: str
+    pattern: str,
+    *,
+    stop: Callable[[], bool] = lambda: False,
 ) -> List[str]:
     """
     Fallback glob implementation matching like Python's glob module
@@ -113,10 +115,17 @@ def fallback_glob(
     Args:
         cwd: Working directory
         pattern: Glob pattern
+        stop: Checked as the walk goes; once true, the matches so far are returned
         
     Returns:
         List of matching file paths
     """
+    with nofollow.directory(cwd) as root:
+        return list(_glob_below(root, pattern, stop))
+
+
+def _glob_below(root: nofollow.Directory, pattern: str, stop: Callable[[], bool]) -> Iterator[str]:
+    """Paths of the regular files below ``root`` that ``pattern`` matches, as the walk finds them."""
     # Normalize pattern; Windows takes either separator, as glob does there.
     if os.altsep:
         pattern = pattern.replace(os.sep, os.altsep)
@@ -124,13 +133,50 @@ def fallback_glob(
         pattern = "**/" + pattern
     pattern_parts = pattern.split("/")
     
-    matches = []
-    with nofollow.directory(cwd) as root:
-        for rel_path, _holder, _name in nofollow.walk_files(root):
-            if _glob_matches(pattern_parts, rel_path.split(os.sep)):
-                matches.append(rel_path)
+    for rel_path, _holder, _name in nofollow.walk_files(root, stop=stop):
+        if _glob_matches(pattern_parts, rel_path.split(os.sep)):
+            yield rel_path
     
-    return matches
+
+def _add_file(files: List[Dict[str, Any]], root: nofollow.Directory, search_path: str, filepath: str) -> bool:
+    """Keep ``filepath`` when it is a regular file below ``root``, reached without a link.
+
+    False, with nothing kept, once MAX_FILES are in: there are more.
+    """
+    status = nofollow.file_status(root, filepath)
+    if status is None:
+        return True
+    if len(files) >= MAX_FILES:
+        return False
+    files.append({
+        'path': os.path.join(search_path, filepath),
+        'mtime': status.st_mtime
+    })
+    return True
+
+
+def _fallback_files(
+    search_path: str,
+    expected: nofollow.Identity,
+    pattern: str,
+    stop: Callable[[], bool],
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """The files to show, and whether there were more, found walking in Python.
+
+    Run in a worker thread, which opens the search directory itself (no
+    descriptor is shared with the event loop, which closes its own when the
+    search is given up) and goes no further unless it is the directory the
+    tool opened, identified by ``expected``. Each match is checked as those
+    ripgrep prints are, and the walk ends at the first one past MAX_FILES.
+    """
+    files: List[Dict[str, Any]] = []
+    with nofollow.directory(search_path) as root:
+        if nofollow.identity(root.status()) != expected:
+            raise nofollow.StaleFile(search_path)
+        for filepath in _glob_below(root, pattern, stop):
+            if not _add_file(files, root, search_path, filepath):
+                return files, True
+    return files, False
 
 
 def _glob_matches(pattern_parts: List[str], path_parts: List[str]) -> bool:
@@ -153,11 +199,6 @@ def _glob_matches(pattern_parts: List[str], path_parts: List[str]) -> bool:
         )
 
     return matches_from(0, 0)
-
-
-async def _as_async(paths: List[str]) -> AsyncIterator[str]:
-    for path in paths:
-        yield path
 
 
 @ToolRegistry.register_function(
@@ -213,6 +254,7 @@ async def glob_tool(
     rg_path = find_ripgrep()
     files: List[Dict[str, Any]] = []
     truncated = False
+    cut_short = False
     
     try:
         # The search directory is opened once without following a link, and
@@ -222,28 +264,24 @@ async def glob_tool(
         with nofollow.directory(search_path) as root:
             if rg_path:
                 found = ripgrep_files(rg_path, root.child_cwd(), [pattern])
+                async with contextlib.aclosing(found):
+                    async for filepath in found:
+                        if not _add_file(files, root, search_path, filepath):
+                            truncated = True
+                            break
             else:
                 global _ripgrep_fallback_logged
                 if not _ripgrep_fallback_logged:
                     _ripgrep_fallback_logged = True
                     log.info("glob.ripgrep_not_found", {"fallback": "python_glob"})
-                found = _as_async(fallback_glob(search_path, pattern))
+                # Off the event loop: walking a home directory takes minutes,
+                # and every other request would wait for it.
+                expected = nofollow.identity(root.status())
+                (files, truncated), cut_short = await search_walk.run_in_thread(
+                    lambda stop: _fallback_files(search_path, expected, pattern, stop)
+                )
             
-            async with contextlib.aclosing(found):
-                async for filepath in found:
-                    status = nofollow.file_status(root, filepath)
-                    if status is None:
-                        continue
-                    if len(files) >= MAX_FILES:
-                        truncated = True
-                        break
-
-                    files.append({
-                        'path': os.path.join(search_path, filepath),
-                        'mtime': status.st_mtime
-                    })
-                
-    except nofollow.LinkOnTheWay:
+    except (nofollow.LinkOnTheWay, nofollow.StaleFile):
         return ToolResult(success=False, error=changed_before_asking(search_path), title=title)
     except Exception as e:
         return ToolResult(
@@ -267,6 +305,11 @@ async def glob_tool(
             output_lines.append("")
             output_lines.append("(Results are truncated. Consider using a more specific path or pattern.)")
     
+    if cut_short:
+        output_lines.append("")
+        output_lines.append(search_walk.stopped_note())
+        truncated = True
+
     return ToolResult(
         success=True,
         output="\n".join(output_lines),
@@ -274,6 +317,7 @@ async def glob_tool(
         truncated=truncated,
         metadata={
             "count": len(files),
-            "truncated": truncated
+            "truncated": truncated,
+            "timed_out": cut_short,
         }
     )
