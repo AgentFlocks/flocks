@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 
 import pytest
 
@@ -248,6 +250,32 @@ def test_save_project_root_page_materializes_user_copy(tmp_path):
     assert (user_root / "project-page" / "dist" / "meta.json").is_file()
     assert not (project_root / "project-page" / "dist" / "meta.json").is_file()
     assert store.page_dir("project-page").is_relative_to(user_root)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="needs POSIX permission bits, which root does not obey",
+)
+def test_read_only_project_page_materializes_a_writable_user_copy(tmp_path):
+    user_root = tmp_path / "user" / "contracts" / "webui"
+    project_root = tmp_path / "project" / ".flocks" / "plugins" / "contracts" / "webui"
+    _write_page(project_root, "project-page", "Project page")
+    page = project_root / "project-page"
+    read_only = sorted([page, *page.rglob("*")], key=lambda path: len(path.parts), reverse=True)
+    for path in read_only:
+        path.chmod(0o555 if path.is_dir() else 0o444)
+
+    try:
+        store = WebUIPagesStore(root=user_root, project_root=project_root)
+        store.write_build_meta(
+            "project-page", store.read_build_meta("project-page").model_copy(update={"status": "ready", "hash": "abc"}),
+        )
+    finally:
+        for path in read_only:
+            path.chmod(0o755 if path.is_dir() else 0o644)
+
+    assert (user_root / "project-page" / "dist" / "meta.json").is_file()
+    assert not (project_root / "project-page" / "dist" / "meta.json").is_file()
 
 
 def test_legacy_user_defined_pages_are_migrated_to_contract_root(tmp_path):

@@ -37,6 +37,7 @@ from flocks.hub.update_protection import (
     public_plan,
     tree_hashes,
 )
+from flocks.utils.file_modes import ensure_owner_writable, remove_tree
 
 
 _TOOL_TYPE_DIRS = {"api", "device", "python", "mcp", "generated"}
@@ -183,7 +184,9 @@ def _purge_stale_scratch(parent: Path, name: str) -> None:
             continue
         try:
             if entry.is_dir() and not entry.is_symlink():
-                shutil.rmtree(entry, ignore_errors=True)
+                # Scratch left by a failed copy of a read-only source holds
+                # read-only directories, which a plain rmtree cannot empty.
+                remove_tree(entry, ignore_errors=True)
             else:
                 entry.unlink()
         except OSError:
@@ -316,7 +319,7 @@ def _copy_package(
         return backup
     except Exception:
         if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
+            remove_tree(tmp, ignore_errors=True)
         raise
 
 
@@ -329,6 +332,11 @@ def _copy_package_contents(src: Path, dst: Path) -> None:
             _copytree_skip_caches(item, target)
         else:
             shutil.copy2(item, target)
+    # The copies carry the source's permission bits, and a hub root can be
+    # read-only (an installed extension package, say). The staged copy is the
+    # installation's own: pages are built into it, metadata is patched in it,
+    # and later updates move it and uninstalls delete it.
+    ensure_owner_writable(dst)
 
 
 def _preserve_native_group_metadata(
@@ -594,7 +602,7 @@ def _copy_webui_package_with_build(
         return backup
     except Exception:
         if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
+            remove_tree(tmp, ignore_errors=True)
         raise
 
 
