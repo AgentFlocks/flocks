@@ -38,7 +38,8 @@ export interface Session {
 }
 
 export interface SessionGoalState {
-  status: 'active' | 'completed' | 'blocked' | 'paused';
+  // 'cleared' only arrives as an event: replaying from an earlier message dropped the goal.
+  status: 'active' | 'completed' | 'blocked' | 'paused' | 'cleared';
   objective: string;
   reason?: string | null;
 }
