@@ -33,7 +33,7 @@ def upgrade_command(
     check: bool = typer.Option(False, "--check", help="只看 Console 给这台机器的安装包，不下载"),
     yes: bool = typer.Option(False, "--yes", "-y", help="不再确认"),
 ) -> None:
-    """问 Console 要这台机器平台的企业版安装包（.run），下载、校验后运行：开源版停下，换成企业版。"""
+    """问 Console 要这台机器平台的企业版安装包（.run；Windows 上是 .exe，会弹管理员确认），下载、校验后运行：开源版停下，换成企业版。"""
     from flocks.updater import enterprise
 
     situation = enterprise.situation()

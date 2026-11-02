@@ -142,6 +142,19 @@ describe('Flocks Pro page of the open edition', () => {
     expect(screen.getByText('bash flockspro-<版本>-linux-arm64.run')).toBeInTheDocument();
   });
 
+  it('FP4b a Windows machine: its program and how to run the installer as an administrator', async () => {
+    situation.mockResolvedValue({
+      ...base, platform: 'windows-amd64', install_root: 'C:\\Program Files\\FlocksPro', account: 'ops',
+      manual_command: "Start-Process -Verb RunAs -FilePath 'flockspro-<版本>-windows-amd64.exe'",
+    });
+    render(<FlocksproUpgradePage />);
+
+    expect(await screen.findByText('upgrade.whatChangesWindows C:\\Program Files\\FlocksPro')).toBeInTheDocument();
+    expect(screen.getByText('upgrade.manualWindows')).toBeInTheDocument();
+    expect(screen.getByText("Start-Process -Verb RunAs -FilePath 'flockspro-<版本>-windows-amd64.exe'")).toBeInTheDocument();
+    expect(screen.queryByText(/upgrade\.manual ops/)).not.toBeInTheDocument();
+  });
+
   it('FP5 shows what Console said', async () => {
     situation.mockResolvedValue(base);
     check.mockRejectedValue({ response: { data: { detail: 'Console 还没有给授权 lic-old-7 的新企业版安装包（linux-arm64）' } } });

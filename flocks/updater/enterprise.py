@@ -4,7 +4,9 @@ The way from this open install to the enterprise edition: what the Flocks Pro pa
 The enterprise edition is an install of its own: ``flockspro-<release>.run`` puts its core, its
 runtime and its own PostgreSQL in /opt/flockspro, takes over this install's data (moved into
 PostgreSQL on its first start) and the licence the machine has, and is run with the same
-``flocks start|stop|status|restart|logs|update``. The Python enterprise package installed into this
+``flocks start|stop|status|restart|logs|update``. On Windows ``flockspro-<release>.exe`` puts it in
+Program Files and runs it as the FlocksPro Core service; it copies this install's data and asks
+Windows for an administrator itself. The Python enterprise package installed into this
 runtime before (``flockspro`` 2026.10 and earlier) gets no more releases: a machine that has it keeps
 it running on this open release until that installer moves the machine.
 
@@ -41,8 +43,14 @@ from flocks.utils.log import Log
 
 log = Log.create(service="updater.enterprise")
 
-#: Where the enterprise installer puts the release (deploy/release/installer.sh in flockspro).
-INSTALL_ROOT = Path("/opt/flockspro")
+_WINDOWS = os.name == "nt"
+#: Where the enterprise installer puts the release (deploy/release/installer.sh in flockspro; on
+#: Windows its install_managed_windows.go: Program Files).
+INSTALL_ROOT = (
+    Path(os.environ.get("ProgramFiles") or r"C:\Program Files") / "FlocksPro" if _WINDOWS else Path("/opt/flockspro")
+)
+#: The one-file installer: a shell one on Unix, a program on Windows.
+INSTALLER_SUFFIX = ".exe" if _WINDOWS else ".run"
 #: The Python enterprise package of before.
 PREVIOUS_DISTRIBUTION = "flockspro"
 
@@ -68,7 +76,7 @@ class InstallerOffer:
 
     @property
     def filename(self) -> str:
-        return f"flockspro-{self.release_id}.run"
+        return f"flockspro-{self.release_id}{INSTALLER_SUFFIX}"
 
 
 def runtime_root() -> Path:
@@ -82,16 +90,18 @@ def work_dir() -> Path:
 
 
 def platform_id() -> str:
-    """This machine as the installers are named: linux-arm64, linux-amd64, darwin-arm64, ..."""
+    """This machine as the installers are named: linux-arm64, linux-amd64, darwin-arm64,
+    windows-amd64, ..."""
     machine = platform.machine().lower()
     arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(machine, machine)
-    return f"{sys.platform}-{arch}"
+    system = "windows" if sys.platform == "win32" else sys.platform
+    return f"{system}-{arch}"
 
 
 def available() -> bool:
-    """A Unix machine (the installer is a shell one) not run by the enterprise core already,
-    which has its own page and upgrades."""
-    return os.name == "posix" and not declared_managed()
+    """A Unix machine (the installer is a shell one) or a Windows one (a program), not run by the
+    enterprise core already, which has its own page and upgrades."""
+    return os.name in ("posix", "nt") and not declared_managed()
 
 
 def _euid() -> int:
@@ -193,8 +203,9 @@ def previous_edition() -> dict[str, Any] | None:
 
 
 def install_root_ready() -> bool:
-    """This account may make or write the install root, as the installer needs."""
-    if _euid() == 0:
+    """This account may make or write the install root, as the installer needs. On Windows the
+    installer asks for an administrator itself (the system's confirmation), so it always may."""
+    if _WINDOWS or _euid() == 0:
         return True
     return INSTALL_ROOT.is_dir() and os.access(INSTALL_ROOT, os.W_OK | os.X_OK)
 
@@ -208,9 +219,21 @@ def prepare_command() -> str | None:
 
 
 def installer_command(path_or_name: str, *, quote: bool = True) -> str:
-    """How the installer is run by hand: as root on a systemd machine, as this account otherwise."""
+    """How the installer is run by hand: as root on a systemd machine, as this account otherwise;
+    on Windows from PowerShell, as an administrator (Windows asks)."""
+    if _WINDOWS:
+        # This install's data directory and flocks command go with it, as when the page starts it:
+        # the administrator who confirms may have another profile, FLOCKS_ROOT another directory.
+        arguments = subprocess.list2cmdline(_windows_open_edition_args())
+        return f"Start-Process -Verb RunAs -FilePath {_powershell_quote(path_or_name)} -ArgumentList {_powershell_quote(arguments)}"
     run = f"bash {shlex.quote(path_or_name) if quote else path_or_name}"
     return f"sudo {run}" if run_by_systemd() and _euid() != 0 else run
+
+
+def _powershell_quote(value: str) -> str:
+    """A PowerShell single-quoted string: every character it takes for a single quote doubled
+    (the ASCII one and the typographic ones, U+2018 to U+201B)."""
+    return "'" + re.sub("['\u2018\u2019\u201a\u201b]", lambda match: match.group(0) * 2, value) + "'"
 
 
 def situation() -> dict[str, Any]:
@@ -229,8 +252,9 @@ def situation() -> dict[str, Any]:
         "prepare_command": prepare_command(),
         # The page starts the installer itself only where this account runs the install.
         "can_start": available() and not systemd and install_root_ready(),
-        # The installer is a shell one: nothing to run by hand on another system.
-        "manual_command": installer_command(f"flockspro-<版本>-{platform_id()}.run", quote=False) if os.name == "posix" else "",
+        # The installer is a shell one, a program on Windows: nothing to run by hand elsewhere.
+        "manual_command": installer_command(f"flockspro-<版本>-{platform_id()}{INSTALLER_SUFFIX}", quote=False)
+        if os.name in ("posix", "nt") else "",
         "upgrade": read_state(),
     }
 
@@ -358,6 +382,8 @@ def _write_state(state: dict[str, Any]) -> None:
 
 
 def _pid_alive(pid: int) -> bool:
+    if _WINDOWS:
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -365,6 +391,32 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    """Whether a process runs, asked of Windows: os.kill there ends the process it names."""
+    if pid <= 0:
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    process_query_limited_information, error_access_denied, still_active = 0x1000, 5, 259
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        # There, but not this account's to look at (an administrator's).
+        return ctypes.get_last_error() == error_access_denied
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _log_tail(path: Path) -> list[str]:
@@ -383,17 +435,26 @@ def _log_tail(path: Path) -> list[str]:
 def upgrade_lock():
     """One upgrade of this machine at a time, from the page or the terminal: an exclusive lock on
     work_dir()/upgrade.lock held while Console is asked, the installer downloaded and started."""
-    import fcntl
-
     work = work_dir()
     work.mkdir(parents=True, exist_ok=True)
     os.chmod(work, 0o700)
     fd = os.open(work / "upgrade.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise EnterpriseUpgradeError("已经在升级了：另一个页面或终端正在给这台机器换装企业版") from None
+        if _WINDOWS:
+            import msvcrt
+
+            # A byte range lock, released when the descriptor closes.
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError:
+                raise EnterpriseUpgradeError("已经在升级了：另一个页面或终端正在给这台机器换装企业版") from None
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise EnterpriseUpgradeError("已经在升级了：另一个页面或终端正在给这台机器换装企业版") from None
         yield
     finally:
         os.close(fd)
@@ -582,7 +643,10 @@ def run_installer(path: Path, offer: InstallerOffer) -> int:
     too. Its exit status."""
     exit_file = work_dir() / "exit-status"
     exit_file.unlink(missing_ok=True)
-    process = subprocess.Popen(["bash", str(path)], cwd=str(path.parent), env=_installer_environment())
+    # Windows: the installer asks for an administrator and runs in the window that opens; it tells
+    # how it ended there, not here.
+    argv = [str(path), "--no-pause", "--exit-status", str(exit_file), *_windows_open_edition_args()] if _WINDOWS else ["bash", str(path)]
+    process = subprocess.Popen(argv, cwd=str(path.parent), env=_installer_environment())
     _write_state({
         "phase": "installing",
         "pid": process.pid,
@@ -593,8 +657,70 @@ def run_installer(path: Path, offer: InstallerOffer) -> int:
         "from": "terminal",
     })
     code = process.wait()
-    exit_file.write_text(f"{code}\n", encoding="utf-8")
+    if not (_WINDOWS and exit_file.exists()):
+        exit_file.write_text(f"{code}\n", encoding="utf-8")
     return code
+
+
+def _windows_open_edition_args() -> list[str]:
+    """What the Windows installer is told of this open install: its data directory and its flocks
+    command, so it finds them as this account has them whichever administrator confirms."""
+    args = ["--open-data", str(runtime_root())]
+    launcher = Path.home() / ".local" / "bin" / "flocks.cmd"
+    if launcher.is_file():
+        args += ["--open-cli", str(launcher)]
+    return args
+
+
+#: Run by this server's interpreter, it starts the Windows installer and exits at once, saying the
+#: installer's pid: the installer is then no descendant of this server, whose whole process tree
+#: `flocks stop` takes -- and install-managed, inside the installer, stops the open edition with it.
+#: 0x208: CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS (no console of the server's, no Ctrl+C of its group).
+_WINDOWS_DETACH = (
+    "import subprocess, sys\n"
+    "log = open(sys.argv[1], 'ab')\n"
+    "process = subprocess.Popen(sys.argv[2:], stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True, creationflags=0x208)\n"
+    "print(process.pid)\n"
+)
+
+
+def _start_windows_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
+    """start_installer on Windows: the installer, apart from this server, asks Windows for an
+    administrator and writes its log and exit status where the page reads them."""
+    work = work_dir()
+    log_file = work / "install.log"
+    exit_file = work / "exit-status"
+    exit_file.unlink(missing_ok=True)
+    with log_file.open("ab") as out:
+        out.write(f"\n== {time.strftime('%Y-%m-%dT%H:%M:%S%z')} {path.name}\n".encode())
+    argv = [str(path), "--no-pause", "--log", str(log_file), "--exit-status", str(exit_file), *_windows_open_edition_args()]
+    launcher = subprocess.Popen(
+        [sys.executable, "-I", "-c", _WINDOWS_DETACH, str(log_file), *argv],
+        cwd=str(work),
+        env=_installer_environment(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+        close_fds=True,
+    )
+    started, _ = launcher.communicate(timeout=30)
+    try:
+        pid = int(started.strip())
+    except ValueError:
+        raise EnterpriseUpgradeError(f"安装包没有起来，看 {log_file}") from None
+    state = {
+        "phase": "installing",
+        "pid": pid,
+        "release_id": offer.release_id,
+        "version": offer.version,
+        "installer": str(path),
+        "log": str(log_file),
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    _write_state(state)
+    log.info("enterprise.installer_started", {"pid": pid, "release_id": offer.release_id})
+    return state
 
 
 def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
@@ -602,6 +728,8 @@ def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
     supervisor, and this process with it, before the enterprise edition starts."""
     if not available():
         raise EnterpriseUpgradeError("这台机器已经是企业版")
+    if _WINDOWS:
+        return _start_windows_installer(path, offer)
     if run_by_systemd():
         raise EnterpriseUpgradeError(f"这台机器由 systemd 管，要以 root 执行：{installer_command(str(path))}")
     if not install_root_ready():

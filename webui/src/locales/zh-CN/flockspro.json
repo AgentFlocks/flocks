@@ -71,6 +71,7 @@
   "upgrade": {
     "title": "升级到新企业版",
     "whatChanges": "升级后：程序在 {{root}}，数据还在原来的目录（第一次启动迁进自带的 PostgreSQL，原来的数据留着），授权沿用这台机器上的；之后照旧用 flocks start|stop|restart|status|logs|update。",
+    "whatChangesWindows": "升级后：程序在 {{root}}，企业版作为「FlocksPro Core」服务随开机启动；开源版的数据复制一份给企业版（原来的目录留着），授权沿用这台机器上的。安装时 Windows 会弹出管理员确认框。",
     "systemd": "这台机器由 systemd 管（开源版离线包）：升级要以 root 运行安装包，这里可以把安装包下载好，再按给出的命令执行。",
     "prepare": "{{account}} 还不能写 {{root}}：先用 root 执行一次（只要这一次），再回来升级。",
     "recheck": "已执行，重新检查",
@@ -81,7 +82,8 @@
     "start": "升级到 {{version}}",
     "download": "下载安装包",
     "manualTitle": "手动升级",
-    "manual": "把安装包（flockspro-<版本>-<平台>.run）拷到这台机器，以 {{account}} 执行："
+    "manual": "把安装包（flockspro-<版本>-<平台>.run）拷到这台机器，以 {{account}} 执行：",
+    "manualWindows": "把安装包（flockspro-<版本>-windows-amd64.exe）拷到这台机器，在 PowerShell 里执行下面这行：Windows 会弹出管理员确认框，安装包也会知道这台开源版的数据目录和 flocks 命令。"
   },
   "progress": {
     "downloading": "正在下载新企业版 {{version}}",
