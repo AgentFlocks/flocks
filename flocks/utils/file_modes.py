@@ -27,11 +27,12 @@ def _add_mode_bits(path: str, bits: int) -> None:
         os.chmod(path, stat.S_IMODE(mode) | bits)
 
 
-def ensure_owner_writable(root: Path) -> None:
+def ensure_owner_writable(root: Path, *, recursive: bool = True) -> None:
     """Let the owner read, write and enter everything under *root*.
 
-    For a tree the caller has just copied and owns.  Bits are only added, so
-    executables stay executable, and no symlink is followed.
+    For a tree the caller owns.  Bits are only added, so executables stay
+    executable, and no symlink is followed.  ``recursive=False`` opens up
+    *root* alone.
     """
     root_path = os.fspath(root)
     mode = os.lstat(root_path).st_mode
@@ -41,6 +42,8 @@ def ensure_owner_writable(root: Path) -> None:
         _add_mode_bits(root_path, _FILE_BITS)
         return
     _add_mode_bits(root_path, _DIRECTORY_BITS)
+    if not recursive:
+        return
     for directory, dirnames, filenames in os.walk(root_path):
         # A directory opens up before the walk goes into it.
         for name in dirnames:

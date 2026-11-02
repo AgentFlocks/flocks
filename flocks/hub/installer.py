@@ -151,7 +151,9 @@ def _resolve_install_destination(
 
 def _remove_path(path: Path) -> None:
     if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
+        # Installs made before staged copies were opened up can still carry a
+        # read-only source's modes.
+        remove_tree(path)
     elif path.exists() or path.is_symlink():
         path.unlink()
 
@@ -202,6 +204,14 @@ def _replace_with_retry(src: Path, dst: Path) -> None:
     fail with ``PermissionError`` (WinError 5 / 32). Elsewhere the rename
     is atomic and never needs retrying.
     """
+    if src.is_dir() and not src.is_symlink():
+        # Moving a directory under another parent rewrites its "..", which
+        # takes write access to the directory itself. An install copied from
+        # a read-only source before staged copies were opened up lacks it.
+        try:
+            ensure_owner_writable(src, recursive=False)
+        except OSError:
+            pass  # The rename reports what is really wrong.
     if sys.platform != "win32":
         src.replace(dst)
         return
@@ -534,7 +544,7 @@ def _remove_attached_access_contracts(
     if recovery_root is not None and (access_dst.exists() or access_dst.is_symlink()):
         _rollback_replacement(access_dst, None, recovery_root=recovery_root / "access")
     elif access_dst.is_dir():
-        shutil.rmtree(access_dst)
+        remove_tree(access_dst)
     elif access_dst.exists():
         access_dst.unlink()
     else:
@@ -1332,7 +1342,7 @@ async def _uninstall_plugin(
     if recovery_root is not None:
         _rollback_replacement(install_path, None, recovery_root=recovery_root / "package")
     elif install_path.is_dir():
-        shutil.rmtree(install_path)
+        remove_tree(install_path)
     else:
         install_path.unlink()
     _remove_attached_access_contracts(

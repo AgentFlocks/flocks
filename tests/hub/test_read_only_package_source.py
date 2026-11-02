@@ -4,7 +4,9 @@ A hub root can be read-only (an extension's installed package, an archive
 unpacked with its modes). ``copytree``/``copy2`` gave the staged copy the same
 permission bits, so building the pages into it failed with ``[Errno 13]
 Permission denied: .../contracts/webui/.soc_ui.<random>/soc_overview/dist``,
-and the failed attempt's scratch copy could not be removed afterwards.
+and the failed attempt's scratch copy could not be removed afterwards. Plugins
+that installed fine that way (no build step) kept the read-only modes on disk,
+which later updates and uninstalls have to cope with.
 """
 
 from __future__ import annotations
@@ -150,6 +152,44 @@ async def test_update_from_a_read_only_hub_root(isolated_hub_env, quiet_runtime,
     assert (installed / "soc_overview" / "dist" / "page.js").is_file()
     assert _owner_can_write_all(installed)
     assert not list(installed.parent.glob(".soc_ui.*"))
+
+
+async def test_install_left_read_only_by_an_older_version_updates_and_uninstalls(isolated_hub_env, quiet_runtime):
+    """Installs copied from a read-only source before this fix kept its modes on disk."""
+    record = await installer.install_plugin("skill", "triaging-security-incident")
+    installed = Path(record.installPath)
+    retired = installed.parent / f".{installed.name}.bak"
+    _set_read_only(installed)
+    try:
+        await installer.install_plugin("skill", "triaging-security-incident")
+        # Left behind, the replaced tree would block the next update as a pending recovery.
+        assert not retired.exists()
+        assert _owner_can_write_all(installed)
+
+        _set_read_only(installed)
+        assert await installer.uninstall_plugin("skill", "triaging-security-incident") is True
+        assert not installed.exists()
+    finally:
+        _restore_write(installed)
+        _restore_write(retired)
+
+
+async def test_protected_update_retains_a_read_only_install(isolated_hub_env, quiet_runtime, fake_compiler):
+    record = await installer.install_plugin("webui", "soc_ui")
+    installed = Path(record.installPath)
+    _set_read_only(installed)
+    try:
+        with pytest.raises(UpdateConfirmationRequired) as asked:
+            await installer.update_plugin("webui", "soc_ui")
+        # The original moves into the backup, which is under another parent.
+        record = await installer.update_plugin(
+            "webui", "soc_ui", confirmation_token=asked.value.plan["token"], confirm_changes=True,
+        )
+        assert (Path(record.backupPath) / "replaced" / "0" / "package" / "workspace.json").is_file()
+        assert _owner_can_write_all(installed)
+    finally:
+        _restore_write(installed)
+        _restore_write(isolated_hub_env["data_dir"] / "hub" / "backups")
 
 
 def test_retry_removes_read_only_scratch_left_by_a_failed_attempt(tmp_path: Path):

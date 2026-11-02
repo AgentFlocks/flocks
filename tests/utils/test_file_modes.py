@@ -35,6 +35,18 @@ def test_owner_gets_write_access_and_nothing_else_changes(tmp_path):
     assert _mode(root / "page" / "build.sh") == 0o755
 
 
+def test_non_recursive_opens_up_the_root_alone(tmp_path):
+    root = tmp_path / "copy"
+    _read_only_copy(root)
+
+    ensure_owner_writable(root, recursive=False)
+
+    assert _mode(root) == 0o755
+    assert _mode(root / "page") == 0o555
+    for directory in (root / "page" / "src", root / "page"):
+        directory.chmod(0o755)
+
+
 def test_symlinks_are_not_followed(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
