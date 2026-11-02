@@ -3156,6 +3156,9 @@ export default function SessionChat({
             goalHydrationVersionRef.current += 1;
             setGoalBanner(nextGoal);
             setDismissedGoalKey(readDismissedGoalKey(sessionId));
+          } else if (action.goal?.status === 'cleared') {
+            goalHydrationVersionRef.current += 1;
+            setGoalBanner(null);
           }
           return;
         }

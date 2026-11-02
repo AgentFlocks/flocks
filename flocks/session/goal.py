@@ -29,6 +29,10 @@ DEFAULT_GOAL_MAX_TURNS = 20
 JUDGE_RESPONSE_MAX_CHARS = 4096
 JUDGE_MAX_TOKENS = 4096
 GOAL_CLARIFICATION_MAX_CHARS = 2000
+# How a goal prompt starts; the objective follows, then a blank line and the
+# instructions, which start with _GOAL_PROMPT_INSTRUCTIONS.
+_GOAL_PROMPT_HEAD = "[Goal mode]\nActive goal: "
+_GOAL_PROMPT_INSTRUCTIONS = "If the active goal is ambiguous or underspecified,"
 GoalStatus = Literal["active", "paused", "completed", "blocked"]
 GoalVerdict = Literal["complete", "blocked", "continue", "waiting", "inactive"]
 
@@ -292,10 +296,13 @@ class GoalManager:
     """Session-scoped goal state and continuation policy."""
 
     @classmethod
-    async def get(cls, session_id: str) -> Optional[GoalState]:
+    async def get(cls, session_id: str, *, strict: bool = False) -> Optional[GoalState]:
+        """The goal state; None when there is none. ``strict``: a storage error is raised, not taken for none."""
         try:
             data = await Storage.get(_goal_key(session_id))
         except Exception as exc:
+            if strict:
+                raise
             log.warn("goal.get.error", {"session_id": session_id, "error": str(exc)})
             return None
         if not data:
@@ -320,6 +327,11 @@ class GoalManager:
         except Exception as exc:
             log.warn("goal.clear.error", {"session_id": session_id, "error": str(exc)})
             return False
+
+    @classmethod
+    async def remove(cls, session_id: str) -> None:
+        """Remove the goal state; unlike :meth:`clear`, a storage error is raised."""
+        await Storage.delete(_goal_key(session_id))
 
     @classmethod
     async def set_goal(
@@ -370,15 +382,35 @@ class GoalManager:
     @classmethod
     def goal_prompt(cls, objective: str) -> str:
         return (
-            "[Goal mode]\n"
-            f"Active goal: {objective}\n\n"
-            "If the active goal is ambiguous or underspecified, ask the user a "
+            f"{_GOAL_PROMPT_HEAD}{objective}\n\n"
+            f"{_GOAL_PROMPT_INSTRUCTIONS} ask the user a "
             "clarifying question using the question tool and wait for the answer "
             "instead of continuing autonomously. "
             "Work toward the active goal. Continue taking concrete steps until the goal "
             "is complete or blocked. In your final response, make the current outcome "
             "clear with evidence of completed work or the specific blocker."
         )
+
+    @classmethod
+    def is_goal_prompt(cls, text: str) -> bool:
+        """Whether ``text`` is a goal prompt: the text of a message that set a goal."""
+        return (text or "").replace("\r\n", "\n").strip().startswith(_GOAL_PROMPT_HEAD)
+
+    @classmethod
+    def objective_from_prompt(cls, text: str) -> str:
+        """The objective in a goal prompt, also one the user edited; the whole text when it is not one.
+
+        The objective may itself hold blank lines: it ends where the
+        instructions :meth:`goal_prompt` adds begin.
+        """
+        text = (text or "").replace("\r\n", "\n").strip()
+        if not text.startswith(_GOAL_PROMPT_HEAD):
+            return text
+        objective = text[len(_GOAL_PROMPT_HEAD):]
+        end = objective.rfind("\n\n" + _GOAL_PROMPT_INSTRUCTIONS)
+        if end != -1:
+            objective = objective[:end]
+        return objective.strip()
 
     @classmethod
     def continuation_prompt(cls, state: GoalState, reason: str) -> str:

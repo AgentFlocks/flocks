@@ -7095,6 +7095,40 @@ describe('SessionChat goal banner', () => {
     expect(screen.queryByText('List built-in tools')).not.toBeInTheDocument();
   });
 
+  it('hides the goal notice when a replay from an earlier message clears the goal', async () => {
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'active',
+          objective: 'List built-in tools',
+        },
+      });
+    });
+
+    expect(await screen.findByText('Goal')).toBeInTheDocument();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'cleared',
+          objective: 'List built-in tools',
+          reason: null,
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('Goal')).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText('List built-in tools')).not.toBeInTheDocument();
+  });
+
   it('keeps a dismissed persisted goal hidden after remount', async () => {
     const user = userEvent.setup();
     sessionApiGetMock.mockResolvedValue({

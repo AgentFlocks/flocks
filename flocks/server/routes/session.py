@@ -3662,19 +3662,21 @@ async def _publish_text_part_update(
     message_id: str,
     part_id: str,
     text: str,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Broadcast a text part update so other subscribers stay in sync."""
     from flocks.server.routes.event import publish_event
 
-    await publish_event("message.part.updated", {
-        "part": {
-            "id": part_id,
-            "messageID": message_id,
-            "sessionID": session_id,
-            "type": "text",
-            "text": text,
-        }
-    })
+    part: Dict[str, Any] = {
+        "id": part_id,
+        "messageID": message_id,
+        "sessionID": session_id,
+        "type": "text",
+        "text": text,
+    }
+    if metadata:
+        part["metadata"] = metadata
+    await publish_event("message.part.updated", {"part": part})
 
 
 def _track_background_task(
@@ -3791,6 +3793,134 @@ async def _prepare_replay_runtime(
         "model_id": model_id,
         "auto_failover": auto_failover,
     }
+
+
+@dataclass
+class _GoalRewind:
+    """What :func:`_rewind_goal_for_replay` did to the goal, to publish or undo."""
+
+    objective: Optional[str] = None  # the goal the replayed message sets, else None
+    event: Optional[Dict[str, Any]] = None  # session.goal.updated, once the replay is in
+    changed: bool = False
+    previous: Any = None  # the GoalState before, put back when the replay fails
+    written: Any = None  # the GoalState the rewind wrote (None: it removed the goal)
+
+
+async def _rewind_goal_for_replay(
+    session_id: str,
+    message_id: str,
+    original_text: str,
+    *,
+    edited_text: Optional[str] = None,
+) -> _GoalRewind:
+    """Bring the session goal back to the message history is being rewound to.
+
+    The goal is kept beside the messages, and after every turn SessionLoop
+    judges it and may append a continuation toward it. Goals are set by goal
+    messages (their text a goal prompt), so replaying from a message
+
+    - that is a goal message starts its goal over -- toward the edited
+      objective when the message is being edited;
+    - followed by a goal message, which the replay drops, clears the goal;
+    - otherwise leaves the goal alone.
+
+    Called before the history is touched, and storage errors are raised: a
+    goal that cannot be read or changed stops the replay there. Should the
+    replay fail later, :func:`_undo_goal_rewind` puts the goal back; the
+    event is the caller's to publish once the replay is in.
+    """
+    from flocks.session.goal import GoalManager
+    from flocks.session.message import Message
+
+    previous = await GoalManager.get(session_id, strict=True)
+
+    if GoalManager.is_goal_prompt(original_text):
+        objective = GoalManager.objective_from_prompt(
+            original_text if edited_text is None else edited_text
+        )
+        if objective:
+            state = await GoalManager.set_goal(session_id, objective)
+            return _GoalRewind(
+                objective=state.objective,
+                event={
+                    "sessionID": session_id,
+                    "status": state.status,
+                    "objective": state.objective,
+                    "reason": state.last_reason,
+                },
+                changed=True,
+                previous=previous,
+                written=state,
+            )
+        drops_goal = True
+    else:
+        drops_goal = False
+        messages = await Message.list(session_id, include_archived=True)
+        message_ids = [message.id for message in messages]
+        if message_id in message_ids:
+            for later in messages[message_ids.index(message_id) + 1:]:
+                if getattr(later, "role", None) != "user":
+                    continue
+                if any(
+                    getattr(part, "type", None) == "text"
+                    and GoalManager.is_goal_prompt(getattr(part, "text", "") or "")
+                    for part in await Message.parts(later.id, session_id)
+                ):
+                    drops_goal = True
+                    break
+
+    if not drops_goal or previous is None:
+        return _GoalRewind(previous=previous)
+    await GoalManager.remove(session_id)
+    return _GoalRewind(
+        event={
+            "sessionID": session_id,
+            "status": "cleared",
+            "objective": previous.objective,
+            "reason": None,
+        },
+        changed=True,
+        previous=previous,
+    )
+
+
+async def _undo_goal_rewind(session_id: str, rewind: _GoalRewind) -> None:
+    """Put the goal back as it was before a replay that failed.
+
+    Only while the goal is still what the rewind left: one set again in the
+    meantime (another message) is newer and stays. Reading and writing back
+    are two steps, so a goal set right between them can still be lost.
+    """
+    from flocks.session.goal import GoalManager
+
+    if not rewind.changed:
+        return
+    current = await GoalManager.get(session_id, strict=True)
+    written = rewind.written
+    if (current is None) != (written is None) or (
+        current is not None
+        and (current.objective, current.created_at) != (written.objective, written.created_at)
+    ):
+        return
+    if rewind.previous is None:
+        await GoalManager.remove(session_id)
+    else:
+        await GoalManager.save(session_id, rewind.previous)
+
+
+def _edited_part_metadata(part: Any, display_text: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Metadata for a text part whose text was edited.
+
+    The UI shows ``displayText`` in place of the text, so the label written
+    for the old text (a goal's objective, a slash command) goes; a goal
+    message gets its new objective instead.
+    """
+    metadata = dict(getattr(part, "metadata", None) or {})
+    metadata.pop("displayText", None)
+    metadata.pop("display_text", None)
+    if display_text:
+        metadata["displayText"] = display_text
+    return metadata or None
 
 
 async def _stop_replay_execution(session_id: str) -> None:
@@ -3952,6 +4082,8 @@ async def resend_session_message(
 
     from flocks.project.bootstrap import instance_bootstrap
     from flocks.project.instance import Instance
+    from flocks.server.routes.event import publish_event
+    from flocks.session.goal import GoalManager
     from flocks.session.lifecycle.revert import SessionRevert
     from flocks.session.message import Message
     from flocks.session.session_loop import SessionLoop
@@ -4002,9 +4134,23 @@ async def resend_session_message(
     async def _handle_resend() -> None:
         runtime = await _prepare_replay_runtime(sessionID, message)
         await _stop_replay_execution(sessionID)
-        updated_session = await SessionRevert.revert(sessionID, messageID)
-        await Message.update_part(sessionID, messageID, text_part.id, text=text)
-        await _publish_text_part_update(sessionID, messageID, text_part.id, text)
+        rewind = await _rewind_goal_for_replay(
+            sessionID,
+            messageID,
+            getattr(text_part, "text", "") or "",
+            edited_text=text,
+        )
+        stored_text = text if rewind.objective is None else GoalManager.goal_prompt(rewind.objective)
+        metadata = _edited_part_metadata(text_part, rewind.objective)
+        try:
+            updated_session = await SessionRevert.revert(sessionID, messageID)
+            await Message.update_part(sessionID, messageID, text_part.id, text=stored_text, metadata=metadata)
+        except BaseException:
+            await _undo_goal_rewind(sessionID, rewind)
+            raise
+        if rewind.event:
+            await publish_event("session.goal.updated", rewind.event)
+        await _publish_text_part_update(sessionID, messageID, text_part.id, stored_text, metadata)
 
         refreshed_message = await Message.get(sessionID, messageID)
         if not refreshed_message:
@@ -4048,6 +4194,7 @@ async def regenerate_session_message(
 
     from flocks.project.bootstrap import instance_bootstrap
     from flocks.project.instance import Instance
+    from flocks.server.routes.event import publish_event
     from flocks.session.lifecycle.revert import SessionRevert
     from flocks.session.message import Message
     from flocks.session.session_loop import SessionLoop
@@ -4071,7 +4218,7 @@ async def regenerate_session_message(
             detail="Assistant message does not have a parent user message",
         )
 
-    parent_message, _ = await _get_message_text_part(sessionID, parent_message_id)
+    parent_message, parent_text_part = await _get_message_text_part(sessionID, parent_message_id)
     if getattr(parent_message, "role", None) != "user":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -4110,7 +4257,18 @@ async def regenerate_session_message(
     async def _handle_regenerate() -> None:
         runtime = await _prepare_replay_runtime(sessionID, parent_message)
         await _stop_replay_execution(sessionID)
-        updated_session = await SessionRevert.revert(sessionID, parent_message_id)
+        rewind = await _rewind_goal_for_replay(
+            sessionID,
+            parent_message_id,
+            getattr(parent_text_part, "text", "") or "",
+        )
+        try:
+            updated_session = await SessionRevert.revert(sessionID, parent_message_id)
+        except BaseException:
+            await _undo_goal_rewind(sessionID, rewind)
+            raise
+        if rewind.event:
+            await publish_event("session.goal.updated", rewind.event)
         refreshed_parent = await Message.get(sessionID, parent_message_id)
         if not refreshed_parent:
             raise HTTPException(
