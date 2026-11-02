@@ -19,6 +19,10 @@ Case list (编号 | 场景):
       account's own install with the installer running; one at a time
   EU7 what the enterprise edition's downgrades kept aside is listed from its record (when, still
       there, size), and nothing of it is removed
+  EU8 Windows: the platform is windows-amd64 and the installer an .exe in Program Files' place;
+      the page may start it (it asks for an administrator itself), from a process that is gone at
+      once (no descendant of this server), and tells it this install's data and flocks command;
+      a run is looked at without os.kill (which ends a process there), one at a time by msvcrt
 """
 
 from __future__ import annotations
@@ -421,3 +425,148 @@ def test_eu7_a_path_this_account_cannot_look_at_does_not_stop_the_list(machine: 
     finally:
         locked.chmod(0o755)
     assert [(i["path"], i["present"], i["size"]) for i in items] == [(str(hidden), None, None), (str(visible), True, 2)]
+
+
+@pytest.fixture
+def windows(machine: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """This machine taken for a Windows one, as far as the module asks."""
+    monkeypatch.setattr(enterprise, "_WINDOWS", True)
+    monkeypatch.setattr(enterprise, "INSTALLER_SUFFIX", ".exe")
+    monkeypatch.setattr(enterprise, "INSTALL_ROOT", Path("C:/Program Files/FlocksPro"))
+    monkeypatch.setattr(enterprise.sys, "platform", "win32")
+    monkeypatch.setattr(enterprise.platform, "machine", lambda: "AMD64")
+    return machine
+
+
+def test_eu8_windows_names_its_platform_and_installer(windows: Path):
+    assert enterprise.platform_id() == "windows-amd64"
+    offer = enterprise.InstallerOffer(url="https://x/i", sha256="0" * 64, release_id="2026.12.30-windows-amd64", version="2026.12.30")
+    assert offer.filename == "flockspro-2026.12.30-windows-amd64.exe"
+    situation = enterprise.situation()
+    assert situation["available"] and situation["can_start"] and situation["prepare_command"] is None
+    # By hand too, the installer is told this install's data directory: the administrator who
+    # confirms may have another profile, FLOCKS_ROOT another directory.
+    # (A temporary directory under a profile with a space in it is quoted for the program.)
+    arguments = enterprise.subprocess.list2cmdline(["--open-data", str(enterprise.runtime_root())])
+    assert situation["manual_command"] == (
+        f"Start-Process -Verb RunAs -FilePath 'flockspro-<版本>-windows-amd64.exe' -ArgumentList '{arguments}'")
+
+
+def test_eu8_the_manual_command_quotes_as_powershell_and_windows_read_it(windows: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FLOCKS_ROOT", "C:\\Users\\Li Lei\\.flocks")
+    command = enterprise.installer_command("C:/Users/O\u2019Neil's/x.exe")
+    # Every single quote PowerShell knows is doubled; the argument with a space is quoted for the program.
+    assert command == ("Start-Process -Verb RunAs -FilePath 'C:/Users/O\u2019\u2019Neil''s/x.exe' "
+                       "-ArgumentList '--open-data \"C:\\Users\\Li Lei\\.flocks\"'")
+    assert enterprise._powershell_quote("a\u2018b\u201ac\u201bd") == "'a\u2018\u2018b\u201a\u201ac\u201b\u201bd'"
+
+
+def test_eu8_the_page_starts_the_windows_installer_from_a_process_gone_at_once(windows: Path, monkeypatch: pytest.MonkeyPatch):
+    started: list[dict] = []
+
+    class Launcher:
+        def __init__(self, argv, **kwargs):
+            started.append({"argv": argv, **kwargs})
+
+        def communicate(self, timeout=None):
+            return b"4242\n", None
+
+    monkeypatch.setattr(enterprise.subprocess, "Popen", Launcher)
+    (Path(os.environ["HOME"]) / ".local" / "bin").mkdir(parents=True)
+    (Path(os.environ["HOME"]) / ".local" / "bin" / "flocks.cmd").write_text("@echo off\n")
+    installer = enterprise.work_dir() / "flockspro-2026.12.30-windows-amd64.exe"
+    installer.parent.mkdir(parents=True, exist_ok=True)
+    installer.write_bytes(b"MZ")
+    offer = enterprise.InstallerOffer(url="https://x/i", sha256="0" * 64, release_id="2026.12.30-windows-amd64", version="2026.12.30")
+
+    state = enterprise.start_installer(installer, offer)
+
+    assert state["phase"] == "installing" and state["pid"] == 4242
+    [launch] = started
+    argv = launch["argv"]
+    # This interpreter starts the installer and exits: the installer is nobody's child here.
+    assert argv[:4] == [sys.executable, "-I", "-c", enterprise._WINDOWS_DETACH]
+    log_file, exit_file = str(enterprise.work_dir() / "install.log"), str(enterprise.work_dir() / "exit-status")
+    assert argv[4:] == [log_file, str(installer), "--no-pause", "--log", log_file, "--exit-status", exit_file,
+                        "--open-data", str(enterprise.runtime_root()),
+                        "--open-cli", str(Path(os.environ["HOME"]) / ".local" / "bin" / "flocks.cmd")]
+    assert launch["stdout"] is enterprise.subprocess.PIPE and launch["stdin"] is enterprise.subprocess.DEVNULL
+    # The go-between gives the installer the log for its output, nothing of its own pipe, and a
+    # group and console apart, and says the pid.
+    seen: dict = {}
+
+    class Child:
+        pid = 777
+
+    fake = type(sys)("subprocess")
+    fake.DEVNULL = -3
+    fake.Popen = lambda argv, **kwargs: seen.update(argv=argv, **kwargs) or Child()
+    printed: list[str] = []
+    monkeypatch.setitem(sys.modules, "subprocess", fake)
+    # As `python -I -c <it> <log> <installer> ...` sees its arguments.
+    monkeypatch.setattr(sys, "argv", ["-c", *argv[4:]])
+    exec(compile(enterprise._WINDOWS_DETACH, "<detach>", "exec"),
+         {"__name__": "__main__", "print": lambda *a: printed.append(" ".join(map(str, a)))})
+    monkeypatch.setitem(sys.modules, "subprocess", enterprise.subprocess)
+    assert seen["argv"] == argv[5:] and seen["close_fds"] is True and seen["creationflags"] == 0x208
+    assert seen["stdout"] is seen["stderr"] and seen["stdout"].name == log_file and seen["stdin"] == -3
+    seen["stdout"].close()
+    assert printed == ["777"]
+    assert "PYTHONPATH" not in launch["env"]
+    # How it ended is the installer's word: its exit status, where the page reads it.
+    Path(exit_file).write_text("0\n")
+    assert enterprise.read_state()["phase"] == "finished"
+
+
+def test_eu8_a_run_is_looked_at_without_os_kill_on_windows(windows: Path, monkeypatch: pytest.MonkeyPatch):
+    def kill(*_args):
+        raise AssertionError("os.kill ends the process it names on Windows")
+
+    monkeypatch.setattr(enterprise.os, "kill", kill)
+    asked: list[int] = []
+    monkeypatch.setattr(enterprise, "_windows_pid_alive", lambda pid: asked.append(pid) or False)
+    enterprise._write_state({"phase": "installing", "pid": 31337, "log": ""})
+    assert enterprise.read_state()["phase"] == "failed"
+    assert asked == [31337]
+
+
+def test_eu8_one_upgrade_at_a_time_on_windows_too(windows: Path, monkeypatch: pytest.MonkeyPatch):
+    import types
+
+    held: set[str] = set()
+
+    def locking(fd, mode, size):
+        # Byte 0 of upgrade.lock, held until the process lets go (this one never does here).
+        if mode == fake.LK_NBLCK and "upgrade.lock" in held:
+            raise OSError(13, "Permission denied")
+        held.add("upgrade.lock")
+
+    fake = types.SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0, locking=locking)
+    monkeypatch.setitem(sys.modules, "msvcrt", fake)
+    with enterprise.upgrade_lock():
+        with pytest.raises(enterprise.EnterpriseUpgradeError, match="已经在升级了"):
+            with enterprise.upgrade_lock():
+                pass
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows processes and msvcrt locks")
+def test_eu8_on_windows_a_run_is_looked_at_and_the_lock_held_across_processes(machine: Path):
+    import subprocess
+
+    assert enterprise._windows_pid_alive(os.getpid())
+    done = subprocess.run([sys.executable, "-c", "pass"])
+    assert done.returncode == 0
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert enterprise._pid_alive(child.pid)
+    finally:
+        child.kill()
+        child.wait()
+    assert not enterprise._pid_alive(child.pid)
+    with enterprise.upgrade_lock():
+        other = subprocess.run([sys.executable, "-c",
+                                "from flocks.updater import enterprise\n"
+                                "try:\n    enterprise.upgrade_lock().__enter__()\nexcept enterprise.EnterpriseUpgradeError:\n    raise SystemExit(3)\n"])
+        assert other.returncode == 3
+    with enterprise.upgrade_lock():
+        pass

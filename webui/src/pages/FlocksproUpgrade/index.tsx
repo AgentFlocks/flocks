@@ -174,6 +174,8 @@ export default function FlocksproUpgradePage() {
   const busy = running || phase === 'installing' || phase === 'downloading';
   const expiry = formatDate(previous?.expires_at);
   const canDownload = Boolean(previous?.license_id) && situation.available;
+  // The Windows installer is a program run as an administrator: other words than the .run's.
+  const windows = situation.platform.startsWith('windows-');
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -226,7 +228,7 @@ export default function FlocksproUpgradePage() {
           <ArrowUpCircle className="h-5 w-5 text-gray-500" aria-hidden="true" />
           <h2 id="flockspro-upgrade" className="text-lg font-semibold text-gray-900">{t('upgrade.title')}</h2>
         </div>
-        <p className="text-sm text-gray-600">{t('upgrade.whatChanges', { root: situation.install_root })}</p>
+        <p className="text-sm text-gray-600">{t(windows ? 'upgrade.whatChangesWindows' : 'upgrade.whatChanges', { root: situation.install_root })}</p>
 
         {situation.systemd && <div className={NOTE}>{t('upgrade.systemd')}</div>}
         {situation.prepare_command && (
@@ -279,7 +281,7 @@ export default function FlocksproUpgradePage() {
         {situation.manual_command && (
           <div className="border-t border-gray-100 pt-4 text-sm text-gray-600">
             <div className="font-medium text-gray-900">{t('upgrade.manualTitle')}</div>
-            <p className="mt-1">{t('upgrade.manual', { account: situation.systemd ? 'root' : situation.account })}</p>
+            <p className="mt-1">{windows ? t('upgrade.manualWindows') : t('upgrade.manual', { account: situation.systemd ? 'root' : situation.account })}</p>
             <Command text={situation.manual_command} />
           </div>
         )}

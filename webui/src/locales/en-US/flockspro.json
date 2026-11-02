@@ -71,6 +71,7 @@
   "upgrade": {
     "title": "Upgrade to the new enterprise edition",
     "whatChanges": "After the upgrade the program is in {{root}}, the data stays where it is (moved into the bundled PostgreSQL on the first start; the original is kept) and the machine's licence is carried over; flocks start|stop|restart|status|logs|update work as before.",
+    "whatChangesWindows": "After the upgrade the program is in {{root}} and runs as the FlocksPro Core service, started with the machine; the open edition's data is copied for it (the original stays) and the machine's licence is carried over. Windows asks for an administrator while it installs.",
     "systemd": "systemd runs this machine (the open edition's offline package): the installer runs as root. The page can download it; then run the command it gives.",
     "prepare": "{{account}} cannot write {{root}} yet: run this once as root, then come back.",
     "recheck": "Done, check again",
@@ -81,7 +82,8 @@
     "start": "Upgrade to {{version}}",
     "download": "Download the installer",
     "manualTitle": "Upgrade by hand",
-    "manual": "Copy the installer (flockspro-<version>-<platform>.run) to this machine and run, as {{account}}:"
+    "manual": "Copy the installer (flockspro-<version>-<platform>.run) to this machine and run, as {{account}}:",
+    "manualWindows": "Copy the installer (flockspro-<version>-windows-amd64.exe) to this machine and run this line in PowerShell: Windows asks for an administrator, and the installer is told where this open edition keeps its data and its flocks command."
   },
   "progress": {
     "downloading": "Downloading the new enterprise edition {{version}}",
