@@ -211,7 +211,17 @@ export interface WorkflowStats {
   thumbsDown: number;
 }
 
+export interface WorkflowDefinitionError {
+  code: 'WORKFLOW_DEFINITION_INVALID';
+  file: string;
+  line?: number | null;
+  column?: number | null;
+  message: string;
+  canRestore?: boolean;
+}
+
 export interface WorkflowSummary {
+  definitionError?: WorkflowDefinitionError | null;
   group_readonly?: boolean;
   group?: string | null;
   id: string;
@@ -229,6 +239,7 @@ export interface WorkflowSummary {
 }
 
 export interface Workflow {
+  definitionError?: WorkflowDefinitionError | null;
   group_readonly?: boolean;
   group?: string | null;
   id: string;
@@ -451,6 +462,9 @@ export const workflowAPI = {
   
   get: (id: string) =>
     client.get<Workflow>(`/api/workflow/${id}`),
+
+  restoreDefinition: (id: string, file: string) =>
+    client.post<Workflow>(`/api/workflow/${id}/restore`, { file }),
   
   create: (data: {
     name: string;

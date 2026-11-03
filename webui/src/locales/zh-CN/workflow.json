@@ -1,4 +1,11 @@
 {
+  "definition": {
+    "invalid": "工作流定义无效",
+    "repairHint": "请根据文件名和错误位置修复定义，然后重试；也可以恢复已保存的有效版本。",
+    "restore": "恢复有效版本",
+    "restoreConfirm": "确定恢复这份文件最近保存的有效版本？当前文件将被替换。",
+    "restoring": "正在恢复…"
+  },
   "pageTitle": "工作流",
   "pageDescription": "管理和执行工作流",
   "createWorkflow": "创建工作流",

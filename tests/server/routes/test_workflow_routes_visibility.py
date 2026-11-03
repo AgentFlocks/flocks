@@ -374,16 +374,14 @@ async def test_storage_migration_create_only_destination_resists_concurrent_crea
 
 @pytest.mark.asyncio
 async def test_create_only_migration_never_deletes_concurrently_created_legacy_draft(workflow_migration_env, monkeypatch):
-    import builtins
-
     workspace, _roots, _legacy = workflow_migration_env
     destination = workspace / ".flocks" / "plugins" / "workflows" / "shared"
-    original_open = builtins.open
-    def create_legacy_draft(path, mode="r", *args, **kwargs):
-        if Path(path) == destination / "workflow.json" and mode == "x":
+    original_write = workflow_routes.write_definition
+    def create_legacy_draft(path, text, **kwargs):
+        if Path(path) == destination / "workflow.json" and kwargs.get("create_only"):
             (destination / "workflow.edit.md").write_bytes(b"# Concurrent legacy draft\r\n")
-        return original_open(path, mode, *args, **kwargs)
-    monkeypatch.setattr(builtins, "open", create_legacy_draft)
+        return original_write(path, text, **kwargs)
+    monkeypatch.setattr(workflow_routes, "write_definition", create_legacy_draft)
     await workflow_routes._migrate_storage_to_filesystem()
     assert (destination / "workflow.edit.md").read_bytes() == b"# Concurrent legacy draft\r\n"
 

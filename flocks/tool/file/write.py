@@ -427,6 +427,11 @@ async def write_tool(
             )
 
     # Generate diff
+    from flocks.workflow.definition_io import validate_file_write
+    try:
+        validate_file_write(filepath, content)
+    except ValueError as exc:
+        return ToolResult(success=False, error=str(exc), title=title)
     diff = trim_diff(generate_diff(filepath, old_content, content))
 
     # Explicit edit/write rules (session, agent, delegating session) apply here.
@@ -464,7 +469,11 @@ async def write_tool(
     
     # Write the file the request was about: the one read above, or none.
     try:
-        nofollow.write_text(filepath, content, expect=existing.identity if existing is not None else None)
+        from flocks.workflow.definition_io import is_definition_path
+        if existing is not None and is_definition_path(filepath):
+            nofollow.replace_text(filepath, content, before=existing)
+        else:
+            nofollow.write_text(filepath, content, expect=existing.identity if existing is not None else None)
     except (nofollow.LinkOnTheWay, nofollow.StaleFile):
         return ToolResult(success=False, error=changed, title=title)
     except Exception as e:
