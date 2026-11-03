@@ -8,6 +8,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import WorkflowDocumentPanel, { type WorkflowDocumentMode } from '@/components/common/WorkflowDocumentPanel';
 import WorkflowMarkdownDiffReview from '@/components/common/WorkflowMarkdownDiffReview';
 import TopBar from './TopBar';
+import DefinitionProblem from './DefinitionProblem';
 import FlowCanvas from './FlowCanvas';
 import RightPanel, { type RightPanelTabId, type WorkflowChatLaunchRequest } from './RightPanel';
 import { extractErrorMessage } from '@/utils/error';
@@ -630,6 +631,10 @@ export default function WorkflowDetail() {
         </div>
       </div>
     );
+  }
+
+  if (workflow.definitionError) {
+    return <DefinitionProblem workflow={workflow} onReload={() => void loadWorkflow()} onBack={() => navigate('/workflows')} />;
   }
 
   return (

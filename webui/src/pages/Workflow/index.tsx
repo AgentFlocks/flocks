@@ -463,6 +463,11 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
         </div>
 
         {/* Description */}
+        {workflow.definitionError && (
+          <p className="text-xs text-red-700" role="status" title={workflow.definitionError.message}>
+            {t('definition.invalid')}
+          </p>
+        )}
         <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">
           {workflow.description || t('noDescription')}
         </p>

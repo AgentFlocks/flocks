@@ -458,6 +458,15 @@ def write_text(path: str, text: str, *, expect: Optional[Identity], newline: Opt
     is then created and must not exist by now. Anything else raises
     :class:`StaleFile`. Missing directories on the way are made.
     """
+    from flocks.workflow.definition_io import is_definition_path, write_definition
+
+    if is_definition_path(path):
+        before = read_text(path, newline=newline)
+        if (before.identity if before is not None else None) != expect:
+            raise StaleFile(path)
+        write_definition(path, text, before=before, create_only=expect is None,
+                         newline=newline, validate_graph=True)
+        return
     holder, name = parent(path, create=True)
     with holder:
         if expect is None:
@@ -495,6 +504,14 @@ def replace_text(
     The file is opened once: the one checked is the one written. A different
     file there, or different text in it, raises :class:`StaleFile`.
     """
+    from flocks.workflow.definition_io import is_definition_path, write_definition
+
+    if is_definition_path(path):
+        # Workflow files are staged as complete UTF-8 bytes; preserve edit's
+        # explicit CRLF handling rather than translating twice on Windows.
+        write_definition(path, text, before=before, newline=read_newline,
+                         validate_graph=True)
+        return
     holder, name = parent(path)
     with holder:
         try:

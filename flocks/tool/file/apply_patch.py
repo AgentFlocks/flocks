@@ -57,7 +57,7 @@ Use apply_patch for complex single-file patch changes."""
 @dataclass
 class PatchChunk:
     """A chunk of changes within a file update"""
-    start_line: int
+    start_line: Optional[int]
     original_lines: List[str] = field(default_factory=list)
     new_lines: List[str] = field(default_factory=list)
 
@@ -150,7 +150,7 @@ def parse_patch(patch_text: str) -> List[PatchHunk]:
                     if match:
                         start_line = int(match.group(1))
                     else:
-                        start_line = 1
+                        start_line = None
                     
                     i += 1
                     
@@ -223,10 +223,24 @@ def apply_chunks(content: str, chunks: List[PatchChunk]) -> str:
     
     lines = content.split("\n")
 
-    # Validate every chunk against the file before touching it: a hunk that
-    # points past the end or whose context no longer matches must fail loudly
-    # instead of deleting whatever happens to sit at that line number.
+    # Resolve every hunk against the same snapshot before applying any changes.
+    # A bare @@ has no position hint: only a unique, exact context can locate it.
+    located = []
     for chunk in chunks:
+        if chunk.start_line is None:
+            if not chunk.original_lines:
+                raise ValueError("A hunk without line numbers needs original context")
+            matches = [
+                index for index in range(len(lines) - len(chunk.original_lines) + 1)
+                if lines[index:index + len(chunk.original_lines)] == chunk.original_lines
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"Patch context must match exactly once; found {len(matches)} matches. "
+                    "Re-read the file and provide more context."
+                )
+            located.append((matches[0], chunk))
+            continue
         start_idx = chunk.start_line - 1
         if start_idx < 0 or start_idx > len(lines) or (
             start_idx == len(lines) and chunk.original_lines
@@ -242,15 +256,20 @@ def apply_chunks(content: str, chunks: List[PatchChunk]) -> str:
             )
         for offset, expected in enumerate(chunk.original_lines):
             actual = lines[start_idx + offset]
-            if expected.rstrip() != actual.rstrip():
+            if expected != actual:
                 raise ValueError(
                     f"Patch context mismatch at line {chunk.start_line + offset}: "
                     f"expected {expected!r}, found {actual!r}. Re-read the file and regenerate the patch."
                 )
+        located.append((start_idx, chunk))
+
+    located.sort(key=lambda item: item[0])
+    for (start, previous), (next_start, _) in zip(located, located[1:]):
+        if next_start < start + max(1, len(previous.original_lines)):
+            raise ValueError("Patch hunks overlap; regenerate a non-overlapping patch")
 
     # Apply chunks in reverse order to preserve line numbers
-    for chunk in reversed(chunks):
-        start_idx = chunk.start_line - 1
+    for start_idx, chunk in reversed(located):
         end_idx = start_idx + len(chunk.original_lines)
         del lines[start_idx:end_idx]
         for i, new_line in enumerate(chunk.new_lines):
@@ -486,6 +505,16 @@ async def apply_patch_tool(
                 success=False,
                 error=checked_error(hunk_paths, f"Failed to process hunk for {hunk.path}: {str(e)}")
             )
+
+    # Validate the complete candidate, including a move's destination, before
+    # requesting permission or changing either path.
+    from flocks.workflow.definition_io import validate_file_write
+    try:
+        for change in file_changes:
+            if change["type"] != "delete":
+                validate_file_write(change.get("movePath") or change["filePath"], change["newContent"])
+    except ValueError as exc:
+        return ToolResult(success=False, error=str(exc))
 
     if sandbox_read_only:
         from flocks.session.execution_mode import is_plan_file_edit

@@ -559,6 +559,11 @@ async def edit_tool(
         return ToolResult(success=False, error=checked_error((filepath,), str(error)), title=title)
 
     content_new = bom + restore_line_endings(normalized_content_new, original_line_ending)
+    from flocks.workflow.definition_io import validate_file_write
+    try:
+        validate_file_write(filepath, content_new)
+    except ValueError as error:
+        return ToolResult(success=False, error=str(error), title=title)
     diff = trim_diff(generate_diff(filepath, base_content, normalized_content_new))
 
     if (

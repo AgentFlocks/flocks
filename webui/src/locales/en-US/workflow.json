@@ -1,4 +1,11 @@
 {
+  "definition": {
+    "invalid": "Invalid workflow definition",
+    "repairHint": "Fix the definition at the reported file and location, then retry, or restore a saved valid version.",
+    "restore": "Restore valid version",
+    "restoreConfirm": "Restore the last saved valid version of this file? The current file will be replaced.",
+    "restoring": "Restoring…"
+  },
   "pageTitle": "Workflows",
   "pageDescription": "Manage and execute workflows",
   "createWorkflow": "Create Workflow",

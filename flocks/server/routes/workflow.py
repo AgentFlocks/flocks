@@ -48,12 +48,12 @@ from flocks.workflow.compiler import compile_workflow
 from flocks.workflow.fs_store import (
     find_workspace_root as _find_workspace_root,
     is_safe_workflow_id as _is_safe_workflow_id,
-    read_workflow_dir as _read_workflow_dir,
+    read_workflow_dir as shared_read_workflow_dir,
     read_workflow_from_fs as shared_read_workflow_from_fs,
     workflow_scan_dirs as _all_scan_dirs,
     normalize_workflow_group,
     patch_workflow_metadata,
-    resolve_workflow_from_fs,
+    resolve_workflow_from_fs as shared_resolve_workflow_from_fs,
     is_managed_workflow,
     overlay_managed_workflows,
     refuse_managed_workflow_write,
@@ -77,6 +77,7 @@ from flocks.workflow.execution_store import (
 )
 from flocks.workflow.io import load_workflow, dump_workflow
 from flocks.workflow.store import WorkflowStore
+from flocks.workflow.definition_io import parse_definition, write_definition
 from flocks.workflow.ownership import abandon_execution, execution_cancelled
 from flocks.workflow.tool_context import build_workflow_tool_context
 from flocks.workflow.tools import get_tool_registry
@@ -275,6 +276,7 @@ class WorkflowResponse(BaseModel):
     createdAt: int = Field(..., description="Created timestamp (ms)")
     updatedAt: int = Field(..., description="Updated timestamp (ms)")
     stats: Dict[str, Any] = Field(default_factory=dict, description="Statistics")
+    definitionError: Optional[Dict[str, Any]] = None
     integrationStatus: Optional[WorkflowIntegrationStatusResponse] = Field(
         None,
         description="API publishing and trigger runtime summary",
@@ -296,6 +298,7 @@ class WorkflowSummaryResponse(BaseModel):
     createdAt: int
     updatedAt: int
     nodeCount: int = 0
+    definitionError: Optional[Dict[str, Any]] = None
     stats: Dict[str, Any] = Field(default_factory=dict)
     integrationStatus: WorkflowIntegrationStatusResponse
 
@@ -428,6 +431,14 @@ def _refuse_managed_workflow_change(workflow_id: str) -> None:
         raise HTTPException(status_code=403, detail=_MANAGED_WORKFLOW_DETAIL)
 
 
+def _read_workflow_dir(wf_dir: Path, workflow_id: str, source: str) -> Optional[Dict[str, Any]]:
+    return shared_read_workflow_dir(wf_dir, workflow_id, source, include_errors=True)
+
+
+def resolve_workflow_from_fs(workflow_id: str) -> Optional[tuple[Path, Dict[str, Any]]]:
+    return shared_resolve_workflow_from_fs(workflow_id, include_errors=True)
+
+
 def _read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:
     """Read workflow data from the filesystem.
 
@@ -435,7 +446,10 @@ def _read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:
     global user roots; per-id dir is ``<root>/<id>/`` with ``workflow.json``
     inside.
     """
-    return shared_read_workflow_from_fs(workflow_id)
+    data = shared_read_workflow_from_fs(workflow_id, include_errors=True)
+    if data and data.get("definitionError"):
+        raise HTTPException(status_code=422, detail=data["definitionError"]["message"])
+    return data
 
 
 async def _build_workflow_tool_context(
@@ -497,29 +511,30 @@ def _write_workflow_to_fs(
     # Claim the migration destination atomically. Never redirect a migration to
     # an existing definition, nor clobber files created by another worker.
     wf_dir.mkdir(parents=True, exist_ok=not create_only)
-    write_mode = "x" if create_only else "w"
 
     # The local group authority is meta.json, never the execution definition.
     workflow_json = dict(workflow_json)
     if isinstance(workflow_json.get("metadata"), dict):
         workflow_json["metadata"] = dict(workflow_json["metadata"])
         workflow_json["metadata"].pop("group", None)
-    with open(wf_dir / "workflow.json", write_mode, encoding="utf-8") as f:
-        json.dump(workflow_json, f, ensure_ascii=False, indent=2)
-
     meta_to_save = {
         k: v
         for k, v in meta.items()
-        if k not in ("workflowJson", "markdownContent", "editMarkdownContent", "stats", "source", "group_readonly")
+        if k not in ("workflowJson", "markdownContent", "editMarkdownContent", "stats", "source", "group_readonly", "definitionError")
     }
-    with open(wf_dir / "meta.json", write_mode, encoding="utf-8") as f:
-        json.dump(meta_to_save, f, ensure_ascii=False, indent=2)
+    definition_text = json.dumps(workflow_json, ensure_ascii=False, indent=2)
+    metadata_text = json.dumps(meta_to_save, ensure_ascii=False, indent=2)
+    # Validate both candidates before either file is replaced.
+    parse_definition(definition_text, "workflow.json")
+    parse_definition(metadata_text, "meta.json")
+    write_definition(wf_dir / "workflow.json", definition_text, create_only=create_only)
+    write_definition(wf_dir / "meta.json", metadata_text, create_only=create_only)
 
     if markdown_content is None and edit_markdown_content is not None:
         markdown_content = edit_markdown_content
 
     if markdown_content is not None:
-        with open(wf_dir / "workflow.md", write_mode, encoding="utf-8") as f:
+        with open(wf_dir / "workflow.md", "x" if create_only else "w", encoding="utf-8") as f:
             f.write(markdown_content)
 
     legacy_edit_file = wf_dir / "workflow.edit.md"
@@ -733,7 +748,7 @@ def _scan_workflow_base_dir(base_dir: Path, source: str) -> Dict[str, Dict[str, 
         if not entry.is_dir():
             continue
         data = _read_workflow_dir(entry, entry.name, source)
-        if data is not None and not is_hidden_workflow_data(data):
+        if data is not None and (data.get("definitionError") or not is_hidden_workflow_data(data)):
             results[entry.name] = data
     return results
 
@@ -1667,6 +1682,7 @@ async def list_workflow_summaries(
                     createdAt=int(data.get("createdAt") or 0),
                     updatedAt=int(data.get("updatedAt") or 0),
                     nodeCount=len(nodes) if isinstance(nodes, list) else 0,
+                    definitionError=data.get("definitionError"),
                     stats=stats,
                     integrationStatus=integration_status,
                 )
@@ -1809,7 +1825,7 @@ async def get_workflow(workflow_id: str):
     are always reflected immediately without any sync step.
     """
     try:
-        data = _read_workflow_from_fs(workflow_id)
+        data = shared_read_workflow_from_fs(workflow_id, include_errors=True)
         if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
@@ -1822,6 +1838,39 @@ async def get_workflow(workflow_id: str):
     except Exception as e:
         log.error("workflow.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get workflow: {str(e)}")
+
+
+class WorkflowRestoreRequest(BaseModel):
+    file: Literal["workflow.json", "meta.json"] = "workflow.json"
+
+
+@router.post("/workflow/{workflow_id}/restore", response_model=WorkflowResponse)
+async def restore_workflow_definition(workflow_id: str, req: WorkflowRestoreRequest):
+    """Explicitly restore the previous readable definition; never auto-run it."""
+    from flocks.tool import nofollow
+    from flocks.workflow.definition_io import WorkflowDefinitionError
+
+    _refuse_managed_workflow_change(workflow_id)
+    selected = resolve_workflow_from_fs(workflow_id)
+    if selected is None:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    wf_dir, data = selected
+    issue = data.get("definitionError")
+    if not issue or issue["file"] != req.file:
+        raise HTTPException(status_code=409, detail="Workflow definition changed or is already valid; reload before restoring")
+    path = wf_dir / req.file
+    try:
+        backup = nofollow.read_text(str(path) + ".last-valid")
+        if backup is None:
+            raise HTTPException(status_code=404, detail="No valid workflow backup is available")
+        write_definition(path, backup.text, before=nofollow.read_text(str(path)), validate_graph=True)
+    except WorkflowDefinitionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (nofollow.StaleFile, nofollow.LinkOnTheWay, FileNotFoundError) as exc:
+        raise HTTPException(status_code=409, detail="Workflow changed; reload before restoring") from exc
+    log.info("workflow.definition.restored", {"id": workflow_id, "file": req.file})
+    await publish_event("workflow.updated", {"id": workflow_id})
+    return await get_workflow(workflow_id)
 
 
 @router.put("/workflow/{workflow_id}", response_model=WorkflowResponse)
@@ -1839,6 +1888,8 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
         if selected is None:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
         wf_dir, data = selected
+        if data.get("definitionError") and req.workflow_json is None:
+            raise HTTPException(status_code=422, detail=data["definitionError"]["message"])
 
         # Guard both edit surfaces before writing metadata, graph, or Markdown.
         if data["group_readonly"]:
@@ -1907,6 +1958,7 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
                 validate_workflow_python(Workflow.from_dict(workflow_json))
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        data.pop("definitionError", None)
         data["updatedAt"] = int(time.time() * 1000)
 
         if req.workflow_json is None and req.markdown_content is None and req.edit_markdown_content is None:

@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from pydantic_core import PydanticCustomError
 
 from flocks.utils.log import Log
+from .definition_io import WorkflowDefinitionError, parse_definition, write_definition
 
 from .center import resolve_workflow_scan_roots
 
@@ -138,6 +139,8 @@ def read_workflow_dir(
     wf_dir: Path,
     workflow_id: str,
     source: str,
+    *,
+    include_errors: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Read a single workflow directory and return metadata plus JSON."""
     json_file = wf_dir / "workflow.json"
@@ -147,9 +150,10 @@ def read_workflow_dir(
     if not json_file.is_file() and not has_markdown:
         return None
 
+    current_file = json_file
     try:
         if json_file.is_file():
-            workflow_json = json.loads(json_file.read_text(encoding="utf-8"))
+            workflow_json = parse_definition(json_file.read_text(encoding="utf-8"), json_file.name)
             json_mtime_ms = int(json_file.stat().st_mtime * 1000)
         else:
             workflow_json = dict(_EMPTY_DRAFT_WORKFLOW_JSON)
@@ -158,9 +162,11 @@ def read_workflow_dir(
         markdown_content: Optional[str] = None
         updated_candidates = [json_mtime_ms]
         if md_file.is_file():
+            current_file = md_file
             markdown_content = md_file.read_text(encoding="utf-8")
             updated_candidates.append(int(md_file.stat().st_mtime * 1000))
         elif legacy_edit_md_file.is_file():
+            current_file = legacy_edit_md_file
             markdown_content = legacy_edit_md_file.read_text(encoding="utf-8")
             updated_candidates.append(int(legacy_edit_md_file.stat().st_mtime * 1000))
 
@@ -176,9 +182,14 @@ def read_workflow_dir(
             "updatedAt": fallback_updated,
         }
         if meta_file.is_file():
-            meta.update(json.loads(meta_file.read_text(encoding="utf-8")))
+            current_file = meta_file
+            meta.update(parse_definition(meta_file.read_text(encoding="utf-8"), meta_file.name))
         if "group" in meta:
             meta["group"] = normalize_workflow_group(meta["group"])
+        meta.pop("definitionError", None)
+        for key, fallback in (("name", workflow_json.get("name") or workflow_id), ("category", "default"), ("status", "draft")):
+            if meta.get(key) is None:
+                meta[key] = fallback
 
         # metadata.group is an import/export transport field, not a second
         # local authority. Local readers always use this workflow's meta.json.
@@ -204,10 +215,41 @@ def read_workflow_dir(
             "editMarkdownContent": markdown_content,
         }
     except Exception as exc:
+        issue = exc if isinstance(exc, WorkflowDefinitionError) else WorkflowDefinitionError(
+            current_file.name,
+            "File is not valid UTF-8" if isinstance(exc, UnicodeError) else "Unreadable file or invalid metadata",
+        )
         log.warning(
             "workflow.fs.read.failed",
-            {"id": workflow_id, "source": source, "error": str(exc)},
+            {"id": workflow_id, "source": source, "path": str(current_file),
+             "line": issue.line, "column": issue.column, "error": str(issue)},
         )
+        if include_errors:
+            # Keep intentional visibility and native display metadata even if
+            # the executable definition is damaged.
+            try:
+                saved_meta = parse_definition((wf_dir / "meta.json").read_text(encoding="utf-8"), "meta.json")
+            except Exception:
+                saved_meta = {}
+            visibility = {key: saved_meta[key] for key in (
+                "hidden", "templateOnly", "internal", "excludeFromUI", "excludeFromPrompt", "visibility",
+            ) if key in saved_meta}
+            if saved_meta.get("status") == "hidden":
+                visibility["hidden"] = True
+            try:
+                modified = int(current_file.stat().st_mtime * 1000)
+            except OSError:
+                modified = 0
+            return {
+                **visibility,
+                "id": workflow_id, "name": saved_meta.get("name") if isinstance(saved_meta.get("name"), str) else workflow_id,
+                "source": source,
+                "group": saved_meta.get("group"),
+                "category": saved_meta.get("category") or "default", "status": "draft", "group_readonly": is_system_workflow_definition(wf_dir),
+                "createdAt": modified, "updatedAt": modified, "workflowJson": dict(_EMPTY_DRAFT_WORKFLOW_JSON),
+                "markdownContent": None, "editMarkdownContent": None,
+                "definitionError": {**issue.as_dict(), "canRestore": (wf_dir / (issue.filename + ".last-valid")).is_file()},
+            }
         return None
 
 
@@ -253,7 +295,7 @@ def patch_workflow_metadata(
         meta = {
             key: value
             for key, value in data.items()
-            if key not in {"id", "source", "group_readonly", "workflowJson", "markdownContent", "editMarkdownContent", "stats"}
+            if key not in {"id", "source", "group_readonly", "workflowJson", "markdownContent", "editMarkdownContent", "stats", "definitionError"}
         }
     updates = dict(updates)
     updates.pop("group_readonly", None)
@@ -262,9 +304,7 @@ def patch_workflow_metadata(
         if is_system_workflow_definition(wf_dir) and updates["group"] != normalize_workflow_group(meta.get("group")):
             raise ValueError("System workflow group is read-only")
     meta.update(updates)
-    (wf_dir / "meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    write_definition(wf_dir / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
     return meta
 
 
@@ -274,6 +314,7 @@ MANAGED_WORKFLOW_SOURCE = "managed"
 # Keys of read_workflow_dir()'s result that are derived, never taken from a
 # managed definition's metadata.
 _DERIVED_KEYS = frozenset({
+    "definitionError",
     "id", "source", "group_readonly", "managed", "version",
     "workflowJson", "markdownContent", "editMarkdownContent", "stats",
 })
@@ -408,7 +449,7 @@ def overlay_managed_workflows(by_id: Dict[str, Dict[str, Any]]) -> None:
             by_id[workflow_id] = data
 
 
-def resolve_workflow_from_fs(workflow_id: str) -> Optional[tuple[Path, Dict[str, Any]]]:
+def resolve_workflow_from_fs(workflow_id: str, *, include_errors: bool = False) -> Optional[tuple[Path, Dict[str, Any]]]:
     """Resolve the selected directory and its data in one discovery pass.
 
     A managed workflow resolves to nothing: it has no directory a writer
@@ -421,17 +462,21 @@ def resolve_workflow_from_fs(workflow_id: str) -> Optional[tuple[Path, Dict[str,
         return None
     for root, source in reversed(workflow_scan_dirs()):
         wf_dir = root / workflow_id
-        data = read_workflow_dir(wf_dir, workflow_id, source)
+        data = read_workflow_dir(wf_dir, workflow_id, source, include_errors=True)
         if data is not None:
+            # An invalid user override must not silently run a lower-priority
+            # bundled workflow with the same id.
+            if data.get("definitionError") and not include_errors:
+                return None
             return wf_dir, data
     return None
 
 
-def read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:
+def read_workflow_from_fs(workflow_id: str, *, include_errors: bool = False) -> Optional[Dict[str, Any]]:
     """Resolve a workflow by ID: the managed definition, else workflow directories on disk."""
     if is_safe_workflow_id(workflow_id) and is_managed_workflow(workflow_id):
         return managed_workflow_data(workflow_id)
-    selected = resolve_workflow_from_fs(workflow_id)
+    selected = resolve_workflow_from_fs(workflow_id, include_errors=include_errors)
     return selected[1] if selected is not None else None
 
 

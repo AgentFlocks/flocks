@@ -5,6 +5,19 @@ import userEvent from '@testing-library/user-event';
 import type { WorkflowSummary } from '@/api/workflow';
 import WorkflowPage from './index';
 
+it('keeps invalid definitions visible and opens their recovery details', () => {
+  mockUseWorkflows.mockReturnValue({
+    workflows: [makeWorkflow({ id: 'broken', name: 'Broken workflow', definitionError: {
+      code: 'WORKFLOW_DEFINITION_INVALID', file: 'workflow.json', line: 3, column: 1,
+      message: 'workflow.json line 3: Extra data', canRestore: true,
+    } })], loading: false, error: null, refetch: vi.fn(),
+  });
+  render(<WorkflowPage />);
+  expect(screen.getByText('definition.invalid')).toBeInTheDocument();
+  fireEvent.click(screen.getByText('Broken workflow'));
+  expect(mockNavigate).toHaveBeenCalledWith('/workflows/broken');
+});
+
 const { mockNavigate, mockUseWorkflows, mockLanguage, nativeWorkflowAPI, toastWarning } = vi.hoisted(() => ({
   toastWarning: vi.fn(),
   nativeWorkflowAPI: { update: vi.fn(), listSummaries: vi.fn() },
