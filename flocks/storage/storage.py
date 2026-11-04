@@ -627,7 +627,10 @@ class Storage:
 
         try:
             materialized = subprocess.run(
-                [sqlite_bin, str(recovered_path)],
+                # `.recover` restores virtual tables (FTS5) by inserting into
+                # sqlite_schema, which a CLI that opens in defensive mode refuses
+                # (Ubuntu 26.04's does). Only this scratch database is affected.
+                [sqlite_bin, "-cmd", ".dbconfig defensive off", str(recovered_path)],
                 input=recover_sql,
                 check=False,
                 capture_output=True,
