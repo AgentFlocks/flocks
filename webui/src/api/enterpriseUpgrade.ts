@@ -1,4 +1,7 @@
 import client from './client';
+import { getCurrentRelease, type VersionInfo } from './update';
+import { extractErrorMessage } from '@/utils/error';
+import { ENTERPRISE_UPDATE_CHANNEL } from '@/utils/updateDismissal';
 
 /** The Python enterprise package of before, still on this machine. */
 export interface PreviousEdition {
@@ -159,4 +162,30 @@ export const enterpriseUpgradeApi = {
     if (!finalState) throw new Error('the upgrade stream ended early');
     return finalState;
   },
+};
+
+/** Where the page for the enterprise upgrade is: applications, Console login, what root has to run. */
+export const ENTERPRISE_UPGRADE_PAGE = '/settings/flockspro';
+
+/**
+ * The version check of a machine with an enterprise licence, in the terms of any other: its update
+ * is the new enterprise edition, which Console has for it. A Console that will not say is an error
+ * to show, not "up to date".
+ */
+export const enterpriseVersionInfo = async (checkFailed?: string): Promise<VersionInfo> => {
+  const current = await getCurrentRelease().catch(() => null);
+  const base = {
+    current_version: current?.current_version ?? '',
+    channel: ENTERPRISE_UPDATE_CHANNEL,
+    release_notes: null,
+    release_url: null,
+    ...(current?.deploy_mode ? { deploy_mode: current.deploy_mode } : {}),
+    ...(current?.update_allowed === false ? { update_allowed: false } : {}),
+  };
+  try {
+    const offer = await enterpriseUpgradeApi.check();
+    return { ...base, latest_version: offer.version, has_update: true, error: null };
+  } catch (err) {
+    return { ...base, latest_version: null, has_update: false, error: extractErrorMessage(err, checkFailed) };
+  }
 };

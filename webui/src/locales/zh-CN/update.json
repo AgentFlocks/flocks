@@ -72,5 +72,12 @@
     "failed": "升级在「{{step}}」这一步失败：{{error}}",
     "noDetail": "具体原因只显示在发起升级的页面上。",
     "recoveryHint": "服务还没有恢复：请在服务器上查看 ~/.flocks/run/upgrade-result.json 和 ~/.flocks/logs/ 下当天的 errors.log，处理后执行 flocks start。"
-  }
+  },
+  "enterpriseDesc": "这台机器有企业版授权，这次升级到新企业版：程序装到 {{root}}，数据和授权沿用，网页地址不变。开源版会先停下，第一次启动要迁移数据，可能要几分钟。",
+  "enterpriseInstalling": "开源版会先停下，企业版第一次启动要迁移数据，可能要几分钟。装好后这个页面会自动刷新。",
+  "enterpriseStageLabels": {
+    "fetching": "下载新企业版安装包",
+    "restarting": "安装新企业版"
+  },
+  "enterpriseOpenPage": "去 Flocks Pro 页"
 }
