@@ -51,6 +51,7 @@ from flocks.cli.service_control import read_supervisor_status
 from flocks.cli.service_manager import (
     BACKEND_RUNTIME_DIR_ENV,
     ServiceError,
+    apply_console_default,
     remove_backend_runtime_record,
     resolve_flocks_cli_command,
     restart_all,
@@ -562,6 +563,7 @@ def serve(
     os.environ["_FLOCKS_SERVER_PORT"] = str(port)
     # One id per service launch, inherited by all uvicorn workers/reload children.
     os.environ["_FLOCKS_SERVICE_BOOT_ID"] = secrets_lib.token_hex(16)
+    apply_console_default()
 
     console.print(Panel(logo(), border_style="cyan"))
     console.print(f"[cyan]Starting server on:[/cyan] http://{host}:{port}")

@@ -107,6 +107,12 @@ def test_hidden_serve_command_is_not_listed_but_still_invocable(monkeypatch, tmp
     assert "Start the Flocks API server" in hidden_help.stdout
 
 
+@pytest.fixture(autouse=True)
+def _keep_console_default_in_the_test(monkeypatch) -> None:
+    """serve() may fill in the Console default in os.environ; the rest of the suite must not see it."""
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example")
+
+
 def test_serve_exposes_runtime_server_port(monkeypatch) -> None:
     import uvicorn
 
@@ -116,6 +122,66 @@ def test_serve_exposes_runtime_server_port(monkeypatch) -> None:
     cli_main.serve(host="127.0.0.1", port=5173, reload=False)
 
     assert os.environ["_FLOCKS_SERVER_PORT"] == "5173"
+
+
+def test_serve_without_console_setting_uses_the_default_flocks_start_gives(monkeypatch) -> None:
+    """launchd, systemd and the enterprise core run `flocks serve` directly, not `flocks start`."""
+    import uvicorn
+
+    from flocks.cli import service_manager
+    from flocks.console.login import ConsoleLoginService
+    from flocks.updater import enterprise
+
+    seen: dict[str, str] = {}
+
+    def fake_run(*_args, **_kwargs):
+        seen["login"] = ConsoleLoginService.console_base_url()
+        seen["upgrade"] = enterprise._console_base_url()
+
+    monkeypatch.delenv("FLOCKS_CONSOLE_BASE_URL")
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+
+    cli_main.serve(host="127.0.0.1", port=5173, reload=False)
+
+    default = service_manager.DEFAULT_FLOCKS_CONSOLE_BASE_URL
+    assert default == "https://portalflocks.threatbook.cn"
+    assert seen == {"login": default, "upgrade": default}
+
+
+@pytest.mark.parametrize(
+    "configured",
+    ["https://custom-console.example.com", ""],
+    ids=["own-console", "set-empty-means-no-console"],
+)
+def test_serve_keeps_console_setting_it_was_given(monkeypatch, configured) -> None:
+    import uvicorn
+
+    from flocks.console.login import ConsoleLoginService
+
+    seen: list[str] = []
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", configured)
+    monkeypatch.setattr(uvicorn, "run", lambda *_a, **_k: seen.append(ConsoleLoginService.console_base_url()))
+
+    cli_main.serve(host="127.0.0.1", port=5173, reload=False)
+
+    assert seen == [configured]
+
+
+@pytest.mark.parametrize("platform", ["posix", "nt"])
+def test_console_set_empty_in_dotenv_stays_empty_on_every_platform(monkeypatch, tmp_path, platform) -> None:
+    from dotenv import load_dotenv
+
+    from flocks.cli import service_manager
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("FLOCKS_CONSOLE_BASE_URL=\n", encoding="utf-8")
+    monkeypatch.delenv("FLOCKS_CONSOLE_BASE_URL")
+    load_dotenv(dotenv, override=False)  # as flocks/startup_env.py does on import
+    with monkeypatch.context() as patched:
+        patched.setattr(service_manager.os, "name", platform)
+        service_manager.apply_console_default()
+
+    assert os.environ["FLOCKS_CONSOLE_BASE_URL"] == ""
 
 
 def test_serve_stays_single_process_under_web_concurrency(monkeypatch) -> None:
