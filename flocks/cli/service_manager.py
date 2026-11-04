@@ -1561,6 +1561,15 @@ def _backend_command_and_env(root: Path, config: ServiceConfig) -> tuple[list[st
     return command, env
 
 
+def apply_console_default() -> None:
+    """Give this process the Console ``flocks start`` gives its backend, when told of no other.
+
+    For what ``flocks start`` does not start: a ``flocks serve`` run directly by launchd, systemd
+    or the enterprise core, a command typed in a shell. Set empty means no Console and stays so.
+    """
+    os.environ.setdefault("FLOCKS_CONSOLE_BASE_URL", DEFAULT_FLOCKS_CONSOLE_BASE_URL)
+
+
 def _build_webui_dist(root: Path, config: ServiceConfig, console) -> None:
     """Build the production WebUI static bundle."""
     npm = resolve_npm_executable()

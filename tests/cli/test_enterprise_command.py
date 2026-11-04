@@ -24,6 +24,8 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "home" / ".flocks"))
     monkeypatch.setenv("FLOCKS_LOG_DIR", str(tmp_path / "logs"))
+    # Set, so that the command's Console default stays out of the rest of the suite's environment.
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example")
     monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
 
 
@@ -76,6 +78,27 @@ def test_check_only_says_what_console_offers(machine):
     assert result.exit_code == 0, result.output
     assert "flockspro-2026.11.21-linux-arm64.run" in result.output and "50 MB" in result.output
     assert machine["downloaded"] is False and machine["ran"] is None
+
+
+@pytest.mark.parametrize(
+    ("setting", "said"),
+    [(None, "没有企业版授权"), ("", "没有配置 Console")],
+    ids=["unset-asks-the-default-console", "set-empty-means-no-console"],
+)
+def test_a_shell_without_a_console_setting_asks_what_the_page_asks(monkeypatch, setting, said):
+    """The real offer: with no licence on this machine it stops before any request is made."""
+    monkeypatch.setattr(enterprise, "situation", lambda: _situation())
+    monkeypatch.setattr(enterprise, "PREVIOUS_DISTRIBUTION", "flockspro-not-installed-here")
+    monkeypatch.delenv("FLOCKSPRO_LICENSE_ID", raising=False)
+    if setting is None:
+        monkeypatch.delenv("FLOCKS_CONSOLE_BASE_URL")
+    else:
+        monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", setting)
+
+    result = runner.invoke(cli_main.app, ["enterprise", "upgrade", "--check"])
+
+    assert result.exit_code == 1 and said in result.output
+    assert enterprise._console_base_url() == ("https://portalflocks.threatbook.cn" if setting is None else "")
 
 
 def test_upgrade_downloads_checks_and_runs_the_installer(machine):
