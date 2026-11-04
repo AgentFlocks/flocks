@@ -202,17 +202,48 @@ def previous_edition() -> dict[str, Any] | None:
     }
 
 
+def install_dir() -> Path:
+    """Where the installer puts the release for this account (deploy/release/installer.sh in
+    flockspro chooses the same): the default where this account may write it or runs from it, else
+    a directory of its own, so a machine set up without root needs none for this either."""
+    if _WINDOWS or _euid() == 0 or (INSTALL_ROOT / "current").exists():
+        return INSTALL_ROOT
+    if INSTALL_ROOT.is_dir() and os.access(INSTALL_ROOT, os.W_OK | os.X_OK):
+        return INSTALL_ROOT
+    return Path.home() / "flockspro"
+
+
 def install_root_ready() -> bool:
-    """This account may make or write the install root, as the installer needs. On Windows the
-    installer asks for an administrator itself (the system's confirmation), so it always may."""
+    """This account may make or write the directory the install goes to, as the installer needs. On
+    Windows the installer asks for an administrator itself (the system's confirmation), so it
+    always may."""
     if _WINDOWS or _euid() == 0:
         return True
-    return INSTALL_ROOT.is_dir() and os.access(INSTALL_ROOT, os.W_OK | os.X_OK)
+    target = install_dir()
+    return os.access(target if target.is_dir() else target.parent, os.W_OK | os.X_OK)
 
 
-def prepare_command() -> str | None:
-    """What root runs once so this account may install (installer.sh says the same)."""
-    if _euid() == 0 or run_by_systemd() or install_root_ready():
+def _default_root_ready() -> bool:
+    """This account may make or write the default directory."""
+    if _WINDOWS or _euid() == 0:
+        return True
+    return os.access(INSTALL_ROOT if INSTALL_ROOT.is_dir() else INSTALL_ROOT.parent, os.W_OK | os.X_OK)
+
+
+def installer_relocatable(path: Path) -> bool:
+    """What the installer says of itself (make_installer.sh, from the signed release): one for a
+    customer, or from before this, goes to the default directory and nowhere else."""
+    try:
+        with path.open("rb") as installer:
+            return b"\nrelocatable=1\n" in installer.read(1 << 16)
+    except OSError:
+        return False
+
+
+def prepare_command(*, default_root: bool = False) -> str | None:
+    """What root runs once so this account may install (installer.sh says the same); default_root
+    when the installer goes nowhere but the default directory."""
+    if _euid() == 0 or run_by_systemd() or (_default_root_ready() if default_root else install_root_ready()):
         return None
     user, group = _account()
     return f"sudo install -d -o {shlex.quote(user)} -g {shlex.quote(group)} -m 0755 {INSTALL_ROOT}"
@@ -247,7 +278,7 @@ def situation() -> dict[str, Any]:
         "account": user,
         "root": _euid() == 0,
         "systemd": systemd,
-        "install_root": str(INSTALL_ROOT),
+        "install_root": str(install_dir()),
         "install_root_ready": install_root_ready(),
         "prepare_command": prepare_command(),
         # The page starts the installer itself only where this account runs the install.
@@ -813,14 +844,15 @@ async def _upgrade(progress: Callable[[dict[str, Any]], Awaitable[None]]) -> dic
         _write_state({**base, "phase": "failed", "message": str(exc) or "下载没有完成"})
         raise
     await progress({"stage": "downloaded", "installer": str(path)})
-    if run_by_systemd() or not install_root_ready():
+    fixed_root = not _WINDOWS and not installer_relocatable(path) and not _default_root_ready()
+    if run_by_systemd() or not install_root_ready() or fixed_root:
         state = {
             "phase": "command",
             "release_id": offer.release_id,
             "version": offer.version,
             "installer": str(path),
             "command": installer_command(str(path)),
-            "prepare_command": prepare_command(),
+            "prepare_command": prepare_command(default_root=fixed_root),
         }
         _write_state(state)
         return state

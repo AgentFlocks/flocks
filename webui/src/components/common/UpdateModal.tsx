@@ -27,7 +27,10 @@ import {
 } from '@/api/update';
 import { checkRestartReadiness } from '@/utils/restartPolling';
 import UpgradeHandoffSteps, { useHandoffFailureMessage } from './UpgradeHandoffSteps';
-import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
+import { ENTERPRISE_UPDATE_CHANNEL, UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
+import { withReleaseUpdate, type ReleaseUpdateSource } from '@/utils/releaseUpdate';
+import { extractErrorMessage } from '@/utils/error';
+import { ENTERPRISE_UPGRADE_PAGE, enterpriseUpgradeApi, enterpriseVersionInfo } from '@/api/enterpriseUpgrade';
 
 // ------------------------------------------------------------------ //
 
@@ -66,11 +69,22 @@ function formatBytes(value?: number | null): string {
   return `${size.toFixed(precision)} ${units[unitIndex]}`;
 }
 
+/** A machine with an enterprise licence: its update is the new enterprise edition, from Console. */
+export interface EnterpriseUpdate {
+  /** Where the installer puts it (flocks.updater.enterprise.install_dir). */
+  installRoot: string;
+  /** This server may run the installer; otherwise the Flocks Pro page says what root has to run. */
+  canStart: boolean;
+}
+
 interface UpdateModalProps {
   initialInfo?: VersionInfo | null;
   forceInitialCheck?: boolean;
   /** Update channel to check and apply; unset means the default channel. */
   channel?: string;
+  enterprise?: EnterpriseUpdate | null;
+  /** A build whose releases its own core installs: how a managed install applies one. */
+  releaseUpdate?: ReleaseUpdateSource;
   canUpgrade?: boolean;
   onClose: () => void;
   onDismiss?: () => void;
@@ -81,6 +95,8 @@ export default function UpdateModal({
   initialInfo,
   forceInitialCheck = false,
   channel = DEFAULT_UPDATE_CHANNEL,
+  enterprise = null,
+  releaseUpdate,
   canUpgrade = true,
   onClose,
   onDismiss,
@@ -116,7 +132,9 @@ export default function UpdateModal({
     setChecking(true);
     setError(null);
     try {
-      const data = await checkUpdate(i18n.language, channel, force);
+      const data = enterprise
+        ? await enterpriseVersionInfo(t('checkFailed'))
+        : await withReleaseUpdate(await checkUpdate(i18n.language, channel, force), releaseUpdate);
       setInfo(data);
       if (data.error) setError(data.error);
     } catch (e: any) {
@@ -124,7 +142,7 @@ export default function UpdateModal({
     } finally {
       setChecking(false);
     }
-  }, [channel, i18n.language, t]);
+  }, [channel, enterprise, i18n.language, releaseUpdate, t]);
 
   useEffect(() => {
     if (!initialInfo) {
@@ -132,15 +150,153 @@ export default function UpdateModal({
     }
   }, [fetchVersion, forceInitialCheck, initialInfo]);
 
+  // The installer runs apart from this server and stops it on the way. What answers here next says
+  // how it went: this open edition again, with why it failed, or the enterprise edition, for which
+  // this machine is no longer one to upgrade. Not answering just now says neither.
+  const pollEnterpriseUntilReady = () => {
+    const startedAt = Date.now();
+    const unlock = (message: string) => {
+      setError(message);
+      setRestartingSync(false);
+      setUpgrading(false);
+    };
+    const poll = async () => {
+      if (Date.now() - startedAt > HANDOFF_MAX_WAIT) {
+        unlock(t('restartTimeout', { reason: t('restartUnknown') }));
+        return;
+      }
+      try {
+        const situation = await enterpriseUpgradeApi.situation();
+        if (!situation.available || situation.upgrade?.phase === 'finished') {
+          window.location.reload();
+          return;
+        }
+        if (situation.upgrade?.phase === 'failed') {
+          unlock(situation.upgrade.message ?? t('upgradeFailed'));
+          return;
+        }
+      } catch (e: any) {
+        // Refused rather than out of reach: another build answers here now (a new sign-in, say).
+        const refused = typeof e?.response?.status === 'number' && e.response.status < 500;
+        if (refused && (await checkRestartReadiness(null)).ready) {
+          window.location.reload();
+          return;
+        }
+      }
+      setTimeout(() => {
+        void poll();
+      }, HEALTH_POLL_INTERVAL);
+    };
+    setTimeout(() => {
+      void poll();
+    }, 1500);
+  };
+
+  // Installed apart from this server, which stays up until the install restarts it: that it answers
+  // says nothing. The source says how it went; asked through the restart, as the Flocks Pro page does.
+  const pollReleaseUntilEnded = (source: ReleaseUpdateSource, token: string) => {
+    const startedAt = Date.now();
+    const unlock = (message: string) => {
+      setError(message);
+      setRestartingSync(false);
+      setUpgrading(false);
+    };
+    const poll = async () => {
+      if (Date.now() - startedAt > HANDOFF_MAX_WAIT) {
+        unlock(t('restartTimeout', { reason: t('restartUnknown') }));
+        return;
+      }
+      try {
+        const outcome = await source.outcome(token);
+        if (outcome.state === 'done') {
+          window.location.reload();
+          return;
+        }
+        if (outcome.state === 'failed' || outcome.state === 'stalled' || outcome.state === 'unknown') {
+          unlock(outcome.detail || t('upgradeFailed'));
+          return;
+        }
+      } catch (e: any) {
+        // Out of reach, or the proxy's answer while the service restarts: keep asking.
+        // The service's own refusal (signed out, say) will not change.
+        const code = e?.response?.status;
+        if (typeof code === 'number' && code >= 400 && code < 500) {
+          unlock(extractErrorMessage(e, t('upgradeFailed')));
+          return;
+        }
+      }
+      setTimeout(() => {
+        void poll();
+      }, HEALTH_POLL_INTERVAL);
+    };
+    setTimeout(() => {
+      void poll();
+    }, 1500);
+  };
+
+  const handleEnterpriseUpgrade = async () => {
+    if (!enterprise?.canStart) {
+      window.location.assign(ENTERPRISE_UPGRADE_PAGE);
+      return;
+    }
+    setUpgrading(true);
+    setUpgradeAttempted(true);
+    setSteps([]);
+    setError(null);
+    try {
+      const state = await enterpriseUpgradeApi.start((event) => {
+        if (event.stage !== 'downloading') return;
+        const received = event.received ?? 0;
+        const total = event.total ?? null;
+        setSteps([{
+          stage: 'fetching',
+          message: '',
+          success: null,
+          downloaded_bytes: received,
+          total_bytes: total,
+          percent: total ? (received / total) * 100 : null,
+        }]);
+      });
+      if (state.phase === 'installing') {
+        // The server reports the download once a second: the last of it comes with this.
+        setSteps((prev) => [
+          ...prev.map((step) => (step.total_bytes
+            ? { ...step, downloaded_bytes: step.total_bytes, percent: 100 }
+            : step)),
+          { stage: 'restarting', message: '', success: null },
+        ]);
+        setRestartingSync(true);
+        pollEnterpriseUntilReady();
+      } else if (state.phase === 'finished') {
+        window.location.reload();
+      } else if (state.phase === 'command') {
+        // Downloaded, and root has to run it: that page shows what to run.
+        window.location.assign(ENTERPRISE_UPGRADE_PAGE);
+      } else {
+        setError(state.message ?? t('upgradeFailed'));
+        setUpgrading(false);
+      }
+    } catch (e: any) {
+      setError(e.message ?? t('upgradeFailed'));
+      setUpgrading(false);
+    }
+  };
+
   const handleUpgrade = useCallback(async () => {
     if (!info?.has_update || !canUpgrade || info.update_allowed === false) return;
+    // The way the shown version came: a background check must not change what this button does.
+    if (info.channel === ENTERPRISE_UPDATE_CHANNEL) {
+      await handleEnterpriseUpgrade();
+      return;
+    }
     setUpgrading(true);
     setUpgradeAttempted(true);
     setSteps([]);
     setError(null);
 
+    const viaRelease = info.deploy_mode === 'managed' ? releaseUpdate : undefined;
     try {
-      await applyUpdate(info.latest_version!, (progress) => {
+      const onProgress = (progress: UpdateProgress) => {
         setSteps((prev) => {
           const existingIndex = prev.findIndex((item) => item.stage === progress.stage);
           if (existingIndex === -1) {
@@ -156,9 +312,18 @@ export default function UpdateModal({
           progressTokenRef.current = progress.progress_token ?? null;
           setHandoffProgress(null);
           setRestartingSync(true);
-          pollUntilReady();
+          if (viaRelease && progress.progress_token) {
+            pollReleaseUntilEnded(viaRelease, progress.progress_token);
+          } else {
+            pollUntilReady();
+          }
         }
-      }, i18n.language, channel);
+      };
+      if (viaRelease) {
+        await viaRelease.start(onProgress);
+      } else {
+        await applyUpdate(info.latest_version!, onProgress, i18n.language, channel);
+      }
       // The stream can close without an error or a restart (e.g. nothing to upgrade):
       // stop showing the upgrade as running.
       if (!restartingRef.current) {
@@ -175,9 +340,10 @@ export default function UpdateModal({
         restartFailureReasonRef.current = e.message;
       }
     }
-  }, [canUpgrade, channel, i18n.language, info, t]);
+  }, [canUpgrade, channel, enterprise, i18n.language, info, releaseUpdate, t]);
 
   const isBusy = upgrading || restarting;
+  const enterpriseShown = info?.channel === ENTERPRISE_UPDATE_CHANNEL;
   const showProgressDialog = upgradeAttempted || upgrading || restarting || steps.length > 0;
   const safeClose = () => {
     if (!isBusy) onClose();
@@ -227,7 +393,9 @@ export default function UpdateModal({
   };
 
   const renderStep = (step: UpdateProgress, index: number) => {
-    const label = t(`stageLabels.${step.stage}`, { defaultValue: step.stage });
+    const label = enterpriseShown
+      ? t(`enterpriseStageLabels.${step.stage}`, { defaultValue: step.stage })
+      : t(`stageLabels.${step.stage}`, { defaultValue: step.stage });
     const restartFailed = step.stage === 'restarting' && handoffProgress?.phase === 'failed';
     const isError = step.stage === 'error' || restartFailed;
     const isSpinning = step.stage === 'restarting' && restarting && !restartFailed;
@@ -322,7 +490,7 @@ export default function UpdateModal({
                     )}
                     {(isBusy || !error) && (
                       <p className="mt-2 text-sm leading-6 text-amber-800">
-                        {t('confirmUpgradeDesc')}
+                        {enterpriseShown ? t('enterpriseInstalling') : t('confirmUpgradeDesc')}
                       </p>
                     )}
                   </div>
@@ -391,13 +559,20 @@ export default function UpdateModal({
                 <div className="font-medium">
                   {t('confirmUpgrade', { version: formatUpdateVersion(latestDisplayVersion) })}
                 </div>
-                <div className="mt-1 leading-5">{t('newVersionDesc')}</div>
+                <div className="mt-1 leading-5">
+                  {enterpriseShown && enterprise ? t('enterpriseDesc', { root: enterprise.installRoot }) : t('newVersionDesc')}
+                </div>
               </div>
             ) : (
               <div className="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-xs text-gray-600">
                 {checking
                   ? t('checkUpdate')
                   : error ?? (info?.deploy_mode === 'offline' && !info.latest_version ? t('offlineNotChecked') : t('upToDate'))}
+                {enterpriseShown && error && !checking && (
+                  <a href={ENTERPRISE_UPGRADE_PAGE} className="mt-1 block font-medium text-gray-700 underline">
+                    {t('enterpriseOpenPage')}
+                  </a>
+                )}
               </div>
             )}
             {/* The deploy-mode notice does not depend on has_update: an offline package
@@ -497,7 +672,7 @@ export default function UpdateModal({
             {canUpgrade && info?.has_update && info.update_allowed !== false && (
               <NoticePrimaryAction onClick={handleUpgrade} className="ml-auto">
                 <ArrowUpCircle className="w-3.5 h-3.5" />
-                {t('confirmAction')}
+                {enterpriseShown && !enterprise?.canStart ? t('enterpriseOpenPage') : t('confirmAction')}
               </NoticePrimaryAction>
             )}
           </div>

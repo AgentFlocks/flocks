@@ -4,10 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import UpdateModal from './UpdateModal';
 
-const { applyUpdate, checkUpdate, checkRestartReadiness } = vi.hoisted(() => ({
+const { applyUpdate, checkUpdate, checkRestartReadiness, enterpriseStart, enterpriseSituation, enterpriseVersionInfo } = vi.hoisted(() => ({
   applyUpdate: vi.fn(),
   checkUpdate: vi.fn(),
   checkRestartReadiness: vi.fn(),
+  enterpriseStart: vi.fn(),
+  enterpriseSituation: vi.fn(),
+  enterpriseVersionInfo: vi.fn(),
 }));
 
 vi.mock('@/api/update', () => ({
@@ -19,6 +22,12 @@ vi.mock('@/api/update', () => ({
 }));
 
 vi.mock('@/utils/restartPolling', () => ({ checkRestartReadiness }));
+
+vi.mock('@/api/enterpriseUpgrade', () => ({
+  ENTERPRISE_UPGRADE_PAGE: '/settings/flockspro',
+  enterpriseUpgradeApi: { start: enterpriseStart, situation: enterpriseSituation },
+  enterpriseVersionInfo,
+}));
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -420,5 +429,268 @@ describe('UpdateModal restart stage', () => {
 
     expect(await screen.findByText('restartTimeout')).toBeInTheDocument();
     expect(checkRestartReadiness).toHaveBeenCalledTimes(5);
+  });
+});
+
+describe('UpdateModal on a machine with an enterprise licence', () => {
+  const enterprise = { installRoot: '/home/me/flockspro', canStart: true };
+  const offered = { ...currentVersion, current_version: '2026.10.30', latest_version: '2026.11.04.31', has_update: true, channel: 'enterprise' };
+  const location = { reload: vi.fn(), assign: vi.fn() };
+  const realLocation = window.location;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    Object.defineProperty(window, 'location', { configurable: true, value: location });
+    enterpriseVersionInfo.mockResolvedValue(offered);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    Object.defineProperty(window, 'location', { configurable: true, value: realLocation });
+  });
+
+  const opened = async (props: Record<string, unknown> = {}) => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={offered} enterprise={enterprise} onClose={vi.fn()} {...props} />);
+    return user;
+  };
+
+  it('checks with Console, not this project\'s releases, and says where the program goes', async () => {
+    const user = await opened();
+    expect(screen.getByText('enterpriseDesc')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'checkUpdate' }));
+    await waitFor(() => expect(enterpriseVersionInfo).toHaveBeenCalledTimes(1));
+    expect(checkUpdate).not.toHaveBeenCalled();
+  });
+
+  it('shows the download, stays through the installer and reloads on what answers next', async () => {
+    let finishStart: (state: unknown) => void = () => {};
+    enterpriseStart.mockImplementation((onEvent: (event: unknown) => void) => new Promise((resolve) => {
+      onEvent({ stage: 'downloading', version: '2026.11.04.31' });
+      onEvent({ stage: 'downloading', received: 43, total: 100 });
+      finishStart = resolve;
+    }));
+    enterpriseSituation
+      .mockResolvedValueOnce({ available: true, upgrade: { phase: 'installing' } })
+      .mockRejectedValueOnce(new Error('out of reach'))
+      .mockRejectedValueOnce(new Error('still out of reach'))
+      .mockResolvedValue({ available: false, upgrade: null });
+    const user = await opened();
+
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '43');
+    expect(screen.getByText('enterpriseStageLabels.fetching')).toBeInTheDocument();
+    expect(applyUpdate).not.toHaveBeenCalled();
+
+    await act(async () => { finishStart({ phase: 'installing', version: '2026.11.04.31' }); });
+    expect(screen.getByText('enterpriseStageLabels.restarting')).toBeInTheDocument();
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '100');
+    expect(screen.getByText('enterpriseInstalling')).toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(1_500); // this server still reports it
+    expect(enterpriseSituation).toHaveBeenCalledTimes(1);
+    expect(location.reload).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2_000); // this server has stopped
+    await vi.advanceTimersByTimeAsync(2_000); // nothing answers yet
+    expect(location.reload).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2_000); // the enterprise edition answers
+    expect(location.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not take a server that answers badly for one thing or the other', async () => {
+    enterpriseStart.mockResolvedValue({ phase: 'installing' });
+    enterpriseSituation
+      .mockRejectedValueOnce({ response: { status: 502 } })
+      .mockResolvedValueOnce({ available: true, upgrade: { phase: 'installing' } })
+      .mockResolvedValue({ available: true, upgrade: { phase: 'installing' } });
+    checkRestartReadiness.mockResolvedValue({ ready: true });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(location.reload).not.toHaveBeenCalled();
+    expect(screen.getByText('enterpriseStageLabels.restarting')).toBeInTheDocument();
+  });
+
+  it('reloads when another build refuses the question and the service is up', async () => {
+    enterpriseStart.mockResolvedValue({ phase: 'installing' });
+    enterpriseSituation.mockRejectedValue({ response: { status: 404 } });
+    checkRestartReadiness.mockResolvedValue({ ready: true });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(location.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not take a refusal for the new edition before the service is up', async () => {
+    enterpriseStart.mockResolvedValue({ phase: 'installing' });
+    enterpriseSituation.mockRejectedValue({ response: { status: 404 } });
+    checkRestartReadiness.mockResolvedValue({ ready: false });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(location.reload).not.toHaveBeenCalled();
+    expect(screen.getByText('enterpriseStageLabels.restarting')).toBeInTheDocument();
+  });
+
+  it('says what failed when the installer reports it, the open edition being back, and the dialog can be closed', async () => {
+    enterpriseStart.mockResolvedValue({ phase: 'installing' });
+    enterpriseSituation
+      .mockRejectedValueOnce(new Error('stopped while it tried'))
+      .mockResolvedValue({ available: true, upgrade: { phase: 'failed', message: '安装没有完成' } });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await screen.findByText('安装没有完成')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
+    expect(location.reload).not.toHaveBeenCalled();
+  });
+
+  it('keeps to the way the shown version came when the machine changes under it', async () => {
+    // The dialog shows Console's version; a check that could not ask has taken the machine's kind away.
+    enterpriseStart.mockResolvedValue({ phase: 'installing' });
+    enterpriseSituation.mockResolvedValue({ available: true, upgrade: { phase: 'installing' } });
+    const user = await opened({ enterprise: null });
+    await user.click(screen.getByRole('button', { name: 'enterpriseOpenPage' }));
+    expect(applyUpdate).not.toHaveBeenCalled();
+    expect(location.assign).toHaveBeenCalledWith('/settings/flockspro');
+  });
+
+  it('says what stopped it before the installer ran', async () => {
+    enterpriseStart.mockRejectedValue(new Error('下载安装包失败'));
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    expect(await screen.findByText('下载安装包失败')).toBeInTheDocument();
+    expect(enterpriseSituation).not.toHaveBeenCalled();
+  });
+
+  it('leaves what root has to run to the Flocks Pro page', async () => {
+    const user = await opened({ enterprise: { installRoot: '/opt/flockspro', canStart: false } });
+    await user.click(screen.getByRole('button', { name: 'enterpriseOpenPage' }));
+    expect(location.assign).toHaveBeenCalledWith('/settings/flockspro');
+    expect(enterpriseStart).not.toHaveBeenCalled();
+
+    location.assign.mockClear();
+    enterpriseStart.mockResolvedValue({ phase: 'command', command: 'bash x.run' });
+    const started = await opened({ initialInfo: { ...offered }, enterprise });
+    await started.click(screen.getAllByRole('button', { name: 'confirmAction' }).at(-1)!);
+    await waitFor(() => expect(location.assign).toHaveBeenCalledWith('/settings/flockspro'));
+  });
+
+  it('shows a Console that will not say, and the way to the page that deals with it', async () => {
+    const failed = { ...offered, latest_version: null, has_update: false, error: 'Console 要先登录才给安装包' };
+    await opened({ initialInfo: failed });
+    expect(screen.getByText('Console 要先登录才给安装包')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'enterpriseOpenPage' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.queryByRole('button', { name: 'confirmAction' })).not.toBeInTheDocument();
+  });
+});
+
+describe('UpdateModal on a release its own core installs', () => {
+  const managed = {
+    ...currentVersion, latest_version: '2026.11.04.33', has_update: true, deploy_mode: 'managed' as const, update_allowed: true, channel: 'flockspro',
+  };
+  const location = { reload: vi.fn(), assign: vi.fn() };
+  const realLocation = window.location;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    Object.defineProperty(window, 'location', { configurable: true, value: location });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    Object.defineProperty(window, 'location', { configurable: true, value: realLocation });
+  });
+
+  const handedOver = (onProgress: (progress: unknown) => void) => {
+    onProgress({ stage: 'fetching', message: '', success: null, bundle_filename: 'r.fprb', downloaded_bytes: 5, total_bytes: 10, percent: 50 });
+    onProgress({ stage: 'restarting', message: '', success: null, progress_token: 'managed:abc' }); // secret-guard: allow (the test's own request id)
+    return Promise.resolve();
+  };
+  const started = async (outcome: () => Promise<unknown>) => {
+    const start = vi.fn(handedOver);
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={managed} channel="flockspro" releaseUpdate={{ status: vi.fn(), start, outcome: outcome as never }} onClose={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    return start;
+  };
+
+  it('applies it through the source, not the built-in updater, and waits for how it ended', async () => {
+    const outcome = vi.fn()
+      .mockResolvedValueOnce({ state: 'pending' })
+      .mockResolvedValueOnce({ state: 'running' })
+      .mockRejectedValueOnce(new Error('the service is restarting'))
+      .mockRejectedValueOnce({ response: { status: 502 } })
+      .mockResolvedValue({ state: 'done' });
+    const start = await started(outcome);
+
+    expect(screen.queryByText('managedModeTitle')).not.toBeInTheDocument();
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(applyUpdate).not.toHaveBeenCalled();
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '50');
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(outcome).toHaveBeenCalledWith('managed:abc');
+    for (let asked = 0; asked < 3; asked += 1) {
+      expect(location.reload).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(2_000);
+    }
+    expect(location.reload).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(location.reload).toHaveBeenCalledTimes(1);
+    // This service stays up until the install restarts it: its answering says nothing.
+    expect(checkRestartReadiness).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['failed', '签名不对'],
+    ['stalled', '升级单元没有接手'],
+    ['unknown', '被另一次升级换掉了'],
+  ])('says why when it ended %s, and the dialog can be closed', async (state, detail) => {
+    await started(vi.fn().mockResolvedValue({ state, detail }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(await screen.findByText(detail)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
+    expect(location.reload).not.toHaveBeenCalled();
+  });
+
+  it('stops at the service refusing the question, which will not change', async () => {
+    const outcome = vi.fn().mockRejectedValue({ response: { status: 401, data: { detail: '请重新登录' } } });
+    await started(outcome);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(await screen.findByText('请重新登录')).toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(outcome).toHaveBeenCalledTimes(1);
+  });
+
+  it('says what stopped it before it was handed over', async () => {
+    const start = vi.fn().mockRejectedValue(new Error('Console 没有这个平台的发布包'));
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={managed} channel="flockspro" releaseUpdate={{ status: vi.fn(), start, outcome: vi.fn() }} onClose={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    expect(await screen.findByText('Console 没有这个平台的发布包')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
+  });
+
+  it('a managed install that is not a release install keeps the notice and no button', async () => {
+    const status = vi.fn().mockResolvedValue({ release_install: false });
+    checkUpdate.mockResolvedValue({ ...managed, update_allowed: false });
+    render(<UpdateModal forceInitialCheck channel="flockspro" releaseUpdate={{ status, start: vi.fn(), outcome: vi.fn() }} onClose={vi.fn()} />);
+
+    expect(await screen.findByText('managedModeTitle')).toBeInTheDocument();
+    await waitFor(() => expect(status).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: 'confirmAction' })).not.toBeInTheDocument();
+  });
+
+  it('checking by hand asks the source as well', async () => {
+    const status = vi.fn().mockResolvedValue({ release_install: true, latest_version: '2026.11.04.34', has_update: true, error: null });
+    checkUpdate.mockResolvedValue({ ...managed, update_allowed: false, latest_version: '2026.11.04.30' });
+    render(<UpdateModal forceInitialCheck channel="flockspro" releaseUpdate={{ status, start: vi.fn(), outcome: vi.fn() }} onClose={vi.fn()} />);
+
+    expect(await screen.findByRole('button', { name: 'confirmAction' })).toBeInTheDocument();
+    expect(screen.queryByText('managedModeTitle')).not.toBeInTheDocument();
   });
 });

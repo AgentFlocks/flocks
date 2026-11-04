@@ -2,6 +2,9 @@ import { DEFAULT_UPDATE_CHANNEL, type VersionInfo } from '@/api/update';
 
 export const UPDATE_DISMISSED_KEY = 'flocks-update-dismissed';
 
+/** The new enterprise edition, offered by Console to a machine with an enterprise licence. */
+export const ENTERPRISE_UPDATE_CHANNEL = 'enterprise';
+
 function normalizeVersionPart(value?: string | null): string {
   const normalized = (value || '').trim();
   return normalized || 'none';
@@ -28,6 +31,11 @@ export function isUpdateDismissed(info: VersionInfo | null | undefined, dismisse
   const dismissalKey = buildUpdateDismissalKey(info);
   if (dismissalKey && dismissedValue === dismissalKey) {
     return true;
+  }
+  // Older records carry no channel of this one's and were never about it; a record of this one's
+  // is not about another's.
+  if (info?.channel === ENTERPRISE_UPDATE_CHANNEL || dismissedValue.startsWith(`${ENTERPRISE_UPDATE_CHANNEL}:`)) {
+    return false;
   }
 
   // Older releases stored either the bare current version or a differently

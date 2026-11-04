@@ -6,7 +6,7 @@ import Layout from './Layout';
 import { ThemeProvider } from '@/contexts/ThemeContext';
 
 const {
-  checkUpdate, getCurrentRelease, onboardingAPI, sessionApi,
+  checkUpdate, getCurrentRelease, enterpriseSituation, enterpriseVersionInfo, onboardingAPI, sessionApi,
   getActiveNotifications, ackNotification, getNotificationAckStatus,
   productNameContextValue,
   useAuth, useWebUIContractPages, useSceneSuiteUpdates, useTaskDashboard,
@@ -15,6 +15,8 @@ const {
   changeLanguage: vi.fn(),
   checkUpdate: vi.fn(),
   getCurrentRelease: vi.fn(),
+  enterpriseSituation: vi.fn(),
+  enterpriseVersionInfo: vi.fn(),
   onboardingAPI: { getStatus: vi.fn() },
   sessionApi: { create: vi.fn() },
   getActiveNotifications: vi.fn(),
@@ -32,6 +34,10 @@ const {
 }));
 
 vi.mock('@/api/update', () => ({ checkUpdate, getCurrentRelease, DEFAULT_UPDATE_CHANNEL: 'default' }));
+vi.mock('@/api/enterpriseUpgrade', () => ({
+  enterpriseUpgradeApi: { situation: enterpriseSituation },
+  enterpriseVersionInfo,
+}));
 vi.mock('@/api/onboarding', () => ({ onboardingAPI }));
 vi.mock('@/api/session', () => ({ sessionApi }));
 vi.mock('@/api/notifications', () => ({ getActiveNotifications, ackNotification, getNotificationAckStatus }));
@@ -130,6 +136,7 @@ beforeEach(() => {
   onboardingAPI.getStatus.mockResolvedValue({ data: { completed: true } });
   checkUpdate.mockResolvedValue({ has_update: false, current_version: '2026.9.1' });
   getCurrentRelease.mockResolvedValue(null);
+  enterpriseSituation.mockResolvedValue({ available: true, previous: null, install_root: '/opt/flockspro', can_start: true });
   getActiveNotifications.mockResolvedValue([]);
   getNotificationAckStatus.mockResolvedValue({ acknowledged: true });
   useSceneSuiteUpdates.mockReturnValue({ hasUnseenSuites: false });
@@ -734,6 +741,79 @@ describe('Layout chrome', () => {
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument());
     expect(updateModalProps.at(-1)).toEqual(expect.objectContaining({ forceInitialCheck: true }));
     expect(updateModalProps.at(-1)).not.toHaveProperty('channel');
+  });
+
+  describe('on a machine with an enterprise licence', () => {
+    const licensed = { available: true, previous: { license_id: 'lic-1', version: '2026.10.19' }, install_root: '/home/me/flockspro', can_start: true };
+    const offered = { has_update: true, current_version: '2026.10.30', latest_version: '2026.11.04.31', channel: 'enterprise' };
+
+    it('reminds of the new enterprise edition, from Console, and its dialog upgrades to it', async () => {
+      enterpriseSituation.mockResolvedValue(licensed);
+      enterpriseVersionInfo.mockResolvedValue(offered);
+      renderAt('/');
+      await waitFor(() => expect(screen.getByText('newVersion')).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument());
+      expect(updateModalProps.at(-1)).toEqual(expect.objectContaining({
+        enterprise: { installRoot: '/home/me/flockspro', canStart: true },
+        initialInfo: offered,
+      }));
+      // Not this project's releases: `flocks update` is for those.
+      expect(checkUpdate).not.toHaveBeenCalled();
+    });
+
+    it('opens the same dialog on a check by hand, a Console that will not say being shown there', async () => {
+      enterpriseSituation.mockResolvedValue(licensed);
+      enterpriseVersionInfo.mockResolvedValue({ has_update: false, current_version: '2026.10.30', latest_version: null, error: '要先登录' });
+      renderAt('/');
+      await waitFor(() => expect(enterpriseVersionInfo).toHaveBeenCalled());
+      // Nothing to offer: no reminder, no dialog of its own accord, and no release check instead.
+      expect(screen.queryByText('newVersion')).not.toBeInTheDocument();
+      expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal:admin' }));
+      fireEvent.click(within(screen.getByRole('menu', { name: 'accountAndGlobal:admin' })).getByRole('menuitem', { name: 'checkUpdate' }));
+      await waitFor(() => expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument());
+      expect(updateModalProps.at(-1)).toEqual(expect.objectContaining({ forceInitialCheck: true, enterprise: expect.any(Object) }));
+      expect(checkUpdate).not.toHaveBeenCalled();
+    });
+
+    it('holds to what it knew when the machine cannot be asked just now', async () => {
+      enterpriseSituation.mockResolvedValueOnce(licensed).mockRejectedValue(new Error('502'));
+      enterpriseVersionInfo.mockResolvedValue(offered);
+      renderAt('/');
+      await waitFor(() => expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument());
+      fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal:admin' }));
+      fireEvent.click(within(screen.getByRole('menu', { name: 'accountAndGlobal:admin' })).getByRole('menuitem', { name: 'checkUpdate' }));
+      await waitFor(() => expect(enterpriseSituation).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(updateModalProps.at(-1)).toEqual(expect.objectContaining({ forceInitialCheck: true })));
+      expect(updateModalProps.at(-1)).toEqual(expect.objectContaining({ enterprise: { installRoot: '/home/me/flockspro', canStart: true } }));
+    });
+
+    it('finds out again on a check by hand: a licence taken since counts', async () => {
+      enterpriseSituation.mockResolvedValueOnce({ available: true, previous: null, install_root: '/x', can_start: true });
+      renderAt('/');
+      await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', undefined));
+      enterpriseSituation.mockResolvedValue(licensed);
+      fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal:admin' }));
+      fireEvent.click(within(screen.getByRole('menu', { name: 'accountAndGlobal:admin' })).getByRole('menuitem', { name: 'checkUpdate' }));
+      await waitFor(() => expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument());
+      expect(updateModalProps.at(-1)).toEqual(expect.objectContaining({ enterprise: { installRoot: '/home/me/flockspro', canStart: true } }));
+    });
+
+    it('stays with this project\'s releases without a licence, or where the page cannot be asked', async () => {
+      for (const situation of [
+        () => Promise.resolve({ available: true, previous: { license_id: null, version: '2026.10.19' }, install_root: '/x', can_start: true }),
+        () => Promise.resolve({ available: false, previous: { license_id: 'lic-1' }, install_root: '/x', can_start: false }),
+        () => Promise.reject(new Error('404')),
+      ]) {
+        vi.clearAllMocks();
+        checkUpdate.mockResolvedValue({ has_update: false, current_version: '2026.9.1' });
+        enterpriseSituation.mockImplementation(situation);
+        const { unmount } = renderAt('/');
+        await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', undefined));
+        expect(enterpriseVersionInfo).not.toHaveBeenCalled();
+        unmount();
+      }
+    });
   });
 
   const bundleRelease = (component: string, notes: string) => ({

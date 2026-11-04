@@ -142,6 +142,32 @@ async def test_eu1b_the_page_and_console_go_by_one_licence(machine: Path, monkey
     assert seen[-1].headers["x-license-id"] == "lic-status-2"
 
 
+def test_eu2_an_account_that_cannot_write_the_default_directory_gets_its_own(machine: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A machine set up without root needs none for this either (installer.sh chooses the same)."""
+    home = machine.parent / "account-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(enterprise, "_euid", lambda: 1000)
+    monkeypatch.setattr(enterprise, "INSTALL_ROOT", machine.parent / "missing")
+
+    situation = enterprise.situation()
+
+    assert situation["install_root"] == str(home / "flockspro")
+    assert situation["can_start"] is True and situation["prepare_command"] is None
+
+
+def test_eu2_an_install_at_the_default_directory_stays_there(machine: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = machine.parent / "account-home"
+    home.mkdir()
+    default = machine.parent / "default-root"
+    (default / "current").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(enterprise, "_euid", lambda: 1000)
+    monkeypatch.setattr(enterprise, "INSTALL_ROOT", default)
+
+    assert enterprise.situation()["install_root"] == str(default)
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="as an account of its own")
 def test_eu2_how_this_account_may_install(machine: Path, monkeypatch: pytest.MonkeyPatch):
     situation = enterprise.situation()
@@ -160,6 +186,48 @@ def test_eu2_how_this_account_may_install(machine: Path, monkeypatch: pytest.Mon
     situation = enterprise.situation()
     assert situation["systemd"] is True and situation["can_start"] is False and situation["prepare_command"] is None
     assert situation["manual_command"].startswith("sudo bash ")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="as an account of its own")
+@pytest.mark.parametrize(("says", "runs"), [(b"relocatable=1", True), (b"relocatable=0", False), (b"", False)])
+async def test_eu2_an_installer_for_the_default_directory_only_asks_root_for_it(
+    machine: Path, monkeypatch: pytest.MonkeyPatch, says: bytes, runs: bool
+) -> None:
+    home = machine.parent / "account-home"
+    home.mkdir()
+    closed = machine.parent / "closed"
+    closed.mkdir()
+    closed.chmod(0o500)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(enterprise, "INSTALL_ROOT", closed / "flockspro")
+    installer = machine.parent / "x.run"
+    installer.write_bytes(b"#!/bin/sh\n" + says + b"\n")
+    offer = enterprise.InstallerOffer(url="https://console/x.run", sha256="a" * 64, release_id="r1", version="2026.11.5", size=1)
+
+    async def fetch() -> enterprise.InstallerOffer:
+        return offer
+
+    async def download(_offer, _progress) -> Path:
+        return installer
+
+    started: list[Path] = []
+    monkeypatch.setattr(enterprise, "fetch_offer", fetch)
+    monkeypatch.setattr(enterprise, "download", download)
+    monkeypatch.setattr(enterprise, "start_installer", lambda path, _offer: started.append(path) or {"phase": "installing"})
+
+    async def progress(_event) -> None:
+        return None
+
+    try:
+        state = await enterprise.upgrade(progress)
+    finally:
+        closed.chmod(0o700)
+
+    if runs:
+        assert started == [installer] and state["phase"] == "installing"
+    else:
+        assert started == [] and state["phase"] == "command"
+        assert state["prepare_command"].startswith("sudo install -d") and str(closed / "flockspro") in state["prepare_command"]
 
 
 async def test_eu3_console_offers_this_platforms_installer(machine: Path, monkeypatch: pytest.MonkeyPatch):

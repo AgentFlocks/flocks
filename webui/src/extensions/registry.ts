@@ -1,3 +1,4 @@
+import type { ReleaseUpdateSource } from '@/utils/releaseUpdate';
 import type { ComponentType } from 'react';
 import { ArrowUpCircle, Crown, type LucideIcon } from 'lucide-react';
 
@@ -159,6 +160,8 @@ export interface WebUIExtensionRegistry {
    * asks for the default channel.
    */
   updateChannel?: string;
+  /** A build whose releases its own core installs: how the update dialog applies one. */
+  releaseUpdate?: ReleaseUpdateSource;
 }
 
 const registry: WebUIExtensionRegistry = {

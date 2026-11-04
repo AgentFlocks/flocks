@@ -72,5 +72,12 @@
     "failed": "The upgrade failed at \"{{step}}\": {{error}}",
     "noDetail": "The detailed reason is only shown on the page that started the upgrade.",
     "recoveryHint": "The service has not come back: check ~/.flocks/run/upgrade-result.json and today's errors.log under ~/.flocks/logs/ on the server, fix the cause, then run flocks start."
-  }
+  },
+  "enterpriseDesc": "This machine has an enterprise licence, so this upgrades it to the new enterprise edition: the program goes to {{root}}, its data and licence stay, and the web address stays the same. The open edition stops first, and the first start migrates data, which can take minutes.",
+  "enterpriseInstalling": "The open edition stops first, and the first start of the enterprise edition migrates data, which can take minutes. This page refreshes by itself when it is done.",
+  "enterpriseStageLabels": {
+    "fetching": "Download the new enterprise installer",
+    "restarting": "Install the new enterprise edition"
+  },
+  "enterpriseOpenPage": "Open the Flocks Pro page"
 }

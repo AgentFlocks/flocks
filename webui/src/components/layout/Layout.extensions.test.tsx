@@ -1,5 +1,5 @@
 import React from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Layout from './Layout';
@@ -200,6 +200,42 @@ describe('Layout extension registry integration', () => {
     renderLayout();
     await flush();
     await vi.waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'private-channel'));
+  });
+
+  describe('on a build whose core installs its releases', () => {
+    const managed = {
+      has_update: false, latest_version: '0.2.0', current_version: '0.2.0', error: null,
+      deploy_mode: 'managed', update_allowed: false, channel: 'private-channel', release_notes: null, release_url: null,
+    };
+    const source = (status: unknown) => ({ status: vi.fn().mockResolvedValue(status), start: vi.fn(), outcome: vi.fn() });
+
+    afterEach(() => {
+      delete (registryMock as Record<string, unknown>).releaseUpdate;
+    });
+
+    it('offers the release it would install, and hands the dialog the way to', async () => {
+      const releaseUpdate = source({ release_install: true, latest_version: '0.3.0', has_update: true, error: null });
+      (registryMock as Record<string, unknown>).releaseUpdate = releaseUpdate;
+      checkUpdate.mockResolvedValue(managed);
+      renderLayout();
+      await flush();
+      expect(await screen.findByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+      expect(updateModalProps.at(-1)).toEqual(expect.objectContaining({
+        releaseUpdate,
+        initialInfo: expect.objectContaining({ latest_version: '0.3.0', has_update: true, update_allowed: true }),
+      }));
+    });
+
+    it('offers nothing where it is not a release install', async () => {
+      const releaseUpdate = source({ release_install: false });
+      (registryMock as Record<string, unknown>).releaseUpdate = releaseUpdate;
+      checkUpdate.mockResolvedValue(managed);
+      renderLayout();
+      await flush();
+      await vi.waitFor(() => expect(releaseUpdate.status).toHaveBeenCalled());
+      await flush();
+      expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+    });
   });
 
   it('gives the update dialog opened by hand the registry update channel', async () => {
