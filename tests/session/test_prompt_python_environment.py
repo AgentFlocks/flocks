@@ -45,7 +45,11 @@ def test_minimal_environment_reports_missing_source_venv(tmp_path, monkeypatch):
 
     environment = SessionPrompt._build_minimal_environment(str(tmp_path))
 
-    assert f"Default host Python virtual environment: {source / '.venv'}" in environment
+    # An installed release has no source .venv: no interpreter path is offered to run
+    # (R04, 2026-10-26: a subagent ran the named .venv/bin/python and it did not exist).
     assert "Flocks source .venv available: no" in environment
+    assert str(source / ".venv") not in environment
+    assert "Default host Python interpreter" not in environment
+    assert "report the missing environment" in environment
     assert "unrelated-venv" not in environment
     assert not (source / ".venv").exists()

@@ -1350,16 +1350,20 @@ class SessionCompaction:
                     _err = str(_e)[:220]
                     history.summary_cooldown_until = time.monotonic() + 600
                     history.summary_last_error = _err
+                    _record_compaction_error(session_id, _e)
                     log.warn("compaction.summary_failed.no_provider", {
                         "session_id": session_id,
                         "error": _err,
                         "cooldown_seconds": 600,
                     })
                     summary_text = None
-                except asyncio.TimeoutError:
+                except asyncio.TimeoutError as _e:
                     # Timeout — medium cooldown (hermes: 60s)
                     history.summary_cooldown_until = time.monotonic() + 60
                     history.summary_last_error = "timeout"
+                    _record_compaction_error(
+                        session_id, _e if str(_e).strip() else asyncio.TimeoutError("Compaction summary timed out")
+                    )
                     log.warn("compaction.summary_failed.timeout", {
                         "session_id": session_id,
                         "cooldown_seconds": 60,
@@ -1391,6 +1395,7 @@ class SessionCompaction:
                     _cd = 30 if _is_json else 60
                     history.summary_cooldown_until = time.monotonic() + _cd
                     history.summary_last_error = _err
+                    _record_compaction_error(session_id, _e)
                     log.warn("compaction.summary_failed.error", {
                         "session_id": session_id,
                         "error": _err,

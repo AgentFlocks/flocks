@@ -102,10 +102,21 @@ def verify_webhook_signature(
 
 
 def verify_verification_token(data: dict, token: str) -> bool:
-    """Check the ``verification_token`` field inside the event body."""
+    """Check the verification token carried in the event body.
+
+    URL-verification challenges and schema 1.0 events put it at the top level;
+    schema 2.0 events (``im.message.receive_v1`` and friends) carry it in
+    ``header.token``.  Checking only the top level rejected every real 2.0
+    event once a verification token was configured.
+    """
     if not token:
         return True
-    return data.get("token", "") == token
+    if data.get("token", "") == token:
+        return True
+    header = data.get("header")
+    if isinstance(header, dict) and header.get("token", "") == token:
+        return True
+    return False
 
 
 def list_account_configs(

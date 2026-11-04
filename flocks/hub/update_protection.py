@@ -97,7 +97,7 @@ def _soc_keys() -> set[tuple[str, str]]:
 
 
 def build_plan(plugin_type: str, plugin_id: str, scope: str = "global") -> dict:
-    from flocks.hub.installer import _component_ref_is_outdated, _resolve_install_destination
+    from flocks.hub.installer import _component_ref_is_outdated, _is_managed_ref, _resolve_install_destination
 
     if scope not in {"global", "project"}:
         raise ValueError("Invalid install scope")
@@ -107,6 +107,8 @@ def build_plan(plugin_type: str, plugin_id: str, scope: str = "global") -> dict:
         for ref in manifest.components:
             if ref.type == "component":
                 raise ValueError("Nested Hub components are not supported")
+            if _is_managed_ref(ref.type, ref.id):
+                continue  # served by the deployment, never replaced locally
             installed = local.infer_local_install(ref.type, ref.id)
             if installed is None or _component_ref_is_outdated(ref, installed, local.get_record(ref.type, ref.id)):
                 refs.append((ref.type, ref.id))

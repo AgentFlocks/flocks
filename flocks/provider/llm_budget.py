@@ -15,18 +15,35 @@ process draws from those slots together; the server loop has none. LLM call
 sites take an :class:`LlmSlot` around the request, which is a no-op on a loop
 without a budget and otherwise holds one of the loop's slots for the whole
 request, including a streamed response.
+
+When the server has registered its loop, workflow coroutines run there instead
+of on the dedicated thread (see ``flocks.workflow._async_runtime``). They are
+submitted inside :func:`budget_scope`, and a slot taken in a scope (including
+from tasks the scoped coroutine starts) draws from that scope's budget on the
+current loop, so the server loop itself still has no budget for interactive
+sessions.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import weakref
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, Iterator, Optional
 
 from flocks.utils.log import Log
 
-__all__ = ["LlmSlot", "llm_slot", "set_loop_budget", "get_loop_budget", "loop_budget_snapshot"]
+__all__ = [
+    "LlmSlot",
+    "budget_scope",
+    "get_loop_budget",
+    "llm_slot",
+    "loop_budget_snapshot",
+    "set_loop_budget",
+    "set_scope_budget",
+]
 
 log = Log.create(service="provider.llm_budget")
 
@@ -54,6 +71,50 @@ class _LoopBudget:
 
 
 _budgets: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _LoopBudget]" = weakref.WeakKeyDictionary()
+
+# Scope name -> limit, and per-loop budgets of each scope (created lazily on the
+# loop that first takes a slot in that scope).
+_scope_limits: Dict[str, int] = {}
+_scoped_budgets: "Dict[str, weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _LoopBudget]]" = {}
+_current_scope: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "flocks_llm_budget_scope", default=None
+)
+
+
+def set_scope_budget(scope: str, limit: Optional[int]) -> None:
+    """Cap concurrent LLM calls made inside :func:`budget_scope` (``0`` lifts it)."""
+    try:
+        resolved = int(limit) if limit is not None else 0
+    except (TypeError, ValueError):
+        resolved = 0
+    resolved = max(0, resolved)
+    _scope_limits[scope] = resolved
+    for budget in list(_scoped_budgets.get(scope, {}).values()):
+        budget.limit = resolved
+
+
+@contextlib.contextmanager
+def budget_scope(scope: str) -> Iterator[None]:
+    """Make LLM slots taken in this context (and tasks it starts) use *scope*'s budget."""
+    token = _current_scope.set(scope)
+    try:
+        yield
+    finally:
+        _current_scope.reset(token)
+
+
+def _scoped_budget(loop: asyncio.AbstractEventLoop) -> Optional[_LoopBudget]:
+    scope = _current_scope.get()
+    if scope is None:
+        return None
+    limit = _scope_limits.get(scope, 0)
+    if limit <= 0:
+        return None
+    per_loop = _scoped_budgets.setdefault(scope, weakref.WeakKeyDictionary())
+    budget = per_loop.get(loop)
+    if budget is None:
+        budget = per_loop[loop] = _LoopBudget(limit=limit)
+    return budget
 
 
 def set_loop_budget(loop: asyncio.AbstractEventLoop, limit: Optional[int]) -> None:
@@ -115,7 +176,7 @@ class LlmSlot:
         if self._held:
             return
         loop = asyncio.get_running_loop()
-        budget = _budgets.get(loop)
+        budget = _budgets.get(loop) or _scoped_budget(loop)
         if budget is None or budget.limit <= 0:
             self._held = True
             return
@@ -142,10 +203,14 @@ class LlmSlot:
             # cancel (a node timeout killing a queued call) instead of a slot.
             waited = loop.time() - waiting_since
             if waited >= SLOW_ACQUIRE_LOG_SECONDS:
+                # The budget actually waited on: the loop's own, or the scope's
+                # (loop_budget_snapshot only knows loop budgets).
                 log.warn("llm_budget.slot.slow_acquire", {
                     "waited_s": round(waited, 1),
                     "acquired": acquired,
-                    **loop_budget_snapshot(loop),
+                    "limit": budget.limit,
+                    "in_flight": budget.in_flight,
+                    "waiting": budget.waiting,
                 })
         self._budget = budget
         self._semaphore = semaphore

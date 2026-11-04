@@ -57,6 +57,7 @@
   "readOnly": {
     "system": "内置插件的分组不能修改。",
     "builtinSkill": "内置技能的分组不能修改。",
+    "externalSkill": "外部目录（如 ~/.claude/skills）里的技能不能在这里改分组。",
     "admin": "你没有修改分组的权限。",
     "catalog": "请先安装或配置此服务。",
     "noEditable": "暂无可修改分组的插件。"

@@ -381,6 +381,7 @@ def show_stats(
         None,
         "-d",
         "--days",
+        min=0,
         help="Show stats for the last N days (default: all time). Use 0 for today.",
     ),
     tools: int = typer.Option(
@@ -428,6 +429,7 @@ def backfill_stats(
         None,
         "-d",
         "--days",
+        min=0,
         help="Backfill usage for the last N days (default: all time). Use 0 for today.",
     ),
     project: Optional[str] = typer.Option(

@@ -8,6 +8,12 @@ from flocks.server.routes.channel import SessionSendRequest, channel_session_sen
 from fastapi import HTTPException
 
 
+def _internal_request() -> SimpleNamespace:
+    """A request with no HTTP identity: ``channel_session_send`` scopes browser users
+    to sessions they can read, while internal/service callers keep cross-session reach."""
+    return SimpleNamespace(state=SimpleNamespace(auth_user=None))
+
+
 @pytest.mark.asyncio
 async def test_channel_session_send_falls_back_to_latest_channel_binding() -> None:
     latest_binding = SimpleNamespace(
@@ -38,7 +44,8 @@ async def test_channel_session_send_falls_back_to_latest_channel_binding() -> No
                 session_id="ses_old",
                 text="hello",
                 channel_type="wecom",
-            )
+            ),
+            _internal_request(),
         )
 
     assert result["ok"] is True
@@ -73,7 +80,8 @@ async def test_channel_session_send_returns_404_when_channel_binding_is_ambiguou
                     session_id="ses_old",
                     text="hello",
                     channel_type="wecom",
-                )
+                ),
+                _internal_request(),
             )
 
     assert exc_info.value.status_code == 404

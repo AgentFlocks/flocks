@@ -53,6 +53,17 @@ def _source_label(source: Optional[str]) -> str:
     return source or "—"
 
 
+INSTALL_SCOPES = ("global", "project")
+
+
+def _validate_scope(value: str) -> str:
+    """Unknown scopes used to fall through to the global install root silently."""
+    normalized = (value or "").strip().lower()
+    if normalized not in INSTALL_SCOPES:
+        raise typer.BadParameter(f"Scope must be one of: {' | '.join(INSTALL_SCOPES)}.")
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 # list
 # ---------------------------------------------------------------------------
@@ -234,26 +245,44 @@ async def _search_skills(query: str) -> list:
                 "install_hint": "(already installed)",
             })
 
-    # 2. Search clawhub.com
-    clawhub_results = await _search_clawhub(query)
-    results.extend(clawhub_results)
-
-    # 3. Search skills.sh
-    results.extend(await _search_skills_sh(query))
-
-    # 4. Search SafeSkill when the CLI is available
-    results.extend(await _search_safeskill(query))
-
-    # 5. Search curated GitHub skill collections
-    github_results = await _search_github_collections(query)
-    # Deduplicate by name
+    # 2-5. Remote sources run concurrently, each bounded by its own timeout, so a
+    # slow or unreachable source cannot stall the whole search (they used to run
+    # one after another, and the GitHub collection crawl alone could take minutes).
+    remote = await asyncio.gather(
+        _bounded(_search_clawhub(query), REMOTE_SOURCE_TIMEOUT_S),
+        _bounded(_search_skills_sh(query), REMOTE_SOURCE_TIMEOUT_S),
+        _bounded(_search_safeskill(query), SAFESKILL_TIMEOUT_S),
+        _bounded(_search_github_collections(query), GITHUB_COLLECTIONS_TIMEOUT_S),
+        return_exceptions=True,
+    )
+    clawhub_results, skills_sh_results, safeskill_results, github_results = (
+        item if isinstance(item, list) else [] for item in remote
+    )
+    # Deduplicate every remote hit by name (first source wins: installed >
+    # clawhub > skills.sh > SafeSkill > GitHub collections).
     existing_names = {r["name"] for r in results}
-    for r in github_results:
-        if r["name"] not in existing_names:
-            results.append(r)
-            existing_names.add(r["name"])
+    for batch in (clawhub_results, skills_sh_results, safeskill_results, github_results):
+        for r in batch:
+            if r["name"] not in existing_names:
+                results.append(r)
+                existing_names.add(r["name"])
 
     return results
+
+
+REMOTE_SOURCE_TIMEOUT_S = 15
+SAFESKILL_TIMEOUT_S = 25
+GITHUB_COLLECTIONS_TIMEOUT_S = 30
+_GITHUB_FETCH_CONCURRENCY = 8
+
+
+async def _bounded(coro, timeout: float) -> list:
+    """Return the source's results, or [] when it exceeds *timeout* or fails."""
+    try:
+        result = await asyncio.wait_for(coro, timeout=timeout)
+    except Exception:
+        return []
+    return result if isinstance(result, list) else []
 
 
 async def _search_clawhub(query: str) -> list:
@@ -427,27 +456,31 @@ async def _search_github_collections(query: str) -> list:
                     entries = resp.json()
                     if not isinstance(entries, list):
                         continue
-                    for entry in entries:
-                        if entry.get("type") != "dir":
-                            continue
-                        skill_name = entry["name"]
-                        if query_lower not in skill_name.lower():
-                            # Try to check description by fetching SKILL.md
-                            skill_md_url = (
-                                f"https://raw.githubusercontent.com/{owner}/{repo}"
-                                f"/main/{skills_dir}/{skill_name}/SKILL.md"
-                            )
-                            md_resp = await client.get(skill_md_url)
-                            if md_resp.status_code != 200:
-                                continue
-                            if query_lower not in md_resp.text.lower():
-                                continue
-                            # Parse description
-                            desc_match = re.search(r"^description:\s*(.+)$", md_resp.text, re.MULTILINE)
-                            description = desc_match.group(1).strip().strip('"\'') if desc_match else ""
-                        else:
-                            description = ""
+                    dir_names = [entry["name"] for entry in entries if entry.get("type") == "dir"]
+                    semaphore = asyncio.Semaphore(_GITHUB_FETCH_CONCURRENCY)
 
+                    async def _match(skill_name: str):
+                        if query_lower in skill_name.lower():
+                            return skill_name, ""
+                        # Name did not match: look at the SKILL.md description instead
+                        # (fetched concurrently — one request per skill, sequential
+                        # fetching made a miss cost minutes).
+                        skill_md_url = (
+                            f"https://raw.githubusercontent.com/{owner}/{repo}"
+                            f"/main/{skills_dir}/{skill_name}/SKILL.md"
+                        )
+                        async with semaphore:
+                            md_resp = await client.get(skill_md_url)
+                        if md_resp.status_code != 200 or query_lower not in md_resp.text.lower():
+                            return None
+                        desc_match = re.search(r"^description:\s*(.+)$", md_resp.text, re.MULTILINE)
+                        return skill_name, (desc_match.group(1).strip().strip('"\'') if desc_match else "")
+
+                    matches = await asyncio.gather(*(_match(name) for name in dir_names), return_exceptions=True)
+                    for match in matches:
+                        if not match or isinstance(match, BaseException):
+                            continue
+                        skill_name, description = match
                         results.append({
                             "name": skill_name,
                             "description": description,
@@ -491,6 +524,7 @@ def install_skill(
     scope: str = typer.Option(
         "global",
         "--scope",
+        callback=_validate_scope,
         help="'global' (default) or 'project'",
     ),
     yes: bool = typer.Option(

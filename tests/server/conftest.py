@@ -57,13 +57,7 @@ async def _server_isolated_env(tmp_path: Path, monkeypatch):
     await Storage.init()
 
     from flocks.task.store import TaskStore
-    if TaskStore._conn is not None:
-        try:
-            await TaskStore._conn.close()
-        except Exception:
-            pass
-    TaskStore._conn = None
-    TaskStore._initialized = False
+    await TaskStore.close()
 
     yield
 
@@ -83,10 +77,4 @@ async def _server_isolated_env(tmp_path: Path, monkeypatch):
         _state_manager._disposers.pop(key, None)
     AgentRegistry._custom_agents.clear()
     AgentRegistry._custom_agents.update(original_custom)
-    if TaskStore._conn is not None:
-        try:
-            await TaskStore._conn.close()
-        except Exception:
-            pass
-    TaskStore._conn = None
-    TaskStore._initialized = False
+    await TaskStore.close()

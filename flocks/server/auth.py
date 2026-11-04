@@ -16,7 +16,9 @@ from starlette.requests import HTTPConnection
 from flocks.auth.context import (
     API_TOKEN_SERVICE_USER_ID,
     AuthUser,
+    reset_current_auth_session,
     reset_current_auth_user,
+    set_current_auth_session,
     set_current_auth_user,
 )
 from flocks.auth.service import AuthService
@@ -55,6 +57,18 @@ PUBLIC_PATHS = frozenset({
     "/auth/bootstrap-status",
     "/auth/bootstrap-admin",
 })
+
+# The TUI-prefixed auth paths are public only for the verb that implements
+# them: ``/auth/login`` etc. also match the TUI-compatible
+# ``PUT /auth/{provider_id}`` route in ``routes/misc.py``, which must stay
+# behind auth — a path-only exemption would let an anonymous ``PUT /auth/login``
+# reach it.  Paths not listed here are public for every method (an unmapped
+# verb then gets the router's usual 405).
+PUBLIC_PATH_METHODS: dict[str, frozenset[str]] = {
+    "/auth/login": frozenset({"POST", "OPTIONS"}),
+    "/auth/bootstrap-admin": frozenset({"POST", "OPTIONS"}),
+    "/auth/bootstrap-status": frozenset({"GET", "HEAD", "OPTIONS"}),
+}
 
 # Static asset prefixes never require auth (WebUI / favicon / etc.)
 PUBLIC_PREFIXES = (
@@ -158,29 +172,36 @@ def get_request_user_agent(request: Request) -> Optional[str]:
     return request.headers.get("user-agent")
 
 
-def get_optional_user(request: Request) -> Optional[AuthUser]:
+def get_optional_user(request: HTTPConnection) -> Optional[AuthUser]:
     user = getattr(request.state, "auth_user", None)
     return user
 
 
-def require_user(request: Request) -> AuthUser:
+def require_user(request: HTTPConnection) -> AuthUser:
     user = get_optional_user(request)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
     return user
 
 
-def require_admin(request: Request) -> AuthUser:
+def require_admin(request: HTTPConnection) -> AuthUser:
     user = require_user(request)
     if user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可执行该操作")
     return user
 
 
-def auth_middleware_exempt(path: str) -> bool:
-    """Return True if the path is public (no auth required)."""
+def auth_middleware_exempt(path: str, method: Optional[str] = None) -> bool:
+    """Return True if the path is public (no auth required).
+
+    ``method`` narrows the fixed-path allowlist for entries listed in
+    ``PUBLIC_PATH_METHODS``; when omitted the check is path-only.
+    """
     if path in PUBLIC_PATHS:
-        return True
+        allowed = PUBLIC_PATH_METHODS.get(path)
+        if method is None or allowed is None or method.upper() in allowed:
+            return True
+        return False
     if any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES):
         return True
     if any(pattern.match(path) for pattern in PUBLIC_PATH_REGEXES):
@@ -285,15 +306,27 @@ def _build_api_token_user() -> AuthUser:
 
 async def apply_auth_for_request(request: HTTPConnection):
     """Resolve auth for the HTTP request."""
+    from flocks.plugin import PluginLoader
+
+    # The same loader signal already stops Channel/tool execution. HTTP and
+    # WebSocket ingress must also stop, including public mutation/webhook
+    # routes that otherwise bypass authentication. Keep probes reachable.
+    if (
+        PluginLoader.has_runtime_critical_entrypoint_failure()
+        and request.url.path not in {"/health", "/api/health"}
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="关键扩展初始化失败，服务暂不可用",
+        )
     auth_token = None
 
     try:
         result = await _apply_auth_for_request(request)
         _blocked, auth_token, user = result
         extension_context: dict[str, Any] = {}
-        # Extensions re-register their adapters at runtime (Flocks Pro does
-        # when its licence or security config changes), possibly while this
-        # request is awaiting one; iterate over a snapshot.
+        # Snapshot: an adapter may (re)register adapters while awaited, and
+        # resuming iteration over the live dict would raise RuntimeError.
         for adapter in list(_auth_context_adapters.values()):
             supplied = await adapter(request, user)
             if isinstance(supplied, Mapping):
@@ -315,9 +348,9 @@ async def _apply_auth_for_request(request: HTTPConnection):
     Policy: every path is protected by default; only whitelisted public paths
     (see `PUBLIC_PATHS` / `PUBLIC_PREFIXES`) bypass auth.
     """
-    if auth_middleware_exempt(request.url.path):
-        token = set_current_auth_user(None)
-        return None, token, None
+    if auth_middleware_exempt(request.url.path, request.scope.get("method")):
+        bound = _bind_auth_context(None)
+        return None, bound, None
 
     if _has_session_cookie(request):
         bootstrapped = await AuthService.has_users()
@@ -327,7 +360,7 @@ async def _apply_auth_for_request(request: HTTPConnection):
                 detail="系统尚未初始化管理员账号，请先完成初始化",
             )
 
-        session_id = request.cookies.get(SESSION_COOKIE_NAME)
+        session_id = (request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
         if not session_id:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
 
@@ -342,8 +375,8 @@ async def _apply_auth_for_request(request: HTTPConnection):
                 detail="当前账号必须先修改密码后才能继续使用",
             )
         request.state.auth_user = auth_user
-        token = set_current_auth_user(auth_user)
-        return None, token, auth_user
+        bound = _bind_auth_context(auth_user, session_id)
+        return None, bound, auth_user
 
     # Non-browser clients must authenticate with an API token because
     # localhost is not a reliable auth boundary.
@@ -357,8 +390,8 @@ async def _apply_auth_for_request(request: HTTPConnection):
                 )
             token_user = _build_api_token_user()
             request.state.auth_user = token_user
-            token = set_current_auth_user(token_user)
-            return None, token, token_user
+            bound = _bind_auth_context(token_user)
+            return None, bound, token_user
 
         expected = _get_expected_api_token()
         if not expected:
@@ -378,7 +411,9 @@ async def _apply_auth_for_request(request: HTTPConnection):
             detail="系统尚未初始化管理员账号，请先完成初始化",
         )
 
-    session_id = request.cookies.get(SESSION_COOKIE_NAME)
+    # A whitespace-only cookie is "no cookie" for _has_session_cookie(); keep
+    # the same reading here so it lands on 请先登录, not 登录已过期.
+    session_id = (request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
     if not session_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
 
@@ -393,9 +428,27 @@ async def _apply_auth_for_request(request: HTTPConnection):
             detail="当前账号必须先修改密码后才能继续使用",
         )
     request.state.auth_user = auth_user
-    token = set_current_auth_user(auth_user)
-    return None, token, auth_user
+    bound = _bind_auth_context(auth_user, session_id)
+    return None, bound, auth_user
+
+
+class _AuthContextToken:
+    """Both context values a request sets: who it is, and the login session it came with."""
+
+    __slots__ = ("user", "session")
+
+    def __init__(self, user, session) -> None:
+        self.user = user
+        self.session = session
+
+
+def _bind_auth_context(user: Optional[AuthUser], session_id: Optional[str] = None) -> _AuthContextToken:
+    return _AuthContextToken(set_current_auth_user(user), set_current_auth_session(session_id))
 
 
 def clear_auth_context(token) -> None:
+    if isinstance(token, _AuthContextToken):
+        reset_current_auth_session(token.session)
+        reset_current_auth_user(token.user)
+        return
     reset_current_auth_user(token)

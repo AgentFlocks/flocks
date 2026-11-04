@@ -154,7 +154,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                   <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.params', { count: tool.parameters.length })}</label>
                   <div className="bg-gray-50 rounded-lg border border-gray-200 overflow-hidden">
                     <div className="overflow-x-auto">
-                      <table className="min-w-full table-fixed divide-y divide-gray-200">
+                      <table className="min-w-full table-fixed divide-y divide-gray-200 max-md:min-w-[32rem]">
                       <thead className="bg-gray-100">
                         <tr>
                           <th className="w-[28%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>

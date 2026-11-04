@@ -5,6 +5,7 @@ Local account/authentication service.
 from __future__ import annotations
 
 import base64
+import asyncio
 import hashlib
 import hmac
 import json
@@ -153,18 +154,11 @@ class LocalAuthBackend:
                 """
             )
             await cls._ensure_user_scope_columns(db)
-            await cls._drop_legacy_tables(db)
             await db.commit()
 
         cls._initialized = True
         cls._initialized_db_path = str(db_path)
         log.info("auth.initialized")
-
-    # Patterns matching tables from the removed cloud-account subsystem;
-    # any table matching these patterns is dropped on first init so new
-    # installs and upgrades converge on the same schema without having to
-    # enumerate every historical table name.
-    _LEGACY_TABLE_PATTERNS: Tuple[str, ...] = ("cloud\\_%",)
 
     @classmethod
     async def _ensure_user_scope_columns(cls, db: aiosqlite.Connection) -> None:
@@ -174,18 +168,6 @@ class LocalAuthBackend:
             await db.execute("ALTER TABLE users ADD COLUMN tenant_ids TEXT NOT NULL DEFAULT '[]'")
         if "asset_groups" not in columns:
             await db.execute("ALTER TABLE users ADD COLUMN asset_groups TEXT NOT NULL DEFAULT '[]'")
-
-    @classmethod
-    async def _drop_legacy_tables(cls, db: aiosqlite.Connection) -> None:
-        for pattern in cls._LEGACY_TABLE_PATTERNS:
-            async with db.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE ? ESCAPE '\\'",
-                (pattern,),
-            ) as cursor:
-                rows = await cursor.fetchall()
-            for (table_name,) in rows:
-                await db.execute(f"DROP TABLE IF EXISTS {table_name}")
-                log.info("auth.legacy_table.dropped", {"table": table_name})
 
     @classmethod
     def _hash_password(cls, password: str) -> str:
@@ -235,6 +217,7 @@ class LocalAuthBackend:
             password=password,
             role="admin",
             must_reset_password=False,
+            only_if_no_users=True,
         )
         await cls.migrate_legacy_sessions_to_admin(user.id)
         return user
@@ -249,6 +232,7 @@ class LocalAuthBackend:
         temp_expires_at: Optional[str] = None,
         tenant_ids: Iterable[str] = (),
         asset_groups: Iterable[str] = (),
+        only_if_no_users: bool = False,
     ) -> LocalUser:
         await cls.init()
         if role not in {"admin", "member"}:
@@ -263,31 +247,51 @@ class LocalAuthBackend:
 
         user_id = Identifier.ascending("user")
         now = _iso_now()
-        password_hash = cls._hash_password(password)
-        db_path = Storage.get_db_path()
-        async with Storage.connect(db_path) as db:
-            await db.execute(
-                """
-                INSERT INTO users (
+        # Hashing is deliberately slow: off the event loop.
+        password_hash = await asyncio.to_thread(cls._hash_password, password)
+        params = (
+            user_id,
+            normalized_username,
+            password_hash,
+            role,
+            1 if must_reset_password else 0,
+            _encode_scope_values(tenant_ids),
+            _encode_scope_values(asset_groups),
+            temp_expires_at,
+            now,
+            now,
+        )
+        columns = """(
                     id, username, password_hash, role, status, must_reset_password,
                     tenant_ids, asset_groups, temp_password_expires_at, created_at, updated_at
-                )
+                )"""
+        if only_if_no_users:
+            # Bootstrap must stay single-shot even when two requests race past
+            # has_users(): the emptiness check and the insert are one statement.
+            sql = f"""
+                INSERT INTO users {columns}
+                SELECT ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?
+                WHERE NOT EXISTS (SELECT 1 FROM users)
+                """
+        else:
+            sql = f"""
+                INSERT INTO users {columns}
                 VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user_id,
-                    normalized_username,
-                    password_hash,
-                    role,
-                    1 if must_reset_password else 0,
-                    _encode_scope_values(tenant_ids),
-                    _encode_scope_values(asset_groups),
-                    temp_expires_at,
-                    now,
-                    now,
-                ),
-            )
-            await db.commit()
+                """
+        db_path = Storage.get_db_path()
+        async with Storage.connect(db_path) as db:
+            try:
+                cursor = await db.execute(sql, params)
+                await db.commit()
+            except Exception as exc:
+                from flocks.coordination import is_unique_violation
+
+                if is_unique_violation(exc):
+                    raise ValueError("用户名已存在") from exc
+                raise
+            if only_if_no_users and cursor.rowcount == 0:
+                cls._has_users_cached = True
+                raise ValueError("账号体系已初始化")
         cls._has_users_cached = True
         return await cls.get_user_by_id(user_id)  # type: ignore[return-value]
 
@@ -467,7 +471,13 @@ class LocalAuthBackend:
             raise ValueError("用户名或密码错误")
 
         if temp_expires_at:
-            expiry = _parse_iso(temp_expires_at)
+            try:
+                expiry = _parse_iso(temp_expires_at)
+            except ValueError:
+                # A corrupt expiry must not leak the parser error to the
+                # caller; treat it like an expired one-time password.
+                log.warn("auth.temp_password_expiry.invalid", {"user_id": user.id})
+                raise ValueError("一次性密码状态异常，请联系管理员重置") from None
             if _utc_now() > expiry:
                 raise ValueError("一次性密码已过期，请联系管理员重置")
 
@@ -711,7 +721,7 @@ class AuthService(metaclass=_AuthServiceFacadeMeta):
     """
     Authentication facade.
 
-    The OSS default backend is ``LocalAuthBackend``. Flocks Pro packages can
+    The default backend is ``LocalAuthBackend``. An installed extension can
     swap in a compatible backend via ``register_backend``.
     """
 
@@ -750,6 +760,33 @@ class AuthService(metaclass=_AuthServiceFacadeMeta):
             if hasattr(backend, attr):
                 setattr(backend, attr, getattr(cls, attr))
         log.info("auth.backend.registered", {"backend": getattr(backend, "__name__", str(backend))})
+
+    #: Entry points through which an installed extension names the account
+    #: backend its installation uses, for processes that do not load
+    #: extensions (the ``flocks admin`` commands).  Each is a callable taking
+    #: no arguments that returns a backend, or None when this install keeps
+    #: its accounts in the runtime; it may be a coroutine function.
+    BACKEND_ENTRYPOINT_GROUP = "flocks.auth.backends"
+
+    @classmethod
+    async def use_installed_backend(cls) -> bool:
+        """Switch to the account backend an installed extension provides; whether one did.
+
+        The server gets that backend when its extensions load.  A command that
+        reads or repairs accounts outside the server asks here, or it would work
+        on the runtime's own account tables while the accounts live elsewhere.
+        """
+        import importlib.metadata
+        import inspect
+
+        for entry_point in importlib.metadata.entry_points(group=cls.BACKEND_ENTRYPOINT_GROUP):
+            backend = entry_point.load()()
+            if inspect.isawaitable(backend):
+                backend = await backend
+            if backend is not None:
+                cls.register_backend(backend)
+                return True
+        return False
 
     @classmethod
     def reset_backend(cls) -> None:

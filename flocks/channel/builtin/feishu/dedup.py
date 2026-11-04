@@ -33,11 +33,10 @@ _FLUSH_INTERVAL_SECONDS = 300       # 5-minute periodic flush
 
 def _default_data_dir() -> Path:
     """Return the default data directory (FLOCKS_DATA_DIR env var takes priority)."""
-    import os
-    override = os.getenv("FLOCKS_DATA_DIR", "").strip()
-    if override:
-        return Path(override)
-    return Path.home() / ".flocks" / "data"
+    from flocks.config.config import _get_data_dir
+
+    # Honors FLOCKS_DATA_DIR / XDG_DATA_HOME / FLOCKS_ROOT like every other data path.
+    return _get_data_dir()
 
 
 def _safe_account_id(account_id: str) -> str:

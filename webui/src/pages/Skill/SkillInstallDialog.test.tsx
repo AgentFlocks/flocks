@@ -88,4 +88,19 @@ describe('SkillInstallDialog', () => {
     expect(onInstalled).toHaveBeenCalledWith(expect.objectContaining({ name: 'onesig-use' }));
     expect(onClose).toHaveBeenCalled();
   });
+
+  it('shows the backend reason, not the axios status line, when install is rejected (TOL-1194)', async () => {
+    const user = userEvent.setup();
+    installMock.mockRejectedValueOnce(Object.assign(new Error('Request failed with status code 422'), {
+      response: { status: 422, data: { error: 'HTTPException', message: 'File not found: /no/such' } },
+    }));
+
+    render(<SkillInstallDialog onClose={vi.fn()} onInstalled={vi.fn()} />);
+    await user.type(screen.getByRole('textbox'), '/no/such');
+    await user.click(screen.getByRole('button', { name: 'Install' }));
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith('Install failed', 'File not found: /no/such');
+    });
+  });
 });

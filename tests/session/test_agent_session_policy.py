@@ -1,6 +1,7 @@
 """Tests for isolated agent session policy enforcement."""
 
 import asyncio
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -27,7 +28,9 @@ from flocks.storage.storage import Storage
 async def policy_storage(tmp_path: Path):
     await Storage.init(tmp_path / "policy.db")
     yield
-    await Storage.clear()
+    # Storage only clears by prefix; drop what these tests write.
+    for prefix in ("session:", "message:", "message_parts:"):
+        await Storage.clear(prefix)
 
 
 def _isolated_agent(runtime_directory: Path) -> AgentInfo:
@@ -365,3 +368,36 @@ async def test_atomic_metadata_updates_preserve_dedicated_policy(policy_storage,
         await Session.mutate_metadata(claimed.project_id, claimed.id, change_agent)
     stored = await Session.get(claimed.project_id, claimed.id)
     assert stored.metadata["_dedicated_agent_policy"]["agent"] == "isolated-security"
+
+
+@pytest.mark.asyncio
+async def test_update_with_metadata_none_keeps_the_dedicated_claim(policy_storage, tmp_path):
+    from flocks.session.session import _UNSET
+
+    session = SessionInfo(projectID="policy-project", directory=str(tmp_path), agent="rex")
+    await _store_session(session)
+    claimed = await prepare_session_for_agent(session, _isolated_agent(tmp_path / "runtime"))
+
+    # ``None`` means "leave the metadata alone" for a generic update.
+    updated = await Session.update(claimed.project_id, claimed.id, title="Renamed", metadata=None)
+
+    assert updated.title == "Renamed"
+    assert updated.metadata["_dedicated_agent_policy"] == claimed.metadata["_dedicated_agent_policy"]
+    with pytest.raises(SessionAgentMismatchError, match="cannot be removed"):
+        await Session.update(claimed.project_id, claimed.id, metadata=_UNSET)
+
+
+@pytest.mark.asyncio
+async def test_refused_user_message_never_reaches_the_message_cache(
+    policy_storage,
+    tmp_path: Path,
+) -> None:
+    session = SessionInfo(projectID="policy-project", directory=str(tmp_path), agent="rex")
+    await _store_session(session)
+    await prepare_session_for_agent(session, _isolated_agent(tmp_path / "runtime"))
+
+    with pytest.raises(SessionAgentMismatchError, match="dedicated to agent"):
+        await Message.create(session.id, MessageRole.USER, "foreign", agent="rex")
+
+    assert [m.agent for m in Message._messages_cache.get(session.id, [])] == []
+    assert await Message.list(session.id, include_archived=True) == []

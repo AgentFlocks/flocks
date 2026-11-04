@@ -47,8 +47,10 @@ export interface WebUIContractWorkspaceListItem {
   pages: WebUIContractPageListItem[];
   /** Scene suite that ships the workspace; the API only lists scenes that have one. */
   suiteId?: string | null;
-  /** The suite needs Flocks Pro and no Pro license is active: it stays installed but cannot open. */
+  /** An extension locked it: it stays installed but cannot open. */
   locked?: boolean;
+  /** The extension's own reason, handed to its `workspace.lockedNotice` component. */
+  lockReason?: string | null;
 }
 
 export interface WebUIContractPageManifest {

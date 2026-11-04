@@ -651,6 +651,131 @@ def test_soc_db_schema_removes_duplicate_survivors_from_prior_migration(tmp_path
     assert "idx_alert_records_first_seen_dedup_key" in indexes
 
 
+def _legacy_alert_table(connection: sqlite3.Connection, *, with_dedup_key_column: bool) -> None:
+    dedup_column = "dedup_key TEXT," if with_dedup_key_column else ""
+    connection.execute(
+        f"""
+        CREATE TABLE alert_records (
+            row_id TEXT PRIMARY KEY,
+            record_id TEXT,
+            asset_date TEXT NOT NULL,
+            source_file TEXT NOT NULL,
+            line_number INTEGER NOT NULL,
+            event_time INTEGER,
+            source_type TEXT,
+            threat_name TEXT,
+            {dedup_column}
+            is_duplicate INTEGER NOT NULL DEFAULT 0,
+            record_json TEXT NOT NULL
+        )
+        """
+    )
+
+
+def test_soc_db_schema_moves_superseded_rows_aside_instead_of_deleting_them(tmp_path: Path) -> None:
+    ensure_schema = _load_functions("_ensure_soc_db_schema")["_ensure_soc_db_schema"]
+    rows = [
+        ("follower-row", 1, {"dedup_key": "legacy-key", "is_duplicate": True, "marker": "follower"}),
+        ("first-seen-row", 0, {"dedup_key": " legacy-key ", "is_duplicate": False, "marker": "first-seen"}),
+        ("replayed-row", 0, {"dedup_key": "legacy-key", "is_duplicate": False, "marker": "replayed"}),
+        ("orphan-row", 1, {"dedup_key": "orphan-key", "is_duplicate": True, "marker": "orphan"}),
+        ("keyless-row", 1, {"is_duplicate": True, "marker": "keyless"}),
+    ]
+    with sqlite3.connect(tmp_path / "legacy-soc.db") as connection:
+        _legacy_alert_table(connection, with_dedup_key_column=False)
+        connection.executemany(
+            "INSERT INTO alert_records (row_id, record_id, asset_date, source_file, line_number, "
+            "event_time, source_type, threat_name, is_duplicate, record_json) "
+            "VALUES (?, '', '2026-07-14', '/source/a.jsonl', 1, 100, '', '', ?, ?)",
+            [(row_id, duplicate, json.dumps(record)) for row_id, duplicate, record in rows],
+        )
+
+        ensure_schema(connection)
+        connection.commit()
+
+        left = connection.execute(
+            "SELECT row_id, dedup_key, is_duplicate FROM alert_records ORDER BY rowid"
+        ).fetchall()
+        moved = connection.execute(
+            "SELECT row_id, is_duplicate, json_extract(record_json, '$.marker'), source_rowid, "
+            "superseded_batch IS NOT NULL, superseded_at IS NOT NULL "
+            "FROM alert_records_superseded ORDER BY source_rowid"
+        ).fetchall()
+
+    assert left == [("first-seen-row", "legacy-key", 0), ("keyless-row", None, 1)]
+    assert moved == [
+        ("follower-row", 1, "follower", 1, 1, 1),
+        ("replayed-row", 0, "replayed", 3, 1, 1),
+        ("orphan-row", 1, "orphan", 4, 1, 1),
+    ]
+
+
+def test_soc_db_schema_leaves_an_older_index_and_adds_the_unique_one(tmp_path: Path) -> None:
+    ensure_schema = _load_functions("_ensure_soc_db_schema")["_ensure_soc_db_schema"]
+    with sqlite3.connect(tmp_path / "old-index-soc.db") as connection:
+        _legacy_alert_table(connection, with_dedup_key_column=True)
+        connection.execute(
+            "CREATE INDEX idx_alert_records_first_seen_dedup_key ON alert_records(dedup_key)"
+        )
+
+        ensure_schema(connection)
+        connection.commit()
+
+        indexes = {
+            row[1]: bool(row[2]) for row in connection.execute("PRAGMA index_list(alert_records)")
+        }
+        insert = (
+            "INSERT INTO alert_records (row_id, asset_date, source_file, line_number, dedup_key, record_json) "
+            "VALUES (?, '2026-07-14', '/source/a.jsonl', 1, 'same-key', '{}')"
+        )
+        connection.execute(insert, ("first",))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert, ("second",))
+
+    assert indexes["idx_alert_records_first_seen_dedup_key"] is False
+    assert indexes["idx_alert_records_first_seen_dedup_key_2"] is True
+
+
+def test_soc_db_schema_keeps_the_unique_index_of_a_prior_migration(tmp_path: Path) -> None:
+    ensure_schema = _load_functions("_ensure_soc_db_schema")["_ensure_soc_db_schema"]
+    with sqlite3.connect(tmp_path / "previously-migrated-soc.db") as connection:
+        _legacy_alert_table(connection, with_dedup_key_column=True)
+        connection.execute(
+            "INSERT INTO alert_records (row_id, asset_date, source_file, line_number, dedup_key, "
+            "is_duplicate, record_json) VALUES ('survivor', '2026-07-14', '/source/a.jsonl', 1, "
+            "'legacy-key', 1, '{\"dedup_key\": \"legacy-key\", \"is_duplicate\": true}')"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX idx_alert_records_first_seen_dedup_key "
+            "ON alert_records(dedup_key) WHERE dedup_key IS NOT NULL AND dedup_key <> ''"
+        )
+        index_before = connection.execute(
+            "SELECT rootpage, sql FROM sqlite_master WHERE name = 'idx_alert_records_first_seen_dedup_key'"
+        ).fetchone()
+
+        ensure_schema(connection)
+        connection.commit()
+
+        index_after = connection.execute(
+            "SELECT rootpage, sql FROM sqlite_master WHERE name = 'idx_alert_records_first_seen_dedup_key'"
+        ).fetchone()
+        moved = connection.execute("SELECT row_id FROM alert_records_superseded").fetchall()
+
+    assert index_after == index_before, "the index was kept, not dropped and made again"
+    assert moved == [("survivor",)]
+
+
+def test_soc_db_schema_on_a_clean_store_moves_nothing(tmp_path: Path) -> None:
+    ensure_schema = _load_functions("_ensure_soc_db_schema")["_ensure_soc_db_schema"]
+    with sqlite3.connect(tmp_path / "fresh-soc.db") as connection:
+        ensure_schema(connection)
+        ensure_schema(connection)
+        connection.commit()
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+    assert tables == {"alert_records"}
+
+
 def test_soc_db_serializes_concurrent_writes_for_the_same_dedup_key(tmp_path: Path) -> None:
     functions = _load_functions(
         "_ensure_soc_db_schema",

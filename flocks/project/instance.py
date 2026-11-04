@@ -354,6 +354,17 @@ class Instance:
                     continue
         return None
 
+    # Upper bound for disposing one instance during shutdown. A stuck state
+    # disposer must not keep the whole process alive (the supervisor kills the
+    # runtime after 10s, which skips the WAL checkpoint that follows).
+    DISPOSE_TIMEOUT_S: float = 3.0
+
+    @classmethod
+    async def _dispose_context(cls, ctx: InstanceContext) -> None:
+        """Run the state disposers of ``ctx`` (no cache / lock handling)."""
+        log.info("disposing_instance", {"directory": ctx.directory})
+        await _state_manager.dispose(ctx.directory)
+
     @classmethod
     async def dispose(cls) -> None:
         """Dispose the current instance"""
@@ -361,10 +372,7 @@ class Instance:
         if not ctx:
             return
         
-        log.info("disposing_instance", {"directory": ctx.directory})
-        
-        # Dispose states
-        await _state_manager.dispose(ctx.directory)
+        await cls._dispose_context(ctx)
         
         # Remove from cache
         async with cls._lock:
@@ -372,25 +380,38 @@ class Instance:
     
     @classmethod
     async def dispose_all(cls) -> None:
-        """Dispose all instances"""
+        """Dispose all instances (bounded; never re-enters ``_lock``)."""
         log.info("disposing_all_instances")
         
+        # Detach every entry first. ``dispose()`` takes ``_lock`` itself, so
+        # calling it while holding the lock here deadlocked shutdown forever.
         async with cls._lock:
-            for directory, task in list(cls._cache.items()):
-                try:
-                    ctx = await task
-                    token = _current_instance.set(ctx)
-                    try:
-                        await cls.dispose()
-                    finally:
-                        _current_instance.reset(token)
-                except Exception as e:
-                    log.error("dispose_all.error", {
-                        "directory": directory,
-                        "error": str(e)
-                    })
-            
+            entries = list(cls._cache.items())
             cls._cache.clear()
+        
+        for directory, task in entries:
+            try:
+                if not task.done():
+                    task.cancel()
+                    continue
+                ctx = task.result()
+                token = _current_instance.set(ctx)
+                try:
+                    await asyncio.wait_for(
+                        cls._dispose_context(ctx), timeout=cls.DISPOSE_TIMEOUT_S
+                    )
+                finally:
+                    _current_instance.reset(token)
+            except asyncio.TimeoutError:
+                log.error("dispose_all.timeout", {
+                    "directory": directory,
+                    "timeout_s": cls.DISPOSE_TIMEOUT_S,
+                })
+            except Exception as e:
+                log.error("dispose_all.error", {
+                    "directory": directory,
+                    "error": str(e)
+                })
 
 
 # Helper functions for getting instance attributes without raising

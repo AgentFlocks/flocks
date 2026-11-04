@@ -7,6 +7,7 @@ import Home from '@/pages/Home';
 import { useAuth } from '@/contexts/AuthContext';
 import { preloadI18nNamespaces } from '@/i18nResources';
 import { recoverLazyLoad } from '@/utils/chunkLoadRecovery';
+import registry from '@ext/registry';
 
 // All non-Home pages are code-split. Home stays eager because it's the very
 // first frame after auth and we don't want a Suspense flash on initial paint.
@@ -46,8 +47,12 @@ const PermissionPage = lazyPage(() => import('@/pages/Permission'), ['permission
 const MonitoringPage = lazyPage(() => import('@/pages/Monitoring'), ['monitoring']);
 const WorkspacePage = lazyPage(() => import('@/pages/Workspace'), ['workspace']);
 const DeviceIntegrationPage = lazyPage(() => import('@/pages/DeviceIntegration'), ['device']);
-const FlocksproUpgradeCallbackPage = lazyPage(() => import('@/pages/FlocksproUpgrade/Callback'), ['flockspro']);
-export const SettingsPage = lazyPage(() => import('@/pages/Settings'));
+// Settings preloads the namespaces of registered extension sections so their
+// sidebar labels are translated on first paint.
+export const SettingsPage = lazyPage(
+  () => import('@/pages/Settings'),
+  registry.settingsSections.flatMap((section) => (section.ns ? [section.ns] : [])),
+);
 export const SceneSuitesPage = lazyPage(() => import('@/pages/SceneSuites'));
 const WebUIContractPageHost = lazyPage(() => import('@/pages/WebUIContractPageHost'));
 const WebUIContractWorkspaceHost = lazyPage(() => import('@/pages/WebUIContractWorkspaceHost'));
@@ -63,13 +68,30 @@ export function LazyRoute({ children }: { children: ReactNode }) {
   );
 }
 
-function AdminOnlyRoute({ children }: { children: ReactNode }) {
+export function AdminOnlyRoute({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   if (user?.role !== 'admin') {
     return <Navigate to="/" replace />;
   }
   return <>{children}</>;
 }
+
+// Routes registered by the build-time extension registry, code-split the same way.
+const extensionRoutes = registry.routes.map((route) => ({
+  ...route,
+  Component: lazyPage(route.load, route.i18nNamespaces ?? []),
+}));
+
+function extensionRouteObject(route: (typeof extensionRoutes)[number]): RouteObject {
+  const element = <LazyRoute><route.Component /></LazyRoute>;
+  return {
+    path: route.path,
+    element: route.adminOnly ? <AdminOnlyRoute>{element}</AdminOnlyRoute> : element,
+  };
+}
+
+/** Extension pages, inside the main layout (one keep-alive pane each). */
+export const appExtensionRoutes: RouteObject[] = extensionRoutes.map(extensionRouteObject);
 
 export function LegacyWebUIContractPageRedirect() {
   const params = useParams();
@@ -133,11 +155,9 @@ export const contentRoutes: RouteObject[] = [
   { path: 'monitoring', element: <LazyRoute><MonitoringPage /></LazyRoute> },
   { path: 'audit-logs', element: <Navigate to="/settings/audit-logs" replace /> },
   { path: 'admin/users', element: <Navigate to="/settings/account" replace /> },
-  { path: 'flockspro-upgrade', element: <AdminOnlyRoute><Navigate to="/settings/flockspro" replace /></AdminOnlyRoute> },
-  {
-    path: 'flockspro-upgrade/callback',
-    element: <AdminOnlyRoute><LazyRoute><FlocksproUpgradeCallbackPage /></LazyRoute></AdminOnlyRoute>,
-  },
+  // A private build registers its own pages (for example an upgrade
+  // flow) through @ext/registry; they get a keep-alive pane like any other.
+  ...appExtensionRoutes,
   { path: '*', element: <Navigate to="/" replace /> },
 ];
 

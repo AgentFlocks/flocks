@@ -1,10 +1,8 @@
 {
   "title": "Flocks 版本信息",
-  "proTitle": "Flocks Pro 版本信息",
   "currentVersion": "当前版本",
   "latestVersion": "最新版本",
   "coreVersion": "Core 版本",
-  "proComponent": "Pro 组件",
   "notInstalled": "未安装",
   "hasUpdate": "有新版本",
   "upToDate": "已是最新",
@@ -26,6 +24,12 @@
   "downloadProgressUnknown": "已下载 {{downloaded}}",
   "checkFailed": "检查版本失败",
   "upgradeFailed": "升级失败",
+  "upgradeComplete": "升级完成",
+  "upgradeCompleteDesc": "服务已返回完成结果，可以关闭此窗口。",
+  "upgradeFailedDesc": "本次更新未能确认完成，请根据下方提示检查服务状态。",
+  "closeAction": "关闭",
+  "streamInterrupted": "升级连接提前结束，未收到完成结果。请检查服务状态后重新检查更新。",
+  "streamTimeout": "升级连接已连续 5 分钟没有响应。请检查服务状态后重新检查更新。",
   "restartTimeout": "服务恢复确认超时：{{reason}}。请手动刷新页面确认状态。",
   "restartUnknown": "未收到明确的健康检查结果",
   "dismissAction": "不再提醒",
@@ -38,11 +42,35 @@
   "offlineNotChecked": "离线部署，未查询远端版本",
   "stageLabels": {
     "fetching": "下载最新源码包",
-    "fetchingPro": "下载 Pro bundle",
     "backing_up": "备份当前版本",
     "applying": "应用新版本",
     "restarting": "重启服务",
     "done": "完成",
     "error": "出错"
+  },
+  "managedModeTitle": "受管发布包",
+  "managedModeDesc": "当前实例的升级由部署统一管理，内置更新器不会修改受管的运行环境。请通过部署提供的升级入口或联系管理员完成更新。",
+  "handoff": {
+    "title": "重启阶段进度",
+    "steps": {
+      "stop": "停止服务",
+      "source_replace": "替换程序文件",
+      "check_runtime": "检查 Node.js 与 npm",
+      "sync_dependencies": "安装后端依赖",
+      "install_components": "安装扩展组件",
+      "build_webui": "构建前端",
+      "finalize": "校验安装结果",
+      "start": "启动服务"
+    },
+    "statuses": {
+      "pending": "未开始",
+      "running": "进行中",
+      "done": "已完成",
+      "skipped": "已跳过",
+      "failed": "失败"
+    },
+    "failed": "升级在「{{step}}」这一步失败：{{error}}",
+    "noDetail": "具体原因只显示在发起升级的页面上。",
+    "recoveryHint": "服务还没有恢复：请在服务器上查看 ~/.flocks/run/upgrade-result.json 和 ~/.flocks/logs/ 下当天的 errors.log，处理后执行 flocks start。"
   }
 }

@@ -28,5 +28,10 @@
     "patternHint": "Use * to match all",
     "adding": "Adding...",
     "add": "Add"
+  },
+  "replyFailed": "Reply failed",
+  "pending": {
+    "title": "Pending requests ({{count}})",
+    "session": "Session"
   }
 }

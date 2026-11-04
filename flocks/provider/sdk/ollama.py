@@ -16,6 +16,11 @@ class OllamaProvider(OpenAIBaseProvider):
     ENV_API_KEY = []  # Ollama doesn't need an API key
     ENV_BASE_URL = "OLLAMA_BASE_URL"
     CATALOG_ID = "ollama"
+    # No auth needed: the shared client builder substitutes this sentinel, so
+    # Ollama gets the same size-capped, retry-free http client as every other
+    # OpenAI-compatible provider instead of a bare AsyncOpenAI().
+    ALLOW_NO_API_KEY = True
+    NO_API_KEY_PLACEHOLDER = "ollama"
 
     def __init__(self):
         super().__init__(provider_id="ollama", name="Ollama")
@@ -23,23 +28,6 @@ class OllamaProvider(OpenAIBaseProvider):
     def is_configured(self) -> bool:
         """Ollama doesn't need an API key, just a running server."""
         return True
-
-    def _get_client(self):
-        """Override to use dummy API key when none is configured."""
-        if self._client is None:
-            from openai import AsyncOpenAI
-
-            base_url = (
-                self._config.base_url
-                if self._config and self._config.base_url
-                else self._base_url
-            )
-            api_key = "ollama"
-            if self._config and self._config.api_key:
-                api_key = self._config.api_key
-
-            self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-        return self._client
 
     def get_models(self):
         """Return models from flocks.json (_config_models) only.

@@ -149,8 +149,11 @@ class GoogleProvider(BaseProvider):
                             mime = getattr(p, "mime", "")
                             if mime.startswith("image/"):
                                 from flocks.session.utils.file_extractor import read_file_part_bytes
+                                from flocks.storage.file_mirror import readable_url
 
-                                data = read_file_part_bytes(getattr(p, "url", ""))
+                                data = read_file_part_bytes(
+                                    readable_url(getattr(p, "url", ""), session_id=getattr(p, "sessionID", None))
+                                )
                                 if data:
                                     parts.append({
                                         "inline_data": {
@@ -379,6 +382,11 @@ class GoogleProvider(BaseProvider):
         
         full_content = ""
         has_calls = False
+        # Each function call gets its own index: the downstream accumulator
+        # keys calls by index, so parallel calls sharing index 0 would be
+        # merged into one.
+        call_index = 0
+        block_reason = None
         async for chunk in response:
             delta = ""
             reasoning = None
@@ -399,11 +407,17 @@ class GoogleProvider(BaseProvider):
                             if tool_calls is None:
                                 tool_calls = []
                             tool_calls.append({
-                                "index": 0, 
+                                "index": call_index, 
                                 "id": f"call_{os.urandom(4).hex()}", 
                                 "type": "function",
                                 "function": {"name": call.name, "arguments": json.dumps(call.args)}
                             })
+                            call_index += 1
+            else:
+                feedback = getattr(chunk, "prompt_feedback", None)
+                reason = getattr(feedback, "block_reason", None) if feedback is not None else None
+                if reason:
+                    block_reason = getattr(reason, "name", None) or str(reason)
             
             usage = normalize_gemini_usage(
                 chunk.usage_metadata,
@@ -442,6 +456,14 @@ class GoogleProvider(BaseProvider):
                 has_calls = True
                 yield StreamChunk(delta="", tool_calls=parsed, finish_reason=None)
         
+        if block_reason and not full_content and not has_calls:
+            # A safety block returns no candidates at all; surface the reason
+            # instead of letting the runner treat it as an empty response and
+            # retry (the message matches the runner's content-policy classifier).
+            raise RuntimeError(
+                f"Gemini content filter triggered: prompt blocked ({block_reason})"
+            )
+        
         yield StreamChunk(delta="", finish_reason="tool-calls" if has_calls else "stop")
 
     def _convert_tools(self, flocks_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -458,7 +480,9 @@ class GoogleProvider(BaseProvider):
             for k, v in obj.items():
                 if k.lower() in ["additional_properties", "additionalproperties"]:
                     continue
-                if k == "anyof":
+                if k.lower() == "anyof":
+                    # JSON Schema spells it "anyOf"; Gemini has no union
+                    # support, so collapse to the first alternative.
                     if isinstance(v, list) and len(v) > 0:
                         return clean_schema(v[0])
                     continue

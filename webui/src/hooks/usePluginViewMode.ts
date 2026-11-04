@@ -3,12 +3,22 @@ import { useCallback, useState } from 'react';
 export type PluginViewMode = 'cards' | 'list';
 const storageKey = (key: string) => `flocks:plugin-view:${key}`;
 
+// A list view needs a desktop-wide table; on a phone the cards read better unless
+// the user picked the list themselves.
+function phoneDefault(fallback: PluginViewMode): PluginViewMode {
+  try {
+    return window.matchMedia?.('(max-width: 767px)').matches ? 'cards' : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function readMode(key: string, fallback: PluginViewMode): PluginViewMode {
   try {
     const value = window.localStorage.getItem(storageKey(key));
-    return value === 'cards' || value === 'list' ? value : fallback;
+    return value === 'cards' || value === 'list' ? value : phoneDefault(fallback);
   } catch {
-    return fallback;
+    return phoneDefault(fallback);
   }
 }
 

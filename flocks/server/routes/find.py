@@ -4,15 +4,17 @@ Find routes for Flocks TUI compatibility
 Provides /find/* endpoints that Flocks SDK expects.
 """
 
+import asyncio
 import os
 import subprocess
+from pathlib import Path
 from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from flocks.config.config import Config
-from flocks.utils.http_file_read_guard import resolve_path_for_http_file_access
+from flocks.utils.http_file_read_guard import assert_http_workspace_path_access, resolve_path_for_http_file_access
 from flocks.utils.log import Log
 
 
@@ -47,6 +49,31 @@ def _validate_search_input(value: str, *, label: str, max_length: int = 500) -> 
         raise HTTPException(status_code=400, detail=f"Invalid {label}")
 
 
+def _readable_search_hits(cwd: str, results: list) -> list:
+    """A readable search root does not authorize every descendant or alias."""
+    from flocks.workspace.manager import WorkspaceManager
+
+    root = Path(cwd).resolve()
+    manager = WorkspaceManager.get_instance()
+    workspace = manager.get_workspace_dir().resolve()
+    decisions: dict[str, bool] = {}
+    visible = []
+    for result in results:
+        relative = result.file if isinstance(result, FindResult) else result
+        if relative not in decisions:
+            try:
+                target = (root / relative).resolve()
+                if not target.is_relative_to(root):
+                    raise PermissionError("Search hit escapes its readable root")
+                assert_http_workspace_path_access(str(target), manager=manager, workspace=workspace)
+                decisions[relative] = True
+            except (OSError, RuntimeError, ValueError):
+                decisions[relative] = False
+        if decisions[relative]:
+            visible.append(result)
+    return visible
+
+
 @router.get(
     "",
     summary="Find text",
@@ -62,7 +89,8 @@ async def find_text(
     
     try:
         # Use ripgrep if available
-        result = subprocess.run(
+        result = await asyncio.to_thread(  # keep the event loop free while the search runs
+            subprocess.run,
             ["rg", "--json", "--max-count", "100", "--", pattern],
             cwd=cwd,
             capture_output=True,
@@ -90,11 +118,12 @@ async def find_text(
             except Exception:
                 continue
         
-        return results
+        return await asyncio.to_thread(_readable_search_hits, cwd, results)
     except FileNotFoundError:
         # ripgrep not available, use grep
         try:
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["grep", "-rn", "--", pattern, "."],
                 cwd=cwd,
                 capture_output=True,
@@ -112,7 +141,7 @@ async def find_text(
                         content=parts[2][:200] if len(parts) > 2 else None,
                     ))
             
-            return results
+            return await asyncio.to_thread(_readable_search_hits, cwd, results)
         except Exception:
             return []
     except Exception as e:
@@ -145,7 +174,8 @@ async def find_files(
             cmd.extend(["--type", "f"])
         cmd.extend(["--", query])
         
-        result = subprocess.run(
+        result = await asyncio.to_thread(  # keep the event loop free while the search runs
+            subprocess.run,
             cmd,
             cwd=cwd,
             capture_output=True,
@@ -153,7 +183,8 @@ async def find_files(
             timeout=10,
         )
         
-        return result.stdout.strip().splitlines() if result.stdout else []
+        files = result.stdout.strip().splitlines() if result.stdout else []
+        return await asyncio.to_thread(_readable_search_hits, cwd, files)
     except FileNotFoundError:
         # fd not available, use find
         try:
@@ -163,7 +194,8 @@ async def find_files(
             elif type == "file":
                 cmd.extend(["-type", "f"])
             
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 cmd,
                 cwd=cwd,
                 capture_output=True,
@@ -172,7 +204,7 @@ async def find_files(
             )
             
             files = result.stdout.strip().splitlines() if result.stdout else []
-            return files[:limit or 50]
+            return await asyncio.to_thread(_readable_search_hits, cwd, files[:limit or 50])
         except Exception:
             return []
     except Exception as e:

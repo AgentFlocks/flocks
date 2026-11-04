@@ -27,6 +27,9 @@
   "calls": "次调用",
   "errors": "错误",
   "performanceTrend": "性能趋势",
-  "chartHint": "图表功能需要安装 recharts",
-  "chartInstall": "运行: npm install recharts"
+  "trendDescription": "打开本页后每 5 秒采样一次，显示最近 10 分钟；速率按分钟统计",
+  "trendCollecting": "正在采样，速率按分钟统计，约 1 分钟后出现趋势",
+  "trendUnavailable": "暂无可用指标",
+  "trendAxis": "次/分钟",
+  "trendAriaLabel": "性能趋势：最新工具调用 {{calls}}，工具解析失败 {{failures}}"
 }

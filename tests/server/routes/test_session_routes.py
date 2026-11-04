@@ -1204,6 +1204,24 @@ class TestSessionCRUD:
         assert resp.json()["title"] == "Updated Title"
 
     @pytest.mark.asyncio
+    async def test_update_session_publishes_session_updated_event(
+        self, client: AsyncClient, session_id: str, monkeypatch: pytest.MonkeyPatch
+    ):
+        """重命名要通过 SSE 广播 session.updated（带 info），TUI 会话列表才会跟着变。"""
+        from flocks.server.routes import event as event_routes
+
+        published: list[tuple[str, dict]] = []
+
+        async def _publish(event_type, properties=None, directory=None):
+            published.append((event_type, properties or {}))
+
+        monkeypatch.setattr(event_routes, "publish_event", _publish)
+        resp = await client.patch(f"/api/session/{session_id}", json={"title": "Renamed via PATCH"})
+        assert resp.status_code == status.HTTP_200_OK
+        updated = [p for t, p in published if t == "session.updated" and p.get("id") == session_id]
+        assert updated and updated[-1]["status"] == "active"
+
+    @pytest.mark.asyncio
     async def test_update_session_auto_and_concrete_model_are_exclusive(
         self,
         client: AsyncClient,
@@ -1529,7 +1547,7 @@ class TestSessionMessages:
         assert running_part.state.status == "running"
 
     @pytest.mark.asyncio
-    async def test_list_messages_recovers_orphan_running_tool_when_session_idle(
+    async def test_list_messages_is_read_only_even_when_local_status_is_idle(
         self,
         client: AsyncClient,
         session_id: str,
@@ -1554,49 +1572,14 @@ class TestSessionMessages:
         assert resp.status_code == status.HTTP_200_OK
         parts = await Message.parts(msg.id, session_id)
         repaired_part = next(p for p in parts if p.id == "part_idle_running")
-        assert isinstance(repaired_part.state, ToolStateError)
-        assert repaired_part.state.status == "error"
-        assert repaired_part.state.error == INTERRUPTED_TOOL_ERROR
+        assert isinstance(repaired_part.state, ToolStateRunning)
+        assert repaired_part.state.status == "running"
         assert repaired_part.state.metadata == {"sessionId": "ses_child"}
         assert repaired_part.state.time["start"] == 1000
-        assert repaired_part.state.time["end"] >= 1000
+        assert (await Message.get(session_id, msg.id)).finish is None
 
     @pytest.mark.asyncio
-    async def test_list_messages_recovers_stale_pending_tool_only_when_idle(
-        self,
-        client: AsyncClient,
-        session_id: str,
-    ):
-        from flocks.session.message import ToolStatePending
-
-        msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
-        part = ToolPart(
-            id="part_pending_on_read", sessionID=session_id, messageID=msg.id,
-            callID="call_pending_on_read", tool="sleep",
-            state=ToolStatePending(input={"timeout_s": 40}, raw='{"timeout_s":40}'),
-        )
-        await Message.store_part(session_id, msg.id, part)
-        SessionStatus.set(session_id, SessionStatusBusy())
-        try:
-            busy_response = await client.get(f"/api/session/{session_id}/message")
-        finally:
-            SessionStatus.clear(session_id)
-        assert busy_response.status_code == status.HTTP_200_OK
-        assert next(p for p in await Message.parts(msg.id, session_id) if p.id == part.id).state.status == "pending"
-
-        idle_response = await client.get(f"/api/session/{session_id}/message")
-        assert idle_response.status_code == status.HTTP_200_OK
-        recovered = next(p for p in await Message.parts(msg.id, session_id) if p.id == part.id)
-        assert recovered.state.status == "error"
-        assert recovered.id == part.id
-        assert recovered.callID == part.callID
-        assert recovered.state.input == {"timeout_s": 40}
-        assert recovered.state.error == INTERRUPTED_TOOL_ERROR
-        assert await client.get(f"/api/session/{session_id}/message")
-        assert next(p for p in await Message.parts(msg.id, session_id) if p.id == part.id).state == recovered.state
-
-    @pytest.mark.asyncio
-    async def test_list_messages_uses_preloaded_orphan_recovery_path(
+    async def test_list_messages_does_not_invoke_recovery(
         self,
         client: AsyncClient,
         session_id: str,
@@ -1612,7 +1595,7 @@ class TestSessionMessages:
         resp = await client.get(f"/api/session/{session_id}/message")
 
         assert resp.status_code == status.HTTP_200_OK
-        preloaded_recovery.assert_awaited_once()
+        preloaded_recovery.assert_not_awaited()
         legacy_recovery.assert_not_called()
 
     @pytest.mark.asyncio
@@ -2859,8 +2842,14 @@ class TestSessionUtilities:
         """History is cleared only after abort drains the active session loop."""
         from flocks.server.routes import session as session_routes
         from flocks.session.interaction_queue import InteractionQueue
+        from flocks.session.session import SessionInfo
+        from flocks.storage.storage import Storage
 
         session_id = "ses_clear_waits_for_idle"
+        stored_session = SessionInfo(
+            id=session_id, projectID="proj_clear_waits_for_idle", directory="/tmp/project",
+        )
+        await Storage.set(f"session:{stored_session.project_id}:{session_id}", stored_session, "session")
         await InteractionQueue.clear(session_id)
         await InteractionQueue.enqueue(
             session_id,
@@ -2886,11 +2875,7 @@ class TestSessionUtilities:
         monkeypatch.setattr(
             session_routes.Session,
             "get_by_id",
-            AsyncMock(return_value=SimpleNamespace(
-                id=session_id,
-                directory="/tmp/project",
-                status="active",
-            )),
+            AsyncMock(return_value=stored_session),
         )
         monkeypatch.setattr(session_routes, "abort_session", fake_abort_session)
         monkeypatch.setattr(session_routes, "_wait_for_session_idle", fake_wait_for_session_idle)
@@ -2931,6 +2916,7 @@ class TestSessionUtilities:
         """POST /api/session/{id}/abort returns 200 (no active generation needed)."""
         resp = await client.post(f"/api/session/{session_id}/abort")
         assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {"status": "not_running", "generation": None}
 
     @pytest.mark.asyncio
     async def test_session_statistics(self, client: AsyncClient, session_id: str):
@@ -2965,11 +2951,13 @@ class TestSessionUtilities:
         from flocks.session.agent_inbox import AgentInbox
         from flocks.session.core.status import SessionStatus, SessionStatusBusy
 
-        root = (await client.post("/api/session", json={"title": "status root"})).json()["id"]
-        child = (await client.post("/api/session", json={"title": "status child", "parentID": root})).json()["id"]
-        grandchild = (
-            await client.post("/api/session", json={"title": "status grandchild", "parentID": child})
-        ).json()["id"]
+        # The status map only lists sessions that exist and the caller may read.
+        ids = []
+        for title in ("root", "child", "grandchild"):
+            created = await client.post("/api/session", json={"title": f"status-{title}"})
+            assert created.status_code == status.HTTP_200_OK, created.text
+            ids.append(created.json()["id"])
+        root, child, grandchild = ids
         AgentInbox.bind(child).parent_id = root
         AgentInbox.bind(grandchild).parent_id = child
         monkeypatch.setattr(SessionStatus, "list", lambda: {grandchild: SessionStatusBusy()})
@@ -3271,6 +3259,7 @@ class TestSessionContext:
         assert result.attachments and len(result.attachments) == 1
         assert result.attachments[0]["source"] == {
             "root": "workspace-output", "path": relative, "username": output_username,
+            "userID": user.id if scope == "user" else None,
         }
         assert result.attachments[0]["sessionID"] == session.id
         assert result.attachments[0]["messageID"] == message.id
@@ -3519,13 +3508,13 @@ class TestSessionContext:
         assert history.json() == []
 
     @pytest.mark.asyncio
-    async def test_legacy_username_owner_binds_upload_from_authenticated_user(
+    async def test_legacy_username_cannot_claim_session_or_bind_upload(
         self,
         client: AsyncClient,
         tmp_path,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        from flocks.session.files import create_chat_upload_target
+        from flocks.session.files import create_chat_upload_target, session_uploads_dir
 
         owner = AuthUser(id="usr_legacy_owner", username="legacy", role="member", status="active")
         monkeypatch.setattr(session_routes, "require_user", lambda _request: owner)
@@ -3539,6 +3528,7 @@ class TestSessionContext:
         upload_id = "prt_legacy_upload_1234"
         staged = create_chat_upload_target(owner.id, upload_id, "legacy.md")
         staged.write_text("legacy", encoding="utf-8")
+        assert not session_uploads_dir(session.id).exists()
 
         response = await client.post(
             f"/api/session/{session.id}/message",
@@ -3556,7 +3546,10 @@ class TestSessionContext:
                 "noReply": True,
             },
         )
-        assert response.status_code == status.HTTP_200_OK
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert staged.read_text(encoding="utf-8") == "legacy"
+        assert not session_uploads_dir(session.id).exists()
+        assert await Message.list(session.id) == []
 
     @pytest.mark.asyncio
     async def test_shared_reader_cannot_mutate_or_run_prompt_queue(
@@ -3801,7 +3794,7 @@ class TestSessionContextRegressions:
         assert part.state.attachments[0]["url"] == large
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mutation", ["source", "remove", "metadata", "tool", "type"])
+    @pytest.mark.parametrize("mutation", ["source", "source_user_id", "remove", "metadata", "tool", "type"])
     async def test_patch_cannot_change_write_provenance(self, client: AsyncClient, session_id: str, mutation):
         message = await Message.create(session_id, MessageRole.ASSISTANT, "")
         part = ToolPart(
@@ -3819,6 +3812,8 @@ class TestSessionContextRegressions:
         body = session_routes._part_to_response_info(part, session_id=session_id, message_id=message.id).model_dump()
         if mutation == "source":
             body["state"]["attachments"][0]["source"]["username"] = "another-user"
+        elif mutation == "source_user_id":
+            body["state"]["attachments"][0]["source"]["userID"] = "another-user-id"
         elif mutation == "remove":
             body["state"].pop("attachments")
         elif mutation == "metadata":

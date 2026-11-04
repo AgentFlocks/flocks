@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -549,7 +549,7 @@ class TestTestCredentialsManifestBranch:
             mock_provider_cls._ensure_initialized = MagicMock()
             mock_provider_cls.apply_config = AsyncMock()
             mock_provider_cls.get.return_value = None
-            mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.execute = AsyncMock(
                 return_value=MagicMock(success=True, error=None)
             )
@@ -561,6 +561,7 @@ class TestTestCredentialsManifestBranch:
         assert result["tool_tested"] == "ngtip_query"
         mock_tr.execute.assert_awaited_once_with(
             tool_name="ngtip_query",
+            ctx=ANY,
             action="query_ip",
             resource="8.8.8.8",
         )
@@ -585,7 +586,7 @@ class TestTestCredentialsManifestBranch:
             mock_provider_cls._ensure_initialized = MagicMock()
             mock_provider_cls.apply_config = AsyncMock()
             mock_provider_cls.get.return_value = None
-            mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.execute = AsyncMock(
                 return_value=MagicMock(success=False, error="invalid apikey")
             )
@@ -644,7 +645,7 @@ class TestTestCredentialsManifestBranch:
             mock_provider_cls._ensure_initialized = MagicMock()
             mock_provider_cls.apply_config = AsyncMock()
             mock_provider_cls.get.return_value = None
-            mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.list_tools.return_value = [heuristic_tool]
             mock_tr._dynamic_tools_by_module = {}
             mock_tr.execute = execute_mock
@@ -690,7 +691,7 @@ class TestTestCredentialsManifestBranch:
             mock_provider_cls._ensure_initialized = MagicMock()
             mock_provider_cls.apply_config = AsyncMock()
             mock_provider_cls.get.return_value = None
-            mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.list_tools.return_value = [tool_info]
             mock_tr._dynamic_tools_by_module = {}
             mock_tr.execute = AsyncMock(

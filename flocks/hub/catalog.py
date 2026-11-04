@@ -13,7 +13,7 @@ from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from flocks.hub import local, tool_tree
+from flocks.hub import local, providers, tool_tree
 from flocks.hub.models import (
     HubCatalogEntry,
     HubGuidedInstall,
@@ -331,6 +331,16 @@ def manifest_relative_path(plugin_type: PluginType, plugin_id: str) -> str:
 
 
 def load_manifest(plugin_type: PluginType, plugin_id: str) -> HubPluginManifest:
+    # During an operation the manifest of what was staged is the one that
+    # counts, whatever the provider lists by now.
+    pinned = providers.staged_manifest(plugin_type, plugin_id)
+    if pinned is not None:
+        return pinned
+    # A provider's own manifest wins over a hub root's listing of the same
+    # plugin: that listing at most announces what the provider delivers.
+    delivered = providers.provided_manifest(plugin_type, plugin_id)
+    if delivered is not None:
+        return delivered
     path = manifest_path(plugin_type, plugin_id)
     if path.is_file():
         return HubPluginManifest.model_validate(_read_json(path))
@@ -780,11 +790,17 @@ def _installed_plugins_cache_key() -> tuple[tuple[str, int, int], ...]:
 
 
 def _catalog_entries_cache_key() -> tuple[tuple[str, int, int], ...]:
+    from flocks.content.managed import ManagedContent
+
     root = get_bundled_hub_root()
     return (
         _path_signature(root / "index.json"),
         _path_signature(root / "taxonomy.json"),
         *(_path_signature(extension_root / "index.json") for extension_root in extension_hub_roots()),
+        (f"providers:{providers.signature()}", 0, 0),
+        # What the deployment serves decides suite states below; it changes
+        # without any local file changing.
+        (f"managed:{ManagedContent.generation()}", 0, 0),
         *_installed_plugins_cache_key(),
         *local.tool_discovery_signature(),
         *_system_plugin_roots_cache_key(),
@@ -797,10 +813,16 @@ def _build_catalog_entries(
 ) -> tuple[HubCatalogEntry, ...]:
     records = local.load_installed_records()
     inferred_installs = local.infer_local_installs()
+    delivered = providers.provided_plugins_or_empty()
     entries = [
         _entry_from_index(item, records, inferred_installs)
         for item in load_index().plugins
+        if (item.type, item.id) not in delivered
     ]
+    entries.extend(
+        _entry_from_provided(manifest, records, inferred_installs)
+        for _provider, manifest in delivered.values()
+    )
     seen: set[tuple[PluginType, str]] = {(entry.type, entry.id) for entry in entries}
     for (system_type, system_id), root in _system_plugin_roots().items():
         if (system_type, system_id) in seen:
@@ -828,7 +850,22 @@ def _build_catalog_entries(
     # when required payloads are missing, even if its version is current. A
     # repair also updates outdated children, so completeness takes precedence.
     by_key = {(entry.type, entry.id): entry for entry in entries}
-    installed_keys = {key for key, entry in by_key.items() if entry.installPath}
+    # What the deployment controls (flocks.content.managed) counts as present
+    # for a suite only while it serves it.  A local copy under such an id is
+    # never loaded, so it neither completes a suite nor makes one outdated.
+    from flocks.content.managed import ManagedContent
+
+    managed_keys = {
+        (kind, content_id)
+        for kind in ("agent", "skill", "workflow")
+        for content_id in ManagedContent.ids(kind)
+    }
+    installed_keys = {key for key, entry in by_key.items() if entry.installPath and key not in managed_keys}
+    installed_keys |= {
+        (kind, content_id)
+        for kind in ("agent", "skill", "workflow")
+        for content_id in ManagedContent.available_ids(kind)
+    }
     for entry in entries:
         if entry.type != "component" or entry.state == "incompatible":
             continue
@@ -862,6 +899,7 @@ def _build_catalog_entries(
             child.state == "updateAvailable"
             for ref in refs
             if ref.type != "component"
+            and (ref.type, ref.id) not in managed_keys
             and (child := by_key.get((ref.type, ref.id))) is not None
         ):
             entry.state = "updateAvailable"
@@ -947,6 +985,7 @@ def clear_catalog_caches() -> None:
     load_index.cache_clear()
     load_taxonomy.cache_clear()
     _manifest_path_lookup.cache_clear()
+    providers.clear_cache()
     _cached_system_plugin_roots.cache_clear()
     _cached_bundled_tool_roots.cache_clear()
 
@@ -1152,12 +1191,23 @@ def _entry_from_index(
         inferred_installs,
     )
 
+    # The manifest is the source of truth for version and OS compatibility;
+    # the index is a denormalized listing that can lag behind it.
+    manifest: Optional[HubPluginManifest]
+    try:
+        manifest = load_manifest(item.type, item.id)
+    except Exception:
+        manifest = None
+    version = manifest.version if manifest and manifest.version else item.version
+
     state, installed_version = _catalog_install_state(
         item.type,
         install_path,
         record,
-        item.version,
+        version,
     )
+    if manifest is not None and not _os_compatible(manifest):
+        state = "incompatible"
 
     return HubCatalogEntry(
         id=item.id,
@@ -1166,7 +1216,7 @@ def _entry_from_index(
         nameCn=item.nameCn,
         description=item.description,
         descriptionCn=item.descriptionCn,
-        version=item.version,
+        version=version,
         category=item.category,
         tags=item.tags,
         useCases=item.useCases,
@@ -1180,6 +1230,44 @@ def _entry_from_index(
         installPath=str(install_path) if install_path else None,
         native=False,
         guidedInstall=item.guidedInstall,
+    )
+
+
+def _entry_from_provided(
+    manifest: HubPluginManifest,
+    records: dict[str, local.InstalledPluginRecord],
+    inferred_installs: dict[tuple[PluginType, str], Path],
+) -> HubCatalogEntry:
+    """Catalog entry for a plugin an extension provides (flocks.hub.providers):
+    listed from its manifest, installed state as for any bundled plugin."""
+    record = records.get(f"{manifest.type}:{manifest.id}")
+    install_path, record = _resolve_install_path(manifest.type, manifest.id, record, inferred_installs)
+    state, installed_version = _catalog_install_state(manifest.type, install_path, record, manifest.version)
+    if not _os_compatible(manifest):
+        state = "incompatible"
+    return HubCatalogEntry(
+        id=manifest.id,
+        type=manifest.type,
+        name=manifest.name,
+        nameCn=manifest.nameCn,
+        description=manifest.description,
+        descriptionCn=getattr(manifest, "descriptionCn", None),
+        version=manifest.version,
+        category=manifest.category,
+        tags=_safe_tags(manifest.tags),
+        useCases=manifest.useCases,
+        domains=manifest.domains,
+        capabilities=manifest.capabilities,
+        trust=manifest.trust,
+        riskLevel=manifest.risk.level,
+        edition=manifest.edition,
+        state=state,
+        installedVersion=installed_version,
+        source=manifest.source.kind,
+        # Where the plugin sits in what its provider stages, so it groups with its kind.
+        manifestPath=(providers.payload_path(manifest) / "manifest.json").as_posix(),
+        installPath=str(install_path) if install_path else None,
+        native=False,
     )
 
 
@@ -1280,13 +1368,17 @@ def _entry_from_bundled_tool(
 
 def list_manifests() -> list[HubPluginManifest]:
     index = load_index()
+    delivered = providers.provided_plugins_or_empty()
     result: list[HubPluginManifest] = []
     for item in index.plugins:
+        if (item.type, item.id) in delivered:
+            continue
         try:
             path = manifest_path(item.type, item.id)
             result.append(HubPluginManifest.model_validate(_read_json(path)))
         except Exception:
             continue
+    result.extend(manifest for _provider, manifest in delivered.values())
     return result
 
 

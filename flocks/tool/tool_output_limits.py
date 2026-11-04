@@ -49,9 +49,9 @@ def _load_tool_output_section():
     Tries two paths in order:
     1. ``Config._cached_config`` — already populated after server start-up,
        zero overhead for hot-path tool calls.
-    2. Synchronous JSON parse of ``~/.flocks/flocks.json`` — used when the
-       tool is called before the async ``Config.get()`` has run (e.g. CLI
-       one-shot mode, unit tests).
+    2. Synchronous JSON parse of ``<config dir>/flocks.json`` (``FLOCKS_ROOT``
+       aware) — used when the tool is called before the async ``Config.get()``
+       has run (e.g. CLI one-shot mode, unit tests).
     """
     try:
         from flocks.config.config import Config
@@ -61,11 +61,12 @@ def _load_tool_output_section():
     except Exception:
         pass
 
-    # Fallback: sync parse of flocks.json
+    # Fallback: sync parse of the real config file (honours FLOCKS_ROOT /
+    # FLOCKS_CONFIG_DIR, same resolution as Config itself)
     try:
         import json as _json
-        from pathlib import Path as _Path
-        config_dir = _Path.home() / ".flocks"
+        from flocks.config.config import _get_config_dir
+        config_dir = _get_config_dir()
         for fname in ("flocks.json", "flocks.jsonc", "config.json"):
             fp = config_dir / fname
             if fp.exists():

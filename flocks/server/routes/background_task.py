@@ -60,24 +60,28 @@ async def _task_session_access(
 ) -> Tuple[bool, bool]:
     """(can_read, can_write) for the session the task runs in.
 
-    The task's own session decides; its parent session stands in when the
-    task has not created one yet. A task tied to no stored session is only
-    visible to admins, like other ownerless runtime state. ``sessions``
-    caches lookups across the tasks of one request.
+    The task's own session decides; its parent session stands in only while
+    the task has not been given one yet. A session that is referenced but
+    cannot be read (deleted, or the read failed) grants nothing: there are
+    several users, a task keeps its prompt and output in memory after its
+    session is gone, and an admin could not read that session while it
+    existed. A task tied to no session at all is ownerless runtime state,
+    visible to admins only. ``sessions`` caches lookups across the tasks of
+    one request.
     """
     from flocks.session.session import Session
 
+    session_id = task.session_id or task.parent_session_id
+    if not session_id:
+        is_admin = SessionPolicy.is_admin(user)
+        return is_admin, is_admin
     cache = sessions if sessions is not None else {}
-    for session_id in (task.session_id, task.parent_session_id):
-        if not session_id:
-            continue
-        if session_id not in cache:
-            cache[session_id] = await Session.get_by_id_unfiltered(session_id)
-        session = cache[session_id]
-        if session is not None:
-            return SessionPolicy.can_read(session, user), SessionPolicy.can_write(session, user)
-    is_admin = SessionPolicy.is_admin(user)
-    return is_admin, is_admin
+    if session_id not in cache:
+        cache[session_id] = await Session.get_by_id_unfiltered(session_id)
+    session = cache[session_id]
+    if session is None:
+        return False, False
+    return SessionPolicy.can_read(session, user), SessionPolicy.can_write(session, user)
 
 
 def _not_found(task_id: str) -> HTTPException:

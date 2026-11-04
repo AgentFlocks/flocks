@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import mimetypes
 import os
 import shutil
@@ -62,6 +63,7 @@ from flocks.server.auth import get_optional_user, require_user
 from flocks.workspace.manager import WorkspaceManager
 from flocks.workspace.models import WorkspaceNode, WorkspaceStats
 from flocks.utils.log import Log
+from flocks.utils.http_file_read_guard import http_private_path_is_blocked, require_http_private_path_access
 
 router = APIRouter()
 log = Log.create(service="workspace.routes")
@@ -72,10 +74,10 @@ _DEFAULT_MAX_UPLOAD_MB = 100
 _DEFAULT_MAX_READ_BYTES = 2 * 1024 * 1024
 _ALLOWED_UPLOAD_EXTENSIONS = {
     ".txt", ".md", ".json", ".yaml", ".yml", ".xml", ".csv",
-    ".pdf", ".doc", ".docx", ".html", ".htm", ".ppt", ".pptx", ".xls", ".xlsx",
+    ".pdf", ".doc", ".docx", ".html", ".htm", ".ppt", ".pptx", ".xls", ".xlsx", ".zip",
 }
 _ALLOWED_UPLOAD_LABEL = (
-    "txt, md, json, yaml, yml, xml, csv, pdf, doc, docx, html, htm, ppt, pptx, xls, xlsx"
+    "txt, md, json, yaml, yml, xml, csv, pdf, doc, docx, html, htm, ppt, pptx, xls, xlsx, zip"
 )
 _ALLOWED_PREVIEW_MEDIA_TYPES = {
     "application/pdf",
@@ -87,12 +89,25 @@ _ALLOWED_PREVIEW_MEDIA_TYPES = {
 }
 
 
+def _env_int(name: str, default: int) -> int:
+    """Read a positive integer setting; a bad value falls back instead of 500-ing."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warn("workspace.env.invalid_int", {"name": name, "value": raw, "default": default})
+        return default
+    return value if value >= 0 else default
+
+
 def _max_upload_bytes() -> int:
-    return int(os.getenv("FLOCKS_WORKSPACE_MAX_UPLOAD_MB", str(_DEFAULT_MAX_UPLOAD_MB))) * 1024 * 1024
+    return _env_int("FLOCKS_WORKSPACE_MAX_UPLOAD_MB", _DEFAULT_MAX_UPLOAD_MB) * 1024 * 1024
 
 
 def _max_read_bytes() -> int:
-    return int(os.getenv("FLOCKS_WORKSPACE_MAX_READ_BYTES", str(_DEFAULT_MAX_READ_BYTES)))
+    return _env_int("FLOCKS_WORKSPACE_MAX_READ_BYTES", _DEFAULT_MAX_READ_BYTES)
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -133,9 +148,15 @@ def _node_from_path(path: Path, root: Path) -> WorkspaceNode:
     """Build a WorkspaceNode from a filesystem path.
 
     Uses a single stat() call; type is derived from st_mode to avoid the
-    extra syscall that Path.is_dir() would issue internally.
+    extra syscall that Path.is_dir() would issue internally. An entry whose
+    target cannot be followed (a dangling symlink) is listed from lstat() as
+    a file, so one broken link does not fail the whole listing and can still
+    be seen and deleted.
     """
-    raw_stat = path.stat()
+    try:
+        raw_stat = path.stat()
+    except OSError:
+        raw_stat = path.lstat()
     is_dir = stat_module.S_ISDIR(raw_stat.st_mode)
 
     # Root node: relative_to returns Path('.'); normalise to '' so the
@@ -172,13 +193,22 @@ def _visible_children(directory: Path, root: Path) -> list[Path]:
     Output directories are organized by date, so show their folders newest-first
     while retaining the normal name order for files.
     """
-    children = [child for child in directory.iterdir() if not child.name.startswith(".")]
+    children = [child for child in directory.iterdir()
+                if not child.name.startswith(".") and not http_private_path_is_blocked(child)]
     if not _is_outputs_directory(directory, root):
         return sorted(children)
 
     directories = sorted((child for child in children if child.is_dir()), reverse=True)
     files = sorted(child for child in children if not child.is_dir())
     return directories + files
+
+
+def _child_node(child: Path, root: Path) -> Optional[WorkspaceNode]:
+    """Node for a listed child, or None when it vanished after the directory scan."""
+    try:
+        return _node_from_path(child, root)
+    except FileNotFoundError:
+        return None
 
 
 def _build_tree_sync(directory: Path, root: Path, depth: int, current: int = 0) -> WorkspaceNode:
@@ -188,15 +218,21 @@ def _build_tree_sync(directory: Path, root: Path, depth: int, current: int = 0) 
         node.children = []
         for child in _visible_children(directory, root):
             if child.is_dir():
-                node.children.append(_build_tree_sync(child, root, depth, current + 1))
+                try:
+                    node.children.append(_build_tree_sync(child, root, depth, current + 1))
+                except FileNotFoundError:
+                    continue  # removed after the directory scan
             else:
-                node.children.append(_node_from_path(child, root))
+                child_node = _child_node(child, root)
+                if child_node is not None:
+                    node.children.append(child_node)
     return node
 
 
 def _list_dir_sync(directory: Path, root: Path) -> list[WorkspaceNode]:
     """Blocking single-level directory listing — call via asyncio.to_thread."""
-    return [_node_from_path(child, root) for child in _visible_children(directory, root)]
+    nodes = (_child_node(child, root) for child in _visible_children(directory, root))
+    return [node for node in nodes if node is not None]
 
 
 def _dir_stats_sync(root: Path):
@@ -204,17 +240,23 @@ def _dir_stats_sync(root: Path):
     file_count = 0
     dir_count = 0
     total_size = 0
-    for item in root.rglob("*"):
-        if item.is_file():
-            file_count += 1
-            total_size += item.stat().st_size
-        elif item.is_dir():
-            dir_count += 1
+    if http_private_path_is_blocked(root):
+        return file_count, dir_count, total_size
+    for parent, directories, filenames in os.walk(root, followlinks=False):
+        directory = Path(parent)
+        directories[:] = [name for name in directories if not http_private_path_is_blocked(directory / name)]
+        dir_count += len(directories)
+        for name in filenames:
+            item = directory / name
+            if not http_private_path_is_blocked(item) and item.is_file():
+                file_count += 1
+                total_size += item.stat().st_size
     return file_count, dir_count, total_size
 
 
 def _read_text_preview_sync(path: Path, max_bytes: int) -> tuple[str, bool]:
     """Read at most ``max_bytes`` from a text file for safe preview."""
+    require_http_private_path_access(path)
     with path.open("rb") as handle:
         data = handle.read(max_bytes + 1)
     truncated = len(data) > max_bytes
@@ -224,6 +266,7 @@ def _read_text_preview_sync(path: Path, max_bytes: int) -> tuple[str, bool]:
 
 
 def _inline_preview_response(target: Path) -> FileResponse:
+    require_http_private_path_access(target)
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     if media_type not in _ALLOWED_PREVIEW_MEDIA_TYPES:
         raise HTTPException(
@@ -248,6 +291,7 @@ def _inline_preview_response(target: Path) -> FileResponse:
 
 
 def _download_response(target: Path, *, filename: Optional[str] = None) -> FileResponse:
+    require_http_private_path_access(target)
     return FileResponse(
         path=str(target),
         filename=filename or target.name,
@@ -300,6 +344,7 @@ async def list_tree(
         base = mgr.resolve_workspace_path(path) if path else workspace_root
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    require_http_private_path_access(base)
     if not base.exists():
         raise HTTPException(status_code=404, detail=f"Path not found: {path}")
     if not base.is_dir():
@@ -317,6 +362,7 @@ async def list_dir(
         base = mgr.resolve_workspace_path(path) if path else workspace_root
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    require_http_private_path_access(base)
     if not base.exists():
         raise HTTPException(status_code=404, detail=f"Path not found: {path}")
     if not base.is_dir():
@@ -331,10 +377,17 @@ class DirCreateRequest(BaseModel):
 @router.post("/dir", summary="Create directory")
 async def create_dir(body: DirCreateRequest):
     mgr = _get_manager()
+    if not body.path.strip() or body.path.strip() in (".", "./"):
+        # The root already exists; "create" with no name is a client bug.
+        raise HTTPException(status_code=422, detail="path must name a directory inside the workspace")
     try:
         target = mgr.resolve_workspace_path(body.path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if target.exists() and not target.is_dir():
+        raise HTTPException(status_code=409, detail=f"A file already exists at: {body.path}")
+    if target.is_dir():
+        return {"path": body.path, "created": False}
     target.mkdir(parents=True, exist_ok=True)
     log.info("workspace.dir.created", {"path": body.path})
     return {"path": body.path, "created": True}
@@ -393,7 +446,7 @@ async def upload_files(
             continue
 
         if purpose == "chat":
-            from flocks.session.files import create_chat_upload_target, remove_staged_chat_upload
+            from flocks.session.files import create_chat_upload_target, remove_staged_chat_upload, store_upload
             from flocks.utils.id import Identifier
 
             filename = sanitize_filename(unquote(raw_name), fallback="")
@@ -428,6 +481,8 @@ async def upload_files(
                 if total > max_bytes:
                     results.append({"name": filename, "error": f"File too large (max {max_mb} MB)"})
                     continue
+                # Kept through the file store as well, like every upload.
+                await store_upload(target)
                 completed = True
             except Exception as exc:
                 results.append({"name": filename, "error": f"Failed to stage upload: {exc}"})
@@ -457,6 +512,11 @@ async def upload_files(
             continue
 
         filename = Path(raw_name).name  # strip any dir component from client
+        if filename in {"", ".", ".."}:
+            # "." or ".." would name the destination directory itself (or its
+            # parent): report this file and go on with the rest of the batch.
+            results.append({"name": raw_name, "error": "Filename is invalid"})
+            continue
         # Read regular Workspace uploads in chunks before overwriting the
         # destination, so an oversized upload leaves existing content intact.
         chunks: list[bytes] = []
@@ -480,7 +540,16 @@ async def upload_files(
         # Keep regular Workspace paths stable across repeated uploads by
         # overwriting the existing file instead of auto-renaming it.
         target = dest_dir / filename
-        target.write_bytes(content)
+        try:
+            target.write_bytes(content)
+        except OSError as exc:
+            # e.g. a directory of that name already exists: this file fails,
+            # the files before and after it keep their own results.
+            results.append({
+                "name": raw_name,
+                "error": f"Failed to save upload: {exc.strerror or type(exc).__name__}",
+            })
+            continue
 
         is_text = WorkspaceManager.is_text_file(target)
         log.info("workspace.file.uploaded", {
@@ -504,11 +573,11 @@ async def upload_files(
 
 @router.delete("/upload/chat/{upload_id}", summary="Discard staged chat upload")
 async def discard_chat_upload(upload_id: str, request: Request):
-    from flocks.session.files import remove_staged_chat_upload
+    from flocks.session.files import discard_staged_chat_upload
 
     current_user = require_user(request)
     try:
-        removed = remove_staged_chat_upload(current_user.id, upload_id)
+        removed = await discard_staged_chat_upload(current_user.id, upload_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"uploadID": upload_id, "removed": removed}
@@ -523,6 +592,7 @@ async def read_file(
         target = mgr.resolve_workspace_path(path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    require_http_private_path_access(target)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     if not target.is_file():
@@ -539,6 +609,8 @@ async def read_file(
             target,
             max_read_bytes,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {
@@ -562,6 +634,8 @@ async def write_file(body: FileWriteRequest):
         target = mgr.resolve_workspace_path(body.path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if target.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a file: {body.path}")
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         target.write_text(body.content, encoding="utf-8")
@@ -598,6 +672,7 @@ async def preview_file(
         target = mgr.resolve_workspace_path(path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    require_http_private_path_access(target)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     if not target.is_file():
@@ -614,6 +689,7 @@ async def download_file(
         target = mgr.resolve_workspace_path(path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    require_http_private_path_access(target)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     if not target.is_file():
@@ -626,24 +702,52 @@ class ZipDownloadRequest(BaseModel):
     archive_name: str = "workspace_files.zip"
 
 
+_DEFAULT_ARCHIVE_NAME = "workspace_files.zip"
+
+
+def _safe_archive_name(name: str) -> str:
+    """Reduce a client-supplied archive name to something safe in a header.
+
+    The value is interpolated into Content-Disposition; control characters or
+    quotes there let a caller inject or truncate response headers.
+    """
+    base = Path(name.replace("\\", "/")).name
+    cleaned = "".join(ch for ch in base if ch.isprintable() and ch not in '"\\;')
+    cleaned = cleaned.strip().strip(".")
+    if not cleaned:
+        return _DEFAULT_ARCHIVE_NAME
+    if not cleaned.lower().endswith(".zip"):
+        cleaned += ".zip"
+    return cleaned
+
+
 @router.post("/download/zip", summary="Batch download as zip")
 async def download_zip(body: ZipDownloadRequest):
     mgr = _get_manager()
+    targets: list[tuple[str, Path]] = []
+    skipped: list[str] = []
+    for rel_path in body.paths:
+        try:
+            target = mgr.resolve_workspace_path(rel_path)
+        except ValueError:
+            skipped.append(rel_path)
+            continue
+        if target.is_file() and not http_private_path_is_blocked(target):
+            targets.append((rel_path, target))
+        else:
+            skipped.append(rel_path)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for rel_path in body.paths:
-            try:
-                target = mgr.resolve_workspace_path(rel_path)
-            except ValueError:
-                continue
-            if target.is_file():
-                zf.write(target, arcname=rel_path)
+        for rel_path, target in targets:
+            zf.write(target, arcname=rel_path)
     buf.seek(0)
-    return StreamingResponse(
-        buf,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{body.archive_name}"'},
-    )
+    headers = {"Content-Disposition": f'attachment; filename="{_safe_archive_name(body.archive_name)}"'}
+    if skipped:
+        # Paths outside the workspace, missing files and directories are left
+        # out of the archive; the header tells the client which ones, so an
+        # empty zip is never silent.
+        headers["X-Skipped-Paths"] = json.dumps(skipped, ensure_ascii=True)
+    return StreamingResponse(buf, media_type="application/zip", headers=headers)
 
 
 class MoveRequest(BaseModel):
@@ -752,7 +856,7 @@ def _build_memory_node_sync(
         children = (
             child
             for child in path.iterdir()
-            if not child.is_symlink()
+            if not child.is_symlink() and not http_private_path_is_blocked(child)
         )
         node.children = [
             _build_memory_node_sync(child, memory_dir, writable_project_ids)
@@ -769,7 +873,7 @@ def _list_memory_sync(
     children = (
         child
         for child in memory_dir.iterdir()
-        if not child.is_symlink()
+        if not child.is_symlink() and not http_private_path_is_blocked(child)
     )
     ordered = sorted(
         children,
@@ -784,10 +888,28 @@ def _list_memory_sync(
     ]
 
 
+async def _settle_memory_note(mgr: WorkspaceManager, target: Path) -> None:
+    """The stored copy of a memory note, before it is served."""
+    from flocks.memory.sync.mirror import reconcile_note
+
+    require_http_private_path_access(target)
+    if target.suffix.lower() != ".md":
+        return
+    try:
+        await reconcile_note(mgr.get_memory_dir(), target)
+    except ValueError:
+        pass
+
+
 @router.get("/memory/list", response_model=List[WorkspaceNode], summary="List memory files")
 async def list_memory(request: Request):
+    from flocks.memory.sync.mirror import reconcile_quietly
+
     mgr = _get_manager()
     memory_dir = mgr.get_memory_dir()
+    require_http_private_path_access(memory_dir)
+    # The stored notes, so the listing has every one of them.
+    await reconcile_quietly(memory_dir)
     if not memory_dir.exists():
         return []
     user = get_optional_user(request)
@@ -804,6 +926,7 @@ async def read_memory_file(
         target = mgr.resolve_memory_path(path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await _settle_memory_note(mgr, target)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"Memory file not found: {path}")
     if not target.is_file():
@@ -820,6 +943,8 @@ async def read_memory_file(
             target,
             max_read_bytes,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {
@@ -839,17 +964,30 @@ async def write_memory_file(request: Request, body: FileWriteRequest):
         target = mgr.resolve_memory_path(body.path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if target.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a file: {body.path}")
     writable_project_ids = Project.registered_project_ids(user.id)
     if not _is_editable_memory_path(body.path, writable_project_ids):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Memory file is read-only",
         )
+    from flocks.memory.sync.mirror import MemoryNotShared, reconcile_note
+
+    mirrored = target.suffix.lower() == ".md"
+    if mirrored:
+        # The stored note first, then this edit, then the stored copy brought
+        # up to date.
+        await reconcile_note(mgr.get_memory_dir(), target)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         target.write_text(body.content, encoding="utf-8")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    if mirrored and not await reconcile_note(mgr.get_memory_dir(), target):
+        # Saved, but the store did not take it: say so rather than report a
+        # write that worked.
+        raise HTTPException(status_code=503, detail=MemoryNotShared.SAVED_UNSETTLED)
     log.info("workspace.memory_file.written", {"path": body.path, "size": len(body.content)})
     return {"path": body.path, "written": True}
 
@@ -863,6 +1001,7 @@ async def preview_memory_file(
         target = mgr.resolve_memory_path(path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await _settle_memory_note(mgr, target)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"Memory file not found: {path}")
     if not target.is_file():
@@ -879,6 +1018,7 @@ async def download_memory_file(
         target = mgr.resolve_memory_path(path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await _settle_memory_note(mgr, target)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"Memory file not found: {path}")
     if not target.is_file():

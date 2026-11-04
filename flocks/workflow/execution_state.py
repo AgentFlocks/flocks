@@ -14,6 +14,7 @@ _VERTEX_OUTPUT_KEY_LIMIT = 50
 
 class StepResult(BaseModel):
     node_id: str
+    node_type: Optional[str] = None
     inputs: Dict[str, Any] = Field(default_factory=dict)
     outputs: Dict[str, Any] = Field(default_factory=dict)
     stdout: str = ""

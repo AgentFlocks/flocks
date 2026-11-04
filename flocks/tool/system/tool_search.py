@@ -28,6 +28,40 @@ IMPORTANT: search query must be in English.
 """
 
 
+async def _isolated_search_tools(ctx: ToolContext) -> Optional[List[Any]]:
+    """Use the same declared-tool intersection and policy projection as calls."""
+    from flocks.agent.registry import Agent
+    from flocks.session.callable_schema import list_session_callable_tool_infos
+    from flocks.session.execution_mode import is_tool_allowed
+    from flocks.session.runtime_controls import runtime_controls
+
+    agent_name = getattr(ctx, "agent", "rex")
+    agent = await Agent.get(agent_name)
+    if agent is None:
+        raise ValueError(f"Tool discovery requires an available agent: {agent_name}")
+    if agent.prompt_profile != "isolated":
+        return None
+    extra = getattr(ctx, "extra", None) or {}
+    result = await list_session_callable_tool_infos(
+        session_id=ctx.session_id,
+        declared_tool_names=agent.tools or [],
+        strict_declared_tools=True,
+        agent=agent.name,
+        step=int((extra.get("execution_context") or {}).get("step") or 0),
+    )
+    # Before-LLM hooks can narrow schemas after the policy projection. Respect
+    # the executing caller's final ceiling instead of restoring hidden tools.
+    turn_names = extra.get("turn_callable_tool_names")
+    turn_ceiling = set(turn_names) if isinstance(turn_names, (list, tuple, set)) else None
+    controls = runtime_controls.get()
+    return [
+        tool for tool in result.tool_infos
+        if (turn_ceiling is None or tool.name in turn_ceiling)
+        and is_tool_allowed(extra.get("execution_mode"), tool.name)
+        and (controls is None or not controls.denial(tool.name))
+    ]
+
+
 async def _build_device_tool_hints(matches: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Build per-tool device discovery hints for device-backed tools only."""
     device_tools = [
@@ -119,9 +153,13 @@ async def tool_search(
     category: Optional[str] = None,
     limit: int = 8,
 ) -> ToolResult:
-    limit = max(1, min(limit or 8, 20))
-    matches, matched_tags = search_tool_catalog(query, category=category, limit=limit)
-    device_hints = await _build_device_tool_hints(matches)
+    limit = max(1, min(8 if limit is None else limit, 20))
+    allowed_tools = await _isolated_search_tools(ctx)
+    matches, matched_tags = search_tool_catalog(
+        query, category=category, limit=limit, tool_infos=allowed_tools,
+    )
+    # Isolated agents do not acquire host device inventories through discovery.
+    device_hints = await _build_device_tool_hints(matches) if allowed_tools is None else {}
     enriched_matches: List[Dict[str, Any]] = []
     for match in matches:
         enriched = dict(match)

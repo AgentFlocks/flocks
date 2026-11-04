@@ -150,6 +150,7 @@ macOS / Linux
 docker run -d \
   --name flocks \
   -p 5173:5173 \
+  -e TZ=Asia/Shanghai \
   --shm-size 4gb \
   -v "${HOME}/.flocks:/home/flocks/.flocks" \
   ghcr.io/agentflocks/flocks:latest
@@ -160,12 +161,15 @@ Windows PowerShell
 docker run -d `
   --name flocks `
   -p 5173:5173 `
+  -e TZ=Asia/Shanghai `
   --shm-size 4gb `
   -v "${env:USERPROFILE}\.flocks:/home/flocks/.flocks" `
   ghcr.io/agentflocks/flocks:latest
 ```
 
 `EXPOSE` in the image only documents container ports. You still need `-p 5173:5173` to access the service from the host browser.
+
+The image does not set a time zone (containers default to UTC), so pass `-e TZ=<your zone>` if scheduled tasks should display local times.
 
 ## 4. FAQ
 

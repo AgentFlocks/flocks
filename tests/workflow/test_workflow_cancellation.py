@@ -253,6 +253,13 @@ def test_run_workflow_cancels_python_node_llm_ask(monkeypatch) -> None:
         "edges": [],
     }
 
+    # ``llm.ask`` now runs the llm.before/llm.after hook stages; warm up the
+    # pipeline first so the one-time plugin/entry-point load is not counted
+    # against the cancellation latency measured below.
+    from flocks.hooks.pipeline import HookPipeline
+
+    asyncio.run(HookPipeline.ensure_initialized())
+
     cancel_event = threading.Event()
     timer = threading.Timer(0.05, cancel_event.set)
     started = time.perf_counter()
@@ -271,3 +278,62 @@ def test_run_workflow_cancels_python_node_llm_ask(monkeypatch) -> None:
     assert result.status == "CANCELLED"
     assert result.outputs == {}
     assert time.perf_counter() - started < 1.0
+
+
+
+# B03: the server's checker takes the ownership lock, and a python node's line
+# tracer traces that checker too. A deadlock there stops the whole server (its
+# health monitor waits on the same lock), so the runs below go in a child
+# process that a hang can be killed with.
+_POLLING_RUN = """
+import json, sys, threading, asyncio
+from flocks.workflow import ownership
+from flocks.workflow.runner import run_workflow
+
+loops, cancel_after = int(sys.argv[1]), float(sys.argv[2])
+exec_id = "exec-polls-cancelled"
+workflow = {
+    "name": "polls_cancelled", "start": "slow",
+    "nodes": [
+        {"id": "slow", "type": "python", "code": (
+            "import time\\n"
+            f"for _ in range({loops}):\\n"
+            "    if cancelled():\\n"
+            "        break\\n"
+            "    time.sleep(0.01)\\n"
+            "outputs['slow_done'] = True\\n")},
+        {"id": "after", "type": "python", "code": "outputs['after_ran'] = True\\n"},
+    ],
+    "edges": [{"from": "slow", "to": "after", "order": 0, "mapping": {"slow_done": "slow_done"}}],
+}
+cancel_event = threading.Event()
+ownership.start_renewal({"id": exec_id})
+if cancel_after >= 0:
+    threading.Timer(cancel_after, ownership.request_cancel, args=(exec_id,)).start()
+result = run_workflow(workflow=workflow, inputs={}, ensure_requirements=False,
+                      cancel=lambda: cancel_event.is_set() or ownership.execution_cancelled(exec_id))
+asyncio.run(ownership.stop_renewal(exec_id))
+print(json.dumps({"status": result.status, "after_ran": result.outputs.get("after_ran")}))
+"""
+
+
+def _polling_run(loops: int, cancel_after: float) -> dict:
+    import json
+    import subprocess
+    import sys
+
+    try:
+        done = subprocess.run([sys.executable, "-c", _POLLING_RUN, str(loops), str(cancel_after)],
+                              capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("the run deadlocked in its own cancel check") from None
+    assert done.returncode == 0, done.stderr[-2000:]
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def test_a_node_polling_cancelled_with_the_server_checker_does_not_deadlock() -> None:
+    assert _polling_run(20, -1) == {"status": "SUCCEEDED", "after_ran": True}
+
+
+def test_a_cancel_through_ownership_stops_the_polling_node_and_the_next_one() -> None:
+    assert _polling_run(3000, 0.3) == {"status": "CANCELLED", "after_ran": None}

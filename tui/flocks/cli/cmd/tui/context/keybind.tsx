@@ -1,5 +1,6 @@
 import { createMemo } from "solid-js"
 import { useSync } from "@tui/context/sync"
+import { resolveKeybinds } from "./keybind-defaults"
 import { Keybind } from "@/util/keybind"
 import { pipe, mapValues } from "remeda"
 import type { KeybindsConfig } from "@flocks-ai/sdk/v2"
@@ -13,8 +14,9 @@ export const { use: useKeybind, provider: KeybindProvider } = createSimpleContex
   init: () => {
     const sync = useSync()
     const keybinds = createMemo(() => {
+      // 后端只回传它认识的键位子集，其余按 TUI 默认键位补齐，否则 ctrl+p / <leader>m / escape 等全部失效
       return pipe(
-        sync.data.config.keybinds ?? {},
+        resolveKeybinds(sync.data.config.keybinds),
         mapValues((value) => Keybind.parse(value)),
       )
     })

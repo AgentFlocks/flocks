@@ -1,7 +1,8 @@
 """
 Shared fixtures for server route tests.
 The isolation (isolated_env) is now provided by tests/server/conftest.py.
-This file only provides route-specific helpers: client, mock_workspace, session_id.
+This file only provides route-specific helpers: client, mock_workspace, session_id,
+recording_webhook_store.
 """
 
 from __future__ import annotations
@@ -74,3 +75,31 @@ async def session_id(client: AsyncClient) -> str:
     resp = await client.post("/api/session", json={"title": "fixture-session"})
     assert resp.status_code == 200, resp.text
     return resp.json()["id"]
+
+
+@pytest.fixture
+def recording_webhook_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[str, str]]:
+    """A workflow store that records webhook deliveries, as a backend that keeps them would.
+
+    The store shipped here records none, so every delivery runs; the webhook
+    route still answers a replay the store recognises as a duplicate, and
+    releases the claim of a delivery refused before it ran.  Returns what is
+    recorded: key -> (delivery id, claim token).
+    """
+    from flocks.workflow.store import WorkflowStore
+
+    recorded: dict[str, tuple[str, str]] = {}
+
+    async def _claim(key: str, delivery_id: str, window_s: float, claim_token: str = "") -> str | None:
+        if key in recorded:
+            return recorded[key][0]
+        recorded[key] = (delivery_id, claim_token)
+        return None
+
+    async def _release(key: str, claim_token: str) -> None:
+        if key in recorded and recorded[key][1] == claim_token:
+            del recorded[key]
+
+    monkeypatch.setattr(WorkflowStore, "claim_webhook_delivery", staticmethod(_claim))
+    monkeypatch.setattr(WorkflowStore, "release_webhook_delivery", staticmethod(_release))
+    return recorded

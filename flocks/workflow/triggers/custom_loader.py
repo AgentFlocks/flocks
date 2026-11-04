@@ -9,6 +9,7 @@ from types import ModuleType
 from typing import Any, Dict, List, Optional
 
 from flocks.workflow.fs_store import find_workspace_root
+from flocks.config.config import get_user_plugins_root
 
 try:  # pragma: no cover - optional dependency fallback
     import yaml
@@ -21,7 +22,7 @@ PLUGIN_FILENAMES = ("trigger.json", "trigger.yaml", "trigger.yml", "manifest.jso
 def trigger_plugin_roots() -> List[Path]:
     workspace = find_workspace_root()
     return [
-        Path.home() / ".flocks" / "plugins" / "triggers",
+        get_user_plugins_root() / "triggers",
         workspace / ".flocks" / "plugins" / "triggers",
     ]
 

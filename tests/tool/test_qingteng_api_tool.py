@@ -13,6 +13,33 @@ from flocks.tool.tool_loader import yaml_to_tool
 _QINGTENG_PLUGIN_DIR = "qingteng_v3_4_1_66"
 
 
+@pytest.fixture(autouse=True)
+def _restore_patched_stdlib():
+    """The handler imports the *real* ``http.client`` (as ``httplib``) and
+    ``time``; these tests swap ``HTTPConnection``/``HTTPSConnection`` for fakes,
+    freeze ``time.time`` on those modules and stub ``ConfigWriter`` — and never
+    put them back. Without this fixture every later test in the process runs
+    with a frozen clock, fake sockets and no API service config."""
+    import http.client
+    import time
+
+    from flocks.config.config_writer import ConfigWriter
+
+    saved_http = (http.client.HTTPConnection, http.client.HTTPSConnection)
+    saved_time = time.time
+    # The last test also replaces the class-level ``ConfigWriter.get_api_service_raw``
+    # without a ``finally``; a stub returning ``{}`` there hides every API service
+    # config from later tests (tool-setting routes saw their service vanish).
+    saved_raw = ConfigWriter.__dict__.get("get_api_service_raw")
+    try:
+        yield
+    finally:
+        http.client.HTTPConnection, http.client.HTTPSConnection = saved_http
+        time.time = saved_time
+        if saved_raw is not None:
+            setattr(ConfigWriter, "get_api_service_raw", saved_raw)
+
+
 def _load_tool(yaml_name: str):
     yaml_path = (
         Path.cwd()

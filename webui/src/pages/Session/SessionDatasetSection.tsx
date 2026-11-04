@@ -23,7 +23,7 @@ class DatasetBoundary extends Component<{ children: ReactNode; resetKey: number 
 
 function BoundaryFallback({ onRetry }: { onRetry: () => void }) {
   const { t } = useTranslation('session');
-  return <div role="alert" className="space-y-2 text-xs text-zinc-500"><p>{t('dataset.renderFailed')}</p><button type="button" className={buttonClass} onClick={onRetry}>{t('dataset.retry')}</button></div>;
+  return <div role="alert" className="space-y-2 p-3 text-xs leading-5 text-red-600 dark:text-red-400"><p>{t('dataset.renderFailed')}</p><button type="button" className={buttonClass} onClick={onRetry}>{t('dataset.retry')}</button></div>;
 }
 
 function rows(binding: SessionDatasets, catalog: Dataset[]): Dataset[] {
@@ -140,9 +140,9 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
   const manageLabel = <>{t('dataset.manage')}<ArrowRight aria-hidden="true" /></>;
   return <section aria-label={t('dataset.title')} className="session-knowledge">
     <div className="session-knowledge-heading">
-      <Database aria-hidden="true" className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
-      <h3 className="truncate text-xs font-semibold text-zinc-700 dark:text-zinc-200">{t('dataset.title')}</h3>
-      {binding && <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{binding.dataset_ids.length}</span>}
+      <Database aria-hidden="true" className="h-4 w-4 text-ui-secondary" />
+      <h3 className="truncate text-[13px] font-medium leading-5 text-ui-text">{t('dataset.title')}</h3>
+      {binding && <span className="rounded bg-ui-subtle px-1.5 py-0.5 text-xs leading-4 text-ui-muted">{binding.dataset_ids.length}</span>}
       <button type="button" className="session-knowledge-icon-button" aria-label={t('dataset.refresh')} title={t('dataset.refresh')} disabled={loading || saving} onClick={() => void load()}><RefreshCw aria-hidden="true" /></button>
     </div>
     <p className="session-knowledge-hint">{t('dataset.scope')}</p>
@@ -187,7 +187,7 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
 
 function DatasetLoading() {
   const { t } = useTranslation('session');
-  return <p role="status" className="border-t border-zinc-200 px-3 py-3 text-xs text-zinc-500 dark:border-zinc-800">{t('dataset.loading')}</p>;
+  return <p role="status" className="border-t border-ui-border bg-ui-surface px-3 py-3 text-xs leading-5 text-ui-secondary">{t('dataset.loading')}</p>;
 }
 
 export default function SessionDatasetSection({ sessionId }: { sessionId: string }) {

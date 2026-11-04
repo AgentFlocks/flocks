@@ -196,7 +196,12 @@ async def test_skill_invalidation_during_discovery_cannot_restore_stale_cache(
     Skill.clear_cache()
 
 
-async def test_monitoring_routes_back_existing_webui_calls(webui_perf_client: AsyncClient):
+async def test_monitoring_routes_back_existing_webui_calls(webui_perf_client: AsyncClient, monkeypatch):
+    from unittest.mock import AsyncMock
+    from flocks.server.routes import monitoring as monitoring_routes
+
+    monkeypatch.setattr(monitoring_routes, "_mcp_server_statuses", AsyncMock(return_value=({}, True)))
+    monkeypatch.setattr(monitoring_routes, "_metrics_rate_state", None)
     status_response = await webui_perf_client.get("/api/monitoring/status")
     metrics_response = await webui_perf_client.get("/api/monitoring/metrics")
     llm_response = await webui_perf_client.get("/api/monitoring/performance/llm")

@@ -86,3 +86,10 @@ it('traps keyboard focus and restores scrolling and focus on unmount', () => {
   expect(trigger).toHaveFocus();
   trigger.remove();
 });
+
+it('records presentation and closes once when Escape is pressed', () => {
+  const events: string[] = [];
+  render(<TokenPolicyNotice onPresented={() => events.push('display')} onClose={() => events.push('close')} />);
+  fireEvent.keyDown(screen.getByRole('button', { name: 'close' }), { key: 'Escape' });
+  expect(events).toEqual(['display', 'close']);
+});

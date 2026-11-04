@@ -24,7 +24,7 @@ def isolated_hooks(monkeypatch):
     original_sink = get_sink()
     HookPipeline.reset()
     monkeypatch.setattr(HookPipeline, "_resolve_project_dir", AsyncMock(return_value=None))
-    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock())
+    monkeypatch.setattr(HookPipeline, "ensure_initialized", AsyncMock(side_effect=lambda *_: tuple(HookPipeline._hooks)))
     monkeypatch.setattr(PluginLoader, "has_runtime_critical_entrypoint_failure", lambda: False)
     yield
     register_sink(original_sink)

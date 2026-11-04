@@ -1,7 +1,9 @@
-"""Background install of an REA tier, one job per service process.
+"""Background install of an REA tier, one job at a time on this host.
 
-The job survives the request and conversation that started it; every client
-reads it through ``/api/rea/status``. Stages and the progress each starts at:
+The job survives the request and conversation that started it and holds the
+host's REA operation lock (see ``operation``), so an install or uninstall in
+another Flocks process waits for it; every client reads it through
+``/api/rea/status``. Stages and the progress each starts at:
 
 - ``check`` (0)        Node.js range, npx, writable Flocks data directory
 - ``components`` (10)  skill and the pinned CLI; the full tier also JDK 21 and
@@ -24,7 +26,9 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
-from flocks.rea import components, runtime
+from flocks.rea import components, operation, runtime
+from flocks.session.ownership import outside_execution
+from flocks.task.lease import outside_task_execution
 from flocks.utils.log import Log
 
 
@@ -64,6 +68,22 @@ class ReaInstallError(Exception):
         self.code = code
         self.detail = detail
         self.blockers = blockers or []
+
+
+def refuse_when_managed() -> None:
+    """A managed install changes no runtime from inside the service.
+
+    Installing or removing REA runs package managers and downloads in the
+    service's own process, past the checks a deployment puts on every command a
+    tool runs; in a managed install the deployment ships REA with its release
+    instead.
+    """
+    from flocks.updater.deploy import declared_managed
+
+    if declared_managed():
+        raise ReaInstallError(
+            "managed", "REA is installed and removed with the deployment's release in a managed install",
+        )
 
 
 def _now_ms() -> int:
@@ -176,10 +196,11 @@ def _build_record(
 
 
 class ReaInstaller:
-    """Process-wide owner of the single REA install job."""
+    """Process-wide owner of the single REA install job; it holds the host's operation lock while it runs."""
 
     _job: Optional[ReaInstallJob] = None
     _task: Optional[asyncio.Task] = None
+    _lock: Optional[operation.OperationLock] = None
 
     @classmethod
     def current_job(cls) -> Optional[ReaInstallJob]:
@@ -207,18 +228,24 @@ class ReaInstaller:
     ) -> ReaInstallJob:
         """Start an install, or return the job that is already running.
 
-        Raises :class:`ReaInstallError` (``uninstalling``) while an uninstall runs.
+        Raises :class:`ReaInstallError` (``uninstalling``) while an uninstall runs,
+        ``busy`` while another job on this host holds the operation lock.
         """
 
         from flocks.rea.uninstaller import ReaUninstaller
 
+        refuse_when_managed()
         current = cls.current_job()
         if current is not None and current.status == "running":
             return current
         if ReaUninstaller.is_running():
             raise ReaInstallError("uninstalling", "REA is being uninstalled")
+        job_id = f"reainst_{uuid.uuid4().hex[:12]}"
+        lock = operation.acquire(job_id)
+        if lock is None:
+            raise ReaInstallError("busy", "another Flocks process on this host is changing REA")
         job = ReaInstallJob(
-            id=f"reainst_{uuid.uuid4().hex[:12]}",
+            id=job_id,
             status="running",
             stage="check",
             progress=STAGE_PROGRESS["check"],
@@ -228,9 +255,31 @@ class ReaInstaller:
             sessionId=session_id,
         )
         cls._job = job
-        cls._task = asyncio.create_task(cls._run(job.id))
-        await cls._publish()
+        cls._lock = lock
+        cls._task = None
+        try:
+            await cls._publish()
+            # Outside the conversation's (or task's) execution: the job outlives it, so
+            # stopping that conversation must not make the job's validation lose its lease.
+            with outside_execution(), outside_task_execution():
+                cls._task = asyncio.create_task(cls._held(job.id, lock))
+            # A task cancelled before it ever ran never reaches _held's finally.
+            cls._task.add_done_callback(lambda _task: lock.release())
+        except BaseException:
+            if cls._task is None:
+                # Stopped before the job owned the lock: let go of it here (the job reads as interrupted).
+                lock.release()
+            raise
         return job
+
+    @classmethod
+    async def _held(cls, job_id: str, lock: operation.OperationLock) -> None:
+        """Run the job holding the operation lock; it is let go only once the job and its threads ended."""
+
+        try:
+            await cls._run(job_id)
+        finally:
+            lock.release()
 
     @classmethod
     async def wait(cls) -> Optional[ReaInstallJob]:
@@ -257,8 +306,11 @@ class ReaInstaller:
     def reset_for_testing(cls) -> None:
         if cls._task is not None and not cls._task.done():
             cls._task.cancel()
+        if cls._lock is not None:
+            cls._lock.release()
         cls._job = None
         cls._task = None
+        cls._lock = None
 
     @classmethod
     async def _set(cls, job_id: str, **changes) -> None:

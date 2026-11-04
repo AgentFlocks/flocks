@@ -56,6 +56,10 @@ def _tool(name: str, arguments: dict[str, Any], calls: list[dict[str, Any]]) -> 
                     type=(
                         ParameterType.INTEGER
                         if isinstance(value, int)
+                        else ParameterType.OBJECT
+                        if isinstance(value, dict)
+                        else ParameterType.ARRAY
+                        if isinstance(value, list)
                         else ParameterType.STRING
                     ),
                 )
@@ -312,3 +316,113 @@ async def test_patch_echoing_redaction_marker_keeps_real_secret() -> None:
     assert result.success is True
     assert seen == [{"host": "[[V_IP_1]]", "command": "uname -a", "password": "[REDACTED]"}]
     assert calls == [{"host": "10.0.0.8", "command": "uname -a", "password": "real-secret"}]
+
+
+@pytest.mark.asyncio
+async def test_legacy_tool_input_rewrite_restores_secret_bearing_fields() -> None:
+    """A hook on the flat legacy shape restores placeholders by rewriting
+    ``tool.input`` in place (the Pro redaction hook works this way). That must
+    reach the handler, including fields the redacted contract view hides."""
+    calls: list[dict[str, Any]] = []
+    placeholders = {"[[V_PASSWORD_1]]": "real-secret", "[[V_IP_1]]": "10.0.0.8"}
+
+    class LegacyRestore(HookBase):
+        async def tool_before(self, ctx) -> dict[str, Any]:
+            legacy = ctx.input["tool"]
+            legacy["input"] = {key: placeholders.get(value, value) for key, value in legacy["input"].items()}
+            validated = dict(ctx.input["tool_execution"]["tool"]["validated_input"])
+            assert validated["password"] == "[REDACTED]"
+            restored = {key: placeholders.get(value, value) for key, value in validated.items()}
+            # Whole-dict echo, "[REDACTED]" included, like the Pro hook.
+            return {"decision": {"action": "allow", "validated_input_patch": restored}}
+
+    arguments = {"host": "[[V_IP_1]]", "command": "uname -a", "password": "[[V_PASSWORD_1]]"}
+    HookPipeline.register("legacy-restore", LegacyRestore())
+    result = await _tool("ssh_host_cmd", arguments, calls).execute(
+        ToolContext(session_id="s-1", message_id="m-1"),
+        **arguments,
+    )
+
+    assert result.success is True
+    assert calls == [{"host": "10.0.0.8", "command": "uname -a", "password": "real-secret"}]
+
+
+@pytest.mark.asyncio
+async def test_legacy_rewrite_of_a_visible_field_does_not_bypass_policy() -> None:
+    """Policies judge the redact_sensitive view; an in-place rewrite of a value
+    they can see is not what runs, the authorized input is."""
+    calls: list[dict[str, Any]] = []
+    seen: list[str] = []
+
+    class LegacyRewrite(HookBase):
+        async def tool_before(self, ctx) -> None:
+            ctx.input["tool"]["input"]["command"] = "dangerous"
+
+    class CommandPolicy(HookBase):
+        async def tool_before(self, ctx) -> dict[str, Any] | None:
+            command = ctx.input["tool_execution"]["tool"]["validated_input"]["command"]
+            seen.append(command)
+            if command == "dangerous":
+                return {"decision": {"action": "deny", "reason": "blocked command"}}
+            return None
+
+    HookPipeline.register("legacy-rewrite", LegacyRewrite())
+    HookPipeline.register("command-policy", CommandPolicy())
+    arguments = {"command": "safe", "workdir": "/tmp/work"}
+    result = await _tool("bash", arguments, calls).execute(
+        ToolContext(session_id="s-1", message_id="m-1"),
+        **arguments,
+    )
+
+    assert result.success is True
+    assert calls == [{"command": "safe", "workdir": "/tmp/work"}]
+    assert seen == ["safe"]
+
+
+@pytest.mark.asyncio
+async def test_nested_legacy_rewrite_restores_secrets_only() -> None:
+    """Hooks get their own copy of nested input: an in-place change to a visible
+    nested value or a list does not leak to the handler, a restored secret does."""
+    calls: list[dict[str, Any]] = []
+
+    class LegacyNested(HookBase):
+        async def tool_before(self, ctx) -> None:
+            options = ctx.input["tool"]["input"]["options"]
+            options["password"] = "real-secret"
+            options["command"] = "dangerous"
+            ctx.input["tool"]["input"]["targets"].append("extra-host")
+
+    HookPipeline.register("legacy-nested", LegacyNested())
+    arguments = {"options": {"command": "safe", "password": "[[V_PASSWORD_1]]"}, "targets": ["host-a"]}
+    result = await _tool("ssh_host_cmd", arguments, calls).execute(
+        ToolContext(session_id="s-1", message_id="m-1"),
+        **arguments,
+    )
+
+    assert result.success is True
+    assert calls == [{"options": {"command": "safe", "password": "real-secret"}, "targets": ["host-a"]}]
+    assert arguments == {"options": {"command": "safe", "password": "[[V_PASSWORD_1]]"}, "targets": ["host-a"]}
+
+
+@pytest.mark.asyncio
+async def test_secret_restore_keeps_a_single_gate_pass() -> None:
+    """Approvals and audit records follow one gate pass, also when a hook
+    restores a secret in place."""
+    calls: list[dict[str, Any]] = []
+    passes: list[str] = []
+
+    class RestoreAndCount(HookBase):
+        async def tool_before(self, ctx) -> None:
+            passes.append(ctx.input["tool_execution"]["tool"]["validated_input"]["password"])
+            ctx.input["tool"]["input"]["password"] = "real-secret"
+
+    HookPipeline.register("restore-and-count", RestoreAndCount())
+    arguments = {"host": "host-a", "command": "uname -a", "password": "[[V_PASSWORD_1]]"}
+    result = await _tool("ssh_host_cmd", arguments, calls).execute(
+        ToolContext(session_id="s-1", message_id="m-1"),
+        **arguments,
+    )
+
+    assert result.success is True
+    assert passes == ["[REDACTED]"]
+    assert calls == [{"host": "host-a", "command": "uname -a", "password": "real-secret"}]

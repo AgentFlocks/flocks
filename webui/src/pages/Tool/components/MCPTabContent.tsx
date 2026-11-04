@@ -520,7 +520,7 @@ export default function MCPTabContent({
       ) : visibleCards.length === 0 ? (
         <EmptyState icon={<Server className="w-16 h-16" />} title={t('mcp.noServers')} description={t('mcp.noServersDesc')} />
       ) : (
-        <div className={viewMode === 'list' ? 'bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100' : 'grid gap-3 sm:grid-cols-2 xl:grid-cols-3'}>
+        <div className={viewMode === 'list' ? 'bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100 max-md:overflow-x-auto' : 'grid gap-3 sm:grid-cols-2 xl:grid-cols-3'}>
           {visibleCards.map(({ id, entry, server, runtimeServer, configured }) => {
             const displayName = entry?.name || server.name;
             const metadataDescription = getMetadataDescription(server.metadata, i18n.language);
@@ -550,7 +550,7 @@ export default function MCPTabContent({
               <div
                 key={id}
                 {...groupDrag.dragProps(id)}
-                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-red-50' : 'hover:bg-gray-50'}${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ''}`}
+                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-red-50' : 'hover:bg-gray-50'}${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ' max-md:min-w-[48rem]'}`}
                 style={{ gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : '32px minmax(0, 1fr)' }}
               >
                 {/* Icon */}
@@ -870,8 +870,8 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   {t('detail.parameters')} <span className="text-gray-400 font-normal">({tool.parameters.length})</span>
                 </label>
-                <div className="rounded-lg border border-gray-200 overflow-hidden">
-                  <table className="min-w-full divide-y divide-gray-200">
+                <div className="rounded-lg border border-gray-200 overflow-hidden max-md:overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200 max-md:min-w-[32rem]">
                     <thead className="bg-gray-50">
                       <tr>
                         <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('detail.paramName')}</th>

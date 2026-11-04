@@ -20,6 +20,8 @@ vi.mock('@/api/knowledgebase', async importOriginal => {
   };
 });
 vi.mock('@/hooks/useDefaultModelVision', () => ({ useDefaultModelVision: () => null }));
+const { authUser } = vi.hoisted(() => ({ authUser: { current: { role: 'admin' } as { role: string } | null } }));
+vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ user: authUser.current }) }));
 vi.mock('@/components/common/FilePreview', () => ({
   getPreviewKind: (node: { name: string }) => node.name.endsWith('.pdf') ? 'pdf' : 'text',
   FilePreviewRenderer: ({ node, content }: { node: { name: string }; content: string | null }) => (
@@ -45,7 +47,18 @@ function Providers({ children }: { children: ReactNode }) {
 describe('KnowledgeTab', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    authUser.current = { role: 'admin' };
     api.datasets.mockResolvedValue({ items: [], total: 0, page: 1 });
+  });
+
+  it('does not offer the shared connection settings to members', async () => {
+    authUser.current = { role: 'member' };
+    api.status.mockResolvedValue({ configured: false, ready: false });
+    render(<KnowledgeTab />, { wrapper: Providers });
+    expect(await screen.findByText(workspace.knowledge.unavailable.knowledgebase_not_configured)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: workspace.knowledge.connection.title })).not.toBeInTheDocument();
+    expect(screen.getByText(workspace.knowledge.unavailable.knowledgebase_not_configuredMemberHint)).toBeInTheDocument();
+    expect(screen.queryByText(workspace.knowledge.unavailable.knowledgebase_not_configuredHint)).not.toBeInTheDocument();
   });
 
   it('uses height-constrained segmented navigation without another Knowledge heading', async () => {

@@ -12,6 +12,28 @@ from flocks.storage.storage import Storage
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("keep_sessions", [False, True])
+async def test_extension_delete_guard_runs_before_archiving_or_hiding_project(client, tmp_path, monkeypatch, keep_sessions):
+    from flocks.project import lifecycle
+    from flocks.project.project import ProjectDeletionError
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(lifecycle, "_deletion_guards", {})
+    created = await client.post("/api/project", json={"name": "Active extension", "worktree": str(tmp_path / "extension")})
+    assert created.status_code == 200
+
+    async def deny(project, owner_id):
+        raise ProjectDeletionError("active extension task")
+
+    lifecycle.register_project_deletion_guard("test", deny)
+    list_sessions = AsyncMock(side_effect=AssertionError("must refuse before session changes"))
+    monkeypatch.setattr(Session, "list_all_unfiltered", list_sessions)
+    response = await client.delete(f"/api/project/{created.json()['id']}", params={"keepSessions": keep_sessions})
+    assert response.status_code == 409
+    list_sessions.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_audit_workspace_does_not_adopt_session_manager_projects(
     client: AsyncClient,
     tmp_path: Path,

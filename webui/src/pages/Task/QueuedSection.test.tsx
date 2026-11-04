@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   markExecutionViewed: vi.fn(),
   cancelExecution: vi.fn(),
   retryExecution: vi.fn(),
+  continueExecution: vi.fn(),
   rerunExecution: vi.fn(),
   deleteExecution: vi.fn(),
   copyText: vi.fn().mockResolvedValue(undefined),
@@ -93,6 +94,7 @@ vi.mock('@/api/task', () => ({
     markExecutionViewed: mocks.markExecutionViewed,
     cancelExecution: mocks.cancelExecution,
     retryExecution: mocks.retryExecution,
+    continueExecution: mocks.continueExecution,
     rerunExecution: mocks.rerunExecution,
     deleteExecution: mocks.deleteExecution,
   },
@@ -355,6 +357,47 @@ describe('QueuedSection', () => {
         },
       }),
     );
+  });
+
+  it('结果不明的失败任务提示先核对，并能在原会话继续', async () => {
+    const user = userEvent.setup();
+    const held = buildExecution('exec-held-1', '部署任务', 'failed', {
+      sessionID: 'ses-held-1',
+      retry: {
+        maxRetries: 3,
+        retryCount: 0,
+        retryDelaySeconds: 60,
+        blockedReason: 'unverified_effects',
+        unverifiedEffects: ['bash:call_deploy'],
+      },
+    });
+    mocks.useTaskExecutions.mockReturnValue({ tasks: [held], total: 1, loading: false, error: null, refetch: mocks.refetch });
+    mocks.getExecution.mockResolvedValue({ data: held });
+    mocks.continueExecution.mockResolvedValue({ data: held });
+
+    render(<QueuedSection onRefreshGlobal={vi.fn()} />);
+    await user.click(screen.getByText('部署任务'));
+
+    expect(await screen.findByText('queued.heldForVerification')).toBeInTheDocument();
+    expect(screen.getByText('bash:call_deploy')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'queued.actionResume' }));
+    expect(mocks.continueExecution).toHaveBeenCalledWith('exec-held-1');
+    // Retrying from scratch stays available: that is the person's call.
+    expect(screen.getByRole('button', { name: 'queued.actionRetry' })).toBeInTheDocument();
+  });
+
+  it('普通失败任务不显示核对提示', async () => {
+    const user = userEvent.setup();
+    const failed = buildExecution('exec-failed-1', '普通失败', 'failed', { sessionID: 'ses-failed-1' });
+    mocks.useTaskExecutions.mockReturnValue({ tasks: [failed], total: 1, loading: false, error: null, refetch: mocks.refetch });
+    mocks.getExecution.mockResolvedValue({ data: failed });
+
+    render(<QueuedSection onRefreshGlobal={vi.fn()} />);
+    await user.click(screen.getByText('普通失败'));
+
+    expect(await screen.findByRole('button', { name: 'queued.actionRetry' })).toBeInTheDocument();
+    expect(screen.queryByText('queued.heldForVerification')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'queued.actionResume' })).not.toBeInTheDocument();
   });
 
   it('详情抽屉打开后会按 execution id 轮询最新状态', async () => {

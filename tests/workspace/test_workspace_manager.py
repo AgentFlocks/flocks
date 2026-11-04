@@ -100,6 +100,41 @@ class TestDirectoryPaths:
         assert outputs_dir == tmp_workspace / "users" / "chen_jie" / "outputs" / "2026-05-09"
         assert outputs_dir.is_dir()
 
+    def test_shared_outputs_may_be_relocated_with_symlink(self, tmp_workspace: Path, tmp_path: Path, manager):
+        manager.ensure_dirs()
+        (tmp_workspace / "outputs").rmdir()
+        elsewhere = tmp_path / "other-disk" / "outputs"
+        elsewhere.mkdir(parents=True)
+        (tmp_workspace / "outputs").symlink_to(elsewhere, target_is_directory=True)
+
+        outputs_dir = manager.get_default_outputs_dir(today=dt.date(2026, 5, 9))
+
+        assert outputs_dir == tmp_workspace / "outputs" / "2026-05-09"
+        assert (elsewhere / "2026-05-09").is_dir()
+
+    def test_shared_outputs_symlink_is_refused_once_accounts_are_isolated(
+        self, tmp_workspace: Path, tmp_path: Path, manager, monkeypatch: pytest.MonkeyPatch,
+    ):
+        manager.ensure_dirs()
+        (tmp_workspace / "outputs").rmdir()
+        elsewhere = tmp_path / "other-account"
+        elsewhere.mkdir()
+        (tmp_workspace / "outputs").symlink_to(elsewhere, target_is_directory=True)
+        monkeypatch.setattr(type(manager), "isolates_accounts", True)
+
+        with pytest.raises(PermissionError, match="escapes its workspace scope"):
+            manager.get_default_outputs_dir()
+
+    def test_per_user_outputs_cannot_be_redirected_by_symlink(self, tmp_workspace: Path, tmp_path: Path, manager):
+        user_root = manager.get_user_workspace_dir("alice")
+        user_root.mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (user_root / "outputs").symlink_to(elsewhere, target_is_directory=True)
+
+        with pytest.raises(PermissionError, match="escapes its workspace scope"):
+            manager.get_default_outputs_dir(username="alice")
+
 
 # ─── Path resolution ──────────────────────────────────────────────────────────
 

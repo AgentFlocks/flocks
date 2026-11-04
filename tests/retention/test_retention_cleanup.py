@@ -536,3 +536,35 @@ async def test_delete_selected_skips_non_idle_status_via_is_busy(tmp_path, monke
 
     assert result == -1  # busy: left alone
     assert len(await _stored_message_ids(session.id)) == 2  # nothing trimmed
+
+
+
+async def test_bulk_delete_trims_a_legacy_parts_blob(tmp_path):
+    session = await _new_session(tmp_path)
+    old = await _turn(session.id, _days_ago_ms(5), _days_ago_ms(5), "old")
+    new = await _turn(session.id, _days_ago_ms(1), _days_ago_ms(1), "new")
+    blob = {}
+    for message_id in old + new:
+        key = f"message_parts:{session.id}:{message_id}"
+        blob[message_id] = await Storage.get(key)
+        await Storage.delete(key)
+    await Storage.set(f"message_parts:{session.id}", blob, "message_parts")
+    Message.invalidate_cache(session.id)
+
+    assert await Message.delete_many(session.id, old) == 2
+
+    remaining = await Storage.get(f"message_parts:{session.id}")
+    assert sorted(remaining) == sorted(new)
+    page, *_ = await Message.list_page_with_parts(session.id, limit=50)
+    assert [item.info.id for item in page] == new
+    assert [part.text for item in page for part in item.parts] == ["q new", "a new"]
+
+
+
+async def test_message_cleanup_of_a_session_deleted_meanwhile_deletes_nothing(tmp_path):
+    session = await _new_session(tmp_path)
+    old = await _turn(session.id, _days_ago_ms(90), _days_ago_ms(90), "old")
+    assert await Session.delete(session.project_id, session.id)
+
+    assert await Message.delete_many(session.id, old) == 0
+    assert await Message.delete_selected(session.id, lambda stored, s: old) == 0

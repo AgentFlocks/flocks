@@ -142,6 +142,7 @@
     "operationFailed": "Operation Failed",
     "deleteConfirm": "Are you sure to delete Skill \"{{name}}\"?",
     "deleteFailed": "Delete Failed",
-    "saveFailed": "Save Failed"
+    "saveFailed": "Save Failed",
+    "nameFormatHint": "Use lowercase letters/digits separated by single hyphens (e.g. my-skill)"
   }
 }

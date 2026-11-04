@@ -40,6 +40,7 @@ async def test_handle_slash_command_forwards_structured_arguments():
         args_json={"team": "blue"},
         surface=None,
         session_id=None,
+        status_callback=None,
     )
     send_text.assert_awaited_once_with("ok")
     send_prompt.assert_not_called()

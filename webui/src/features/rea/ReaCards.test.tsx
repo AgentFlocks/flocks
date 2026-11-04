@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import zhSession from '@/locales/zh-CN/session.json';
@@ -331,6 +331,23 @@ describe('install card', () => {
     await waitFor(() => expect(value.submitPrompt).toHaveBeenCalledWith(zh.stop.light));
   });
 
+  it('sends once when its button is pressed twice before the card re-renders', async () => {
+    api.status.mockResolvedValue(status({ state: 'degraded', canInstall: true }));
+    const part = toolPart('install', { metadata: { phase: 'tasks', tier: 'light', tasks: [{ ref: 'a', unknown: false }] } });
+    let finish: () => void = () => {};
+    const { value } = renderWithChat(<ReaToolPart part={part} />, {
+      submitPrompt: vi.fn(() => new Promise<void>((resolve) => { finish = resolve; })),
+    });
+    const stop = await screen.findByRole('button', { name: zh.tasks.stop });
+    act(() => {
+      // Both presses land before React disables the button.
+      stop.click();
+      stop.click();
+    });
+    expect(value.submitPrompt).toHaveBeenCalledTimes(1);
+    await act(async () => finish());
+  });
+
   it('counts the other conversations and the ones whose state could not be read', () => {
     api.status.mockResolvedValue(status({ state: 'degraded', canInstall: true }));
     const part = toolPart('install', { metadata: { phase: 'tasks', tier: 'light', tasks: [
@@ -339,6 +356,15 @@ describe('install card', () => {
     renderWithChat(<ReaToolPart part={part} />);
     const items = within(screen.getByTestId('rea-tasks-list')).getAllByRole('listitem');
     expect(items.map((item) => item.textContent)).toEqual(['另外 2 个会话', zh.tasks.oneUnknown]);
+  });
+
+  it('says another Flocks process on the server is changing REA', () => {
+    api.status.mockResolvedValue(status({ state: 'installing', canInstall: true }));
+    renderWithChat(<ReaToolPart part={toolPart('install', {
+      state: 'error',
+      metadata: { phase: 'failed', ok: false, errorCode: 'busy', tier: 'light' },
+    })} />);
+    expect(screen.getByTestId('rea-install-card')).toHaveTextContent(zh.error.busy);
   });
 
   it('keeps the tier when the conversations did not stop, and counts them', async () => {
@@ -525,6 +551,15 @@ describe('install card', () => {
     expect(screen.getByTestId('rea-blockers')).toHaveTextContent(
       '这台主机（mac_arm_64）的 Ghidra 发行包没有预编译的反编译器：请执行 cd /opt/ghidra_12.1.4_PUBLIC/support/gradle && ./gradlew buildNatives',
     );
+  });
+
+  it('says a managed install changes REA only with its release, without a retry', () => {
+    api.status.mockResolvedValue(status({ state: 'not_installed', canInstall: true }));
+    renderWithChat(<ReaToolPart part={toolPart('install', {
+      state: 'error', metadata: { phase: 'failed', ok: false, errorCode: 'managed' },
+    })} />);
+    expect(screen.getByTestId('rea-install-card')).toHaveTextContent(zh.error.managed);
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
   });
 
   it('shows plan mode and permission refusals without a retry', () => {

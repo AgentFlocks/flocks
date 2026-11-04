@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import uuid
 from collections import deque
@@ -22,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Dict, Optional, TextIO, Tuple
 
 from .errors import NodeExecutionError, RunCancelledError
-from .llm import get_lazy_llm
+from .llm import get_lazy_llm, llm_hook_context_from_registry
 from .tools import ToolFacade, get_tool_registry
 
 
@@ -44,6 +45,7 @@ _HOST_PROCESS_RPC_QUEUE_SIZE = 4
 _HOST_PROCESS_STDERR_MAX_BYTES = 1024 * 1024
 _WORKFLOW_SITE_PACKAGES = "/workspace/.flocks/workflow/site-packages"
 _TOOL_CANCEL_CHECKER_INSTALL_LOCK = threading.Lock()
+_CANCEL_TRACE_INTERVAL_SECONDS = 0.05
 
 
 class _RPCFrameTooLarge(ValueError):
@@ -211,6 +213,38 @@ def _legacy_registry_cancel_scope(registry: Any, checker: Optional[Callable[[], 
         return contextlib.nullcontext()
 
 
+#: Names a node's code always has; a backend's service cannot take one of them.
+_NODE_GLOBALS = frozenset({"__builtins__", "inputs", "outputs", "cancelled", "is_cancelled", "llm", "tool", "get_path"})
+
+
+def _workflow_services(cancel_checker: Optional[Callable[[], bool]]) -> Dict[str, Any]:
+    """What the backend offers python nodes by name (flocks.coordination.workflow_services)."""
+    from flocks.coordination import workflow_services
+
+    return {
+        name: service
+        for name, service in workflow_services(cancel_checker).items()
+        if isinstance(name, str) and name.isidentifier() and name not in _NODE_GLOBALS
+    }
+
+
+def _exposed_methods(service: Any) -> Tuple[str, ...]:
+    """The methods a node may call on a service: the ones it lists, none private."""
+    return tuple(
+        method for method in getattr(service, "exposed_methods", ())
+        if isinstance(method, str) and method.isidentifier() and not method.startswith("_")
+    )
+
+
+def _service_specs(services: Dict[str, Any]) -> Dict[str, Any]:
+    """For an isolated node: each service's name, callable methods and call time limit."""
+    specs: Dict[str, Any] = {}
+    for name, service in services.items():
+        timeout = getattr(service, "rpc_timeout_s", None)
+        specs[name] = [list(_exposed_methods(service)), float(timeout) if timeout else None]
+    return specs
+
+
 @dataclass
 class PythonExecRuntime(Runtime):
     """Trusted host-process runtime.
@@ -252,11 +286,22 @@ class PythonExecRuntime(Runtime):
         g["inputs"] = inputs
         g["outputs"] = {}
 
+        checking = threading.local()
+
         def _cancel_requested() -> bool:
+            # The line tracer below traces the checker too: on a line inside a
+            # check the node itself started it would check again, re-entering
+            # whatever the checker holds (the ownership lock is not reentrant,
+            # and the whole server then waits on it). One check at a time.
+            if getattr(checking, "active", False):
+                return False
+            checking.active = True
             try:
                 return bool(self.cancel_checker and self.cancel_checker())
             except Exception:
                 return False
+            finally:
+                checking.active = False
 
         if _cancel_requested():
             raise RunCancelledError("<runtime>")
@@ -265,7 +310,10 @@ class PythonExecRuntime(Runtime):
         # a line tracer so simple Python loops can be interrupted by UI stop.
         g["cancelled"] = _cancel_requested
         g["is_cancelled"] = _cancel_requested
-        g["llm"] = get_lazy_llm(cancel_checker=self.cancel_checker)
+        g["llm"] = get_lazy_llm(
+            cancel_checker=self.cancel_checker,
+            hook_context=llm_hook_context_from_registry(self.tool_registry),
+        )
         reg = self.tool_registry or get_tool_registry()
         if hasattr(reg, "cancel_checker"):
             try:
@@ -273,6 +321,9 @@ class PythonExecRuntime(Runtime):
             except Exception:
                 pass
         g.setdefault("tool", ToolFacade(reg) if not isinstance(reg, ToolFacade) else reg)
+        # What the backend offers python nodes by name (flocks.coordination.workflow_services).
+        for name, service in _workflow_services(self.cancel_checker).items():
+            g[name] = service
 
         def get_path(path: str, data: Any = None) -> Any:
             if data is None:
@@ -310,10 +361,17 @@ class PythonExecRuntime(Runtime):
 
         buf = io.StringIO()
         previous_trace = None
+        next_cancel_check = time.monotonic() + _CANCEL_TRACE_INTERVAL_SECONDS
 
         def _cancel_trace(_frame: Any, event: str, _arg: Any) -> Any:
-            if event == "line" and _cancel_requested():
-                raise RunCancelledError("<runtime>")
+            nonlocal next_cancel_check
+            # Imports and computation can execute millions of Python lines.
+            # The checker may cross a process boundary to verify ownership;
+            # sample that I/O while keeping explicit tool/node checks immediate.
+            if event == "line" and time.monotonic() >= next_cancel_check:
+                if _cancel_requested():
+                    raise RunCancelledError("<runtime>")
+                next_cancel_check = time.monotonic() + _CANCEL_TRACE_INTERVAL_SECONDS
             return _cancel_trace
 
         try:
@@ -434,7 +492,10 @@ class SandboxPythonExecRuntime(Runtime):
         if not isinstance(env, dict):
             env = {}
         token = uuid.uuid4().hex
-        python_cmd = self._build_python_cmd(code=code, bridge_token=token)
+        # One set of the backend's services for this execution: the node's
+        # calls, one after another, reach the same objects.
+        services = _workflow_services(self.cancel_checker)
+        python_cmd = self._build_python_cmd(code=code, bridge_token=token, services=services)
         cmd = [
             "docker",
             "exec",
@@ -493,7 +554,7 @@ class SandboxPythonExecRuntime(Runtime):
                     continue
                 msg_type = str(msg.get("type") or "").strip().lower()
                 if msg_type == "rpc":
-                    resp = self._handle_rpc_request(msg=msg, token=token)
+                    resp = self._handle_rpc_request(msg=msg, token=token, services=services)
                     self._write_json_line(proc.stdin, resp)
                 elif msg_type == "final" and msg.get("token") == token:
                     payload = msg.get("payload")
@@ -557,6 +618,7 @@ class SandboxPythonExecRuntime(Runtime):
         bridge_token: str,
         rpc_max_bytes: Optional[int] = _RPC_MAX_BYTES,
         extra_site_packages: str = _WORKFLOW_SITE_PACKAGES,
+        services: Optional[Dict[str, Any]] = None,
     ) -> str:
         wrapped = f"""
 import contextlib
@@ -630,7 +692,7 @@ def _read_rpc_responses():
     except Exception as exc:
         _fail_rpc_waiters(str(exc))
 
-def _rpc_call(payload):
+def _rpc_call(payload, timeout_s=None):
     global _rpc_seq
     with _rpc_seq_lock:
         _rpc_seq += 1
@@ -651,7 +713,8 @@ def _rpc_call(payload):
         with _rpc_write_lock:
             _out.write(json.dumps(req, ensure_ascii=False, default=str) + "\\n")
             _out.flush()
-        waiter["event"].wait()
+        if not waiter["event"].wait(timeout_s):
+            raise TimeoutError("Workflow host capability timed out")
         resp = waiter["response"] or {{}}
     finally:
         with _rpc_waiters_lock:
@@ -695,6 +758,23 @@ class _ToolProxy:
 
     def run_safe(self, name, **kwargs):
         return _rpc_call({{"kind": "tool_safe", "name": name, "kwargs": kwargs}})
+
+# A backend's service, reached through the host: only the methods it exposes.
+class _ServiceProxy:
+    def __init__(self, name, methods, timeout_s):
+        self._name = name
+        self._methods = frozenset(methods)
+        self._timeout_s = timeout_s
+
+    def __getattr__(self, method):
+        if method.startswith("_") or method not in self._methods:
+            raise AttributeError(f"{{self._name}}.{{method}} is not available")
+
+        def call(*args, **kwargs):
+            return _rpc_call({{"kind": "service", "service": self._name, "method": method,
+                              "args": list(args), "kwargs": kwargs}}, timeout_s=self._timeout_s)
+
+        return call
 
 class _LLMProxy:
     def ask(
@@ -759,6 +839,8 @@ g = {{
     "tool": _ToolProxy(),
     "llm": _LLMProxy(),
 }}
+for _service_name, (_service_methods, _service_timeout) in {_service_specs(services or {})!r}.items():
+    g[_service_name] = _ServiceProxy(_service_name, _service_methods, _service_timeout)
 
 _extra_site = {json.dumps(extra_site_packages, ensure_ascii=False)}
 if _extra_site and os.path.isdir(_extra_site) and _extra_site not in sys.path:
@@ -800,12 +882,14 @@ sys.stdout.flush()
         rpc_max_bytes: Optional[int] = _RPC_MAX_BYTES,
         extra_site_packages: str = _WORKFLOW_SITE_PACKAGES,
         python_executable: str = "python3",
+        services: Optional[Dict[str, Any]] = None,
     ) -> str:
         wrapped = self._build_python_source(
             code=code,
             bridge_token=bridge_token,
             rpc_max_bytes=rpc_max_bytes,
             extra_site_packages=extra_site_packages,
+            services=services,
         )
         return f"{shlex.quote(python_executable)} -I -c {shlex.quote(wrapped)}"
 
@@ -835,6 +919,7 @@ sys.stdout.flush()
         msg: Dict[str, Any],
         token: str,
         cancel_checker: Optional[Callable[[], bool]] = None,
+        services: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         req_id = str(msg.get("id") or "")
         if msg.get("token") != token:
@@ -848,6 +933,19 @@ sys.stdout.flush()
         try:
             if kind == "cancelled":
                 output = bool(effective_cancel_checker and effective_cancel_checker())
+                return {"type": "rpc_result", "token": token, "id": req_id, "ok": True, "output": output}
+
+            if kind == "service":
+                name = str(rpc.get("service") or "")
+                method = str(rpc.get("method") or "")
+                service = (services or {}).get(name)
+                if service is None or method not in _exposed_methods(service):
+                    raise RuntimeError(f"{name}.{method} is not available in this installation")
+                args = rpc.get("args") or []
+                kwargs = rpc.get("kwargs") or {}
+                if not isinstance(args, list) or not isinstance(kwargs, dict):
+                    raise RuntimeError("Service call arguments must be a list and a mapping")
+                output = getattr(service, method)(*args, **kwargs)
                 return {"type": "rpc_result", "token": token, "id": req_id, "ok": True, "output": output}
 
             if kind in ("tool", "tool_safe"):
@@ -908,7 +1006,10 @@ sys.stdout.flush()
                     retry_delay_s = float(retry_delay_raw)
                 except Exception as exc:
                     raise RuntimeError("LLM retry_delay_s must be a number when provided") from exc
-                output = get_lazy_llm(cancel_checker=effective_cancel_checker).ask(
+                output = get_lazy_llm(
+                    cancel_checker=effective_cancel_checker,
+                    hook_context=llm_hook_context_from_registry(self.tool_registry),
+                ).ask(
                     prompt,
                     temperature=temperature,
                     model=model,
@@ -1010,6 +1111,15 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                     message="rpc_max_response_bytes and rpc_max_workers exceed rpc_max_inflight_bytes",
                 )
 
+        bridge_closed = threading.Event()
+
+        def _rpc_cancel_requested() -> bool:
+            return bridge_closed.is_set() or self._cancel_requested()
+
+        # One set of the backend's services for this execution: the node's
+        # calls, one after another, reach the same objects.
+        services = _workflow_services(_rpc_cancel_requested)
+
         inherited_fds = self._resolve_inherited_fds(inputs)
         retained_fds = self._resolve_retained_fds(inputs)
         managed_fds = tuple(dict.fromkeys((*inherited_fds, *retained_fds.values())))
@@ -1038,6 +1148,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 bridge_token=token,
                 rpc_max_bytes=rpc_max_bytes,
                 extra_site_packages=package_root,
+                services=services,
             )
             with tempfile.NamedTemporaryFile(
                 mode="w",
@@ -1055,6 +1166,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 rpc_max_bytes=rpc_max_bytes,
                 extra_site_packages=package_root,
                 python_executable=sys.executable,
+                services=services,
             )
             process_args = ["sh", "-lc", python_cmd]
 
@@ -1095,7 +1207,6 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
         )
         stderr_thread.start()
 
-        bridge_closed = threading.Event()
         stdout_reader_stop = threading.Event()
         bridge_errors: list[str] = []
         inflight_budget = _InflightByteBudget(rpc_max_inflight_bytes)
@@ -1155,9 +1266,6 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
             thread_name_prefix="wf-process-rpc",
         )
 
-        def _rpc_cancel_requested() -> bool:
-            return bridge_closed.is_set() or self._cancel_requested()
-
         def _handle_rpc(message: Dict[str, Any], request_bytes: int) -> None:
             response_reservation = rpc_response_limit or 0
             response_reserved = False
@@ -1169,6 +1277,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                     msg=message,
                     token=token,
                     cancel_checker=_rpc_cancel_requested,
+                    services=services,
                 )
                 response_error: Optional[str] = None
                 try:
@@ -1420,6 +1529,14 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 os.killpg(proc.pid, signal.SIGTERM)
             except ProcessLookupError:
                 return
+            except PermissionError as signal_error:
+                # macOS can report EPERM after the last group member exits.
+                # Confirm and reap that exit; a live child must still fail.
+                try:
+                    proc.wait(timeout=0.05)
+                except subprocess.TimeoutExpired:
+                    raise signal_error from None
+                return
         else:
             proc.terminate()
         try:
@@ -1430,6 +1547,11 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                except PermissionError as signal_error:
+                    try:
+                        proc.wait(timeout=0.05)
+                    except subprocess.TimeoutExpired:
+                        raise signal_error from None
             else:
                 proc.kill()
             proc.wait()

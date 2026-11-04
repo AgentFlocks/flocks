@@ -61,6 +61,15 @@ _BLOCKED_PATTERN_SOURCES = [
     r"\bsed\b.*-i\b",
     r"\bfind\b.*-exec\s+(?:rm|mv|cp|chmod|chown)\b",
     r"\bfind\b.*-delete\b",
+    # Raw device / filesystem destruction and scheduler wipes.
+    r"\bdd\b.*\bof=",
+    r"\bshred\b",
+    r"\bmkfs(?:\.\w+)?\b",
+    r"\bcrontab\b.*\s-r\b",
+    # Interpreters running inline code: the quoted payload is invisible to the
+    # blacklist, so treat the whole segment as write-capable.
+    r"\b(?:python[0-9.]*|perl|ruby|node|php)\b.*\s-[cCe]\b",
+    r"\b(?:ba|z|k|da)?sh\b\s+(?:\S+\s+)*-c\b",
 ]
 _BLOCKED_PATTERNS = [re.compile(p) for p in _BLOCKED_PATTERN_SOURCES]
 _BLOCKED_BASE_COMMANDS = {

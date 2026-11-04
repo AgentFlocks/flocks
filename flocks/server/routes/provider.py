@@ -12,16 +12,17 @@ import json
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
-from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, ConfigDict, ValidationError, field_validator
 from pydantic_core import PydanticCustomError
 
 from flocks.audit import emit_audit_event
 from flocks.auth.context import AuthUser
 from flocks.utils.log import Log
+from flocks.provider.base_url import BaseURLValidationError, validate_provider_base_url
 from flocks.provider.provider import BaseProvider, Provider, ModelInfo as ProviderModelInfo
 from flocks.security.secrets import SecretManager
 from flocks.server.auth import get_request_ip, get_request_user_agent, require_admin, require_user
@@ -49,6 +50,7 @@ from flocks.tool.schema.api_service_schema import (
     _should_persist_secondary_secret,
     normalize_api_service_group,
 )
+from flocks.config.config import get_user_plugins_root
 
 
 router = APIRouter()
@@ -323,6 +325,19 @@ def _is_placeholder_api_key(value: Optional[str]) -> bool:
     return isinstance(value, str) and value.strip() == _NO_API_KEY_PLACEHOLDER
 
 
+def _validated_base_url(value: Optional[str], *, field: str = "base_url") -> Optional[str]:
+    """Validate a user supplied base URL; ``None``/blank passes through unchanged."""
+    if value is None or not value.strip():
+        return value
+    try:
+        return validate_provider_base_url(value, field=field)
+    except BaseURLValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+
 def _get_inline_provider_api_key(provider_id: str) -> Optional[str]:
     """Return an inline apiKey from flocks.json when present.
 
@@ -382,6 +397,78 @@ def _get_npm_package(provider_id: str) -> str:
     """Get the NPM SDK package for a provider (from catalog.json)."""
     from flocks.provider.model_catalog import get_provider_npm
     return get_provider_npm(provider_id)
+
+
+# Upper bound for one API-service connectivity probe (declared or heuristic).
+API_SERVICE_PROBE_TIMEOUT_S: float = 30.0
+
+
+def _build_api_service_probe_context(provider_id: str, tool_name: str) -> "ToolContext":
+    """ToolContext for a server-initiated, non-interactive connectivity probe.
+
+    The probe has no session and nobody to answer a confirmation prompt, so it
+    carries its own trusted execution profile: an ``api`` entry with
+    ``auto-allow-all`` permission / network modes. Policy hooks (policy gate,
+    audit) still run — only the interactive user-confirm step is skipped,
+    which otherwise waited 300s and then denied the probe.
+    """
+    import uuid
+
+    from flocks.session.execution_profile import PROFILE_VERSION, _workspace_root_dir
+    from flocks.tool.registry import ToolContext
+
+    now = datetime.now(timezone.utc).isoformat()
+    return ToolContext(
+        session_id="default",
+        message_id="default",
+        call_id=f"probe_{uuid.uuid4().hex}",
+        extra={
+            "api_service_probe": provider_id,
+            "tool_name": tool_name,
+            "non_interactive": True,
+            "session_execution_profile": {
+                "version": PROFILE_VERSION,
+                "session_id": "default",
+                "project_id": None,
+                "workspace_dir": _workspace_root_dir(),
+                "project_root": "",
+                "project_revision": None,
+                "owner_user_id": None,
+                "owner_username": None,
+                "entry": "api",
+                "visible_agents": [],
+                "default_agent": "",
+                "permission_mode": "auto-allow-all",
+                "runtime_mode": "exe-mode",
+                "network_mode": "auto-allow-all",
+                "actor_role": None,
+                "actor_department": None,
+                "revision": 1,
+                "source": "provider.api_service_probe",
+                "updated_at": now,
+            },
+        },
+    )
+
+
+def _is_creatable_provider_id(provider_id: str) -> bool:
+    """Whether POST credentials may auto-create a flocks.json entry for this id.
+
+    custom-* providers are created through /api/custom/providers first, so an
+    unknown custom-* id here is a typo, not a request to create one.
+    """
+    if provider_id == "openai-compatible":
+        return True
+    try:
+        from flocks.provider.model_catalog import get_raw_catalog
+        if provider_id in get_raw_catalog():
+            return True
+    except Exception:
+        pass
+    try:
+        return Provider.get(provider_id) is not None
+    except Exception:
+        return False
 
 
 def _build_model_from_config(
@@ -464,6 +551,10 @@ def _merge_config_models(
         merged = _build_model_from_config(provider_id, model_id, model_cfg, existing)
         if merged:
             models_dict[model_id] = merged
+        else:
+            # disabled (soft-deleted) in flocks.json: hide it even if the runtime
+            # still lists it
+            models_dict.pop(model_id, None)
 
     return models_dict
 
@@ -800,12 +891,15 @@ async def update_api_service_route(
     _admin: object = Depends(require_admin),
 ):
     try:
-        update = APIServiceUpdateRequest.model_validate(request)
+        payload = APIServiceUpdateRequest.model_validate(request)
     except ValidationError as exc:
-        raise RequestValidationError([
-            {**error, "loc": ("body", *error["loc"])} for error in exc.errors()
-        ]) from exc
-    return await update_api_service(provider_id, update)
+        # Same shape FastAPI produces for a typed body (the model is defined
+        # further down in this module, so it cannot be used as the annotation).
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=[{**error, "loc": ["body", *error["loc"]]} for error in json.loads(exc.json())],
+        ) from exc
+    return await update_api_service(provider_id, payload)
 
 
 @router.delete(
@@ -869,6 +963,7 @@ async def get_provider(provider_id: str) -> ProviderInfo:
             source="config",  # Provider source
             env=[],  # Environment variable names
             key=None,  # API key not exposed
+            configured=provider.is_configured(),
             options={},
             models=models_dict,
         )
@@ -958,7 +1053,7 @@ async def configure_provider(
         provider_config = ProviderConfig(
             provider_id=provider_id,
             api_key=config.api_key,
-            base_url=config.base_url,
+            base_url=_validated_base_url(config.base_url),
             custom_settings=config.custom_settings,
         )
         
@@ -1066,7 +1161,7 @@ async def update_provider(
         provider_config = ProviderConfig(
             provider_id=provider_id,
             api_key=config.api_key,
-            base_url=config.base_url,
+            base_url=_validated_base_url(config.base_url),
             custom_settings=config.custom_settings,
         )
         
@@ -1199,7 +1294,7 @@ def _is_api_service_builtin(provider_id: str, tools: Optional[List[Any]] = None)
     from flocks.config.api_versioning import discover_api_service_descriptors
 
     project_root = Path.cwd() / ".flocks" / "plugins" / "tools" / "api"
-    user_root = Path.home() / ".flocks" / "plugins" / "tools" / "api"
+    user_root = get_user_plugins_root() / "tools" / "api"
 
     for descriptor in discover_api_service_descriptors():
         if descriptor.storage_key != provider_id:
@@ -1478,6 +1573,12 @@ async def update_api_service(provider_id: str, request: APIServiceUpdateRequest)
             else:
                 existing["group"] = request.group or ""
         await ToolRegistry.init_async()
+        if (
+            raw_existing is None
+            and provider_id not in ToolRegistry.get_api_service_ids()
+            and _find_api_service_descriptor(provider_id) is None
+        ):
+            raise HTTPException(status_code=404, detail="API service not found")
         if request.enabled is not None:
             existing["enabled"] = request.enabled
         if request.verify_ssl is not None:
@@ -1537,7 +1638,7 @@ def _find_user_installed_tool_plugin_for(storage_key: str) -> Optional[tuple[str
     from flocks.config.api_versioning import discover_api_service_descriptors
     from flocks.hub import local as hub_local
 
-    user_root = (Path.home() / ".flocks" / "plugins" / "tools").resolve()
+    user_root = (get_user_plugins_root() / "tools").resolve()
     for descriptor in discover_api_service_descriptors(refresh=True):
         if descriptor.storage_key != storage_key:
             continue
@@ -1753,6 +1854,7 @@ class ProviderCredentialRequest(BaseModel):
     username: Optional[str] = Field(None, description="Optional username for API services")
     fields: Optional[Dict[str, Optional[str]]] = Field(None, description="Dynamic service credential fields")
     provider_name: Optional[str] = Field(None, description="Display name for the provider")
+    skip_catalog_bootstrap: bool = Field(False, description="Keep the model inventory explicitly managed instead of adding catalog defaults")
 
 
 class ProviderCredentialResponse(BaseModel):
@@ -1902,8 +2004,16 @@ async def set_provider_credentials(
         # the existing secret" so callers can safely update only the base URL
         # or model selection without receiving the original key back first.
         api_key_optional = (
-            provider_id == "openai-compatible" or provider_id.startswith("custom-")
+            provider_id in {"openai-compatible", "cherry", "ollama", "local"} or provider_id.startswith("custom-")
         )
+        _validated_base_url(request.base_url)
+        if (
+            ConfigWriter.get_provider_raw(provider_id) is None
+            and not _is_creatable_provider_id(provider_id)
+        ):
+            # Unknown id and nothing to update: refuse before touching
+            # .secret.json / flocks.json so no bogus provider is persisted.
+            raise HTTPException(status_code=404, detail=f"Unknown provider: {provider_id}")
         secrets = get_secret_manager()
         secret_id = request.secret_id or f"{provider_id}_llm_key"
         effective_api_key = (request.api_key or "").strip()
@@ -1964,7 +2074,12 @@ async def set_provider_credentials(
         if raw_provider:
             # ThreatBook onboarding may precede catalog sync on first run or
             # upgrade. Other providers keep their model list when rotating keys.
-            if not preserve_existing_secret and provider_id in _THREATBOOK_LLM_PROVIDER_IDS:
+            if (
+                not preserve_existing_secret
+                and not request.skip_catalog_bootstrap
+                and raw_provider.get("model_sync") != "manual"
+                and provider_id in _THREATBOOK_LLM_PROVIDER_IDS
+            ):
                 from flocks.provider.model_catalog import get_provider_model_definitions
 
                 existing_models = raw_provider.get("models") or {}
@@ -1979,8 +2094,12 @@ async def set_provider_credentials(
                     provider_id, "options.baseURL", request.base_url
                 )
             if not preserve_existing_secret:
-                # Persist a newly supplied key's reference even when the URL
-                # is unchanged (including an incomplete first-run entry).
+                # A newly supplied key uses the canonical secret reference so the
+                # next apply_config resolves the key that was just saved (a
+                # custom secret_id would otherwise leave flocks.json pointing at
+                # the old secret), even when the URL is unchanged (including an
+                # incomplete first-run entry). When preserving a stored or inline
+                # key, leave its existing config reference untouched.
                 ConfigWriter.update_provider_field(
                     provider_id, "options.apiKey", f"{{secret:{secret_id}}}"
                 )
@@ -1988,8 +2107,15 @@ async def set_provider_credentials(
                 ConfigWriter.update_provider_field(
                     provider_id, "name", request.provider_name
                 )
+            if request.skip_catalog_bootstrap:
+                ConfigWriter.update_provider_field(provider_id, "model_sync", "manual")
         else:
-            # Provider not yet in flocks.json — create a minimal entry
+            # Provider not yet in flocks.json — create a minimal entry, but only
+            # for ids the system actually knows (catalog / registered SDK
+            # provider / the generic openai-compatible id). Anything else would
+            # silently persist a bogus provider (e.g. "null") with an
+            # openai-compatible npm package and show up as "connected".
+            # (validated up-front, before any secret is written)
             # Use model_catalog for model defaults; fall back to SDK built-ins.
             npm = _get_npm_package(provider_id)
             models: dict = {}
@@ -2031,6 +2157,10 @@ async def set_provider_credentials(
                 base_url=effective_base_url,
                 models=models,
             )
+            if request.skip_catalog_bootstrap:
+                models = {}
+                config_dict["models"] = {}
+                config_dict["model_sync"] = "manual"
             if request.provider_name:
                 config_dict["name"] = request.provider_name
             ConfigWriter.add_provider(provider_id, config_dict)
@@ -2064,6 +2194,8 @@ async def set_provider_credentials(
             # Update display name if provided
             if request.provider_name:
                 provider.name = request.provider_name
+            if request.skip_catalog_bootstrap:
+                await Provider.apply_config(await Config.get(), provider_id=provider_id)
 
 
         log.info("provider.credentials.set", {
@@ -2360,6 +2492,7 @@ async def set_service_credentials(
 
         if not field_updates:
             raise HTTPException(status_code=400, detail="At least one credential field is required")
+        _validated_base_url(field_updates.get("base_url"))
 
         secrets = get_secret_manager()
         existing = ConfigWriter.get_api_service_raw(provider_id) or {}
@@ -2558,6 +2691,9 @@ async def _prepare_isolated_provider(provider: BaseProvider) -> BaseProvider:
     if settings is not None:
         provider._config_models = []
         Provider.apply_provider_config(provider, settings)
+
+    if getattr(provider, "_model_sync_manual", False):
+        return provider
 
     # Backfill even a nonempty list: an upgrade can introduce the onboarding
     # default before the background catalog sync has reached this provider.
@@ -2831,11 +2967,27 @@ async def _test_provider_credentials_impl(
         else:
             # This is an API service (not a registered provider)
             # Try to test connectivity by calling a simple tool
-            from flocks.tool.registry import ToolRegistry, ToolCategory, ToolInfo
+            from flocks.tool.registry import ToolRegistry, ToolCategory, ToolContext, ToolInfo
             from flocks.server.routes.tool import _get_tool_source
             from flocks.tool.credential_context import activate_credential_probe
 
             await ToolRegistry.init_async()
+
+            # Connectivity probes run outside any session. An audit hook
+            # refuses to record (and therefore denies) a real tool execution
+            # that has no call id, so give each probe its own id explicitly.
+            def _probe_ctx(tool_name: str) -> ToolContext:
+                return _build_api_service_probe_context(provider_id, tool_name)
+
+            async def _run_probe(tool_name: str, params: dict) -> Any:
+                # A probe is one bounded network round-trip; never let it hang
+                # a request (onboarding validate) on a stuck gate or endpoint.
+                # The probe may invoke a still-disabled tool without enabling it.
+                async with activate_credential_probe():
+                    return await asyncio.wait_for(
+                        ToolRegistry.execute(tool_name=tool_name, ctx=_probe_ctx(tool_name), **params),
+                        timeout=API_SERVICE_PROBE_TIMEOUT_S,
+                    )
 
             # If the plugin ships a `_test.yaml` with a `connectivity` block,
             # honour the declared (tool, params) probe. Tool failures (e.g.
@@ -2850,8 +3002,7 @@ async def _test_provider_credentials_impl(
                     "service": provider_id, "tool": spec.tool, "params": spec.params,
                 })
                 try:
-                    async with activate_credential_probe():
-                        probe = await ToolRegistry.execute(tool_name=spec.tool, **spec.params)
+                    probe = await _run_probe(spec.tool, spec.params)
                     latency = int((time.time() - start) * 1000)
                     response = {
                         "success": probe.success,
@@ -3158,8 +3309,7 @@ async def _test_provider_credentials_impl(
                     "single_attempt": True,
                 })
 
-                async with activate_credential_probe():
-                    result = await ToolRegistry.execute(tool_name=test_tool.name, **test_params)
+                result = await _run_probe(test_tool.name, test_params)
                 latency = int((time.time() - start) * 1000)
 
                 if result.success:

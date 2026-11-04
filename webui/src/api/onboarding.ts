@@ -57,6 +57,7 @@ export interface OnboardingApplyResponse {
 
 export interface OnboardingStatusResponse {
   completed: boolean;
+  dismissed?: boolean;
   has_default_model: boolean;
   default_model?: {
     provider_id: string;
@@ -75,8 +76,27 @@ export interface OnboardingStatusResponse {
   };
 }
 
+export interface OnboardingDraft {
+  model: OnboardingRequest | null;
+  intel: OnboardingRequest | null;
+  model_has_key: boolean;
+  intel_has_key: boolean;
+  dismissed: boolean;
+}
+
+export interface OnboardingDraftInput {
+  model?: OnboardingRequest;
+  intel?: OnboardingRequest;
+  dismissed?: boolean;
+}
+
 export const onboardingAPI = {
   getStatus: () => client.get<OnboardingStatusResponse>('/api/onboarding/status'),
+
+  getDraft: () => client.get<OnboardingDraft>('/api/onboarding/draft'),
+
+  saveDraft: (payload: OnboardingDraftInput) =>
+    client.post<OnboardingDraft>('/api/onboarding/draft', payload),
 
   validate: (payload: OnboardingRequest) =>
     client.post<OnboardingValidateResponse>('/api/onboarding/validate', payload),

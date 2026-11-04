@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import platform
 import subprocess
 import sys
 import time
@@ -30,23 +31,65 @@ def _repo_root() -> Path:
 
 
 def resolve_esbuild_bin() -> Optional[Path]:
-    """Locate esbuild from the bundled webui toolchain."""
-    webui_bin = _repo_root() / "webui" / "node_modules" / ".bin"
+    """Locate the packaged compiler or the native binary installed by npm.
+
+    Keep this within the runtime tree. In particular, Windows can execute the
+    native .exe without relying on an npm .cmd launcher and Node's PATH.
+    """
+    modules = _repo_root() / "webui" / "node_modules"
+    webui_bin = modules / ".bin"
+    machine = platform.machine().lower()
+    arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64"}.get(machine, machine)
+    candidates = []
     if sys.platform == "win32":
-        candidate = webui_bin / "esbuild.cmd"
-        if candidate.is_file():
+        candidates.append(webui_bin / "esbuild.exe")
+        candidates.append(modules / "@esbuild" / f"win32-{arch}" / "esbuild.exe")
+        candidates.append(webui_bin / "esbuild.cmd")
+    else:
+        candidates.append(webui_bin / "esbuild")
+        candidates.append(modules / "@esbuild" / f"{sys.platform}-{arch}" / "bin" / "esbuild")
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
-    candidate = webui_bin / "esbuild"
-    if candidate.is_file():
-        return candidate
+    return None
+
+
+def bundle_digest(content: bytes) -> str:
+    """The digest a page's build record carries for its bundle."""
+    return hashlib.sha256(content).hexdigest()[:16]
+
+
+def prebuilt_bundle_problem(store: WebUIPagesStore, page_id: str) -> Optional[str]:
+    """Why a page's shipped bundle cannot be served as it is; None when it can.
+
+    A page can be delivered already built, without the source it was built
+    from. Its bundle is then served only if its build record says it was
+    built for this runtime and the bundle is the one the record describes.
+    """
+    bundle = store.bundle_path(page_id)
+    if not bundle.is_file():
+        return "is missing"
+    meta = store.read_build_meta(page_id)
+    if meta.status != "ready":
+        return f"is not a finished build (status {meta.status})"
+    if meta.runtime != RUNTIME_NAME or meta.runtimeVersion != RUNTIME_VERSION or meta.sdkImport != SDK_IMPORT_NAME:
+        return (
+            f"was built for {meta.runtime} v{meta.runtimeVersion}, "
+            f"and this version runs {RUNTIME_NAME} v{RUNTIME_VERSION}"
+        )
+    if meta.hash != bundle_digest(bundle.read_bytes()):
+        return "does not match its build record"
     return None
 
 
 class WebUIPageBuilder:
     """Compile a page entry file into dist/page.js."""
 
-    def __init__(self, store: Optional[WebUIPagesStore] = None) -> None:
+    def __init__(self, store: Optional[WebUIPagesStore] = None, *, minify: bool = False) -> None:
         self._store = store or WebUIPagesStore()
+        # Minified bundles are for pages shipped built (see
+        # prebuilt_bundle_problem); pages built on the install stay readable.
+        self._minify = minify
 
     def build(self, page_id: str) -> WebUIPageBuildMeta:
         page_id = self._store.validate_page_id(page_id)
@@ -63,7 +106,11 @@ class WebUIPageBuilder:
 
         esbuild = resolve_esbuild_bin()
         if esbuild is None:
-            raise RuntimeError("esbuild is not available; install webui dependencies first")
+            raise RuntimeError(
+                "esbuild is not available in this runtime. "
+                "For a source installation, reinstall the locked WebUI dependencies (npm ci in webui). "
+                "For a packaged installation, install a complete runtime package containing the WebUI compiler."
+            )
 
         dist_dir = page_dir / "dist"
         dist_dir.mkdir(parents=True, exist_ok=True)
@@ -85,6 +132,8 @@ class WebUIPageBuilder:
             f"--alias:react/jsx-runtime={_SHIMS_DIR / 'jsx-runtime.js'}",
             f"--alias:{WEBUI_CONTRACT_SDK_IMPORT}={_SHIMS_DIR / 'sdk.js'}",
         ]
+        if self._minify:
+            cmd.append("--minify")
 
         env = os.environ.copy()
         try:
@@ -153,7 +202,7 @@ class WebUIPageBuilder:
             self._store.write_build_meta(page_id, meta)
             return meta
 
-        digest = hashlib.sha256(content).hexdigest()[:16]
+        digest = bundle_digest(content)
         meta = WebUIPageBuildMeta(
             status="ready",
             hash=digest,

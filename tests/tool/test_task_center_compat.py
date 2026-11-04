@@ -30,7 +30,7 @@ async def isolated_task_env(tmp_path: pytest.TempPathFactory, monkeypatch: pytes
     TaskManager._instance = None
     TaskManager._startup_error = None
     TaskStore._initialized = False
-    TaskStore._conn = None
+    TaskStore._handle = None
 
     await Storage.init()
     await TaskStore.init()
@@ -46,7 +46,7 @@ async def isolated_task_env(tmp_path: pytest.TempPathFactory, monkeypatch: pytes
     TaskManager._instance = None
     TaskManager._startup_error = None
     TaskStore._initialized = False
-    TaskStore._conn = None
+    TaskStore._handle = None
 
 
 class TestTaskCenterCompatibility:

@@ -590,6 +590,9 @@ def mcp_server_config(
         "command": [*command, "--mcp"],
         "enabled": True,
         "timeout": _MCP_TIMEOUT_SECONDS,
+        # REA keeps one evidence ledger and one open target per connection: every
+        # conversation gets its own (Flocks isolates ``rea`` even without this field).
+        "isolation": "session",
     }
     if tier == "full":
         config["environment"] = {

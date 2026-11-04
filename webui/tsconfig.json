@@ -16,6 +16,8 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
     "paths": {
+      "@ext/registry": ["./src/extensions/registry.ts"],
+      "@ext/*": ["./src/extensions/*"],
       "@/*": ["./src/*"],
       "@/api/*": ["./src/api/*"],
       "@/components/*": ["./src/components/*"],
@@ -30,5 +32,15 @@
     }
   },
   "include": ["src"],
-  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test"]
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "src/test",
+    // Build-time configuration: runs in Node during a Vite build, never in the
+    // browser bundle, and is type-checked by tsconfig.node.json instead. The
+    // app config has no Node types, so `import path` would fail here.
+    "src/config/apiProxy.ts",
+    "src/config/viteHosts.ts",
+    "src/config/extensionRegistry.ts"
+  ]
 }

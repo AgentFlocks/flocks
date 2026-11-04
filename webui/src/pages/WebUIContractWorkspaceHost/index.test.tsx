@@ -5,13 +5,31 @@ import WebUIContractWorkspaceHost from './index';
 import { setupSSEMock } from '@/test/mocks/sse';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
+import { __resetExtensionSlotCacheForTesting } from '@/components/extensions/ExtensionSlot';
 
-const { useWebUIContractPagesMock } = vi.hoisted(() => ({
+const { useWebUIContractPagesMock, sceneSuitesMock, extensionRegistry } = vi.hoisted(() => ({
   useWebUIContractPagesMock: vi.fn(),
+  sceneSuitesMock: vi.fn(),
+  // Extensions reach this page only through its slots.
+  extensionRegistry: {
+    routes: [],
+    navItems: [],
+    settingsSections: [],
+    slots: [] as Array<{ id: string; slot: string; component: (props: { context: Record<string, unknown> }) => JSX.Element | null }>,
+    i18n: {},
+  },
 }));
+
+vi.mock('@ext/registry', () => ({ __esModule: true, default: extensionRegistry }));
 
 vi.mock('@/hooks/useWebUIContractPages', () => ({
   useWebUIContractPages: useWebUIContractPagesMock,
+}));
+
+vi.mock('@/api/hub', () => ({
+  hubAPI: {
+    sceneSuites: sceneSuitesMock,
+  },
 }));
 
 vi.mock('@/pages/WebUIContractPageHost/PageRuntimeHost', () => ({
@@ -54,6 +72,9 @@ describe('WebUIContractWorkspaceHost', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    extensionRegistry.slots = [];
+    __resetExtensionSlotCacheForTesting();
+    sceneSuitesMock.mockResolvedValue({ data: [] });
     useWebUIContractPagesMock.mockReturnValue({
       pages: [],
       loading: false,
@@ -135,6 +156,74 @@ describe('WebUIContractWorkspaceHost', () => {
     });
   });
 
+  const lockedWorkspace = {
+    id: 'code_audit_ui',
+    title: '代码漏洞审计工作区',
+    route: '/contracts/webui/workspaces/code_audit_ui',
+    icon: 'FileSearch',
+    order: 20,
+    enabled: true,
+    placement: 'sceneWorkspace',
+    defaultPageId: 'code-security-workspace',
+    suiteId: 'code-audit-workspace',
+    locked: true,
+    lockReason: 'license',
+    pages: [],
+  };
+
+  it('shows a generic notice for a scene whose suite an extension locked', async () => {
+    useWebUIContractPagesMock.mockReturnValue({ pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: [] });
+    sceneSuitesMock.mockResolvedValue({
+      data: [{ id: 'code-audit-workspace', edition: 'pro', workspaceId: 'code_audit_ui', locked: true, lockReason: 'edition' }],
+    });
+
+    renderHostAt('/contracts/webui/workspaces/code_audit_ui');
+
+    expect(await screen.findByText('workspace.lockedTitle')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'workspace.suitesAction' })).toHaveAttribute('href', '/scenes/suites');
+  });
+
+  it('says not found for a missing scene whose suite is not locked', async () => {
+    useWebUIContractPagesMock.mockReturnValue({ pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: [] });
+    sceneSuitesMock.mockResolvedValue({
+      data: [{ id: 'code-audit-workspace', edition: 'pro', workspaceId: 'code_audit_ui', locked: false }],
+    });
+
+    renderHostAt('/contracts/webui/workspaces/code_audit_ui');
+
+    expect(await screen.findByText('workspace.notFound')).toBeInTheDocument();
+    expect(screen.queryByText('workspace.lockedTitle')).not.toBeInTheDocument();
+  });
+
+  it('keeps an installed workspace an extension locked closed', async () => {
+    useWebUIContractPagesMock.mockReturnValue({ pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: [lockedWorkspace] });
+
+    renderHostAt('/contracts/webui/workspaces/code_audit_ui');
+
+    expect(await screen.findByText('workspace.lockedTitle')).toBeInTheDocument();
+    expect(screen.queryByText(/^page:/)).not.toBeInTheDocument();
+  });
+
+  it('lets the extension word the notice for a scene it locked', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    extensionRegistry.slots = [{
+      id: 'test-locked-notice',
+      slot: 'workspace.lockedNotice',
+      component: ({ context }) => {
+        seen.push(context);
+        return <div>{`locked-because-${String(context.reason)}`}</div>;
+      },
+    }];
+    __resetExtensionSlotCacheForTesting();
+    useWebUIContractPagesMock.mockReturnValue({ pages: [], loading: false, error: null, refetch: vi.fn(), workspaces: [lockedWorkspace] });
+
+    renderHostAt('/contracts/webui/workspaces/code_audit_ui');
+
+    expect(await screen.findByText('locked-because-license')).toBeInTheDocument();
+    expect(screen.queryByText('workspace.lockedTitle')).not.toBeInTheDocument();
+    expect(seen[0]).toMatchObject({ workspaceId: 'code_audit_ui', suiteId: 'code-audit-workspace', reason: 'license', suite: null });
+  });
+
   it('redirects the workspace root to its default page', async () => {
     renderHostAt('/contracts/webui/workspaces/scene_workspace');
 
@@ -213,6 +302,37 @@ describe('WebUIContractWorkspaceHost', () => {
     expect(screen.getByText('page:investigation-list').parentElement).toHaveClass('p-6');
     expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
     expect(screen.queryByRole('navigation', { name: 'workspace.sectionNavigation' })).not.toBeInTheDocument();
+  });
+
+  it('keeps an enabled page reachable by direct link when it is omitted from navigation', async () => {
+    const data = useWebUIContractPagesMock();
+    data.workspaces[0].sections[1].pageIds = ['ops-overview'];
+
+    renderHostAt('/contracts/webui/workspaces/scene_workspace/investigation-list');
+
+    expect(await screen.findByText('page:investigation-list')).toBeInTheDocument();
+  });
+
+  it('does not restore direct access to an unlisted disabled page', async () => {
+    const data = useWebUIContractPagesMock();
+    data.workspaces[0].sections[1].pageIds = ['ops-overview'];
+    data.workspaces[0].pages.find((page: { id: string }) => page.id === 'investigation-list').enabled = false;
+
+    renderHostAt('/contracts/webui/workspaces/scene_workspace/investigation-list');
+
+    expect(await screen.findByText('workspace.pageNotFound')).toBeInTheDocument();
+    expect(screen.queryByText('page:investigation-list')).not.toBeInTheDocument();
+  });
+
+  it('keeps a locked workspace closed when an unlisted page is requested directly', async () => {
+    const data = useWebUIContractPagesMock();
+    data.workspaces[0].sections[1].pageIds = ['ops-overview'];
+    data.workspaces[0].locked = true;
+
+    renderHostAt('/contracts/webui/workspaces/scene_workspace/investigation-list');
+
+    expect(await screen.findByText('workspace.lockedTitle')).toBeInTheDocument();
+    expect(screen.queryByText('page:investigation-list')).not.toBeInTheDocument();
   });
 
   it('temporarily uses dark theme for the posture dashboard when the user preference is light', async () => {

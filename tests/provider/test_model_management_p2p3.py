@@ -487,7 +487,6 @@ class TestUsageTracking:
         from flocks.session.message import (
             AssistantMessageInfo,
             MessagePath,
-            MessageWithParts,
             TokenCache,
             TokenUsage,
             UserMessageInfo,
@@ -525,7 +524,6 @@ class TestUsageTracking:
             tokens=TokenUsage(input=11, output=7, reasoning=3, cache=TokenCache(read=5, write=2)),
             cost=1.25,
         )
-        message = MessageWithParts(info=assistant, parts=[])
 
         run_async(record_usage(RecordUsageRequest(
             provider_id="anthropic",
@@ -543,13 +541,13 @@ class TestUsageTracking:
         async def fake_list_all():
             return [session]
 
-        async def fake_list_with_parts(session_id: str, include_archived: bool = False):
+        async def fake_list_messages(session_id: str, include_archived: bool = False):
             assert session_id == session.id
             assert include_archived is False
-            return [MessageWithParts(info=user, parts=[]), message]
+            return [user, assistant]
 
         monkeypatch.setattr(usage_service.Session, "list_all", fake_list_all)
-        monkeypatch.setattr(usage_service.Message, "list_with_parts", fake_list_with_parts)
+        monkeypatch.setattr(usage_service.Message, "list", fake_list_messages)
 
         result = run_async(backfill_usage_records())
         records = run_async(get_usage_records(session_ids=[session.id]))
@@ -647,7 +645,6 @@ class TestUsageTracking:
         from flocks.session.message import (
             AssistantMessageInfo,
             MessagePath,
-            MessageWithParts,
             TokenCache,
             TokenUsage,
             UserMessageInfo,
@@ -685,18 +682,17 @@ class TestUsageTracking:
             tokens=TokenUsage(input=11, output=7, reasoning=3, cache=TokenCache(read=5, write=2)),
             cost=1.25,
         )
-        message = MessageWithParts(info=assistant, parts=[])
 
         async def fake_list_all():
             return [session]
 
-        async def fake_list_with_parts(session_id: str, include_archived: bool = False):
+        async def fake_list_messages(session_id: str, include_archived: bool = False):
             assert session_id == session.id
             assert include_archived is False
-            return [MessageWithParts(info=user, parts=[]), message]
+            return [user, assistant]
 
         monkeypatch.setattr(usage_service.Session, "list_all", fake_list_all)
-        monkeypatch.setattr(usage_service.Message, "list_with_parts", fake_list_with_parts)
+        monkeypatch.setattr(usage_service.Message, "list", fake_list_messages)
 
         first = run_async(backfill_usage_records())
         second = run_async(backfill_usage_records())

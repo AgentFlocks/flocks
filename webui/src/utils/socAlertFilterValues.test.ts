@@ -8,6 +8,8 @@ import {
 const EN_TEXT: Record<string, string> = {
   '访问': 'Access',
   '高危': 'High',
+  '深信服 SIP': 'Sangfor SIP',
+  '未知协议': 'Unknown protocol',
 };
 const english = (text: string) => EN_TEXT[text] || text;
 
@@ -17,6 +19,14 @@ describe('SOC alert filter value localization', () => {
     expect(filterOptionText('threat_phase', 'access', english)).toBe('Access');
     expect(filterOptionText('threat_type', 'SQL injection')).toBe('SQL injection');
     expect(filterOptionText('threat_type', 'SQL injection', english)).toBe('SQL injection');
+  });
+
+  it('names sources and unknown protocols without changing their stored values', () => {
+    expect(filterOptionText('_source_type', 'sangfor-sip')).toBe('深信服 SIP');
+    expect(filterOptionText('_source_type', 'sangfor-sip', english)).toBe('Sangfor SIP');
+    expect(filterOptionText('net_type', 'unknown')).toBe('未知协议');
+    expect(matchesFilterOptionSearch('_source_type', 'sangfor-sip', '深信服')).toBe(true);
+    expect(matchesFilterOptionSearch('_source_type', 'sangfor-sip', 'sangfor', english)).toBe(true);
   });
 
   it('matches raw, Chinese, and English option text regardless of locale', () => {

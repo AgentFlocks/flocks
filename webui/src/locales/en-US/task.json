@@ -1,6 +1,12 @@
 {
   "pageTitle": "Tasks",
   "pageDescription": "Manage task queues, scheduled tasks, and published API services",
+  "health": {
+    "degraded": "The task service is experiencing errors and is retrying. The list may be out of date; avoid submitting duplicates.",
+    "unavailable": "The task service is not ready. Please try again shortly.",
+    "unknown": "Task service status could not be checked. Retrying.",
+    "pendingResults": "{{count}} finished tasks are waiting for their results to be saved."
+  },
   "createTask": "Create Task",
   "tabs": {
     "queued": "Task Queue",
@@ -74,6 +80,18 @@
     "custom": "Custom..."
   },
   "queued": {
+    "filterNamePlaceholder": "Search task names",
+    "filterExecutionTime": "Execution time range",
+    "filterStartTime": "Execution start time from",
+    "filterEndTime": "Execution start time through",
+    "filterAllPriorities": "All priorities",
+    "filterSearch": "Search",
+    "filterReset": "Reset",
+    "filterTimeHint": "Filters actual start times in your local timezone, including the final minute. Tasks that have not started are excluded from time filters.",
+    "filterInvalidTime": "Enter a valid execution time",
+    "filterInvalidRange": "Start time cannot be later than end time",
+    "filterEmptyTitle": "No matching tasks",
+    "filterEmptyDescription": "Adjust the filters or select Reset",
     "filterAll": "All",
     "filterCompleted": "Completed",
     "filterFailed": "Failed",
@@ -98,6 +116,8 @@
     "workflowJsonFormat": "JSON format",
     "actionCancel": "Cancel",
     "actionRetry": "Retry",
+    "actionResume": "Resume in session",
+    "heldForVerification": "This run stopped after starting actions whose effects were not confirmed, so it is not retried automatically. Check whether the calls below took effect, then resume it in its session or retry it.",
     "actionRerun": "Re-run",
     "actionDelete": "Delete",
     "confirmDelete": "Are you sure you want to delete this task?",

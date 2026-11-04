@@ -18,6 +18,16 @@ from flocks.plugin.loader import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_loader_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Loader tests mutate both extension points and plugin roots. Restore the
+    # original objects when done; initialized registries still depend on them.
+    monkeypatch.setattr(PluginLoader, "_extension_points", {})
+    monkeypatch.setattr(PluginLoader, "_plugin_root", DEFAULT_PLUGIN_ROOT)
+    monkeypatch.setattr(PluginLoader, "_last_load_errors", [])
+    monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", False)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -92,16 +102,15 @@ class TestLoadModule:
 # ---------------------------------------------------------------------------
 
 class TestPluginLoader:
-    @pytest.fixture(autouse=True)
-    def _reset(self):
-        PluginLoader.clear_extension_points()
-        PluginLoader.clear_runtime_critical_entrypoint_failure()
-        yield
-        PluginLoader.clear_extension_points()
-        PluginLoader.clear_runtime_critical_entrypoint_failure()
-
-    def test_register_and_load_agents(self, tmp_path: Path):
+    def test_register_and_load_agents(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         """Simulates the AGENTS extension point with plain dicts."""
+        # Installed package entry points (e.g. a commercial plugin present in the
+        # developer's venv) re-run the loader during load_all and would dispatch
+        # the same file twice; this test is about directory scanning only.
+        monkeypatch.setattr(
+            "flocks.plugin.loader.importlib.metadata.entry_points",
+            lambda: type("_NoEntryPoints", (), {"select": lambda self, *, group: []})(),
+        )
         agents_dir = tmp_path / "agents"
         _write_plugin(agents_dir, "my_agent.py", """\
             AGENTS = [
@@ -122,7 +131,7 @@ class TestPluginLoader:
             item_type=dict,
             dedup_key=lambda d: d["name"],
         ))
-        PluginLoader.load_all()
+        PluginLoader.load_all(project_dir=tmp_path)  # cwd would also scan the repo's preset plugins
 
         assert len(collected) == 1
         assert collected[0]["name"] == "test-agent"
@@ -670,10 +679,6 @@ class TestPluginLoader:
 
 class TestProjectLevelPlugins:
     """Tests for project-level .flocks/plugins/ scanning added in load_all()."""
-
-    def setup_method(self):
-        PluginLoader.clear_extension_points()
-        PluginLoader._plugin_root = DEFAULT_PLUGIN_ROOT
 
     def test_load_all_scans_project_plugins(self, tmp_path: Path):
         """load_all() should pick up plugins from <project>/.flocks/plugins/ in addition

@@ -154,20 +154,29 @@ class VertexAnthropicProvider(BaseProvider):
             return credentials.token
             
         except ImportError:
-            # Fallback: try to get token from gcloud CLI
-            import subprocess
+            pass
+        except Exception as exc:
+            # No ADC on this machine (or it could not be refreshed): try the
+            # CLI before giving up, same as when google-auth is missing.
+            log.warn("vertex_anthropic.adc_failed", {"error": str(exc)})
+
+        # Fallback: try to get token from gcloud CLI
+        import subprocess
+        try:
             result = subprocess.run(
                 ["gcloud", "auth", "print-access-token"],
                 capture_output=True,
                 text=True
             )
-            if result.returncode == 0:
-                return result.stdout.strip()
-            raise ValueError(
-                "Could not get Google Cloud credentials. "
-                "Install google-auth: pip install google-auth "
-                "or authenticate with: gcloud auth application-default login"
-            )
+        except (FileNotFoundError, OSError):
+            result = None
+        if result is not None and result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        raise ValueError(
+            "Could not get Google Cloud credentials. "
+            "Install google-auth: pip install google-auth "
+            "or authenticate with: gcloud auth application-default login"
+        )
     
     def _get_api_url(self, model_id: str) -> str:
         """
@@ -407,6 +416,18 @@ class VertexAnthropicProvider(BaseProvider):
                     json=payload,
                     timeout=120.0,
                 ) as response:
+                    if getattr(response, "status_code", 200) != 200:
+                        # Error bodies are plain JSON, not SSE: without this the
+                        # loop below yields nothing and the caller sees an empty
+                        # response instead of the real failure.
+                        body = (await response.aread()).decode("utf-8", errors="replace")
+                        log.error("vertex_anthropic.stream.error", {
+                            "status": response.status_code,
+                            "body": body[:500],
+                        })
+                        raise Exception(
+                            f"Vertex Anthropic API error: {response.status_code}"
+                        )
                     async for line in response.aiter_lines():
                         if line.startswith("data: "):
                             data = line[6:]

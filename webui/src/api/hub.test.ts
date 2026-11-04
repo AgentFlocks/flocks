@@ -47,11 +47,11 @@ describe('hubAPI.installStream', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: false,
       status: 403,
-      json: async () => ({ detail: '该套件需要 Flocks Pro 授权后才能安装' }),
+      json: async () => ({ detail: '该套件需要授权后才能安装' }),
     }));
     const { hubAPI } = await import('./hub');
     await expect(hubAPI.installStream('component', 'pro-scene', vi.fn()))
-      .rejects.toThrow('该套件需要 Flocks Pro 授权后才能安装');
+      .rejects.toThrow('该套件需要授权后才能安装');
   });
 
   it('falls back to the HTTP status for a non-JSON error response', async () => {

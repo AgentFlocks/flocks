@@ -173,6 +173,10 @@ async def add_provider_tool(
         from flocks.provider.provider import Provider, ProviderConfig, ModelInfo
         from flocks.security import get_secret_manager
 
+        name = (name or "").strip()
+        if not name:
+            return ToolResult(success=False, error="Provider name is required.")
+
         pid = "custom-" + name.lower().replace(" ", "-").replace("_", "-")
 
         if ConfigWriter.get_provider_raw(pid) is not None:
@@ -209,7 +213,7 @@ async def add_provider_tool(
             output=(
                 f"已成功添加供应商 {name}（ID: {pid}）。\n"
                 f"Base URL: {base_url}\n"
-                f"API Key: {api_key[:4]}***{api_key[-4:]}\n"
+                f"API Key: {_mask_api_key(api_key)}\n"
                 f"接下来请使用 add_model 工具为该供应商添加模型。"
             ),
         )
@@ -318,6 +322,15 @@ async def add_model_tool(
             ModelInfo,
         )
 
+        if context_window <= 0 or max_output_tokens <= 0:
+            return ToolResult(
+                success=False,
+                error=(
+                    "context_window and max_output_tokens must be positive integers "
+                    f"(got context_window={context_window}, max_output_tokens={max_output_tokens})."
+                ),
+            )
+
         # Always run fuzzy matching to resolve user-facing names to internal IDs
         candidates = Provider.list_providers()
         resolved = _fuzzy_match_provider(provider_id, candidates)
@@ -419,6 +432,13 @@ async def add_model_tool(
 
 
 # ==================== helpers ====================
+
+
+def _mask_api_key(api_key: str) -> str:
+    """Echo only a hint of the key; short keys would leak entirely via prefix+suffix."""
+    if len(api_key) < 12:
+        return "***"
+    return f"{api_key[:4]}***{api_key[-4:]}"
 
 
 def _fuzzy_match_provider(query: str, candidates: List[str]) -> Optional[str]:

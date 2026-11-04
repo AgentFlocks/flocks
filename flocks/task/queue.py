@@ -1,6 +1,7 @@
 """Priority execution queue."""
 
 import asyncio
+from datetime import datetime
 from typing import Optional
 
 from flocks.utils.log import Log
@@ -19,6 +20,7 @@ class TaskQueue:
         self.max_concurrent = max_concurrent
         self._paused = False
         self._running_ids: set[str] = set()
+        self._running_started_at: dict[str, Optional[datetime]] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -40,13 +42,17 @@ class TaskQueue:
                 return None
             execution, _ = claimed
             self._running_ids.add(execution.id)
+            self._running_started_at[execution.id] = execution.started_at
             return execution
 
     def mark_started(self, execution_id: str) -> None:
         self._running_ids.add(execution_id)
 
-    def mark_finished(self, execution_id: str) -> None:
+    def mark_finished(self, execution_id: str, *, expected_started_at: Optional[datetime] = None) -> None:
+        if expected_started_at is not None and self._running_started_at.get(execution_id) not in (None, expected_started_at):
+            return
         self._running_ids.discard(execution_id)
+        self._running_started_at.pop(execution_id, None)
 
     async def pending_count(self) -> int:
         return await TaskStore.count_queued_refs()

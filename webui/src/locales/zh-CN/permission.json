@@ -28,5 +28,10 @@
     "patternHint": "使用 * 匹配所有",
     "adding": "添加中...",
     "add": "添加"
+  },
+  "replyFailed": "回复失败",
+  "pending": {
+    "title": "待处理请求（{{count}}）",
+    "session": "会话"
   }
 }

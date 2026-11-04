@@ -28,27 +28,42 @@ from flocks.storage.storage import Storage
 # ---------------------------------------------------------------------------
 
 class TestResolveGlobalWorkflowRoots:
-    def test_includes_new_canonical_path(self):
-        roots = resolve_global_workflow_roots()
-        canonical = Path.home() / ".flocks" / "plugins" / "workflows"
-        assert canonical in roots
+    """Global roots hang off the runtime root (``FLOCKS_ROOT`` → ``~/.flocks``).
 
-    def test_canonical_path_is_highest_priority(self):
+    They used to be spelled ``Path.home() / ".flocks"`` here, which only held
+    when no ``FLOCKS_ROOT`` was exported: an instance started with one must not
+    read (or write) the default user's workflows, so the resolver follows
+    ``get_flocks_root()`` and these tests pin the root explicitly.
+    """
+
+    @pytest.fixture
+    def flocks_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        root = tmp_path / "instance-root"
+        monkeypatch.setenv("FLOCKS_ROOT", str(root))
+        return root
+
+    def test_includes_new_canonical_path(self, flocks_root: Path):
+        roots = resolve_global_workflow_roots()
+        assert flocks_root / "plugins" / "workflows" in roots
+
+    def test_canonical_path_is_highest_priority(self, flocks_root: Path):
         """plugins/workflows/ must be last (highest priority, last-wins)."""
         roots = resolve_global_workflow_roots()
-        canonical = Path.home() / ".flocks" / "plugins" / "workflows"
-        assert roots[-1] == canonical
+        assert roots[-1] == flocks_root / "plugins" / "workflows"
 
-    def test_includes_legacy_compat_paths(self):
+    def test_includes_legacy_compat_paths(self, flocks_root: Path):
         roots = resolve_global_workflow_roots()
-        legacy_plugin = Path.home() / ".flocks" / "plugins" / "workflow"
-        legacy_main = Path.home() / ".flocks" / "workflow"
-        assert legacy_plugin in roots
-        assert legacy_main in roots
+        assert flocks_root / "plugins" / "workflow" in roots
+        assert flocks_root / "workflow" in roots
 
-    def test_returns_three_paths(self):
+    def test_returns_three_paths(self, flocks_root: Path):
         roots = resolve_global_workflow_roots()
         assert len(roots) == 3
+
+    def test_defaults_to_home_dot_flocks_without_flocks_root(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("FLOCKS_ROOT", raising=False)
+        roots = resolve_global_workflow_roots()
+        assert roots[-1] == Path.home() / ".flocks" / "plugins" / "workflows"
 
 
 class TestResolveProjectWorkflowRoots:

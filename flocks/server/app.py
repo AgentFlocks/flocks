@@ -7,6 +7,7 @@ Main HTTP API server for AI-Native SecOps Platform
 import asyncio
 import inspect
 import os
+import threading
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Callable, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -33,23 +35,16 @@ from flocks.hooks.execution import (
     execution_lifecycle_scope,
 )
 from flocks.server.auth import apply_auth_for_request, clear_auth_context
+from flocks.server.route_extensions import polling_paths
 from flocks.server.static_webui import maybe_serve_static_webui
 
-# Load .env file at startup
+# The .env flocks loaded on import (flocks/startup_env.py).
 try:
-    from dotenv import load_dotenv
-    # Try to find .env in project root
-    current_dir = Path(__file__).parent.parent.parent  # Go up to project root
-    env_file = current_dir / ".env"
-    if env_file.exists():
-        load_dotenv(env_file)
+    from flocks import startup_env
+
+    env_file = startup_env.load()
+    if env_file is not None:
         print(f"[OK] Loaded environment from {env_file}")
-    else:
-        # Try current working directory
-        load_dotenv()
-        print("[OK] Loaded environment from current directory")
-except ImportError:
-    print("[WARN] python-dotenv not installed, skipping .env loading")
 except Exception as e:
     print(f"[WARN] Failed to load .env: {e}")
 
@@ -111,6 +106,19 @@ def _schedule_startup_phase(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """The server's lifecycle; this process serves (``flocks.extensions.serving``) for exactly its span."""
+    from flocks.extensions import mark_serving
+
+    mark_serving(True)
+    try:
+        async with _serving_lifespan(app):
+            yield
+    finally:
+        mark_serving(False)
+
+
+@asynccontextmanager
+async def _serving_lifespan(app: FastAPI):
     """Handle application lifecycle"""
     from flocks.notifications.token_policy import service_boot_id
 
@@ -130,6 +138,14 @@ async def lifespan(app: FastAPI):
 
     # Startup
     log.info("server.startup", {"version": "0.2.0"})
+
+    # Extensions before anything else starts: discover and register the installed
+    # plugins (their entry points shake hands with what they depend on), check the
+    # capabilities the deployment requires, mount the routes they contributed.  A
+    # missing or failed requirement stops the start here, before any business
+    # service runs.
+    await _run_startup_phase(log, "extensions.prepare", lambda: _prepare_during_startup(app))
+
     try:
         from flocks.updater.updater import cleanup_replaced_files
 
@@ -194,6 +210,21 @@ async def lifespan(app: FastAPI):
     
     # Initialize storage
     await _run_startup_phase(log, "storage.init", Storage.init)
+    # Let flocks.session.ownership abort the sessions this process runs.
+    from flocks.server.routes.session import install_remote_abort_handler
+
+    install_remote_abort_handler()
+
+    # Content the deployment manages (flocks.content.managed): loaded before
+    # anything reads agents, skills or workflows -- a start that cannot list
+    # it fails rather than serve local copies in its place -- then kept current.
+    from flocks.content.managed import ManagedContent, run_refresher
+
+    if ManagedContent.active():
+        await _run_startup_phase(log, "content.managed.load", ManagedContent.ensure_loaded)
+        app.state.startup_background_tasks.append(
+            asyncio.create_task(run_refresher(), name="content.managed.refresher")
+        )
     from flocks.notifications.token_policy import TokenPolicyService
 
     try:
@@ -518,8 +549,9 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         log.warning("knowledgebase.integration.start_failed", {"error_type": type(exc).__name__})
 
-    # Extension services (e.g. Pro's scheduled audits) start on this loop once
-    # the server is ready, without holding up requests.
+    # Extension services (e.g. scheduled audits, or replaying a spool of
+    # results an earlier process left unreported) start on this loop once the
+    # server is ready, without holding up requests.
     from flocks.extensions import run_startup_hooks
 
     _schedule_startup_phase(app, log, "extensions.startup_hooks", run_startup_hooks)
@@ -546,7 +578,7 @@ async def lifespan(app: FastAPI):
     if background_tasks:
         await asyncio.gather(*background_tasks, return_exceptions=True)
 
-    # Extension services (e.g. Pro webhook consumers) stop while sessions and
+    # Extension services (e.g. webhook consumers) stop while sessions and
     # storage are still available to them.
     try:
         from flocks.extensions import run_shutdown_hooks
@@ -768,9 +800,24 @@ _SECURITY_HEADERS = {
 }
 
 
+def _security_headers_for_scope(scope: Scope) -> dict[str, str]:
+    """Extensions may request same-origin microphone permission for their UI.
+
+    This browser policy does not activate a feature or grant recording consent;
+    the extension must still authorize its API and the browser prompts the user.
+    """
+    state = getattr(scope.get("app"), "state", None)
+    if getattr(state, "browser_microphone_allowed", False) is True:
+        return {
+            **_SECURITY_HEADERS,
+            "Permissions-Policy": "camera=(), microphone=(self), geolocation=()",
+        }
+    return _SECURITY_HEADERS
+
+
 def _is_noisy_request_path(path: str) -> bool:
     """Return True for high-frequency polling endpoints that are noisy on success."""
-    if path in _REQUEST_LOG_SKIP_EXACT:
+    if path in _REQUEST_LOG_SKIP_EXACT or path in polling_paths():
         return True
     if (
         path.startswith(("/api/session/", "/session/"))
@@ -893,6 +940,52 @@ class _DeferredCORSMiddleware:
         await self._inner(scope, receive, send)
 
 
+class _ExtensionErrorResponseMiddleware:
+    """Answer an error an extension registered a response for, before the catch-all.
+
+    The catch-all (``general_exception_handler``) runs in the outermost error
+    middleware, which re-raises after answering so the server logs a crash; an
+    extension's deliberate refusal (``flocks.extensions.register_error_response``)
+    is a response, not a crash. Innermost, so the other middlewares see it as
+    an ordinary response. Once a response has started it can no longer be
+    replaced, and the error goes on as before.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def tracking_send(message: Message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracking_send)
+        except Exception as exc:
+            if started:
+                raise
+            from flocks.extensions import error_response
+
+            try:
+                answered = await error_response(Request(scope, receive=receive), exc)
+            except Exception as handler_exc:  # the catch-all still answers
+                log.warn("server.error_response_failed", {"path": scope.get("path"), "error": str(handler_exc)})
+                answered = None
+            if answered is None:
+                raise
+            await answered(scope, receive, send)
+
+
+app.add_middleware(_ExtensionErrorResponseMiddleware)
+
+
 class _SecurityHeadersMiddleware:
     """Attach baseline browser security headers without spawning request tasks."""
 
@@ -907,7 +1000,7 @@ class _SecurityHeadersMiddleware:
         async def send_with_security_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
-                for name, value in _SECURITY_HEADERS.items():
+                for name, value in _security_headers_for_scope(scope).items():
                     headers.setdefault(name, value)
             await send(message)
 
@@ -1103,16 +1196,45 @@ class _AuthGuardMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
+    async def _reject(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        response: JSONResponse,
+        *,
+        started_at: float,
+    ) -> None:
+        # This middleware sits outside _RequestLoggingMiddleware and
+        # _SecurityHeadersMiddleware, so a rejection short-circuits both: it
+        # must carry the baseline security headers and be logged itself.
+        for name, value in _security_headers_for_scope(scope).items():
+            if name not in response.headers:
+                response.headers[name] = value
+        path = scope.get("path", "")
+        if _should_log_request(path, response.status_code):
+            log.info(
+                "request.complete",
+                {
+                    "method": scope.get("method", ""),
+                    "path": path,
+                    "status": response.status_code,
+                    "duration": int((time.monotonic() - started_at) * 1000),
+                },
+            )
+        await response(scope, receive, send)
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
+        started_at = time.monotonic()
         request = _HookRequest(scope, receive)
         # HTTP ingress identity is created by the authentication lifecycle.
         # Keep its generic scope and opaque context alive through the endpoint:
         # prompt execution is often spawned from the endpoint in a child task,
-        # where the Pro gate must be able to restore that verified identity.
+        # where a policy gate must be able to restore that verified identity.
         with execution_lifecycle_scope():
             try:
                 await _run_http_middleware_hooks(request, {"stage": "before_auth"})
@@ -1122,7 +1244,7 @@ class _AuthGuardMiddleware:
                     status_code=exc.status_code,
                     content={"error": "AuthError", "message": exc.detail},
                 )
-                await response(scope, receive, send)
+                await self._reject(scope, receive, send, response, started_at=started_at)
                 return
             except Exception as exc:
                 log.error(
@@ -1133,7 +1255,7 @@ class _AuthGuardMiddleware:
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     content={"error": "InternalError", "message": "鉴权处理异常，请稍后重试"},
                 )
-                await response(scope, receive, send)
+                await self._reject(scope, receive, send, response, started_at=started_at)
                 return
 
             try:
@@ -1161,6 +1283,8 @@ class _StaticWebUIMiddleware:
         request = Request(scope, receive=receive)
         static_response = await maybe_serve_static_webui(request)
         if static_response is not None:
+            for name, value in _security_headers_for_scope(scope).items():
+                static_response.headers.setdefault(name, value)
             await static_response(scope, receive, send)
             return
         await self.app(scope, receive, send)
@@ -1173,9 +1297,14 @@ app.add_middleware(_StaticWebUIMiddleware)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Handle validation errors"""
+    # ``exc.errors()`` echoes the offending ``input`` back; for a malformed
+    # body that is raw ``bytes``, which ``JSONResponse`` cannot serialise and
+    # would turn this 422 into a 500.  Encode it first (an exception in an
+    # error's ``ctx`` by its message).
+    details = jsonable_encoder(exc.errors(), custom_encoder={Exception: str})
     log.warning("validation.error", {
         "path": request.url.path,
-        "errors": exc.errors(),
+        "errors": details,
     })
     
     return JSONResponse(
@@ -1183,7 +1312,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={
             "error": "ValidationError",
             "message": "Request validation failed",
-            "details": exc.errors(),
+            "details": details,
         }
     )
 
@@ -1203,13 +1332,33 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
         content={
             "error": "HTTPException",
             "message": exc.detail,
-        }
+        },
+        # Keep headers the route attached (e.g. Retry-After on a 429).
+        headers=getattr(exc, "headers", None) or None,
     )
+
+
+from flocks.workflow.fs_store import ManagedWorkflowReadOnly  # noqa: E402
+
+
+@app.exception_handler(ManagedWorkflowReadOnly)
+async def managed_workflow_read_only_handler(request: Request, exc: ManagedWorkflowReadOnly):
+    """A write aimed at a workflow the deployment manages is refused, not a server error."""
+    return JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content={"detail": str(exc)})
 
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     """Handle all other exceptions"""
+    from flocks.extensions import error_response
+
+    try:
+        answered = await error_response(request, exc)
+    except Exception as handler_exc:  # an extension's handler must not make the answer worse than a 500
+        log.warn("server.error_response_failed", {"path": request.url.path, "error": str(handler_exc)})
+        answered = None
+    if answered is not None:
+        return answered
     import traceback
     tb = traceback.format_exc()
     log.error("server.error", {
@@ -1234,9 +1383,10 @@ app.add_middleware(_DeferredCORSMiddleware)
 
 
 # Import and include routers
-from flocks.server.routes.health import router as health_router
+from flocks.server.routes.health import router as health_router, public_router as public_health_router
 from flocks.server.routes.session import router as session_router
 from flocks.server.routes.provider import router as provider_router
+from flocks.server.routes.model_discovery import router as model_discovery_router
 from flocks.server.routes.config import router as config_router
 from flocks.server.routes.project import router as project_router
 from flocks.server.routes.file import router as file_router
@@ -1296,14 +1446,16 @@ from flocks.server.routes.auth import router as auth_router
 from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
 from flocks.server.routes.device import router as device_router
-from flocks.server.routes.console_upgrade import router as console_upgrade_router
-from flocks.server.routes.flockspro_license import router as flockspro_license_router
+from flocks.server.routes.license import router as license_router
+from flocks.server.routes.enterprise_upgrade import router as enterprise_upgrade_router
 from flocks.server.routes.webui import router as webui_pages_router
 from flocks.server.routes.contracts import router as contracts_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
+app.include_router(public_health_router, tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
 app.include_router(provider_router, prefix="/api/provider", tags=["Provider"])
+app.include_router(model_discovery_router, prefix="/api/provider", tags=["Provider"])
 app.include_router(model_router, prefix="/api/model", tags=["Model"])
 app.include_router(config_router, prefix="/api/config", tags=["Config"])
 app.include_router(project_router, prefix="/api/project", tags=["Project"])
@@ -1353,6 +1505,8 @@ app.include_router(workspace_router, prefix="/api/workspace", tags=["Workspace"]
 app.include_router(create_knowledgebase_router(), prefix="/api")
 # Self-upgrade routes
 app.include_router(update_router, prefix="/api/update", tags=["Update"])
+app.include_router(license_router, prefix="/api/license", tags=["License"])
+app.include_router(enterprise_upgrade_router, prefix="/api/enterprise-upgrade", tags=["Enterprise upgrade"])
 # Log viewing routes
 app.include_router(logs_router, prefix="/api/logs", tags=["Logs"])
 app.include_router(stats_router, prefix="/api/stats", tags=["Stats"])
@@ -1362,7 +1516,6 @@ app.include_router(admin_users_router, prefix="/api/admin", tags=["Admin"])
 app.include_router(notifications_router, prefix="/api/notifications", tags=["Notifications"])
 # Device integration (named instances, SQL-backed)
 app.include_router(device_router, prefix="/api/devices", tags=["Device"])
-app.include_router(console_upgrade_router, prefix="/api/console", tags=["ConsoleUpgrade"])
 app.include_router(webui_pages_router, prefix="/api", tags=["WebUI"])
 app.include_router(contracts_router, prefix="/api", tags=["AccessContracts"])
 
@@ -1450,7 +1603,53 @@ def _load_installed_package_plugins() -> None:
         else:
             log.info("plugins.installed.loaded")
     except Exception as e:
-        log.warning("plugins.installed.load_failed", {"error": str(e)})
+        from flocks.plugin import PluginLoader
+        from flocks.plugin.loader import CriticalPluginEntrypointFailure
+
+        if not PluginLoader.interruption_is_critical(e):
+            # No installed package opted into fail-closed startup and nothing
+            # reported a critical failure, so there are no required guards to
+            # wait for. An unreadable plugin directory keeps its previous
+            # meaning: skip it and keep serving. The loader has already kept
+            # the failure signal of the last completed pass.
+            log.warning("plugins.installed.load_failed", {"error": str(e)})
+        else:
+            app.state.critical_plugin_entrypoint_failure = True
+            app.state.critical_plugin_entrypoint_failures = ("plugin_loader",)
+            log.error("plugins.installed.load_failed", {"error": str(e)})
+            raise CriticalPluginEntrypointFailure(
+                "plugin loading did not complete; refusing to serve without verified extensions"
+            ) from e
+
+    _enforce_startup_requirements()
+
+
+def _enforce_startup_requirements() -> None:
+    """Stop startup when a declared extension is missing.
+
+    A deployment that declared an extension mandatory depends on it for
+    behaviour the rest of the process assumes is in place, so serving without
+    it would apply the wrong rules rather than none.  There is no degraded
+    mode: the process either has what it was told to have, or it does not
+    start.  A build with nothing declared is unaffected.
+    """
+
+    from flocks.plugin.readiness import (
+        check_startup_readiness,
+        enforce_startup_readiness,
+    )
+
+    report = check_startup_readiness(
+        failed_entrypoints=tuple(
+            getattr(app.state, "critical_plugin_entrypoint_failures", ()) or ()
+        ),
+    )
+    app.state.startup_readiness = report
+    enforce_startup_readiness(report)
+
+    from flocks.server.static_webui import enforce_pinned_webui_dist
+
+    enforce_pinned_webui_dist()
 
 
 def _route_registered(path: str, method: str) -> bool:
@@ -1464,42 +1663,63 @@ def _route_registered(path: str, method: str) -> bool:
     return False
 
 
-def _install_flockspro_license_fallback() -> None:
-    status_registered = _route_registered("/api/flockspro/license/status", "GET")
-    refresh_registered = _route_registered("/api/flockspro/license/refresh", "POST")
-    if status_registered and refresh_registered:
-        log.info("flockspro.license.fallback.skipped", {
-            "status_registered": status_registered,
-            "refresh_registered": refresh_registered,
-        })
-        return
-    app.include_router(flockspro_license_router, prefix="/api/flockspro/license", tags=["FlocksProLicense"])
-    log.info("flockspro.license.fallback.installed")
+def _install_extension_routes() -> None:
+    """Mount routes contributed by extensions.
+
+    Extensions register their routers; the application does not import any of
+    them by name. Anything registered while plugins were loading is installed
+    here, and anything registered later is installed as it arrives.
+    """
+    from flocks.server.route_extensions import bind_route_app, installed_route_providers
+
+    bind_route_app(app)
+    installed = installed_route_providers()
+    if installed:
+        log.info("server.routes.extensions_installed", {"providers": installed})
 
 
-def _install_flockspro_policy_fallback() -> None:
-    overview_registered = _route_registered("/api/flockspro/policy/security/overview", "GET")
-    if overview_registered:
-        log.info(
-            "flockspro.policy.fallback.skipped",
-            {"overview_registered": overview_registered},
-        )
-        return
+_prepare_lock = threading.Lock()
+_prepared = False
+
+
+def prepare_app() -> None:
+    """Explicit startup of the extension layer, in this order: discover and register
+    the installed plugins (their entry points do any version handshake), verify the
+    capabilities the deployment requires, mount the routes extensions contributed.
+
+    Importing this module does none of it; the lifespan calls this first, before any
+    business service starts.  Idempotent: later calls return at once.  A failure
+    raises and leaves the app unprepared, so the server does not start.
+    """
+    global _prepared
+    with _prepare_lock:
+        if _prepared:
+            return
+        _load_installed_package_plugins()
+        _install_extension_routes()
+        _prepared = True
+
+
+def app_prepared() -> bool:
+    """Whether :func:`prepare_app` has completed in this process."""
+    return _prepared
+
+
+async def _prepare_during_startup(application: FastAPI) -> None:
+    """:func:`prepare_app` from the lifespan, off the loop (entry points may block).
+
+    The server runs this lifespan through a middleware stack it has already
+    built, yet an extension may still add middleware of its own while it
+    registers.  Let it, and build the stack again for the requests that follow:
+    none has been served yet, so nothing is lost with the stack replaced.
+    """
+    built = getattr(application, "middleware_stack", None) is not None
+    application.middleware_stack = None
     try:
-        from flockspro.web.policy_routes import router as flockspro_policy_router
-    except Exception as exc:
-        log.warning(
-            "flockspro.policy.fallback.import_failed",
-            {"error": str(exc)},
-        )
-        return
-    app.include_router(flockspro_policy_router)
-    log.info("flockspro.policy.fallback.installed")
-
-
-_load_installed_package_plugins()
-_install_flockspro_license_fallback()
-_install_flockspro_policy_fallback()
+        await asyncio.to_thread(prepare_app)
+    finally:
+        if built:
+            application.middleware_stack = application.build_middleware_stack()
 
 
 @app.get("/", tags=["Root"])

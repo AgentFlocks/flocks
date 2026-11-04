@@ -70,6 +70,13 @@ RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 CHAIN_EXHAUSTION_COOLDOWN_SECONDS = 5.0
 
 
+def _part_field(part: Any, name: str, default: Any = None) -> Any:
+    """消息 part 既可能是 pydantic 对象也可能是 dict（旧存储），统一取字段。"""
+    if isinstance(part, dict):
+        return part.get(name, default)
+    return getattr(part, name, default)
+
+
 @dataclass(frozen=True)
 class RuntimeModel:
     """Concrete provider/model candidate used by Auto failover."""
@@ -507,6 +514,111 @@ class SessionLoop:
                 cls.abort(sid, only_category=only_category)
         return aborted
 
+    # ------------------------------------------------------------------
+    # 文件快照：用户轮次起点 snapshot part → 每步 patch part → 轮次结束 diff
+    # ------------------------------------------------------------------
+    @classmethod
+    def _snapshot_worktree(cls, ctx: LoopContext) -> Optional[str]:
+        import os
+
+        worktree = getattr(ctx.session, "directory", None)
+        if not worktree or not os.path.isdir(worktree):
+            return None
+        return worktree
+
+    @classmethod
+    async def _track_turn_snapshot(cls, ctx: LoopContext, last_user: MessageInfo) -> Optional[str]:
+        """步开始前记录 git tree 快照；用户消息还没有 snapshot part 时补上（轮次起点）。"""
+        worktree = cls._snapshot_worktree(ctx)
+        if not worktree:
+            return None
+        try:
+            from flocks.snapshot.snapshot import Snapshot
+
+            snapshot = await Snapshot.track(ctx.session.project_id, worktree)
+        except Exception as exc:
+            log.debug("loop.snapshot.track_failed", {"session_id": ctx.session.id, "error": str(exc)})
+            return None
+        if not snapshot:
+            return None
+        try:
+            parts = await Message.parts(last_user.id, ctx.session.id)
+            if not any(_part_field(part, "type") == "snapshot" for part in parts):
+                from flocks.session.message import SnapshotPart
+
+                await Message.add_part(
+                    ctx.session.id,
+                    last_user.id,
+                    SnapshotPart(sessionID=ctx.session.id, messageID=last_user.id, snapshot=snapshot),
+                )
+        except Exception as exc:
+            log.warn("loop.snapshot.part_failed", {"session_id": ctx.session.id, "error": str(exc)})
+        return snapshot
+
+    @classmethod
+    async def _record_step_patch(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        last_user: MessageInfo,
+        snapshot: Optional[str],
+    ) -> None:
+        """步结束后把本步改动过的文件记成 assistant 消息的 patch part（hash=改动前快照）。"""
+        worktree = cls._snapshot_worktree(ctx)
+        if not snapshot or not worktree:
+            return
+        try:
+            from flocks.snapshot.snapshot import Snapshot
+
+            patch = await Snapshot.patch(ctx.session.project_id, worktree, snapshot)
+        except Exception as exc:
+            log.debug("loop.snapshot.patch_failed", {"session_id": ctx.session.id, "error": str(exc)})
+            return
+        if not patch.files:
+            return
+        try:
+            messages = await Message.list(ctx.session.id)
+            assistant = next(
+                (
+                    msg
+                    for msg in reversed(messages)
+                    if msg.role == MessageRole.ASSISTANT and getattr(msg, "parentID", None) == last_user.id
+                ),
+                None,
+            )
+            if assistant is None:
+                return
+            from flocks.session.message import PatchPart
+
+            part = PatchPart(sessionID=ctx.session.id, messageID=assistant.id, hash=snapshot, files=patch.files)
+            await Message.add_part(ctx.session.id, assistant.id, part)
+            await cls._publish_runtime_event(callbacks, "message.part.updated", {"part": part.model_dump(by_alias=True)})
+            log.info("loop.snapshot.patch_recorded", {
+                "session_id": ctx.session.id,
+                "message_id": assistant.id,
+                "files": len(patch.files),
+            })
+        except Exception as exc:
+            log.warn("loop.snapshot.patch_part_failed", {"session_id": ctx.session.id, "error": str(exc)})
+
+    @classmethod
+    async def _record_turn_diffs(cls, ctx: LoopContext, last_user: MessageInfo) -> None:
+        """轮次结束：按快照算出会话/消息级文件 diff 存起来（GET /session/{id}/diff 读的就是它）。"""
+        worktree = cls._snapshot_worktree(ctx)
+        if not worktree:
+            return
+        try:
+            from flocks.session.lifecycle.summary import SessionSummary
+
+            await SessionSummary.record_turn_diffs(
+                session_id=ctx.session.id,
+                user_message_id=last_user.id,
+                project_id=ctx.session.project_id,
+                worktree=worktree,
+            )
+        except Exception as exc:
+            log.warn("loop.snapshot.diff_failed", {"session_id": ctx.session.id, "error": str(exc)})
+
     @classmethod
     def end_cancelled_execution(cls, session_id: str) -> None:
         """Stop what a cancelled, not aborted, execution left running.
@@ -746,6 +858,69 @@ class SessionLoop:
         working_directory: Optional[str] = None,
         auto_failover: bool = False,
     ) -> LoopResult:
+        """One live runner per session: the run holds the session's execution lease (flocks.session.ownership)."""
+        from flocks.session.ownership import SessionExecutionLease, SessionOwnershipLost, current_lease
+
+        kwargs = dict(provider_id=provider_id, model_id=model_id, agent_name=agent_name,
+                      callbacks=callbacks, working_directory=working_directory, auto_failover=auto_failover)
+        from flocks.session import turn_receipt
+        from flocks.content.managed import task_scope
+
+        async def run_with_lease(lease: SessionExecutionLease) -> LoopResult:
+            lease.require_owned()
+            with task_scope(f"session:{session_id}#{lease.generation}"):
+                result = await cls._run_owned(session_id, **kwargs)
+            lease.require_owned()
+            if result.action == "queued":
+                turn_receipt.note_handed_off()
+            return result
+
+        # Callers that must atomically prepare input before execution may
+        # already own this session. Borrow only the current context's lease;
+        # its owner retains renewal/release responsibility. _run_owned still
+        # enforces lifecycle and the in-process single-runner boundary.
+        borrowed_lease = current_lease(session_id)
+        if borrowed_lease is not None:
+            try:
+                return await run_with_lease(borrowed_lease)
+            except SessionOwnershipLost as exc:
+                return LoopResult(action="error", error=str(exc))
+
+        if cls.is_running(session_id):
+            result = await cls._run_owned(session_id, **kwargs)
+            if result.action == "queued":
+                turn_receipt.note_handed_off()  # the run going on here answers it
+            return result
+        lease = await SessionExecutionLease.acquire(session_id)
+        if lease is None:
+            # Another worker's run takes the new message on its next step.
+            turn_receipt.note_handed_off()
+            return LoopResult(action="queued", error="Loop already running")
+        try:
+            async with lease:
+                # One run is one task: managed definitions it reads keep the
+                # version they had when it first read them.
+                return await run_with_lease(lease)
+        except SessionOwnershipLost as exc:
+            return LoopResult(action="error", error=str(exc))
+        finally:
+            # Agent input left for the next execution starts it only once the
+            # lease row is released; an earlier wake loses the acquire race.
+            from flocks.session.agent_inbox import AgentInbox
+            if session_id in AgentInbox._inboxes:
+                AgentInbox.wake(session_id, (callbacks or LoopCallbacks()).event_publish_callback)
+
+    @classmethod
+    async def _run_owned(
+        cls,
+        session_id: str,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        callbacks: Optional[LoopCallbacks] = None,
+        working_directory: Optional[str] = None,
+        auto_failover: bool = False,
+    ) -> LoopResult:
         """
         Run session loop
         
@@ -963,7 +1138,7 @@ class SessionLoop:
             while True:
                 result = await cls._run_loop(ctx, callbacks or LoopCallbacks())
                 # A cancelled execution ends here (its inbox is closed); input
-                # sent since then is left to the next one, woken in finally.
+                # sent since then is left to the next one, woken by run().
                 if (ctx.should_abort() or result.error or (ctx.inbox is not None and ctx.inbox.stopped)
                         or not AgentInbox.get(session_id).messages):
                     await cls._settle_todos(ctx, result)
@@ -1008,22 +1183,28 @@ class SessionLoop:
             
                 # Set status to idle
                 SessionStatus.set(session_id, SessionStatusIdle())
-                await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "idle")
-            
-                # Touch session (update timestamp)
-                await Session.touch(session.project_id, session_id)
-
-                # Publish idle event
+                from flocks.session.ownership import require_execution_allowed, SessionOwnershipLost
+                from flocks.task.lease import ExecutionOwnershipError
                 try:
-                    from flocks.bus.bus import Bus
-                    from flocks.bus.events import SessionIdle
-                    await Bus.publish(SessionIdle, {"sessionID": session_id})
-                except Exception as exc:
-                    log.warn("loop.idle.event_error", {"error": str(exc)})
+                    require_execution_allowed(session_id)
+                    can_publish_idle = True
+                except (SessionOwnershipLost, ExecutionOwnershipError):
+                    can_publish_idle = False
+                if can_publish_idle:
+                    await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "idle")
+            
+                    # Touch session (update timestamp)
+                    await Session.touch(session.project_id, session_id)
+
+                    # Publish idle event
+                    try:
+                        from flocks.bus.bus import Bus
+                        from flocks.bus.events import SessionIdle
+                        await Bus.publish(SessionIdle, {"sessionID": session_id})
+                    except Exception as exc:
+                        log.warn("loop.idle.event_error", {"error": str(exc)})
             finally:
                 cls._active_loops.pop(session_id, None)
-                from flocks.session.agent_inbox import AgentInbox
-                AgentInbox.wake(session_id, (callbacks or LoopCallbacks()).event_publish_callback)
                 # Agent-triggered loops have no HTTP prompt chain to drain the
                 # user's existing queue when they finish.
                 from flocks.session.interaction_queue import InteractionQueue
@@ -1630,6 +1811,36 @@ class SessionLoop:
                 event_payload,
             )
 
+    @staticmethod
+    async def _dedicated_agent_violation(
+        session_id: str,
+        messages: List[MessageInfo],
+        step_agent: Optional[str],
+    ) -> Optional[str]:
+        """Re-check a dedicated-agent claim against the step about to run.
+
+        Claims and new user messages share a database lock, but a foreign user
+        message can still be in storage from before the claim checks existed,
+        from an import, or from an older process. It must neither pick the
+        agent for this step nor reach the dedicated agent's context.
+        """
+        current = await Session.get_by_id_unfiltered(session_id)
+        metadata = getattr(current, "metadata", None)
+        policy = (
+            metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY)
+            if isinstance(metadata, dict)
+            else None
+        )
+        if not (isinstance(policy, dict) and policy.get("version") == 1):
+            return None
+        claimed = policy.get("agent")
+        if step_agent != claimed or any(
+            msg.role == MessageRole.USER and getattr(msg, "agent", None) != claimed
+            for msg in messages
+        ):
+            return f"Session {session_id} is dedicated to agent {claimed!r}"
+        return None
+
     @classmethod
     async def _run_loop(
         cls,
@@ -1654,6 +1865,8 @@ class SessionLoop:
         retry_preparation = False
 
         while not ctx.should_abort():
+            from flocks.session.ownership import require_execution_allowed
+            require_execution_allowed(ctx.session.id)
             from flocks.session.agent_inbox import AgentInbox
             await AgentInbox.drain(ctx.session.id, callbacks)
             if ctx.should_abort():
@@ -1752,6 +1965,23 @@ class SessionLoop:
                     step=ctx.step,
                     stop_reason="no_user_message",
                 )
+                break
+
+            policy_violation = await cls._dedicated_agent_violation(
+                ctx.session.id,
+                messages,
+                getattr(last_user, "agent", None) or ctx.agent_name,
+            )
+            if policy_violation:
+                log.warning("loop.agent_session_policy_rejected", {
+                    "session_id": ctx.session.id,
+                    "step": ctx.step,
+                    "error": policy_violation,
+                })
+                loop_error = policy_violation
+                loop_error_code = "agent_session_policy"
+                if callbacks.on_error:
+                    await callbacks.on_error(policy_violation)
                 break
 
             last_assistant_parts = (
@@ -2439,6 +2669,10 @@ class SessionLoop:
                 # taken before the model was known, without the system prompt.
                 cls._schedule_context_usage_push(ctx, callbacks)
 
+            # 步开始前记录工作区快照（首步时把 snapshot part 挂到用户消息上），
+            # 步结束后据此生成 patch part，revert / diff 都靠它
+            step_snapshot = await cls._track_turn_snapshot(ctx, last_user)
+
             # Process single step — wrap in a Task so abort() can cancel it immediately
             # rather than waiting for the current tool call to finish.
             step_task = asyncio.create_task(
@@ -2475,6 +2709,8 @@ class SessionLoop:
             # Callback: step end
             if callbacks.on_step_end:
                 await callbacks.on_step_end(ctx.step)
+
+            await cls._record_step_patch(ctx, callbacks, last_user, step_snapshot)
             
             # Handle result
             if step_result.action == "stop":
@@ -2498,6 +2734,8 @@ class SessionLoop:
                     ),
                     None,
                 )
+
+                await cls._record_turn_diffs(ctx, last_user)
 
                 if loop_error_code:
                     break

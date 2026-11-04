@@ -19,7 +19,9 @@ from flocks.contracts.webui.models import (
     WebUIWorkspaceListItem,
     WebUIWorkspaceManifest,
 )
+from flocks.utils.file_modes import ensure_owner_writable
 from flocks.utils.log import Log
+from flocks.config.config import get_user_plugins_root
 
 log = Log.create(service="webui-pages-store")
 
@@ -85,7 +87,7 @@ def get_webui_pages_root() -> Path:
     override = os.environ.get("FLOCKS_CONTRACTS_WEBUI_ROOT")
     if override:
         return Path(override).expanduser().resolve()
-    return (Path.home() / ".flocks" / "plugins" / "contracts" / "webui").resolve()
+    return (get_user_plugins_root() / "contracts" / "webui").resolve()
 
 
 def get_legacy_webui_pages_root() -> Path:
@@ -93,7 +95,7 @@ def get_legacy_webui_pages_root() -> Path:
     override = os.environ.get("FLOCKS_USER_DEFINED_PAGES_ROOT")
     if override:
         return Path(override).expanduser().resolve()
-    return (Path.home() / ".flocks" / "plugins" / "user_defined_pages").resolve()
+    return (get_user_plugins_root() / "user_defined_pages").resolve()
 
 
 def get_project_webui_pages_root(project_dir: Optional[Path] = None) -> Path:
@@ -197,12 +199,22 @@ class WebUIPagesStore:
                 pass
         if source is not None and source != target:
             shutil.copytree(source, target)
+            # The copy keeps a read-only source's permission bits; it is the
+            # user's own page now and gets written to right after.
+            ensure_owner_writable(target)
             self._normalize_migrated_page(target, page_id)
             log.info("webui_pages.materialized", {"pageId": page_id, "source": str(source), "target": str(target)})
         return target
 
     def page_exists(self, page_id: str) -> bool:
         return self._find_page_dir(self.validate_page_id(page_id)) is not None
+
+    def workspace_id_for_page(self, page_id: str) -> Optional[str]:
+        """The workspace an existing page belongs to; None for a standalone page."""
+        page_dir = self._find_page_dir(self.validate_page_id(page_id))
+        if page_dir is None:
+            return None
+        return self.workspace_id_for_path(page_dir)
 
     def _assert_writable_relative(self, relative_path: str) -> Path:
         if not relative_path or Path(relative_path).is_absolute():
@@ -610,6 +622,7 @@ class WebUIPagesStore:
                 continue
             try:
                 shutil.copytree(child, target)
+                ensure_owner_writable(target)
                 self._normalize_migrated_page(target, page_id)
                 log.info("webui_pages.legacy_migrated", {"pageId": page_id, "source": str(child), "target": str(target)})
             except Exception as exc:

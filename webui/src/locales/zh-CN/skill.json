@@ -141,6 +141,7 @@
     "operationFailed": "操作失败",
     "deleteConfirm": "确定要删除 Skill \"{{name}}\" 吗？",
     "deleteFailed": "删除失败",
-    "saveFailed": "保存失败"
+    "saveFailed": "保存失败",
+    "nameFormatHint": "名称需为小写字母/数字，用单个连字符分隔（如 my-skill）"
   }
 }

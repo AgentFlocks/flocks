@@ -7,7 +7,9 @@ from __future__ import annotations
 import threading
 import time
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
@@ -192,6 +194,35 @@ async def _emit_auth_audit(event_type: str, payload: dict) -> None:
     except Exception:
         # Audit failures must not block auth flow.
         pass
+
+
+_CONSOLE_UPSTREAM_ERROR = "console 登录服务调用失败，请稍后重试"
+
+
+_CONSOLE_LOGIN_CALLBACK_PATH = "/flockspro-upgrade/callback"
+
+
+def _console_return_url(request: Request, value: str) -> str:
+    """The post-login target handed to the Console: a page of this site, as an absolute URL.
+
+    The Console sends the browser back to an absolute URL, so a path is put on the origin this
+    request came in on; a URL is taken only when it names that same host. Nothing that names
+    another host goes through (open-redirect guard)."""
+    host = request.url.netloc
+    if "://" in value:
+        try:
+            target = urlsplit(value)
+        except ValueError:  # e.g. an unclosed [ of an IPv6 host
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="return_to 仅允许站内路径") from None
+        if target.scheme not in ("http", "https") or target.netloc.lower() != host.lower() or not target.path:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="return_to 仅允许站内路径")
+        return urlunsplit((target.scheme, target.netloc, target.path, target.query, ""))
+    if not value.startswith("/") or value.startswith("//") or "\\" in value:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="return_to 仅允许站内路径")
+    scheme = "https" if should_use_secure_cookie(request) else request.url.scheme
+    return f"{scheme}://{host}{value}"
+
+
 class BootstrapStatusResponse(BaseModel):
     bootstrapped: bool
 
@@ -342,12 +373,16 @@ async def login(payload: LoginRequest, response: Response, request: Request) -> 
 @router.get("/console-login/start", response_model=ConsoleLoginStartResponse, summary="发起 console 云账号登录")
 async def console_login_start(request: Request, return_to: str | None = None) -> ConsoleLoginStartResponse:
     require_admin(request)
-    resolved_return_to = return_to or "/flockspro-upgrade/callback"
+    # The page that starts the sign-in says where to come back to; the Console only takes its
+    # callback page otherwise.
+    resolved_return_to = _console_return_url(request, return_to or _CONSOLE_LOGIN_CALLBACK_PATH)
     try:
         result = await ConsoleLoginService.start_console_login(return_to=resolved_return_to)
         return ConsoleLoginStartResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=_CONSOLE_UPSTREAM_ERROR) from exc
 
 
 @router.post("/logout", summary="退出登录")
@@ -407,6 +442,8 @@ async def console_login_finish(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=_CONSOLE_UPSTREAM_ERROR) from exc
 
 
 @router.get("/console-login/session", response_model=ConsoleLoginSessionResponse, summary="查询本地 console 登录状态")

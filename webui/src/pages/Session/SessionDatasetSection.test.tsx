@@ -57,7 +57,7 @@ describe('SessionDatasetSection', () => {
     await screen.findByRole('button', { name: session.dataset.select });
     const heading = screen.getByRole('heading', { name: session.dataset.title });
     const hint = screen.getByText(session.dataset.scope);
-    expect(heading).toHaveClass('text-xs', 'font-semibold', 'text-zinc-700');
+    expect(heading).toHaveClass('text-[13px]', 'font-medium', 'text-ui-text');
     expect(hint).toHaveClass('session-knowledge-hint');
     expect(heading.parentElement!.nextElementSibling).toBe(hint);
     expect(screen.queryByText(session.dataset.scopeTitle)).not.toBeInTheDocument();

@@ -16,11 +16,10 @@ ProgressCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
 from flocks.provider.provider import ChatMessage
 from flocks.utils.log import Log
 from flocks.session.prompt import SessionPrompt
+from flocks.session.response_rewriter import transform_complete_response
 from flocks.session.llm_hook_utils import (
-    apply_hook_request_output,
-    restore_text_with_replacements,
-    serialize_chat_message,
-    stream_text_replacements_from_hook_output,
+    model_call_hook_metadata,
+    run_llm_before_for_call,
     strip_think_blocks,
 )
 from .models import DEFAULT_COMPACTION_PROMPT_WITH_PREVIOUS
@@ -173,44 +172,32 @@ async def _llm_chat_with_timeout(
     """Call provider_client.chat with a timeout guard."""
     provider_options: Dict[str, Any] = {"max_tokens": max_tokens}
     replacements: list[tuple[str, str]] = []
+    llm_hook_metadata: Dict[str, Any] = {
+        "sessionID": session_id,
+        "agent": "session.compaction",
+        "step": None,
+        "model": {"providerID": None, "modelID": model_id},
+        "purpose": purpose,
+    }
     if session_id:
         try:
-            from flocks.hooks.pipeline import HookPipeline, HookStage
-
             provider_id = (
                 getattr(provider_client, "provider_id", None)
                 or getattr(provider_client, "id", None)
                 or provider_client.__class__.__name__
             )
-            llm_hook_metadata = {
-                "sessionID": session_id,
-                "agent": "session.compaction",
-                "step": None,
-                "model": {
-                    "providerID": provider_id,
-                    "modelID": model_id,
-                },
-                "purpose": purpose,
-            }
-            if await HookPipeline.has_stage_handlers(HookStage.LLM_BEFORE, llm_hook_metadata):
-                llm_before_ctx = await HookPipeline.run_llm_before({
-                    **llm_hook_metadata,
-                    "request": {
-                        "messageCount": len(messages),
-                        "messages": [serialize_chat_message(message) for message in messages],
-                        "toolCount": 0,
-                        "tools": [],
-                        "providerOptions": dict(provider_options),
-                        "providerToolsEnabled": False,
-                    },
-                })
-                hook_output = getattr(llm_before_ctx, "output", None) or {}
-                messages, provider_options = apply_hook_request_output(
-                    messages,
-                    provider_options,
-                    hook_output,
-                )
-                replacements = stream_text_replacements_from_hook_output(hook_output)
+            llm_hook_metadata = await model_call_hook_metadata(
+                session_id=session_id,
+                agent="session.compaction",
+                purpose=purpose,
+                provider_id=provider_id,
+                model_id=model_id,
+            )
+            messages, provider_options, replacements = await run_llm_before_for_call(
+                llm_hook_metadata,
+                messages,
+                provider_options,
+            )
         except Exception as hook_err:
             log.error("compaction.llm_before_hook.error", {
                 "session_id": session_id,
@@ -228,8 +215,12 @@ async def _llm_chat_with_timeout(
         ),
         timeout=timeout,
     )
-    if replacements and response is not None and isinstance(getattr(response, "content", None), str):
-        response.content = restore_text_with_replacements(response.content, replacements)
+    if response is not None and isinstance(getattr(response, "content", None), str):
+        response.content = await transform_complete_response(
+            response.content,
+            llm_hook_metadata,
+            legacy_replacements=replacements,
+        )
     if response is not None and isinstance(getattr(response, "content", None), str):
         response.content = strip_think_blocks(response.content)
     return response

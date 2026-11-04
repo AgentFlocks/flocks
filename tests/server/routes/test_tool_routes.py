@@ -77,6 +77,88 @@ def _patch_session_user(monkeypatch: pytest.MonkeyPatch, role: str) -> None:
     monkeypatch.setattr(auth_module.AuthService, "get_user_by_session_id", _get_user_by_session_id)
 
 
+_TOOL_OWNER = AuthUser(
+    id="usr_tool_owner", username="tool-owner", role="member", status="active", must_reset_password=False,
+)
+_TOOL_READER = AuthUser(
+    id="usr_tool_reader", username="tool-reader", role="member", status="active", must_reset_password=False,
+)
+_TOOL_ADMIN = AuthUser(
+    id="usr_tool_admin", username="tool-admin", role="admin", status="active", must_reset_password=False,
+)
+
+
+def _patch_cookie_users(monkeypatch: pytest.MonkeyPatch, users: dict[str, AuthUser]) -> None:
+    """Resolve each ``flocks_session`` cookie value to the given user."""
+    from flocks.server import auth as auth_module
+
+    class _StoredUser:
+        def __init__(self, user: AuthUser) -> None:
+            self._user = user
+
+        def to_auth_user(self) -> AuthUser:
+            return self._user
+
+    async def _has_users():
+        return True
+
+    async def _get_user_by_session_id(cookie_value: str):
+        user = users.get(cookie_value)
+        return _StoredUser(user) if user is not None else None
+
+    monkeypatch.setattr(auth_module.AuthService, "has_users", _has_users)
+    monkeypatch.setattr(auth_module.AuthService, "get_user_by_session_id", _get_user_by_session_id)
+
+
+async def _create_owned_session_and_message(
+    title: str,
+    *,
+    owner: AuthUser | None,
+    shared_with: tuple[AuthUser, ...] = (),
+) -> tuple[str, str]:
+    extra = {"metadata": {"shared_read_access_user_ids": [user.id for user in shared_with]}} if shared_with else {}
+    session = await Session.create(
+        project_id="default",
+        directory=str(Path.cwd()),
+        title=title,
+        agent="rex",
+        owner_user_id=owner.id if owner else None,
+        owner_username=owner.username if owner else None,
+        **extra,
+    )
+    message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.USER,
+        content=f"{title} message",
+        agent="rex",
+    )
+    return session.id, message.id
+
+
+async def _post_tool_call(
+    client: AsyncClient,
+    *,
+    endpoint: str,
+    tool_name: str,
+    session_id: str,
+    message_id: str,
+    cookie: str,
+):
+    headers = {"cookie": f"flocks_session={cookie}"}
+    context = {"sessionID": session_id, "messageID": message_id, "agent": "rex"}
+    if endpoint == "batch":
+        return await client.post(
+            "/api/tools/batch",
+            headers=headers,
+            json={"calls": [{"name": tool_name, "params": {}}], "parallel": False, **context},
+        )
+    return await client.post(
+        f"/api/tools/{tool_name}/{endpoint}",
+        headers=headers,
+        json={"params": {}, **context},
+    )
+
+
 async def _create_session_and_message(title: str) -> tuple[str, str]:
     session = await Session.create(
         project_id="default",
@@ -317,6 +399,7 @@ class TestToolRouteSecurity:
     ):
         from flocks.server.routes import tool as tool_routes
 
+        monkeypatch.setattr(tool_routes, "legacy_tool_permission_prompt_required", lambda: True)
         permission_ask = AsyncMock(return_value=None)
         monkeypatch.setattr(tool_routes, "legacy_tool_permission_prompt_required", lambda: True)
         monkeypatch.setattr(tool_routes.PermissionNext, "ask", permission_ask)
@@ -368,6 +451,7 @@ class TestToolRouteSecurity:
     ):
         from flocks.server.routes import tool as tool_routes
 
+        monkeypatch.setattr(tool_routes, "legacy_tool_permission_prompt_required", lambda: True)
         permission_ask = AsyncMock(return_value=None)
         monkeypatch.setattr(tool_routes, "legacy_tool_permission_prompt_required", lambda: True)
         monkeypatch.setattr(tool_routes.PermissionNext, "ask", permission_ask)
@@ -410,6 +494,145 @@ class TestToolRouteSecurity:
         assert kwargs["session_id"] == session_id
         assert kwargs["metadata"]["messageID"] == message_id
         assert kwargs["tool"] == {"name": "http_batch_named_tool"}
+
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", ["execute", "test", "batch"])
+    async def test_shared_reader_cannot_run_tools_in_owner_session(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        endpoint: str,
+    ):
+        """A read-only share must not let the reader run tools in the owner's session."""
+        _patch_cookie_users(monkeypatch, {"reader-cookie": _TOOL_READER})
+        session_id, message_id = await _create_owned_session_and_message(
+            "shared-readonly-session", owner=_TOOL_OWNER, shared_with=(_TOOL_READER,),
+        )
+        calls: list[str] = []
+
+        async def handler(ctx) -> ToolResult:
+            calls.append(ctx.session_id)
+            return ToolResult(success=True, output="ran")
+
+        tool = Tool(
+            info=ToolInfo(
+                name="http_shared_reader_tool",
+                description="shared reader probe",
+                category=ToolCategory.SYSTEM,
+            ),
+            handler=handler,
+        )
+
+        with _temporary_tool(tool):
+            response = await _post_tool_call(
+                client,
+                endpoint=endpoint,
+                tool_name="http_shared_reader_tool",
+                session_id=session_id,
+                message_id=message_id,
+                cookie="reader-cookie",
+            )
+
+        assert response.status_code == 403, response.text
+        assert "write access" in response.json()["message"]
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_archived_session_cannot_run_tools(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        _patch_cookie_users(monkeypatch, {"owner-cookie": _TOOL_OWNER})
+        session_id, message_id = await _create_owned_session_and_message(
+            "archived-tool-session", owner=_TOOL_OWNER,
+        )
+        assert await Session.archive("default", session_id)
+        calls: list[str] = []
+
+        async def handler(ctx) -> ToolResult:
+            calls.append(ctx.session_id)
+            return ToolResult(success=True, output="ran")
+
+        tool = Tool(
+            info=ToolInfo(
+                name="http_archived_session_tool",
+                description="archived session probe",
+                category=ToolCategory.SYSTEM,
+            ),
+            handler=handler,
+        )
+
+        with _temporary_tool(tool):
+            response = await _post_tool_call(
+                client,
+                endpoint="execute",
+                tool_name="http_archived_session_tool",
+                session_id=session_id,
+                message_id=message_id,
+                cookie="owner-cookie",
+            )
+
+        assert response.status_code == 409, response.text
+        assert calls == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("caller", "owner"),
+        [(_TOOL_OWNER, _TOOL_OWNER), (_TOOL_ADMIN, None)],
+        ids=["owner", "admin-on-ownerless-session"],
+    )
+    async def test_session_tool_execution_names_the_http_caller_as_actor(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        caller: AuthUser,
+        owner: AuthUser | None,
+    ):
+        """The execution payload's actor is whoever ran the tool, not the session owner."""
+        from flocks.hooks import tool_gate
+
+        _patch_cookie_users(monkeypatch, {"caller-cookie": caller})
+        session_id, message_id = await _create_owned_session_and_message(
+            "actor-session", owner=owner,
+        )
+        payloads: list[dict] = []
+        original_gate = tool_gate.run_tool_gate
+
+        async def recording_gate(payload, *args, **kwargs):
+            payloads.append(payload)
+            return await original_gate(payload, *args, **kwargs)
+
+        monkeypatch.setattr(tool_gate, "run_tool_gate", recording_gate)
+
+        async def handler(ctx) -> ToolResult:
+            return ToolResult(success=True, output="ran")
+
+        tool = Tool(
+            info=ToolInfo(
+                name="http_actor_probe_tool",
+                description="actor probe",
+                category=ToolCategory.SYSTEM,
+            ),
+            handler=handler,
+        )
+
+        with _temporary_tool(tool):
+            response = await _post_tool_call(
+                client,
+                endpoint="execute",
+                tool_name="http_actor_probe_tool",
+                session_id=session_id,
+                message_id=message_id,
+                cookie="caller-cookie",
+            )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["success"] is True
+        assert payloads, "the tool gate never saw the execution"
+        subject = payloads[-1]["tool_execution"]["actor"]["subject"]
+        assert subject == {"id": caller.id, "type": "human"}
 
 
 class TestToolListPageRoute:
@@ -586,3 +809,154 @@ class TestToolListPageRoute:
         assert first_builds > 0
         assert second_builds == first_builds
         assert index_builds > second_builds
+
+
+class TestToolRouteRegressions:
+    """Regressions found during the 2026-09-14 full-suite run (G3a)."""
+
+    @pytest.mark.asyncio
+    async def test_list_page_enabled_filter_is_case_insensitive(self, client: AsyncClient):
+        lower = await client.get("/api/tools/page", params={"enabled": "true", "limit": 200})
+        upper = await client.get("/api/tools/page", params={"enabled": "TRUE", "limit": 200})
+
+        assert lower.status_code == 200 and upper.status_code == 200
+        assert lower.json()["total"] > 0
+        assert upper.json()["total"] == lower.json()["total"]
+
+    @pytest.mark.asyncio
+    async def test_internal_sentinel_tools_are_not_listed(self, client: AsyncClient):
+        """``invalid`` is registered for the runtime but is not a tool to list, group or enable."""
+        from flocks.tool.registry import ToolRegistry
+
+        ToolRegistry.init()
+        assert ToolRegistry.get("invalid") is not None
+        listed = await client.get("/api/tools")
+        page = await client.get("/api/tools/page", params={"q": "invalid", "limit": 200})
+
+        assert listed.status_code == 200 and page.status_code == 200
+        assert "invalid" not in {item["name"] for item in listed.json()}
+        assert "invalid" not in {item["name"] for item in page.json()["items"]}
+
+    @pytest.mark.asyncio
+    async def test_patch_unknown_device_returns_404(self, client: AsyncClient):
+        response = await client.patch(
+            "/api/tools/read",
+            params={"device_id": "device-that-does-not-exist"},
+            json={"enabled": False},
+        )
+
+        assert response.status_code == 404, response.text
+        assert response.json()["message"] == "Device not found: device-that-does-not-exist"
+
+    @pytest.mark.asyncio
+    async def test_http_execution_context_carries_call_id(self, client: AsyncClient):
+        seen: dict[str, object] = {}
+
+        async def handler(ctx) -> ToolResult:
+            seen["call_id"] = ctx.call_id
+            seen["profile"] = ctx.extra.get("session_execution_profile")
+            return ToolResult(success=True, output="ok")
+
+        tool = Tool(
+            info=ToolInfo(name="http_call_id_probe", description="probe", category=ToolCategory.CUSTOM, source="custom"),
+            handler=handler,
+        )
+        with _temporary_tool(tool):
+            response = await client.post("/api/tools/http_call_id_probe/execute", json={"params": {}})
+
+        assert response.status_code == 200, response.text
+        assert isinstance(seen["call_id"], str) and seen["call_id"].startswith("cal_")
+        # direct execution describes the HTTP caller so policy extensions see a subject
+        profile = seen["profile"]
+        assert isinstance(profile, dict)
+        assert profile["entry"] == "api"
+        assert profile["subject_id"] == "api-token-service" and profile["subject_type"] == "service"
+
+    @pytest.mark.asyncio
+    async def test_direct_http_ask_is_rejected_with_403(self, client: AsyncClient):
+        async def handler(ctx) -> ToolResult:
+            await ctx.ask(permission="bash", patterns=["pwd"], always=["*"], metadata={})
+            return ToolResult(success=True, output="should not run")
+
+        tool = Tool(
+            info=ToolInfo(name="http_ask_probe", description="probe", category=ToolCategory.CUSTOM, source="custom"),
+            handler=handler,
+        )
+        with _temporary_tool(tool):
+            response = await client.post("/api/tools/http_ask_probe/execute", json={"params": {}})
+
+        assert response.status_code == 403, response.text
+        assert response.json()["message"] == "This HTTP execution context cannot auto-approve tool permissions."
+
+    @pytest.mark.asyncio
+    async def test_create_tool_rejects_empty_name(self, client: AsyncClient):
+        response = await client.post("/api/tools", json={"name": "", "handler": {"type": "http", "url": "https://x"}})
+
+        assert response.status_code == 422, response.text
+        assert response.json()["details"][0]["loc"] == ["body", "name"]
+
+    @pytest.mark.asyncio
+    async def test_create_tool_rejects_path_traversal_name(self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from flocks.tool import tool_loader
+
+        plugins = tmp_path / "plugins"
+        monkeypatch.setattr(tool_loader, "_TOOLS_SUBDIR", plugins / "tools")
+        response = await client.post(
+            "/api/tools",
+            json={"name": "../evil", "handler": {"type": "http", "method": "GET", "url": "https://x"}},
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["details"][0]["loc"] == ["body", "name"]
+        assert not list(plugins.rglob("*.yaml")) if plugins.exists() else True
+
+    @pytest.mark.asyncio
+    async def test_create_tool_rejects_path_traversal_provider(self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from flocks.tool import tool_loader
+
+        plugins = tmp_path / "plugins"
+        monkeypatch.setattr(tool_loader, "_TOOLS_SUBDIR", plugins / "tools")
+        response = await client.post(
+            "/api/tools",
+            json={"name": "t1", "provider": "../../escape", "handler": {"type": "http", "method": "GET", "url": "https://x"}},
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["details"][0]["loc"] == ["body", "provider"]
+        assert not list(plugins.rglob("*.yaml")) if plugins.exists() else True
+
+    @pytest.mark.asyncio
+    async def test_create_tool_invalid_handler_leaves_no_file(self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from flocks.tool import tool_loader
+
+        plugins = tmp_path / "plugins"
+        monkeypatch.setattr(tool_loader, "_TOOLS_SUBDIR", plugins / "tools")
+        response = await client.post("/api/tools", json={"name": "bad_handler", "handler": {"type": "python"}})
+
+        assert response.status_code == 400, response.text
+        assert response.json()["message"] == "Invalid tool definition: Unknown handler type: python"
+        assert not (plugins / "tools" / "api" / "bad_handler.yaml").exists()
+        assert ToolRegistry.get("bad_handler") is None
+
+    @pytest.mark.asyncio
+    async def test_update_tool_rejects_invalid_handler_without_writing(self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import yaml
+
+        from flocks.tool import tool_loader
+
+        plugins = tmp_path / "plugins"
+        monkeypatch.setattr(tool_loader, "_TOOLS_SUBDIR", plugins / "tools")
+        created = await client.post(
+            "/api/tools",
+            json={"name": "put_probe", "handler": {"type": "http", "method": "GET", "url": "https://x"}},
+        )
+        assert created.status_code == 201, created.text
+        try:
+            response = await client.put("/api/tools/put_probe", json={"handler": {"type": "nope"}})
+
+            assert response.status_code == 400, response.text
+            assert "Unknown handler type: nope" in response.json()["message"]
+            raw = yaml.safe_load((plugins / "tools" / "api" / "put_probe.yaml").read_text())
+            assert raw["handler"]["type"] == "http"
+        finally:
+            await client.delete("/api/tools/put_probe")

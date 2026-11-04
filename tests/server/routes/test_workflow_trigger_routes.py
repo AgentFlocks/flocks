@@ -916,6 +916,7 @@ async def test_trigger_routes_answer_extension_stop_with_403_and_reason(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
     _stop_workflow_trigger_ingress,
+    recording_webhook_store: dict[str, tuple[str, str]],
     path: str,
     request_kwargs: dict[str, Any],
 ) -> None:
@@ -951,7 +952,6 @@ async def test_trigger_routes_answer_extension_stop_with_403_and_reason(
         "_execute_workflow_effect",
         _must_not_run,
     )
-
     response = await client.post(path, **request_kwargs)
 
     assert response.status_code == 403, response.text
@@ -959,6 +959,69 @@ async def test_trigger_routes_answer_extension_stop_with_403_and_reason(
         "Workflow trigger stopped by extension: headless_evidence_missing"
     )
     assert _stop_workflow_trigger_ingress.operations == ["workflow.trigger.execute"]
+
+    # A refused delivery is not remembered: the same request is refused
+    # again instead of being answered as a duplicate.
+    assert recording_webhook_store == {}
+    retry = await client.post(path, **request_kwargs)
+    assert retry.status_code == 403, retry.text
+
+
+@pytest.mark.asyncio
+async def test_webhook_stopped_after_the_run_is_not_run_again_on_retry(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    recording_webhook_store: dict[str, tuple[str, str]],
+) -> None:
+    """A stop in ingress.after comes once the workflow ran: the delivery stays claimed, a retry is a duplicate."""
+
+    class _StopAfterRun(HookBase):
+        async def ingress_after(self, ctx):
+            return {"execution": {"stop": True, "detail": "post_run_check_failed"}}
+
+    HookPipeline.reset()
+    HookPipeline._initialized = True
+    HookPipeline.register("test.workflow.trigger.after", _StopAfterRun())
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: {
+            "id": workflow_id,
+            "workflowJson": {
+                "start": "n1",
+                "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+                "edges": [],
+                "triggers": [
+                    {
+                        "id": "hook-default",
+                        "type": "custom_webhook",
+                        "enabled": True,
+                        "auth": {"type": "api_key", "apiKey": "demo-secret"},
+                        "mapping": {"payload": "$.body"},
+                    }
+                ],
+            },
+        },
+    )
+    runs: list[dict[str, Any]] = []
+
+    async def _run(**kwargs: Any) -> dict[str, Any]:
+        runs.append(kwargs)
+        return {"matched": True, "executed": True, "inputs": {}}
+
+    monkeypatch.setattr(workflow_routes.default_trigger_runtime, "_execute_workflow_effect", _run)
+    request_kwargs = {"headers": {"x-api-key": "demo-secret"}, "json": {"severity": "high"}}
+
+    try:
+        first = await client.post("/webhook/workflows/wf-1/hook-default", **request_kwargs)
+        retry = await client.post("/webhook/workflows/wf-1/hook-default", **request_kwargs)
+    finally:
+        HookPipeline.reset()
+
+    assert first.status_code == 403, first.text
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["duplicate"] is True
+    assert len(runs) == 1
 
 
 class _HeadlessIdentityContract(HookBase):
@@ -1039,6 +1102,8 @@ async def test_verified_webhook_runs_with_its_verified_auth_under_headless_ident
     assert carrier["evidence"] == {
         "auth_scheme": "api_key",
         "api_key_id": "sha256:" + hashlib.sha256(b"ledger-secret").hexdigest(),
+        "trigger_id": "hook-default",
+        "trigger_type": "webhook",
     }
     assert "ledger-secret" not in repr(carrier["evidence"])
 
@@ -1098,30 +1163,47 @@ async def test_wrong_key_never_reaches_the_ingress_hooks(
 
 
 @pytest.mark.asyncio
-async def test_unverified_trigger_test_run_is_still_refused_and_recorded(
+async def test_trigger_test_run_carries_no_verified_key_and_a_refusal_is_recorded(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
-    _headless_identity_contract,
 ) -> None:
+    """v2: an operator-issued test run is the compatibility carrier, but no key was verified."""
+
+    class _RefuseAll(HookBase):
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, Any]] = []
+
+        async def ingress_before(self, ctx):
+            self.payloads.append(dict(ctx.input))
+            return {"execution": {"stop": True, "detail": "refused_for_test"}}
+
+    hook = _RefuseAll()
+    HookPipeline.reset()
+    HookPipeline._initialized = True
+    HookPipeline.register("test.refuse.all", hook)
     monkeypatch.setattr(
         workflow_routes,
         "_read_workflow_from_fs",
         lambda workflow_id: _webhook_workflow({"type": "api_key", "apiKey": "ledger-secret"}),
     )
-
-    response = await client.post(
-        "/api/workflow/wf-1/triggers/hook-default/test",
-        json={"body": {"legacy_compat": True}},
-    )
+    try:
+        response = await client.post(
+            "/api/workflow/wf-1/triggers/hook-default/test",
+            json={"body": {"legacy_compat": True, "evidence": {"api_key_id": "forged"}}},
+        )
+        history = (await client.get("/api/workflow/wf-1/history")).json()
+    finally:
+        HookPipeline.reset()
 
     assert response.status_code == 403, response.text
-    assert _headless_identity_contract.payloads[0].get("legacy_compat") is not True
-    history = (await client.get("/api/workflow/wf-1/history")).json()
+    carrier = hook.payloads[0]
+    assert carrier["legacy_compat"] is True
+    assert "api_key_id" not in carrier["evidence"] and "key_id" not in carrier["evidence"]
     assert len(history) == 1
     assert history[0]["status"] == "error"
     assert history[0]["triggerId"] == "hook-default"
     assert history[0]["errorMessage"] == (
-        "Run refused by extension (hook=test.headless.identity, stage=ingress.before)"
+        "Run refused by extension (hook=test.refuse.all, stage=ingress.before)"
     )
 
 
@@ -1561,3 +1643,109 @@ async def test_sync_workflow_config_preserves_existing_template(
     assert config_path.read_text(encoding="utf-8") == before
     stored = await workflow_routes.WorkflowStore.get_config(workflow_id)
     assert stored == body["config"]
+
+
+# ---------------------------------------------------------------------------
+# syslog trigger port range (WFL-0316 backend half)
+# ---------------------------------------------------------------------------
+
+def _install_syslog_trigger_env(monkeypatch: pytest.MonkeyPatch, *, existing_triggers: list[dict[str, Any]] | None = None):
+    base_workflow = {
+        "id": "wf-1",
+        "name": "demo",
+        "workflowJson": {
+            "start": "n1",
+            "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+            "edges": [],
+            **({"triggers": existing_triggers} if existing_triggers is not None else {}),
+        },
+    }
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: base_workflow if workflow_id == "wf-1" else None,
+    )
+    persisted: list[list[Any]] = []
+
+    async def _fake_persist(workflow_id: str, workflow_data: dict[str, Any], triggers: list[Any]) -> dict[str, Any]:
+        persisted.append(triggers)
+        return {
+            **workflow_data,
+            "workflowJson": {
+                **workflow_data["workflowJson"],
+                "triggers": [trigger.model_dump(mode="json") for trigger in triggers],
+            },
+        }
+
+    async def _fake_restart(workflow_id: str, workflow_json: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    async def _fake_status(workflow_id: str, trigger: Any) -> dict[str, Any]:
+        return {"workflowId": workflow_id, "triggerId": trigger.id, "state": "stopped"}
+
+    monkeypatch.setattr(workflow_routes, "_persist_workflow_triggers", _fake_persist)
+    monkeypatch.setattr(
+        workflow_routes,
+        "default_trigger_runtime",
+        SimpleNamespace(restart_workflow=_fake_restart, get_trigger_status=_fake_status),
+    )
+    return persisted
+
+
+def _syslog_trigger_body(port: Any, trigger_id: str = "syslog-default") -> dict[str, Any]:
+    return {
+        "id": trigger_id,
+        "type": "syslog",
+        "enabled": False,
+        "source": {"protocol": "udp", "host": "127.0.0.1", "port": port, "format": "auto"},
+        "mapping": {"syslog_message": "$.body"},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("port", [0, 70000, -1, "abc"])
+async def test_create_syslog_trigger_rejects_out_of_range_port(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    port: Any,
+) -> None:
+    persisted = _install_syslog_trigger_env(monkeypatch)
+
+    response = await client.post("/api/workflow/wf-1/triggers", json=_syslog_trigger_body(port))
+
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert body["error"] == "ValidationError"
+    messages = " | ".join(str(item.get("msg")) for item in body["details"])
+    assert "source.port must be an integer between 1 and 65535" in messages, body
+    assert f"got {port!r}" in messages, body
+    assert persisted == []  # nothing written, no listener restarted
+
+
+@pytest.mark.asyncio
+async def test_create_syslog_trigger_accepts_boundary_port(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted = _install_syslog_trigger_env(monkeypatch)
+
+    response = await client.post("/api/workflow/wf-1/triggers", json=_syslog_trigger_body(65535))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["trigger"]["source"]["port"] == 65535
+    assert [trigger.id for trigger in persisted[0]] == ["syslog-default"]
+
+
+@pytest.mark.asyncio
+async def test_update_syslog_trigger_rejects_out_of_range_port(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = [_syslog_trigger_body(5140)]
+    persisted = _install_syslog_trigger_env(monkeypatch, existing_triggers=existing)
+
+    response = await client.put("/api/workflow/wf-1/triggers/syslog-default", json=_syslog_trigger_body(70000))
+
+    assert response.status_code == 422, response.text
+    assert "got 70000" in response.text
+    assert persisted == []

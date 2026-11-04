@@ -32,7 +32,7 @@ Use this tool when testing a workflow node-by-node (BFS order):
 4. After all nodes pass, run the full workflow with `run_workflow`.
 
 Parameters:
-- workflow: Workflow definition (dict) or absolute path to workflow.json.
+- workflow: Workflow definition (dict), registered workflow ID, or absolute path to workflow.json.
 - node_id: ID of the node to execute (must exist in the workflow).
 - inputs: Input data for the node (use previous node's outputs for downstream nodes).
 
@@ -49,12 +49,35 @@ def _load_workflow_dict(workflow: Union[Dict[str, Any], str]) -> Dict[str, Any]:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
+        # Same resolution order as run_workflow: registered workflow ID first,
+        # then a workflow.json path.
+        from flocks.workflow.fs_store import read_workflow_from_fs
+
+        existing = read_workflow_from_fs(raw)
+        if existing is not None:
+            return dict(existing["workflowJson"])
+        from flocks.workflow.fs_store import is_managed_workflow
+
+        if is_managed_workflow(raw):
+            # Reserved for the deployment's definition, which is unavailable:
+            # never a file that happens to share the name.
+            raise ValueError(f"Workflow {raw} is unavailable from its managed source")
         p = Path(raw).expanduser()
         if p.exists() and p.is_file():
+            # A local copy of a managed workflow stands for the managed one.
+            from flocks.workflow.fs_store import managed_workflow_id_for_path
+
+            managed_id = managed_workflow_id_for_path(p)
+            if managed_id is not None:
+                managed = read_workflow_from_fs(managed_id)
+                if managed is None:
+                    raise ValueError(f"Workflow {managed_id} is unavailable from its managed source")
+                return dict(managed["workflowJson"])
             with open(p, encoding="utf-8") as f:
                 return json.load(f)
         raise ValueError(
-            f"Unsupported workflow value. Provide a workflow dict or a valid workflow.json file path. Got: {raw!r}"
+            "Unsupported workflow value. Provide a workflow dict, a registered workflow ID, "
+            f"or a valid workflow.json file path. Got: {raw!r}"
         )
 
 
@@ -62,14 +85,20 @@ def _run_node_sync(
     workflow_dict: Dict[str, Any],
     node_id: str,
     inputs: Dict[str, Any],
+    tool_context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
-    """Synchronous helper: run one node via WorkflowEngine.run_node()."""
+    """Synchronous helper: run one node via WorkflowEngine.run_node().
+
+    The node runs where a whole run would (the sandbox when ``sandbox.mode``
+    requires one), and its code is checked under the calling session, not as
+    an anonymous "workflow".
+    """
     from flocks.workflow.models import Workflow as WfModel
     from flocks.workflow.engine import WorkflowEngine
-    from flocks.workflow.repl_runtime import PythonExecRuntime
+    from flocks.workflow.runner import workflow_python_runtime
 
     wf = WfModel.from_dict(workflow_dict)
-    engine = WorkflowEngine(wf, runtime=PythonExecRuntime())
+    engine = WorkflowEngine(wf, runtime=workflow_python_runtime(tool_context))
     step = engine.run_node(node_id, inputs)
     return {
         "node_id": step.node_id,
@@ -129,7 +158,7 @@ def _format_node_result(result: Dict[str, Any]) -> str:
         ToolParameter(
             name="workflow",
             type=ParameterType.OBJECT,
-            description="Workflow definition (dict) or absolute path to workflow.json.",
+            description="Workflow definition (dict), registered workflow ID, or absolute path to workflow.json.",
             required=True,
             json_schema={
                 "anyOf": [
@@ -177,7 +206,7 @@ async def run_workflow_node_tool(
 
     try:
         result = await asyncio.wait_for(
-            asyncio.to_thread(_run_node_sync, workflow_dict, node_id, node_inputs),
+            asyncio.to_thread(_run_node_sync, workflow_dict, node_id, node_inputs, ctx),
             timeout=NODE_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:

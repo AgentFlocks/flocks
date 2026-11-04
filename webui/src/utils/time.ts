@@ -12,21 +12,8 @@ export function formatSmartTime(
 ): string {
   const d = new Date(timestamp);
   const now = new Date(nowTimestamp);
-  const diffDays = localCalendarDayNumber(now) - localCalendarDayNumber(d);
   const time = formatClockTime(d, locale);
 
-  if (diffDays === 0) {
-    return time;
-  }
-  if (diffDays === 1) {
-    return locale.toLowerCase().startsWith('zh')
-      ? `昨天 ${time}`
-      : `Yesterday ${time}`;
-  }
-  if (diffDays > 1 && diffDays < 7) {
-    const weekday = new Intl.DateTimeFormat(locale, { weekday: 'long' }).format(d);
-    return `${weekday} ${time}`;
-  }
   if (now.getFullYear() === d.getFullYear()) {
     if (locale.toLowerCase().startsWith('zh')) {
       return `${d.getMonth() + 1}月${d.getDate()}日 ${time}`;
@@ -100,8 +87,4 @@ function formatClockTime(d: Date, locale: string): string {
     hour: 'numeric',
     minute: '2-digit',
   }).format(d);
-}
-
-function localCalendarDayNumber(d: Date): number {
-  return Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86_400_000);
 }

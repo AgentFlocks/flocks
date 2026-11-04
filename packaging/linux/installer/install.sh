@@ -12,15 +12,14 @@
 # systemd unit, /usr/local/bin/flocks, the service user and SELinux rules live outside.
 #
 # Re-running is safe: an existing installation is stopped, its program directories
-# are renamed to *.bak-<timestamp> (never deleted), user data under /var/lib/flocks
-# (or <dir>/flocks/data) is left untouched and the Pro component is re-installed when it
-# was active. A re-run finds the directory of the existing install by itself; moving an
-# install to another directory is refused.
+# are renamed to *.bak-<timestamp> (never deleted) and user data under /var/lib/flocks
+# (or <dir>/flocks/data) is left untouched. A re-run finds the directory of the existing
+# install by itself; moving an install to another directory is refused.
 #
-# A package that ships a Pro bundle is fully offline: Pro is installed from that bundle,
-# uv / npm are pinned offline and network upgrades are refused. A package without one is
-# the open-source edition: it installs offline but upgrades like a source install (the Pro
-# upgrade in the WebUI and core updates go online).
+# The package is the open-source edition: it installs offline and upgrades like a source
+# install (core updates go online), or by running a newer package. An install it cannot
+# take over -- one a supervising process manages, or one carrying a component an earlier
+# package or an online upgrade added -- is refused before anything changes.
 #
 # Optional environment knobs (FLOCKS_OFFLINE_BASE is in the manual, the rest is for operators / CI):
 #   FLOCKS_OFFLINE_BASE=/data         install below /data/flocks (the directory must exist; not needed on re-runs)
@@ -59,7 +58,7 @@ log() {
     printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$line" 2>/dev/null >> "$LOG_FILE" || true
   fi
 }
-PAYLOAD_ENTRIES="versions.json installer tools flocks bundle cache"
+PAYLOAD_ENTRIES="versions.json installer tools flocks cache"
 FAILED_DIR_PREFIX="flocks-offline-failed-"
 same_dir() { [[ "$(cd "$1" 2>/dev/null && pwd -P)" == "$(cd "$2" 2>/dev/null && pwd -P)" ]]; }
 fail() {
@@ -194,8 +193,6 @@ PY
 
 CORE_VERSION="$(json_get "$SRC_ROOT/versions.json" core_version)"
 PKG_ARCH="$(json_get "$SRC_ROOT/versions.json" arch)"
-UPDATE_CHANNEL="$(json_get "$SRC_ROOT/versions.json" update_channel)"
-HAS_PRO_BUNDLE="$(json_get "$SRC_ROOT/versions.json" pro_bundle)"
 
 # ---------------------------------------------------------------------------
 # where to install
@@ -324,8 +321,8 @@ UV_BIN="$INSTALL_ROOT/tools/uv/uv"
 MIGRATE_HELPER="$SRC_ROOT/installer/migrate_data.py"
 [[ -f "$MIGRATE_HELPER" ]] || fail "安装包不完整：缺少 installer/migrate_data.py"
 # The data root is the FLOCKS_ROOT an existing installation already runs with (the env merge
-# below keeps that line), else the default. The Pro marker, the data dirs and the migration of
-# a previous installation's data all use this one value.
+# below keeps that line), else the default. The checks on what the install carries, the data
+# dirs and the migration of a previous installation's data all use this one value.
 DATA_ROOT="$DATA_HOME/.flocks"
 CONFIGURED_ROOT=""
 if ! CONFIGURED_ROOT="$("$BUNDLED_PY" "$MIGRATE_HELPER" env-root "$ENV_FILE")"; then
@@ -334,7 +331,13 @@ fi
 if [[ -n "$CONFIGURED_ROOT" ]]; then
   DATA_ROOT="$CONFIGURED_ROOT"
 fi
-MARKER="$DATA_ROOT/run/pro-bundle-installed.json"
+# written when a component outside this package was installed into the venv (an earlier package
+# that carried it, or its own online upgrade); this package would leave it out
+COMPONENT_MARKER_PATTERN="run/*-bundle-installed.json"
+# ...except the Python enterprise package of before (flockspro, 2026.10 and earlier): it is carried
+# into the new venv, as `flocks update` keeps it on an online install, and the end of the run says
+# where the enterprise edition went (a separate installer now, flockspro-<release>.run).
+PREVIOUS_PRO_MARKER="run/pro-bundle-installed.json"
 # the venv names the build root: anywhere else it is rewritten (after the last refusal, in staging)
 RELOCATE=0
 if [[ "$INSTALL_ROOT" != "$BUILD_ROOT" ]]; then
@@ -481,7 +484,7 @@ if not previous or key(result.get("version") or "") != key(sys.argv[2]) or key(s
 print(result.get("phase"), result.get("failed_stage") or "-")
 PYRES
 }
-# An install that upgraded online (core updates / Pro in the WebUI) may already be newer than this
+# An install that upgraded online (core updates in the WebUI) may already be newer than this
 # package: re-running an older package would put old code on data that newer code has already used.
 # Let it through only when that newer version never finished installing and this package is not older
 # than what ran before it (re-running the package is the recovery then), or when the operator asks for
@@ -515,65 +518,174 @@ if [[ -n "$MIGRATE_FROM" && -f "$MIGRATE_FROM/version/.current_version" ]]; then
   fi
 fi
 
-# An activated Pro instance (marker present, here or in the data being migrated) must not
-# silently turn into OSS when the new package ships no Pro bundle: either the previous bundle
-# can be carried over (same core version, wheel matches its manifest sha256) or we stop here,
-# before anything is changed.
-PRO_ACTIVE=0
-if [[ -f "$MARKER" ]] || [[ -n "$MIGRATE_FROM" && -f "$MIGRATE_FROM/run/pro-bundle-installed.json" ]]; then
-  PRO_ACTIVE=1
-fi
-CARRY_OVER_BUNDLE=0
-if [[ -d "$SRC_ROOT/bundle" && ! -d "$SRC_ROOT/bundle/wheels" ]]; then
-  fail "安装包不完整：bundle/ 目录里没有 wheels/"
-fi
-bundle_compatible() {
-  "$BUNDLED_PY" - "$1" "$2" <<'PYCHECK'
-import hashlib, json, pathlib, sys
-bundle, new_core = pathlib.Path(sys.argv[1]), sys.argv[2].lstrip("v")
-manifest = json.load(open(bundle / "manifest.json", encoding="utf-8"))
-old_core = str(manifest.get("core_version", "")).lstrip("v")
-if old_core != new_core:
-    print(f"pro bundle core {old_core} != new core {new_core}", file=sys.stderr)
-    sys.exit(1)
-wheel = bundle / manifest["flockspro_wheel"]
-expected = str(manifest.get("bundle_sha256") or "").lower()
-actual = hashlib.sha256(wheel.read_bytes()).hexdigest()
-if expected and expected != actual:
-    print("pro wheel sha256 does not match its manifest", file=sys.stderr)
-    sys.exit(1)
-PYCHECK
+# Installs this package must not take over, refused before anything changes: one a supervising
+# process manages (its upgrades are that process's business, and it would start the old program
+# again), and one whose venv carries a component this package does not -- replacing the venv
+# would drop it without a word. The same holds for data brought over from such an install.
+# "Managed" is read the way the runtime reads it (flocks/updater/deploy.py declared_managed):
+# FLOCKS_DEPLOY_MODE in the service environment, or the top-level "mode" of the data root's
+# config/deployment.json, either one stripped and lower-cased. Prints where it is declared, nothing
+# when it is not; it always exits 0, so the substitution below never trips the ERR trap.
+managed_declaration() {
+  "$BUNDLED_PY" - "$1" "${2:-}" <<'PY'
+import json, sys
+root, env_file = sys.argv[1], sys.argv[2]
+try:
+    payload = json.load(open(f"{root}/config/deployment.json", encoding="utf-8"))
+except (OSError, ValueError):
+    payload = None
+mode = payload.get("mode") if isinstance(payload, dict) else None
+if isinstance(mode, str) and mode.strip().lower() == "managed":
+    print(f"{root}/config/deployment.json")
+elif env_file:
+    try:
+        lines = open(env_file, encoding="utf-8").read().splitlines()
+    except (OSError, ValueError):
+        lines = []
+    # the last assignment is the one the service gets
+    mode = None
+    for line in lines:
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "FLOCKS_DEPLOY_MODE":
+            mode = value.strip().strip("\"'").strip().lower()
+    if mode == "managed":
+        print(env_file)
+PY
 }
-if [[ "$PRO_ACTIVE" -eq 1 && ! -d "$SRC_ROOT/bundle/wheels" ]]; then
-  OLD_BUNDLE="$INSTALL_ROOT/bundle"
-  if [[ -f "$OLD_BUNDLE/manifest.json" ]] && ls "$OLD_BUNDLE"/wheels/flockspro-*.whl >/dev/null 2>&1; then
-    if bundle_compatible "$OLD_BUNDLE" "$CORE_VERSION"; then
-      CARRY_OVER_BUNDLE=1
-      log "新安装包不含 Pro 组件，沿用当前已激活的 Pro bundle（core 版本一致）"
-    else
-      fail "这台机器已激活 Flocks Pro，但新安装包不含 Pro 组件，且现有 Pro bundle 与新版本不匹配；请使用带 Pro 组件的配套安装包，或先在页面上把 Pro 降级为开源版再升级。本次未做任何改动"
-    fi
-  elif grep -Eq '^(FLOCKS_DEPLOY_MODE=offline|FLOCKS_OFFLINE_INSTALL=|FLOCKS_PRO_BUNDLE_DIR=)' "$ENV_FILE" 2>/dev/null; then
-    # an offline (Pro-bundle) install whose bundle is gone: it cannot upgrade online either
-    fail "这台机器已激活 Flocks Pro，但新安装包不含 Pro 组件，机器上的 Pro bundle 也找不到；请使用带 Pro 组件的配套安装包，或先在页面上把 Pro 降级为开源版再升级。本次未做任何改动"
-  else
-    # Pro was upgraded online on top of an open-source package: /opt/flocks/bundle never existed
-    fail "这台机器已激活 Flocks Pro，但新安装包只含开源版，覆盖安装会让 Pro 失效；请在页面上在线升级 Pro，或先在页面上把 Pro 降级为开源版再用新安装包升级。本次未做任何改动"
-  fi
-fi
+# This package runs on SQLite only. An install on another database (set up by another package
+# or an extension) keeps its data there, and its settings would make the new
+# program refuse to start; it is refused here, before anything changes. Decided by the new
+# program's own rule (flocks/db_backend.py backend_choice, loaded from this package) on the
+# environment the service will get: its env file over the first .env the program loads
+# (flocks/startup_env.py). Data brought over from another install is judged by its own
+# config/database.json. Prints why it is refused, nothing for SQLite; always exits 0.
+database_declaration() {
+  "$BUNDLED_PY" - "$SRC_ROOT/flocks" "$INSTALL_ROOT" "$DATA_HOME" "$1" "${2:-}" <<'PY'
+import importlib.util, os, sys
+from pathlib import Path
+source_tree, install_root, data_home, root, env_file = sys.argv[1:6]
+try:
+    spec = importlib.util.spec_from_file_location("_installer_db_backend", Path(source_tree) / "flocks" / "db_backend.py")
+    db_backend = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = db_backend
+    spec.loader.exec_module(db_backend)
+except Exception as exc:  # a package without it is broken: say so rather than guess
+    print(f"的数据库设置无法检查（安装包里的 flocks/db_backend.py 读不了：{type(exc).__name__}）")
+    raise SystemExit(0)
 
-# offline: Pro comes from a bundle on this machine (shipped or carried over), uv / npm pinned offline;
-# online: open-source package, the Pro upgrade and core updates go online like a source install
-if [[ -d "$SRC_ROOT/bundle" || "$CARRY_OVER_BUNDLE" -eq 1 ]]; then
-  UPGRADE_MODE="offline"
-  DEPLOY_MODE="offline"
-else
-  UPGRADE_MODE="online"
-  DEPLOY_MODE="source"
+def read_env(path):
+    values = {}
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except (OSError, ValueError):
+        return values
+    for line in lines:  # the last assignment is the one the program gets
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):]
+        key, sep, value = line.partition("=")
+        if sep and key.strip() and not key.lstrip().startswith("#"):
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            values[key.strip()] = value
+    return values
+
+if env_file:
+    environ = read_env(env_file)  # what systemd hands the service: no ${...}, no trailing comments
+    environ.setdefault("HOME", data_home)
+    # the .env the new program loads: beside its source tree, else the nearest one above it
+    program = Path(install_root) / "flocks"
+    dotenv_file = next((candidate for candidate in (
+        Path(source_tree) / ".env", Path(source_tree) / "flocks" / ".env",
+        *(directory / ".env" for directory in (program.parent, *program.parent.parents)),
+    ) if candidate.is_file()), None)
+    if dotenv_file is not None:
+        # Read the way the program reads it (flocks/startup_env.py: python-dotenv's load_dotenv,
+        # override=False): ${VAR} from the service environment, trailing comments dropped, and
+        # what the service environment already sets wins. python-dotenv comes from this package.
+        for directory in sorted((Path(source_tree) / ".venv" / "lib").glob("python*/site-packages")):
+            sys.path.insert(0, str(directory))
+        try:
+            from dotenv.main import DotEnv
+        except ImportError:
+            print(f"的数据库设置无法检查（{dotenv_file} 要用 python-dotenv 读，安装包里没有）")
+            raise SystemExit(0)
+        process_environ = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(environ)
+        try:
+            loaded = DotEnv(dotenv_file, interpolate=True, override=False, encoding="utf-8").dict()
+        finally:
+            os.environ.clear()
+            os.environ.update(process_environ)
+        for key, value in loaded.items():
+            if key not in environ and value is not None:
+                environ[key] = value
+    os.environ["HOME"] = environ["HOME"]  # ~ for a missing FLOCKS_ROOT
+else:
+    # A migration source is judged in its own root, including a data/ symlink
+    # to another disk, never against the installer's or target service's HOME.
+    environ = {"FLOCKS_ROOT": root, "FLOCKS_CONFIG_DIR": str(Path(root) / "config")}
+try:
+    if env_file:
+        choice = db_backend.backend_choice(environ)
+    else:
+        choice = db_backend.persisted_choice(environ) or db_backend.BackendChoice(db_backend.SQLITE, "default")
+    # Persisted ownership outlives database.json and the backend package.
+    # Check it before any stop, data copy, or program replacement; malformed
+    # records are equally unable to authorize this SQLite-only installation.
+    db_backend._validate_commitment(choice, environ)
+except Exception as exc:
+    print(f"的数据库设置读不出来（{type(exc).__name__}: {exc}）")
+    raise SystemExit(0)
+if choice.backend != db_backend.SQLITE:
+    print(f"用的数据库是 {choice.backend}（由 {choice.source} 决定）")
+PY
+}
+for root in "$DATA_ROOT" ${MIGRATE_FROM:+"$MIGRATE_FROM"}; do
+  if [[ "$root" == "$DATA_ROOT" ]]; then
+    declared_in="$(managed_declaration "$root" "$ENV_FILE")"
+    database_in="$(database_declaration "$root" "$ENV_FILE")"
+  else
+    declared_in="$(managed_declaration "$root")"
+    database_in="$(database_declaration "$root")"
+  fi
+  if [[ -n "$declared_in" ]]; then
+    fail "${root} 属于一个由外部管理进程托管的安装（${declared_in} 声明了 managed），它的升级由那个管理进程负责，开源版离线包不能覆盖。本次未做任何改动"
+  fi
+  if [[ -n "$database_in" ]]; then
+    if [[ -e "$root/$PREVIOUS_PRO_MARKER" ]]; then
+      fail "${root} 所属的安装${database_in}（老企业版切过库）；本离线包只支持 SQLite。这台机器请用新企业版安装包升级：以 root 执行 bash flockspro-<版本>-<平台>.run，数据库、数据和授权都沿用。本次未做任何改动"
+    fi
+    fail "${root} 所属的安装${database_in}；本离线包只支持 SQLite，覆盖安装后服务会起不来。请按那套安装原来的方式升级，或先把数据迁回 SQLite 再用本安装包。本次未做任何改动"
+  fi
+  for marker in "$root"/${COMPONENT_MARKER_PATTERN}; do
+    if [[ "$marker" == "$root/$PREVIOUS_PRO_MARKER" ]]; then
+      continue
+    fi
+    if [[ -e "$marker" || -L "$marker" ]]; then
+      fail "${root} 所属的安装装过本安装包不带的组件（${marker}），覆盖安装会让它失效；请按该组件提供的方式升级，或先在页面上把它卸掉再用本安装包升级。本次未做任何改动"
+    fi
+  done
+done
+PREVIOUS_PRO=0
+for root in "$DATA_ROOT" ${MIGRATE_FROM:+"$MIGRATE_FROM"}; do
+  if [[ -e "$root/$PREVIOUS_PRO_MARKER" ]]; then
+    PREVIOUS_PRO=1
+  fi
+done
+# where its package comes from: as installed in the venv that runs now (parked beside the new one
+# below), which is the version the machine runs (an upgrade from the page may have made it newer
+# than the bundle); else the newest wheel in the bundle an earlier offline package carried
+PREVIOUS_PRO_WHEEL=""
+if [[ "$PREVIOUS_PRO" -eq 1 ]]; then
+  PREVIOUS_PRO_WHEEL="$(ls "$INSTALL_ROOT"/bundle/wheels/flockspro-*.whl 2>/dev/null | sort -V | tail -n 1 || true)"
+  log "这台机器装着老企业版（Python 版），升级后照旧保留"
 fi
 
 if [[ "$DRY_RUN" == "1" ]]; then
-  log "dry-run: 将安装到 ${INSTALL_ROOT}，基目录 ${BASE:-（默认布局）}，服务用户 ${SERVICE_USER}，数据目录 ${DATA_ROOT}，配置 ${ENV_FILE}，日志 ${LOG_FILE}，端口 ${PORT}，systemd=${HAVE_SYSTEMD}，Pro bundle=${HAS_PRO_BUNDLE}，carry-over-bundle=${CARRY_OVER_BUNDLE}，upgrade=${UPGRADE_MODE}，relocate=${RELOCATE}，迁移旧数据=${MIGRATE_FROM:-无}"
+  log "dry-run: 将安装到 ${INSTALL_ROOT}，基目录 ${BASE:-（默认布局）}，服务用户 ${SERVICE_USER}，数据目录 ${DATA_ROOT}，配置 ${ENV_FILE}，日志 ${LOG_FILE}，端口 ${PORT}，systemd=${HAVE_SYSTEMD}，relocate=${RELOCATE}，迁移旧数据=${MIGRATE_FROM:-无}，保留老企业版=$([[ "$PREVIOUS_PRO" -eq 1 ]] && echo "是（原来的 Python 环境里的${PREVIOUS_PRO_WHEEL:+，没有就用 ${PREVIOUS_PRO_WHEEL}}）" || echo 否)"
   if [[ -n "$BASE" && ! -d "$BASE" ]]; then
     log "dry-run: 基目录 ${BASE} 还不存在，正式安装前要先建好（或挂载好）"
   fi
@@ -635,7 +747,7 @@ fi
 run_as_service_user() {
   # $0 is the env file, the remaining arguments are the command to run; start from the
   # repo dir because the installer's own cwd (the staging dir) is not readable by the service user
-  runuser -u "$SERVICE_USER" -- bash -c 'set -a; if [ -f "$0" ]; then . "$0" || exit 97; fi; set +a; cd "${FLOCKS_REPO_ROOT:-/}" 2>/dev/null || cd /; exec "$@"' "$ENV_FILE" "$@"
+  runuser -u "$SERVICE_USER" -- bash -c 'unset FLOCKS_DB_BACKEND FLOCKS_DB_DSN FLOCKS_DB_DSN_FILE; set -a; if [ -f "$0" ]; then . "$0" || exit 97; fi; set +a; cd "${FLOCKS_REPO_ROOT:-/}" 2>/dev/null || cd /; exec "$@"' "$ENV_FILE" "$@"
 }
 
 if [[ "$EXISTING_INSTALL" -eq 1 ]]; then
@@ -662,28 +774,26 @@ fi
 if [[ "$PARKED" -eq 1 ]]; then
   log "旧程序目录已改名为 *.bak-${STAMP}（确认新版本正常后可自行清理）"
 fi
-if [[ "$CARRY_OVER_BUNDLE" -eq 1 && -d "$INSTALL_ROOT/bundle.bak-$STAMP" ]]; then
-  mv "$INSTALL_ROOT/bundle.bak-$STAMP" "$INSTALL_ROOT/bundle"
-fi
 
 # ---------------------------------------------------------------------------
 # place the payload
 # ---------------------------------------------------------------------------
-for dir in tools flocks bundle cache; do
+for dir in tools flocks cache; do
   if [[ -d "$SRC_ROOT/$dir" ]]; then
     mv "$SRC_ROOT/$dir" "$INSTALL_ROOT/$dir"
   fi
 done
 # installer/ (this script's directory) is moved into place last, see finish_staging
 mv "$SRC_ROOT/versions.json" "$INSTALL_ROOT/versions.json"
+# this package has no bundle/; the one an earlier package carried the enterprise package in goes back
+if [[ "$PREVIOUS_PRO" -eq 1 && -d "$INSTALL_ROOT/bundle.bak-$STAMP" && ! -e "$INSTALL_ROOT/bundle" ]]; then
+  mv "$INSTALL_ROOT/bundle.bak-$STAMP" "$INSTALL_ROOT/bundle"
+fi
 # the payload now lives under the install root; use the python from its final location
 BUNDLED_PY="$INSTALL_ROOT/tools/python/bin/python3"
 [[ -x "$FLOCKS_CLI" ]] || fail "安装包不完整：缺少 ${FLOCKS_CLI}"
 mkdir -p "$INSTALL_ROOT/cache/uv"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$REPO_DIR" "$INSTALL_ROOT/cache"
-if [[ -d "$INSTALL_ROOT/bundle" ]]; then
-  chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_ROOT/bundle"
-fi
 chmod 755 "$INSTALL_ROOT"
 selinux_label_base() {
   # SELinux knows no file contexts below a directory like /data: everything there is default_t,
@@ -729,23 +839,19 @@ fi
 # ---------------------------------------------------------------------------
 # /etc/flocks/flocks.env  (managed keys are overwritten, everything else kept)
 # ---------------------------------------------------------------------------
-# keys that only make sense with a Pro bundle on the machine; in the online mode none may stay:
-# UV_OFFLINE / npm_config_offline break the online dependency sync, the offline channel asks Console
-# for a release that is not there, and FLOCKS_OFFLINE_INSTALL=1 turns the updater's refusal back on
-# as soon as FLOCKS_DEPLOY_MODE goes missing from the file
-OFFLINE_ONLY_KEYS_RE='^(FLOCKS_OFFLINE_INSTALL|FLOCKS_UPDATE_CHANNEL|FLOCKS_PRO_BUNDLE_DIR|UV_OFFLINE|npm_config_offline)='
+# offline pins older packages wrote; none may stay: UV_OFFLINE / npm_config_offline break the online
+# dependency sync, the offline channel names a release that is not there, and FLOCKS_OFFLINE_INSTALL=1
+# turns the updater's refusal back on as soon as FLOCKS_DEPLOY_MODE goes missing from the file
+OFFLINE_ONLY_KEYS_RE='^(FLOCKS_OFFLINE_INSTALL|FLOCKS_UPDATE_CHANNEL|UV_OFFLINE|npm_config_offline)='
 render_env_template() {
   sed \
     -e "s|@INSTALL_ROOT@|$INSTALL_ROOT|g" \
     -e "s|@DATA_HOME@|$DATA_HOME|g" \
     -e "s|@PORT@|$PORT|g" \
-    -e "s|@UPDATE_CHANNEL@|$UPDATE_CHANNEL|g" \
-    -e "s|@DEPLOY_MODE@|$DEPLOY_MODE|g" \
-    "$SRC_ROOT/installer/flocks.env.template" \
-  | if [[ "$UPGRADE_MODE" == "online" ]]; then sed -E "/$OFFLINE_ONLY_KEYS_RE/d"; else cat; fi
+    "$SRC_ROOT/installer/flocks.env.template"
 }
-# FLOCKS_DEPLOY_MODE is managed so that a package of the other kind switches an existing install over
-MANAGED_KEYS="FLOCKS_INSTALL_ROOT FLOCKS_REPO_ROOT FLOCKS_NODE_HOME FLOCKS_DEPLOY_MODE FLOCKS_UPDATE_CHANNEL FLOCKS_PRO_BUNDLE_DIR UV_CACHE_DIR UV_PYTHON PATH"
+# FLOCKS_DEPLOY_MODE is managed so that an install an older offline package left switches over
+MANAGED_KEYS="FLOCKS_INSTALL_ROOT FLOCKS_REPO_ROOT FLOCKS_NODE_HOME FLOCKS_DEPLOY_MODE UV_CACHE_DIR UV_PYTHON PATH"
 if [[ -n "$PORT_OVERRIDE" ]]; then
   # only an explicit request changes the port of an existing install
   MANAGED_KEYS="$MANAGED_KEYS FLOCKS_PORT"
@@ -786,12 +892,10 @@ else
   render_env_template > "$ENV_FILE"
   log "已写入 ${ENV_FILE}"
 fi
-if [[ "$UPGRADE_MODE" == "online" ]]; then
-  # no Pro bundle here: also drop the offline pins an earlier install of a Pro-bundle package left
-  # in this file, otherwise the updater keeps refusing the online Pro upgrade and uv / npm stay offline
-  sed -i -E "/$OFFLINE_ONLY_KEYS_RE/d" "$ENV_FILE"
-fi
-log "升级方式：$([[ "$UPGRADE_MODE" == "online" ]] && echo "在线（开源版安装包，Pro 在页面上在线升级）" || echo "离线（Pro 组件来自 ${INSTALL_ROOT}/bundle）")"
+# drop the offline pins an older package left in this file, otherwise the updater keeps refusing
+# online upgrades and uv / npm stay offline
+sed -i -E "/$OFFLINE_ONLY_KEYS_RE/d" "$ENV_FILE"
+log "升级方式：在线（和源码安装一样），或者用新版安装包覆盖"
 chmod 640 "$ENV_FILE"
 chown "root:$SERVICE_USER" "$ENV_FILE"
 
@@ -812,43 +916,123 @@ if [[ "$RELOCATE" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# the Python enterprise package of before, carried into the new venv
+# ---------------------------------------------------------------------------
+# As it was installed in the venv just parked, else from the bundle's wheel (without its
+# dependencies, which this venv has). It is put together in a directory of its own first and goes
+# into the venv only once the new program's own plugin loader, run on it the way the service runs it
+# at start, loads and calls every entry point it declares without a failure: a critical one that
+# fails closes the whole service, an ordinary one that fails leaves its features broken. A package
+# that does not pass, or a step that fails on the way, leaves nothing behind in the venv.
+# 0: kept; 1: not kept, PREVIOUS_PRO_PROBLEM says why.
+PREVIOUS_PRO_PROBLEM=""
+PREVIOUS_PRO_CHECK='
+import importlib.metadata as m, os, sys
+staging = sys.argv[1]
+sys.path.insert(0, staging)
+dists = [d for d in m.distributions(path=[staging]) if (d.metadata["Name"] or "").lower() == "flockspro"]
+if not dists:
+    print("no flockspro distribution", file=sys.stderr); sys.stdout.flush(); os._exit(1)
+names = {ep.name for ep in dists[0].entry_points if ep.group in ("flocks.plugins", "flocks.plugins.critical")}
+from flocks.plugin.loader import PluginLoader
+result = PluginLoader._load_entry_points()
+failed = sorted({n for n in result.critical_entrypoint_failures if n in names}
+                | {e for e in PluginLoader._last_load_errors if any(e.startswith(f"entry point {n}:") for n in names)})
+if failed:
+    print("; ".join(failed)[:300], file=sys.stderr)
+sys.stderr.flush()
+# its bootstrap may leave threads running: the answer is in, end here
+os._exit(1 if failed else 0)
+'
+keep_previous_enterprise_package() {
+  local wheel="$1" old_venv="$2" new_venv="$3" old_site new_site staging entry name check_out moved=""
+  new_site="$(ls -d "$new_venv"/lib/python3.*/site-packages 2>/dev/null | head -n 1 || true)"
+  old_site="$(ls -d "$old_venv"/lib/python3.*/site-packages 2>/dev/null | head -n 1 || true)"
+  if [[ -z "$new_site" ]]; then
+    PREVIOUS_PRO_PROBLEM="新的 Python 环境里没有 site-packages（${new_venv}）"
+    return 1
+  fi
+  # (inside the if that calls this, a failing command does not stop the installer: each step is checked)
+  staging="$(mktemp -d "$INSTALL_ROOT/cache/previous-enterprise.XXXXXX" 2>/dev/null || true)"
+  if [[ -z "$staging" || ! -d "$staging" ]]; then
+    PREVIOUS_PRO_PROBLEM="在 ${INSTALL_ROOT}/cache 下建不了临时目录"
+    return 1
+  fi
+  if [[ -n "$old_site" && -d "$old_site/flockspro" ]]; then
+    # the package, its metadata (entry points) and the code-audit engine it may have brought
+    for entry in "$old_site"/flockspro "$old_site"/flockspro-*.dist-info "$old_site"/flocks_code_security* "$old_site"/flocks_code_security-*.dist-info; do
+      [[ -e "$entry" && ! -e "$staging/${entry##*/}" ]] || continue
+      if ! cp -a "$entry" "$staging/"; then
+        PREVIOUS_PRO_PROBLEM="拷不出 ${entry}"
+        break
+      fi
+    done
+    if [[ -z "$PREVIOUS_PRO_PROBLEM" ]] && ! chown -R "$SERVICE_USER:$SERVICE_USER" "$staging"; then
+      PREVIOUS_PRO_PROBLEM="改不了 ${staging} 的属主"
+    fi
+  elif [[ -n "$wheel" && -f "$wheel" ]]; then
+    if ! chown -R "$SERVICE_USER:$SERVICE_USER" "$staging"; then
+      PREVIOUS_PRO_PROBLEM="改不了 ${staging} 的属主"
+    elif ! run_as_service_user "$UV_BIN" pip install --offline --python "$new_venv/bin/python" --no-deps --target "$staging" "$wheel" >/dev/null 2>&1; then
+      PREVIOUS_PRO_PROBLEM="${wheel##*/} 装不进新的 Python 环境"
+    fi
+  else
+    PREVIOUS_PRO_PROBLEM="原来的 Python 环境里找不到它（${old_site:-$old_venv}），也没有老离线包带的 wheel"
+  fi
+  if [[ -z "$PREVIOUS_PRO_PROBLEM" ]]; then
+    for entry in "$staging"/*; do
+      name="${entry##*/}"
+      [[ "$name" != bin ]] || continue
+      if [[ -e "$new_site/$name" ]]; then
+        PREVIOUS_PRO_PROBLEM="新的 Python 环境里已经有 ${name}"
+        break
+      fi
+    done
+  fi
+  if [[ -z "$PREVIOUS_PRO_PROBLEM" ]]; then
+    if ! check_out="$(run_as_service_user $(command -v timeout >/dev/null 2>&1 && echo timeout 300) "$new_venv/bin/python" -I -c "$PREVIOUS_PRO_CHECK" "$staging" 2>&1 >/dev/null)"; then
+      PREVIOUS_PRO_PROBLEM="它在新版开源上加载不起来（老企业版包和这一版不配${check_out:+：$(printf '%s' "$check_out" | tail -n 1)}）"
+    fi
+  fi
+  if [[ -z "$PREVIOUS_PRO_PROBLEM" ]]; then
+    for entry in "$staging"/*; do
+      name="${entry##*/}"
+      [[ "$name" != bin ]] || continue
+      if mv "$entry" "$new_site/"; then
+        moved="$moved $name"
+      else
+        PREVIOUS_PRO_PROBLEM="${name} 移不进新的 Python 环境"
+        break
+      fi
+    done
+    if [[ -n "$PREVIOUS_PRO_PROBLEM" ]]; then
+      # half a package (its dist-info without its code, say) is worse than none: what went in comes out
+      for name in $moved; do
+        mv "$new_site/$name" "$staging/" || PREVIOUS_PRO_PROBLEM="${PREVIOUS_PRO_PROBLEM}；${new_site}/${name} 没能撤回，请手工移走"
+      done
+    fi
+  fi
+  # what is left in the staging directory goes, file by file (nothing else is in it)
+  find "$staging" ! -type d -exec rm -f {} + 2>/dev/null || true
+  find "$staging" -depth -type d -exec rmdir {} + 2>/dev/null || true
+  [[ -z "$PREVIOUS_PRO_PROBLEM" ]]
+}
+PREVIOUS_PRO_KEPT=0
+if [[ "$PREVIOUS_PRO" -eq 1 ]]; then
+  if keep_previous_enterprise_package "$PREVIOUS_PRO_WHEEL" "$INSTALL_ROOT/flocks.bak-$STAMP/.venv" "$REPO_DIR/.venv"; then
+    PREVIOUS_PRO_KEPT=1
+    log "老企业版（Python 版）已装进新的 Python 环境"
+  else
+    log "警告: 老企业版没能保留：${PREVIOUS_PRO_PROBLEM}；这台机器先按开源版运行（老企业版的功能和安全配置都不在了），授权文件还在，升级到新企业版时照样沿用"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # CLI wrapper
 # ---------------------------------------------------------------------------
 sed -e "s|@ENV_FILE@|$ENV_FILE|g" -e "s|@FLOCKS_CLI@|$FLOCKS_CLI|g" -e "s|@SERVICE_USER@|$SERVICE_USER|g" \
   "$SRC_ROOT/installer/flocks-cli-wrapper.sh" > "$WRAPPER"
 chmod 755 "$WRAPPER"
-
-# ---------------------------------------------------------------------------
-# keep the Pro component when upgrading an activated installation
-# ---------------------------------------------------------------------------
-if [[ -f "$MARKER" && -d "$INSTALL_ROOT/bundle/wheels" ]]; then
-  PRO_WHEEL="$(ls "$INSTALL_ROOT/bundle/wheels"/flockspro-*.whl 2>/dev/null | head -n 1 || true)"
-  if [[ -n "$PRO_WHEEL" ]]; then
-    log "重新安装 Pro 组件 $(basename "$PRO_WHEEL")"
-    run_as_service_user "$UV_BIN" pip install --python "$VENV_BIN/python" --no-deps "$PRO_WHEEL" >/dev/null
-    run_as_service_user "$BUNDLED_PY" - "$INSTALL_ROOT/bundle/manifest.json" "$MARKER" <<'PY'
-import json, sys
-from datetime import datetime, timezone
-manifest = json.load(open(sys.argv[1], encoding="utf-8"))
-try:
-    previous = json.load(open(sys.argv[2], encoding="utf-8"))
-except Exception:
-    previous = {}
-release_id = manifest.get("release_id") or manifest.get("bundle_release_id") or previous.get("release_id")
-payload = {
-    "release_id": release_id,
-    "bundle_release_id": manifest.get("bundle_release_id") or release_id,
-    "bundle_version": manifest["bundle_version"],
-    "core_version": manifest["core_version"],
-    "flockspro_component_version": manifest["flockspro_component_version"],
-    "build_id": manifest.get("build_id") or previous.get("build_id"),
-    "bundle_sha256": manifest.get("bundle_sha256"),
-    "installed_at": datetime.now(timezone.utc).isoformat(),
-}
-json.dump(payload, open(sys.argv[2], "w", encoding="utf-8"), sort_keys=True)
-PY
-  fi
-fi
 
 # the code on disk is now CORE_VERSION. The updater's version marker can still name a newer version (a
 # downgrade, or a hand-made rollback before a repair run); get_current_version() reports the higher of
@@ -943,6 +1127,9 @@ finish_staging() {
 report_migration() {
   if [[ -n "$MIGRATE_FROM" ]]; then
     log "旧数据目录 ${MIGRATE_FROM} 原样保留；确认新实例里的账号、会话和配置都在之后可自行清理"
+  fi
+  if [[ "$PREVIOUS_PRO" -eq 1 ]]; then
+    log "企业版换成了单独的安装包，老企业版不再更新；升级到新企业版：以 root 执行 bash flockspro-<版本>-<平台>.run（数据和授权沿用），或在网页左下角的账号菜单 → Flocks Pro 里升级"
   fi
 }
 

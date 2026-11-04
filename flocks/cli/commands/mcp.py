@@ -8,6 +8,7 @@ Ported from original cli/cmd/mcp.ts
 import asyncio
 import json
 import os
+import shlex
 import webbrowser
 from typing import Optional
 
@@ -18,6 +19,7 @@ from rich.table import Table
 from rich.prompt import Prompt, Confirm
 
 from flocks.mcp import MCP, get_manager, McpStatus
+from flocks.mcp.types import McpStatusInfo
 from flocks.mcp.auth import McpAuth
 from flocks.mcp.utils import REMOTE_MCP_TYPES
 from flocks.config.config import Config
@@ -112,10 +114,10 @@ async def _list_servers(format: str):
     # Filter to only configured servers
     servers = []
     for name, server_config in mcp_config.items():
-        if 'type' not in server_config:
-            continue
-        
         status = statuses.get(name)
+        if status is None and server_config.get("enabled", True) is False:
+            # Disabled servers are never started, so the manager has no entry for them.
+            status = McpStatusInfo(status=McpStatus.DISABLED)
         # OAuth support is determined by config, not manager method
         oauth_config = server_config.get('oauth')
         supports_oauth = _is_remote(server_config) and oauth_config is not False
@@ -197,15 +199,26 @@ def mcp_add(
     name: Optional[str] = typer.Option(None, "-n", "--name", help="Server name"),
     server_type: Optional[str] = typer.Option(None, "-t", "--type", help="Server type: local or remote"),
     url: Optional[str] = typer.Option(None, "--url", help="Server URL (for remote servers)"),
-    command: Optional[str] = typer.Option(None, "-c", "--command", help="Command to run (for local servers)"),
-    global_: bool = typer.Option(False, "-g", "--global", help="Add to global config"),
+    command: Optional[str] = typer.Option(
+        None, "-c", "--command",
+        help="Command to run (for local servers); shell-style quoting is supported for paths with spaces",
+    ),
+    oauth: Optional[bool] = typer.Option(
+        None, "--oauth/--no-oauth",
+        help="Remote servers: enable/disable OAuth without prompting (omit to be asked interactively)",
+    ),
+    global_: bool = typer.Option(
+        False, "-g", "--global",
+        hidden=True,
+        help="Kept for compatibility: MCP servers are always stored in the user-level config",
+    ),
 ):
     """
     Add an MCP server
     
     Interactive mode if no options provided.
     """
-    asyncio.run(_add_server(name, server_type, url, command, global_))
+    asyncio.run(_add_server(name, server_type, url, command, global_, oauth=oauth))
 
 
 async def _add_server(
@@ -214,6 +227,7 @@ async def _add_server(
     url: Optional[str],
     command: Optional[str],
     global_: bool,
+    oauth: Optional[bool] = None,
 ):
     """Internal add implementation"""
     console.print()
@@ -244,9 +258,17 @@ async def _add_server(
             console.print("[red]Command is required for local servers[/red]")
             raise typer.Exit(1)
         
+        try:
+            command_argv = shlex.split(command)
+        except ValueError as error:
+            console.print(f"[red]Invalid command line: {error}[/red]")
+            raise typer.Exit(1) from error
+        if not command_argv:
+            console.print("[red]Command is required for local servers[/red]")
+            raise typer.Exit(1)
         mcp_config = {
             "type": "local",
-            "command": command.split(),
+            "command": command_argv,
         }
     else:
         if not url:
@@ -256,9 +278,19 @@ async def _add_server(
             console.print("[red]URL is required for remote servers[/red]")
             raise typer.Exit(1)
         
-        use_oauth = Confirm.ask("Does this server require OAuth authentication?", default=False)
+        if oauth is None:
+            use_oauth = Confirm.ask("Does this server require OAuth authentication?", default=False)
+        else:
+            # --oauth/--no-oauth: non-interactive callers must not block on a prompt.
+            use_oauth = oauth
         
-        if use_oauth:
+        if use_oauth and oauth is True:
+            mcp_config = {
+                "type": "remote",
+                "url": url,
+                "oauth": {},
+            }
+        elif use_oauth:
             has_client_id = Confirm.ask("Do you have a pre-registered client ID?", default=False)
             
             if has_client_id:
@@ -291,10 +323,22 @@ async def _add_server(
     config_path = Config.get_config_file()
     
     # Load existing config
-    import json
     if config_path.exists():
-        with open(config_path) as f:
-            existing_config = json.load(f)
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                existing_config = json.load(f)
+        except json.JSONDecodeError as error:
+            console.print(
+                f"[red]Config file {config_path} is not valid JSON ({error}); "
+                "fix it before adding MCP servers.[/red]"
+            )
+            raise typer.Exit(1) from error
+        except OSError as error:
+            console.print(f"[red]Failed to read config file {config_path}: {error}[/red]")
+            raise typer.Exit(1) from error
+        if not isinstance(existing_config, dict):
+            console.print(f"[red]Config file {config_path} must contain a JSON object.[/red]")
+            raise typer.Exit(1)
     else:
         existing_config = {}
     
@@ -306,8 +350,8 @@ async def _add_server(
     
     # Save config
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_path, "w") as f:
-        json.dump(existing_config, f, indent=2)
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(existing_config, f, indent=2, ensure_ascii=False)
     
     console.print(f"[green]MCP server \"{name}\" added to {config_path}[/green]")
 
@@ -429,7 +473,7 @@ def mcp_logout(
 
 async def _logout_server(name: Optional[str]):
     """Internal logout implementation"""
-    credentials = await McpAuth.all()
+    credentials = await McpAuth.list_all()
     
     if not credentials:
         console.print("[dim]No MCP OAuth credentials stored[/dim]")
@@ -445,8 +489,8 @@ async def _logout_server(name: Optional[str]):
         console.print("Servers with stored credentials:")
         for i, server_name in enumerate(server_names, 1):
             entry = credentials[server_name]
-            has_tokens = bool(entry.get("tokens"))
-            has_client = bool(entry.get("clientInfo"))
+            has_tokens = bool(getattr(entry, "tokens", None))
+            has_client = bool(getattr(entry, "client_info", None))
             hint = ""
             if has_tokens and has_client:
                 hint = " (tokens + client)"
@@ -525,21 +569,28 @@ async def _debug_server(name: str):
     icon = _get_auth_status_icon(auth_status)
     console.print(f"Auth status: {icon} {auth_status}")
     
-    # Check stored credentials
+    # Check stored credentials (McpAuthEntry.tokens is a plain dict)
     entry = await McpAuth.get(name)
     if entry:
-        if entry.tokens:
-            console.print(f"  Access token: {entry.tokens.access_token[:20]}...")
-            if entry.tokens.expires_at:
+        tokens = entry.tokens if isinstance(entry.tokens, dict) else {}
+        if tokens:
+            access_token = str(tokens.get("access_token") or "")
+            if access_token:
+                console.print(f"  Access token: {access_token[:20]}...")
+            expires_at = entry.expires_at or tokens.get("expires_at")
+            if expires_at:
                 from datetime import datetime
-                expires_dt = datetime.fromtimestamp(entry.tokens.expires_at)
-                is_expired = entry.tokens.expires_at < datetime.now().timestamp()
+                expires_dt = datetime.fromtimestamp(float(expires_at))
+                is_expired = float(expires_at) < datetime.now().timestamp()
                 console.print(f"  Expires: {expires_dt.isoformat()} {'(EXPIRED)' if is_expired else ''}")
-            if entry.tokens.refresh_token:
+            if tokens.get("refresh_token"):
                 console.print("  Refresh token: present")
         
-        if entry.client_info:
-            console.print(f"  Client ID: {entry.client_info.client_id}")
+        client_info = getattr(entry, "client_info", None)
+        if client_info:
+            client_id = getattr(client_info, "client_id", None) or (client_info.get("client_id") if isinstance(client_info, dict) else None)
+            if client_id:
+                console.print(f"  Client ID: {client_id}")
     else:
         console.print("  No stored credentials")
     
@@ -560,7 +611,7 @@ def mcp_connect(
 async def _connect_server(name: str):
     """Internal connect implementation"""
     config = await Config.get()
-    mcp_config = getattr(config, 'mcp', None) or {}
+    mcp_config = _configured_servers(config)
     
     server_config = mcp_config.get(name)
     if not server_config:
@@ -627,6 +678,10 @@ async def _list_tools(server: Optional[str]):
     from flocks.mcp import McpToolRegistry
     from flocks.tool import ToolRegistry
     
+    # Tool registration is per process: connect the configured servers here
+    # first, otherwise a fresh CLI process never sees any MCP tools.
+    await get_manager().status()
+    
     console.print()
     console.print("[bold cyan]MCP Tools[/bold cyan]")
     console.print()
@@ -677,6 +732,7 @@ async def _refresh_tools(server: Optional[str]):
     """Internal refresh implementation"""
     from flocks.mcp import McpToolRegistry
     
+    await get_manager().status()
     console.print()
     
     if server:
@@ -718,6 +774,9 @@ def mcp_serve(
     max_budget: Optional[float] = typer.Option(None, "--max-budget"),
 ):
     """Expose Flocks as an MCP server over stdin/stdout (no HTTP service needed)."""
+    from flocks.cli.managed import refuse_local_runtime_when_managed
+
+    refuse_local_runtime_when_managed("flocks mcp serve")
     import math
     from pathlib import Path
     from flocks.cli.commands.exec import PermissionMode, SandboxMode, split_tools

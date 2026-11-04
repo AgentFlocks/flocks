@@ -6,7 +6,7 @@ import pytest
 
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
-from flocks.utils.log import set_log_retention_days_override
+from flocks.utils.log import set_log_cleanup_managed, set_log_retention_days_override
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +35,7 @@ async def isolate_retention_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     Session.invalidate_cache()
     Message.invalidate_cache()
     set_log_retention_days_override(None)
+    set_log_cleanup_managed(False)
 
     await Storage.init(db_path)
 
@@ -44,6 +45,7 @@ async def isolate_retention_storage(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     Session.invalidate_cache()
     Message.invalidate_cache()
     set_log_retention_days_override(None)
+    set_log_cleanup_managed(False)
     Config._global_config = None
     Config.clear_cache()
     Storage._initialized = False

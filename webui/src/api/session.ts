@@ -97,16 +97,34 @@ export interface SessionListParams {
   status?: 'active' | 'archived' | 'all';
 }
 
+export interface SessionListGroupRequest {
+  projectID: string;
+  limit: number;
+  offset: number;
+}
+
+export interface SessionListGroup {
+  projectID: string;
+  items: Session[];
+  /** Every session of the group (after the search filter), not only this page. */
+  total?: number;
+  lastActivityAt?: number | null;
+}
+
 export interface SessionMessagePage {
   sessionID: string;
   items: Array<{ info: Record<string, unknown>; parts: SessionMessagePartPayload[] }>;
   hasMore: boolean;
   nextBefore?: string | null;
+  hasNewer?: boolean;
+  nextAfter?: string | null;
 }
 
 export interface SessionMessageListParams {
   limit?: number;
   before?: string | null;
+  after?: string | null;
+  around?: string | null;
   page?: boolean;
   include_archived?: boolean;
 }
@@ -214,6 +232,15 @@ export const sessionApi = {
   list: async (params?: SessionListParams): Promise<Session[]> => {
     const response = await client.get<Session[]>('/api/session', { params });
     return response.data;
+  },
+
+  /** Fetch one page per project from a single session snapshot. */
+  listGrouped: async (projects: SessionListGroupRequest[], search?: string): Promise<SessionListGroup[]> => {
+    const response = await client.post<{ groups: SessionListGroup[] }>('/api/session/list-grouped', {
+      projects,
+      search,
+    });
+    return response.data.groups;
   },
 
   /**

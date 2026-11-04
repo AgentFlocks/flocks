@@ -6,7 +6,6 @@ tool schema short, and load the full SKILL.md only after the model has already
 decided which skill applies.
 """
 
-import os
 from typing import List
 
 from flocks.tool.registry import (
@@ -114,12 +113,10 @@ async def skill_tool_impl(
         metadata={}
     )
     
-    # Load skill content
-    location = skill.location
-    
+    # Load skill content: from its file, or -- for a skill the deployment
+    # manages -- from its content source, one version for this session.
     try:
-        with open(location, 'r', encoding='utf-8') as f:
-            content = f.read()
+        content = await Skill.read_body(skill, scope=ctx.session_id)
     except Exception as e:
         return ToolResult(
             success=False,
@@ -127,7 +124,7 @@ async def skill_tool_impl(
         )
     
     # Get base directory
-    skill_dir = os.path.dirname(location)
+    skill_dir = Skill.base_directory(skill) or "(managed skill: no files on disk)"
 
     # Format output
     output = f"""## Skill: {skill.name}
@@ -201,8 +198,7 @@ async def get_skill(name: str) -> dict | None:
         return None
 
     try:
-        with open(skill.location, 'r', encoding='utf-8') as f:
-            content = f.read()
+        content = await Skill.read_body(skill)
     except Exception:
         content = ""
 

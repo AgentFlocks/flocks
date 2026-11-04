@@ -5,17 +5,19 @@ Validates todo CRUD operations and event publishing.
 """
 
 import pytest
+from collections import defaultdict
 from flocks.session.features.todo import Todo, TodoInfo, TodoStatus, TodoPriority
 from flocks.bus.bus import Bus
 from flocks.storage.storage import Storage
 
 
 @pytest.fixture(autouse=True)
-async def cleanup():
+async def cleanup(monkeypatch):
     """Clear storage and subscriptions before/after each test"""
     from flocks.storage.storage import Storage
     
-    Bus.clear_subscriptions()
+    monkeypatch.setattr(Bus, "_subscriptions", defaultdict(list))
+    monkeypatch.setattr(Bus, "_global_callback", None)
     
     # Clear storage before test
     await Storage.init()
@@ -29,7 +31,6 @@ async def cleanup():
     keys = await Storage.list_keys(prefix="todo:")
     for key in keys:
         await Storage.delete(key)
-    Bus.clear_subscriptions()
 
 
 @pytest.mark.asyncio

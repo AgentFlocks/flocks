@@ -754,6 +754,210 @@ def test_soc_overview_keeps_threat_names_and_types_separate(tmp_path: Path):
     } == {"web_attack": 1, "unknown": 1}
 
 
+def _overview_alert_store(db_path: Path, asset_date: str, records: list[dict], start: int) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE alert_records "
+            "(record_json TEXT NOT NULL, asset_date TEXT NOT NULL, event_time INTEGER NOT NULL)"
+        )
+        conn.executemany(
+            "INSERT INTO alert_records VALUES (?, ?, ?)",
+            [(json.dumps(record), asset_date, start + index) for index, record in enumerate(records)],
+        )
+        conn.commit()
+
+
+def _overview_stats(db_path: Path, monkeypatch: pytest.MonkeyPatch, date: str) -> dict:
+    handlers = _load_overview_handlers()
+    monkeypatch.setenv("FLOCKS_SOC_ALERTS_SQLITE_DB", str(db_path))
+    monkeypatch.setattr(handlers, "WORKFLOW_DB", db_path.parent / "no-workflow.db")
+    return handlers.get_stats(SimpleNamespace(), SimpleNamespace(query_params={"date": date}))
+
+
+def test_soc_overview_reports_the_model_verdicts_instead_of_estimating_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    # Raw fields that the removed estimate read as "attack succeeded" on every row.
+    records = []
+    for index in range(10):
+        verdict, result = ("attack", "failed") if index == 0 else ("non_attack", "unknown")
+        cached = index < 3
+        records.append({
+            "id": f"alert-{index}", "threat_name": "SQL injection", "_source_type": "tdp",
+            "threat_result": "success", "rsp_status_code": 200, "rsp_body_len": 120,
+            "is_duplicate": False, "dedup_key": f"key-{index}",
+            "triage_attack_verdict": verdict, "triage_attack_success": result,
+            "triage_source": "cache" if cached else "triaged", "triage_status": "cached" if cached else "ok",
+        })
+    db_path = tmp_path / "soc.db"
+    _overview_alert_store(db_path, "2026-09-03", records, int(datetime(2026, 9, 3, 10, 0).timestamp()))
+
+    result = _overview_stats(db_path, monkeypatch, "2026-09-03")
+
+    assert {item["key"]: item["value"] for item in result["verdicts"]} == {
+        "attack_success": 0, "attack": 0, "attack_failed": 1, "non_attack": 9, "unknown": 0,
+    }
+    assert (
+        result["triage"]["totalRecords"], result["triage"]["newTriaged"], result["triage"]["cacheHit"],
+    ) == (10, 7, 3)
+    assert result["timeline"] == {
+        "labels": ["2026-09-03"], "window": "按日统计",
+        "denoiseRaw": [10], "denoiseUnique": [10], "triageTotal": [10], "triageAttack": [1],
+    }
+
+
+def test_soc_overview_counts_each_triage_row_once_and_reads_legacy_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    records = [
+        {"triage_status": "ok", "triage_attack_verdict": "non_attack", "triage_attack_success": "unknown"},
+        {"triage_status": "failed", "triage_attack_verdict": "unknown", "triage_attack_success": "unknown"},
+        # Older rows kept the outcome in the verdict, with a boolean or no result.
+        {"triage_status": "ok", "triage_attack_verdict": "attack_failed", "triage_attack_success": False},
+        {"triage_status": "ok", "triage_attack_verdict": "attack_failed"},
+        {"triage_status": "ok", "triage_attack_verdict": "attack_success"},
+        {"triage_status": "ok", "triage_attack_verdict": "attack", "triage_attack_success": True},
+        # A migrated alert that was never triaged.
+        {"threat_name": "not triaged"},
+    ]
+    db_path = tmp_path / "soc.db"
+    _overview_alert_store(
+        db_path, "2026-09-04",
+        [{"id": str(index), **record} for index, record in enumerate(records)],
+        int(datetime(2026, 9, 4, 9, 0).timestamp()),
+    )
+
+    result = _overview_stats(db_path, monkeypatch, "2026-09-04")
+
+    assert {item["key"]: item["value"] for item in result["verdicts"]} == {
+        "attack_success": 2, "attack": 0, "attack_failed": 2, "non_attack": 1, "unknown": 1,
+    }
+    assert (
+        result["triage"]["totalRecords"], result["triage"]["triageFailed"], result["denoise"]["totalRaw"],
+    ) == (6, 1, 7)
+    # The failed row is pending once, not once as failed and again as unknown.
+    assert result["closedLoop"] == {
+        "autoClosed": 3, "resolved": 5, "manualDecision": 1, "pending": 1, "resolutionRate": round(5 / 6, 4),
+    }
+
+
+def test_soc_dashboard_holds_the_write_lock_while_its_triggers_are_down(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """An alert written while the projection triggers are being replaced would never reach the facts."""
+    db_path = tmp_path / "soc.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE alert_records (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "record_json TEXT NOT NULL, asset_date TEXT NOT NULL, event_time INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO alert_records(record_json, asset_date, event_time) VALUES (?, ?, ?)",
+            (json.dumps({"threat_name": "first"}), "2026-07-14", 1784014800),
+        )
+        conn.commit()
+    handlers = _load_dashboard_handlers()
+    handlers.DEFAULT_SQLITE_DB = db_path
+    handlers._schema_ready.clear()
+    assert handlers._ensure_sqlite_schema() is True
+    handlers._schema_ready.clear()  # a restart: same schema version, the triggers are replaced again
+
+    seen = {}
+    real_drop = handlers._drop_dashboard_triggers
+
+    def drop_then_another_writer(conn):
+        real_drop(conn)
+        other = sqlite3.connect(db_path, timeout=0)
+        try:
+            other.execute(
+                "INSERT INTO alert_records(record_json, asset_date, event_time) VALUES (?, ?, ?)",
+                (json.dumps({"threat_name": "second"}), "2026-07-14", 1784014900),
+            )
+            other.commit()
+            seen["written_meanwhile"] = True
+        except sqlite3.OperationalError:
+            seen["written_meanwhile"] = False  # it waits for the schema check (busy timeout in real writers)
+        finally:
+            other.close()
+
+    monkeypatch.setattr(handlers, "_drop_dashboard_triggers", drop_then_another_writer)
+    assert handlers._ensure_sqlite_schema() is True
+
+    with sqlite3.connect(db_path) as conn:
+        alerts = conn.execute("SELECT COUNT(*) FROM alert_records").fetchone()[0]
+        facts = conn.execute("SELECT COUNT(*) FROM soc_dashboard_alert_facts").fetchone()[0]
+    assert seen == {"written_meanwhile": False}
+    assert facts == alerts == 1
+
+
+def test_soc_dashboard_upgrades_an_older_facts_table_in_place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A schema version bump recomputes the facts where they are; no table or index is dropped."""
+    db_path = tmp_path / "soc.db"
+    record = {
+        "_source_type": "tdp", "threat_name": "SQL injection", "threat_type": "web_attack",
+        "triage_status": "ok", "_triage_persisted_at": "2026-07-14T13:00:00",
+        "triage_attack_verdict": "attack", "triage_attack_success": "success",
+    }
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE alert_records (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "record_json TEXT NOT NULL, asset_date TEXT NOT NULL, event_time INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO alert_records(record_json, asset_date, event_time) VALUES (?, ?, ?)",
+            (json.dumps(record), "2026-07-14", 1784014800),
+        )
+        conn.execute("CREATE TABLE soc_dashboard_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT NOT NULL)")
+        conn.execute("INSERT INTO soc_dashboard_meta VALUES ('schema_version', '3')")
+        # Schema version 3: verdict / attack_success instead of the triage_attack_* pair.
+        conn.execute(
+            "CREATE TABLE soc_dashboard_alert_facts (alert_row_id INTEGER PRIMARY KEY, "
+            "row_key TEXT NOT NULL UNIQUE, asset_date TEXT NOT NULL, event_time INTEGER, "
+            "source_type TEXT, threat_name TEXT, threat_type TEXT, is_duplicate INTEGER NOT NULL DEFAULT 0, "
+            "phase TEXT, direction TEXT, result TEXT, protocol TEXT, severity TEXT, response_code TEXT, "
+            "port TEXT, has_triage INTEGER NOT NULL DEFAULT 0, triage_persisted_at TEXT, triage_status TEXT, "
+            "triage_source TEXT, verdict TEXT, risk_level TEXT, triage_ms INTEGER NOT NULL DEFAULT 0, "
+            "attack_success INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute(
+            "INSERT INTO soc_dashboard_alert_facts (alert_row_id, row_key, asset_date, verdict) "
+            "VALUES (1, '1', '2026-07-14', 'attack'), (999, 'gone', '2026-07-13', 'benign')"
+        )
+        conn.commit()
+
+    dropped = []
+    real_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+
+        def authorizer(action, name, *_):
+            if action in (sqlite3.SQLITE_DROP_TABLE, sqlite3.SQLITE_DROP_INDEX):
+                dropped.append(name)
+            return sqlite3.SQLITE_OK
+
+        connection.set_authorizer(authorizer)
+        return connection
+
+    handlers = _load_dashboard_handlers()
+    handlers.DEFAULT_SQLITE_DB = db_path
+    handlers._schema_ready.clear()
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite3, "connect", connect)
+        assert handlers._ensure_sqlite_schema() is True
+
+    with sqlite3.connect(db_path) as conn:
+        facts = conn.execute(
+            "SELECT alert_row_id, row_key, threat_type, has_triage, triage_attack_verdict, "
+            "triage_attack_success FROM soc_dashboard_alert_facts ORDER BY alert_row_id"
+        ).fetchall()
+        version = conn.execute(
+            "SELECT meta_value FROM soc_dashboard_meta WHERE meta_key='schema_version'"
+        ).fetchone()[0]
+
+    assert dropped == []
+    assert facts == [(1, "1", "web_attack", 1, "attack", "success")]
+    assert version == "4"
+
+
 def test_soc_dashboard_activity_does_not_mix_name_type_or_risk_fields():
     handlers = _load_dashboard_handlers()
     row = {
@@ -836,6 +1040,60 @@ def test_soc_alert_verdict_uses_model_triage_instead_of_raw_attack_result():
         {"attack_verdict": "attack_success", "attack_success": True, "threat_result": "success"}
     ) == "unknown"
     assert operations._verdict_bucket({"threat_result": "success"}) == "unknown"
+
+
+# Records as the triage workflow wrote them over time: the current pair of fields,
+# and older ones that kept the outcome in the verdict or as a boolean.
+ATTACK_OUTCOMES = [
+    ({"triage_attack_verdict": "attack_success"}, "success"),
+    ({"triage_attack_verdict": "attack_failed"}, "failed"),
+    ({"triage_attack_verdict": "attack_failed", "triage_attack_success": False}, "failed"),
+    ({"triage_attack_verdict": "attack_success", "triage_attack_success": False}, "success"),
+    ({"triage_attack_verdict": "attack", "triage_attack_success": True}, "success"),
+    ({"triage_attack_verdict": "attack", "triage_attack_success": False}, "unknown"),
+    ({"triage_attack_verdict": "attack", "triage_attack_success": "failed"}, "failed"),
+    ({"triage_attack_verdict": "attack_success", "triage_attack_success": "unknown"}, "unknown"),
+    ({"triage_attack_verdict": "non_attack", "triage_attack_success": "success"}, "unknown"),
+]
+
+
+def _load_workspace_query_tool():
+    path = (
+        Path(__file__).resolve().parents[2]
+        / ".flocks/flockshub/plugins/tools/python/soc_workspace_query/soc_workspace_query.py"
+    )
+    spec = importlib.util.spec_from_file_location("soc_workspace_query_outcome_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module
+
+
+@pytest.mark.parametrize("record,expected", ATTACK_OUTCOMES)
+def test_every_soc_entry_reads_an_attack_outcome_the_same_way(record, expected):
+    """Alerts page, posture dashboard (Python and SQL), overview and the query tool (Python and SQL)."""
+    dashboard = _load_dashboard_handlers()
+    query_tool = _load_workspace_query_tool()
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute("CREATE TABLE alert_records (record_json TEXT NOT NULL)")
+        conn.execute("INSERT INTO alert_records VALUES (?)", (json.dumps(record),))
+        dashboard_sql = conn.execute(
+            f"SELECT {dashboard._fact_expressions('source')[-1]} FROM alert_records AS source"
+        ).fetchone()[0]
+        query_sql = conn.execute(f"SELECT {query_tool.ATTACK_RESULT_SQL} FROM alert_records").fetchone()[0]
+
+    readings = {
+        "alerts": _load_alert_operations()._triage_attack_success(record),
+        "dashboard": dashboard._triage_attack_success_value(record),
+        "dashboard_sql": dashboard_sql,
+        "overview": _load_overview_handlers()._triage_attack_success_value(record),
+        "query_tool": query_tool._attack_result(record),
+        "query_tool_sql": query_sql,
+    }
+    assert readings == dict.fromkeys(readings, expected)
 
 
 def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path: Path):

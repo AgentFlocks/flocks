@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from flocks.tool.file.mkdir import mkdir_tool
 from flocks.tool.file.move import move_tool
 from flocks.tool.file.write import write_tool
 from flocks.tool.registry import ToolContext
+from tests.helpers.filesystem_races import swap_after_listing
 
 
 def _ruleset(*rules: tuple[str, str]) -> list[PermissionRule]:
@@ -341,20 +343,19 @@ async def test_a_change_made_while_waiting_for_permission_is_not_overwritten(tmp
 
 
 @pytest.mark.asyncio
-async def test_copy_sees_the_files_a_directory_link_in_the_source_brings_along(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    # copytree follows directory links, so the linked files land in the copy.
+async def test_copy_keeps_directory_links_in_the_source_as_links(tmp_path: Path, monkeypatch) -> None:
+    # Nothing a link inside the source points at is read: the link is copied as a link.
     (tmp_path / "outside").mkdir()
     (tmp_path / "outside" / "secret.txt").write_text("secret\n", encoding="utf-8")
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "link").symlink_to(tmp_path / "outside", target_is_directory=True)
     ctx = _rule_ctx(tmp_path, monkeypatch, ("edit", "*", "allow"), ("edit", "copied/link/secret.txt", "deny"))
 
-    with pytest.raises(PermissionError):
-        await copy_tool(ctx=ctx, sourcePath="src", targetPath="copied")
+    result = await copy_tool(ctx=ctx, sourcePath="src", targetPath="copied")
 
-    assert not (tmp_path / "copied").exists()
+    assert result.success is True, result.error
+    assert (tmp_path / "copied" / "link").is_symlink()
+    assert os.readlink(tmp_path / "copied" / "link") == str(tmp_path / "outside")
 
 
 TWO_LINKS = {"shared": None, "src/l1": "shared", "src/l2": "shared"}
@@ -363,19 +364,19 @@ LINK_TO_SIBLING = {"src/data": None, "src/link": "src/data"}
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("layout", "denied"),
+    ("layout", "denied", "written"),
     [
-        (TWO_LINKS, "copied/l1/secret.txt"),
-        (TWO_LINKS, "copied/l2/secret.txt"),
-        (LINK_TO_SIBLING, "copied/data/secret.txt"),
-        (LINK_TO_SIBLING, "copied/link/secret.txt"),
+        (TWO_LINKS, "copied/l1/secret.txt", False),
+        (TWO_LINKS, "copied/l2/secret.txt", False),
+        (LINK_TO_SIBLING, "copied/data/secret.txt", True),
+        (LINK_TO_SIBLING, "copied/link/secret.txt", False),
     ],
     ids=["two-links-first", "two-links-second", "sibling-directory", "sibling-link"],
 )
-async def test_copy_sees_every_path_that_reaches_the_same_directory(
-    tmp_path: Path, monkeypatch, layout: dict, denied: str,
+async def test_copy_writes_only_what_the_source_really_holds(
+    tmp_path: Path, monkeypatch, layout: dict, denied: str, written: bool,
 ) -> None:
-    # copytree copies a directory again for every link that reaches it.
+    # A directory is copied; a path only a link reaches is not written, so its rule is not asked.
     for name, link_target in layout.items():
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -386,22 +387,27 @@ async def test_copy_sees_every_path_that_reaches_the_same_directory(
             path.symlink_to(tmp_path / link_target, target_is_directory=True)
     ctx = _rule_ctx(tmp_path, monkeypatch, ("edit", "*", "allow"), ("edit", denied, "deny"))
 
-    with pytest.raises(PermissionError):
-        await copy_tool(ctx=ctx, sourcePath="src", targetPath="copied")
-
-    assert not (tmp_path / "copied").exists()
+    if written:
+        with pytest.raises(PermissionError):
+            await copy_tool(ctx=ctx, sourcePath="src", targetPath="copied")
+        assert not (tmp_path / "copied").exists()
+        return
+    result = await copy_tool(ctx=ctx, sourcePath="src", targetPath="copied")
+    assert result.success is True, result.error
+    for name, link_target in layout.items():
+        if name.startswith("src/") and link_target is not None:
+            assert (tmp_path / "copied" / name.removeprefix("src/")).is_symlink()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("link_target", ["src", "."], ids=["to-the-source", "above-the-source"])
-async def test_copy_refuses_a_source_with_a_link_back_into_itself(tmp_path: Path, link_target: str) -> None:
+async def test_copy_copies_a_link_back_into_the_source_as_a_link(tmp_path: Path, link_target: str) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "a.txt").write_text("a\n", encoding="utf-8")
     (tmp_path / "src" / "loop").symlink_to((tmp_path / link_target).resolve(), target_is_directory=True)
-    requests: list = []
 
-    async def _approve(request) -> None:
-        requests.append(request)
+    async def _approve(_request) -> None:
+        return None
 
     ctx = ToolContext(
         session_id="ses_loop", message_id="msg_loop",
@@ -411,16 +417,224 @@ async def test_copy_refuses_a_source_with_a_link_back_into_itself(tmp_path: Path
 
     result = await copy_tool(ctx=ctx, sourcePath="src", targetPath="copied")
 
-    assert result.success is False
-    assert "links back" in (result.error or "")
-    assert requests == []
-    assert not (tmp_path / "copied").exists()
+    assert result.success is True, result.error
+    assert (tmp_path / "copied" / "loop").is_symlink()
+    assert (tmp_path / "copied" / "a.txt").read_text(encoding="utf-8") == "a\n"
+
+
+def _names_under(root: Path) -> set[str]:
+    """Every name under ``root`` without going through links."""
+    found: set[str] = set()
+    for _directory, directories, files in os.walk(root, followlinks=False):
+        found.update(directories)
+        found.update(files)
+    return found
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", ["copy", "move"])
-async def test_landing_through_a_link_in_the_target_is_judged_where_it_writes(
-    tmp_path: Path, monkeypatch, tool: str,
+async def test_an_inner_link_retargeted_while_listing_brings_nothing_of_theirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A link inside the source is pointed at another user's directory as the tree is listed."""
+    from flocks.tool import path_utils
+
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    (safe / "ok.txt").write_text("ok\n", encoding="utf-8")
+    other = tmp_path / "other_user"
+    other.mkdir()
+    (other / "their-private-name.txt").write_text("theirs\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "link").symlink_to(safe, target_is_directory=True)
+    list_tree = path_utils.tree_entries
+
+    def retarget_then_list(*args, **kwargs):
+        if os.readlink(src / "link") != str(other):
+            (src / "link").unlink()
+            (src / "link").symlink_to(other, target_is_directory=True)
+        return list_tree(*args, **kwargs)
+
+    monkeypatch.setattr(copy_module, "tree_entries", retarget_then_list)
+    requests: list = []
+
+    async def _approve(request) -> None:
+        requests.append(request)
+
+    ctx = ToolContext(
+        session_id="ses_inner_listing", message_id="msg_inner_listing",
+        permission_callback=_approve, extra={"workspace_dir": str(tmp_path)},
+    )
+
+    result = await copy_tool(ctx=ctx, sourcePath="src", targetPath="dest")
+
+    assert result.success is True, result.error
+    assert "their-private-name" not in repr([(r.patterns, r.metadata) for r in requests])
+    assert (tmp_path / "dest" / "link").is_symlink()
+    assert "their-private-name.txt" not in _names_under(tmp_path / "dest")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["copy", "delete", "move"])
+async def test_a_directory_replaced_by_a_link_as_it_is_listed_is_not_asked_about(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str,
+) -> None:
+    """``src/sub`` is a real directory when ``src`` is listed and a link to their files when read."""
+    src = tmp_path / "src"
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "mine.txt").write_text("mine\n", encoding="utf-8")
+    other = tmp_path / "other_user"
+    other.mkdir()
+    (other / "their-private-name.txt").write_text("theirs\n", encoding="utf-8")
+    swap_after_listing(monkeypatch, src, "sub", lambda: (
+        (src / "sub").rename(tmp_path / "parked"),
+        (src / "sub").symlink_to(other, target_is_directory=True),
+    ))
+    requests: list = []
+
+    async def _approve(request) -> None:
+        requests.append(request)
+
+    ctx = ToolContext(
+        session_id="ses_sub_swap", message_id="msg_sub_swap",
+        permission_callback=_approve, extra={"workspace_dir": str(tmp_path)},
+    )
+    calls = {
+        "copy": lambda: copy_tool(ctx=ctx, sourcePath="src", targetPath="copied"),
+        "delete": lambda: delete_tool(ctx=ctx, path="src"),
+        "move": lambda: move_tool(ctx=ctx, sourcePath="src", targetPath="moved"),
+    }
+
+    result = await calls[tool]()
+
+    assert result.success is False
+    assert requests == []
+    assert (other / "their-private-name.txt").read_text(encoding="utf-8") == "theirs\n"
+
+
+async def _approve_all(_request) -> None:
+    return None
+
+
+def _copy_ctx(tmp_path: Path) -> ToolContext:
+    return ToolContext(
+        session_id="ses_copy_again", message_id="msg_copy_again",
+        permission_callback=_approve_all, extra={"workspace_dir": str(tmp_path)},
+    )
+
+
+@pytest.mark.asyncio
+async def test_copying_a_tree_with_links_again_updates_the_copy(tmp_path: Path) -> None:
+    for name in ("one", "two"):
+        (tmp_path / name).mkdir()
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_text("first\n", encoding="utf-8")
+    (src / "link").symlink_to(tmp_path / "one", target_is_directory=True)
+    assert (await copy_tool(ctx=_copy_ctx(tmp_path), sourcePath="src", targetPath="copied")).success
+
+    (src / "a.txt").write_text("second\n", encoding="utf-8")
+    (src / "link").unlink()
+    (src / "link").symlink_to(tmp_path / "two", target_is_directory=True)
+    result = await copy_tool(ctx=_copy_ctx(tmp_path), sourcePath="src", targetPath="copied")
+
+    assert result.success is True, result.error
+    assert (tmp_path / "copied" / "a.txt").read_text(encoding="utf-8") == "second\n"
+    assert os.readlink(tmp_path / "copied" / "link") == str(tmp_path / "two")
+
+
+@pytest.mark.asyncio
+async def test_a_link_takes_the_place_of_a_file_but_not_of_a_directory(tmp_path: Path) -> None:
+    (tmp_path / "elsewhere").mkdir()
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_text("new\n", encoding="utf-8")
+    (src / "link").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    copied = tmp_path / "copied"
+    copied.mkdir()
+    (copied / "link").write_text("a file\n", encoding="utf-8")
+
+    assert (await copy_tool(ctx=_copy_ctx(tmp_path), sourcePath="src", targetPath="copied")).success
+    assert (copied / "link").is_symlink()
+
+    other = tmp_path / "copied_dir"
+    (other / "link").mkdir(parents=True)
+    (other / "a.txt").write_text("old\n", encoding="utf-8")
+    result = await copy_tool(ctx=_copy_ctx(tmp_path), sourcePath="src", targetPath="copied_dir")
+
+    # Refused before anything was written: no half-merged copy.
+    assert result.success is False
+    assert "is a directory where the source has a link" in (result.error or "")
+    assert (other / "link").is_dir() and not (other / "link").is_symlink()
+    assert (other / "a.txt").read_text(encoding="utf-8") == "old\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["edit", "apply_patch"])
+async def test_an_error_after_a_swap_while_reading_quotes_nothing_of_theirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str,
+) -> None:
+    """The path is swapped just as the file is opened; the edit then fails on their content."""
+    import builtins
+    import importlib
+
+    work = tmp_path / "work"
+    work.mkdir()
+    other = tmp_path / "other_user"
+    other.mkdir()
+    (work / "report.txt").write_text("mine\n", encoding="utf-8")
+    (other / "report.txt").write_text("their private line\n", encoding="utf-8")
+    module = importlib.import_module(f"flocks.tool.file.{tool}")
+    open_by_descriptor = os.open
+
+    def swap() -> None:
+        if not work.is_symlink():
+            work.rename(tmp_path / "parked")
+            work.symlink_to(other, target_is_directory=True)
+
+    def open_after_the_swap(file, *args, **kwargs):
+        if str(file).endswith("report.txt"):
+            swap()
+        return builtins.open(file, *args, **kwargs)
+
+    def open_descriptor_after_the_swap(file, *args, **kwargs):
+        if str(file).endswith("report.txt"):
+            swap()
+        return open_by_descriptor(file, *args, **kwargs)
+
+    # By path (builtins.open) or through the directory's descriptor (os.open).
+    monkeypatch.setattr(module, "open", open_after_the_swap, raising=False)
+    monkeypatch.setattr(os, "open", open_descriptor_after_the_swap)
+    requests: list = []
+
+    async def _approve(request) -> None:
+        requests.append(request)
+
+    ctx = ToolContext(
+        session_id="ses_read_swap", message_id="msg_read_swap",
+        permission_callback=_approve, extra={"workspace_dir": str(tmp_path)},
+    )
+    calls = {
+        "edit": lambda: edit_tool(
+            ctx=ctx, filePath="work/report.txt", edits=[{"oldString": "mine", "newString": "changed"}],
+        ),
+        "apply_patch": lambda: apply_patch_tool(ctx=ctx, patchText=(
+            "*** Begin Patch\n*** Update File: work/report.txt\n@@\n-mine\n+changed\n*** End Patch\n"
+        )),
+    }
+
+    result = await calls[tool]()
+
+    assert result.success is False
+    assert "changed after it was checked" in (result.error or "")
+    assert "their private" not in (result.error or "")
+    assert requests == []
+    assert (other / "report.txt").read_text(encoding="utf-8") == "their private line\n"
+
+
+@pytest.mark.asyncio
+async def test_landing_through_a_link_named_as_the_target_is_judged_where_it_writes(
+    tmp_path: Path, monkeypatch,
 ) -> None:
     (tmp_path / "protected").mkdir()
     (tmp_path / "dest").mkdir()
@@ -429,16 +643,30 @@ async def test_landing_through_a_link_in_the_target_is_judged_where_it_writes(
     (tmp_path / "src" / "sub" / "x.txt").write_text("new\n", encoding="utf-8")
     ctx = _rule_ctx(tmp_path, monkeypatch, *PROTECTED)
 
+    # dest/sub, as named, is protected/ once resolved: the file would land there.
     with pytest.raises(PermissionError):
-        if tool == "copy":
-            # copytree merges src into dest and writes dest/sub/x.txt, i.e. protected/x.txt.
-            await copy_tool(ctx=ctx, sourcePath="src", targetPath="dest")
-        else:
-            # dest/sub is an existing directory: the file lands in protected/.
-            await move_tool(ctx=ctx, sourcePath="src/sub/x.txt", targetPath="dest/sub")
+        await move_tool(ctx=ctx, sourcePath="src/sub/x.txt", targetPath="dest/sub")
 
     assert not (tmp_path / "protected" / "x.txt").exists()
     assert (tmp_path / "src" / "sub" / "x.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_link_inside_the_target_is_replaced_not_written_through(tmp_path: Path, monkeypatch) -> None:
+    """Merging into a tree, a link standing where the source has a directory is replaced by it."""
+    (tmp_path / "protected").mkdir()
+    (tmp_path / "dest").mkdir()
+    (tmp_path / "dest" / "sub").symlink_to(tmp_path / "protected", target_is_directory=True)
+    (tmp_path / "src" / "sub").mkdir(parents=True)
+    (tmp_path / "src" / "sub" / "x.txt").write_text("new\n", encoding="utf-8")
+    ctx = _rule_ctx(tmp_path, monkeypatch, *PROTECTED)
+
+    result = await copy_tool(ctx=ctx, sourcePath="src", targetPath="dest")
+
+    assert result.success is True, result.error
+    assert not (tmp_path / "dest" / "sub").is_symlink()
+    assert (tmp_path / "dest" / "sub" / "x.txt").read_text(encoding="utf-8") == "new\n"
+    assert list((tmp_path / "protected").iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -536,3 +764,360 @@ async def test_target_becoming_a_directory_while_waiting_is_not_covered(tmp_path
 
     assert result.success is False
     assert not (tmp_path / "dest" / "a.txt").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["write", "edit", "apply_patch", "mkdir", "delete", "copy", "move"])
+async def test_a_path_redirected_while_waiting_for_permission_is_refused(tmp_path: Path, tool: str) -> None:
+    """A directory on the way swapped for a link during the wait (arch_v2).
+
+    The paths were checked against the workspace and policy bindings before
+    the wait; afterwards they would lead into another user's files.  The
+    other user's file has the same text, so comparing contents alone passes.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    other = tmp_path / "other_user"
+    other.mkdir()
+    (work / "report.txt").write_text("mine\n", encoding="utf-8")
+    (other / "report.txt").write_text("mine\n", encoding="utf-8")
+
+    async def _approve_after_the_redirect(_request) -> None:
+        work.rename(tmp_path / "parked")
+        work.symlink_to(other, target_is_directory=True)
+
+    ctx = ToolContext(
+        session_id="ses_redirect", message_id="msg_redirect",
+        permission_callback=_approve_after_the_redirect,
+        extra={"workspace_dir": str(tmp_path)},
+    )
+    calls = {
+        "write": lambda: write_tool(ctx=ctx, content="new\n", filePath="work/report.txt"),
+        "edit": lambda: edit_tool(
+            ctx=ctx, filePath="work/report.txt", edits=[{"oldString": "mine", "newString": "changed"}],
+        ),
+        "apply_patch": lambda: apply_patch_tool(ctx=ctx, patchText=(
+            "*** Begin Patch\n*** Update File: work/report.txt\n@@\n-mine\n+changed\n*** End Patch\n"
+        )),
+        "mkdir": lambda: mkdir_tool(ctx=ctx, path="work/new_dir"),
+        "delete": lambda: delete_tool(ctx=ctx, path="work/report.txt"),
+        "copy": lambda: copy_tool(ctx=ctx, sourcePath="work/report.txt", targetPath="work/copy.txt"),
+        "move": lambda: move_tool(ctx=ctx, sourcePath="work/report.txt", targetPath="work/moved.txt"),
+    }
+
+    result = await calls[tool]()
+
+    assert result.success is False
+    assert "changed while waiting for permission" in (result.error or "")
+    assert sorted(entry.name for entry in other.iterdir()) == ["report.txt"]
+    assert (other / "report.txt").read_text(encoding="utf-8") == "mine\n"
+    assert (tmp_path / "parked" / "report.txt").read_text(encoding="utf-8") == "mine\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["write", "edit", "apply_patch", "mkdir", "delete", "copy", "move"])
+async def test_a_path_redirected_before_the_tool_looks_again_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str,
+) -> None:
+    """The swap lands right after the path was checked, before the snapshot is taken.
+
+    A snapshot of where the path leads at that point would take the link as
+    the baseline; the path as it was checked is the baseline instead.
+    """
+    import importlib
+
+    from flocks.tool import path_utils
+
+    work = tmp_path / "work"
+    work.mkdir()
+    other = tmp_path / "other_user"
+    other.mkdir()
+    (work / "report.txt").write_text("mine\n", encoding="utf-8")
+    (other / "report.txt").write_text("mine\n", encoding="utf-8")
+    resolve = path_utils.resolve_tool_path
+
+    async def resolve_then_redirect(*args, **kwargs):
+        resolution = await resolve(*args, **kwargs)
+        if not work.is_symlink():
+            # Another task, scheduled right after the check.
+            work.rename(tmp_path / "parked")
+            work.symlink_to(other, target_is_directory=True)
+        return resolution
+
+    for name in ("write", "edit", "apply_patch", "mkdir", "delete", "copy", "move"):
+        monkeypatch.setattr(importlib.import_module(f"flocks.tool.file.{name}"), "resolve_tool_path", resolve_then_redirect)
+
+    # Their file matches the edit too, so only the check keeps it out of a diff.
+    (other / "report.txt").write_text("mine\ntheir secret\n", encoding="utf-8")
+    requests: list = []
+
+    async def _approve(request) -> None:
+        requests.append(request)
+
+    ctx = ToolContext(
+        session_id="ses_redirect", message_id="msg_redirect",
+        permission_callback=_approve, extra={"workspace_dir": str(tmp_path)},
+    )
+    calls = {
+        "write": lambda: write_tool(ctx=ctx, content="new\n", filePath="work/report.txt"),
+        "edit": lambda: edit_tool(
+            ctx=ctx, filePath="work/report.txt", edits=[{"oldString": "mine", "newString": "changed"}],
+        ),
+        "apply_patch": lambda: apply_patch_tool(ctx=ctx, patchText=(
+            "*** Begin Patch\n*** Update File: work/report.txt\n@@\n-mine\n+changed\n*** End Patch\n"
+        )),
+        "mkdir": lambda: mkdir_tool(ctx=ctx, path="work/new_dir"),
+        "delete": lambda: delete_tool(ctx=ctx, path="work/report.txt"),
+        "copy": lambda: copy_tool(ctx=ctx, sourcePath="work/report.txt", targetPath="work/copy.txt"),
+        "move": lambda: move_tool(ctx=ctx, sourcePath="work/report.txt", targetPath="work/moved.txt"),
+    }
+
+    result = await calls[tool]()
+
+    assert result.success is False
+    # Nothing read or listed through the link reaches an approval request.
+    assert requests == []
+    assert sorted(entry.name for entry in other.iterdir()) == ["report.txt"]
+    assert (other / "report.txt").read_text(encoding="utf-8") == "mine\ntheir secret\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["copy", "delete", "move"])
+async def test_names_listed_through_a_path_redirected_meanwhile_are_not_asked_about(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool: str,
+) -> None:
+    """The swap lands while the tree is being listed for the approval request."""
+    from flocks.tool import path_utils
+
+    work = tmp_path / "work"
+    (work / "tree").mkdir(parents=True)
+    (work / "tree" / "mine.txt").write_text("mine\n", encoding="utf-8")
+    other = tmp_path / "other_user"
+    (other / "tree").mkdir(parents=True)
+    (other / "tree" / "their-private-name.txt").write_text("theirs\n", encoding="utf-8")
+    module = {"copy": copy_module, "delete": delete_module, "move": move_module}[tool]
+    list_tree = path_utils.tree_entries
+
+    def list_after_the_swap(*args, **kwargs):
+        if not work.is_symlink():
+            work.rename(tmp_path / "parked")
+            work.symlink_to(other, target_is_directory=True)
+        return list_tree(*args, **kwargs)
+
+    monkeypatch.setattr(module, "tree_entries", list_after_the_swap)
+    requests: list = []
+
+    async def _approve(request) -> None:
+        requests.append(request)
+
+    ctx = ToolContext(
+        session_id="ses_listing", message_id="msg_listing",
+        permission_callback=_approve, extra={"workspace_dir": str(tmp_path)},
+    )
+    calls = {
+        "copy": lambda: copy_tool(ctx=ctx, sourcePath="work/tree", targetPath="copied"),
+        "delete": lambda: delete_tool(ctx=ctx, path="work/tree"),
+        "move": lambda: move_tool(ctx=ctx, sourcePath="work/tree", targetPath="moved"),
+    }
+
+    result = await calls[tool]()
+
+    assert result.success is False
+    assert requests == []
+    assert (other / "tree" / "their-private-name.txt").read_text(encoding="utf-8") == "theirs\n"
+
+
+@pytest.mark.asyncio
+async def test_a_hard_link_put_in_place_while_waiting_is_refused(tmp_path: Path) -> None:
+    """Same path, but now another user's file (a hard link): not the approved file."""
+    (tmp_path / "report.txt").write_text("mine\n", encoding="utf-8")
+    other = tmp_path / "other_user.txt"
+    other.write_text("mine\n", encoding="utf-8")
+
+    async def _approve_after_the_swap(_request) -> None:
+        (tmp_path / "report.txt").unlink()
+        (tmp_path / "report.txt").hardlink_to(other)
+
+    ctx = ToolContext(
+        session_id="ses_hardlink", message_id="msg_hardlink",
+        permission_callback=_approve_after_the_swap,
+        extra={"workspace_dir": str(tmp_path)},
+    )
+
+    result = await edit_tool(
+        ctx=ctx, filePath="report.txt", edits=[{"oldString": "mine", "newString": "changed"}],
+    )
+
+    assert result.success is False
+    assert other.read_text(encoding="utf-8") == "mine\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["write", "edit", "apply_patch", "mkdir", "delete", "copy", "move"])
+async def test_parent_path_rules_hold_for_a_child_in_another_directory(
+    tmp_path: Path, monkeypatch, tool: str,
+) -> None:
+    """A delegated child with its own session directory (arch_v2).
+
+    The child names paths relative to its directory ("../parent/protected/a.txt");
+    the parent's rules are relative to the parent's ("protected/*").
+    """
+    parent_dir = tmp_path / "parent"
+    child_dir = tmp_path / "child"
+    (parent_dir / "protected").mkdir(parents=True)
+    child_dir.mkdir()
+    protected_file = parent_dir / "protected" / "a.txt"
+    protected_file.write_text("old\n", encoding="utf-8")
+    (child_dir / "x.txt").write_text("x\n", encoding="utf-8")
+    parent = _session("ses_parent")
+    parent.directory = str(parent_dir)
+    parent.permission = [
+        SimpleNamespace(permission=permission, action=action, pattern=pattern)
+        for permission, pattern, action in PROTECTED
+    ]
+    child = _session("ses_child", category="task", parent_id="ses_parent", rules=(("edit", "allow"),))
+    child.directory = str(child_dir)
+    runner = _runner(monkeypatch, child, {"ses_parent": parent})
+    ctx = ToolContext(
+        session_id="ses_child", message_id="msg_child",
+        permission_callback=runner._handle_permission,
+        extra={"workspace_dir": str(child_dir)},
+    )
+    target = str(protected_file)
+    calls = {
+        "write": lambda: write_tool(ctx=ctx, content="new\n", filePath=target),
+        "edit": lambda: edit_tool(ctx=ctx, filePath=target, edits=[{"oldString": "old", "newString": "new"}]),
+        "apply_patch": lambda: apply_patch_tool(ctx=ctx, patchText=(
+            f"*** Begin Patch\n*** Update File: {target}\n@@\n-old\n+new\n*** End Patch\n"
+        )),
+        "mkdir": lambda: mkdir_tool(ctx=ctx, path=str(parent_dir / "protected" / "sub")),
+        "delete": lambda: delete_tool(ctx=ctx, path=target),
+        "copy": lambda: copy_tool(
+            ctx=ctx, sourcePath="x.txt", targetPath=str(parent_dir / "protected" / "x.txt"),
+        ),
+        "move": lambda: move_tool(ctx=ctx, sourcePath=target, targetPath="moved.txt"),
+    }
+
+    with pytest.raises(PermissionError, match="Permission denied: edit"):
+        await calls[tool]()
+
+    assert protected_file.read_text(encoding="utf-8") == "old\n"
+    assert sorted(entry.name for entry in (parent_dir / "protected").iterdir()) == ["a.txt"]
+    assert not (child_dir / "moved.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_child_in_another_directory_still_reaches_what_the_parent_allows(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    parent_dir = tmp_path / "parent"
+    child_dir = tmp_path / "child"
+    (parent_dir / "protected").mkdir(parents=True)
+    child_dir.mkdir()
+    parent = _session("ses_parent")
+    parent.directory = str(parent_dir)
+    parent.permission = [
+        SimpleNamespace(permission=permission, action=action, pattern=pattern)
+        for permission, pattern, action in PROTECTED
+    ]
+    child = _session("ses_child", category="task", parent_id="ses_parent", rules=(("edit", "allow"),))
+    child.directory = str(child_dir)
+    runner = _runner(monkeypatch, child, {"ses_parent": parent})
+    ctx = ToolContext(
+        session_id="ses_child", message_id="msg_child",
+        permission_callback=runner._handle_permission,
+        extra={"workspace_dir": str(child_dir)},
+    )
+
+    result = await write_tool(ctx=ctx, content="ok\n", filePath=str(parent_dir / "notes.txt"))
+    own = await write_tool(ctx=ctx, content="ok\n", filePath="drafts/draft.txt")
+
+    assert result.success is True and own.success is True
+    assert (parent_dir / "notes.txt").read_text(encoding="utf-8") == "ok\n"
+    assert (child_dir / "drafts" / "draft.txt").read_text(encoding="utf-8") == "ok\n"
+
+
+@pytest.mark.asyncio
+async def test_copy_refuses_a_link_inside_the_source_retargeted_while_waiting(tmp_path: Path) -> None:
+    """The link the request listed was replaced by one pointing elsewhere (arch_v2)."""
+    safe = tmp_path / "safe"
+    other = tmp_path / "other_user"
+    for directory in (safe, other):
+        directory.mkdir()
+        (directory / "file.txt").write_text(f"{directory.name}\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "link").symlink_to(safe, target_is_directory=True)
+
+    async def _approve_after_retargeting(_request) -> None:
+        (src / "link").unlink()
+        (src / "link").symlink_to(other, target_is_directory=True)
+
+    ctx = ToolContext(
+        session_id="ses_inner", message_id="msg_inner",
+        permission_callback=_approve_after_retargeting,
+        extra={"workspace_dir": str(tmp_path)},
+    )
+
+    result = await copy_tool(ctx=ctx, sourcePath="src", targetPath="dest")
+
+    assert result.success is False
+    assert "changed while waiting for permission" in (result.error or "")
+    assert not (tmp_path / "dest").exists()
+
+
+@pytest.mark.asyncio
+async def test_copy_refuses_a_hard_link_put_under_the_target_while_waiting(tmp_path: Path) -> None:
+    """copytree overwrites existing files in the target; one became another user's file."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "report.txt").write_text("new\n", encoding="utf-8")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "report.txt").write_text("old\n", encoding="utf-8")
+    other = tmp_path / "other_user.txt"
+    other.write_text("theirs\n", encoding="utf-8")
+
+    async def _approve_after_the_swap(_request) -> None:
+        (dest / "report.txt").unlink()
+        (dest / "report.txt").hardlink_to(other)
+
+    ctx = ToolContext(
+        session_id="ses_dest", message_id="msg_dest",
+        permission_callback=_approve_after_the_swap,
+        extra={"workspace_dir": str(tmp_path)},
+    )
+
+    result = await copy_tool(ctx=ctx, sourcePath="src", targetPath="dest")
+
+    assert result.success is False
+    assert other.read_text(encoding="utf-8") == "theirs\n"
+
+
+@pytest.mark.asyncio
+async def test_parent_rules_judge_an_absolute_pattern_where_it_points(tmp_path: Path, monkeypatch) -> None:
+    """A tool that could not make a path relative (another drive on Windows) sends it absolute."""
+    parent_dir = tmp_path / "parent"
+    child_dir = tmp_path / "child"
+    (parent_dir / "protected").mkdir(parents=True)
+    child_dir.mkdir()
+    parent = _session("ses_parent")
+    parent.directory = str(parent_dir)
+    parent.permission = [
+        SimpleNamespace(permission=permission, action=action, pattern=pattern)
+        for permission, pattern, action in PROTECTED
+    ]
+    child = _session("ses_child", category="task", parent_id="ses_parent", rules=(("edit", "allow"),))
+    child.directory = str(child_dir)
+    runner = _runner(monkeypatch, child, {"ses_parent": parent})
+    request = SimpleNamespace(
+        permission="edit",
+        patterns=[str(parent_dir / "protected" / "a.txt")],
+        always=["*"],
+        metadata={"tool": "write", "filepath": str(parent_dir / "protected" / "a.txt"),
+                  "pattern_base": str(child_dir)},
+        message_id="msg_abs",
+    )
+
+    with pytest.raises(PermissionError, match="Permission denied: edit"):
+        await runner._handle_permission(request)

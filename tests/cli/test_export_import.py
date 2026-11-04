@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -13,7 +14,9 @@ from flocks.storage.storage import Storage
 if not hasattr(mcp_server, "get_manager"):
     mcp_server.get_manager = lambda: None
 
-from flocks.server.client import SessionClient
+import httpx
+
+from flocks.server.client import FlocksClient
 
 runner = CliRunner()
 
@@ -70,12 +73,17 @@ def test_export_and_import_round_trip(monkeypatch, tmp_path) -> None:
 
     stored_entries: list[tuple[str, object, str | None]] = []
 
-    async def fake_set(key: str, value: object, category: str | None = None):
-        stored_entries.append((key, value, category))
+    async def fake_mutate_many(*, set_entries=(), **kwargs):
+        stored_entries.extend(set_entries)
 
     monkeypatch.setattr(export_cmd.Session, "get_by_id", fake_get_by_id)
     monkeypatch.setattr(export_cmd.Message, "list_with_parts", fake_list_with_parts)
-    monkeypatch.setattr(import_cmd.Storage, "set", fake_set)
+    monkeypatch.setattr(import_cmd.Storage, "mutate_many", fake_mutate_many)
+
+    async def fake_get(key: str, default=None):
+        return default  # nothing imported yet: no conflict
+
+    monkeypatch.setattr(import_cmd.Storage, "get", fake_get)
 
     export_result = runner.invoke(
         export_cmd.export_app,
@@ -123,7 +131,9 @@ async def test_import_writes_messages_in_runtime_storage_format(monkeypatch, tmp
     input_path = tmp_path / "session-import.json"
     input_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    await import_cmd._import_session(str(input_path), "proj_imported")
+    # force=True: the shared Storage singleton may still hold this session id from an
+    # earlier test in the same process, and this test is about part normalization.
+    await import_cmd._import_session(str(input_path), "proj_imported", force=True)
 
     Message.invalidate_cache(session.id)
     imported = await Message.list_with_parts(session.id)
@@ -136,6 +146,15 @@ async def test_import_writes_messages_in_runtime_storage_format(monkeypatch, tmp
     assert await Storage.get(f"message_parts:{session.id}") is None
     stored_parts = await Storage.get(f"message_parts:{session.id}:msg_export_test")
     assert stored_parts[0]["text"] == "hello export"
+    recent, *_ = await Message.list_recent_with_parts(session.id)
+    assert [item.info.id for item in recent] == [message.info.id]
+    assert recent[0].parts[0].text == "hello export"
+
+    # A deliberate replacement must invalidate an already warm message cache.
+    payload["messages"][0]["parts"][0]["text"] = "updated import"
+    await asyncio.to_thread(input_path.write_text, json.dumps(payload), encoding="utf-8")
+    await import_cmd._import_session(str(input_path), "proj_imported", force=True)
+    assert (await Message.list_with_parts(session.id))[0].parts[0].text == "updated import"
 
 
 @pytest.mark.asyncio
@@ -195,7 +214,9 @@ async def test_import_normalizes_legacy_reasoning_parts(monkeypatch, tmp_path) -
     input_path = tmp_path / "legacy-session-import.json"
     input_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    await import_cmd._import_session(str(input_path), "proj_imported")
+    # force=True: the shared Storage singleton may still hold this session id from an
+    # earlier test in the same process, and this test is about part normalization.
+    await import_cmd._import_session(str(input_path), "proj_imported", force=True)
 
     Message.invalidate_cache(session.id)
     imported = await Message.list_with_parts(session.id, include_archived=True)
@@ -215,20 +236,26 @@ def test_export_help_does_not_show_project_option() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_client_messages_returns_info_and_parts(monkeypatch) -> None:
+async def test_session_client_messages_returns_info_and_parts() -> None:
+    """The client reads a session's messages from the service, as the service returns them."""
     session = _build_session()
     message = _build_message_with_parts(session.id)
+    seen: list[tuple[str, str | None]] = []
 
-    async def fake_list_with_parts(session_id: str, include_archived: bool = False):
-        assert session_id == session.id
-        assert include_archived is False
-        return [message]
+    def serve(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.headers.get("Authorization")))
+        return httpx.Response(200, json=[{
+            "info": message.info.model_dump(by_alias=True, mode="json"),
+            "parts": [part.model_dump(by_alias=True, mode="json") for part in message.parts],
+        }])
 
-    monkeypatch.setattr("flocks.server.client.Message.list_with_parts", fake_list_with_parts)
+    client = FlocksClient("http://127.0.0.1:8000", api_token="tok", transport=httpx.MockTransport(serve))
+    try:
+        result = await client.session.messages(session.id, "/tmp/flocks-project")
+    finally:
+        await client.close()
 
-    client = SessionClient(base_url="http://127.0.0.1:8000")
-    result = await client.messages(session.id, "/tmp/flocks-project")
-
+    assert seen == [(f"/api/session/{session.id}/message", "Bearer tok")]
     assert len(result) == 1
     assert result[0]["info"]["id"] == message.info.id
     assert result[0]["parts"][0]["id"] == "part_export_test"

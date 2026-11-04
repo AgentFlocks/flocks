@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HUB_ROOT = ROOT / ".flocks" / "flockshub"
+OPEN_EDITION = "oss"
 
 
 def load_json(path: Path) -> dict:
@@ -62,6 +63,11 @@ def main() -> int:
         manifest = load_json(manifest_path)
         if manifest.get("id") != plugin_id or manifest.get("type") != plugin_type:
             fail(f"Manifest id/type mismatch: {manifest_rel}")
+        # The open product lists open-edition plugins only; an extension that
+        # licenses an edition lists that edition's plugins from its own hub root.
+        for edition in (entry.get("edition", OPEN_EDITION), manifest.get("edition", OPEN_EDITION)):
+            if edition != OPEN_EDITION:
+                fail(f"Bundled plugin {plugin_type}:{plugin_id} is of edition {edition!r}; only {OPEN_EDITION!r} is bundled")
         if manifest.get("version") != entry.get("version"):
             fail(f"Index/manifest version mismatch: {manifest_rel}")
         if manifest.get("category") not in categories:

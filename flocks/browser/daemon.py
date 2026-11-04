@@ -127,10 +127,15 @@ async def _silent(coro) -> None:
         pass
 
 
+def _open_direct(url: str, timeout: float):
+    """``urlopen`` that never goes through HTTP_PROXY: CDP endpoints are loopback / LAN."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=timeout)
+
+
 def _local_cdp_ws_url(port: int, devtools_path: str | None = None) -> str:
     """Return a validated local browser WebSocket URL from profile metadata."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1) as response:
+        with _open_direct(f"http://127.0.0.1:{port}/json/version", timeout=1) as response:
             payload = json.loads(response.read())
         if not isinstance(payload, dict):
             raise ValueError("invalid CDP version response")
@@ -161,7 +166,7 @@ def get_ws_url() -> str:
         last_err = None
         while time.time() < deadline:
             try:
-                return json.loads(urllib.request.urlopen(f"{url}/json/version", timeout=5).read())[
+                return json.loads(_open_direct(f"{url}/json/version", timeout=5).read())[
                     "webSocketDebuggerUrl"
                 ]
             except Exception as error:

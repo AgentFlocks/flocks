@@ -6,21 +6,22 @@ describe('formatSmartTime', () => {
   const at = (year: number, month: number, day: number, hour = 15, minute = 34) =>
     new Date(year, month - 1, day, hour, minute).getTime();
 
-  it('uses a compact 24-hour clock for messages from today', () => {
-    expect(formatSmartTime(at(2026, 7, 24), 'zh-CN', at(2026, 7, 24, 18, 0))).toBe('15:34');
+  it('includes the calendar date for messages from today', () => {
+    expect(formatSmartTime(at(2026, 7, 24), 'zh-CN', at(2026, 7, 24, 18, 0))).toBe('7月24日 15:34');
   });
 
-  it('labels messages from yesterday', () => {
-    expect(formatSmartTime(at(2026, 7, 23), 'zh-CN', at(2026, 7, 24, 18, 0))).toBe('昨天 15:34');
+  it('uses the calendar date for messages from yesterday', () => {
+    expect(formatSmartTime(at(2026, 7, 23), 'zh-CN', at(2026, 7, 24, 18, 0))).toBe('7月23日 15:34');
   });
 
-  it('uses the weekday for messages within the previous week', () => {
-    expect(formatSmartTime(at(2026, 7, 23), 'zh-CN', at(2026, 7, 25, 18, 0))).toBe('星期四 15:34');
+  it('uses the calendar date for messages within the previous week', () => {
+    expect(formatSmartTime(at(2026, 7, 23), 'zh-CN', at(2026, 7, 25, 18, 0))).toBe('7月23日 15:34');
   });
 
-  it('uses a Chinese month and day for older messages from the same year', () => {
+  it('includes the year for older messages only when needed', () => {
     expect(formatSmartTime(at(2026, 7, 10), 'zh-CN', at(2026, 7, 24, 18, 0))).toBe('7月10日 15:34');
     expect(formatSmartTime(at(2026, 6, 20), 'zh-CN', at(2026, 7, 24, 18, 0))).toBe('6月20日 15:34');
+    expect(formatSmartTime(at(2025, 12, 31), 'zh-CN', at(2026, 1, 1))).toBe('2025年12月31日 15:34');
   });
 });
 

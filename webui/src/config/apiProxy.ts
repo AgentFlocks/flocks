@@ -10,6 +10,7 @@ export function createApiProxy(target: string) {
       target,
       changeOrigin: true,
       xfwd: true,
+      ws: true,
     },
     '/event': {
       target,

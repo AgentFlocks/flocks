@@ -9,6 +9,9 @@ Verifies file writing behavior:
 """
 
 import os
+import ntpath
+import shlex
+import sys
 import pytest
 from pathlib import Path
 from types import SimpleNamespace
@@ -214,31 +217,90 @@ async def test_filename_only_redirects_to_default_outputs(tmp_path, monkeypatch)
         "root": "workspace-output",
         "path": f"{dt.date.today().isoformat()}/hello.txt",
         "username": None,
+        "userID": None,
     }
     assert str(tmp_path) not in str(attachment)
 
 
 @pytest.mark.asyncio
-async def test_source_root_absolute_basename_redirects_to_default_outputs(tmp_path, monkeypatch):
-    """Absolute source-root basename should be treated as filename-only intent."""
-    monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(tmp_path / "workspace"))
-    WorkspaceManager._instance = None
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("path_kind", ["absolute", "dot-relative", "nested", "parent-relative", "tilde"])
+async def test_explicit_paths_visible_to_read_and_bash(tmp_path, monkeypatch, path_kind, existing):
+    """Explicit destinations must agree across tools, including new root files."""
+    project_dir = tmp_path / "project with spaces"
+    project_dir.mkdir()
+    monkeypatch.setenv("HOME", str(project_dir))
+    target = project_dir / "pyproject.toml"
+    paths = {
+        "absolute": str(target),
+        "dot-relative": "./pyproject.toml",
+        "nested": "nested/../pyproject.toml",
+        "parent-relative": "../project with spaces/pyproject.toml",
+        "tilde": "~/pyproject.toml",
+    }
+    if existing:
+        target.write_text("old content", encoding="utf-8")
+    ctx = _make_ctx(extra={"workspace_dir": str(project_dir)})
+    if existing:
+        assert (await ToolRegistry.execute("read", ctx, filePath=paths[path_kind])).success
+    result = await ToolRegistry.execute(
+        "write", ctx, filePath=paths[path_kind], content="cross-tool content",
+    )
+    read_result = await ToolRegistry.execute("read", ctx, filePath=paths[path_kind])
+    bash_result = await ToolRegistry.execute("bash", ctx, command="cat ./pyproject.toml")
 
+    assert result.success, result.error
+    assert read_result.success, read_result.error
+    assert bash_result.success, bash_result.error
+    assert "cross-tool content" in read_result.output
+    assert "cross-tool content" in bash_result.output
+    assert target.read_text() == "cross-tool content"
+    assert result.metadata["filepath"] == str(target.resolve())
+    assert str(target.resolve()) in result.output
+    assert not (tmp_path / "workspace" / "outputs").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("file_path", ["report.txt", "  report.txt  "])
+async def test_filename_only_returns_usable_output_path(tmp_path, file_path):
     project_dir = tmp_path / "project"
-    project_dir.mkdir(parents=True, exist_ok=True)
-    source_root_target = project_dir / "report.txt"
-
-    ctx = _make_ctx()
-    with patch("flocks.tool.path_utils.Instance.get_directory", return_value=str(project_dir)):
-        result = await ToolRegistry.execute(
-            "write", ctx, filePath=str(source_root_target), content="report"
-        )
-
-    assert result.success, f"write failed: {result.error}"
+    project_dir.mkdir()
+    ctx = _make_ctx(extra={"workspace_dir": str(project_dir)})
+    result = await ToolRegistry.execute("write", ctx, filePath=file_path, content="output content")
+    assert result.success, result.error
+    target = result.output.split("\nPath: ", 1)[1]
+    assert target == result.metadata["filepath"]
     expected = tmp_path / "workspace" / "outputs" / dt.date.today().isoformat() / "report.txt"
-    assert expected.exists()
-    assert expected.read_text() == "report"
-    assert not source_root_target.exists()
+    assert Path(target) == expected.resolve()
+    read_result = await ToolRegistry.execute("read", ctx, filePath=target)
+    quoted = "'" + target.replace("'", "''") + "'" if sys.platform == "win32" else shlex.quote(target)
+    bash_result = await ToolRegistry.execute("bash", ctx, command=f"cat {quoted}")
+    assert read_result.success, read_result.error
+    assert bash_result.success, bash_result.error
+    assert "output content" in read_result.output
+    assert "output content" in bash_result.output
+
+
+@pytest.mark.parametrize("path", ["C:report.txt", "C:/report.txt", r"C:\report.txt"])
+def test_windows_drive_paths_are_not_bare_filenames(path):
+    from flocks.tool.file.write import _is_filename_only
+
+    # Exercise Windows drive syntax even when the test host is Unix.
+    with patch("flocks.tool.file.write.os.path.splitdrive", ntpath.splitdrive):
+        assert not _is_filename_only(path)
+
+
+@pytest.mark.asyncio
+async def test_existing_bare_filename_keeps_project_path(tmp_path):
+    target = tmp_path / "existing.txt"
+    target.write_text("old", encoding="utf-8")
+    ctx = _make_ctx(extra={"workspace_dir": str(tmp_path)})
+    assert (await ToolRegistry.execute("read", ctx, filePath="existing.txt")).success
+    result = await ToolRegistry.execute("write", ctx, filePath="existing.txt", content="updated")
+    assert result.success, result.error
+    assert target.read_text() == "updated"
+    assert result.metadata["filepath"] == str(target.resolve())
+    assert not (tmp_path / "workspace" / "outputs").exists()
 
 
 @pytest.mark.asyncio
@@ -313,7 +375,7 @@ async def test_output_attachment_matches_written_scope(
     ctx = _make_ctx(extra={"workspace_dir": str(tmp_path / "project")})
     auth_user = AuthUser(id="writer", username=auth_username, role=role) if auth_username else None
     session = SimpleNamespace(
-        id=ctx.session_id, project_id="global", owner_user_id="test-owner",
+        id=ctx.session_id, project_id="global", owner_user_id="test-owner" if session_owner else None,
         owner_username=session_owner, directory="", metadata={},
     )
     content = "Correct output: café\n"
@@ -344,6 +406,7 @@ async def test_output_attachment_matches_written_scope(
     assert attachment["modifiedAt"] == int(target.stat().st_mtime * 1000)
     assert attachment["source"] == {
         "root": "workspace-output", "path": relative, "username": scope_username,
+        "userID": ("writer" if auth_user else "test-owner") if scope_username else None,
     }
     assert str(tmp_path) not in str(attachment)
 
@@ -515,7 +578,7 @@ async def test_output_attachment_requires_existing_regular_file(tmp_path, kind):
     target = tmp_path / "workspace" / "outputs" / "not-a-file"
     if kind == "directory":
         target.mkdir(parents=True)
-    with patch("flocks.tool.file.write._resolve_owner_username", new=AsyncMock(return_value=None)):
+    with patch("flocks.tool.file.write._resolve_output_owner", new=AsyncMock(return_value=(None, None))):
         assert await _build_output_attachment(_make_ctx(), str(target)) is None
     if kind == "missing":
         assert not (tmp_path / "workspace").exists()
@@ -559,6 +622,7 @@ async def test_output_scope_tracks_authenticated_writer_not_session_owner(tmp_pa
         "root": "workspace-output",
         "path": relative,
         "username": "admin_team",
+        "userID": "admin",
     }
     target = tmp_path / "workspace" / "users" / "admin_team" / "outputs" / relative
     assert target.read_text() == "admin output"
@@ -603,3 +667,34 @@ async def test_output_scope_tracks_authenticated_writer_not_session_owner(tmp_pa
         assert (await build_session_context(session, include_roots=False))["outputs"] == []
         with pytest.raises(FileNotFoundError):
             await resolve_session_resource(session, resource_id)
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+async def test_shared_outputs_moved_to_another_disk_follow_account_isolation(tmp_path, monkeypatch, isolated):
+    """A single-user install may move workspace/outputs to another disk and
+    link it back; earlier output attachments stay readable. Once an extension
+    isolates accounts, a symlinked shared outputs/ could be rebound into
+    another account's root, so its descriptors no longer resolve."""
+    from flocks.session.files import _attachment_source_path
+    from flocks.tool.file.write import _build_output_attachment
+
+    outputs = WorkspaceManager.get_instance().get_workspace_dir() / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    target = outputs / "report.md"
+    target.write_text("report", encoding="utf-8")
+    session = SimpleNamespace(id="test-session", owner_user_id=None, owner_username=None)
+    with (
+        patch("flocks.auth.context.get_current_auth_user", return_value=None),
+        patch("flocks.session.session.Session.get_by_id", new=AsyncMock(return_value=session)),
+    ):
+        attachment = await _build_output_attachment(_make_ctx(), str(target))
+    assert attachment is not None and attachment["source"]["username"] is None
+
+    other_disk = tmp_path / "other-disk" / "outputs"
+    other_disk.parent.mkdir()
+    outputs.rename(other_disk)
+    outputs.symlink_to(other_disk, target_is_directory=True)
+    monkeypatch.setattr(WorkspaceManager, "isolates_accounts", isolated)
+    part = SimpleNamespace(state=SimpleNamespace(metadata={"filepath": str(target)}))
+    resolved = _attachment_source_path(session, attachment, message_id="msg-1", part=part)
+    assert resolved == (None if isolated else other_disk / "report.md")

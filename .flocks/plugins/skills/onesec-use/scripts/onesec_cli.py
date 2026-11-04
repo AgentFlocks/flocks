@@ -96,7 +96,7 @@ def threat(ctx):
     default=True,
     help="输出原始 JSON（默认开启）",
 )
-@click.option("--table-output", "json_output", flag_value=False, help="切换为表格输出")
+@click.option("--table-output", "json_output", flag_value=False, default=True, help="切换为表格输出")
 @click.pass_context
 def search_threats(ctx, days, page, page_size, keyword, json_output):
     """搜索威胁行动。"""
@@ -144,7 +144,7 @@ def search_threats(ctx, days, page, page_size, keyword, json_output):
     default=True,
     help="输出原始 JSON（默认开启）",
 )
-@click.option("--table-output", "json_output", flag_value=False, help="切换为表格输出")
+@click.option("--table-output", "json_output", flag_value=False, default=True, help="切换为表格输出")
 @click.pass_context
 def get_threat_top(ctx, days, limit, json_output):
     """查看 TOP 威胁名称。"""
@@ -194,7 +194,7 @@ def log(ctx):
     default=True,
     help="输出原始 JSON（默认开启）",
 )
-@click.option("--table-output", "json_output", flag_value=False, help="切换为表格输出")
+@click.option("--table-output", "json_output", flag_value=False, default=True, help="切换为表格输出")
 @click.pass_context
 def search_logs(ctx, sql, limit, hours, days, json_output):
     """按 SQL 搜索日志。"""
@@ -242,7 +242,7 @@ def search_logs(ctx, sql, limit, hours, days, json_output):
     default=True,
     help="输出原始 JSON（默认开启）",
 )
-@click.option("--table-output", "json_output", flag_value=False, help="切换为表格输出")
+@click.option("--table-output", "json_output", flag_value=False, default=True, help="切换为表格输出")
 @click.pass_context
 def get_log_types(ctx, days, json_output):
     """查看日志类型统计。"""
@@ -278,7 +278,7 @@ def get_log_types(ctx, days, json_output):
     default=True,
     help="输出原始 JSON（默认开启）",
 )
-@click.option("--table-output", "json_output", flag_value=False, help="切换为表格输出")
+@click.option("--table-output", "json_output", flag_value=False, default=True, help="切换为表格输出")
 @click.pass_context
 def get_log_trend(ctx, days, json_output):
     """查看日志趋势。"""

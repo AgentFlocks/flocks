@@ -14,7 +14,7 @@ from flocks.knowledgebase import connection_settings, runtime
 from flocks.knowledgebase.client import KnowledgebaseClient
 from flocks.knowledgebase.ragflow import RagflowAdapter
 from flocks.security.secrets import SecretManager
-from flocks.server.auth import require_user
+from flocks.server.auth import require_admin, require_user
 from flocks.server.config_mutation import GLOBAL_CONFIG_MUTATION_LOCK
 from flocks.server.routes.knowledgebase import create_router
 
@@ -51,9 +51,32 @@ def files(tmp_path, monkeypatch):
 def app(files):
     app = FastAPI()
     app.include_router(create_router(), prefix="/api")
-    # A signed-in ordinary user, not an administrator, may read and update.
+    # Any signed-in user may read the connection; replacing it (and its key) is
+    # global configuration, so the update route is admin-only.
     app.dependency_overrides[require_user] = lambda: "member"
+    app.dependency_overrides[require_admin] = lambda: "admin"
     return app
+
+
+async def test_members_can_read_but_not_replace_the_connection(files):
+    from fastapi import Request as FastAPIRequest
+
+    from flocks.auth.context import AuthUser
+
+    member_app = FastAPI()
+
+    @member_app.middleware("http")
+    async def as_member(request: FastAPIRequest, call_next):
+        request.state.auth_user = AuthUser(id="member-1", username="member", role="member", status="active")
+        return await call_next(request)
+
+    member_app.include_router(create_router(), prefix="/api")
+    before = files.config.read_bytes() if files.config.exists() else None
+
+    assert (await request(member_app, "GET")).status_code == 200
+    rejected = await request(member_app, "PUT", json=put(files))
+    assert rejected.status_code == 403
+    assert (files.config.read_bytes() if files.config.exists() else None) == before
 
 
 async def request(app, method, **kwargs):

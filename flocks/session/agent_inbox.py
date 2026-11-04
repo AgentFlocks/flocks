@@ -11,6 +11,9 @@ from flocks.session.core.task_utils import fire_and_forget
 from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session
 from flocks.utils.id import Identifier
+from flocks.utils.log import Log
+
+log = Log.create(service="agent.inbox")
 
 
 GUIDANCE = (
@@ -54,6 +57,9 @@ class AgentInbox:
     # The inbox each of those jobs delivers to; once stopped, it drops results.
     _report_to: dict[str, Inbox] = {}
     _finalizers: set[asyncio.Task] = set()
+    # Backoff for a wake that found the session lease held: about 45 s in all,
+    # past the 30 s expiry of a lease whose holder died.
+    _QUEUED_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2) + (5.0,) * 8
 
     @classmethod
     def track_finalizer(cls, task: asyncio.Task) -> None:
@@ -112,11 +118,15 @@ class AgentInbox:
 
     @classmethod
     def wake(cls, session_id: str, publisher=None) -> None:
+        cls._wake(session_id, publisher, 0)
+
+    @classmethod
+    def _wake(cls, session_id: str, publisher, attempt: int) -> None:
         from flocks.session.session import is_model_auto_session_category
         from flocks.session.session_loop import SessionLoop, LoopCallbacks, LoopResult
 
         inbox = cls.get(session_id)
-        if cls.dispatch(inbox, lambda: cls.wake(session_id, publisher)):
+        if cls.dispatch(inbox, lambda: cls._wake(session_id, publisher, attempt)):
             return
         # A completed execution remains registered until its result is delivered.
         if SessionLoop.is_running(session_id) or session_id in cls._wakes or session_id in cls._children:
@@ -173,6 +183,8 @@ class AgentInbox:
                     result = delivered.result()
                     if result is not None and result.action == "stop" and not result.error:
                         cls.wake(session_id, publisher)
+                    elif result is not None and result.action == "queued":
+                        cls._retry_queued(session_id, publisher, attempt)
 
             finalizer.add_done_callback(finished)
 
@@ -180,6 +192,25 @@ class AgentInbox:
         cls._wakes[session_id] = task
         track_background_task(task, session_id=session_id)
         task.add_done_callback(completed)
+
+    @classmethod
+    def _retry_queued(cls, session_id: str, publisher, attempt: int) -> None:
+        """Retry a wake whose execution found the session lease still held.
+
+        A loop in this process wakes again once it releases the lease; a holder
+        in another process gives no such signal, so poll for a bounded time."""
+        if attempt >= len(cls._QUEUED_RETRY_DELAYS):
+            inbox = cls._inboxes.get(session_id)
+            log.warn("agent.inbox.wake_retry_exhausted", {
+                "session_id": session_id,
+                "attempts": attempt,
+                "pending": len(inbox.messages) if inbox else 0,
+            })
+            return
+        asyncio.get_running_loop().call_later(
+            cls._QUEUED_RETRY_DELAYS[attempt],
+            lambda: cls._wake(session_id, publisher, attempt + 1),
+        )
 
     @classmethod
     async def drain(cls, session_id: str, callbacks) -> bool:

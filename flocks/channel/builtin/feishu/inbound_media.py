@@ -39,7 +39,9 @@ def _parse_media_url(media_url: str) -> tuple[Optional[str], Optional[str]]:
 
 
 def _media_storage_dir(account_id: str) -> Path:
-    return Path.home() / ".flocks" / "data" / "channel_media" / "feishu" / account_id
+    from flocks.config.config import _get_data_dir
+
+    return _get_data_dir() / "channel_media" / "feishu" / account_id
 
 
 def _sanitize_filename(name: str) -> str:

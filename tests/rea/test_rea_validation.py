@@ -430,3 +430,41 @@ def test_hidden_details_count_what_conversations_leave_out():
     }) == 4
     assert validation.hidden_details({"notes": ["伪代码含 ×3 与 +7"], "actual": samples.EXPECTED_OUTPUT, "calls": []}) == 0
     assert validation.hidden_details(None) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_validation_run_uses_and_then_closes_an_rea_connection_of_its_own(monkeypatch):
+    # Opening the samples in a conversation's connection would switch away its target and,
+    # with close_binary, clear its evidence.
+    from flocks.mcp import MCP
+
+    scopes, closed = [], []
+
+    async def execute(name, ctx, **kwargs):
+        scopes.append((ctx.session_id, (ctx.extra or {}).get("mcp_scope")))
+        return ToolResult(success=True, output=json.dumps({"ok": True}))
+
+    async def close_scope(name, scope):
+        closed.append((name, scope))
+
+    async def validator(root, *, session_id):
+        result = validation.CapabilityResult("javascript", status="passed", static="passed", runtime="passed")
+        await validation.call_rea(result, "open_binary", {"path": "x"}, session_id=session_id)
+        await validation.call_rea(result, "close_binary", {}, session_id=session_id)
+        return result
+
+    async def skipped(root, *, session_id):
+        return validation.CapabilityResult("x", status="passed", static="passed", runtime="not_applicable")
+
+    monkeypatch.setattr(ToolRegistry, "execute", execute)
+    monkeypatch.setattr(MCP, "close_scope", close_scope)
+    monkeypatch.setitem(validation._VALIDATORS, "javascript", validator)
+    monkeypatch.setitem(validation._VALIDATORS, "dotnet", skipped)
+    monkeypatch.setitem(validation._VALIDATORS, "archive", skipped)
+
+    await validation.run_validation("light", session_id="ses_install")
+
+    assert len(scopes) == 2 and len({scope for _session, scope in scopes}) == 1
+    session_id, scope = scopes[0]
+    assert session_id == "ses_install" and scope.startswith("rea-validation:")
+    assert closed == [("rea", scope)]

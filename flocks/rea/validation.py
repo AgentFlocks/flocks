@@ -14,10 +14,12 @@ and actual results, and separate static-analysis and runtime outcomes.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import re
 import time
+import uuid
 import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -28,6 +30,8 @@ from flocks.utils.log import Log
 
 
 log = Log.create(service="rea.validation")
+# The REA connection the running validation uses (see run_validation).
+_validation_scope: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("rea_validation_scope", default=None)
 
 LIGHT_CAPABILITIES = ("javascript", "dotnet", "archive")
 FULL_CAPABILITIES = (*LIGHT_CAPABILITIES, "native")
@@ -115,7 +119,10 @@ async def call_rea(
 
     from flocks.tool.registry import ToolContext, ToolRegistry
 
-    ctx = ToolContext(session_id=session_id, message_id="rea-validation", agent="rex")
+    scope = _validation_scope.get()
+    # Its own REA connection: opening the samples there leaves every conversation's target alone.
+    extra = {"mcp_scope": scope} if scope else None
+    ctx = ToolContext(session_id=session_id, message_id="rea-validation", agent="rex", extra=extra)
     name = f"{runtime.MCP_SERVER_NAME}_{tool}"
     try:
         outcome = await ToolRegistry.execute(name, ctx, **args)
@@ -498,18 +505,36 @@ async def run_validation(
     session_id: str,
     on_result: Optional[Callable[[CapabilityResult], Awaitable[None]]] = None,
 ) -> dict[str, Any]:
-    """Run the tier's samples one after another (REA keeps one active target per service)."""
+    """Run the tier's samples one after another (REA keeps one active target per connection).
+
+    The run has an REA connection of its own, closed when it ends.
+    """
 
     root = runtime.validation_root() / time.strftime("%Y%m%d-%H%M%S")
     root.mkdir(parents=True, exist_ok=True)
     results: dict[str, dict[str, Any]] = {}
-    for key in tier_capabilities(tier):
-        try:
-            outcome = await _VALIDATORS[key](root, session_id=session_id)
-        except Exception as exc:  # one failing sample must not hide the others
-            log.error("rea.validation.crashed", {"capability": key, "error": str(exc)})
-            outcome = CapabilityResult(key, status="failed", static="failed", notes=[f"验证出错：{exc}"])
-        results[key] = outcome.to_dict()
-        if on_result is not None:
-            await on_result(outcome)
+    scope = f"rea-validation:{uuid.uuid4().hex[:12]}"
+    previous = _validation_scope.set(scope)
+    try:
+        for key in tier_capabilities(tier):
+            try:
+                outcome = await _VALIDATORS[key](root, session_id=session_id)
+            except Exception as exc:  # one failing sample must not hide the others
+                log.error("rea.validation.crashed", {"capability": key, "error": str(exc)})
+                outcome = CapabilityResult(key, status="failed", static="failed", notes=[f"验证出错：{exc}"])
+            results[key] = outcome.to_dict()
+            if on_result is not None:
+                await on_result(outcome)
+    finally:
+        _validation_scope.reset(previous)
+        await _close_connection(scope)
     return {"tier": tier, "ok": tier_passed(tier, results), "root": str(root), "capabilities": results}
+
+
+async def _close_connection(scope: str) -> None:
+    try:
+        from flocks.mcp import MCP
+
+        await MCP.close_scope(runtime.MCP_SERVER_NAME, scope)
+    except Exception as exc:
+        log.debug("rea.validation.close_failed", {"error": str(exc)})

@@ -359,6 +359,11 @@ async def run_dream_bridge(
                 GLOBAL_MEMORY_FILENAME,
             )
 
+        from flocks.memory.sync.mirror import reconcile_quietly
+
+        # The stored notes as they stand, so the comparison below sees only
+        # the agent's edits.
+        await reconcile_quietly(memory_root)
         original_files: dict[tuple[MemoryScope, str], Optional[str]] = {}
         for key, file_path in file_targets.items():
             if file_path.exists():

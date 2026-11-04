@@ -617,10 +617,10 @@ def test_probe_cdp_url_discovers_websocket_and_performs_cdp_handshake(monkeypatc
 
     def fake_websocket_connect(url: str, **kwargs):
         assert url == "ws://browser.test/devtools/browser/1"
-        assert kwargs == {"open_timeout": 3.0, "close_timeout": 3.0}
+        assert kwargs == {"open_timeout": 3.0, "close_timeout": 3.0, "proxy": None}  # CDP is never proxied
         return FakeWebSocket()
 
-    monkeypatch.setattr(admin.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(admin, "_open_direct", fake_urlopen)
     monkeypatch.setattr(admin, "websocket_connect", fake_websocket_connect)
 
     assert admin._probe_cdp_endpoint("BU_CDP_URL", "http://browser.test") == (
@@ -687,3 +687,41 @@ def test_chrome_running_on_non_windows_detects_brave_process(monkeypatch) -> Non
     monkeypatch.setattr("subprocess.check_output", lambda *args, **kwargs: "Brave Browser\n")
 
     assert admin._chrome_running()
+
+
+def test_probe_cdp_endpoint_names_the_connection_failure() -> None:
+    """A refused port must read as refused, not just as the exception class name.
+
+    Regression: the probe reported ``connection failed (URLError)`` for every
+    failure, so the doctor output could not tell a closed port from a DNS miss.
+    """
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()  # closed again: nothing listens on this port now
+
+    ok, reason = admin._probe_cdp_endpoint("BU_CDP_URL", f"http://127.0.0.1:{port}", timeout=2.0)
+
+    assert ok is False
+    assert reason.startswith("connection failed (URLError:")
+    assert "refused" in reason.lower()
+
+
+def test_version_tuple_strips_release_tag_prefix() -> None:
+    """A ``v``-prefixed release tag must compare against the bare installed version.
+
+    Regression: ``_version_tuple("v2026.8.17")`` was ``(0, 8, 17)``, so the
+    update check compared every tagged release as older than any install.
+    """
+    assert admin._version_tuple("v2026.8.17") == (2026, 8, 17)
+    assert admin._version_tuple("2026.8.17") == (2026, 8, 17)
+    assert admin._version_tuple("v2026.8.17") > admin._version_tuple("2026.7.29")
+
+
+def test_check_for_update_sees_a_newer_tagged_release(monkeypatch) -> None:
+    monkeypatch.setattr(admin, "_version", lambda: "2026.7.29")
+    monkeypatch.setattr(admin, "_latest_release_tag", lambda force=False: "v2026.8.17")
+
+    assert admin.check_for_update() == ("2026.7.29", "v2026.8.17", True)

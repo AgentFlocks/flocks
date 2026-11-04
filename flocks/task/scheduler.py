@@ -8,6 +8,7 @@ from flocks.utils.log import Log
 
 from .models import ExecutionTriggerType, SchedulerMode, SchedulerStatus, TaskTrigger
 from .store import TaskStore
+from .health import ComponentHealth
 
 log = Log.create(service="task.scheduler")
 
@@ -24,6 +25,7 @@ class TaskScheduler:
         self._check_interval = check_interval
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        self._health = ComponentHealth()
 
     @property
     def is_running(self) -> bool:
@@ -40,6 +42,7 @@ class TaskScheduler:
         if self._running:
             return
         self._running = True
+        self._health.started()
         self._task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
@@ -53,46 +56,67 @@ class TaskScheduler:
 
     async def _loop(self) -> None:
         while self._running:
+            self._health.started()
             try:
                 await self._tick()
             except Exception as exc:
+                self._health.failed(exc, operation="tick")
                 log.error("scheduler.tick_error", {"error": str(exc)})
             await asyncio.sleep(self._check_interval)
 
     async def _tick(self) -> None:
-        from .manager import TaskManager
-
         now = datetime.now(timezone.utc)
         schedulers = await TaskStore.list_due_schedulers()
+        failed = False
         for scheduler in schedulers:
-            next_run = self._parse_next_run(scheduler.trigger)
-            if not next_run or next_run > now:
-                continue
-            active = await TaskStore.get_active_execution_for_scheduler(scheduler.id)
-            if active is not None:
-                continue
+            try:
+                await self._tick_scheduler(scheduler, now)
+            except Exception as exc:
+                failed = True
+                self._health.failed(exc, operation="fire_scheduler")
+                log.error("scheduler.task_error", {"scheduler_id": scheduler.id,
+                                                    "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None)})
+        if not failed:
+            self._health.succeeded()
 
-            trigger_type = (
-                ExecutionTriggerType.RUN_ONCE
-                if scheduler.mode == SchedulerMode.ONCE
-                else ExecutionTriggerType.SCHEDULED
-            )
-            await TaskManager.create_execution_from_scheduler(
-                scheduler,
-                trigger_type=trigger_type,
-                enqueue=True,
-            )
+    def health_snapshot(self) -> dict:
+        state = self._health.snapshot(max_silence=max(60, self._check_interval * 3))
+        if self._task is not None and self._task.done() and self._running:
+            state["status"] = "degraded"
+        return state
 
-            if scheduler.mode == SchedulerMode.CRON and scheduler.trigger.cron:
-                scheduler.trigger.next_run = self._compute_next(
-                    scheduler.trigger,
-                    after=now,
-                )
-                await TaskStore.update_scheduler(scheduler)
-            if scheduler.mode == SchedulerMode.ONCE:
-                scheduler.status = SchedulerStatus.DISABLED
-                scheduler.trigger.next_run = None
-                await TaskStore.update_scheduler(scheduler)
+    async def _tick_scheduler(self, scheduler, now: datetime) -> None:
+        from .manager import TaskManager
+
+        next_run = self._parse_next_run(scheduler.trigger)
+        if not next_run or next_run > now:
+            return
+        active = await TaskStore.get_active_execution_for_scheduler(scheduler.id)
+        if active is not None:
+            return
+
+        trigger_type = (
+            ExecutionTriggerType.RUN_ONCE
+            if scheduler.mode == SchedulerMode.ONCE
+            else ExecutionTriggerType.SCHEDULED
+        )
+        trigger = scheduler.trigger.model_copy(deep=True)
+        status = scheduler.status
+        if scheduler.mode == SchedulerMode.CRON and trigger.cron:
+            trigger.next_run = self._compute_next(trigger, after=now)
+        if scheduler.mode == SchedulerMode.ONCE:
+            status = SchedulerStatus.DISABLED
+            trigger.next_run = None
+        # Started only if nobody changed the scheduler since it was read
+        # here: writing this copy back used to undo an edit or a disable.
+        fired = await TaskStore.fire_scheduler(
+            scheduler,
+            TaskManager.build_execution_from_scheduler(scheduler, trigger_type=trigger_type),
+            trigger=trigger,
+            status=status,
+        )
+        if not fired:
+            log.info("scheduler.changed_before_run", {"scheduler_id": scheduler.id})
 
     @staticmethod
     def _parse_next_run(trigger: TaskTrigger) -> Optional[datetime]:

@@ -119,7 +119,7 @@ def monitor(ctx):
     default=True,
     help="输出原始JSON（默认开启）",
 )
-@click.option("--table-output", "json_output", flag_value=False, help="切换为表格输出")
+@click.option("--table-output", "json_output", flag_value=False, default=True, help="切换为表格输出")
 @click.pass_context
 def monitor_threats(ctx, page, page_size, limit, days, hours, time_from, time_to, sql, json_output):
     """查询威胁列表 (api/web/hw/monitor/threat/list)
@@ -225,7 +225,7 @@ def logs(ctx):
     default=True,
     help="输出原始JSON（默认开启）",
 )
-@click.option("--table-output", "json_output", flag_value=False, help="切换为表格输出")
+@click.option("--table-output", "json_output", flag_value=False, default=True, help="切换为表格输出")
 @click.pass_context
 def logs_search(ctx, sql_arg, sql, days, hours, time_from, time_to, limit, net_data_type, full, columns, json_output):
     """使用SQL搜索日志 (api/web/log/searchBySql)

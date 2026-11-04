@@ -26,6 +26,16 @@ _SE_ISO_TS_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?"
 )
 _SE_SPACE_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\s*\d{2}:\s*\d{2}")
+# BSD TAG with process id: "sshd[1234]" -> app_name=sshd, pid=1234
+_TAG_PID_RE = re.compile(r"^(.+?)\[([^\[\]]+)\]$")
+
+
+def _split_tag_pid(tag: str) -> tuple[str, str]:
+    """Split ``app[pid]`` into ``(app, pid)``; a bare tag yields ``pid == ""``."""
+    m = _TAG_PID_RE.match(tag.strip())
+    if not m:
+        return tag.strip(), ""
+    return m.group(1).strip(), m.group(2).strip()
 
 
 def _pri_parts(pri: int) -> tuple[int, int]:
@@ -231,12 +241,12 @@ def _parse_rfc5424(
     ts, s = _next_rfc5424_token(s)
     hostname, s = _next_rfc5424_token(s)
     app_name, s = _next_rfc5424_token(s)
-    _procid, s = _next_rfc5424_token(s)
+    procid, s = _next_rfc5424_token(s)
     _msgid, s = _next_rfc5424_token(s)
     _sdata, s = _next_rfc5424_token(s)
     msg = s.strip()
 
-    return {
+    parsed: Dict[str, Any] = {
         "raw": raw,
         "facility": facility,
         "severity": severity,
@@ -246,6 +256,9 @@ def _parse_rfc5424(
         "message": msg,
         "format": "rfc5424",
     }
+    if procid and procid != "-":
+        parsed["pid"] = procid
+    return parsed
 
 
 def _parse_iso3164(
@@ -256,16 +269,20 @@ def _parse_iso3164(
     severity: int,
 ) -> Dict[str, Any]:
     """Handle non-standard <PRI>ISO_TS HOSTNAME APP[PID]: msg (no RFC5424 version)."""
-    return {
+    app_name, pid = _split_tag_pid(m.group(3))
+    parsed: Dict[str, Any] = {
         "raw": raw,
         "facility": facility,
         "severity": severity,
         "timestamp": _normalize_ts(m.group(1)),
         "hostname": m.group(2),
-        "app_name": m.group(3),
+        "app_name": app_name,
         "message": m.group(4).strip(),
         "format": "iso3164",
     }
+    if pid:
+        parsed["pid"] = pid
+    return parsed
 
 
 def _parse_rfc3164(
@@ -281,14 +298,16 @@ def _parse_rfc3164(
         hostname = m.group(2)
         remainder = (m.group(3) or "").strip()
         app_name = ""
+        pid = ""
         message = remainder
-        # TAG: message (tag is alphanumeric, often "sshd" or "su")
+        # TAG: message (tag is alphanumeric, often "sshd" or "su"; BSD
+        # syslog appends the process id as "sshd[1234]").
         if remainder and ":" in remainder:
             tag, _, body = remainder.partition(":")
             if tag and " " not in tag and tag.isprintable():
-                app_name = tag.strip()
+                app_name, pid = _split_tag_pid(tag)
                 message = body.strip()
-        return {
+        parsed: Dict[str, Any] = {
             "raw": raw,
             "facility": facility,
             "severity": severity,
@@ -298,6 +317,9 @@ def _parse_rfc3164(
             "message": message,
             "format": "rfc3164",
         }
+        if pid:
+            parsed["pid"] = pid
+        return parsed
 
     return {
         "raw": raw,

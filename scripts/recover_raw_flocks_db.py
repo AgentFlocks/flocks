@@ -629,9 +629,12 @@ def _materialize_recovered_sql(recover_sql_path: Path, extracted_db_path: Path) 
     """Execute recovered SQL into a scratch SQLite database."""
 
     with _atomic_output_path(extracted_db_path) as temporary_path:
+        # Older .recover output writes virtual-table definitions through
+        # writable_schema without disabling defensive mode. Allow those writes
+        # only in this short-lived connection to the new scratch database.
         completed = subprocess.run(
             ["sqlite3", str(temporary_path)],
-            input=recover_sql_path.read_text(encoding="utf-8"),
+            input=".dbconfig defensive off\n" + recover_sql_path.read_text(encoding="utf-8"),
             check=False,
             capture_output=True,
             text=True,

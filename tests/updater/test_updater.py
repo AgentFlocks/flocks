@@ -138,6 +138,29 @@ def test_spawn_restart_handoff_redirects_output_to_backend_log(
     assert "handoff stderr" in backend_output
 
 
+def test_spawn_restart_handoff_passes_extra_env_to_the_real_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-root"))
+    monkeypatch.setenv("FLOCKS_TEST_INHERITED", "kept")
+    command = [
+        sys.executable,
+        "-c",
+        "import os; print(os.environ['FLOCKS_UPGRADE_PROGRESS_TOKEN'], os.environ['FLOCKS_TEST_INHERITED'])",
+    ]
+
+    process = updater._spawn_restart_handoff(
+        command,
+        cwd=tmp_path,
+        extra_env={"FLOCKS_UPGRADE_PROGRESS_TOKEN": "tok-123"},
+    )
+
+    assert process.wait(timeout=10) == 0
+    backend_output = (tmp_path / "flocks-root" / "logs" / "backend.log").read_text(encoding="utf-8")
+    assert "tok-123 kept" in backend_output
+
+
 def test_capture_service_snapshot_allows_stopped_service_without_control_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -563,6 +586,7 @@ def test_build_dependency_sync_command_installs_project_on_windows(
     assert updater._build_dependency_sync_command("uv", uv_default_index="https://mirror.example/simple") == [
         "uv",
         "sync",
+        "--inexact",
         "--no-python-downloads",
         "--default-index",
         "https://mirror.example/simple",
@@ -574,7 +598,13 @@ def test_build_dependency_sync_command_keeps_project_install_on_non_windows(
 ) -> None:
     monkeypatch.setattr(updater.sys, "platform", "linux")
 
-    assert updater._build_dependency_sync_command("uv") == ["uv", "sync", "--no-python-downloads"]
+    assert updater._build_dependency_sync_command("uv") == ["uv", "sync", "--inexact", "--no-python-downloads"]
+
+
+def test_prebuilt_dependency_sync_keeps_user_installed_packages(tmp_path: Path) -> None:
+    command = updater._build_prebuilt_dependency_sync_command("/opt/flocks/tools/uv/uv", tmp_path / "wheels")
+
+    assert command[:6] == ["/opt/flocks/tools/uv/uv", "sync", "--inexact", "--frozen", "--offline", "--no-python-downloads"]
 
 
 def test_wheel_build_config_does_not_force_include_runtime_or_build_outputs() -> None:
@@ -666,7 +696,7 @@ async def test_fetch_gitee_release_returns_web_archive_urls(monkeypatch: pytest.
             assert follow_redirects is True
             return _FakeResponse()
 
-    monkeypatch.setattr(updater.httpx, "AsyncClient", lambda timeout=15: _FakeClient())
+    monkeypatch.setattr(updater.httpx, "AsyncClient", lambda **_kw: _FakeClient())
 
     tag, notes, html_url, zip_url, tar_url = await updater._fetch_gitee_release("flocks/flocks", "token")
 
@@ -716,7 +746,7 @@ async def test_download_archive_uses_curl_user_agent_for_gitee_web_archive(
     monkeypatch.setattr(
         updater.httpx,
         "AsyncClient",
-        lambda timeout, follow_redirects=True: _FakeClient(),
+        lambda **_kw: _FakeClient(),
     )
 
     archive_path = await updater._download_archive(
@@ -771,7 +801,7 @@ async def test_download_archive_keeps_auth_header_for_non_gitee_sources(
     monkeypatch.setattr(
         updater.httpx,
         "AsyncClient",
-        lambda timeout, follow_redirects=True: _FakeClient(),
+        lambda **_kw: _FakeClient(),
     )
 
     archive_path = await updater._download_archive(
@@ -1712,6 +1742,82 @@ async def test_perform_update_does_not_prepare_handover_before_spawning_handoff(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("wait_for_handoff", [False, True])
+async def test_perform_update_hands_the_progress_token_to_dialog_and_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    wait_for_handoff: bool,
+) -> None:
+    from flocks.updater.handoff_progress import UPGRADE_PROGRESS_TOKEN_ENV
+
+    archive_path = tmp_path / "flocks.zip"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    (staged_root / "webui").mkdir(parents=True)
+    install_root = tmp_path / "install-root"
+    install_root.mkdir()
+    spawns: list[dict[str, object]] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="zip",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    async def fake_sleep(_seconds) -> None:
+        return None
+
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_find_executable", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: ["/usr/bin/python3", "-m", "flocks.cli.main", "start"])
+    monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        updater,
+        "_capture_service_snapshot",
+        lambda: updater.ServiceSnapshot(config=service_manager.ServiceConfig(), daemon_pid=None, was_running=False),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_spawn_restart_handoff",
+        lambda argv, **kwargs: spawns.append({"argv": list(argv), **kwargs}) or SimpleNamespace(pid=4321, wait=lambda: 0),
+    )
+    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+
+    progresses = []
+    if wait_for_handoff:
+        progresses = [step async for step in updater.perform_update("2026.4.1", wait_for_handoff=True)]
+    else:
+        with pytest.raises(SystemExit, match="0"):
+            async for step in updater.perform_update("2026.4.1"):
+                progresses.append(step)
+
+    restarting = next(step for step in progresses if step.stage == "restarting")
+    assert len(spawns) == 1
+    if wait_for_handoff:
+        # the CLI waits for the handoff itself; no browser polls the service port
+        assert restarting.progress_token is None
+        assert spawns[0]["extra_env"] is None
+        assert progresses[-1].stage == "done"
+    else:
+        assert isinstance(restarting.progress_token, str) and len(restarting.progress_token) >= 24
+        assert spawns[0]["extra_env"] == {UPGRADE_PROGRESS_TOKEN_ENV: restarting.progress_token}
+
+
+@pytest.mark.asyncio
 async def test_perform_update_rejects_source_update_without_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1812,6 +1918,7 @@ async def test_dependency_sync_retries_cn_mirror_with_default_source(
         if cmd == [
             "/usr/bin/uv",
             "sync",
+            "--inexact",
             "--no-python-downloads",
             "--default-index",
             "https://mirrors.aliyun.com/pypi/simple",
@@ -1850,11 +1957,12 @@ async def test_dependency_sync_retries_cn_mirror_with_default_source(
         [
             "/usr/bin/uv",
             "sync",
+            "--inexact",
             "--no-python-downloads",
             "--default-index",
             "https://mirrors.aliyun.com/pypi/simple",
         ],
-        ["/usr/bin/uv", "sync", "--no-python-downloads"],
+        ["/usr/bin/uv", "sync", "--inexact", "--no-python-downloads"],
     ]
 
 
@@ -1892,11 +2000,12 @@ async def test_dependency_sync_retries_default_source_after_timeout_and_logs_out
         [
             "uv",
             "sync",
+            "--inexact",
             "--no-python-downloads",
             "--default-index",
             "https://mirrors.aliyun.com/pypi/simple",
         ],
-        ["uv", "sync", "--no-python-downloads"],
+        ["uv", "sync", "--inexact", "--no-python-downloads"],
     ]
     timeout_payload = next(payload for event, payload in warnings if event == "updater.dependencies.sync_timeout")
     assert timeout_payload["stdout"] == "mirror stdout"
@@ -2510,7 +2619,7 @@ async def test_dependency_sync_updates_windows_venv_in_place(
     )
 
     assert error is None
-    assert sync_calls == [([r"C:\tools\uv.exe", "sync", "--no-python-downloads"], install_root)]
+    assert sync_calls == [([r"C:\tools\uv.exe", "sync", "--inexact", "--no-python-downloads"], install_root)]
     assert (install_root / ".venv" / "Scripts" / "python.exe").read_text(encoding="utf-8") == "old"
     assert not (install_root / ".venv.flocks_backup").exists()
 
@@ -3145,7 +3254,7 @@ async def test_perform_update_spawns_restart_process_on_windows(
     monkeypatch.setattr(
         updater,
         "_spawn_restart_handoff",
-        lambda argv, cwd=None: popen_calls.append((list(argv), cwd)) or SimpleNamespace(pid=4321),
+        lambda argv, cwd=None, **_kwargs: popen_calls.append((list(argv), cwd)) or SimpleNamespace(pid=4321),
     )
     monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
     monkeypatch.setattr(updater.os, "execv", lambda *_args: events.append("execv"))

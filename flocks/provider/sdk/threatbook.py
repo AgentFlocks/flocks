@@ -24,7 +24,7 @@ class ThreatBookCnLLMProvider(OpenAIBaseProvider):
 class ThreatBookIoLLMProvider(OpenAIBaseProvider):
     """ThreatBook international LLM provider (OpenAI-compatible)."""
 
-    DEFAULT_BASE_URL = "https://llm.threatbook.io/v1"
+    DEFAULT_BASE_URL = "https://llm.threatbook.cn/v1"
     ENV_API_KEY = ["THREATBOOK_IO_LLM_API_KEY"]
     ENV_BASE_URL = "THREATBOOK_IO_LLM_BASE_URL"
     CATALOG_ID = "threatbook-io-llm"

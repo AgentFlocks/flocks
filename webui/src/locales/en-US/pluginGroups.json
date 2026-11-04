@@ -57,6 +57,7 @@
   "readOnly": {
     "system": "The group of a built-in plugin cannot be changed.",
     "builtinSkill": "The group of a built-in skill cannot be changed.",
+    "externalSkill": "Skills from external directories (such as ~/.claude/skills) cannot be regrouped here.",
     "admin": "You do not have permission to change groups.",
     "catalog": "Install or configure this service first.",
     "noEditable": "No plugins are available for grouping."

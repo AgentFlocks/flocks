@@ -226,16 +226,17 @@ async def test_resolve_compaction_context_prefers_requested_agent_override():
 
 
 @pytest.mark.asyncio
-async def test_compact_command_uses_resolved_compaction_context_for_message_metadata():
-    session = SimpleNamespace(id="ses_test", directory="/tmp")
+async def test_compact_command_uses_resolved_compaction_context_for_message_metadata(tmp_path):
+    from flocks.server.routes import session as session_routes
+    from flocks.session.session import Session
+
+    # A real durable session must exist for the lifecycle write guard.
+    session = await Session.create(project_id="default", directory=str(tmp_path))
 
     async def provide_side_effect(*, directory, init, fn):
         return await fn()
 
     with patch(
-        "flocks.server.routes.session.Session.get_by_id",
-        new=AsyncMock(return_value=session),
-    ), patch(
         "flocks.server.routes.session._resolve_compaction_context",
         new=AsyncMock(return_value=("security", "threatbook-cn-llm", "minimax-m2.7")),
     ), patch(
@@ -252,10 +253,12 @@ async def test_compact_command_uses_resolved_compaction_context_for_message_meta
         new=AsyncMock(),
     ) as run_compaction_mock:
         response = await send_session_command(
-            "ses_test",
+            session.id,
             CommandRequest(command="compact", arguments=""),
         )
-        await asyncio.sleep(0.01)
+        pending = list(session_routes.pending_background_tasks())
+        assert pending
+        await asyncio.wait_for(asyncio.gather(*pending), timeout=5)
 
     assert response["status"] == "accepted"
     create_message_mock.assert_awaited()
@@ -267,3 +270,51 @@ async def test_compact_command_uses_resolved_compaction_context_for_message_meta
     run_compaction_mock.assert_awaited_once()
     assert run_compaction_mock.await_args.kwargs["explicit_provider_id"] == "threatbook-cn-llm"
     assert run_compaction_mock.await_args.kwargs["explicit_model_id"] == "minimax-m2.7"
+
+
+@pytest.mark.asyncio
+async def test_a_manual_compaction_holds_the_sessions_execution_lease():
+    # Like a runner: no runner, and no data retention, in any process can take the
+    # session while it is being compacted; and it waits for a runner holding it.
+    from flocks.session.ownership import SessionExecutionLease, current_lease
+
+    session = SimpleNamespace(id="ses_compact_lease", directory="/tmp")
+    messages = [SimpleNamespace(id="msg_user", role=MessageRole.USER, agent="rex", model=None)]
+    seen = {}
+
+    async def process(**kwargs):
+        seen["current"] = current_lease("ses_compact_lease") is not None
+        seen["other"] = await SessionExecutionLease.acquire("ses_compact_lease")
+        return "continue"
+
+    with patch(
+        "flocks.server.routes.session.Session.get_by_id",
+        new=AsyncMock(return_value=session),
+    ), patch(
+        "flocks.server.routes.session._resolve_compaction_context",
+        new=AsyncMock(return_value=("rex", "anthropic", "claude-test")),
+    ), patch(
+        "flocks.session.lifecycle.revert.SessionRevert.cleanup",
+        new=AsyncMock(),
+    ), patch(
+        "flocks.session.message.Message.list",
+        new=AsyncMock(return_value=messages),
+    ), patch(
+        "flocks.provider.provider.Provider.resolve_model_info",
+        return_value=(200_000, 8_192, None),
+    ), patch(
+        "flocks.session.lifecycle.compaction.compaction.SessionCompaction.process",
+        new=process,
+    ), patch(
+        "flocks.server.routes.session._publish_context_usage_update",
+        new=AsyncMock(),
+    ):
+        await _run_session_compaction("ses_compact_lease")
+        assert seen == {"current": True, "other": None}
+
+        runner = await SessionExecutionLease.acquire("ses_compact_lease")
+        try:
+            with pytest.raises(ValueError, match="is running"):
+                await _run_session_compaction("ses_compact_lease")
+        finally:
+            await runner.release()

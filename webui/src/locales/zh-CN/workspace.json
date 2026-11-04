@@ -126,6 +126,7 @@
       "integration_pendingHint": "当前安装尚未挂载知识库后端。请联系管理员完成后端接入后重新检查。此时未加载文件或知识集。",
       "knowledgebase_not_configured": "知识库尚未配置",
       "knowledgebase_not_configuredHint": "请在连接设置中配置 RAGFlow，保存后即生效。服务就绪前，文件和知识集操作保持禁用。",
+      "knowledgebase_not_configuredMemberHint": "需要管理员在连接设置中配置 RAGFlow。服务就绪前，文件和知识集操作保持禁用。",
       "knowledgebase_unavailable": "知识库服务不可用",
       "knowledgebase_unavailableHint": "请联系管理员检查知识库服务连接和后端状态，然后重新检查。此状态不代表知识库为空。",
       "check": "重新检查连接"
@@ -289,5 +290,6 @@
     "selectDesc": "记忆文件由 Rex 等 Agent 自动写入，记录任务上下文与关键信息",
     "loadMemoryFailed": "加载记忆文件失败",
     "readFileFailed": "读取文件失败"
-  }
+  },
+  "title": "工作目录"
 }

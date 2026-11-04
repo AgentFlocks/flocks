@@ -194,7 +194,7 @@ export default function WorkflowPage() {
 
       {error && <p role="alert" className="px-4 py-2 text-sm text-red-600">{error}</p>}
       {/* Toolbar */}
-      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3">
+      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3 max-md:px-0">
         <div className="ml-auto flex items-center gap-2">
           <PluginViewToggle value={viewMode} onChange={setViewMode} />
           <button
@@ -221,7 +221,7 @@ export default function WorkflowPage() {
 
       {/* Content */}
       <div
-        className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-4 md:flex-row"
+        className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-4 md:flex-row max-md:px-0"
         style={{ scrollbarGutter: 'stable' }}
       >
         <GroupNav inventoryComplete={!loading && !error} preferenceKey="workflow" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
@@ -463,6 +463,11 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
         </div>
 
         {/* Description */}
+        {workflow.definitionError && (
+          <p className="text-xs text-red-700" role="status" title={workflow.definitionError.message}>
+            {t('definition.invalid')}
+          </p>
+        )}
         <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">
           {workflow.description || t('noDescription')}
         </p>

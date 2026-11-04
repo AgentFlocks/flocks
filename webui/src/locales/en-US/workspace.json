@@ -126,6 +126,7 @@
       "integration_pendingHint": "The knowledge backend is not mounted in this installation. Ask an administrator to complete the backend integration, then check again. No files or Knowledge Sets have been loaded.",
       "knowledgebase_not_configured": "Knowledge base is not configured",
       "knowledgebase_not_configuredHint": "Configure RAGFlow in Connection settings. Changes take effect after saving. File and Knowledge Set actions remain disabled until the service reports ready.",
+      "knowledgebase_not_configuredMemberHint": "An administrator needs to configure RAGFlow in Connection settings. File and Knowledge Set actions remain disabled until the service reports ready.",
       "knowledgebase_unavailable": "Knowledge service is unavailable",
       "knowledgebase_unavailableHint": "Check the knowledge service connection and backend availability with an administrator, then check again. This is not an empty knowledge base.",
       "check": "Check connection again"
@@ -289,5 +290,6 @@
     "selectDesc": "Memory files are written automatically by agents like Rex to record task context and key information",
     "loadMemoryFailed": "Failed to load memory files",
     "readFileFailed": "Failed to read file"
-  }
+  },
+  "title": "Working directory"
 }

@@ -342,7 +342,6 @@ class TestRexPromptAwareness:
         rex = await Agent.get("rex")
         prompt = rex.prompt or ""
         assert "### Available Agents:" in prompt
-        assert "Default flow" in prompt
         assert "### Delegation Table:" not in prompt
 
     @pytest.mark.asyncio

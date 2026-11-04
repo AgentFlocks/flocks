@@ -124,6 +124,97 @@ class SessionSummary:
         )
     
     @classmethod
+    async def record_turn_diffs(
+        cls,
+        session_id: str,
+        user_message_id: str,
+        project_id: str,
+        worktree: str,
+    ) -> List[Dict[str, Any]]:
+        """轮次结束时按快照算文件 diff 并落库（不触发 LLM）。
+
+        - 会话级：从会话第一个 snapshot part 到当前工作区，只保留 patch part 记录过的文件
+          （把用户自己在中途改的文件排除掉），存 ``session_diff:<sid>``；
+        - 消息级：从该用户消息的 snapshot part 到当前工作区，存 ``message_diff:<sid>:<mid>``。
+        """
+        from flocks.session.message import Message
+        from flocks.snapshot.snapshot import Snapshot
+        from flocks.storage.storage import Storage
+
+        def _field(part: Any, name: str, default: Any = None) -> Any:
+            return part.get(name, default) if isinstance(part, dict) else getattr(part, name, default)
+
+        def _rel(path: str) -> str:
+            try:
+                return os.path.relpath(path, worktree)
+            except ValueError:
+                return path
+
+        messages = await Message.list(session_id)
+        first_snapshot: Optional[str] = None
+        turn_snapshot: Optional[str] = None
+        patched_all: set = set()
+        patched_turn: set = set()
+        in_turn = False
+        for msg in messages:
+            role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
+            if role == "user":
+                in_turn = msg.id == user_message_id
+            parts = await Message.parts(msg.id, session_id)
+            for part in parts:
+                ptype = _field(part, "type")
+                if ptype == "snapshot":
+                    snapshot = _field(part, "snapshot")
+                    if snapshot:
+                        first_snapshot = first_snapshot or snapshot
+                        if msg.id == user_message_id:
+                            turn_snapshot = snapshot
+                elif ptype == "patch":
+                    files = {_rel(f) for f in (_field(part, "files") or [])}
+                    patched_all |= files
+                    if in_turn:
+                        patched_turn |= files
+        if not first_snapshot:
+            return []
+
+        current = await Snapshot.track(project_id, worktree)
+        if not current:
+            return []
+
+        session_diffs = [
+            d.model_dump()
+            for d in await Snapshot.diff_full(project_id, worktree, first_snapshot, current)
+            if d.file in patched_all
+        ]
+        await Storage.set(f"session_diff:{session_id}", session_diffs, "session_diff")
+
+        if turn_snapshot:
+            turn_diffs = [
+                d.model_dump()
+                for d in await Snapshot.diff_full(project_id, worktree, turn_snapshot, current)
+                if d.file in patched_turn
+            ]
+            await Storage.set(f"message_diff:{session_id}:{user_message_id}", turn_diffs, "session_diff")
+
+        try:
+            from flocks.session.session import Session
+
+            await Session.update(project_id, session_id, summary={
+                "additions": sum(d["additions"] for d in session_diffs),
+                "deletions": sum(d["deletions"] for d in session_diffs),
+                "files": len(session_diffs),
+            })
+        except Exception as exc:
+            log.warn("summary.session.update_error", {"error": str(exc)})
+
+        log.info("summary.turn_diffs", {
+            "session_id": session_id,
+            "message_id": user_message_id,
+            "files": len(session_diffs),
+        })
+        return session_diffs
+
+    @classmethod
     async def _summarize_session(
         cls,
         session_id: str,

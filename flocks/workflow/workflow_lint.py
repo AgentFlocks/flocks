@@ -7,6 +7,7 @@ import re
 from typing import Any, Dict, List, Optional, Set
 
 from .models import Node, Workflow
+from .validation import python_syntax_errors
 
 
 _OUTPUTS_SUBSCRIPT_RE = re.compile(r"""outputs\[\s*['"](?P<key>[^'"]+)['"]\s*\]""")
@@ -638,6 +639,7 @@ def lint_workflow(
             subworkflow nodes.
     """
     results: List[Dict[str, Any]] = []
+    results.extend(python_syntax_errors(workflow))
     results.extend(lint_implicit_full_payload_edges(workflow))
     results.extend(lint_recommend_strict_edge_mapping(workflow))
     # Existing mapping checks (warnings)

@@ -18,7 +18,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from flocks.utils.log import set_log_retention_days_override
+from flocks.utils.log import set_log_cleanup_managed, set_log_retention_days_override
 
 MAX_RETENTION_DAYS = 3650
 DEFAULT_LOG_DAYS = 30
@@ -76,20 +76,45 @@ async def load_policy() -> RetentionPolicy:
     return policy_from_config(await Config.get())
 
 
+async def load_saved_policy() -> RetentionPolicy:
+    """The policy as saved right now: every configuration layer, never a cached copy.
+
+    The CLI and the server are separate processes; a copy cached before an
+    admin's change would keep deleting under the old policy.
+    """
+    from flocks.config.config import Config
+    from flocks.config.runtime import runtime_config
+
+    override = runtime_config.get()
+    return policy_from_config(override if override is not None else await Config.load_fresh())
+
+
 def apply_log_retention(policy: RetentionPolicy) -> None:
     """Make the logger's own startup / day-rollover cleanup follow the policy."""
     set_log_retention_days_override(policy.log_days)
 
 
 async def preload_log_retention() -> None:
-    """Apply the saved log-retention period before the logger's first cleanup.
+    """Hand log cleanup over to the data retention scheduler before the logger starts.
 
-    Startup calls ``Log.init`` (which prunes old logs) before the retention
-    scheduler loads the policy, so without this a saved ``0`` (keep forever) or a
-    period longer than ``FLOCKS_LOG_RETENTION_DAYS`` would still lose logs on
-    that first prune. Best-effort: a config read failure leaves the env default.
+    Called before ``Log.init`` by every Flocks process (CLI and server). From
+    then on the logger deletes nothing on its own, neither on startup nor at
+    day rollover, where it only knows the period it read once: expired logs go
+    only in the scheduler's rounds, under the policy as last saved. The saved
+    period is still applied for what asks the logger.
     """
+    set_log_cleanup_managed(True)
     try:
-        apply_log_retention(await load_policy())
+        apply_log_retention(await load_saved_policy())
     except Exception:
         pass
+
+
+async def bump_policy_version() -> int:
+    """Called after a new policy was written to flocks.json.
+
+    The scheduler reads the saved policy before every round, so in one process
+    there is no version to move. A database backend whose processes share
+    retention replaces this module with one that keeps a shared version.
+    """
+    return 0

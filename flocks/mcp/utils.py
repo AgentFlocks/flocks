@@ -332,7 +332,10 @@ def extract_api_key_from_mcp_url(server_name: str, config: Dict[str, Any]) -> Di
         key_encoded, _, value_encoded = part.partition("=")
         key = unquote(key_encoded)
         value = unquote(value_encoded)
-        if key.lower() in _SENSITIVE_QUERY_PARAMS and not value.startswith("{secret:"):
+        # Blank values are intentionally-pending credentials (see
+        # ``config_has_pending_credentials``); storing "" as a secret would hide
+        # that and trigger a doomed connect attempt.
+        if key.lower() in _SENSITIVE_QUERY_PARAMS and value.strip() and not value.startswith("{secret:"):
             from flocks.security import get_secret_manager
             from flocks.security.secrets import get_mcp_secret_id
             secret_key = get_mcp_secret_id(server_name)

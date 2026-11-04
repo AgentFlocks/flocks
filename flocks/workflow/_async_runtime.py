@@ -17,6 +17,18 @@ dedicated daemon thread. ``run_sync`` submits coroutines to it via
 the loop never closes during the process lifetime, any late async cleanup
 (stream ``aclose``, GC, etc.) always runs on a live loop.
 
+Loop affinity with the server:
+    Hook pipelines run inside these coroutines (``llm.before`` redaction,
+    ``tool.execute.before`` gates) and may hold resources bound to the loop
+    that created them -- the commercial extension keeps one ``grpc.aio``
+    channel on the server's main loop. Awaiting such a resource from a
+    different loop fails with "attached to a different loop", so when the
+    server has registered its loop (:func:`register_primary_loop`) workflow
+    coroutines are submitted there instead of to the private loop. The
+    private loop remains the fallback for CLI / test processes without a
+    running server loop, and for callers already executing on the primary
+    loop's thread (submitting there would self-deadlock).
+
 Design notes:
     * Lazy initialization guarded by a module-level ``threading.Lock`` so
       concurrent first-callers cannot start multiple loops.
@@ -35,35 +47,98 @@ import concurrent.futures
 import threading
 from typing import Any, Callable, Coroutine
 
-from flocks.provider.llm_budget import get_loop_budget, set_loop_budget
+from flocks.provider.llm_budget import budget_scope, get_loop_budget, set_loop_budget, set_scope_budget
 
 __all__ = [
     "run_sync",
     "run_sync_cancellable",
+    "register_primary_loop",
+    "primary_loop",
     "configure_llm_concurrency",
     "llm_concurrency_limit",
     "is_workflow_loop",
     "DEFAULT_LLM_MAX_CONCURRENCY",
+    "WORKFLOW_LLM_BUDGET_SCOPE",
     "_get_loop_for_testing",
 ]
 
-# Cap on LLM calls in flight on the workflow loop (``llm.ask`` plus every
+# Cap on LLM calls in flight for workflow execution (``llm.ask`` plus every
 # subagent session started by ``delegate_task`` inside a workflow). Interactive
 # sessions run on the server loop and are not budgeted, so this is the share of
 # the provider's quota that workflows can take away from them. It is a
-# process-wide cap: there is one workflow loop, so all concurrent runs (syslog /
-# kafka / scheduled / manual) draw from these slots together, not one budget per
-# run. Overridden by ``workflow.llm.max_concurrency`` in flocks.json; 0 lifts
-# the cap. A wait longer than a few seconds is logged as
+# process-wide cap: all concurrent runs (syslog / kafka / scheduled / manual)
+# draw from these slots together, not one budget per run. On the private loop
+# the budget is attached to the loop; when workflow coroutines run on the
+# registered server loop (see "Loop affinity" above) they draw from the
+# ``WORKFLOW_LLM_BUDGET_SCOPE`` budget instead, so interactive sessions on that
+# loop stay unbudgeted. Overridden by ``workflow.llm.max_concurrency`` in
+# flocks.json; 0 lifts the cap. A wait longer than a few seconds is logged as
 # ``llm_budget.slot.slow_acquire`` — the wait counts towards the node timeout,
 # so without that line a saturated budget just looks like a node timing out.
 DEFAULT_LLM_MAX_CONCURRENCY = 8
+WORKFLOW_LLM_BUDGET_SCOPE = "workflow"
 
 
 _lock = threading.Lock()
 _loop: asyncio.AbstractEventLoop | None = None
 _thread: threading.Thread | None = None
+_primary_loop: asyncio.AbstractEventLoop | None = None
 _llm_limit: int = DEFAULT_LLM_MAX_CONCURRENCY
+set_scope_budget(WORKFLOW_LLM_BUDGET_SCOPE, _llm_limit)
+
+
+def register_primary_loop(loop: asyncio.AbstractEventLoop | None = None) -> asyncio.AbstractEventLoop:
+    """Record the server's main event loop as the preferred target for workflow coroutines.
+
+    Called from async server entry points (startup sync, run/trigger/poller
+    dispatch). Idempotent; the latest registered loop wins so a restarted
+    in-process server replaces a stale, closed loop.
+    """
+    global _primary_loop
+    if loop is None:
+        loop = asyncio.get_running_loop()
+    _primary_loop = loop
+    return loop
+
+
+def primary_loop() -> asyncio.AbstractEventLoop | None:
+    """Return the registered server loop when it is still usable, else ``None``."""
+    loop = _primary_loop
+    if loop is None or loop.is_closed() or not loop.is_running():
+        return None
+    return loop
+
+
+def _current_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
+def _select_loop() -> asyncio.AbstractEventLoop:
+    """Prefer the server loop; fall back to the private loop when unusable.
+
+    The private loop is also used when the caller is *on* the server loop's
+    thread: blocking there on a future that needs the same loop would hang.
+    """
+    primary = primary_loop()
+    if primary is not None and _current_loop() is not primary:
+        return primary
+    return _ensure_loop()
+
+
+async def _in_workflow_budget_scope(coro: Coroutine[Any, Any, Any]) -> Any:
+    """Run *coro* (and the tasks it starts) against the workflow LLM budget."""
+    with budget_scope(WORKFLOW_LLM_BUDGET_SCOPE):
+        return await coro
+
+
+def _submit(coro: Coroutine[Any, Any, Any], loop: asyncio.AbstractEventLoop) -> "concurrent.futures.Future[Any]":
+    """Schedule *coro* on *loop*; on a shared loop it runs under the workflow budget scope."""
+    if loop is not _loop:
+        coro = _in_workflow_budget_scope(coro)
+    return asyncio.run_coroutine_threadsafe(coro, loop)
 
 
 def _ensure_loop() -> asyncio.AbstractEventLoop:
@@ -107,10 +182,12 @@ def _ensure_loop() -> asyncio.AbstractEventLoop:
 
 
 def configure_llm_concurrency(limit: int | None) -> None:
-    """Set the workflow loop's LLM budget (``None`` / ``0`` = unlimited).
+    """Set the workflow LLM budget (``None`` / ``0`` = unlimited).
 
-    Safe to call from any thread and before the loop exists; the value is
-    applied when the loop starts. Callers holding a slot keep it.
+    Applies to the private workflow loop and to workflow coroutines running on
+    the registered server loop. Safe to call from any thread and before the
+    loop exists; the value is applied when the loop starts. Callers holding a
+    slot keep it.
     """
     global _llm_limit
     try:
@@ -118,6 +195,7 @@ def configure_llm_concurrency(limit: int | None) -> None:
     except (TypeError, ValueError):
         resolved = 0
     _llm_limit = max(0, resolved)
+    set_scope_budget(WORKFLOW_LLM_BUDGET_SCOPE, _llm_limit)
     with _lock:
         loop = _loop
     if loop is not None and loop.is_running():
@@ -171,10 +249,10 @@ def run_sync(coro: Coroutine[Any, Any, Any]) -> Any:
             self-deadlock). Call sites from inside the loop should simply
             ``await`` the coroutine directly.
     """
-    loop = _ensure_loop()
+    loop = _select_loop()
     _assert_not_workflow_loop(coro, loop)
 
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    future = _submit(coro, loop)
     try:
         return future.result()
     except concurrent.futures.CancelledError as exc:
@@ -196,10 +274,10 @@ def run_sync_cancellable(
     poll_interval_s: float = 0.1,
 ) -> Any:
     """Run *coro* on the shared loop while polling a sync cancellation hook."""
-    loop = _ensure_loop()
+    loop = _select_loop()
     _assert_not_workflow_loop(coro, loop)
 
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    future = _submit(coro, loop)
     try:
         while True:
             if cancel_checker():
@@ -219,6 +297,11 @@ def run_sync_cancellable(
                     return future.result()
     except concurrent.futures.CancelledError as exc:
         raise asyncio.CancelledError() from exc
+
+
+def _clear_primary_loop_for_testing() -> None:
+    global _primary_loop
+    _primary_loop = None
 
 
 def _get_loop_for_testing() -> tuple[asyncio.AbstractEventLoop | None, threading.Thread | None]:

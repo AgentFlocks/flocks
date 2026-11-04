@@ -239,21 +239,24 @@ async def _probe_fts5_tokenizer(db: Any) -> str:
 
     Raises the FTS5-missing error untouched so the caller can disable search;
     an older SQLite that has FTS5 but rejects a tokenizer option just gets the
-    next candidate.
+    next candidate.  The probe table is made in an in-memory database attached
+    for the probe, so it goes away with it and nothing is left behind.
     """
     last_error: Optional[sqlite3.OperationalError] = None
     for candidate in FTS5_TOKENIZER_CANDIDATES:
+        await db.execute("ATTACH DATABASE ':memory:' AS _flocks_fts5_probe")
         try:
             await db.execute(
-                "CREATE VIRTUAL TABLE temp._flocks_session_fts5_probe "
+                "CREATE VIRTUAL TABLE _flocks_fts5_probe._flocks_session_fts5_probe "
                 f"USING fts5(text, tokenize = '{candidate}')"
             )
-            await db.execute("DROP TABLE temp._flocks_session_fts5_probe")
         except sqlite3.OperationalError as exc:
             if _is_fts5_unavailable_error(exc) or not _is_tokenizer_error(exc):
                 raise
             last_error = exc
             continue
+        finally:
+            await db.execute("DETACH DATABASE _flocks_fts5_probe")
         if candidate != FTS5_TOKENIZER_CANDIDATES[0]:
             log.warning(
                 "session_search.tokenizer_fallback",

@@ -9,12 +9,12 @@ import asyncio
 import json
 from typing import Any, List, Optional
 
-import aiosqlite
 from fastapi import APIRouter, HTTPException, Request, status as http_status
 from pydantic import BaseModel, Field
 
 from flocks.audit import emit_audit_event
-from flocks.server.auth import get_request_ip, get_request_user_agent, require_user
+from flocks.coordination import is_unique_violation
+from flocks.server.auth import get_request_ip, get_request_user_agent, require_admin, require_user
 from flocks.tool.device import (
     DEFAULT_GROUP_ID,
     MULTI_GROUP_ENABLED,
@@ -87,7 +87,9 @@ async def route_create_group(body: DeviceGroupCreate):
         raise HTTPException(status_code=400, detail="name is required")
     try:
         return await create_group(name, body.description, body.sort_order)
-    except aiosqlite.IntegrityError:
+    except Exception as exc:
+        if not is_unique_violation(exc):
+            raise
         raise HTTPException(status_code=409, detail=f"机房名称 '{name}' 已存在")
 
 
@@ -104,7 +106,9 @@ async def route_update_group(group_id: str, body: DeviceGroupUpdate):
     """Rename the default room (or any room when multi-group is enabled)."""
     try:
         result = await update_group(group_id, body.name, body.description, body.sort_order)
-    except aiosqlite.IntegrityError:
+    except Exception as exc:
+        if not is_unique_violation(exc):
+            raise
         attempted = (body.name or "").strip() or "(unchanged)"
         raise HTTPException(status_code=409, detail=f"机房名称 '{attempted}' 已存在")
     if result is None:
@@ -155,7 +159,11 @@ async def route_sync_devices(refresh: bool = True):
     response_model=DeviceTemplate,
     status_code=http_status.HTTP_201_CREATED,
 )
-async def route_create_custom_device_template(body: CustomDeviceTemplateCreate):
+async def route_create_custom_device_template(body: CustomDeviceTemplateCreate, request: Request):
+    # Creating a template writes plugin files into the server's global plugin
+    # directory and registers new (http/script) tools into the shared runtime,
+    # which is an admin-level change to what the agent can execute.
+    require_admin(request)
     try:
         return create_custom_device_template(body)
     except FileExistsError as exc:
@@ -185,7 +193,13 @@ async def route_get_device_credentials(
     request: Request,
     body: Optional[DeviceCredentialRevealRequest] = None,
 ):
-    current_user = require_user(request)
+    # Revealing a device credential returns the plaintext secret (device
+    # appliance passwords, API keys). That is an admin-only action: gate it
+    # with require_admin so a non-admin member cannot read stored device
+    # secrets, matching the "仅管理员可执行" pattern used by the console and
+    # admin routes. Other device-management endpoints stay require_user by
+    # design (see CLAUDE.md: OSS device management is not admin-gated).
+    current_user = require_admin(request)
     row = await fetch_device(device_id)
     if row is None:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Device not found")

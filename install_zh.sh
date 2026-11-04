@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
+# Re-exec under a real bash: dash/sh (no BASH_VERSION) and bash running as "sh" (POSIX mode).
+[ -n "${BASH_VERSION:-}" ] && ! shopt -oq posix 2>/dev/null || exec bash "$0" "$@"
 
 set -euo pipefail
 
@@ -8,6 +9,7 @@ REPO_SLUG="${FLOCKS_REPO_SLUG:-flocks/flocks}"
 DEFAULT_BRANCH="${FLOCKS_DEFAULT_BRANCH:-main}"
 VERSION="${VERSION:-$DEFAULT_BRANCH}"
 INSTALL_TUI=0
+FORCE_INSTALL="${FLOCKS_INSTALL_FORCE:-0}"
 TMP_DIR=""
 DEFAULT_INSTALL_DIR="${PWD%/}/flocks"
 INSTALL_DIR="${FLOCKS_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
@@ -35,7 +37,7 @@ cleanup() {
 
 print_usage() {
   cat <<EOF
-用法: install_zh.sh [--with-tui] [--version <标签或分支>]
+用法: install_zh.sh [--with-tui] [--version <标签或分支>] [--force]
 
 Flocks 中国用户一键安装脚本。
 该脚本会从 Gitee 下载仓库源码压缩包，解压到临时目录后复制到持久化安装目录，
@@ -55,11 +57,13 @@ Flocks 中国用户一键安装脚本。
 选项：
   --with-tui, -t         同时安装 TUI 依赖。
   --version <value>      指定标签或分支。默认值: $DEFAULT_BRANCH
+  --force                安装目录已存在时继续安装：旧目录会改名保留为 <目录>.bak-<时间戳>，不会被删除。
   --help, -h             显示帮助信息。
 
 环境变量：
   VERSION                等同于 --version。
   FLOCKS_INSTALL_DIR     指定持久化安装目录。默认值: $INSTALL_DIR
+  FLOCKS_INSTALL_FORCE   设为 1 等同于 --force（适合 curl | bash 场景）。
   FLOCKS_REPO_SLUG       指定 Gitee 仓库，例如 owner/repo。
   FLOCKS_DEFAULT_BRANCH  指定默认分支。默认值: $DEFAULT_BRANCH
 EOF
@@ -76,6 +80,9 @@ parse_args() {
         VERSION="$2"
         shift
         ;;
+      --force)
+        FORCE_INSTALL=1
+        ;;
       --help|-h)
         print_usage
         exit 0
@@ -87,6 +94,30 @@ parse_args() {
     esac
     shift
   done
+}
+
+prepare_install_dir() {
+  local backup_dir
+
+  if [[ ! -e "$INSTALL_DIR" && ! -L "$INSTALL_DIR" ]]; then
+    return 0
+  fi
+
+  if [[ -d "$INSTALL_DIR" && ! -L "$INSTALL_DIR" && -z "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]]; then
+    rmdir "$INSTALL_DIR"
+    return 0
+  fi
+
+  if [[ "$FORCE_INSTALL" != "1" ]]; then
+    fail "安装目录已存在: $INSTALL_DIR。如需继续请加 --force（旧目录将改名保留为 ${INSTALL_DIR}.bak-<时间戳>），或用 FLOCKS_INSTALL_DIR 指定其他目录。"
+  fi
+
+  backup_dir="${INSTALL_DIR}.bak-$(date +%Y%m%d%H%M%S)"
+  while [[ -e "$backup_dir" || -L "$backup_dir" ]]; do
+    backup_dir="${backup_dir}-$RANDOM"
+  done
+  info "已有安装目录已改名保留（未删除）: $backup_dir"
+  mv "$INSTALL_DIR" "$backup_dir"
 }
 
 ensure_dependencies() {
@@ -105,7 +136,9 @@ download_archive() {
   local last_error=""
   local url=""
 
-  while IFS= read -r url; do
+  # Candidate URLs contain no whitespace; a plain word loop keeps this POSIX-mode safe
+  # (process substitution is unavailable when bash runs as sh).
+  for url in $(build_candidate_urls); do
     [[ -n "$url" ]] || continue
     info "尝试下载源码压缩包: $url"
     if curl -fsSL "$url" -o "$archive_path"; then
@@ -113,7 +146,7 @@ download_archive() {
       return 0
     fi
     last_error="$url"
-  done < <(build_candidate_urls)
+  done
 
   fail "无法从 Gitee 下载版本 \"$VERSION\" 的源码压缩包。最后尝试的地址: ${last_error:-<none>}"
 }
@@ -165,7 +198,7 @@ main() {
 
   install_parent="$(dirname "$INSTALL_DIR")"
   mkdir -p "$install_parent"
-  rm -rf "$INSTALL_DIR"
+  prepare_install_dir
   cp -R "$project_dir" "$INSTALL_DIR"
 
   info "下载来源: $download_url"

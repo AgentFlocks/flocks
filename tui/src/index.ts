@@ -81,6 +81,8 @@ const cli = yargs(hideBin(process.argv))
       msg?.startsWith("Invalid values:")
     ) {
       if (err) throw err
+      // 自定义 fail 后 yargs 不再自行输出校验信息，先把原因打出来再给帮助
+      console.error(msg + EOL)
       cli.showHelp("log")
     }
     if (err) throw err

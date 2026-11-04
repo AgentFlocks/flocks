@@ -9,8 +9,8 @@ from typing import Optional
 from flocks.project.instance import Instance
 
 
-# Hub roots contributed by extensions (Flocks Pro ships its scene suites this
-# way). Each is shaped like the bundled root: ``index.json`` plus ``plugins/``.
+# Hub roots contributed by extensions (an extension can ship its scene suites
+# this way). Each is shaped like the bundled root: ``index.json`` plus ``plugins/``.
 # Their index entries join the catalog and replace bundled entries with the
 # same type and id, so a placeholder listed by OSS can be backed by the real
 # package once the extension is installed.

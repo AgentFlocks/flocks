@@ -35,6 +35,28 @@ def _make_tool_info(name: str):
     )
 
 
+def _assert_probe_call(mock_execute, tool_name: str, **params):
+    """The probe must run exactly once with an explicit ToolContext that carries
+    a call id (the Pro audit hook denies executions without one)."""
+    mock_execute.assert_awaited_once()
+    kwargs = dict(mock_execute.await_args.kwargs)
+    ctx = kwargs.pop("ctx")
+    assert kwargs == {"tool_name": tool_name, **params}
+    assert ctx.call_id and ctx.call_id.startswith("probe_")
+    assert ctx.extra.get("api_service_probe")
+    assert ctx.extra.get("tool_name") == tool_name
+    # Probes have no session and nobody to answer a confirmation prompt: they
+    # must declare a non-interactive execution profile so the Pro network
+    # policy does not park them in run_user_confirm for 300s (PLT-0186).
+    assert ctx.extra.get("non_interactive") is True
+    profile = ctx.extra.get("session_execution_profile")
+    assert isinstance(profile, dict)
+    assert profile["entry"] == "api"
+    assert profile["permission_mode"] == "auto-allow-all"
+    assert profile["network_mode"] == "auto-allow-all"
+    assert profile["source"] == "provider.api_service_probe"
+
+
 # Patch targets: these imports happen inside the test_provider_credentials
 # function body, so we patch at the source module level.
 _PATCH_SECRET_MGR = "flocks.security.get_secret_manager"
@@ -43,6 +65,7 @@ _PATCH_TOOL_REGISTRY = "flocks.tool.registry.ToolRegistry"
 _PATCH_CONFIG_GET = "flocks.config.config.Config.get"
 _PATCH_CONFIG_RAW = "flocks.config.config_writer.ConfigWriter.get_provider_raw"
 _PATCH_TOOL_SOURCE = "flocks.server.routes.tool._get_tool_source"
+_PATCH_TOOL_SETTINGS = "flocks.config.config_writer.ConfigWriter.list_tool_settings"
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +163,8 @@ class TestTestCredentialsToolExecution:
             patch(_PATCH_PROVIDER) as mock_provider_cls,
             patch(_PATCH_TOOL_REGISTRY) as mock_tr,
             patch(_PATCH_TOOL_SOURCE, return_value=("api", "threatbook_api")),
+            # keep the developer's ~/.flocks tool_settings out of the test
+            patch(_PATCH_TOOL_SETTINGS, return_value={}),
         ):
             mock_provider_cls._ensure_initialized = MagicMock()
             mock_provider_cls.apply_config = AsyncMock()
@@ -226,10 +251,7 @@ class TestTestCredentialsToolExecution:
 
             assert result["success"] is True, result
             assert result["tool_tested"] == "threatbook_cn_url_scan"
-            mock_tr.execute.assert_awaited_once_with(
-                tool_name="threatbook_cn_url_scan",
-                url="https://example.com",
-            )
+            _assert_probe_call(mock_tr.execute, "threatbook_cn_url_scan", url="https://example.com")
 
     @pytest.mark.asyncio
     async def test_onesec_service_prefers_threat_probe_and_uses_enum_action(self):
@@ -301,10 +323,7 @@ class TestTestCredentialsToolExecution:
 
             assert result["success"] is True, result
             assert result["tool_tested"] == "onesec_threat"
-            mock_tr.execute.assert_awaited_once_with(
-                tool_name="onesec_threat",
-                action="threat_query_bd_version",
-            )
+            _assert_probe_call(mock_tr.execute, "onesec_threat", action="threat_query_bd_version")
 
     @pytest.mark.asyncio
     async def test_service_prefers_login_probe_over_action_dispatch_tool(self):
@@ -366,7 +385,7 @@ class TestTestCredentialsToolExecution:
 
             assert result["success"] is True, result
             assert result["tool_tested"] == "example_login"
-            mock_tr.execute.assert_awaited_once_with(tool_name="example_login")
+            _assert_probe_call(mock_tr.execute, "example_login")
 
     @pytest.mark.asyncio
     async def test_declared_manifest_probe_is_used_before_heuristic_tool_selection(self):
@@ -412,10 +431,7 @@ class TestTestCredentialsToolExecution:
             assert result["success"] is True, result
             assert result["tool_tested"] == "tdp_system_status"
             assert result["probe_source"] == "manifest"
-            mock_tr.execute.assert_awaited_once_with(
-                tool_name="tdp_system_status",
-                action="service",
-            )
+            _assert_probe_call(mock_tr.execute, "tdp_system_status", action="service")
 
     @pytest.mark.asyncio
     async def test_login_probe_does_not_overmatch_business_tools(self):
@@ -652,10 +668,7 @@ class TestTestCredentialsToolExecution:
             assert result["success"] is True, result
             assert result["tool_tested"] == "onesig_login"
             assert mock_tr.execute.await_count == 1
-            mock_tr.execute.assert_awaited_once_with(
-                tool_name="onesig_login",
-                action="test",
-            )
+            _assert_probe_call(mock_tr.execute, "onesig_login", action="test")
 
     @pytest.mark.asyncio
     async def test_service_metadata_secret_is_used_for_hyphenated_service(self):
@@ -680,6 +693,7 @@ class TestTestCredentialsToolExecution:
                 return_value={"auth": {"secret": "threatbook_cn_api_key"}},
             ),
             patch(_PATCH_TOOL_SOURCE, return_value=("api", "threatbook-cn")),
+            patch(_PATCH_TOOL_SETTINGS, return_value={}),
         ):
             mock_provider_cls._ensure_initialized = MagicMock()
             mock_provider_cls.apply_config = AsyncMock()
@@ -912,6 +926,54 @@ class TestTestCredentialsInlineConfigFallback:
             assert result["model_id"] == "unsaved-prod-deployment"
             provider.chat.assert_awaited_once()
             assert provider.chat.await_args.args[0] == "unsaved-prod-deployment"
+
+
+@pytest.mark.asyncio
+async def test_probe_is_bounded_by_timeout(monkeypatch):
+    """A probe stuck in the tool gate (e.g. waiting for a confirmation that nobody
+    can answer) must fail fast instead of holding the request for minutes."""
+    import asyncio
+
+    from flocks.server.routes import provider as provider_routes
+    from flocks.server.routes.provider import test_provider_credentials
+
+    tool_info = ToolInfo(
+        name="stuck_service_ping",
+        description="ping",
+        category=ToolCategory.CUSTOM,
+        parameters=[],
+    )
+    mock_secrets = MagicMock()
+    mock_secrets.get.return_value = "valid-api-key"
+
+    async def _never_returns(**_kwargs):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(provider_routes, "API_SERVICE_PROBE_TIMEOUT_S", 0.05)
+    with (
+        patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+        patch(_PATCH_PROVIDER) as mock_provider_cls,
+        patch(_PATCH_TOOL_REGISTRY) as mock_tr,
+        patch(_PATCH_TOOL_SOURCE, return_value=("api", "stuck_service")),
+        patch(_PATCH_TOOL_SETTINGS, return_value={}),
+    ):
+        mock_provider_cls._ensure_initialized = MagicMock()
+        mock_provider_cls.apply_config = AsyncMock()
+        mock_provider_cls.get.return_value = None
+        mock_tr.init = MagicMock()
+        mock_tr.init_async = AsyncMock()
+        mock_tr.list_tools.return_value = [tool_info]
+        mock_tr._dynamic_tools_by_module = {"flocks.tool.generated.stuck_service": ["stuck_service_ping"]}
+        mock_tr.execute = AsyncMock(side_effect=_never_returns)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        result = await asyncio.wait_for(test_provider_credentials("stuck_service"), timeout=5)
+        elapsed = loop.time() - started
+
+    assert result["success"] is False, result
+    assert elapsed < 2, elapsed
+    assert result["tool_tested"] == "stuck_service_ping"
 
 
 class TestTestCredentialsHideTheKeyInErrors:

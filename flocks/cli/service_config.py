@@ -45,8 +45,17 @@ class ServiceConfig:
 
 
 def loopback_host(host: str) -> str:
-    """Return a local access host for wildcard bind addresses."""
-    return "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    """Return a local access host for wildcard bind addresses.
+
+    ``::`` must map to ``::1`` rather than ``127.0.0.1``: asyncio binds IPv6
+    listeners with ``IPV6_V6ONLY`` set, so an IPv4 loopback probe of an
+    ``[::]`` server never connects and every start would time out.
+    """
+    if host == "0.0.0.0":
+        return "127.0.0.1"
+    if host == "::":
+        return "::1"
+    return host
 
 
 def _format_host_for_url(host: str) -> str:
@@ -214,9 +223,12 @@ def _first_port(cli_value: int | None, env_names: tuple[str, ...], label: str) -
         if not env_value:
             continue
         try:
-            return int(env_value)
+            port = int(env_value)
         except ValueError as error:
             raise ServiceConfigError(f"{label} port from {env_name} must be an integer.") from error
+        if not 1 <= port <= 65535:
+            raise ServiceConfigError(f"{label} port from {env_name} must be between 1 and 65535, got {port}.")
+        return port
     return None
 
 

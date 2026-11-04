@@ -261,6 +261,48 @@ def service_healthy() -> bool:
     return status == "connecting" or (status == "connected" and tools > 0)
 
 
+async def reconcile_service() -> None:
+    """Follow the registration as flocks.json holds it now: connect or drop ``rea`` in this process.
+
+    An install or uninstall writes flocks.json for the whole host but connects
+    or removes the service only in the Flocks process that ran it.
+    """
+
+    from flocks.mcp import MCP
+
+    if ReaInstaller.is_running() or ReaUninstaller.is_running():
+        return  # the job is changing it
+    statuses, initialized = MCP.status_snapshot()
+    if not initialized:
+        return  # MCP is still starting and reads the registration itself
+    registered = runtime.current_mcp_config()
+    if registered is not None and registered.get("enabled", True) is False:
+        registered = None
+    local = MCP.server_config(runtime.MCP_SERVER_NAME)
+    if registered is None:
+        if local is not None or runtime.MCP_SERVER_NAME in statuses:
+            await MCP.remove(runtime.MCP_SERVER_NAME)
+            log.info("rea.service.removed_here", {})
+        return
+    if local is None or not runtime.mcp_config_matches(local, registered):
+        await MCP.connect(runtime.MCP_SERVER_NAME, registered)
+        log.info("rea.service.connected_here", {})
+
+
+async def sync_with_host(*, strict: bool = False) -> None:
+    """Catch up with what other Flocks processes on this host did to REA's service (flocks.json).
+
+    ``strict`` raises when that cannot be read, for callers that must not go on without it.
+    """
+
+    try:
+        await reconcile_service()
+    except Exception as exc:
+        if strict:
+            raise
+        log.warning("rea.sync.service_failed", {"error": str(exc)})
+
+
 def _uninstall_is_latest() -> bool:
     """The last REA operation in this process was the uninstall (not a newer install)."""
 
@@ -422,6 +464,7 @@ def public_uninstall_job(job: Any, *, admin: bool) -> Optional[dict[str, Any]]:
 
 
 async def build_status(user: Any, *, refresh: bool = False) -> dict[str, Any]:
+    await sync_with_host()
     checks = await runtime.check_environment(refresh=refresh)
     admin = can_install(user)
     state = install_state()

@@ -1172,3 +1172,50 @@ async def test_embedding_failure_falls_back_to_keyword_results(
         sources=[MemorySource.MEMORY],
     )
     assert [result.path for result in results] == ["MEMORY.md"]
+
+
+@pytest.mark.asyncio
+async def test_tokenizer_probe_leaves_nothing_behind_and_drops_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The FTS5 probe table lives in an in-memory database attached for the probe."""
+    db_path = tmp_path / "probe.db"
+    await Storage.init(db_path)
+    statements: list[str] = []
+    original_connect = Storage.connect
+
+    class Recording:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def execute(self, sql, *args):
+            statements.append(sql)
+            return self._inner.execute(sql, *args)
+
+    class RecordingContext:
+        def __init__(self, path=None):
+            self._context = original_connect(path)
+
+        async def __aenter__(self):
+            return Recording(await self._context.__aenter__())
+
+        async def __aexit__(self, *exc):
+            return await self._context.__aexit__(*exc)
+
+    monkeypatch.setattr(Storage, "connect", classmethod(lambda _cls, path=None: RecordingContext(path)))
+
+    assert await ensure_session_search_tables(db_path)
+
+    assert any("_flocks_session_fts5_probe" in sql for sql in statements)
+    assert not [sql for sql in statements if sql.lstrip().upper().startswith("DROP")]
+    connection = sqlite3.connect(db_path)
+    leftovers = connection.execute(
+        "SELECT name FROM sqlite_master WHERE name LIKE '%fts5_probe%' "
+        "UNION SELECT name FROM sqlite_temp_master WHERE name LIKE '%fts5_probe%'"
+    ).fetchall()
+    connection.close()
+    assert leftovers == []

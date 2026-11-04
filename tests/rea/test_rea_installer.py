@@ -331,3 +331,127 @@ async def test_install_events_say_only_that_something_changed(monkeypatch):
     assert sent == [("rea.install.updated", {"job": {
         "id": "reainst_x", "status": "failed", "stage": "components", "progress": 30, "tier": "full",
     }})]
+
+
+@pytest.mark.asyncio
+async def test_the_install_outlives_the_conversation_that_started_it(ready_host, monkeypatch):
+    # Stopping the conversation releases its execution lease; the job it left
+    # running must not carry that lease into its validation.
+    import time
+
+    from flocks.session import ownership
+
+    seen = {}
+    real = validation.run_validation
+
+    async def run_validation(tier, *, session_id, on_result=None):
+        seen["session_lease"] = ownership.current_lease(session_id)
+        ownership.require_execution_allowed(session_id)  # what every tool call checks first
+        return await real(tier, session_id=session_id, on_result=on_result)
+
+    monkeypatch.setattr(validation, "run_validation", run_validation)
+    conversation = ownership.SessionExecutionLease("ses_install", "owner", 1, 30.0, time.monotonic() + 30)
+    previous = ownership._current.set(conversation)
+    try:
+        await ReaInstaller.start("light", user_id="admin-1", session_id="ses_install")
+    finally:
+        ownership._current.reset(previous)
+    conversation.released = True  # the user stopped the conversation meanwhile
+
+    job = await ReaInstaller.wait()
+
+    assert job.status == "succeeded", job
+    assert seen == {"session_lease": None}
+
+
+@pytest.mark.asyncio
+async def test_one_rea_job_at_a_time_across_the_processes_of_a_host(ready_host):
+    from flocks.rea import operation
+
+    other = operation.acquire("reainst_other")  # another Flocks process on this host runs a job
+    assert other is not None
+    try:
+        with pytest.raises(ReaInstallError) as refused:
+            await ReaInstaller.start("light", user_id="admin-1", session_id="ses_x")
+        assert refused.value.code == "busy"
+        assert ready_host["mcp"].connects == []  # nothing of REA was touched
+        assert ReaInstaller.current_job() is None
+    finally:
+        other.release()
+
+    # Once that job ended, an install starts here.
+    job = await ReaInstaller.start("light", user_id="admin-1", session_id="ses_x")
+    assert operation.holder() == job.id
+    assert (await ReaInstaller.wait()).status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_the_install_holds_the_hosts_rea_lock_until_its_file_work_ended(ready_host, monkeypatch):
+    # Stopped mid-step (an uninstall cancels it), the job keeps the lock until the
+    # thread it started has finished: no other job can work on the same files meanwhile.
+    import threading
+
+    from flocks.rea import operation
+
+    step_started, release_step = threading.Event(), threading.Event()
+
+    def slow_file_step():
+        step_started.set()
+        release_step.wait(10)
+
+    async def ensure_components(tier, on_done=None):
+        await runtime.run_in_thread(slow_file_step)
+        return {}
+
+    monkeypatch.setattr(components, "ensure_components", ensure_components)
+    job = await ReaInstaller.start("light", user_id="admin-1", session_id="ses_x")
+    await asyncio.to_thread(step_started.wait, 10)
+    assert operation.holder() == job.id and operation.acquire("reainst_next") is None
+
+    assert ReaInstaller.cancel()
+    await asyncio.sleep(0.2)
+    assert operation.holder() == job.id  # the thread still runs: the lock stays
+    assert operation.acquire("reainst_next") is None
+
+    release_step.set()
+    ended = await ReaInstaller.wait()
+    assert (ended.status, ended.errorCode) == ("failed", "interrupted")
+    assert operation.holder() is None
+    nxt = operation.acquire("reainst_next")
+    assert nxt is not None
+    nxt.release()
+
+
+@pytest.mark.asyncio
+async def test_an_install_stopped_before_its_job_runs_lets_go_of_the_lock(ready_host, monkeypatch):
+    from flocks.rea import operation
+
+    import flocks.server.routes.event as event_routes
+
+    # Stopped while the job is being announced (the conversation was stopped).
+    entered = asyncio.Event()
+    real_publish = event_routes.publish_event
+
+    async def hang(event, payload):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(event_routes, "publish_event", hang)
+    start = asyncio.create_task(ReaInstaller.start("light", user_id="admin-1", session_id="ses_x"))
+    await entered.wait()
+    assert operation.holder() is not None
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    assert operation.holder() is None
+    monkeypatch.setattr(event_routes, "publish_event", real_publish)
+
+    # Cancelled after the job task was created but before it ever ran.
+    job = await ReaInstaller.start("light", user_id="admin-1", session_id="ses_x")
+    assert operation.holder() == job.id
+    assert ReaInstaller.cancel()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert operation.holder() is None
+    assert ReaInstaller.current_job().status == "failed"
+

@@ -8,6 +8,7 @@ import {
   DashboardCounts,
   QueueStatus,
   TaskSystemNotice,
+  TaskSystemHealth,
   PaginatedResponse,
 } from '@/api/task';
 import { createSharedResource, useSharedResource, type SharedResource } from './useSharedResource';
@@ -60,6 +61,14 @@ const taskSystemNoticeResource = createSharedResource<TaskSystemNotice | null>({
   getErrorMessage: (err) => (err instanceof Error && err.message ? err.message : 'Failed to fetch system notice'),
 });
 
+const taskSystemHealthResource = createSharedResource<TaskSystemHealth | null>({
+  initialData: null,
+  staleTimeMs: TASK_LIST_STALE_TIME_MS,
+  minFetchIntervalMs: TASK_LIST_MIN_FETCH_INTERVAL_MS,
+  fetcher: async () => (await taskAPI.health()).data,
+  getErrorMessage: () => 'Task health unavailable',
+});
+
 function normalizeSchedulerFilters(filters?: SchedulerListParams): SchedulerListParams {
   return {
     status: filters?.status,
@@ -76,6 +85,9 @@ function normalizeExecutionFilters(filters?: TaskListParams & { schedulerID?: st
   return {
     status: filters?.status,
     priority: filters?.priority,
+    title: filters?.title?.trim() || undefined,
+    startedAfter: filters?.startedAfter,
+    startedBefore: filters?.startedBefore,
     deliveryStatus: filters?.deliveryStatus,
     schedulerID: filters?.schedulerID,
     sortBy: filters?.sortBy,
@@ -231,14 +243,19 @@ function useAdaptiveTaskPolling<T extends { status: string }>(
       return hasActive ? Math.min(pollInterval, 4000) : pollInterval;
     };
 
+    let cancelled = false;
     let timerId: number;
     const tick = async () => {
       await resource.fetch({ silent: true });
+      if (cancelled) return;
       timerId = window.setTimeout(tick, scheduleDelay());
     };
 
     timerId = window.setTimeout(tick, scheduleDelay());
-    return () => window.clearTimeout(timerId);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerId);
+    };
   }, [activeStatuses, pollInterval, resource]);
 }
 
@@ -251,6 +268,7 @@ export function __resetTaskResourcesForTesting(): void {
   schedulerExecutionResources.clear();
   taskDashboardResource.resetForTesting();
   queueStatusResource.resetForTesting();
+  taskSystemHealthResource.resetForTesting();
   taskSystemNoticeResource.resetForTesting();
 }
 
@@ -294,6 +312,9 @@ export function useTaskExecutions(
       filters?.status,
       filters?.priority,
       filters?.deliveryStatus,
+      filters?.title,
+      filters?.startedAfter,
+      filters?.startedBefore,
       filters?.schedulerID,
       filters?.sortBy,
       filters?.sortOrder,
@@ -390,4 +411,10 @@ export function useTaskSystemNotice() {
   } = useSharedResource(taskSystemNoticeResource);
 
   return { notice, loading, error, refetch };
+}
+
+export function useTaskSystemHealth() {
+  const { data: health, error } = useSharedResource(taskSystemHealthResource);
+  usePollSharedResource(taskSystemHealthResource, 5000);
+  return { health, error };
 }

@@ -29,6 +29,16 @@ session_app = typer.Typer(
 
 console = Console()
 
+LIST_FORMATS = ("table", "json")
+
+
+def _validate_list_format(value: str) -> str:
+    """Reject unknown ``--format`` values instead of silently printing a table."""
+    normalized = (value or "").strip().lower()
+    if normalized not in LIST_FORMATS:
+        raise typer.BadParameter(f"Output format must be one of: {', '.join(LIST_FORMATS)}.")
+    return normalized
+
 
 def _format_time(timestamp_ms: int) -> str:
     """Format timestamp for display"""
@@ -45,11 +55,12 @@ def _truncate(text: str, max_width: int) -> str:
 @session_app.command("list")
 def session_list(
     max_count: Optional[int] = typer.Option(
-        None, "-n", "--max-count",
+        None, "-n", "--max-count", min=1,
         help="Limit to N most recent sessions"
     ),
     format: str = typer.Option(
         "table", "--format",
+        callback=_validate_list_format,
         help="Output format: table or json"
     ),
     project: Optional[str] = typer.Option(
@@ -87,8 +98,12 @@ async def _list_sessions(
     elif project_filter:
         all_sessions = [s for s in all_sessions if s.project_id == project_filter]
 
-    # Only include parent sessions (not child/forked sessions)
-    all_sessions = [s for s in all_sessions if not s.parent_id]
+    # Only include parent sessions (not child/forked sessions); archived
+    # sessions stay hidden until `flocks session restore`.
+    all_sessions = [
+        s for s in all_sessions
+        if not s.parent_id and not s.time.archived and s.status != "archived"
+    ]
     
     # Sort by updated time (newest first)
     all_sessions.sort(key=lambda s: s.time.updated, reverse=True)
@@ -324,6 +339,9 @@ async def _restore_session(session_id: str, project_id: Optional[str]):
     if session.parent_id is not None:
         console.print(f"[red]Restore the root session for this session tree: {session_id}[/red]")
         raise typer.Exit(1)
+    if not session.time.archived and session.status != "archived":
+        console.print(f"[red]Failed to restore session (not found or not archived): {session_id}[/red]")
+        raise typer.Exit(1)
 
     success = await Session.restore(
         project_id,
@@ -372,6 +390,9 @@ def session_resume(
 def _invoke_session(prompt, directory, model, agent, output_format, **kwargs):
     from pathlib import Path
     import sys
+    from flocks.cli.managed import refuse_local_runtime_when_managed
+
+    refuse_local_runtime_when_managed("flocks session new/resume")
     from flocks.cli.commands.exec import OutputFormat, invoke_headless
     from flocks.cli.headless import ExecOptions
 

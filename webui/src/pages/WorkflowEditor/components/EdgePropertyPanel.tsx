@@ -68,7 +68,7 @@ export default function EdgePropertyPanel({ selectedEdge, onClose, onUpdate }: E
   };
 
   return (
-    <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-2xl border-l border-gray-200 z-50 flex flex-col">
+    <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-2xl border-l border-gray-200 z-50 flex flex-col max-md:w-full">
       <div className="flex items-center justify-between p-4 border-b border-gray-200 bg-gray-50">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Edge Properties</h2>

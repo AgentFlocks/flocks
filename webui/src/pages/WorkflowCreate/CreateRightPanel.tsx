@@ -70,7 +70,7 @@ export default function CreateRightPanel({
 
   return (
     <div
-      className="flex flex-col bg-white border-l border-gray-200 flex-shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out"
+      className={`flex flex-col bg-white border-l border-gray-200 flex-shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out${open ? ' max-md:absolute max-md:inset-y-0 max-md:right-0 max-md:z-10 max-md:!w-full' : ''}`}
       style={{ width: open ? width : 0 }}
     >
       <div className="flex border-b border-gray-100 flex-shrink-0">

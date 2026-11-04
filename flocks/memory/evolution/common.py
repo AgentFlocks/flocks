@@ -75,10 +75,6 @@ CREATE TABLE IF NOT EXISTS memory_evolution_checkpoints (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_evolution_checkpoint_updated
 ON memory_evolution_checkpoints(pipeline, scope, scope_id, updated_at);
-
-DROP INDEX IF EXISTS idx_memory_skill_proposals_status;
-DROP TABLE IF EXISTS memory_skill_proposals;
-DROP TABLE IF EXISTS memory_skill_evolution_state;
 """
 
 

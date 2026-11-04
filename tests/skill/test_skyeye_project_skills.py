@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 def test_parse_skyeye_project_skill_files() -> None:
     skill_files = [
         PROJECT_ROOT / ".flocks" / "plugins" / "skills" / "skyeye-use" / "SKILL.md",
-        PROJECT_ROOT / ".flocks" / "plugins" / "skills" / "skyeye-sensor-data-fetch" / "SKILL.md",
+        PROJECT_ROOT / ".flocks" / "plugins" / "skills" / "skyeye-sensor-use" / "SKILL.md",
     ]
 
     parsed = [Skill._parse_skill_md(str(skill_file)) for skill_file in skill_files]
@@ -21,7 +21,7 @@ def test_parse_skyeye_project_skill_files() -> None:
     assert "SkyEye" in parsed[0].description
 
     assert parsed[1] is not None
-    assert parsed[1].name == "skyeye-sensor-data-fetch"
+    assert parsed[1].name == "skyeye-sensor-use"
     assert "Sensor" in parsed[1].description
 
 
@@ -31,4 +31,4 @@ async def test_discover_skyeye_project_skills() -> None:
     skill_names = {skill.name for skill in skills}
 
     assert "skyeye-use" in skill_names
-    assert "skyeye-sensor-data-fetch" in skill_names
+    assert "skyeye-sensor-use" in skill_names

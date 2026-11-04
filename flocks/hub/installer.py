@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from flocks.config.config import Config
-from flocks.hub import local
+from flocks.hub import local, providers
 from flocks.hub.catalog import _catalog_install_state, clear_catalog_caches, load_manifest
 from flocks.hub.custom_pages import carry_over, classify_pages
 from flocks.hub.files import plugin_root
@@ -37,6 +37,7 @@ from flocks.hub.update_protection import (
     public_plan,
     tree_hashes,
 )
+from flocks.utils.file_modes import ensure_owner_writable, remove_tree
 
 
 _TOOL_TYPE_DIRS = {"api", "device", "python", "mcp", "generated"}
@@ -150,7 +151,9 @@ def _resolve_install_destination(
 
 def _remove_path(path: Path) -> None:
     if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
+        # Installs made before staged copies were opened up can still carry a
+        # read-only source's modes.
+        remove_tree(path)
     elif path.exists() or path.is_symlink():
         path.unlink()
 
@@ -183,7 +186,9 @@ def _purge_stale_scratch(parent: Path, name: str) -> None:
             continue
         try:
             if entry.is_dir() and not entry.is_symlink():
-                shutil.rmtree(entry, ignore_errors=True)
+                # Scratch left by a failed copy of a read-only source holds
+                # read-only directories, which a plain rmtree cannot empty.
+                remove_tree(entry, ignore_errors=True)
             else:
                 entry.unlink()
         except OSError:
@@ -199,6 +204,14 @@ def _replace_with_retry(src: Path, dst: Path) -> None:
     fail with ``PermissionError`` (WinError 5 / 32). Elsewhere the rename
     is atomic and never needs retrying.
     """
+    if src.is_dir() and not src.is_symlink():
+        # Moving a directory under another parent rewrites its "..", which
+        # takes write access to the directory itself. An install copied from
+        # a read-only source before staged copies were opened up lacks it.
+        try:
+            ensure_owner_writable(src, recursive=False)
+        except OSError:
+            pass  # The rename reports what is really wrong.
     if sys.platform != "win32":
         src.replace(dst)
         return
@@ -316,7 +329,7 @@ def _copy_package(
         return backup
     except Exception:
         if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
+            remove_tree(tmp, ignore_errors=True)
         raise
 
 
@@ -329,6 +342,11 @@ def _copy_package_contents(src: Path, dst: Path) -> None:
             _copytree_skip_caches(item, target)
         else:
             shutil.copy2(item, target)
+    # The copies carry the source's permission bits, and a hub root can be
+    # read-only (an installed extension package, say). The staged copy is the
+    # installation's own: pages are built into it, metadata is patched in it,
+    # and later updates move it and uninstalls delete it.
+    ensure_owner_writable(dst)
 
 
 def _preserve_native_group_metadata(
@@ -526,7 +544,7 @@ def _remove_attached_access_contracts(
     if recovery_root is not None and (access_dst.exists() or access_dst.is_symlink()):
         _rollback_replacement(access_dst, None, recovery_root=recovery_root / "access")
     elif access_dst.is_dir():
-        shutil.rmtree(access_dst)
+        remove_tree(access_dst)
     elif access_dst.exists():
         access_dst.unlink()
     else:
@@ -535,7 +553,7 @@ def _remove_attached_access_contracts(
 
 
 def _build_webui_pages(plugin_id: str, install_dir: Path) -> None:
-    from flocks.contracts.webui.builder import WebUIPageBuilder
+    from flocks.contracts.webui.builder import WebUIPageBuilder, prebuilt_bundle_problem
     from flocks.contracts.webui.store import WebUIPagesStore
 
     store = WebUIPagesStore(root=install_dir, project_root=None, legacy_root=None)
@@ -545,6 +563,15 @@ def _build_webui_pages(plugin_id: str, install_dir: Path) -> None:
 
     builder = WebUIPageBuilder(store)
     for page in pages:
+        entry = store.page_dir(page.id) / store.get_page(page.id).manifest.entry
+        if not entry.is_file():
+            # Shipped already built and without its source (a provider may
+            # ship pages that way): the bundle is used as it is, provided it
+            # was built for this runtime.
+            problem = prebuilt_bundle_problem(store, page.id)
+            if problem is not None:
+                raise RuntimeError(f"WebUI page {plugin_id}/{page.id} ships no source, and its bundle {problem}")
+            continue
         try:
             meta = builder.build(page.id)
         except Exception as exc:
@@ -585,7 +612,7 @@ def _copy_webui_package_with_build(
         return backup
     except Exception:
         if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
+            remove_tree(tmp, ignore_errors=True)
         raise
 
 
@@ -788,6 +815,46 @@ def _component_ref_is_outdated(
     return state == "updateAvailable"
 
 
+_MANAGED_KINDS = frozenset({"agent", "skill", "workflow"})
+
+
+def _is_managed_ref(plugin_type: str, plugin_id: str) -> bool:
+    """Whether the deployment controls this agent, skill or workflow name.
+
+    Controlled names never get a local copy -- it would never load
+    (flocks.content.managed) -- whether or not the item is available now.
+    """
+    if plugin_type not in _MANAGED_KINDS:
+        return False
+    from flocks.content.managed import managed_ids
+
+    return plugin_id in managed_ids(plugin_type)
+
+
+def is_provided_by_deployment(plugin_type: str, plugin_id: str) -> bool:
+    """Whether the deployment serves this item right now (a withdrawn one is not provided)."""
+    if plugin_type not in _MANAGED_KINDS:
+        return False
+    from flocks.content.managed import ManagedContent
+
+    return plugin_id in ManagedContent.available_ids(plugin_type)
+
+
+def _refuse_managed_definition_name(plugin_type: str, plugin_id: str, source: Path) -> None:
+    """A package may name its agent something other than its own id: check that name too."""
+    if plugin_type != "agent":
+        return
+    import yaml
+
+    definition = source / "agent.yaml"
+    try:
+        name = (yaml.safe_load(definition.read_text(encoding="utf-8")) or {}).get("name")
+    except (OSError, ValueError, AttributeError):
+        return
+    if isinstance(name, str) and name != plugin_id and _is_managed_ref("agent", name):
+        raise PermissionError(f"agent {name} is managed by the deployment; a local copy would never load")
+
+
 async def _install_component_refs(
     manifest: HubPluginManifest,
     *,
@@ -814,6 +881,23 @@ async def _install_component_refs(
                 item.message = "Nested Hub components are not supported"
                 await _emit_component_progress(progress, manifest, "item", item=item)
                 raise ValueError("Nested Hub components are not supported")
+            if _is_managed_ref(ref.type, ref.id):
+                # The deployment controls this one; a local copy would never
+                # load (flocks.content.managed).
+                if is_provided_by_deployment(ref.type, ref.id):
+                    item.status = "skipped"
+                    item.message = "Provided by the deployment"
+                    await _emit_component_progress(progress, manifest, "item", item=item)
+                    continue
+                if ref.optional:
+                    item.status = "skipped"
+                    item.message = "Withdrawn by the deployment"
+                    await _emit_component_progress(progress, manifest, "item", item=item)
+                    continue
+                item.status = "failed"
+                item.message = "Withdrawn by the deployment"
+                await _emit_component_progress(progress, manifest, "item", item=item)
+                raise PermissionError(f"{ref.type} {ref.id} is managed by the deployment and is not available")
             existing_path = local.infer_local_install(ref.type, ref.id)
             if existing_path is not None:
                 existing_record = local.get_record(ref.type, ref.id)
@@ -934,6 +1018,19 @@ def _clear_device_template_cache_if_needed(plugin_type: PluginType) -> None:
         pass
 
 
+def _record_kind(plugin_type: str, plugin_id: str, manifest: HubPluginManifest) -> str:
+    if providers.staged_root(plugin_type, plugin_id) is not None:
+        return manifest.source.kind
+    return "bundled"
+
+
+async def preview_plan(plugin_type: PluginType, plugin_id: str, scope: str = "global") -> dict:
+    """The update plan for a plugin, with the files of whatever a provider
+    delivers of it staged for the length of the preview."""
+    async with providers.operation(plugin_type, plugin_id):
+        return await asyncio.to_thread(build_plan, plugin_type, plugin_id, scope)
+
+
 async def install_plugin(
     plugin_type: PluginType,
     plugin_id: str,
@@ -944,7 +1041,12 @@ async def install_plugin(
     confirmation_token: str | None = None,
     confirm_changes: bool = False,
 ) -> InstalledPluginRecord:
-    async with mutation_lock():
+    if _is_managed_ref(plugin_type, plugin_id):
+        # Before staging or planning: neither can make a local copy load.
+        raise PermissionError(
+            f"{plugin_type} {plugin_id} is managed by the deployment; a local copy would never load"
+        )
+    async with mutation_lock(), providers.operation(plugin_type, plugin_id):
         plan = build_plan(plugin_type, plugin_id, scope)
         # Block the whole operation before replacing any suite child when an
         # earlier failure left an unresolved original in a temporary backup.
@@ -996,12 +1098,17 @@ async def _install_plugin(
     progress: InstallProgressCallback | None = None,
     protection_plan: dict | None = None,
 ) -> InstalledPluginRecord:
+    if _is_managed_ref(plugin_type, plugin_id):
+        raise PermissionError(
+            f"{plugin_type} {plugin_id} is managed by the deployment; a local copy would never load"
+        )
     manifest = load_manifest(plugin_type, plugin_id)
     # Match the official manifest with its own payload. The preview resolver
     # prefers project overrides and can otherwise reinstall old/custom files
     # while recording the official release's new version.
     src = plugin_root(plugin_type, plugin_id, prefer_bundled=True)
     validate_package(src, manifest)
+    _refuse_managed_definition_name(plugin_type, plugin_id, src)
     dst = _resolve_install_destination(plugin_type, plugin_id, src, scope)
     access_dst = _contracts_access_dir(plugin_id, scope) if plugin_type == "webui" and (src / "access").is_dir() else None
     expected = None
@@ -1072,7 +1179,8 @@ async def _install_plugin(
             plugin_type=plugin_type,
             plugin_id=plugin_id,
             version=manifest.version,
-            source=f"bundled:{manifest.source.path or ''}",
+            # A provided plugin is recorded under its own kind of source.
+            source=f"{_record_kind(plugin_type, plugin_id, manifest)}:{manifest.source.path or ''}",
             install_path=dst,
             enabled=True,
             scope=scope,
@@ -1234,7 +1342,7 @@ async def _uninstall_plugin(
     if recovery_root is not None:
         _rollback_replacement(install_path, None, recovery_root=recovery_root / "package")
     elif install_path.is_dir():
-        shutil.rmtree(install_path)
+        remove_tree(install_path)
     else:
         install_path.unlink()
     _remove_attached_access_contracts(

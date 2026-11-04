@@ -4,6 +4,16 @@ Flocks - Flocks Python Implementation
 AI-Native SecOps Platform
 """
 
+# The process's .env first (flocks/startup_env.py): what it sets decides, among
+# other things, the database backend.  A backend other than SQLite can replace
+# runtime modules, which has to be in place before the first of them is
+# imported (flocks/db_backend.py).
+from flocks import startup_env as _startup_env
+from flocks import db_backend as _db_backend
+
+_startup_env.load()
+_db_backend.install()
+
 from importlib.metadata import version, PackageNotFoundError
 
 try:

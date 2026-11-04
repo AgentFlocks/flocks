@@ -652,7 +652,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
 
   return (
     <div
-      className="flex flex-col flex-shrink-0 bg-white border-l border-gray-200 h-full overflow-hidden"
+      className="flex flex-col flex-shrink-0 bg-white border-l border-gray-200 h-full overflow-hidden max-md:absolute max-md:inset-0 max-md:z-20 max-md:!w-full"
       style={{ width }}
     >
       {/* Header */}

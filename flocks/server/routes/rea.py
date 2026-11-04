@@ -6,7 +6,9 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from flocks.rea import service
+from flocks.rea.installer import ReaInstallError
 from flocks.rea.uninstaller import (
+    OperationRunning,
     ReaUninstaller,
     TasksRunning,
     kept_resources,
@@ -35,6 +37,7 @@ async def rea_status(request: Request, refresh: bool = Query(False)):
 @router.get("/rea/uninstall/preview", summary="What an REA uninstall removes, keeps and stops")
 async def rea_uninstall_preview(request: Request):
     require_admin(request)
+    await service.sync_with_host()
     return {
         "state": service.install_state(),
         "removes": removable_resources(),
@@ -48,6 +51,7 @@ async def rea_uninstall(body: UninstallRequest, request: Request):
     """Starts the uninstall; 409 ``tasks_running`` while related work runs and ``stopTasks`` is not set."""
 
     user = require_admin(request)
+    await service.sync_with_host()
     try:
         await ReaUninstaller.start(
             stop_tasks=body.stopTasks,
@@ -63,5 +67,16 @@ async def rea_uninstall(body: UninstallRequest, request: Request):
                 "tasks": exc.tasks,
             },
         ) from exc
+    except OperationRunning as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "operation_running",
+                "message": "Another Flocks process on this host is installing or uninstalling REA; try again when it finished.",
+            },
+        ) from exc
+    except ReaInstallError as exc:
+        # A managed install: REA comes and goes with the deployment's release.
+        raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc)}) from exc
     log.info("rea.uninstall.started", {"stop_tasks": body.stopTasks})
     return await service.build_status(user)

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Build the Linux offline installer: a single self-extracting `flocks-offline.run`
-# that carries Python, Node.js, uv, a prebuilt virtualenv, the built WebUI and
-# (optionally) a Pro bundle. Run it on the oldest distribution the package must support,
+# that carries Python, Node.js, uv, a prebuilt virtualenv and the built WebUI of the
+# open-source edition. Run it on the oldest distribution the package must support,
 # for the architecture it is for: the `build_image` of versions.manifest.json (RHEL 8.10 /
 # UBI 8.10, glibc 2.28). The build fails when a shipped binary needs a newer glibc than
 # `glibc_floor` (see glibc_floor.py), which is what happens when built on a newer distribution.
@@ -15,10 +15,9 @@
 # Usage:
 #   packaging/linux/build-offline-run.sh [--repo-root DIR] [--output-dir DIR]
 #       [--install-root /opt/flocks] [--cache-dir DIR]
-#       [--flockspro-wheel PATH] [--pro-bundle-version VER] [--pro-release-id ID] [--pro-build-id ID]
 #       [--skip-webui-build] [--no-dev-group] [--ship-uv-cache] [--repack] [--allow-dirty]
 #   --repack reuses an existing staging root (toolchain, venv, WebUI) and only refreshes
-#   the sources, installer files, the Pro bundle and versions.json before packing again.
+#   the sources, installer files and versions.json before packing again.
 #   --allow-dirty exports the working tree as Git sees it (uncommitted changes and untracked
 #   files included, ignored files excluded) instead of the exact HEAD commit; see export-source.sh.
 #
@@ -29,6 +28,7 @@
 #   FLOCKS_MAKESELF_URL   makeself source tarball URL
 #   FLOCKS_UV_DEFAULT_INDEX  PyPI index used while building the venv
 #   FLOCKS_NPM_REGISTRY      npm registry used while building the WebUI
+#   FLOCKS_ESBUILD_ARCHIVE   pre-downloaded target esbuild npm tarball (integrity is still checked)
 
 set -euo pipefail
 
@@ -38,10 +38,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUTPUT_DIR="$REPO_ROOT/packaging/linux/Output"
 INSTALL_ROOT=""
 CACHE_DIR="${FLOCKS_CACHE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/flocks-offline-build}"
-FLOCKSPRO_WHEEL=""
-PRO_BUNDLE_VERSION=""
-PRO_RELEASE_ID=""
-PRO_BUILD_ID=""
 SKIP_WEBUI_BUILD=0
 DEV_GROUP=1
 SHIP_UV_CACHE=0
@@ -52,7 +48,7 @@ info() { printf '[build-offline-run] %s\n' "$*"; }
 fail() { printf '[build-offline-run] error: %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -61,10 +57,6 @@ while [[ $# -gt 0 ]]; do
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
     --install-root) INSTALL_ROOT="$2"; shift 2 ;;
     --cache-dir) CACHE_DIR="$2"; shift 2 ;;
-    --flockspro-wheel) FLOCKSPRO_WHEEL="$2"; shift 2 ;;
-    --pro-bundle-version) PRO_BUNDLE_VERSION="$2"; shift 2 ;;
-    --pro-release-id) PRO_RELEASE_ID="$2"; shift 2 ;;
-    --pro-build-id) PRO_BUILD_ID="$2"; shift 2 ;;
     --skip-webui-build) SKIP_WEBUI_BUILD=1; shift ;;
     --no-dev-group) DEV_GROUP=0; shift ;;
     --ship-uv-cache) SHIP_UV_CACHE=1; shift ;;
@@ -105,6 +97,22 @@ TRIPLE="$(manifest_get arch "$ARCH" triple)"
 NODE_ARCH="$(manifest_get arch "$ARCH" node_arch)"
 [[ -n "$INSTALL_ROOT" ]] || INSTALL_ROOT="$(manifest_get install_root)"
 
+# The cache and the output stay outside the tree that is packed whole: inside it the toolchain
+# archives, the uv cache, an older build's bundle/ and the package itself would go into the package.
+inside_dir() {
+  python3 - "$1" "$2" <<'PY'
+import os, sys
+child, parent = (os.path.realpath(p) for p in sys.argv[1:3])
+print("inside" if child == parent or child.startswith(parent.rstrip(os.sep) + os.sep) else "")
+PY
+}
+if [[ -n "$(inside_dir "$CACHE_DIR" "$INSTALL_ROOT")" ]]; then
+  fail "--cache-dir $CACHE_DIR is inside the install root $INSTALL_ROOT, which is packed whole; use a directory outside it."
+fi
+if [[ -n "$(inside_dir "$OUTPUT_DIR" "$INSTALL_ROOT")" ]]; then
+  fail "--output-dir $OUTPUT_DIR is inside the install root $INSTALL_ROOT, which is packed whole; use a directory outside it."
+fi
+
 PY_VERSION="$(manifest_get python version)"
 PY_RELEASE="$(manifest_get python python_build_standalone_release)"
 PY_TEMPLATE="$(manifest_get python archive_template)"
@@ -124,7 +132,6 @@ CORE_VERSION="$(python3 -c 'import tomllib,sys; print(tomllib.load(open(sys.argv
 CORE_VERSION_PLAIN="${CORE_VERSION#v}"
 GIT_SHA="unknown"   # set from the export stamp below
 BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-UPDATE_CHANNEL="flockspro-offline-${CORE_VERSION_PLAIN}"
 
 info "core ${CORE_VERSION} arch ${ARCH} → ${INSTALL_ROOT}"
 info "python ${PY_VERSION}+${PY_RELEASE}, node ${NODE_VERSION}, uv ${UV_VERSION}, makeself ${MAKESELF_VERSION}"
@@ -233,7 +240,7 @@ if [[ -n "${FLOCKS_UV_DEFAULT_INDEX:-}" ]]; then
   UV_SYNC_ARGS+=(--default-index "$FLOCKS_UV_DEFAULT_INDEX")
 fi
 # the uv cache lives outside the payload so repeated builds reuse the downloads; it is only
-# shipped on request (a Pro-only offline install never needs it, see updater prebuilt mode)
+# shipped on request (the prebuilt venv is used as it is, see UV_NO_SYNC in flocks.env)
 UV_BUILD_CACHE="$CACHE_DIR/uv"
 mkdir -p "$UV_BUILD_CACHE"
 (
@@ -256,7 +263,7 @@ esac
 (cd / && "$INSTALL_ROOT/flocks/.venv/bin/flocks" --version >/dev/null)
 
 # ---------------------------------------------------------------------------
-# WebUI bundle (built in a scratch copy so node_modules never enters the payload)
+# WebUI bundle (built in a scratch copy so development dependencies do not enter the payload)
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_WEBUI_BUILD" -eq 1 && -f "$REPO_ROOT/webui/dist/index.html" ]]; then
   info "reusing existing webui/dist"
@@ -264,9 +271,15 @@ if [[ "$SKIP_WEBUI_BUILD" -eq 1 && -f "$REPO_ROOT/webui/dist/index.html" ]]; the
   tar -C "$REPO_ROOT/webui/dist" -cf - . | tar -C "$INSTALL_ROOT/flocks/webui/dist" -xf -
 else
   info "building WebUI with bundled node ${NODE_VERSION}"
-  WEBUI_SCRATCH="$CACHE_DIR/webui-build-${CORE_VERSION_PLAIN}-${GIT_SHA}"
-  mkdir -p "$WEBUI_SCRATCH"
-  tar -C "$REPO_ROOT/webui" -cf - --exclude='./node_modules' --exclude='./dist' . | tar -C "$WEBUI_SCRATCH" -xf -
+  # the scratch copy keeps the repository layout: the WebUI imports files outside webui/
+  # (the knowledge-base guides under flocks/knowledgebase/ as ?raw), relative to the repo root.
+  # It is copied from the exported source, not the repository: a cache directory inside the
+  # repository (--cache-dir) would otherwise copy the scratch into itself.
+  WEBUI_SCRATCH_ROOT="$CACHE_DIR/webui-build-${CORE_VERSION_PLAIN}-${GIT_SHA}"
+  WEBUI_SCRATCH="$WEBUI_SCRATCH_ROOT/webui"
+  mkdir -p "$WEBUI_SCRATCH_ROOT"
+  tar -C "$INSTALL_ROOT/flocks" -cf - --exclude='./webui/node_modules' --exclude='./webui/dist' --exclude='./.venv' . \
+    | tar -C "$WEBUI_SCRATCH_ROOT" -xf -
   (
     cd "$WEBUI_SCRATCH"
     export PATH="$INSTALL_ROOT/tools/node/bin:$PATH"
@@ -285,6 +298,24 @@ fi
 find "$INSTALL_ROOT/flocks/webui/dist" -exec touch {} +
 fi  # REPACK build guard
 
+# Hub WebUI pages are built on install/update. Ship just the locked native compiler,
+# including when --skip-webui-build or --repack bypasses the frontend build.
+case "$ARCH" in
+  x86_64) ESBUILD_PLATFORM=linux-amd64 ;;
+  aarch64) ESBUILD_PLATFORM=linux-arm64 ;;
+esac
+ESBUILD_OUTPUT="$INSTALL_ROOT/flocks/webui/node_modules/.bin/esbuild"
+ESBUILD_ARCHIVE_ARGS=()
+if [[ -n "${FLOCKS_ESBUILD_ARCHIVE:-}" ]]; then
+  ESBUILD_ARCHIVE_ARGS=(--archive "$FLOCKS_ESBUILD_ARCHIVE")
+fi
+"$PYTHON_BIN" "$INSTALL_ROOT/flocks/scripts/package_webui_esbuild.py" \
+  --lock "$INSTALL_ROOT/flocks/webui/package-lock.json" --platform "$ESBUILD_PLATFORM" \
+  --output "$ESBUILD_OUTPUT" ${ESBUILD_ARCHIVE_ARGS[@]+"${ESBUILD_ARCHIVE_ARGS[@]}"}
+"$ESBUILD_OUTPUT" --version
+"$INSTALL_ROOT/flocks/.venv/bin/python" -I -B \
+  "$INSTALL_ROOT/flocks/scripts/check_webui_runtime.py" --expected-root "$INSTALL_ROOT/flocks"
+
 # every binary that ships (toolchain, venv wheels) must load on the oldest supported glibc /
 # libstdc++; a wheel picked for a newer build host only fails on the customer's machine
 info "checking shipped binaries against glibc_floor"
@@ -292,42 +323,11 @@ info "checking shipped binaries against glibc_floor"
   || fail "some shipped binaries need a newer glibc / libstdc++ than glibc_floor in $MANIFEST; build in its build_image"
 
 # ---------------------------------------------------------------------------
-# optional Pro bundle (manifest.json + wheels/), consumed via FLOCKS_PRO_BUNDLE_DIR
+# a staging root reused with --repack may still hold the bundle/ of an older build;
+# it is not part of this package
 # ---------------------------------------------------------------------------
-HAS_PRO_BUNDLE=0
-if [[ -n "$FLOCKSPRO_WHEEL" ]]; then
-  [[ -f "$FLOCKSPRO_WHEEL" ]] || fail "flockspro wheel not found: $FLOCKSPRO_WHEEL"
-  WHEEL_NAME="$(basename "$FLOCKSPRO_WHEEL")"
-  [[ "$WHEEL_NAME" == flockspro-*.whl ]] || fail "expected a flockspro-*.whl, got $WHEEL_NAME"
-  if [[ -d "$INSTALL_ROOT/bundle" ]]; then
-    mv "$INSTALL_ROOT/bundle" "$CACHE_DIR/bundle.previous-$(date +%s)"
-  fi
-  mkdir -p "$INSTALL_ROOT/bundle/wheels"
-  cp "$FLOCKSPRO_WHEEL" "$INSTALL_ROOT/bundle/wheels/$WHEEL_NAME"
-  PRO_COMPONENT_VERSION="$(printf '%s' "$WHEEL_NAME" | sed -E 's/^flockspro-([^-]+)-.*/\1/')"
-  [[ -n "$PRO_BUNDLE_VERSION" ]] || PRO_BUNDLE_VERSION="v${CORE_VERSION_PLAIN}"
-  WHEEL_SHA256="$(sha256sum "$INSTALL_ROOT/bundle/wheels/$WHEEL_NAME" | awk '{print $1}')"
-  "$PYTHON_BIN" - "$INSTALL_ROOT/bundle/manifest.json" <<PY
-import json, sys
-manifest = {
-    "prebuilt": True,
-    "bundle_version": "${PRO_BUNDLE_VERSION}",
-    "core_version": "v${CORE_VERSION_PLAIN}",
-    "flockspro_component_version": "${PRO_COMPONENT_VERSION}",
-    "flockspro_wheel": "wheels/${WHEEL_NAME}",
-    "bundle_sha256": "${WHEEL_SHA256}",
-    "channel": "${UPDATE_CHANNEL}",
-    "built_at": "${BUILD_TIME}",
-}
-if "${PRO_RELEASE_ID}":
-    manifest["release_id"] = "${PRO_RELEASE_ID}"
-    manifest["bundle_release_id"] = "${PRO_RELEASE_ID}"
-if "${PRO_BUILD_ID}":
-    manifest["build_id"] = "${PRO_BUILD_ID}"
-json.dump(manifest, open(sys.argv[1], "w", encoding="utf-8"), indent=2, sort_keys=True)
-PY
-  HAS_PRO_BUNDLE=1
-  info "pro bundle: ${WHEEL_NAME} (component ${PRO_COMPONENT_VERSION}, bundle ${PRO_BUNDLE_VERSION})"
+if [[ -d "$INSTALL_ROOT/bundle" ]]; then
+  mv "$INSTALL_ROOT/bundle" "$CACHE_DIR/bundle.previous-$(date +%s)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -352,11 +352,9 @@ json.dump({
     "built_at": "${BUILD_TIME}",
     "arch": "${ARCH}",
     "install_root": "${INSTALL_ROOT}",
-    "update_channel": "${UPDATE_CHANNEL}",
     "python": "${PY_VERSION}",
     "nodejs": "${NODE_VERSION}",
     "uv": "${UV_VERSION}",
-    "pro_bundle": bool(${HAS_PRO_BUNDLE}),
 }, open(sys.argv[1], "w", encoding="utf-8"), indent=2, sort_keys=True)
 PY
 

@@ -622,14 +622,60 @@ class ACPAgent:
             
         Returns:
             Patched content or None if failed
+
+        Hunks are applied in order against the original text; any context or
+        removed line that does not match returns None so the client is never
+        handed a half-applied file.
         """
+        import re
+
+        hunk_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
         try:
-            # Simple implementation - for full support would need a proper diff library
-            import difflib
-            
-            # This is a simplified implementation
-            # A full implementation would use a proper patch library
-            return None  # Placeholder - patch application would go here
+            src = content.splitlines(keepends=True)
+            lines = diff.splitlines(keepends=True)
+            out: List[str] = []
+            pos = 0
+            applied = False
+            i = 0
+            while i < len(lines):
+                match = hunk_re.match(lines[i])
+                if not match:
+                    i += 1
+                    continue
+                start = max(int(match.group(1)) - 1, 0)
+                if start < pos:
+                    return None
+                out.extend(src[pos:start])
+                pos = start
+                i += 1
+                while i < len(lines) and not lines[i].startswith("@@"):
+                    line = lines[i]
+                    i += 1
+                    if line.startswith("\\"):
+                        # "\ No newline at end of file" marker
+                        continue
+                    tag, body = line[:1], line[1:]
+                    if tag == " ":
+                        if pos >= len(src) or src[pos].rstrip("\r\n") != body.rstrip("\r\n"):
+                            return None
+                        out.append(src[pos])
+                        pos += 1
+                    elif tag == "-":
+                        if pos >= len(src) or src[pos].rstrip("\r\n") != body.rstrip("\r\n"):
+                            return None
+                        pos += 1
+                    elif tag == "+":
+                        out.append(body)
+                    else:
+                        return None
+                applied = True
+            if not applied:
+                return None
+            out.extend(src[pos:])
+            result = "".join(out)
+            if content and not content.endswith("\n") and result.endswith("\n") and pos >= len(src):
+                result = result[:-1]
+            return result
         except Exception as e:
             log.error("patch.apply.error", {"error": str(e)})
             return None
@@ -1075,9 +1121,9 @@ class ACPAgent:
                     "description": agent.get("description"),
                 })
         
-        # Get default agent
-        from flocks.agent.registry import Agent
-        default_agent_name = Agent.default_agent()
+        # The service's default agent, among the ones it offers (not this
+        # machine's configuration: the editor may drive another host).
+        default_agent_name = await self._service_default_agent(cwd, agents)
         
         current_mode_id = default_agent_name
         for mode in available_modes:
@@ -1154,7 +1200,11 @@ class ACPAgent:
         return {
             "sessionId": session_id,
             "models": {
-                "currentModelId": f"{model['providerID']}/{model['modelID']}",
+                # The service's choice when it named none (empty: it decides per turn).
+                "currentModelId": (
+                    f"{model['providerID']}/{model['modelID']}" if model.get("providerID") and model.get("modelID")
+                    else (available_models[0]["modelId"] if available_models else "")
+                ),
                 "availableModels": available_models,
             },
             "modes": {
@@ -1253,9 +1303,8 @@ class ACPAgent:
         if not current_model:
             self._session_manager.set_model(session.id, model)
         
-        # Get agent
-        from flocks.agent.registry import Agent
-        agent = session.mode_id or await Agent.default_agent()
+        # The agent the editor picked; otherwise the session's, as the service sets it.
+        agent = session.mode_id or ""
         
         # Build parts
         parts = []
@@ -1334,9 +1383,12 @@ class ACPAgent:
             "_meta": {},
         }
         
+        # The service runs the turn and streams it (session/update notifications
+        # come from its events); the call returns when the turn is over, with
+        # how it ended -- "cancelled" after a session/cancel.
         if not cmd:
             # Regular prompt
-            await self._sdk.session.prompt(
+            stop = await self._sdk.session.prompt(
                 session_id=session_id,
                 model={
                     "providerID": model["providerID"],
@@ -1346,17 +1398,18 @@ class ACPAgent:
                 agent=agent,
                 directory=directory,
             )
-            return done_response
-
-        await self._sdk.session.command(
-            session_id=session_id,
-            command=cmd["name"],
-            arguments=cmd["args"],
-            arguments_json=self._parse_command_arguments(cmd["args"]),
-            model=f"{model['providerID']}/{model['modelID']}",
-            agent=agent,
-            directory=directory,
-        )
+        else:
+            stop = await self._sdk.session.command(
+                session_id=session_id,
+                command=cmd["name"],
+                arguments=cmd["args"],
+                arguments_json=self._parse_command_arguments(cmd["args"]),
+                model=(f"{model['providerID']}/{model['modelID']}" if model.get("providerID") and model.get("modelID") else ""),
+                agent=agent,
+                directory=directory,
+            )
+        if isinstance(stop, str) and stop:
+            done_response["stopReason"] = stop
         return done_response
 
     async def _restart_session_state(self, session_id: str) -> None:
@@ -1437,21 +1490,20 @@ class ACPAgent:
         if self._config.default_model:
             return self._config.default_model
         
-        # Priority 2 & 3: default_models.llm -> config.model (via unified helper)
+        # Priority 2 & 3: the service's default_models.llm -> model, when it
+        # offers that model (the service's configuration, not this machine's:
+        # the editor may drive another host).
+        providers: List[Dict[str, Any]] = []
         try:
-            from flocks.config.config import Config
-            default_llm = await Config.resolve_default_llm()
-            if default_llm:
-                return {
-                    "providerID": default_llm["provider_id"],
-                    "modelID": default_llm["model_id"],
-                }
+            providers = await self._sdk.config.providers(directory=cwd)
+            configured = _configured_default_model(await self._sdk.config.get(directory=cwd))
+            if configured and _offered(providers, configured):
+                return configured
         except Exception as e:
-            log.error("config.resolve_default_llm.error", {"error": str(e)})
+            log.error("config.service_default_model.error", {"error": str(e)})
         
         # Priority 4: Get from available providers
         try:
-            providers = await self._sdk.config.providers(directory=cwd)
             
             # Prefer flocks provider
             flocks_provider = next((p for p in providers if p.get("id") == "flocks"), None)
@@ -1473,12 +1525,49 @@ class ACPAgent:
         except Exception as e:
             log.error("providers.get.error", {"error": str(e)})
         
-        # Priority 5: Fallback
-        return {"providerID": "anthropic", "modelID": "claude-sonnet-4-20250514"}
+        # Nothing the service offers: no model named, the service decides.
+        return {"providerID": "", "modelID": ""}
+
+    async def _service_default_agent(self, cwd: str, agents: List[Dict[str, Any]]) -> str:
+        """The service's default agent, if it offers it; else rex, else its first primary agent."""
+        visible = [a.get("name") for a in agents if a.get("mode") != "subagent" and not a.get("hidden")]
+        try:
+            config = await self._sdk.config.get(directory=cwd) or {}
+        except Exception as e:
+            log.error("config.service_default_agent.error", {"error": str(e)})
+            config = {}
+        configured = config.get("defaultAgent") or config.get("default_agent")
+        for name in (configured, "rex"):
+            if name and name in visible:
+                return name
+        return visible[0] if visible else ""
     
     def shutdown(self) -> None:
         """Shutdown the agent"""
         self._event_abort = True
+
+
+
+def _configured_default_model(config: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """``default_models.llm`` (structured), else ``model`` ("provider/model"), as the service holds them."""
+    llm = ((config or {}).get("default_models") or {}).get("llm") or {}
+    provider = llm.get("provider_id") or llm.get("providerID")
+    model = llm.get("model_id") or llm.get("modelID")
+    if provider and model:
+        return {"providerID": provider, "modelID": model}
+    raw = (config or {}).get("model")
+    if isinstance(raw, str) and "/" in raw:
+        provider, model = raw.split("/", 1)
+        if provider and model:
+            return {"providerID": provider, "modelID": model}
+    return None
+
+
+def _offered(providers: List[Dict[str, Any]], model: Dict[str, str]) -> bool:
+    return any(
+        provider.get("id") == model["providerID"] and model["modelID"] in (provider.get("models") or {})
+        for provider in providers
+    )
 
 
 class ACP:

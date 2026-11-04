@@ -119,7 +119,10 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
   ]), [t]);
   const rexComposerControls = useRexComposerControls();
 
-  const canSubmit = !isReadonly && (formData.name && formData.description && formData.content);
+  // Mirrors the backend rule (Skill._is_valid_name): lowercase slug, single hyphens.
+  const nameValid = /^[a-z0-9]+(-[a-z0-9]+)*$/.test(formData.name || '');
+  const showNameHint = !isReadonly && !!formData.name && !nameValid;
+  const canSubmit = !isReadonly && nameValid && (formData.name && formData.description && formData.content);
 
   const handleSubmit = async () => {
     if (isReadonly) { onClose(); return; }
@@ -198,7 +201,8 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
       rexGuideEmptyTitle={!isEdit ? t('create.emptyStateTitle') : undefined}
       rexGuideIcon={!isEdit ? <BookOpen className="h-5 w-5" /> : undefined}
       {...(!isEdit ? rexComposerControls : {})}
-      submitDisabled={!canSubmit}
+      // Read-only sheets turn the submit button into 「关闭」; it must stay clickable even though the form can't be submitted.
+      submitDisabled={isReadonly ? false : !canSubmit}
       submitLoading={loading}
       submitLabel={isReadonly ? t('sheet.submitClose') : undefined}
       hideForm={!isEdit}
@@ -244,9 +248,13 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
               type="text"
               value={formData.name}
               onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-sm font-mono"
+              className={`w-full px-4 py-2 border ${showNameHint ? 'border-red-500' : 'border-gray-300'} rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-sm font-mono`}
               placeholder="my-skill"
+              aria-invalid={showNameHint || undefined}
             />
+          )}
+          {showNameHint && (
+            <p className="mt-1 text-xs text-red-600" data-testid="skill-name-hint">{t('sheet.nameFormatHint')}</p>
           )}
         </div>
 

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
 import { hubAPI, type HubSceneSuite } from '@/api/hub';
+import ExtensionSlot from '@/components/extensions/ExtensionSlot';
 import { useDelayedVisible } from '@/hooks/useDelayedVisible';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
@@ -25,8 +26,8 @@ export default function WebUIContractWorkspaceHost() {
   const { theme, setTemporaryThemeOverride } = useContext(ThemeContext);
   // Hidden tabs stay mounted; the override must follow the tab on screen.
   const paneActive = useContext(PaneActiveContext);
-  // A workspace that is missing may simply belong to a suite this edition
-  // cannot install; say so instead of "not found".
+  // A workspace that is missing may belong to a suite an extension locked;
+  // say so instead of "not found".
   const [missingSuite, setMissingSuite] = useState<HubSceneSuite | null>(null);
   const workspace = useMemo(
     () => workspaces.find((item) => item.id === workspaceId),
@@ -62,7 +63,11 @@ export default function WebUIContractWorkspaceHost() {
     };
   }, [loading, workspace, workspaceId]);
 
-  const currentPage = pages.find((page) => page.id === pageId);
+  // Sections describe navigation; an enabled page can remain reachable by a
+  // direct link while it is temporarily omitted from those sections.
+  const currentPage = pages.find((page) => page.id === pageId) ?? (workspace?.enabled
+    ? workspace.pages.find((page) => page.id === pageId && page.enabled)
+    : undefined);
   const currentSection = currentPage
     ? findWorkspaceSection(sections, currentPage.id, location.search)
     : undefined;
@@ -79,20 +84,27 @@ export default function WebUIContractWorkspaceHost() {
     return () => setTemporaryThemeOverride(null);
   }, [paneActive, setTemporaryThemeOverride, temporaryThemeOverride]);
 
-  const proOnlyNotice = (
-    <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
-      <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0" />
-      <div>
-        <div className="font-medium">{t('workspace.proOnlyTitle')}</div>
-        <div className="mt-1 text-sm">{t('workspace.proOnlyBody')}</div>
-        <Link
-          to="/scenes/suites"
-          className="mt-3 inline-flex rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm text-amber-900 hover:bg-amber-100 dark:border-amber-800 dark:bg-transparent dark:text-amber-200"
-        >
-          {t('workspace.proOnlyAction')}
-        </Link>
+  // An extension locked the scene (or the suite that ships it); what to say
+  // and where to send the user is the extension's, with a generic notice otherwise.
+  const lockedNotice = (reason: string | null | undefined, suite: HubSceneSuite | null) => (
+    <ExtensionSlot
+      name="workspace.lockedNotice"
+      context={{ workspaceId, suiteId: suite?.id ?? workspace?.suiteId ?? null, reason: reason ?? null, suite }}
+    >
+      <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+        <AlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
+        <div>
+          <div className="font-medium">{t('workspace.lockedTitle')}</div>
+          <div className="mt-1 text-sm">{t('workspace.lockedBody')}</div>
+          <Link
+            to="/scenes/suites"
+            className="mt-3 inline-flex rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm text-amber-900 hover:bg-amber-100 dark:border-amber-800 dark:bg-transparent dark:text-amber-200"
+          >
+            {t('workspace.suitesAction')}
+          </Link>
+        </div>
       </div>
-    </div>
+    </ExtensionSlot>
   );
 
   if (!workspaceId) {
@@ -103,7 +115,7 @@ export default function WebUIContractWorkspaceHost() {
     if (!showLoading) return null;
     return (
       <div className="flex items-center gap-2 text-sm text-zinc-500">
-        <Loader2 className="h-4 w-4 animate-spin" />
+        <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
         {t('workspace.loading')}
       </div>
     );
@@ -112,7 +124,7 @@ export default function WebUIContractWorkspaceHost() {
   if (error) {
     return (
       <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900">
-        <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0" />
+        <AlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
         <div>
           <div className="font-medium">{t('workspace.unavailableTitle')}</div>
           <div className="mt-1 text-sm">{error}</div>
@@ -132,7 +144,7 @@ export default function WebUIContractWorkspaceHost() {
     if (missingSuite && missingSuite.workspaceEnabled === false) {
       return (
         <div className="flex items-start gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4 text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200">
-          <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0" />
+          <AlertCircle aria-hidden="true" className="mt-0.5 h-5 w-5 flex-shrink-0" />
           <div>
             <div className="font-medium">{t('workspace.disabledTitle')}</div>
             <div className="mt-1 text-sm">{t('workspace.disabledBody')}</div>
@@ -140,20 +152,20 @@ export default function WebUIContractWorkspaceHost() {
               to="/scenes/suites"
               className="mt-3 inline-flex rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:bg-transparent dark:text-zinc-200"
             >
-              {t('workspace.proOnlyAction')}
+              {t('workspace.suitesAction')}
             </Link>
           </div>
         </div>
       );
     }
-    if (missingSuite?.edition === 'pro') return proOnlyNotice;
+    if (missingSuite?.locked) return lockedNotice(missingSuite.lockReason, missingSuite);
     return <div className="text-sm text-zinc-500">{t('workspace.notFound')}</div>;
   }
 
-  // Installed, but its suite needs a Pro license that is not active.
-  if (workspace.locked) return proOnlyNotice;
+  // Installed, but an extension locked it.
+  if (workspace.locked) return lockedNotice(workspace.lockReason, null);
 
-  if (pages.length === 0) {
+  if (pages.length === 0 && !currentPage) {
     return <div className="text-sm text-zinc-500">{t('workspace.empty')}</div>;
   }
 
@@ -175,7 +187,7 @@ export default function WebUIContractWorkspaceHost() {
     : 'h-full min-w-0 overflow-x-auto p-6';
 
   return (
-    <div className="h-full min-h-0 overflow-hidden bg-zinc-50 dark:bg-zinc-950">
+    <div className="bg-zinc-50 dark:bg-zinc-950 h-full min-h-0 overflow-hidden">
       <div className={pageContentClassName}>
         <PageRuntimeHost
           key={`${currentPage.id}:${location.key}`}

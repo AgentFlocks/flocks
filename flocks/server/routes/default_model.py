@@ -27,8 +27,8 @@ log = Log.create(service="routes.default_model")
 
 class SetDefaultModelRequest(BaseModel):
     """Set default model request"""
-    provider_id: str = Field(..., description="Provider ID")
-    model_id: str = Field(..., description="Model ID")
+    provider_id: str = Field(..., min_length=1, description="Provider ID")
+    model_id: str = Field(..., min_length=1, description="Model ID")
 
 
 class DefaultModelListResponse(BaseModel):
@@ -232,15 +232,48 @@ async def get_default_model(model_type: ModelType) -> DefaultModelConfig:
 )
 @serialized_config_mutation
 async def set_default_model(
-    model_type: ModelType, body: SetDefaultModelRequest,
+    model_type: ModelType,
+    body: SetDefaultModelRequest,
     _admin: object = Depends(require_admin),
 ) -> DefaultModelConfig:
     """Set the default model for a specific model type."""
+    provider_id = body.provider_id.strip()
+    model_id = body.model_id.strip()
+    if not provider_id or not model_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="provider_id and model_id must not be blank",
+        )
+
+    # The default must reference a model the runtime can actually resolve;
+    # otherwise Auto mode later fails with primary_provider_not_found.
+    config = await Config.get()
+    await Provider.apply_config(config, provider_id=provider_id)
     manager = get_model_manager()
+    if Provider.get(provider_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Provider '{provider_id}' not found",
+        )
+    definition = manager.get_model(provider_id, model_id)
+    if definition is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown model '{provider_id}/{model_id}'",
+        )
+    if definition.model_type != model_type:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Model '{provider_id}/{model_id}' is of type "
+                f"'{definition.model_type.value}', not '{model_type.value}'"
+            ),
+        )
+
     result = manager.set_default_model(
         model_type=model_type,
-        provider_id=body.provider_id,
-        model_id=body.model_id,
+        provider_id=provider_id,
+        model_id=model_id,
     )
     return result
 
@@ -251,7 +284,10 @@ async def set_default_model(
     summary="Delete default model for type",
 )
 @serialized_config_mutation
-async def delete_default_model(model_type: ModelType, _admin: object = Depends(require_admin)):
+async def delete_default_model(
+    model_type: ModelType,
+    _admin: object = Depends(require_admin),
+):
     """Remove default model setting for a model type."""
     manager = get_model_manager()
     deleted = manager.delete_default_model(model_type)

@@ -149,6 +149,44 @@ describe('useTasks shared resources', () => {
     expect(listExecutionsMock).toHaveBeenCalledTimes(2);
   });
 
+  it('stops polling after unmount while a request is in flight', async () => {
+    vi.useFakeTimers();
+    let finish = (_page: ReturnType<typeof makeExecutionPage>) => {};
+    listExecutionsMock
+      .mockResolvedValueOnce(makeExecutionPage([]))
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }))
+      .mockResolvedValue(makeExecutionPage([]));
+    const hook = renderHook(() => useTaskExecutions({ offset: 0, limit: 20 }, { pollInterval: 5000 }));
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(listExecutionsMock).toHaveBeenCalledTimes(2);
+    hook.unmount();
+    await act(async () => { finish(makeExecutionPage([])); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(20000); });
+    expect(listExecutionsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not resume an old filter after its in-flight request settles', async () => {
+    vi.useFakeTimers();
+    let finish = (_page: ReturnType<typeof makeExecutionPage>) => {};
+    listExecutionsMock
+      .mockResolvedValueOnce(makeExecutionPage([]))
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }))
+      .mockResolvedValue(makeExecutionPage([]));
+    const hook = renderHook(
+      ({ offset }) => useTaskExecutions({ offset, limit: 20 }, { pollInterval: 5000 }),
+      { initialProps: { offset: 0 } },
+    );
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    hook.rerender({ offset: 20 });
+    await act(async () => { finish(makeExecutionPage([])); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(20000); });
+    expect(listExecutionsMock.mock.calls.filter(([params]) => params.offset === 0)).toHaveLength(2);
+    expect(listExecutionsMock.mock.calls.filter(([params]) => params.offset === 20).length).toBeGreaterThan(1);
+    hook.unmount();
+  });
+
   it('shares dashboard and queue status requests across concurrent hook instances', async () => {
     const firstDashboard = renderHook(() => useTaskDashboard());
     const secondDashboard = renderHook(() => useTaskDashboard());

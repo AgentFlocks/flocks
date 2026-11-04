@@ -161,6 +161,16 @@ class MCP:
         return await manager.remove(name)
     
     @classmethod
+    def server_config(cls, name: str) -> Optional[Dict[str, Any]]:
+        """The configuration ``name`` was last connected (or tried) with in this process."""
+        return get_manager().server_config(name)
+
+    @classmethod
+    async def close_scope(cls, name: str, scope: str) -> None:
+        """Close one conversation's connection to an isolated server (see McpServerManager.scoped_client)."""
+        await get_manager().close_scope(name, scope)
+
+    @classmethod
     async def refresh_tools(cls, name: str) -> int:
         """
         Refresh server's tool list

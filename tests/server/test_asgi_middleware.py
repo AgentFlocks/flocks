@@ -1,9 +1,14 @@
 import asyncio
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 from collections.abc import Awaitable, Callable
 
 import pytest
 from starlette.applications import Starlette
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
 from starlette.routing import Route
@@ -93,17 +98,44 @@ async def test_auth_guard_keeps_ingress_context_and_scope_for_endpoint(
     assert observed["scope_during_auth"] is observed["scope_during_endpoint"]
 
 
-def test_production_http_middleware_is_pure_asgi_and_keeps_order() -> None:
-    middleware_classes = [entry.cls for entry in server_app.app.user_middleware]
+def test_production_http_middleware_is_pure_asgi_and_keeps_order(tmp_path) -> None:
+    # Import a clean Core app: installed package plugins can add their own
+    # middleware, and other tests may already have imported those plugins.
+    script = textwrap.dedent("""
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from starlette.middleware.base import BaseHTTPMiddleware
 
-    assert BaseHTTPMiddleware not in middleware_classes
-    assert middleware_classes == [
-        server_app._DeferredCORSMiddleware,
-        server_app._StaticWebUIMiddleware,
-        server_app._AuthGuardMiddleware,
-        server_app._RequestLoggingMiddleware,
-        server_app._InstanceContextMiddleware,
-        server_app._SecurityHeadersMiddleware,
+        with patch("dotenv.load_dotenv"), patch(
+            "flocks.plugin.PluginLoader.load_all",
+            return_value=SimpleNamespace(has_critical_entrypoint_failure=False),
+        ):
+            from flocks.server.app import app
+
+        entries = app.user_middleware
+        assert not any(issubclass(entry.cls, BaseHTTPMiddleware) for entry in entries)
+        print(json.dumps([entry.cls.__name__ for entry in entries]))
+    """)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.splitlines()[-1]) == [
+        "_DeferredCORSMiddleware",
+        "_StaticWebUIMiddleware",
+        "_AuthGuardMiddleware",
+        "_RequestLoggingMiddleware",
+        "_InstanceContextMiddleware",
+        "_SecurityHeadersMiddleware",
+        "_ExtensionErrorResponseMiddleware",
     ]
 
 
@@ -458,3 +490,101 @@ async def test_instance_context_without_directory_uses_process_cwd(
     )
 
     assert provided_directories == [str(process_cwd)]
+
+
+@pytest.mark.asyncio
+async def test_auth_guard_rejection_carries_security_headers_and_request_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The auth guard sits outside the security-header and request-log
+    middleware, so a 401 it emits itself must still carry the baseline headers
+    and be logged as ``request.complete``."""
+    from starlette.exceptions import HTTPException
+
+    sent: list[Message] = []
+    logged: list[tuple[str, dict]] = []
+
+    async def hook(_request, _context) -> None:
+        return None
+
+    async def apply_auth(_request: Request):
+        raise HTTPException(status_code=401, detail="请先登录")
+
+    async def endpoint(_scope, _receive, _send) -> None:  # pragma: no cover - must not run
+        raise AssertionError("endpoint must not be reached")
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    monkeypatch.setattr(server_app, "_run_http_middleware_hooks", hook)
+    monkeypatch.setattr(server_app, "apply_auth_for_request", apply_auth)
+    monkeypatch.setattr(server_app.log, "info", lambda event, payload: logged.append((event, payload)))
+
+    await server_app._AuthGuardMiddleware(endpoint)(_http_scope("/api/session"), receive, send)
+
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 401
+    headers = {k.decode(): v.decode() for k, v in start["headers"]}
+    for name, value in server_app._SECURITY_HEADERS.items():
+        assert headers.get(name.lower()) == value, name
+    assert logged and logged[0][0] == "request.complete"
+    assert logged[0][1]["path"] == "/api/session" and logged[0][1]["status"] == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path, expected_status", [
+    ("/api/session", 503),
+    ("/api/channel/example/webhook", 503),
+    ("/api/auth/bootstrap-admin", 503),
+    ("/health", 200),
+    # An extension's readiness probe is not exempt: the node is not ready.
+    ("/ready", 503),
+])
+async def test_critical_plugin_failure_blocks_http_effects_but_keeps_health(
+    monkeypatch, path, expected_status,
+) -> None:
+    import httpx
+    from starlette.responses import JSONResponse
+    from flocks.plugin import PluginLoader
+    from flocks.server import auth
+
+    effects = []
+
+    async def endpoint(scope, receive, send):
+        effects.append(scope["path"])
+        await JSONResponse({"ok": True})(scope, receive, send)
+
+    async def hook(_request, _context):
+        return None
+
+    monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", True)
+    monkeypatch.setattr(auth, "_auth_context_adapters", {})
+    monkeypatch.setattr(auth, "_is_valid_api_token", lambda _token: True)
+    monkeypatch.setattr(server_app, "_run_http_middleware_hooks", hook)
+    transport = httpx.ASGITransport(app=server_app._AuthGuardMiddleware(endpoint))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(path, headers={"Authorization": "Bearer valid"})
+
+    assert response.status_code == expected_status
+    assert effects == ([path] if expected_status == 200 else [])
+
+
+@pytest.mark.asyncio
+async def test_critical_plugin_failure_blocks_websocket_auth(monkeypatch) -> None:
+    from fastapi import HTTPException
+    from starlette.requests import HTTPConnection
+    from flocks.plugin import PluginLoader
+    from flocks.server import auth
+
+    scope = _http_scope("/api/pty/example/connect")
+    scope.update(type="websocket", scheme="ws", headers=[(b"authorization", b"Bearer valid")])
+    monkeypatch.setattr(PluginLoader, "_runtime_critical_entrypoint_failure", True)
+    monkeypatch.setattr(auth, "_auth_context_adapters", {})
+    monkeypatch.setattr(auth, "_is_valid_api_token", lambda _token: True)
+    with pytest.raises(HTTPException) as caught:
+        _blocked, token, _user = await auth.apply_auth_for_request(HTTPConnection(scope))
+        auth.clear_auth_context(token)
+    assert caught.value.status_code == 503

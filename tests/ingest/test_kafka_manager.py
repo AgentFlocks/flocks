@@ -497,6 +497,9 @@ async def test_restart_workflow_cleans_resources_after_connect_failure(
         async def start(self) -> None:
             raise RuntimeError("broker unreachable")
 
+        def subscribe(self, **kwargs) -> None:  # noqa: ANN003
+            pass
+
         async def stop(self) -> None:
             self.stopped = True
 
@@ -512,7 +515,11 @@ async def test_restart_workflow_cleans_resources_after_connect_failure(
             }
         },
     )
-    monkeypatch.setitem(sys.modules, "aiokafka", SimpleNamespace(AIOKafkaConsumer=_Consumer))
+    monkeypatch.setitem(
+        sys.modules,
+        "aiokafka",
+        SimpleNamespace(AIOKafkaConsumer=_Consumer, ConsumerRebalanceListener=object, TopicPartition=tuple),
+    )
 
     status = await manager.restart_workflow(workflow_id)
 

@@ -199,6 +199,52 @@ async def test_call_llm_releases_slot_when_a_tool_starts_mid_stream(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_inline_tool_hands_back_the_workflow_budget_slot(monkeypatch):
+    """An inline run_workflow inside a budgeted session must be able to take a slot.
+
+    With ``workflow.llm.max_concurrency=1`` the turn holds the only budget slot;
+    if it kept it while the tool ran, the nested workflow's model call would
+    wait for that slot and the turn would wait for the tool.
+    """
+    from flocks.provider import llm_budget
+
+    _patch_call_llm_env(monkeypatch)
+    runner = SessionRunner(session=_session(), provider_id="prov", model_id="m")
+    llm_budget.set_scope_budget("workflow-test", 1)
+    observed: dict[str, bool] = {}
+
+    class _Provider:
+        def chat_stream(self, **kwargs):
+            async def _gen():
+                yield _chunk("calling tool")
+                await _FakeProcessor.tool_start_callback("run_workflow", {"workflow": "nested"})
+
+                async def _nested_model_call():
+                    async with llm_budget.llm_slot():
+                        return True
+
+                observed["nested_got_slot"] = await asyncio.wait_for(_nested_model_call(), 2)
+                yield _chunk("", "stop")
+
+            return _gen()
+
+    try:
+        with llm_budget.budget_scope("workflow-test"):
+            await runner._call_llm(
+                provider=_Provider(),
+                messages=[ChatMessage(role="user", content="hi")],
+                tools=[],
+                agent=SimpleNamespace(name="rex"),
+                assistant_msg=SimpleNamespace(id="msg_a"),
+            )
+    finally:
+        llm_budget.set_scope_budget("workflow-test", 0)
+
+    assert observed["nested_got_slot"] is True
+    assert runner._active_budget_slot is None
+
+
+@pytest.mark.asyncio
 async def test_parallel_subagent_tool_keeps_the_parent_slot(monkeypatch):
     """Fan-out stays inside the cap: siblings wait for the parent stream to end.
 

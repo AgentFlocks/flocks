@@ -18,7 +18,8 @@ export default function WorkbenchSidePanel({
     <div
       aria-hidden={!open}
       inert={!open || undefined}
-      className={`relative z-10 flex min-w-0 flex-col bg-white border-l border-gray-200 flex-shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out motion-reduce:transition-none ${className}`}
+      // Phones: an open panel covers the area beside it at full width instead of squeezing it.
+      className={`relative z-10 flex min-w-0 flex-col bg-white border-l border-gray-200 flex-shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out motion-reduce:transition-none ${open ? 'max-md:absolute max-md:inset-y-0 max-md:right-0 max-md:!w-full ' : ''}${className}`}
       style={{ ...style, width: open ? width : 0 }}
     >
       {children}

@@ -118,3 +118,73 @@ async def test_read_log_returns_same_nested_filename_as_list(tmp_path: Path, mon
     assert listed_name == f"{today}/errors.log"
     assert response.filename == listed_name
     assert response.content == "warn"
+
+
+def test_read_log_file_reads_only_the_tail_of_a_large_file(tmp_path: Path, monkeypatch) -> None:
+    """The tail comes from block reads at the end of the file, so the bytes
+    actually read for it stay bounded by the tail size, not the file size."""
+    log_path = tmp_path / "backend.log"
+    line = "x" * 99 + "\n"
+    with log_path.open("w", encoding="utf-8") as handle:
+        for _ in range(200_000):  # ~20 MB
+            handle.write(line)
+    log_path.with_name("marker").write_text("")
+
+    read_bytes = {"n": 0}
+    original_read = log_routes.Path.open
+
+    class _CountingFile:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def read(self, n=-1):
+            data = self._inner.read(n)
+            read_bytes["n"] += len(data)
+            return data
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+    def counting_open(self, mode="r", *args, **kwargs):
+        handle = original_read(self, mode, *args, **kwargs)
+        return _CountingFile(handle) if mode == "rb" and self == log_path else handle
+
+    monkeypatch.setattr(log_routes, "_count_lines", lambda path: 200_000)  # count is separately bounded
+    monkeypatch.setattr(log_routes.Path, "open", counting_open)
+
+    response = log_routes._read_log_file(log_path, tail=200)
+
+    assert response.total_lines == 200_000 and response.truncated is True
+    assert response.content.count("\n") == 199 and response.content.endswith("x" * 99)
+    assert read_bytes["n"] < 4 * 64 * 1024, read_bytes
+
+
+def test_read_log_file_matches_text_mode_line_semantics(tmp_path: Path) -> None:
+    for text in ("", "\n", "a", "a\n", "a\nb", "a\nb\n", "one\r\ntwo\r\n"):
+        log_path = tmp_path / "backend.log"
+        log_path.write_bytes(text.encode())
+        expected_lines = [line.rstrip("\r\n") for line in text.splitlines(keepends=True)]
+        response = log_routes._read_log_file(log_path, tail=5)
+        assert response.total_lines == len(expected_lines), text
+        assert response.content == "\n".join(expected_lines), text
+
+
+@pytest.mark.asyncio
+async def test_read_log_rejects_non_zero_padded_date_dirs(tmp_path: Path, monkeypatch) -> None:
+    """Only ``YYYY-MM-DD`` directories are log directories; ``2026-9-13`` is
+    not one even though ``strptime`` would parse it."""
+    (tmp_path / "2026-9-13").mkdir()
+    (tmp_path / "2026-9-13" / "flocks.log").write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(log_routes, "get_log_dir", lambda: tmp_path)
+
+    listing = await log_routes.list_logs()
+    assert [f.name for f in listing.files] == []
+    with pytest.raises(HTTPException) as exc_info:
+        await log_routes.read_log("2026-9-13/flocks.log", tail=10)
+    assert exc_info.value.status_code == 404

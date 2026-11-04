@@ -47,3 +47,31 @@ def get_current_auth_user() -> Optional[AuthUser]:
     """Get current request user from context."""
 
     return _current_auth_user.get()
+
+
+_current_auth_session: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_auth_session",
+    default=None,
+)
+
+
+def set_current_auth_session(session_id: Optional[str]) -> contextvars.Token:
+    """Set the login session the current request was authenticated with."""
+
+    return _current_auth_session.set(session_id)
+
+
+def reset_current_auth_session(token: contextvars.Token) -> None:
+    _current_auth_session.reset(token)
+
+
+def get_current_auth_session() -> Optional[str]:
+    """The browser login session behind the current request, if it came with one.
+
+    None for API-token requests and work outside a request.  An account
+    backend that keeps its accounts elsewhere passes it on, so the place that
+    keeps them can tell who asks for a change rather than take this process's
+    word for it.
+    """
+
+    return _current_auth_session.get()

@@ -30,7 +30,7 @@ class TestThreatBookProviderModelBootstrap:
             assert model["pricing"] == {
                 "input": 1.0,
                 "output": 2.0,
-                "cache_read": 0.2,
+                "cache_read": 0.02,
                 "cache_write": None,
                 "currency": "CNY",
             }

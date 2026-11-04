@@ -14,6 +14,7 @@ import { buildGuidedCreateGroups } from '@/components/common/GuidedCreatePanel';
 import { useRexComposerControls } from '@/components/common/useRexComposerControls';
 import client from '@/api/client';
 import { mcpAPI } from '@/api/mcp';
+import { extractErrorMessage } from '@/utils/error';
 
 // ─── MCPSheet ─────────────────────────────────────────────────────────────────
 
@@ -580,8 +581,8 @@ export function MCPSheet({ onClose, onSaved, onRefresh }: MCPSheetProps) {
       setSubmitting(true);
       await client.post('/api/mcp', { name: formData.name, config: buildMCPConfigFromForm(formData) });
       onSaved();
-    } catch (err: any) {
-      alert(t('alert.addFailed', { error: err.response?.data?.detail || err.message }));
+    } catch (err: unknown) {
+      alert(t('alert.addFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setSubmitting(false);
     }

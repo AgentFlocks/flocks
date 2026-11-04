@@ -50,12 +50,18 @@ def test_interrupt_stops_a_server_still_waiting_for_stdin(tmp_path):
     import subprocess
     import time
 
-    env = {**os.environ, "FLOCKS_ROOT": str(tmp_path / "state")}
+    # faulthandler lets a hung server print every thread's stack on SIGABRT.
+    env = {**os.environ, "FLOCKS_ROOT": str(tmp_path / "state"), "PYTHONFAULTHANDLER": "1"}
     env.pop("VIRTUAL_ENV", None)
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "flocks.cli.main", "mcp", "serve", "-C", str(tmp_path), "--max-budget", "0"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
-    )
+    stderr_path = tmp_path / "server-stderr.txt"
+    with stderr_path.open("wb") as stderr:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "flocks.cli.main", "mcp", "serve", "-C", str(tmp_path), "--max-budget", "0"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, env=env,
+            # A runner started as a background job ignores SIGINT, and Python only
+            # turns SIGINT into KeyboardInterrupt when it inherits the default.
+            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
+        )
     try:
         initialize = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}}
@@ -72,7 +78,13 @@ def test_interrupt_stops_a_server_still_waiting_for_stdin(tmp_path):
         time.sleep(0.5)
         # stdin stays open, so the server is blocked waiting for the next line.
         proc.send_signal(signal.SIGINT)
-        assert proc.wait(timeout=10) == 0
+        try:
+            code = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.send_signal(signal.SIGABRT)
+            proc.wait(timeout=10)
+            pytest.fail("server still running 10 s after SIGINT:\n" + stderr_path.read_text(errors="replace")[-6000:])
+        assert code == 0
     finally:
         if proc.poll() is None:
             proc.kill()

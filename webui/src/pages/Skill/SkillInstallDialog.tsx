@@ -3,6 +3,7 @@ import { CloudDownload, X, Info } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { skillAPI, Skill } from '@/api/skill';
 import { useToast } from '@/components/common/Toast';
+import { extractErrorMessage } from '@/utils/error';
 
 interface SkillInstallDialogProps {
   onClose: () => void;
@@ -67,7 +68,8 @@ export default function SkillInstallDialog({ onClose, onInstalled }: SkillInstal
     } catch (err: unknown) {
       toast.error(
         t('installFailed'),
-        err instanceof Error ? err.message : String(err),
+        // 422/409 carry the installer's reason in the response body; err.message is only axios' status line
+        extractErrorMessage(err, err instanceof Error ? err.message : String(err)),
       );
     } finally {
       setInstalling(false);

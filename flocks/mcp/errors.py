@@ -12,6 +12,10 @@ class McpServerNotConnectedError(ValueError):
     """
 
 
+class McpServerBusyError(RuntimeError):
+    """Every connection an isolated server may have in this process is busy."""
+
+
 def is_method_not_found_error(exc: BaseException) -> bool:
     """Return whether an exception chain contains JSON-RPC method-not-found."""
     return _contains_method_not_found(exc, seen=set())

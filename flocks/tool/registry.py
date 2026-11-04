@@ -7,6 +7,7 @@ Compatible with Flocks's TypeScript Tool system.
 
 import ast
 import asyncio
+import copy
 import importlib
 import json
 import os
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Mapping, Optional, Set
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_core import PydanticCustomError
@@ -172,6 +173,16 @@ class ToolInfo(BaseModel):
 
     group: Optional[str] = Field(None, description="Optional plugin group")
     group_readonly: bool = Field(False, description="Computed from the actual system definition source")
+    side_effect: Optional[Literal["none", "idempotent", "queryable", "unknown"]] = Field(
+        None,
+        description=(
+            "What a call may change outside the run (flocks.task.outcome): 'none', "
+            "'idempotent' (repeating it has the effect of once by its nature -- not by "
+            "an idempotency key, which a retried run does not reuse), 'queryable' (its "
+            "effect can be looked up; also for calls guarded by a key) or 'unknown'. "
+            "Unset: read-only built-ins are 'none', everything else 'unknown'."
+        ),
+    )
 
     _validate_group = field_validator("group", mode="before")(normalize_tool_group)
 
@@ -273,6 +284,7 @@ class ToolContext:
         metadata_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
         input_patch_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        validated_input_guard: Optional[Callable[[str, Dict[str, Any]], Awaitable[bool]]] = None,
     ):
         self.session_id = session_id
         self.message_id = message_id
@@ -285,6 +297,26 @@ class ToolContext:
         self._metadata: Dict[str, Any] = {}
         self.event_publish_callback = event_publish_callback
         self._input_patch_callback = input_patch_callback
+        # Optional caller-owned precondition on the final effective inputs.
+        # It can restrict an allowed call, never bypass an extension's gate.
+        self.validated_input_guard = validated_input_guard
+
+    @property
+    def idempotency_key(self) -> Optional[str]:
+        """A key naming this call, for an external system that deduplicates requests.
+
+        The same for every attempt of this call (a retry inside the tool, a
+        replay of the call), different for every other call -- including the
+        calls of a run started again, in a new session.  So it guards a call
+        against its own repeats, not a task against being run twice: a tool
+        that relies on it declares ``side_effect="queryable"``, and a run whose
+        such call did not confirm waits for a person instead of retrying.
+        """
+        if not self.call_id:
+            return None
+        import hashlib
+
+        return hashlib.sha256(f"{self.session_id}\x00{self.call_id}".encode("utf-8")).hexdigest()[:32]
 
     async def notify_input_patched(self, effective_input: Dict[str, Any]) -> None:
         """Report the input the handler will actually receive after a
@@ -425,7 +457,9 @@ def _coerce_params(
         if declared == ParameterType.STRING and not isinstance(v, str):
             original_type = type(v).__name__
             if isinstance(v, (dict, list)):
-                v = json.dumps(v, ensure_ascii=False)
+                # pretty-print: the main consumer is ``write`` content, where
+                # compact JSON is what nobody wants on disk
+                v = json.dumps(v, ensure_ascii=False, indent=2)
             else:
                 v = str(v)
             log.debug("tool.execute.coerce_param", {
@@ -462,6 +496,30 @@ def _coerce_params(
                 })
         coerced[k] = v
     return coerced
+
+
+def _numeric_type_errors(
+    kwargs: Dict[str, Any],
+    parameters: List["ToolParameter"],
+) -> List[str]:
+    """Describe integer/number parameters whose values survived coercion unchanged.
+
+    ``_coerce_params`` leaves a value it cannot convert as-is (``limit="abc"``);
+    handing that to the handler produces an opaque TypeError deep inside the
+    tool, so refuse it up front the way unknown parameters are refused.
+    """
+    errors: List[str] = []
+    for param in parameters:
+        if param.name not in kwargs:
+            continue
+        value = kwargs[param.name]
+        if value is None:
+            continue
+        if param.type == ParameterType.INTEGER and not isinstance(value, int):
+            errors.append(f"parameter '{param.name}' must be an integer (got {value!r})")
+        elif param.type == ParameterType.NUMBER and not isinstance(value, (int, float)):
+            errors.append(f"parameter '{param.name}' must be a number (got {value!r})")
+    return errors
 
 
 def _normalize_param_key(name: str) -> str:
@@ -518,11 +576,14 @@ def remap_schema_kwargs(
         normalized = _normalize_param_key(key)
         candidates = declared_lookup.get(normalized, [])
         if len(candidates) == 1:
+            # A recognised alias never surfaces as an unknown parameter: when
+            # the canonical key was also supplied it wins and the alias is
+            # dropped (same rule as the scoped aliases above).
             target = candidates[0]
+            aliases[key] = target
             if target not in remapped:
                 remapped[target] = value
-                aliases[key] = target
-                continue
+            continue
         remapped[key] = value
 
     return remapped, aliases
@@ -646,6 +707,29 @@ class Tool:
                     )
 
             coerced_kwargs = _coerce_params(effective_kwargs, self.info.parameters, self.info.name)
+            type_errors = _numeric_type_errors(coerced_kwargs, self.info.parameters)
+            if type_errors:
+                schema_hint = _schema_hint_from_properties(
+                    declared_param_names,
+                    list(schema.required),
+                )
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Invalid arguments for {self.info.name}: "
+                        f"{'; '.join(type_errors)}. {schema_hint}"
+                    ),
+                    metadata={
+                        "schema_precheck": {
+                            "tool": self.info.name,
+                            "source": self.info.source,
+                            "invalid_types": type_errors,
+                            "allowed": declared_param_names,
+                            "required": list(schema.required),
+                            "aliases": remap_aliases,
+                        }
+                    },
+                )
 
             # Preserve extension-owned ingress context for work created by an
             # enclosing lifecycle.  Flocks treats this as an opaque carrier;
@@ -654,6 +738,7 @@ class Tool:
                 HookDecisionAction,
                 ToolDecision,
                 ToolExecutionOutcome,
+                merge_redacted_rewrite,
                 restore_redacted_echo,
             )
             from flocks.hooks.execution import (
@@ -696,43 +781,58 @@ class Tool:
             terminal_error: BaseException | None = None
             input_patched = False
             try:
-                # The only tool.execute.before firing for this call.  The
-                # session stream layer deliberately does not run it again;
-                # it learns about an input rewrite via notify_input_patched.
-                before_ctx = await HookPipeline.run_tool_before(payload)
-                raw_decision = before_ctx.output.get("decision")
-                normalized_decision = (
-                    {
-                        key: value
-                        for key, value in raw_decision.items()
-                        if key in {"action", "reason", "labels", "validated_input_patch"}
-                    }
-                    if isinstance(raw_decision, Mapping)
-                    else {}
+                from flocks.hooks.tool_gate import run_tool_gate, take_carried_decision
+
+                # The only tool.execute.before firing for this call: the
+                # session stream layer does not run it again (it learns about
+                # an input rewrite via notify_input_patched), and a caller that
+                # already ran the gate passes its verdict down rather than
+                # having the handlers asked twice.
+                verdict = take_carried_decision(
+                    ctx.extra, call_id=getattr(ctx, "call_id", None)
                 )
-                decision = ToolDecision.model_validate(
-                    normalized_decision
-                )
-                legacy_stop = execution_stop_error(before_ctx)
-                if legacy_stop is not None:
-                    decision = ToolDecision(
-                        action=HookDecisionAction.DENY,
-                        reason=str(legacy_stop),
+                original_kwargs = coerced_kwargs
+                legacy_base = coerced_kwargs
+                rewritten: Dict[str, Any] = {}
+                if verdict is None:
+                    # The flat legacy keys travel next to the contract, as they did
+                    # when the stream layer fired this gate: a handler written
+                    # against the old shape rewrites ``tool.input`` in place. Give
+                    # it a deep copy so nothing it mutates reaches the handler
+                    # unseen. Hooks on ``tool.input.rewrite`` do not need it.
+                    legacy_input = copy.deepcopy(coerced_kwargs)
+                    verdict = await run_tool_gate(
+                        {
+                            **payload,
+                            "sessionID": ctx.session_id,
+                            "workspace": tool_context_extra.get("workspace_dir"),
+                            "agent": ctx.agent,
+                            "tool": {
+                                "name": self.info.name,
+                                "input": legacy_input,
+                                "callID": getattr(ctx, "call_id", None),
+                            },
+                        },
+                        call_id=getattr(ctx, "call_id", None),
+                        tool_input=legacy_input,
                     )
-                if decision.validated_input_patch:
-                    pre_patch_kwargs = coerced_kwargs
+                    # One gate pass authorizes the call (approvals and audit run
+                    # once). Policies judged the redact_sensitive view, so an
+                    # in-place rewrite may only fill values hidden there: the
+                    # secrets a redaction hook restores. Anything a policy
+                    # can see must come through validated_input_patch.
+                    rewritten = verdict.tool_input or {}
+                    legacy_base = merge_redacted_rewrite(coerced_kwargs, rewritten)
+                decision = verdict.decision
+                if decision.validated_input_patch or legacy_base != coerced_kwargs:
                     # Hooks see the redact_sensitive view; never let an echoed
-                    # "[REDACTED]" marker replace the real secret.
+                    # "[REDACTED]" marker replace the real (restored) secret.
                     patch = restore_redacted_echo(
-                        coerced_kwargs,
-                        dict(decision.validated_input_patch),
+                        legacy_base,
+                        dict(decision.validated_input_patch or {}),
                     )
-                    patched_kwargs = {
-                        **coerced_kwargs,
-                        **patch,
-                    }
                     patched_kwargs, _ = remap_schema_kwargs(
-                        patched_kwargs,
+                        {**legacy_base, **patch},
                         declared_param_names,
                         tool_name=self.info.name,
                     )
@@ -755,7 +855,6 @@ class Tool:
                         self.info.parameters,
                         self.info.name,
                     )
-                    input_patched = coerced_kwargs != pre_patch_kwargs
                     payload = await build_session_tool_execution_payload(
                         session_id=ctx.session_id,
                         message_id=ctx.message_id,
@@ -766,7 +865,21 @@ class Tool:
                         tool_context_extra=tool_context_extra,
                         validated_input=coerced_kwargs,
                     )
-
+                input_patched = coerced_kwargs != original_kwargs
+                dropped = sorted(
+                    key for key in set(rewritten) | set(original_kwargs)
+                    if rewritten
+                    and rewritten.get(key) != original_kwargs.get(key)
+                    and rewritten.get(key) != coerced_kwargs.get(key)
+                )
+                if dropped:
+                    # Visible values a legacy hook changed in place without
+                    # also patching them through the contract.
+                    log.warn("tool.legacy_input_rewrite.ignored", {
+                        "tool": self.info.name,
+                        "call_id": getattr(ctx, "call_id", None),
+                        "keys": dropped,
+                    })
                 if decision.action is HookDecisionAction.DENY:
                     terminal_status = "deny"
                     result = ToolResult(
@@ -789,10 +902,29 @@ class Tool:
                         },
                     )
                 else:
-                    if input_patched:
-                        await ctx.notify_input_patched(coerced_kwargs)
-                    result = await self.handler(ctx, **coerced_kwargs)
-                    terminal_status = "success" if result.success else "error"
+                    inputs_allowed = True
+                    if ctx.validated_input_guard is not None:
+                        try:
+                            inputs_allowed = await ctx.validated_input_guard(
+                                self.info.name, copy.deepcopy(coerced_kwargs)
+                            ) is True
+                        except Exception:
+                            inputs_allowed = False
+                    if not inputs_allowed:
+                        terminal_status = "deny"
+                        result = ToolResult(
+                            success=False,
+                            error="Final tool arguments did not satisfy the caller's execution precondition",
+                            metadata={
+                                "validated_input_guard_blocked": True,
+                                "hook_decision": decision.model_dump(mode="json"),
+                            },
+                        )
+                    else:
+                        if input_patched:
+                            await ctx.notify_input_patched(coerced_kwargs)
+                        result = await self.handler(ctx, **coerced_kwargs)
+                        terminal_status = "success" if result.success else "error"
             except asyncio.CancelledError as exc:
                 terminal_status = "cancelled"
                 terminal_error = exc
@@ -941,6 +1073,8 @@ class ToolRegistry:
         ("flocks.tool.channel", ["channel_message", "im_send_message"]),
         # wecom/ — 企业微信 MCP（文档、智能表格）
         ("flocks.tool.wecom", ["wecom_mcp"]),
+        # invalid-argument fallback tool (excluded from search/callable schema by name)
+        ("flocks.tool", ["invalid"]),
     ]
 
     _tools: Dict[str, Tool] = {}
@@ -1327,7 +1461,7 @@ class ToolRegistry:
                     success=False,
                     error=(
                         f"Tool {tool_name!r} is not available in "
-                        f"{str(execution_mode)!r} execution mode."
+                        f"{str(getattr(execution_mode, 'value', execution_mode))!r} execution mode."
                     ),
                 )
             denial_reason = tool_call_denial_reason(
@@ -1416,15 +1550,26 @@ class ToolRegistry:
                         success=False,
                         error=f"设备 {device_id!r} 未找到或已禁用，请通过 device_manage(action='list') 确认 device_id 是否正确。",
                     )
+                from flocks.session.ownership import require_execution_allowed
+                require_execution_allowed(ctx.session_id)
                 result = await tool.execute(ctx, **kwargs)
         else:
+            from flocks.session.ownership import require_execution_allowed
+            require_execution_allowed(ctx.session_id)
             result = await tool.execute(ctx, **kwargs)
 
         if not credential_probe_active:
             if result.success:
                 cls._reset_failure_state(tool_name)
             else:
-                if await cls._failure_auto_disable_enabled():
+                result_metadata = result.metadata or {}
+                if (result_metadata.get("blocked_by_hook") or result_metadata.get("confirmation_required")
+                        or result_metadata.get("validated_input_guard_blocked") or result_metadata.get("transient")):
+                    # A hook verdict (policy deny / confirmation) says nothing about
+                    # the tool itself, nor does a moment of being busy; counting
+                    # them would switch the tool off for everyone after three.
+                    disabled = False
+                elif await cls._failure_auto_disable_enabled():
                     disabled = cls._record_failure(tool, kwargs, result.error)
                 else:
                     cls._reset_failure_state(tool_name)
@@ -1658,7 +1803,9 @@ class ToolRegistry:
         except Exception as e:
             log.debug("tool_registry.python_source_discovery_failed", {"error": str(e)})
 
-        user_plugin_root = (Path.home() / ".flocks" / "plugins").resolve()
+        from flocks.config.config import get_user_plugins_root
+
+        user_plugin_root = get_user_plugins_root().resolve()
         python_plugin_names: set[str] = set()
         for name in new_plugin_tools:
             tool = cls._tools.get(name)
@@ -1942,8 +2089,10 @@ class ToolRegistry:
         from flocks.plugin import ExtensionPoint, PluginLoader
         from flocks.tool.tool_loader import yaml_to_tool
 
-        # User-level plugin root: ~/.flocks/plugins/
-        _user_plugin_root = Path.home() / ".flocks" / "plugins"
+        # User-level plugin root: <flocks root>/plugins/
+        from flocks.config.config import get_user_plugins_root
+
+        _user_plugin_root = get_user_plugins_root()
 
         def _is_native_source(source: str) -> bool:
             """True if the source file is project-level (not user-global)."""
@@ -2706,7 +2855,9 @@ class ToolFileWatcher:
             from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
             user_plugin_root = DEFAULT_PLUGIN_ROOT
         except Exception:
-            user_plugin_root = Path.home() / ".flocks" / "plugins"
+            from flocks.config.config import get_user_plugins_root
+
+            user_plugin_root = get_user_plugins_root()
 
         if os.path.isdir(user_plugin_root):
             dirs.add(str(user_plugin_root))

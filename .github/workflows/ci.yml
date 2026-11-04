@@ -2,8 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -34,9 +33,54 @@ jobs:
       - name: Validate bundled Hub
         run: uv run python scripts/validate_flockshub.py
 
-      - name: Python test
-        run: uv run pytest tests/scripts tests/hub
+      - name: Package and exercise the runtime WebUI compiler
+        run: |
+          python scripts/package_webui_esbuild.py --lock webui/package-lock.json --platform auto --output webui/node_modules/.bin/esbuild
+          uv run --no-sync python -I -B scripts/check_webui_runtime.py
 
+      - name: Python test
+        run: uv run --no-sync pytest tests/scripts tests/hub tests/contracts/webui/test_builder.py
+
+      # Architecture V1.2 guarantees: caller identity, model call ids, workflow
+      # code gates, page secrets, pinned UI directory, managed-install CLI and
+      # startup declarations. Listed by file until the whole suite runs here.
+      - name: Python test (architecture guarantees)
+        run: >-
+          uv run --no-sync pytest
+          tests/session/test_v12_call_identity.py
+          tests/workflow/test_v12_workflow_gates.py
+          tests/contracts/webui/test_page_api_secrets.py
+          tests/server/test_static_webui.py
+          tests/plugin/test_v12_readiness_declarations.py
+          tests/cli/test_v12_managed_cli.py
+          tests/transform/test_response_transform.py
+
+  webui-runtime-platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install target runtime
+        run: uv sync --group dev --frozen
+      - name: Package compiler without frontend dependencies
+        shell: bash
+        run: |
+          compiler=webui/node_modules/.bin/esbuild
+          if [ "$RUNNER_OS" = Windows ]; then compiler="$compiler.exe"; fi
+          python scripts/package_webui_esbuild.py --lock webui/package-lock.json --platform auto --output "$compiler"
+      - name: Exercise real plugin install and update
+        run: uv run --no-sync python -I -B scripts/check_webui_runtime.py
+      - name: Check compiler resolution and release validation
+        run: uv run --no-sync pytest tests/contracts/webui/test_builder.py tests/scripts/test_package_webui_esbuild.py tests/scripts/test_check_webui_runtime.py
 
   frontend:
     runs-on: ubuntu-latest
@@ -59,6 +103,9 @@ jobs:
 
       - name: Frontend lint
         run: npm run lint
+
+      - name: Frontend tests
+        run: npm run test:run
 
       - name: Frontend build
         run: npm run build

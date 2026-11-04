@@ -121,7 +121,9 @@ interface AlertOperationsData {
     benign?: number;
     unknown?: number;
     representativeCount?: number;
+    availableCount?: number;
   };
+  filterOptions?: Partial<Record<FilterKey, string[]>>;
   tableColumns?: AlertTableColumn[];
   incidents?: IncidentCluster[];
 }
@@ -178,7 +180,7 @@ const MARKDOWN_STEP_ORDER = [
   '攻击分析结果',
 ];
 
-const EMPTY_DATA: Required<Pick<AlertOperationsData, 'summary' | 'source' | 'tableColumns' | 'incidents'>> = {
+const EMPTY_DATA: Required<Pick<AlertOperationsData, 'summary' | 'source' | 'tableColumns' | 'incidents' | 'filterOptions'>> = {
   source: { label: 'SOC Contract SQLite', pageId: 'soc-alerts', sampleMode: false, dataSource: 'sqlite' },
   summary: {
     sourcePageId: 'soc-alerts',
@@ -193,7 +195,9 @@ const EMPTY_DATA: Required<Pick<AlertOperationsData, 'summary' | 'source' | 'tab
     benign: 0,
     unknown: 0,
     representativeCount: 0,
+    availableCount: 0,
   },
+  filterOptions: {},
   tableColumns: [],
   incidents: [],
 };
@@ -201,6 +205,20 @@ const EMPTY_DATA: Required<Pick<AlertOperationsData, 'summary' | 'source' | 'tab
 const ALL_FILTER_VALUE = '__all__';
 
 const EN_TEXT: Record<string, string> = {
+  '深信服 SIP': 'Sangfor SIP',
+  '天眼': 'SkyEye',
+  '未知来源': 'Unknown source',
+  '未知协议': 'Unknown protocol',
+  '清空筛选': 'Clear filters',
+  '筛选条件已修改，点击查询生效': 'Filters changed. Run the query to apply them.',
+  '当前筛选条件下没有匹配的告警': 'No alerts match the current filters',
+  '可以清空筛选条件，查看当前时间范围内的全部告警。': 'Clear the filters to see all alerts in the current time range.',
+  '当前时间范围内暂无告警': 'No alerts in the current time range',
+  '可以扩大时间范围；如刚接入设备，请确认告警已完成研判并入库。': 'Try a wider time range. For a new source, check that alerts have been triaged and stored.',
+  '正在查询告警…': 'Loading alerts…',
+  '重试': 'Retry',
+  '告警调查': 'Alert Investigation',
+  '当前仅展示前 {count} 条告警，请缩小时间范围或增加筛选条件。': 'Showing the first {count} alerts. Narrow the time range or add filters.',
   '数据源': 'Data Source',
   '协议类型': 'Protocol',
   '流量方向': 'Traffic Direction',
@@ -412,8 +430,8 @@ const MORE_FILTER_CONFIGS: FilterConfig[] = [
 const FILTER_CONFIGS = [...BASE_FILTER_CONFIGS, ...MORE_FILTER_CONFIGS];
 
 const DEFAULT_FILTER_VALUES: Record<FilterKey, string[]> = {
-  _source_type: ['tdp'],
-  net_type: ['http'],
+  _source_type: [],
+  net_type: [],
   direction: [],
   threat_severity: [],
   threat_level: [],
@@ -458,6 +476,26 @@ const REFRESH_INTERVAL_MS: Record<RefreshKey, number> = {
 };
 
 const DEFAULT_TIME_RANGE: TimeRangeKey = '7d';
+
+// Inline SVG colours get no dark mapping from the host, so they read these instead.
+const THEME_CSS = `
+[data-soc-alerts-root] {
+  --soc-alerts-chart-grid: #dbe3ef;
+  --soc-alerts-chart-axis: #475569;
+  --soc-alerts-chart-label: #475569;
+  --soc-alerts-stamp-band: #fff;
+}
+.dark [data-soc-alerts-root] {
+  --soc-alerts-chart-grid: rgb(var(--ui-border, 74 85 99));
+  --soc-alerts-chart-axis: rgb(var(--ui-control, 125 135 148));
+  --soc-alerts-chart-label: rgb(var(--ui-muted, 161 172 184));
+  --soc-alerts-stamp-band: rgb(var(--ui-surface, 48 56 66));
+}
+`;
+const CHART_GRID_STYLE = { stroke: 'var(--soc-alerts-chart-grid, #dbe3ef)' };
+const CHART_AXIS_STYLE = { stroke: 'var(--soc-alerts-chart-axis, #475569)' };
+const CHART_LABEL_STYLE = { fill: 'var(--soc-alerts-chart-label, #475569)' };
+
 const PAGE_SIZE = 50;
 const QUERY_LIMIT = 10000;
 const ALERT_TABLE_COLUMN_WIDTH = 220;
@@ -588,7 +626,9 @@ function normalizeData(payload: AlertOperationsData): typeof EMPTY_DATA {
       benign: numberValue(payload.summary?.benign),
       unknown: numberValue(payload.summary?.unknown),
       representativeCount: numberValue(payload.summary?.representativeCount),
+      availableCount: numberValue(payload.summary?.availableCount ?? payload.summary?.totalUnique),
     },
+    filterOptions: payload.filterOptions || {},
     tableColumns: Array.isArray(payload.tableColumns) ? payload.tableColumns : [],
     incidents: Array.isArray(payload.incidents) ? payload.incidents : [],
   };
@@ -1137,7 +1177,6 @@ function FilterDropdown({
   open,
   onToggle,
   onApply,
-  onQuery,
   tr,
 }: {
   config: FilterConfig;
@@ -1146,7 +1185,6 @@ function FilterDropdown({
   open: boolean;
   onToggle: () => void;
   onApply: (value: string[]) => void;
-  onQuery: (value: string[]) => void;
   tr: Translate;
 }) {
   const [search, setSearch] = useState('');
@@ -1188,7 +1226,8 @@ function FilterDropdown({
     return () => window.removeEventListener('resize', measure);
   }, [open]);
 
-  const choices = options.filter((option) => option && option !== ALL_FILTER_VALUE);
+  // Keep selected values removable even when absent from this time window's facets.
+  const choices = [...new Set([...value, ...options])].filter((option) => option && option !== ALL_FILTER_VALUE);
   const visibleChoices = choices.filter((choice) => matchesFilterOptionSearch(config.key, choice, search, tr));
   const selected = new Set(draft.map(normalized));
 
@@ -1203,6 +1242,8 @@ function FilterDropdown({
     <div ref={rootRef} className="relative" data-soc-menu-root="true" style={{ zIndex: open ? 40 : 1 }}>
       <button
         type="button"
+        aria-expanded={open}
+        aria-label={`${tr(config.label)}：${optionLabel(config.key, value, tr)}`}
         onClick={onToggle}
         className={`flex h-10 w-full items-center justify-between rounded border bg-white px-3 text-left text-sm text-slate-600 transition ${open ? 'border-blue-500 ring-4 ring-blue-100' : 'border-slate-300 hover:border-slate-400'}`}
       >
@@ -1211,6 +1252,8 @@ function FilterDropdown({
       </button>
       {open && (
         <div
+          role="dialog"
+          aria-label={tr(config.label)}
           className={`absolute ${alignRight ? 'right-0' : 'left-0'} top-[calc(100%+8px)] w-full rounded-md border border-slate-200 bg-white shadow-xl`}
           style={{ zIndex: 41, minWidth: FILTER_PANEL_MIN_WIDTH, top: 'calc(100% + 8px)' }}
         >
@@ -1233,6 +1276,7 @@ function FilterDropdown({
                     key={choice}
                     type="button"
                     role="checkbox"
+                    aria-label={optionText(config.key, choice, tr)}
                     aria-checked={checked}
                     onClick={() => toggleChoice(choice)}
                     className="flex h-10 w-full items-center gap-3 rounded px-1 text-left text-sm text-slate-700 hover:bg-slate-50"
@@ -1251,8 +1295,8 @@ function FilterDropdown({
               <button type="button" onClick={() => setDraft([])} className="text-slate-600 hover:text-slate-900">{tr('清空')}</button>
             </div>
             <div className="flex items-center gap-2">
-              <button type="button" onClick={() => onApply(draft)} className="rounded border border-slate-300 bg-white px-5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">{tr('确定')}</button>
-              <button type="button" onClick={() => onQuery(draft)} className="rounded bg-[#303a65] px-5 py-2 text-sm font-medium text-white hover:bg-[#263052]" style={{ backgroundColor: '#303a65' }}>{tr('查询')}</button>
+              <button type="button" onClick={onToggle} className="rounded border border-slate-300 bg-white px-5 py-2 text-sm text-slate-600">{tr('取消')}</button>
+              <button type="button" onClick={() => onApply(draft)} className="rounded bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700">{tr('确定')}</button>
             </div>
           </div>
         </div>
@@ -1529,8 +1573,10 @@ export default function SocAlertsPage() {
   }, [appliedFilters, appliedTimeFilter, load]);
 
   const filterOptions = useMemo(() => (
-    Object.fromEntries(FILTER_CONFIGS.map((config) => [config.key, buildFilterOptions(data.incidents, config.key)])) as Record<FilterKey, string[]>
-  ), [data.incidents]);
+    Object.fromEntries(FILTER_CONFIGS.map((config) => [config.key,
+      data.filterOptions[config.key] || buildFilterOptions(data.incidents, config.key),
+    ])) as Record<FilterKey, string[]>
+  ), [data.filterOptions, data.incidents]);
 
   const visibleFilterConfigs = showMoreFilters ? FILTER_CONFIGS : BASE_FILTER_CONFIGS;
   const openFilterKey = openMenu?.startsWith('filter:') ? openMenu.slice('filter:'.length) as FilterKey : null;
@@ -1588,16 +1634,17 @@ export default function SocAlertsPage() {
 
   const resetQuery = useCallback(() => {
     const defaults = cloneFilters(DEFAULT_FILTER_VALUES);
-    const defaultTimeFilter = createRelativeTimeFilter(DEFAULT_TIME_RANGE);
     setKeyword('');
     setSelectedFilters(defaults);
     setAppliedKeyword('');
     setAppliedFilters(cloneFilters(defaults));
-    setTimeFilter(defaultTimeFilter);
-    setAppliedTimeFilter(defaultTimeFilter);
+    setAppliedTimeFilter(timeFilter);
     setOpenMenu(null);
     setPage(1);
-  }, []);
+  }, [timeFilter]);
+
+  const filtersDirty = keyword !== appliedKeyword || JSON.stringify(selectedFilters) !== JSON.stringify(appliedFilters);
+  const hasAppliedFilters = Boolean(appliedKeyword.trim()) || Object.values(appliedFilters).some((values) => values.length > 0);
 
   const pageCount = Math.max(1, Math.ceil(sortedIncidents.length / PAGE_SIZE));
   const currentPage = Math.min(page, pageCount);
@@ -1605,12 +1652,13 @@ export default function SocAlertsPage() {
 
   const timeline = useMemo(() => buildTimeline(filteredIncidents, resolveTimeWindow(appliedTimeFilter)), [appliedTimeFilter, filteredIncidents]);
   return (
-    <div className="relative min-h-full overflow-y-auto bg-[#f5f7fb] text-slate-900" style={{ isolation: 'isolate' }} data-soc-alerts-root="true">
+    <div onKeyDown={(event) => { if (event.key === 'Escape') setOpenMenu(null); }} className="relative min-h-full overflow-y-auto bg-[#f5f7fb] text-slate-900" style={{ isolation: 'isolate' }} data-soc-alerts-root="true">
+      <style>{THEME_CSS}</style>
       {openMenu && <button type="button" aria-label={tr('关闭筛选菜单')} className="absolute inset-0 cursor-default" style={{ zIndex: 5 }} onClick={() => setOpenMenu(null)} />}
       <div className="relative border-b border-slate-200 bg-white" style={{ zIndex: 10 }}>
         <div className="px-6 py-4">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <div className="text-base font-semibold text-slate-950">{tr('日志调查')}</div>
+            <div className="text-base font-semibold text-slate-950">{tr('告警调查')}</div>
             <div className="flex items-center gap-2 text-sm">
               <TimeRefreshPopover
                 value={timeFilter}
@@ -1639,15 +1687,6 @@ export default function SocAlertsPage() {
                       setSelectedFilters((current) => ({ ...current, [config.key]: next }));
                       setOpenMenu(null);
                     }}
-                    onQuery={(next) => {
-                      const nextFilters = cloneFilters({ ...selectedFilters, [config.key]: next });
-                      setSelectedFilters(nextFilters);
-                      setAppliedKeyword(keyword);
-                      setAppliedFilters(cloneFilters(nextFilters));
-                      setAppliedTimeFilter(timeFilter);
-                      setOpenMenu(null);
-                      setPage(1);
-                    }}
                     tr={tr}
                   />
                 ))}
@@ -1661,6 +1700,7 @@ export default function SocAlertsPage() {
                   <input
                     value={keyword}
                     onChange={(event) => setKeyword(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) runQuery(); }}
                     className="min-w-0 flex-1 border-0 bg-transparent outline-none placeholder:text-slate-400"
                     placeholder={tr('请输入源地址、目标地址、HTTP Host、URL、规则 ID 或威胁名称')}
                   />
@@ -1680,6 +1720,7 @@ export default function SocAlertsPage() {
                 <button
                   type="button"
                   onClick={runQuery}
+                  aria-label={tr('查询')}
                   style={{ backgroundColor: '#303a65', borderColor: '#303a65', color: '#ffffff' }}
                   className="inline-flex h-10 min-w-[96px] shrink-0 items-center justify-center gap-2 rounded border px-4 text-sm font-medium transition hover:opacity-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-100"
                 >
@@ -1689,16 +1730,18 @@ export default function SocAlertsPage() {
                 <button
                   type="button"
                   onClick={resetQuery}
+                  aria-label={tr('清空筛选')}
                   className="inline-flex h-10 min-w-[96px] shrink-0 items-center justify-center gap-2 rounded border border-slate-300 bg-white px-4 text-sm font-medium text-slate-600 transition hover:border-slate-400 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-100"
                 >
                   <span className="text-base leading-none">✖</span>
-                  {tr('重置')}
+                  {tr('清空筛选')}
                 </button>
               </div>
             </div>
           )}
 
-          <div className="mt-3 flex justify-end">
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <span role="status" className="text-xs text-slate-500">{filtersDirty ? tr('筛选条件已修改，点击查询生效') : ''}</span>
             <button type="button" onClick={() => setFiltersOpen((open) => !open)} className="text-sm text-blue-600 hover:text-blue-700">{filtersOpen ? `⌃ ${tr('收起查询')}` : `⌄ ${tr('展开查询')}`}</button>
           </div>
         </div>
@@ -1726,13 +1769,29 @@ export default function SocAlertsPage() {
           </div>
         </div>
 
+        {!loading && (data.summary.representativeCount || 0) > data.incidents.length && (
+          <p className="px-6 py-3 text-sm text-slate-500" role="status">{interpolate(tr('当前仅展示前 {count} 条告警，请缩小时间范围或增加筛选条件。'), { count: data.incidents.length })}</p>
+        )}
+
         {error && (
           <div className="border-b border-slate-200 px-6 py-3 text-sm text-orange-600">
             {error}
           </div>
         )}
 
-        <IncidentTable
+        {loading || error || filteredIncidents.length === 0 ? (
+          <div className="m-6 rounded border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500" role="status">
+            {loading ? tr('正在查询告警…') : error ? (
+              <button type="button" onClick={() => void load(appliedTimeFilter, appliedFilters)} className="text-blue-600">{tr('重试')}</button>
+            ) : (
+              <>
+                <p className="font-medium text-slate-700">{tr(hasAppliedFilters && (data.summary.availableCount || 0) > 0 ? '当前筛选条件下没有匹配的告警' : '当前时间范围内暂无告警')}</p>
+                <p className="mt-2">{tr(hasAppliedFilters && (data.summary.availableCount || 0) > 0 ? '可以清空筛选条件，查看当前时间范围内的全部告警。' : '可以扩大时间范围；如刚接入设备，请确认告警已完成研判并入库。')}</p>
+                {hasAppliedFilters && <button type="button" onClick={resetQuery} className="mt-3 text-blue-600">{tr('清空筛选')}</button>}
+              </>
+            )}
+          </div>
+        ) : <IncidentTable
           incidents={pagedIncidents}
           total={filteredIncidents.length}
           page={currentPage}
@@ -1742,7 +1801,7 @@ export default function SocAlertsPage() {
           onSelect={(incident) => setSelectedIncident((current) => (current?.id === incident.id ? null : incident))}
           onCloseSelected={() => setSelectedIncident(null)}
           tr={tr}
-        />
+        />}
       </section>
     </div>
   );
@@ -1818,7 +1877,7 @@ function TimelineChart({ buckets, tr }: { buckets: TimelineBucket[]; tr: Transla
         onMouseLeave={() => setActiveBucket(null)}
       >
         {[plotTop, plotMiddle, plotBottom].map((y) => (
-          <line key={y} x1={plotLeft} x2={chartWidth - plotRight} y1={y} y2={y} stroke="#dbe3ef" strokeWidth="1" />
+          <line key={y} x1={plotLeft} x2={chartWidth - plotRight} y1={y} y2={y} style={CHART_GRID_STYLE} strokeWidth="1" />
         ))}
         {buckets.map((bucket, index) => {
           const x = xForIndex(index);
@@ -1842,15 +1901,15 @@ function TimelineChart({ buckets, tr }: { buckets: TimelineBucket[]; tr: Transla
             </g>
           );
         })}
-        <line x1={plotLeft} x2={chartWidth - plotRight} y1={plotBottom} y2={plotBottom} stroke="#475569" strokeWidth="1" />
-        <text x="8" y={plotTop + 4} fontSize="11" fill="#475569">{formatNumber(maxValue)}</text>
-        <text x="8" y={plotMiddle + 4} fontSize="11" fill="#475569">{formatNumber(midValue)}</text>
-        <text x="22" y={plotBottom + 4} fontSize="11" fill="#475569">0</text>
+        <line x1={plotLeft} x2={chartWidth - plotRight} y1={plotBottom} y2={plotBottom} style={CHART_AXIS_STYLE} strokeWidth="1" />
+        <text x="8" y={plotTop + 4} fontSize="11" style={CHART_LABEL_STYLE}>{formatNumber(maxValue)}</text>
+        <text x="8" y={plotMiddle + 4} fontSize="11" style={CHART_LABEL_STYLE}>{formatNumber(midValue)}</text>
+        <text x="22" y={plotBottom + 4} fontSize="11" style={CHART_LABEL_STYLE}>0</text>
         {labelIndexes.map((bucketIndex, labelIndex) => {
           const bucket = buckets[bucketIndex];
           const anchor = labelIndex === 0 ? 'start' : labelIndex === labelIndexes.length - 1 ? 'end' : 'middle';
           return (
-            <text key={`${bucket.label}-label-${bucketIndex}`} x={xForIndex(bucketIndex)} y={chartHeight - 4} fontSize="11" fill="#475569" textAnchor={anchor}>{bucket.label}</text>
+            <text key={`${bucket.label}-label-${bucketIndex}`} x={xForIndex(bucketIndex)} y={chartHeight - 4} fontSize="11" style={CHART_LABEL_STYLE} textAnchor={anchor}>{bucket.label}</text>
           );
         })}
       </svg>
@@ -2476,7 +2535,7 @@ function AttackResultStamp({ bucket, tr }: { bucket: 'success' | 'failed' | 'unk
             <text x="130" y="149" style={{ fontSize: 18 }}>★</text>
             <text x="147" y="145" style={{ fontSize: 13 }}>★</text>
           </g>
-          <path d="M32 78 H228 V122 H32 Z" fill="#fff" strokeWidth="5.2" />
+          <path d="M32 78 H228 V122 H32 Z" style={{ fill: 'var(--soc-alerts-stamp-band, #fff)' }} strokeWidth="5.2" />
           <path d="M42 88 H218" opacity="0.36" strokeWidth="2" />
           <path d="M42 112 H218" opacity="0.36" strokeWidth="2" />
           <text

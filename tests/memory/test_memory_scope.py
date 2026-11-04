@@ -389,3 +389,61 @@ async def test_old_memory_index_schema_is_rebuilt_without_other_data(
     assert {"scope", "scope_id", "path"}.issubset(columns)
     assert cache_row == ("hash",)
     assert marker_row == ("preserved",)
+
+
+@pytest.mark.asyncio
+async def test_pre_scope_memory_tables_are_kept_aside_not_dropped(tmp_path: Path) -> None:
+    """An index made before scopes is renamed out of the way, rows and all; the new tables get every index."""
+    import re
+
+    from flocks.storage.vector import VECTOR_SCHEMA_SQL
+
+    db_path = tmp_path / "prescope.db"
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE memory_files (
+            path TEXT PRIMARY KEY, project_id TEXT NOT NULL, source TEXT NOT NULL,
+            hash TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, indexed_at REAL NOT NULL
+        );
+        CREATE TABLE memory_chunks (
+            id TEXT PRIMARY KEY, path TEXT NOT NULL, project_id TEXT NOT NULL, source TEXT NOT NULL,
+            start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, hash TEXT NOT NULL, text TEXT NOT NULL,
+            embedding BLOB, embedding_model TEXT, embedding_dims INTEGER,
+            created_at REAL NOT NULL, updated_at REAL NOT NULL
+        );
+        CREATE INDEX idx_memory_files_source ON memory_files(source);
+        CREATE INDEX idx_memory_chunks_path ON memory_chunks(path);
+        CREATE INDEX idx_memory_chunks_source ON memory_chunks(source);
+        CREATE VIRTUAL TABLE memory_fts USING fts5(text, chunk_id, path, source, project_id, start_line, end_line);
+        INSERT INTO memory_files VALUES ('MEMORY.md', 'p', 'memory', 'h', 1, 2, 3);
+        INSERT INTO memory_chunks VALUES ('c1', 'MEMORY.md', 'p', 'memory', 1, 1, 'h', 'old text', NULL, NULL, NULL, 1, 1);
+        INSERT INTO memory_fts VALUES ('old text', 'c1', 'MEMORY.md', 'memory', 'p', 1, 1);
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    await ensure_vector_tables(db_path)
+    await ensure_vector_tables(db_path)  # a second start sets nothing more aside
+
+    connection = sqlite3.connect(db_path)
+    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    backups = sorted(name for name in tables if "_bak_" in name and not re.search(r"_(data|idx|content|docsize|config)$", name))
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(memory_files)")}
+    kept = {
+        table: connection.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0]
+        for table in backups
+    }
+    indexes_on = {
+        row[0]: row[1]
+        for row in connection.execute("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index'")
+    }
+    connection.close()
+
+    assert {"scope", "scope_id", "path"}.issubset(columns)
+    assert len(backups) == 3 and all(count == 1 for count in kept.values()), kept
+    assert {re.sub(r"_bak_\d{8}$", "", name) for name in backups} == {"memory_fts", "memory_chunks", "memory_files"}
+    wanted = re.findall(r"CREATE INDEX IF NOT EXISTS (\w+)\s+ON (\w+)\(", VECTOR_SCHEMA_SQL)
+    for name, table in wanted:
+        assert indexes_on.get(name) == table or indexes_on.get(f"{name}_scoped") == table, (name, indexes_on)

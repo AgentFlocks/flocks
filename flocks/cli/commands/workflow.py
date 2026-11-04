@@ -33,6 +33,9 @@ def workflow_run(
     directory: Path = typer.Option(Path("."), "-C", "--cd", exists=True, file_okay=False, resolve_path=True),
     timeout: float = typer.Option(300.0, "--timeout", min=0.001),
 ):
+    from flocks.cli.managed import refuse_local_runtime_when_managed
+
+    refuse_local_runtime_when_managed("flocks workflow run")
     try:
         values = json.loads(inputs)
         if not isinstance(values, dict):

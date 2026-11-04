@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import IntegrationTab from './IntegrationTab';
+import IntegrationTab, { SYSLOG_PORT_RANGE_ERROR, validateSyslogPort } from './IntegrationTab';
 
 const { workflowAPI, workflowAPIEndpoints } = vi.hoisted(() => ({
   workflowAPI: {
@@ -749,5 +749,66 @@ describe('IntegrationTab trigger workspace', () => {
     await waitFor(() => {
       expect(workflowAPI.deleteTrigger).toHaveBeenCalledWith('wf-1', 'hook-1');
     });
+  });
+});
+
+describe('Syslog trigger port validation (WFL-0316)', () => {
+  // 字段与保存流程共用的校验：1~65535 的整数
+  it.each([
+    ['0', SYSLOG_PORT_RANGE_ERROR],
+    ['70000', SYSLOG_PORT_RANGE_ERROR],
+    ['65535', ''],
+    ['abc', SYSLOG_PORT_RANGE_ERROR],
+  ])('validateSyslogPort(%s) → %j', (raw, expected) => {
+    expect(validateSyslogPort(raw)).toBe(expected);
+  });
+
+  async function openSyslogPanel() {
+    const user = userEvent.setup();
+    const workflow = { id: 'wf-1', name: 'wf', workflowJson: { start: 'n1', nodes: [], edges: [] } } as any;
+    workflowAPI.getTriggers.mockResolvedValue({
+      data: [{
+        trigger: {
+          id: 'syslog-default',
+          type: 'syslog' as const,
+          name: 'Syslog Listener',
+          enabled: false,
+          source: { protocol: 'udp', host: '0.0.0.0', port: 5140, format: 'auto' },
+          mapping: { syslog_message: '$.body' },
+        },
+        status: { state: 'stopped' },
+      }],
+    });
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
+    // 记录行有名称按钮与展开箭头两个按钮都带该名称，点第一个（名称按钮）即可选中并展开「编辑配置」
+    await user.click((await screen.findAllByRole('button', { name: /Syslog Listener/ }))[0]);
+    // dev keeps the port a number input (spinbutton); letters never reach it.
+    const port = await screen.findByRole('spinbutton', { name: 'Port' });
+    const save = screen.getByRole('button', { name: '保存' });
+    return { user, port, save };
+  }
+
+  it.each([
+    ['0', 0],
+    ['70000', 70000],
+    ['abc', null],
+  ])('shows the range error and disables 保存 for port %s', async (value, shown) => {
+    const { user, port, save } = await openSyslogPanel();
+    await user.clear(port);
+    await user.type(port, value);
+    expect(port).toHaveValue(shown);
+    expect(screen.getByText(SYSLOG_PORT_RANGE_ERROR)).toBeInTheDocument();
+    expect(save).toBeDisabled();
+    await user.click(save);
+    expect(workflowAPI.updateTrigger).not.toHaveBeenCalled();
+  });
+
+  it('accepts 65535 with no error and keeps 保存 enabled', async () => {
+    const { user, port, save } = await openSyslogPanel();
+    await user.clear(port);
+    await user.type(port, '65535');
+    expect(port).toHaveValue(65535);
+    expect(screen.queryByText(SYSLOG_PORT_RANGE_ERROR)).not.toBeInTheDocument();
+    expect(save).toBeEnabled();
   });
 });

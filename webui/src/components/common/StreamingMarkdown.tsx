@@ -354,7 +354,7 @@ const MarkdownContent = memo(function MarkdownContent({ content }: { content: st
   const normalizedContent = normalizeLatexDelimiters(content);
 
   return (
-    <div className="prose prose-sm w-full min-w-0 max-w-full">
+    <div className="prose chat-prose w-full min-w-0 max-w-full">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
         rehypePlugins={[
@@ -364,6 +364,9 @@ const MarkdownContent = memo(function MarkdownContent({ content }: { content: st
           [rehypeHighlight, { detect: false, ignoreMissing: true }],
         ]}
         components={{
+          table({ children, node: _node, ...props }) {
+            return <div className="chat-table-scroll" tabIndex={0}><table {...props}>{children}</table></div>;
+          },
           code({ className, children, ...props }) {
             // Detect block-level code (fenced code block):
             // 1. Has a language-* class (explicit language tag)
@@ -376,7 +379,7 @@ const MarkdownContent = memo(function MarkdownContent({ content }: { content: st
             if (!isBlock) {
               return (
                 <code
-                  className="rounded-md bg-zinc-100/80 px-1.5 py-0.5 font-mono text-[0.85em] font-normal text-zinc-700 dark:bg-white/[0.07] dark:text-zinc-200"
+                  className="chat-inline-code"
                   {...props}
                 >
                   {children}

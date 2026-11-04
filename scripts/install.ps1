@@ -1307,6 +1307,14 @@ function Main {
         Pop-Location
     }
 
+    Write-Info (Get-LocalizedText -English "Checking the WebUI plugin compiler..." -Chinese "正在检查 WebUI 插件编译器...")
+    $null = Invoke-NativeCommandOrFail `
+        -Description "WebUI plugin runtime check" `
+        -FilePath "uv" `
+        -ArgumentList @("run", "--no-sync", "python", "-I", "-B", (Join-Path $RootDir "scripts/check_webui_runtime.py")) `
+        -WorkingDirectory $RootDir `
+        -StreamOutput
+
     if ($InstallTui) {
         Install-Bun
         Write-Info (Get-LocalizedText -English "Installing TUI dependencies..." -Chinese "正在安装 TUI 依赖...")

@@ -25,8 +25,9 @@
 - **处理逻辑**:
   - 遍历告警中的 IOC（IP、域名、URL）
   - 自动去重，并跳过内网/保留地址，避免对 `127.0.0.1`、RFC1918 地址做无意义情报查询
-  - 使用 `threatbook_ip_query`、`threatbook_domain_query`、`threatbook_url_query` 查询
-  - 使用 `virustotal_ip_query`、`virustotal_domain_query`、`virustotal_url_query` 做补充查询
+  - 使用微步 MCP 的 `threatbook_mcp_ip_query`、`threatbook_mcp_domain_query` 查询；MCP 服务名是 `threatbook` 的旧配置自动改用 `threatbook_ip_query` 这一组
+  - URL 只在注册了 `threatbook_mcp_url_query` 或 `threatbook_url_query` 时查询，URL 的主机名已经按域名查过
+  - IP 或域名的情报工具没有注册时打印一行 `[intel] WARNING`，研判照常进行
   - 汇总所有情报结果
 
 ### 3. 漏洞信息查询（并行）
@@ -36,7 +37,7 @@
 - **输出**: `vuln_info` - 漏洞详细信息
 - **处理逻辑**:
   - 从 `threat.msg`、`threat.tag`、URL 等文本中提取漏洞ID（如 `CVE-2021-xxx`）
-  - 仅当存在标准漏洞编号时才调用 `__mcp_vuln_query`
+  - 仅当存在标准漏洞编号时才调用 `threatbook_mcp_vuln_query`（旧配置为 `threatbook_vuln_query`）
   - 获取漏洞描述、影响产品、修复方案、POC 等信息
   - 无漏洞ID时返回空结果
 

@@ -118,17 +118,13 @@ Tell the user: 微步 LLM 是 Flocks 默认的推理引擎。中国区请前往 
 
 ```python
 # Run via: uv run python -c "..." from the project root
-import json
-from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.security import get_secret_manager
 
 LLM_KEY = '<KEY>'  # substitute actual key
 
 # 1. Save key to .secret.json
-secret_file = Config.get_secret_file()
-secrets = json.loads(secret_file.read_text()) if secret_file.exists() else {}
-secrets['threatbook-cn-llm_llm_key'] = LLM_KEY
-secret_file.write_text(json.dumps(secrets, indent=2))
+get_secret_manager().set('threatbook-cn-llm_llm_key', LLM_KEY)
 
 # 2. Register provider in flocks.json so apply_config() can resolve the secret ref
 ConfigWriter.add_provider('threatbook-cn-llm', {
@@ -147,16 +143,12 @@ print('ThreatBook CN LLM configured (secret + flocks.json).')
 Ask if the user has an OpenAI API Key (https://platform.openai.com/api-keys). If yes:
 
 ```python
-import json
-from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.security import get_secret_manager
 
 LLM_KEY = '<KEY>'
 
-secret_file = Config.get_secret_file()
-secrets = json.loads(secret_file.read_text()) if secret_file.exists() else {}
-secrets['openai_llm_key'] = LLM_KEY
-secret_file.write_text(json.dumps(secrets, indent=2))
+get_secret_manager().set('openai_llm_key', LLM_KEY)
 
 ConfigWriter.add_provider('openai', {
     'name': 'OpenAI',
@@ -171,16 +163,12 @@ print('OpenAI LLM configured.')
 Ask if the user has an Anthropic API Key (https://console.anthropic.com/). If yes:
 
 ```python
-import json
-from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.security import get_secret_manager
 
 LLM_KEY = '<KEY>'
 
-secret_file = Config.get_secret_file()
-secrets = json.loads(secret_file.read_text()) if secret_file.exists() else {}
-secrets['anthropic_llm_key'] = LLM_KEY
-secret_file.write_text(json.dumps(secrets, indent=2))
+get_secret_manager().set('anthropic_llm_key', LLM_KEY)
 
 ConfigWriter.add_provider('anthropic', {
     'name': 'Anthropic',
@@ -280,17 +268,13 @@ Tell the user:
 
 ```python
 # Run via: uv run python -c "..." from the project root
-import json
-from flocks.config.config import Config
+from flocks.security import get_secret_manager
 
 API_KEY = '<API_KEY>'  # substitute actual key provided by user
 REGION = 'cn'  # or 'global'
 
-secret_file = Config.get_secret_file()
-secrets = json.loads(secret_file.read_text()) if secret_file.exists() else {}
 secret_key = 'threatbook_cn_api_key' if REGION == 'cn' else 'threatbook_io_api_key'
-secrets[secret_key] = API_KEY
-secret_file.write_text(json.dumps(secrets, indent=2))
+get_secret_manager().set(secret_key, API_KEY)
 
 print(f'ThreatBook API Key saved to .secret.json as {secret_key}.')
 ```
@@ -405,16 +389,12 @@ Use concise Chinese wording such as: `通道配置已经写入。请现在进入
 3. 把 App ID 和 App Secret 告诉我
 
 ```python
-import json
-from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.security import get_secret_manager
 
 APP_SECRET = '<APP_SECRET>'  # substitute actual value
 
-secret_file = Config.get_secret_file()
-secrets = json.loads(secret_file.read_text()) if secret_file.exists() else {}
-secrets['channel_feishu_appSecret'] = APP_SECRET
-secret_file.write_text(json.dumps(secrets, indent=2))
+get_secret_manager().set('channel_feishu_appSecret', APP_SECRET)
 
 ConfigWriter.update_config_section('channels.feishu', {
     'enabled': True,
@@ -438,16 +418,12 @@ ConfigWriter.update_config_section('channels.feishu', {
 3. 把 Bot ID 和 Secret 告诉我
 
 ```python
-import json
-from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.security import get_secret_manager
 
 SECRET = '<SECRET>'  # substitute actual value
 
-secret_file = Config.get_secret_file()
-secrets = json.loads(secret_file.read_text()) if secret_file.exists() else {}
-secrets['channel_wecom_secret'] = SECRET
-secret_file.write_text(json.dumps(secrets, indent=2))
+get_secret_manager().set('channel_wecom_secret', SECRET)
 
 ConfigWriter.update_config_section('channels.wecom', {
     'enabled': True,
@@ -469,16 +445,12 @@ ConfigWriter.update_config_section('channels.wecom', {
 3. 把 Client ID 和 Client Secret 告诉我
 
 ```python
-import json
-from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.security import get_secret_manager
 
 CLIENT_SECRET = '<CLIENT_SECRET>'  # substitute actual value
 
-secret_file = Config.get_secret_file()
-secrets = json.loads(secret_file.read_text()) if secret_file.exists() else {}
-secrets['channel_dingtalk_clientSecret'] = CLIENT_SECRET
-secret_file.write_text(json.dumps(secrets, indent=2))
+get_secret_manager().set('channel_dingtalk_clientSecret', CLIENT_SECRET)
 
 ConfigWriter.update_config_section('channels.dingtalk', {
     'enabled': True,
@@ -498,16 +470,12 @@ ConfigWriter.update_config_section('channels.dingtalk', {
 3. 复制 API token 告诉我
 
 ```python
-import json
-from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.security import get_secret_manager
 
 BOT_TOKEN = '<BOT_TOKEN>'  # substitute actual value
 
-secret_file = Config.get_secret_file()
-secrets = json.loads(secret_file.read_text()) if secret_file.exists() else {}
-secrets['channel_telegram_botToken'] = BOT_TOKEN
-secret_file.write_text(json.dumps(secrets, indent=2))
+get_secret_manager().set('channel_telegram_botToken', BOT_TOKEN)
 
 ConfigWriter.update_config_section('channels.telegram', {
     'enabled': True,
@@ -646,7 +614,7 @@ Template:
 ## Implementation Notes
 
 1. **Python execution**: Always use `bash` tool + `uv run python -c "..."` from the **project root** to ensure correct paths and virtual environment.
-2. **Secret file writes**: Write secrets to `Config.get_secret_file()` (normally `~/.flocks/config/.secret.json`) via `json.load/dump` (load existing → merge new key → write back). `SecretManager` also works, but using `Config.get_secret_file()` keeps onboarding scripts aligned with the runtime config directory.
+2. **Secret file writes**: Always save secrets with `get_secret_manager().set(KEY, VALUE)` (from `flocks.security`). It writes `Config.get_secret_file()` (normally `~/.flocks/config/.secret.json`) under the secret store's lock and replaces the file atomically. Never read, edit and write `.secret.json` yourself: a concurrent write by the server or another script would be lost.
 3. **Key naming conventions**:
    - LLM providers: `{provider}_llm_key` (e.g. `openai_llm_key`, `anthropic_llm_key`, `threatbook-cn-llm_llm_key`)
    - ThreatBook MCP 工具: 当前实现会把 key 保存为 `threatbook_mcp_key`（兼容旧项目中的 `threatbook_mcp_api_key`），并在 `mcp.threatbook_mcp.url` 中写入 `{secret:...}` 引用

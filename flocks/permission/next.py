@@ -189,6 +189,31 @@ class PermissionNext:
         )
 
     @classmethod
+    async def list_permanent_rules(cls) -> Dict[str, str]:
+        """Return the durable permission -> action ("allow"/"deny") rules."""
+        await cls._ensure_persisted_state_loaded()
+        return dict(cls._permanent_rules)
+
+    @classmethod
+    async def set_permanent_rule(cls, permission: str, action: str) -> None:
+        """Create or replace a durable rule (same store an "always" reply writes)."""
+        if action not in {"allow", "deny"}:
+            raise ValueError("action must be 'allow' or 'deny'")
+        await cls._ensure_persisted_state_loaded()
+        cls._permanent_rules[permission] = action
+        await cls._persist_permanent_rule(permission, action)
+
+    @classmethod
+    async def delete_permanent_rule(cls, permission: str) -> bool:
+        """Remove a durable rule; False when there was none."""
+        await cls._ensure_persisted_state_loaded()
+        if permission not in cls._permanent_rules:
+            return False
+        cls._permanent_rules.pop(permission, None)
+        await Storage.delete(f"{cls._PERMANENT_PREFIX}{permission}")
+        return True
+
+    @classmethod
     async def _persist_session_rules(cls, session_id: str) -> None:
         await Storage.set(
             f"{cls._SESSION_PREFIX}{session_id}",
@@ -347,7 +372,7 @@ class PermissionNext:
             return "allow"
 
         if "delegationChain" not in metadata:
-            # Every caller (session runner, Pro confirmations, tool routes)
+            # Every caller (session runner, extension confirmations, tool routes)
             # gets it, so the sessions that delegated this one show it too.
             chain = await cls._delegation_chain(session_id)
             if chain:
@@ -431,8 +456,8 @@ class PermissionNext:
                 })
             except Exception as exc:
                 log.debug("permission.replied.publish_failed", {"error": str(exc)})
-        # OSS only transports the reply; Pro decides whether it means a
-        # denial, one-time grant, or durable authorization.
+        # Flocks only transports the reply; the policy extension decides whether
+        # it means a denial, one-time grant, or durable authorization.
         return str(reply)
 
     @classmethod

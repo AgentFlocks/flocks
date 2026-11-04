@@ -27,6 +27,13 @@ describe('extractErrorMessage', () => {
       .toBe('Valid message');
   });
 
+  it('shows field-level details from the production validation error envelope', () => {
+    expect(extractErrorMessage({ response: { data: {
+      error: 'ValidationError', message: 'Request validation failed',
+      details: [{ loc: ['body', 'models', 0, 'name'], msg: 'Invalid model name', ctx: { error: 'Invalid model name' } }],
+    } } })).toBe('models.0.name: Invalid model name');
+  });
+
   it('serializes non-string validation messages without returning objects', () => {
     expect(extractErrorMessage({ response: { data: { detail: [{ msg: { nested: true } }] } } }))
       .toBe('{"msg":{"nested":true}}');

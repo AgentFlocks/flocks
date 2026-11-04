@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
+from flocks.utils.monitor import get_monitor
 from flocks.utils.json_repair import (
     parse_json_robust as _parse_json_robust,
     repair_truncated_json,
@@ -111,6 +112,37 @@ class ToolCallAccumulator:
         self._accumulator: dict[str, dict[str, Any]] = {}
         self._index_to_id: dict[int, str] = {}
 
+    @property
+    def _session_id(self) -> Optional[str]:
+        return getattr(self._processor, "session_id", None)
+
+    def _record_parsed(self, tool_name: str) -> None:
+        # Feed the monitor behind /api/session/metrics; it never blocks the stream.
+        try:
+            get_monitor().record_tool_call_parsed(tool_name, session_id=self._session_id)
+        except Exception as exc:  # pragma: no cover - metrics are best effort
+            log.debug("tool_accumulator.monitor_failed", {"error": str(exc)})
+
+    def _record_failed(self, tool_name: str, error: str, arguments: str) -> None:
+        try:
+            get_monitor().record_tool_call_failed(
+                tool_name, error, arguments, session_id=self._session_id,
+            )
+        except Exception as exc:  # pragma: no cover
+            log.debug("tool_accumulator.monitor_failed", {"error": str(exc)})
+
+    def _record_repaired(self, tool_name: str, strategy: str) -> None:
+        try:
+            get_monitor().record_tool_call_repaired(tool_name, strategy, session_id=self._session_id)
+        except Exception as exc:  # pragma: no cover
+            log.debug("tool_accumulator.monitor_failed", {"error": str(exc)})
+
+    def _record_invalid(self, tool_name: str) -> None:
+        try:
+            get_monitor().record_tool_call_invalid(tool_name, session_id=self._session_id)
+        except Exception as exc:  # pragma: no cover
+            log.debug("tool_accumulator.monitor_failed", {"error": str(exc)})
+
     async def feed_chunk(self, tc: dict[str, Any]) -> None:
         """Process a single tool-call chunk from the provider stream."""
         tc_index = tc.get("index", 0)
@@ -177,6 +209,7 @@ class ToolCallAccumulator:
                         return
 
                 if final_name:
+                    self._record_parsed(final_name)
                     await self._processor.process_event(
                         ToolCallEvent(
                             tool_call_id=tc_id,
@@ -227,6 +260,7 @@ class ToolCallAccumulator:
                         raised_output_limit=raised_output_limit,
                     )
                 )
+                self._record_failed(tool_name, error_msg, accumulated_args)
                 await self._processor.process_event(
                     ToolInputErrorEvent(
                         id=tc_id,
@@ -275,6 +309,7 @@ class ToolCallAccumulator:
                         raised_output_limit=raised_output_limit,
                     )
                 )
+                self._record_failed(tool_name, error_msg, accumulated_args)
                 await self._processor.process_event(
                     ToolInputErrorEvent(
                         id=tc_id,
@@ -299,6 +334,7 @@ class ToolCallAccumulator:
                 continue
 
             if ok:
+                self._record_parsed(tool_name)
                 if not tc_data.get("input_started"):
                     await self._processor.process_event(
                         ToolInputStartEvent(id=tc_id, tool_name=tool_name)
@@ -309,6 +345,8 @@ class ToolCallAccumulator:
                     )
                 )
                 continue
+
+            self._record_failed(tool_name, "tool arguments are not valid JSON", accumulated_args)
 
             # --- Repair strategies ---
             repaired = await self._try_repair(
@@ -323,6 +361,7 @@ class ToolCallAccumulator:
                 f"Please ensure valid JSON with balanced braces/brackets."
             )
 
+            self._record_invalid(tool_name)
             await self._processor.process_event(
                 ToolCallEvent(
                     tool_call_id=tc_id,
@@ -395,6 +434,10 @@ class ToolCallAccumulator:
                     log.info("tool_accumulator.repair.success", {
                         "original": tool_name, "repaired": candidate,
                     })
+                    self._record_repaired(
+                        tool_name,
+                        "case" if candidate != tool_name else "json",
+                    )
                     return True
             return False
 

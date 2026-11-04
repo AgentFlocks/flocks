@@ -23,6 +23,7 @@ from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
+from flocks.workflow.ownership import abandon_execution, execution_cancelled
 from flocks.workflow.tool_context import (
     build_workflow_tool_context,
     cleanup_workflow_tool_context,
@@ -159,6 +160,17 @@ class SyslogManager:
         # save endpoint can report bind failures synchronously.
         self._listener_ready: dict[str, asyncio.Event] = {}
         self._dispatcher = EventDispatcher()
+        # Restart and stop of one workflow happen one at a time: two of them
+        # interleaving (two saves of its config, say) would leave a listener
+        # that nothing tracks any more.
+        self._workflow_locks: dict[str, asyncio.Lock] = {}
+        self._stopped = False
+
+    def _lock_for(self, workflow_id: str) -> asyncio.Lock:
+        lock = self._workflow_locks.get(workflow_id)
+        if lock is None:
+            lock = self._workflow_locks[workflow_id] = asyncio.Lock()
+        return lock
 
     @staticmethod
     def _config_key(workflow_id: str) -> str:
@@ -196,6 +208,7 @@ class SyslogManager:
         return self._default_trigger_from_config(data)
 
     async def start_all(self) -> None:
+        self._stopped = False
         try:
             configs = await WorkflowStore.list_configs(kind="workflow_syslog_config")
         except Exception as exc:
@@ -219,7 +232,12 @@ class SyslogManager:
                     )
 
     async def stop_all(self) -> None:
-        for workflow_id in list(self._tasks.keys()):
+        # A restart still under way (reading its config, say) has registered
+        # nothing yet: every workflow that ever took its lock is visited, so
+        # stopping waits for that restart, which then sees ``_stopped`` and
+        # starts nothing (see _restart_locked).
+        self._stopped = True
+        for workflow_id in sorted(set(self._tasks) | set(self._workflow_locks)):
             await self.stop_workflow(workflow_id)
 
     def get_listener_status(self, workflow_id: str) -> Dict[str, Any]:
@@ -276,6 +294,10 @@ class SyslogManager:
         return active
 
     async def stop_workflow(self, workflow_id: str) -> None:
+        async with self._lock_for(workflow_id):
+            await self._stop_workflow_locked(workflow_id)
+
+    async def _stop_workflow_locked(self, workflow_id: str) -> None:
         cancel_event = self._generation_cancel_events.pop(workflow_id, None)
         if cancel_event is not None:
             cancel_event.set()
@@ -315,7 +337,11 @@ class SyslogManager:
         ``save_syslog_config`` route) can therefore surface bind errors to the
         user instead of silently leaving the listener in a failed state.
         """
-        await self.stop_workflow(workflow_id)
+        async with self._lock_for(workflow_id):
+            return await self._restart_locked(workflow_id, startup=startup)
+
+    async def _restart_locked(self, workflow_id: str, *, startup: bool = False) -> Dict[str, Any]:
+        await self._stop_workflow_locked(workflow_id)
         if self._active_draining_workers(workflow_id):
             error = "previous_workers_still_draining"
             self._listener_status[workflow_id] = {"state": "failed", "error": error}
@@ -325,6 +351,10 @@ class SyslogManager:
         except Exception as exc:
             log.warning("syslog.restart_read_failed", {"workflow_id": workflow_id, "error": str(exc)})
             return {"state": "failed", "error": str(exc)}
+        if self._stopped:
+            # The manager was stopped while the config was read.
+            self._listener_status[workflow_id] = {"state": "stopped", "error": None}
+            return {"state": "stopped", "error": None}
         if not isinstance(data, dict) or not data.get("enabled"):
             self._listener_status[workflow_id] = {"state": "stopped", "error": None}
             return {"state": "stopped", "error": None}
@@ -469,39 +499,35 @@ class SyslogManager:
                 throttle.maybe_flush()
 
         async def _bind_and_serve() -> None:
-            """Bind the socket synchronously then mark the listener ready.
+            """Serve the socket and flip ``ready`` once the bind really happened.
 
-            ``run_udp_syslog_server`` / ``run_tcp_syslog_server`` create the
-            endpoint at the top of their body and then await abort; we wrap
-            them with a tiny helper so we can flip the ``ready`` flag
-            *after* the bind has succeeded.  Bind failures are caught by the
-            outer ``try`` below and reported back as ``state="failed"``.
+            ``run_udp_syslog_server`` / ``run_tcp_syslog_server`` invoke
+            ``on_bound`` right after the endpoint exists.  Guessing with "one
+            event-loop tick" was wrong whenever the loop had to resolve the
+            host first (hostnames, malformed literals such as ``999.1.1.1``):
+            the bind result arrived later than the tick and the route
+            reported ``listening`` for a socket that then failed.  Bind
+            failures are caught by the outer ``try`` below and reported back
+            as ``state="failed"``.
             """
-            # We rely on the underlying asyncio APIs raising OSError before
-            # they yield control, so wrapping the call alone is enough.  We
-            # additionally schedule a single-shot "mark ready" task that
-            # runs on the next event-loop tick — by which point the bind has
-            # either succeeded or raised.
-            mark_task = asyncio.create_task(_mark_ready_after_bind())
             flush_task = asyncio.create_task(_periodic_drop_flush())
             try:
                 if protocol == "tcp":
-                    await run_tcp_syslog_server(host, port, format_hint, on_msg, abort_event=abort)
+                    await run_tcp_syslog_server(
+                        host, port, format_hint, on_msg, abort_event=abort, on_bound=_mark_listening
+                    )
                 else:
-                    await run_udp_syslog_server(host, port, format_hint, on_msg, abort_event=abort)
+                    await run_udp_syslog_server(
+                        host, port, format_hint, on_msg, abort_event=abort, on_bound=_mark_listening
+                    )
             finally:
-                if not mark_task.done():
-                    mark_task.cancel()
                 if not flush_task.done():
                     flush_task.cancel()
                 # Best-effort: emit any leftover drop count on shutdown so a
                 # tail of dropped messages isn't silently lost.
                 throttle.flush_remaining()
 
-        async def _mark_ready_after_bind() -> None:
-            # Give the bind one event-loop tick to complete (or raise) so we
-            # don't claim "listening" before the socket actually exists.
-            await asyncio.sleep(0)
+        def _mark_listening() -> None:
             if not ready.is_set():
                 self._listener_status[workflow_id] = {
                     "state": "listening",
@@ -621,84 +647,89 @@ class SyslogManager:
                 input_params=summarized_inputs,
             )
             exec_id = exec_data["id"]
-            step_recorder = ExecutionStepRecorder()
-            start_time = time.time()
-            trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
-            tool_context = None
+            # Every way out of here ends the run: one whose end was not recorded (a
+            # cancel while its context is cleaned up, say) is let go, not left live.
             try:
-                tool_context = await build_workflow_tool_context(
-                    workflow_id=workflow_id,
-                    action_name=f"trigger:{trigger.type}",
-                )
-                result = await asyncio.to_thread(
-                    run_workflow,
-                    workflow=workflow_plan,
-                    inputs=mapped_inputs,
-                    run_id=exec_id,
-                    trace=False,
-                    execution_profile="high_frequency",
-                    cancel=run_cancel_event.is_set,
-                    on_step_complete=step_recorder.on_step_complete,
-                    tool_context=tool_context,
-                )
-                status, error_msg = resolve_execution_outcome(result)
-                duration = time.time() - start_time
-                step_count = step_recorder.step_count or result.steps
-                exec_data.update(step_recorder.summary)
-                exec_data.update(
-                    {
-                        "status": status,
-                        "outputResults": compact_outputs_for_storage(result.outputs),
-                        "finishedAt": int(time.time() * 1000),
-                        "duration": duration,
-                        "errorMessage": error_msg,
-                        "executionLog": [],
-                        "stepCount": step_count,
-                        "currentNodeId": result.last_node_id,
-                        "currentPhase": status,
-                        "currentStepIndex": step_count,
-                        "triggerId": trigger.id,
-                        "triggerType": trigger.type,
-                        "deliveryId": trigger_meta.get("deliveryId"),
-                        "attempt": trigger_meta.get("attempt"),
-                        "triggerSource": trigger_meta.get("source"),
-                    }
-                )
-            except Exception as exc:
-                duration = time.time() - start_time
-                log.error(
-                    "syslog.workflow_run_failed",
-                    {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
-                )
-                exec_data.update(step_recorder.summary)
-                exec_data.update(
-                    {
-                        "status": "error",
-                        "errorMessage": str(exc),
-                        "finishedAt": int(time.time() * 1000),
-                        "duration": duration,
-                        "executionLog": [],
-                        "currentPhase": "error",
-                        "triggerId": trigger.id,
-                        "triggerType": trigger.type,
-                        "deliveryId": trigger_meta.get("deliveryId"),
-                        "attempt": trigger_meta.get("attempt"),
-                        "triggerSource": trigger_meta.get("source"),
-                    }
-                )
-            finally:
-                steps = step_recorder.take_steps()
-                await cleanup_workflow_tool_context(tool_context)
+                step_recorder = ExecutionStepRecorder()
+                start_time = time.time()
+                trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
+                tool_context = None
                 try:
-                    await record_execution_result(
-                        workflow_id,
-                        exec_id,
-                        exec_data,
-                        steps=steps,
+                    tool_context = await build_workflow_tool_context(
+                        workflow_id=workflow_id,
+                        action_name=f"trigger:{trigger.type}",
+                    )
+                    result = await asyncio.to_thread(
+                        run_workflow,
+                        workflow=workflow_plan,
+                        inputs=mapped_inputs,
+                        run_id=exec_id,
+                        trace=False,
+                        execution_profile="high_frequency",
+                        cancel=lambda: run_cancel_event.is_set() or execution_cancelled(exec_id),
+                        on_step_complete=step_recorder.on_step_complete,
+                        tool_context=tool_context,
+                    )
+                    status, error_msg = resolve_execution_outcome(result)
+                    duration = time.time() - start_time
+                    step_count = step_recorder.step_count or result.steps
+                    exec_data.update(step_recorder.summary)
+                    exec_data.update(
+                        {
+                            "status": status,
+                            "outputResults": compact_outputs_for_storage(result.outputs),
+                            "finishedAt": int(time.time() * 1000),
+                            "duration": duration,
+                            "errorMessage": error_msg,
+                            "executionLog": [],
+                            "stepCount": step_count,
+                            "currentNodeId": result.last_node_id,
+                            "currentPhase": status,
+                            "currentStepIndex": step_count,
+                            "triggerId": trigger.id,
+                            "triggerType": trigger.type,
+                            "deliveryId": trigger_meta.get("deliveryId"),
+                            "attempt": trigger_meta.get("attempt"),
+                            "triggerSource": trigger_meta.get("source"),
+                        }
                     )
                 except Exception as exc:
-                    log.warning("syslog.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
-            return exec_data
+                    duration = time.time() - start_time
+                    log.error(
+                        "syslog.workflow_run_failed",
+                        {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
+                    )
+                    exec_data.update(step_recorder.summary)
+                    exec_data.update(
+                        {
+                            "status": "error",
+                            "errorMessage": str(exc),
+                            "finishedAt": int(time.time() * 1000),
+                            "duration": duration,
+                            "executionLog": [],
+                            "currentPhase": "error",
+                            "triggerId": trigger.id,
+                            "triggerType": trigger.type,
+                            "deliveryId": trigger_meta.get("deliveryId"),
+                            "attempt": trigger_meta.get("attempt"),
+                            "triggerSource": trigger_meta.get("source"),
+                        }
+                    )
+                finally:
+                    steps = step_recorder.take_steps()
+                    await cleanup_workflow_tool_context(tool_context)
+                    try:
+                        await record_execution_result(
+                            workflow_id,
+                            exec_id,
+                            exec_data,
+                            steps=steps,
+                        )
+                    except Exception as exc:
+                        log.warning("syslog.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
+                return exec_data
+            finally:
+                await abandon_execution(exec_id)
 
         try:
             action_payload = {
@@ -710,6 +741,12 @@ class SyslogManager:
                 "workflow_id": workflow_id,
                 "trigger": trigger,
                 "event": event,
+                # The listener itself is the authenticated ingress here.
+                "evidence": {
+                    "auth_scheme": "syslog",
+                    "trigger_id": trigger.id,
+                    "trigger_type": trigger.type,
+                },
                 "metadata": {
                     "legacy_compat": True,
                     "trigger_type": "syslog",

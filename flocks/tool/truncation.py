@@ -109,6 +109,11 @@ def truncate_output(
         return TruncateResult(content=text, truncated=False)
 
     lines = text.split("\n")
+    # A trailing newline ends the last line; it must not count as one more
+    # (otherwise exactly ``max_lines`` lines of ``seq`` output get "truncated"
+    # by dropping an empty string and the count is off by one).
+    if len(lines) > 1 and lines[-1] == "":
+        lines.pop()
     total_bytes = len(text.encode("utf-8"))
 
     if len(lines) <= max_lines and total_bytes <= max_bytes:

@@ -8,7 +8,7 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 TASKS_DDL = """
@@ -69,6 +69,11 @@ CREATE TABLE IF NOT EXISTS task_execution_queue_refs (
     status       TEXT NOT NULL DEFAULT 'queued',
     created_at   TEXT NOT NULL,
     started_at   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS task_legacy_migrations (
+    source_db    TEXT PRIMARY KEY,
+    completed_at TEXT NOT NULL
 );
 """
 
@@ -141,18 +146,8 @@ def _legacy_tables_exist(conn: sqlite3.Connection) -> bool:
     )
 
 
-def _drop_legacy_tables(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        DROP TABLE IF EXISTS task_queue_refs;
-        DROP TABLE IF EXISTS task_execution_records;
-        DROP TABLE IF EXISTS tasks;
-        """
-    )
-
-
-def _upsert_scheduler(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
-    conn.execute(
+def _insert_schedulers(conn: sqlite3.Connection, payloads: Iterable[dict[str, Any]]) -> None:
+    conn.executemany(
         """
         INSERT INTO task_schedulers
         (id, title, description, mode, status, priority, source, trigger,
@@ -161,33 +156,13 @@ def _upsert_scheduler(conn: sqlite3.Connection, payload: dict[str, Any]) -> None
         VALUES (:id, :title, :description, :mode, :status, :priority, :source, :trigger,
                 :execution_mode, :agent_name, :workflow_id, :skills, :category, :context,
                 :workspace_directory, :retry, :tags, :created_at, :updated_at, :created_by, :dedup_key)
-        ON CONFLICT(id) DO UPDATE SET
-          title=excluded.title,
-          description=excluded.description,
-          mode=excluded.mode,
-          status=excluded.status,
-          priority=excluded.priority,
-          source=excluded.source,
-          trigger=excluded.trigger,
-          execution_mode=excluded.execution_mode,
-          agent_name=excluded.agent_name,
-          workflow_id=excluded.workflow_id,
-          skills=excluded.skills,
-          category=excluded.category,
-          context=excluded.context,
-          workspace_directory=excluded.workspace_directory,
-          retry=excluded.retry,
-          tags=excluded.tags,
-          updated_at=excluded.updated_at,
-          created_by=excluded.created_by,
-          dedup_key=excluded.dedup_key
         """,
-        payload,
+        payloads,
     )
 
 
-def _upsert_execution(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
-    conn.execute(
+def _insert_executions(conn: sqlite3.Connection, payloads: Iterable[dict[str, Any]]) -> None:
+    conn.executemany(
         """
         INSERT INTO task_executions
         (id, scheduler_id, title, description, priority, source, trigger_type, status,
@@ -198,46 +173,18 @@ def _upsert_execution(conn: sqlite3.Connection, payload: dict[str, Any]) -> None
                 :delivery_status, :queued_at, :started_at, :completed_at, :duration_ms, :session_id,
                 :result_summary, :error, :execution_input_snapshot, :workspace_directory, :retry,
                 :execution_mode, :agent_name, :workflow_id, :created_at, :updated_at)
-        ON CONFLICT(id) DO UPDATE SET
-          scheduler_id=excluded.scheduler_id,
-          title=excluded.title,
-          description=excluded.description,
-          priority=excluded.priority,
-          source=excluded.source,
-          trigger_type=excluded.trigger_type,
-          status=excluded.status,
-          delivery_status=excluded.delivery_status,
-          queued_at=excluded.queued_at,
-          started_at=excluded.started_at,
-          completed_at=excluded.completed_at,
-          duration_ms=excluded.duration_ms,
-          session_id=excluded.session_id,
-          result_summary=excluded.result_summary,
-          error=excluded.error,
-          execution_input_snapshot=excluded.execution_input_snapshot,
-          workspace_directory=excluded.workspace_directory,
-          retry=excluded.retry,
-          execution_mode=excluded.execution_mode,
-          agent_name=excluded.agent_name,
-          workflow_id=excluded.workflow_id,
-          updated_at=excluded.updated_at
         """,
-        payload,
+        payloads,
     )
 
 
-def _upsert_queue_ref(conn: sqlite3.Connection, payload: dict[str, Any]) -> None:
-    conn.execute(
+def _insert_queue_refs(conn: sqlite3.Connection, payloads: Iterable[dict[str, Any]]) -> None:
+    conn.executemany(
         """
         INSERT INTO task_execution_queue_refs (id, execution_id, status, created_at, started_at)
         VALUES (:id, :execution_id, :status, :created_at, :started_at)
-        ON CONFLICT(id) DO UPDATE SET
-          execution_id=excluded.execution_id,
-          status=excluded.status,
-          created_at=excluded.created_at,
-          started_at=excluded.started_at
         """,
-        payload,
+        payloads,
     )
 
 
@@ -336,8 +283,11 @@ def _build_manual_execution_payload(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_record_execution_payload(row: dict[str, Any], task_row: dict[str, Any] | None) -> dict[str, Any]:
-    source = _json_loads(task_row.get("source")) if task_row else {}
-    schedule = _json_loads(task_row.get("schedule")) if task_row else {}
+    # ``schedule`` is NULL for every non-scheduled legacy task and ``source``
+    # may be NULL too; an execution record of such a task must not abort the
+    # whole migration.
+    source = (_json_loads(task_row.get("source")) if task_row else None) or {}
+    schedule = (_json_loads(task_row.get("schedule")) if task_row else None) or {}
     run_once = bool(schedule.get("run_once") or schedule.get("runOnce"))
     started_at = _parse_dt(row.get("started_at"))
     queued_at = started_at or _parse_dt(task_row.get("updated_at") if task_row else None)
@@ -390,31 +340,65 @@ def _build_synthetic_active_execution(row: dict[str, Any], execution_id: str) ->
     return payload
 
 
-def migrate(db_path: Path, state_path: Path | None = None) -> int:
-    conn = sqlite3.connect(db_path)
+def migrate(
+    db_path: Path,
+    state_path: Path | None = None,
+    *,
+    target_db_path: Path | None = None,
+) -> int:
+    """Copy an immutable legacy snapshot into the task store in one transaction.
+
+    The source is retained. A committed target-side receipt makes retries a
+    no-op, including after users have updated their migrated tasks. Unrelated
+    pre-existing IDs raise a constraint error instead of overwriting live data.
+    """
+    conn: sqlite3.Connection | None = None
     try:
-        conn.executescript(TASKS_DDL)
-        if not _legacy_tables_exist(conn):
+        source_path = db_path.resolve()
+        target_path = (target_db_path or source_path.with_name("tasks.db")).resolve()
+        if target_path == source_path:
+            raise ValueError("Migration target must differ from the retained legacy source")
+        # Read-only open also rejects a mistyped/missing source path.
+        source = sqlite3.connect(f"{source_path.as_uri()}?mode=ro", uri=True, timeout=30)
+        try:
+            source.execute("BEGIN")
+            if not _legacy_tables_exist(source):
+                _clear_state(state_path)
+                return 0
+            tasks = _fetch_all(source, "SELECT * FROM tasks") if _table_exists(source, "tasks") else []
+            records = _fetch_all(source, "SELECT * FROM task_execution_records") if _table_exists(source, "task_execution_records") else []
+            queue_refs = _fetch_all(source, "SELECT * FROM task_queue_refs") if _table_exists(source, "task_queue_refs") else []
+        finally:
+            source.close()
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(target_path, timeout=30)
+        conn.execute("BEGIN IMMEDIATE")
+        # executescript would implicitly commit an existing transaction.
+        for statement in TASKS_DDL.split(";"):
+            if statement.strip():
+                conn.execute(statement)
+        if conn.execute(
+            "SELECT 1 FROM task_legacy_migrations WHERE source_db = ?",
+            (str(source_path),),
+        ).fetchone():
+            conn.rollback()
             _clear_state(state_path)
             return 0
 
-        tasks = _fetch_all(conn, "SELECT * FROM tasks") if _table_exists(conn, "tasks") else []
-        records = _fetch_all(conn, "SELECT * FROM task_execution_records") if _table_exists(conn, "task_execution_records") else []
-        queue_refs = _fetch_all(conn, "SELECT * FROM task_queue_refs") if _table_exists(conn, "task_queue_refs") else []
-
         task_map = {row["id"]: row for row in tasks}
+        record_ids = {row["id"] for row in records}
         synthetic_execution_ids: dict[str, str] = {}
 
-        for row in tasks:
-            _upsert_scheduler(conn, _build_scheduler_payload(row))
-
-        for row in tasks:
-            if row.get("type") == "scheduled":
-                continue
-            _upsert_execution(conn, _build_manual_execution_payload(row))
-
-        for row in records:
-            _upsert_execution(conn, _build_record_execution_payload(row, task_map.get(row["task_id"])))
+        _insert_schedulers(conn, (_build_scheduler_payload(row) for row in tasks))
+        execution_payloads = {
+            row["id"]: _build_manual_execution_payload(row)
+            for row in tasks if row.get("type") != "scheduled"
+        }
+        execution_payloads.update({
+            row["id"]: _build_record_execution_payload(row, task_map.get(row["task_id"]))
+            for row in records
+        })
 
         for row in tasks:
             if row.get("type") != "scheduled":
@@ -423,13 +407,25 @@ def migrate(db_path: Path, state_path: Path | None = None) -> int:
                 continue
             context = _json_loads(row.get("context")) or {}
             record_id = context.get("_execution_record_id")
-            if record_id and any(r["id"] == record_id for r in records):
+            if record_id and record_id in record_ids:
                 continue
             synthetic_id = f"legacy_exec_{row['id']}"
             synthetic_execution_ids[row["id"]] = synthetic_id
-            _upsert_execution(conn, _build_synthetic_active_execution(row, synthetic_id))
+            execution_payloads[synthetic_id] = _build_synthetic_active_execution(row, synthetic_id)
+
+        # Paused was removed from the runtime enum. Normalize before writing so
+        # an already-running TaskStore sees the same result as a fresh startup.
+        for payload in execution_payloads.values():
+            if payload["status"] == "paused":
+                payload["status"] = "cancelled"
+                payload["completed_at"] = (
+                    payload["completed_at"] or payload["updated_at"] or payload["created_at"] or _now_iso()
+                )
+                payload["error"] = payload["error"] or "Normalized from legacy paused state."
+        _insert_executions(conn, execution_payloads.values())
 
         seen_queue_targets: set[str] = set()
+        queue_payloads: list[dict[str, Any]] = []
         for row in queue_refs:
             execution_id = row.get("execution_record_id")
             if not execution_id:
@@ -441,12 +437,14 @@ def migrate(db_path: Path, state_path: Path | None = None) -> int:
             if not execution_id:
                 continue
             seen_queue_targets.add(execution_id)
-            _upsert_queue_ref(
-                conn,
+            queue_status = row.get("status") or "queued"
+            if queue_status == "paused" or execution_payloads.get(execution_id, {}).get("status") == "cancelled":
+                queue_status = "completed"
+            queue_payloads.append(
                 {
                     "id": row["id"],
                     "execution_id": execution_id,
-                    "status": row.get("status") or "queued",
+                    "status": queue_status,
                     "created_at": row.get("created_at") or _now_iso(),
                     "started_at": row.get("started_at"),
                 },
@@ -457,8 +455,7 @@ def migrate(db_path: Path, state_path: Path | None = None) -> int:
                 continue
             if row.get("status") not in ("queued", "running") or row["id"] in seen_queue_targets:
                 continue
-            _upsert_queue_ref(
-                conn,
+            queue_payloads.append(
                 {
                     "id": f"legacy_qref_{row['id']}",
                     "execution_id": row["id"],
@@ -468,12 +465,17 @@ def migrate(db_path: Path, state_path: Path | None = None) -> int:
                 },
             )
 
-        _drop_legacy_tables(conn)
+        _insert_queue_refs(conn, queue_payloads)
+        conn.execute(
+            "INSERT INTO task_legacy_migrations (source_db, completed_at) VALUES (?, ?)",
+            (str(source_path), _now_iso()),
+        )
         conn.commit()
         _clear_state(state_path)
         return 0
     except Exception as exc:
-        conn.commit()
+        if conn is not None:
+            conn.rollback()
         _write_state(
             state_path,
             {
@@ -486,24 +488,30 @@ def migrate(db_path: Path, state_path: Path | None = None) -> int:
         print(f"legacy migration failed: {exc}", file=sys.stderr)
         return 1
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def _default_db_path() -> Path:
     data_dir = os.environ.get("FLOCKS_DATA_DIR")
     if data_dir:
         return Path(data_dir) / "flocks.db"
+    root = os.environ.get("FLOCKS_ROOT")
+    if root:
+        return Path(root) / "data" / "flocks.db"
     return Path.home() / ".flocks" / "data" / "flocks.db"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Migrate legacy task tables into scheduler/execution tables.")
-    parser.add_argument("--db", dest="db_path", default=None, help="SQLite database path")
+    parser.add_argument("--db", dest="db_path", default=None, help="Legacy source SQLite database (preserved)")
+    parser.add_argument("--target-db", default=None, help="Target SQLite database (default: tasks.db beside source)")
     parser.add_argument("--state-file", dest="state_file", default=None, help="Migration state file path")
     args = parser.parse_args()
     db_path = Path(args.db_path) if args.db_path else _default_db_path()
     state_path = Path(args.state_file) if args.state_file else None
-    return migrate(db_path, state_path)
+    target_db_path = Path(args.target_db) if args.target_db else None
+    return migrate(db_path, state_path, target_db_path=target_db_path)
 
 
 if __name__ == "__main__":

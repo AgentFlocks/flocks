@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -40,14 +40,8 @@ def _skill(name: str, description: str) -> SkillInfo:
 
 
 def _make_ctx() -> ToolContext:
-    ctx = MagicMock(spec=ToolContext)
-    ctx.ask = AsyncMock(return_value=None)
-    ctx.metadata = MagicMock()
-    ctx.aborted = False
-    ctx.extra = {}
-    ctx.agent = "rex"
-    ctx.session_id = "ses_test_skill"
-    return ctx
+    # A real context: ToolRegistry.execute reads more of it than a spec'd mock carries.
+    return ToolContext(session_id="ses_test_skill", message_id="msg_test_skill", agent="rex")
 
 
 # ---------------------------------------------------------------------------

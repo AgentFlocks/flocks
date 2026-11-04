@@ -25,6 +25,7 @@ from flocks.tool.registry import (
     ToolRegistry,
     ToolResult,
 )
+from flocks.updater.deploy import declared_managed
 from flocks.utils.log import Log
 
 
@@ -80,7 +81,12 @@ _ERROR_HINTS = {
     "install_failed": "The install job failed unexpectedly.",
     "interrupted": "The install was interrupted (service restart or stopped by an uninstall).",
     "uninstalling": "REA is being uninstalled; install again when the uninstall finished.",
+    "busy": "Another Flocks process on this host is installing or uninstalling REA; try again when it finished.",
     "tasks_unreadable": "A busy conversation could not be read, so it can be neither confirmed nor stopped from here.",
+    "managed": (
+        "This is a managed install: REA is installed and removed with the deployment's release. "
+        "Tell the user to ask whoever runs the deployment."
+    ),
 }
 
 
@@ -444,13 +450,24 @@ async def _user_confirmed(ctx: ToolContext, phrases: tuple[str, ...], *, after: 
 
 # Opaque references to the replies a 「tasks」 card lists (a conversation and the message that started
 # its running reply): what the user approved is checked against them, without keeping other
-# conversations' ids in this one. A new reply there, or a restart here, changes them, so an old card
-# then lists the conversations again.
-_TASK_REF_SALT = secrets.token_hex(16)
+# conversations' ids in this one. A new reply there changes them, so an old card then lists the
+# conversations again. One salt for every Flocks process: the card one process made is confirmed in
+# whichever process takes the user's answer.
+_TASK_REF_SALT_KEY = "rea:task_ref_salt"
+_task_ref_salt: Optional[str] = None
 
 
-def _task_ref(task: dict[str, Any]) -> str:
-    seed = f"{_TASK_REF_SALT}:{task['id']}:{task.get('turn') or ''}"
+async def _load_task_ref_salt() -> str:
+    global _task_ref_salt
+    if _task_ref_salt is None:
+        from flocks.coordination import shared_setdefault
+
+        _task_ref_salt = str(await shared_setdefault(_TASK_REF_SALT_KEY, secrets.token_hex(16)))
+    return _task_ref_salt
+
+
+def _task_ref(task: dict[str, Any], salt: str) -> str:
+    seed = f"{salt}:{task['id']}:{task.get('turn') or ''}"
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
 
 
@@ -492,17 +509,17 @@ def _task_summary(tasks: list[dict[str, Any]]) -> str:
     return " and ".join(parts)
 
 
-def _public_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _public_tasks(tasks: list[dict[str, Any]], salt: str) -> list[dict[str, Any]]:
     """What the conversation keeps of them: an opaque reference to the running reply, no title."""
 
-    return [{"ref": _task_ref(task), "unknown": bool(task.get("unknown"))} for task in tasks]
+    return [{"ref": _task_ref(task, salt), "unknown": bool(task.get("unknown"))} for task in tasks]
 
 
-def _tasks_result(tasks: list[dict[str, Any]], tier: str) -> ToolResult:
+def _tasks_result(tasks: list[dict[str, Any]], tier: str, salt: str) -> ToolResult:
     lines = [
         f"Other conversations are using REA right now: {_task_summary(tasks)}. Do not guess which ones.",
-        "Validating REA again would interrupt their analysis: the check opens its own samples in the REA service "
-        "they share, and a new registration reconnects it. Nothing was changed yet.",
+        "Installing REA again could interrupt their analysis: a new registration reconnects the REA service "
+        "they use. Nothing was changed yet.",
         "The user sees a card listing them, with a button to stop them and continue. Ask in one short sentence "
         "whether to stop them and continue, then stop and wait. When the user chose that on the card, call "
         "action=\"install\" with the same tier and confirmed=true; any other reply leaves them running.",
@@ -515,7 +532,7 @@ def _tasks_result(tasks: list[dict[str, Any]], tier: str) -> ToolResult:
             "action": "install",
             "phase": "tasks",
             "tier": tier,
-            "tasks": _public_tasks(tasks),
+            "tasks": _public_tasks(tasks, salt),
         }},
     )
 
@@ -622,11 +639,19 @@ def _failure_result(job: ReaInstallJob) -> ToolResult:
 
 async def _install(ctx: ToolContext, tier: Optional[str], confirmed: bool) -> ToolResult:
     user = _current_user()
+    await service.sync_with_host()
     if not service.can_install(user):
         return ToolResult(
             success=False,
             error="Only administrators can install the REA plugin. Tell the user to ask an administrator.",
             metadata={"rea": {"action": "install", "phase": "failed", "ok": False, "errorCode": "forbidden"}},
+        )
+    if declared_managed():
+        # Refused before a plan is shown: the install would be refused at its start anyway.
+        return ToolResult(
+            success=False,
+            error=_ERROR_HINTS["managed"],
+            metadata={"rea": {"action": "install", "phase": "failed", "ok": False, "errorCode": "managed"}},
         )
     if _plan_mode(ctx):
         return ToolResult(
@@ -680,7 +705,7 @@ async def _install(ctx: ToolContext, tier: Optional[str], confirmed: bool) -> To
                 ),
                 metadata={"rea": {
                     "action": "install", "phase": "failed", "ok": False, "errorCode": "tasks_unreadable",
-                    "tier": tier, "tasks": _public_tasks(busy),
+                    "tier": tier, "tasks": _public_tasks(busy, await _load_task_ref_salt()),
                 }},
             )
         if busy:
@@ -690,8 +715,9 @@ async def _install(ctx: ToolContext, tier: Optional[str], confirmed: bool) -> To
             approved = {
                 task.get("ref") for task in (reply[1].get("tasks") or []) if isinstance(task, dict)
             } if reply is not None and reply[0] in STOP_PHRASES[tier] else set()
-            if not approved or not {_task_ref(task) for task in busy} <= approved:
-                return _tasks_result(busy, tier)
+            salt = await _load_task_ref_salt()
+            if not approved or not {_task_ref(task, salt) for task in busy} <= approved:
+                return _tasks_result(busy, tier, salt)
             still = await stop_tasks(busy)
             if still:
                 left = [task for task in busy if task["id"] in still]
@@ -703,7 +729,7 @@ async def _install(ctx: ToolContext, tier: Optional[str], confirmed: bool) -> To
                     ),
                     metadata={"rea": {
                         "action": "install", "phase": "failed", "ok": False, "errorCode": "tasks_running",
-                        "tier": tier, "tasks": _public_tasks(left),
+                        "tier": tier, "tasks": _public_tasks(left, salt),
                     }},
                 )
     try:
@@ -829,6 +855,7 @@ async def _attached_files(session_id: Optional[str]) -> Optional[int]:
 
 async def _status(ctx: ToolContext) -> ToolResult:
     user = _current_user()
+    await service.sync_with_host()
     state = service.install_state()
     admin = service.can_install(user)
     attached = await _attached_files(ctx.session_id) if state == "ready" else None

@@ -709,3 +709,17 @@ async def test_a_retry_keeps_the_tier_of_the_last_attempt(ctx, as_user, jobs, co
     result = await rea_analysis_tool(ctx, action="install", confirmed=True)
     assert result.success is True
     assert jobs["started"] == [("full", "admin-1", SESSION)]
+
+
+@pytest.mark.asyncio
+async def test_the_task_references_are_the_same_in_every_process():
+    # A 「tasks」 card one process made is confirmed in whichever process takes the answer.
+    rea_tool._task_ref_salt = None
+    first = await rea_tool._load_task_ref_salt()
+    rea_tool._task_ref_salt = None  # another process: nothing cached yet
+    try:
+        assert await rea_tool._load_task_ref_salt() == first
+    finally:
+        rea_tool._task_ref_salt = None
+    task = {"id": "ses_b", "turn": "msg_1:msg_2"}
+    assert rea_tool._task_ref(task, first) == rea_tool._task_ref(dict(task), first)

@@ -1,3 +1,5 @@
+import base64
+import gzip
 import importlib.util
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -812,8 +814,9 @@ async def test_skyeye_alarm_list_forwards_extended_filters():
     assert api_name == "alarm_alarm_list"
     assert params["threat_type"] == "web_attack"
     assert params["serial_num"] == "sensor-1"
-    assert params["alarm_sip"] == "10.0.0.1"
-    assert params["attack_sip"] == "1.1.1.1"
+    # SkyEye takes IP filters gzip-compressed and base64-encoded.
+    assert gzip.decompress(base64.b64decode(params["alarm_sip"])).decode() == "10.0.0.1"
+    assert gzip.decompress(base64.b64decode(params["attack_sip"])).decode() == "1.1.1.1"
     assert params["attack_stage"] == "recon"
     assert params["asset_group"] == "237"
     assert params["hazard_level"] == "2,3"

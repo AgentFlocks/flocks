@@ -96,7 +96,7 @@ def default_network_mode(entry: str | None) -> str:
     if normalized == "unknown":
         return "require-confirm"
     if normalized == "delegate":
-        # Delegate sessions inherit their mode from the parent in Pro.
+        # Delegate sessions inherit their mode from the parent under a policy extension.
         return "require-confirm"
     return "require-confirm"
 
@@ -298,13 +298,15 @@ async def upsert_session_execution_profile(
     session = await Session.get_by_id(str(session_id or "").strip())
     if session is None:
         return None
-    merged_profile = merge_profile(session, patch=patch, source=source)
-    metadata = with_profile_metadata(getattr(session, "metadata", None), merged_profile)
-    updated = await Session.update(
-        session.project_id,
-        session.id,
-        metadata=metadata,
-    )
+
+    def merge_current(metadata: dict[str, Any]) -> dict[str, Any]:
+        # Merged into the metadata as it is under the lifecycle lock: the copy
+        # read above may predate another update (contextFolders, a knowledge
+        # base) that writing it back whole would undo.
+        current = session.model_copy(update={"metadata": metadata})
+        return with_profile_metadata(metadata, merge_profile(current, patch=patch, source=source))
+
+    updated = await Session.mutate_metadata(session.project_id, session.id, merge_current)
     if updated is None:
         return None
     return profile_from_session(updated)

@@ -344,8 +344,7 @@ async def run_direct_command(
                 )
 
             try:
-                with open(skill.location, "r", encoding="utf-8") as file:
-                    skill_content = file.read().strip()
+                skill_content = (await Skill.read_body(skill, scope=session_id)).strip()
             except Exception as exc:
                 return DirectCommandResult(handled=True, text=f"Failed to load skill: {str(exc)}")
 

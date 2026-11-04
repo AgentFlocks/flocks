@@ -312,6 +312,8 @@ class EventBroadcaster:
           run published them (the auth user in the publisher's context).
         - Events published with no user in context (file watchers,
           schedulers) or by the API-token service identity go to admins.
+        - ``session.deleted`` for a row that is already gone goes to the
+          deleting user (as above) and to admins.
         - Client-control events (``tui.*``) always follow the publisher rules
           above, even when their properties carry a sessionID.
         """
@@ -336,6 +338,16 @@ class EventBroadcaster:
             })
             return
         if session is None:
+            if event.get("type") == "session.deleted":
+                # The row is already gone by the time the lifecycle bridge
+                # forwards session.deleted, so there is nothing to filter on.
+                # The payload is just the id; it still never goes to every
+                # connected user.
+                actor = get_current_auth_user()
+                for queue, user in clients:
+                    if user.role == "admin" or _is_actor_event_recipient(user, actor):
+                        self._publish_to_queue(queue, event)
+                return
             log.debug("event.session_access_missing", {
                 "session_id": session_id,
                 "event_type": event.get("type"),
@@ -474,6 +486,86 @@ def create_runtime_event(runtime_type: str, properties: dict = None) -> dict:
     })
 
 
+async def _session_info_payload(session_id: str) -> Optional[dict]:
+    """Full session in the shape TUI/opencode clients keep in their session list.
+
+    Serialised without a request user (the broadcaster applies per-subscriber
+    read filtering; per-user flags such as canWrite are not meaningful in a
+    broadcast).
+    """
+    session = await _get_event_session(session_id)
+    if session is None:
+        return None
+    from flocks.auth.context import reset_current_auth_user, set_current_auth_user
+    from flocks.server.routes.session import _session_to_response
+
+    token = set_current_auth_user(None)
+    try:
+        return _session_to_response(session).model_dump(by_alias=True)
+    except Exception as exc:  # noqa: BLE001 - a lifecycle event must never break the publisher
+        log.warning("event.session_info_payload_failed", {"session_id": session_id, "error": str(exc)})
+        return None
+    finally:
+        reset_current_auth_user(token)
+
+
+async def _with_session_info(event_type: str, properties: Optional[dict]) -> Optional[dict]:
+    """``session.updated`` published as ``{id, status}`` (archive/restore/rename
+    routes) is invisible to TUI clients, which only act on ``properties.info``.
+    Attach the full session while keeping the original keys for WebUI consumers."""
+    if event_type != "session.updated" or not isinstance(properties, dict):
+        return properties
+    if isinstance(properties.get("info"), dict):
+        return properties
+    session_id = properties.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        return properties
+    info = await _session_info_payload(session_id)
+    if info is None:
+        return properties
+    return {**properties, "info": info}
+
+
+_lifecycle_bridge_installed = False
+
+
+def install_session_lifecycle_bridge() -> None:
+    """Forward Bus session lifecycle events to the SSE stream.
+
+    ``Session.create`` / ``Session.delete`` only publish on the in-process Bus;
+    nothing carried them to SSE, so TUI session lists never learned about
+    sessions created or deleted elsewhere (OPS-0255 / OPS-0257). Emitted in the
+    TUI/opencode shape: ``session.updated {info: <full session>}`` (the client
+    inserts unknown ids) and ``session.deleted {info: {id}}``.
+    """
+    global _lifecycle_bridge_installed
+    if _lifecycle_bridge_installed:
+        return
+    _lifecycle_bridge_installed = True
+    from flocks.bus.bus import Bus
+    from flocks.bus.events import SessionCreated, SessionDeleted
+
+    async def _on_created(event: dict) -> None:
+        info = (event.get("properties") or {}).get("info") or {}
+        session_id = info.get("id")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        payload = await _session_info_payload(session_id)
+        if payload is None:
+            return
+        await publish_event("session.updated", {"info": payload})
+
+    async def _on_deleted(event: dict) -> None:
+        session_id = (event.get("properties") or {}).get("sessionID")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        await publish_event("session.deleted", {"info": {"id": session_id}})
+
+    Bus.subscribe(SessionCreated, _on_created)
+    Bus.subscribe(SessionDeleted, _on_deleted)
+    log.info("event.session_lifecycle_bridge.installed", {})
+
+
 # Helper to publish events
 async def publish_event(event_type: str, properties: dict = None, directory: str = None):
     """
@@ -486,6 +578,7 @@ async def publish_event(event_type: str, properties: dict = None, directory: str
     Events are sent in direct Event format (type + properties) for TUI compatibility.
     The /event endpoint expects direct events, not wrapped in GlobalEvent.
     """
+    properties = await _with_session_info(event_type, properties)
     event = create_event(event_type, properties)
     broadcaster = EventBroadcaster.get()
     
@@ -596,3 +689,8 @@ __all__ = [
     "get_event_directory",
     "sse_generator",
 ]
+
+
+# Wire Bus session lifecycle → SSE as soon as the routes module is loaded (app.py
+# imports it at startup); idempotent, no event loop needed to subscribe.
+install_session_lifecycle_bridge()

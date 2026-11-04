@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json as _json
+import uuid
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
@@ -48,19 +49,27 @@ class FlocksToolAdapter:
         return scoped
 
     def _tool_context(self) -> ToolContext:
-        """Return workflow context with any neutral parent carrier preserved."""
+        """Return a per-call workflow context with any neutral parent carrier preserved.
+
+        Every invocation gets its own ``call_id``: audit sinks record the
+        attempt under that id (a parent session's id would make every tool
+        call inside the workflow collide with the call that started it, and a
+        missing id is rejected before the tool runs).
+        """
+        call_id = f"wf-{uuid.uuid4().hex}"
         if self._ctx is None:
-            return ToolContext(session_id="workflow", message_id="workflow")
+            return ToolContext(session_id="workflow", message_id="workflow", call_id=call_id)
         existing = self._ctx.extra.get("execution_context")
         inherited = current_execution_context()
-        if isinstance(existing, Mapping) or not inherited:
-            return self._ctx
+        extra = dict(self._ctx.extra)
+        if not isinstance(existing, Mapping) and inherited:
+            extra["execution_context"] = inherited
         return ToolContext(
             session_id=self._ctx.session_id,
             message_id=self._ctx.message_id,
             agent=self._ctx.agent,
-            call_id=self._ctx.call_id,
-            extra={**self._ctx.extra, "execution_context": inherited},
+            call_id=call_id,
+            extra=extra,
             abort_event=self._ctx.abort,
             permission_callback=self._ctx._permission_callback,
             metadata_callback=self._ctx._metadata_callback,

@@ -81,7 +81,7 @@ def patched_runtime(fake_provider: _FakeProvider):
       ``Config.get`` never reach a real event loop.
     """
 
-    def _fake_run_coro_sync(coro):
+    def _fake_run_coro_sync(coro, cancel_checker=None):
         # Drain the coroutine to avoid "coroutine was never awaited" warnings.
         try:
             coro.close()
@@ -245,7 +245,7 @@ def test_prepare_provider_uses_runtime_api_key_when_shared_config_missing(
         configured=False,
     )
 
-    def _fake_run_coro_sync(coro):
+    def _fake_run_coro_sync(coro, cancel_checker=None):
         try:
             coro.close()
         except Exception:

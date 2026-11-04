@@ -27,6 +27,9 @@
   "calls": "calls",
   "errors": "errors",
   "performanceTrend": "Performance Trend",
-  "chartHint": "Chart requires recharts",
-  "chartInstall": "Run: npm install recharts"
+  "trendDescription": "Sampled every 5 seconds while this page is open; shows the last 10 minutes; rates are counted per minute",
+  "trendCollecting": "Sampling; rates are counted per minute, so the trend appears after about a minute",
+  "trendUnavailable": "No metrics available",
+  "trendAxis": "per minute",
+  "trendAriaLabel": "Performance trend: latest tool calls {{calls}}, tool parse failures {{failures}}"
 }

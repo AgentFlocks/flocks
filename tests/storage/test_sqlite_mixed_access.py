@@ -25,7 +25,7 @@ async def isolated_storage_and_task_env(
     Storage._initialized = False
     Storage._db_path = None
     TaskStore._initialized = False
-    TaskStore._conn = None
+    TaskStore._handle = None
 
     await Storage.init()
     await TaskStore.init()
@@ -38,12 +38,12 @@ async def isolated_storage_and_task_env(
     Storage._initialized = False
     Storage._db_path = None
     TaskStore._initialized = False
-    TaskStore._conn = None
+    TaskStore._handle = None
 
 
 @pytest.mark.asyncio
-async def test_mixed_storage_task_and_usage_access_share_consistent_sqlite_config() -> None:
-    scheduler = TaskScheduler(title="sqlite-mixed-access")
+async def test_mixed_storage_task_and_usage_share_postgres() -> None:
+    scheduler = TaskScheduler(title="postgres-mixed-access")
     await TaskStore.create_scheduler(scheduler)
 
     async def write_storage(idx: int) -> None:

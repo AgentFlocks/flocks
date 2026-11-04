@@ -26,10 +26,9 @@ import { useLocation, useNavigate, useSearchParams, useParams } from 'react-rout
 import SessionComposerMenu, { SessionComposerMenuHeader, SessionModeOption } from './SessionComposerMenu';
 import { sessionPath } from '@/utils/sessionUrl';
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
-import CopyButton from '@/components/common/CopyButton';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
-import SessionChat, { buildInstructionDisplayText, type ComposerPrefill, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import SessionChat, { buildInstructionDisplayText, type ComposerPrefill, type PromptDisplayOptions, type SendWelcomePrompt, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
 import SessionContextPanel from './SessionContextPanel';
 import { getInitialSidePanelWidth, getMaxSidePanelWidth, SIDE_PANEL_MIN_WIDTH } from '@/components/common/sidePanelSizing';
 import SuiteInstallProgressPanel, {
@@ -39,14 +38,8 @@ import SuiteInstallProgressPanel, {
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi, type SessionContextFile, type SessionContextSnapshot } from '@/api/session';
-import {
-  flocksproPolicyApi,
-  isSessionExecutionSettingsUnsupported,
-  type NetworkMode,
-  type PermissionMode,
-  type RuntimeMode,
-} from '@/api/flocksproPolicy';
-import { flocksproUsersApi } from '@/api/flocksproUsers';
+import ExtensionSlot from '@/components/extensions/ExtensionSlot';
+import type { SessionStartHook } from '@/extensions/registry';
 import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
 import { currentReaIdentity, reaAcceptsSamples, useReaStatus } from '@/features/rea/useRea';
 import { ReaShortcut } from '@/features/rea/ReaCards';
@@ -60,7 +53,7 @@ import { writeChatDraft } from '@/utils/chatDraft';
 import { skillAPI, type Skill } from '@/api/skill';
 import { workflowAPI, type WorkflowSummary } from '@/api/workflow';
 import type { Agent } from '@/api/agent';
-import { useSessions } from '@/hooks/useSessions';
+import { SESSION_HISTORY_PAGE_SIZE, noteSessionListChange, useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
 import { useProviders } from '@/hooks/useProviders';
 import {
@@ -70,6 +63,7 @@ import {
 import client from '@/api/client';
 import ProjectFolderDialog from '@/components/layout/ProjectFolderDialog';
 import { announceProjectsChanged, onProjectsChanged } from '@/utils/projectEvents';
+import { requestClock } from '@/utils/sharedRequest';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type FilePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
@@ -117,9 +111,6 @@ type ProjectSummary = {
   name?: string | null;
   isDefault?: boolean;
   pathStatus?: 'available' | 'missing' | 'unreadable';
-  sessionCount?: number;
-  matchedSessionCount?: number;
-  lastActivityAt?: number | null;
   ownerUserID?: string | null;
   canWrite?: boolean;
   canDelete?: boolean;
@@ -189,7 +180,7 @@ function ComposerResourcePicker({
         <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${open ? '-rotate-90' : ''}`} />
       </button>
       {open && (
-        <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+        <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden max-md:left-0 rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
           <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
             <span className="min-w-0 truncate text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">
               {title}
@@ -254,8 +245,6 @@ function ComposerResourcePicker({
     </div>
   );
 }
-const MULTI_PROJECT_SESSION_PAGE_SIZE = 6;
-const SINGLE_PROJECT_SESSION_PAGE_SIZE = 20;
 type ChatModelOption = {
   key: string;
   providerID: string;
@@ -339,6 +328,41 @@ function getProjectLabel(project?: ProjectSummary, fallbackDirectory?: string): 
   if (explicitName) return explicitName;
   const directory = project?.worktree || fallbackDirectory || '';
   return getPathBasename(directory);
+}
+
+/**
+ * Live-connection indicator for the chat header. Only the two states a user
+ * can act on are shown: reconnecting (transient) and failed (retries exhausted,
+ * reload to resume). ``connected`` renders nothing.
+ */
+function SSEStatusIndicator({ status, t }: { status: SSEConnectionStatus; t: (key: string) => string }) {
+  if (status !== 'reconnecting' && status !== 'failed') return null;
+  const failed = status === 'failed';
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      data-testid="sse-status"
+      data-sse-status={status}
+      className={`flex min-w-0 items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-medium ${
+        failed
+          ? 'border-red-200 bg-red-50 text-red-600'
+          : 'border-amber-200 bg-amber-50 text-amber-700'
+      }`}
+    >
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${failed ? 'bg-red-500' : 'animate-pulse bg-amber-500'}`} />
+      <span className="truncate">{failed ? t('connectionFailed') : t('reconnecting')}</span>
+      {failed && (
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          className="rounded px-1.5 py-0.5 text-xs font-medium underline-offset-2 hover:underline"
+        >
+          {t('chat.retry')}
+        </button>
+      )}
+    </div>
+  );
 }
 
 function WorkbenchRefreshStatus({ label }: { label: string }) {
@@ -497,19 +521,13 @@ export default function SessionPage() {
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [showModelOptions, setShowModelOptions] = useState(false);
   const modelSelectorRef = useRef<HTMLDivElement>(null);
-  const [showPermissionModeOptions, setShowPermissionModeOptions] = useState(false);
-  const permissionModeSelectorRef = useRef<HTMLDivElement>(null);
-  const [proPolicyEnabled, setProPolicyEnabled] = useState(false);
-  const [sessionPermissionMode, setSessionPermissionMode] = useState<PermissionMode | null>(null);
-  const [draftPermissionMode, setDraftPermissionMode] = useState<PermissionMode>('require-confirm');
-  const [sessionRuntimeMode, setSessionRuntimeMode] = useState<RuntimeMode | null>(null);
-  const [sessionNetworkMode, setSessionNetworkMode] = useState<NetworkMode | null>(null);
-  const [sessionNetworkModeDefault, setSessionNetworkModeDefault] = useState<NetworkMode | null>(null);
-  const [sessionNetworkModeOverridden, setSessionNetworkModeOverridden] = useState(false);
-  const [sessionEntry, setSessionEntry] = useState<string>('unknown');
-  const [sessionExecutionRevision, setSessionExecutionRevision] = useState<number | null>(null);
-  const [draftRuntimeMode, setDraftRuntimeMode] = useState<RuntimeMode>('dev-mode');
-  const [draftNetworkMode, setDraftNetworkMode] = useState<NetworkMode>('require-confirm');
+  // Prepared when a first message is sent and run on its new session before
+  // the prompt; extensions register them through the session.settings slot.
+  const sessionStartHooksRef = useRef(new Set<SessionStartHook>());
+  const registerSessionStartHook = useCallback((hook: SessionStartHook) => {
+    sessionStartHooksRef.current.add(hook);
+    return () => { sessionStartHooksRef.current.delete(hook); };
+  }, []);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
   const [startingRea, setStartingRea] = useState(false);
@@ -525,7 +543,8 @@ export default function SessionPage() {
   const [pendingOptimisticMessage, setPendingOptimisticMessage] = useState<Message | null>(null);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [contextPanelOpen, setContextPanelOpen] = useState(false);
-  const [contextPanelWidth, setContextPanelWidth] = useState(() => getInitialSidePanelWidth());
+  const [cacheUsageContainer, setCacheUsageContainer] = useState<HTMLDivElement | null>(null);
+  const [contextPanelWidth, setContextPanelWidth] = useState(() => Math.min(340, getInitialSidePanelWidth()));
   const [contextSnapshot, setContextSnapshot] = useState<SessionContextSnapshot | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
   const [contextLoadingMore, setContextLoadingMore] = useState(false);
@@ -550,6 +569,7 @@ export default function SessionPage() {
   const [requestedContextResource, setRequestedContextResource] = useState<{ sessionId: string | null; resourceID: string } | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [refreshingProjects, setRefreshingProjects] = useState(true);
+  const [projectsReady, setProjectsReady] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const supportsVision = useDefaultModelVision();
   const [searchQuery] = useState('');
@@ -557,6 +577,8 @@ export default function SessionPage() {
   const [selectedSessionFallback, setSelectedSessionFallback] = useState<Session | null>(null);
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
+  // When the latest session.updated arrived: the list refresh it schedules must start later.
+  const sessionUpdateEventAtRef = useRef(0);
   const contextRefetchTimerRef = useRef<number | null>(null);
   const selectedSessionIdRef = useRef(selectedSessionId);
   selectedSessionIdRef.current = selectedSessionId;
@@ -569,9 +591,8 @@ export default function SessionPage() {
     () => [TASK_SESSION_GROUP_ID, ...projects.map((project) => project.id)],
     [projects],
   );
-  const sessionListPageSize = projects.length >= 1
-    ? MULTI_PROJECT_SESSION_PAGE_SIZE
-    : SINGLE_PROJECT_SESSION_PAGE_SIZE;
+  // The same lists the history sidebar shows, so both share one request;
+  // project counts and recent activity come with them.
   const {
     sessions,
     loading: loadingSessions,
@@ -579,9 +600,11 @@ export default function SessionPage() {
     refetch: refetchSessions,
     updateSessionTitle,
     addSession,
+    statsByProject = {},
   } = useSessions(searchQuery, {
     projectIds: sessionProjectIds,
-    pageSize: sessionListPageSize,
+    pageSize: SESSION_HISTORY_PAGE_SIZE,
+    enabled: projectsReady,
   });
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
@@ -774,9 +797,8 @@ export default function SessionPage() {
         label: getProjectLabel(project),
         worktree: project.worktree,
         sessions: projectSessions,
-        sessionCount: searchQuery.trim()
-          ? project.matchedSessionCount ?? projectSessions.length
-          : project.sessionCount ?? projectSessions.length,
+        // With a search the total counts the matching sessions only.
+        sessionCount: statsByProject[project.id]?.total ?? projectSessions.length,
         pathStatus: project.pathStatus ?? 'available',
         canWrite: project.canWrite ?? true,
         canDelete: project.canDelete ?? true,
@@ -785,16 +807,15 @@ export default function SessionPage() {
     })
       .filter((group) => {
         if (!searchQuery.trim()) return true;
-        const project = projects.find((item) => item.id === group.id);
-        return (project?.matchedSessionCount ?? group.sessions.length) > 0 || group.id === selectedProjectId;
+        return group.sessionCount > 0 || group.id === selectedProjectId;
       })
       .sort((a, b) => {
-        const aLatest = projects.find((project) => project.id === a.id)?.lastActivityAt ?? a.sessions[0]?.time?.updated ?? 0;
-        const bLatest = projects.find((project) => project.id === b.id)?.lastActivityAt ?? b.sessions[0]?.time?.updated ?? 0;
+        const aLatest = statsByProject[a.id]?.lastActivityAt ?? a.sessions[0]?.time?.updated ?? 0;
+        const bLatest = statsByProject[b.id]?.lastActivityAt ?? b.sessions[0]?.time?.updated ?? 0;
         if (aLatest !== bLatest) return bLatest - aLatest;
         return a.label.localeCompare(b.label);
       });
-  }, [projects, searchQuery, selectedProjectId, sessions]);
+  }, [projects, searchQuery, selectedProjectId, sessions, statsByProject]);
 
   const selectedProjectIDForCreate = selectedProjectId && selectedProjectId !== TASK_SESSION_GROUP_ID
     ? selectedProjectId
@@ -848,7 +869,7 @@ export default function SessionPage() {
     setRefreshingProjects(true);
     try {
       const listResult = await client.get('/api/project', {
-        params: { search: query.trim() || undefined },
+        params: { search: query.trim() || undefined, includeSessionStats: false },
       });
       if (requestSeq !== projectListRequestSeqRef.current) return;
       const nextProjects = Array.isArray(listResult.data)
@@ -857,7 +878,7 @@ export default function SessionPage() {
         ))
         : [];
       setProjects((currentProjects) => {
-        if (!ensureProject?.id || nextProjects.some((project) => project.id === ensureProject.id)) {
+        if (!ensureProject?.id || nextProjects.some((project: ProjectSummary) => project.id === ensureProject.id)) {
           return nextProjects;
         }
         const currentProject = currentProjects.find((project) => project.id === ensureProject.id);
@@ -866,6 +887,7 @@ export default function SessionPage() {
     } finally {
       if (requestSeq === projectListRequestSeqRef.current) {
         setRefreshingProjects(false);
+        setProjectsReady(true);
       }
     }
   }, []);
@@ -949,7 +971,8 @@ export default function SessionPage() {
     sessionUpdateRefetchTimerRef.current = window.setTimeout(() => {
       sessionUpdateRefetchTimerRef.current = null;
       void Promise.all([
-        refetchSessions(),
+        // The history sidebar refreshes on the same events; one request serves both.
+        refetchSessions({ freshAfter: sessionUpdateEventAtRef.current }),
         fetchProjects(undefined, searchQuery),
       ]);
     }, SESSION_UPDATE_REFETCH_DEBOUNCE_MS);
@@ -1061,6 +1084,8 @@ export default function SessionPage() {
       // Session/title updates can arrive in bursts when several sessions or
       // background tasks finish together. Coalesce the full sidebar refresh so
       // those bursts don't turn into a request/re-render storm.
+      sessionUpdateEventAtRef.current = requestClock();
+      noteSessionListChange(sessionUpdateEventAtRef.current);
       scheduleSessionListRefetch();
     }
   }, [
@@ -1270,220 +1295,10 @@ export default function SessionPage() {
     return () => document.removeEventListener('mousedown', handle);
   }, [showModelOptions]);
 
-  useEffect(() => {
-    if (!showPermissionModeOptions) return;
-    const handle = (event: MouseEvent) => {
-      if (!(event.target as HTMLElement).closest('[data-permission-mode-selector]')) {
-        setShowPermissionModeOptions(false);
-      }
-    };
-    document.addEventListener('mousedown', handle);
-    return () => document.removeEventListener('mousedown', handle);
-  }, [showPermissionModeOptions]);
-
-  useEffect(() => {
-    void flocksproUsersApi.hasCapability().then(setProPolicyEnabled);
-  }, []);
-
-  useEffect(() => {
-    if (!proPolicyEnabled || !selectedSessionId) {
-      setSessionPermissionMode(null);
-      setSessionRuntimeMode(null);
-      setSessionNetworkMode(null);
-      setSessionNetworkModeDefault(null);
-      setSessionNetworkModeOverridden(false);
-      setSessionEntry('unknown');
-      setSessionExecutionRevision(null);
-      return;
-    }
-    let cancelled = false;
-    void flocksproPolicyApi.getSessionExecutionSettings(selectedSessionId)
-      .then((result) => {
-        if (cancelled) return;
-        setSessionPermissionMode(result.permissionMode);
-        setSessionRuntimeMode(result.runtimeMode);
-        setSessionNetworkMode(result.networkMode);
-        setSessionNetworkModeDefault(result.networkModeDefault);
-        setSessionNetworkModeOverridden(result.networkModeOverridden);
-        setSessionEntry(result.entry);
-        setSessionExecutionRevision(result.revision);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setSessionPermissionMode(null);
-        setSessionRuntimeMode(null);
-        setSessionNetworkMode(null);
-        setSessionNetworkModeDefault(null);
-        setSessionNetworkModeOverridden(false);
-        setSessionEntry('unknown');
-        setSessionExecutionRevision(null);
-      });
-    return () => { cancelled = true; };
-  }, [proPolicyEnabled, selectedSessionId]);
-
-  const handlePermissionModeChange = useCallback(async (permissionMode: PermissionMode) => {
-    if (!proPolicyEnabled) return;
-    if (!selectedSessionId) {
-      setDraftPermissionMode(permissionMode);
-      return;
-    }
-    try {
-      const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
-        permissionMode,
-        ...(sessionExecutionRevision === null ? {} : { revision: sessionExecutionRevision }),
-      });
-      setSessionPermissionMode(updated.permissionMode);
-      setSessionRuntimeMode(updated.runtimeMode);
-      setSessionNetworkMode(updated.networkMode);
-      setSessionNetworkModeDefault(updated.networkModeDefault);
-      setSessionNetworkModeOverridden(updated.networkModeOverridden);
-      setSessionEntry(updated.entry);
-      setSessionExecutionRevision(updated.revision);
-    } catch (error: unknown) {
-      if (isSessionExecutionSettingsUnsupported(error)) return;
-      const message = error instanceof Error ? error.message : String(error);
-      toast.error(t('chat.error', 'Error'), message);
-    }
-  }, [proPolicyEnabled, selectedSessionId, sessionExecutionRevision, t, toast]);
-
-  const handleRuntimeModeChange = useCallback(async (runtimeMode: RuntimeMode) => {
-    if (!proPolicyEnabled) return;
-    if (!selectedSessionId) {
-      setDraftRuntimeMode(runtimeMode);
-      return;
-    }
-    try {
-      const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
-        runtimeMode,
-        ...(sessionExecutionRevision === null ? {} : { revision: sessionExecutionRevision }),
-      });
-      setSessionPermissionMode(updated.permissionMode);
-      setSessionRuntimeMode(updated.runtimeMode);
-      setSessionNetworkMode(updated.networkMode);
-      setSessionNetworkModeDefault(updated.networkModeDefault);
-      setSessionNetworkModeOverridden(updated.networkModeOverridden);
-      setSessionEntry(updated.entry);
-      setSessionExecutionRevision(updated.revision);
-    } catch (error: unknown) {
-      if (isSessionExecutionSettingsUnsupported(error)) return;
-      const message = error instanceof Error ? error.message : String(error);
-      toast.error(t('chat.error', 'Error'), message);
-    }
-  }, [proPolicyEnabled, selectedSessionId, sessionExecutionRevision, t, toast]);
-
-  const handleNetworkModeChange = useCallback(async (networkMode: NetworkMode) => {
-    if (!proPolicyEnabled) return;
-    if (!selectedSessionId) {
-      setDraftNetworkMode(networkMode);
-      return;
-    }
-    try {
-      const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
-        networkMode,
-        ...(sessionExecutionRevision === null ? {} : { revision: sessionExecutionRevision }),
-      });
-      setSessionPermissionMode(updated.permissionMode);
-      setSessionRuntimeMode(updated.runtimeMode);
-      setSessionNetworkMode(updated.networkMode);
-      setSessionNetworkModeDefault(updated.networkModeDefault);
-      setSessionNetworkModeOverridden(updated.networkModeOverridden);
-      setSessionEntry(updated.entry);
-      setSessionExecutionRevision(updated.revision);
-    } catch (error: unknown) {
-      if (isSessionExecutionSettingsUnsupported(error)) return;
-      const message = error instanceof Error ? error.message : String(error);
-      toast.error(t('chat.error', 'Error'), message);
-    }
-  }, [proPolicyEnabled, selectedSessionId, sessionExecutionRevision, t, toast]);
-
-  const permissionModeLabels = useMemo<Record<PermissionMode, string>>(
-    () => ({
-      readonly: t('permissionMode.readonly'),
-      'require-confirm': t('permissionMode.requireConfirm'),
-      'auto-allow-all': t('permissionMode.autoAllowAll'),
-    }),
-    [t],
+  const sessionSettingsSlotContext = useMemo(
+    () => ({ sessionId: selectedSessionId, onSessionStart: registerSessionStartHook }),
+    [registerSessionStartHook, selectedSessionId],
   );
-
-  const permissionModeOptions = useMemo(
-    () => ([
-      {
-        value: 'readonly' as const,
-        label: permissionModeLabels.readonly,
-        description: t('permissionMode.readonlyDesc'),
-      },
-      {
-        value: 'require-confirm' as const,
-        label: permissionModeLabels['require-confirm'],
-        description: t('permissionMode.requireConfirmDesc'),
-      },
-      {
-        value: 'auto-allow-all' as const,
-        label: permissionModeLabels['auto-allow-all'],
-        description: t('permissionMode.autoAllowAllDesc'),
-      },
-    ]),
-    [permissionModeLabels, t],
-  );
-  const runtimeModeLabels = useMemo<Record<RuntimeMode, string>>(
-    () => ({
-      'dev-mode': t('permissionMode.runtimeDev', '开发模式'),
-      'exe-mode': t('permissionMode.runtimeExe', '执行模式'),
-    }),
-    [t],
-  );
-  const runtimeModeOptions = useMemo(
-    () => ([
-      {
-        value: 'dev-mode' as const,
-        label: runtimeModeLabels['dev-mode'],
-        description: t('permissionMode.runtimeDevDesc', 'Plugins 与代码目录按当前会话权限模式处理'),
-      },
-      {
-        value: 'exe-mode' as const,
-        label: runtimeModeLabels['exe-mode'],
-        description: t('permissionMode.runtimeExeDesc', 'Plugins 与代码目录固定 readonly'),
-      },
-    ]),
-    [runtimeModeLabels, t],
-  );
-  const networkModeLabels = useMemo<Record<NetworkMode, string>>(
-    () => ({
-      'auto-deny-all': t('permissionMode.networkAutoDenyAll', '自动拒绝全部'),
-      'require-confirm': t('permissionMode.networkRequireConfirm', '访问前确认'),
-      'auto-allow-all': t('permissionMode.networkAutoAllowAll', '自动允许全部'),
-    }),
-    [t],
-  );
-  const networkModeOptions = useMemo(
-    () => ([
-      {
-        value: 'auto-deny-all' as const,
-        label: networkModeLabels['auto-deny-all'],
-        description: t('permissionMode.networkAutoDenyAllDesc', '未命中白名单的网络请求全部拒绝。'),
-      },
-      {
-        value: 'require-confirm' as const,
-        label: networkModeLabels['require-confirm'],
-        description: t('permissionMode.networkRequireConfirmDesc', '未命中白名单时弹出独立网络确认。'),
-      },
-      {
-        value: 'auto-allow-all' as const,
-        label: networkModeLabels['auto-allow-all'],
-        description: t('permissionMode.networkAutoAllowAllDesc', '未命中黑白名单时自动放行。'),
-      },
-    ]),
-    [networkModeLabels, t],
-  );
-  const currentPermissionMode = selectedSessionId
-    ? (sessionPermissionMode ?? 'require-confirm')
-    : draftPermissionMode;
-  const currentRuntimeMode = selectedSessionId
-    ? (sessionRuntimeMode ?? 'dev-mode')
-    : draftRuntimeMode;
-  const currentNetworkMode = selectedSessionId
-    ? (sessionNetworkMode ?? 'require-confirm')
-    : draftNetworkMode;
 
   useEffect(() => {
     if (selectedSession?.model_auto) {
@@ -1664,6 +1479,11 @@ export default function SessionPage() {
   ) => {
     const navigationKey = navigationRef.current.key;
     try {
+      // What each extension needs done on the new session, fixed now: the
+      // page may move on (and the extension go away) while it is created.
+      const sessionStartWork = Array.from(sessionStartHooksRef.current)
+        .map((prepare) => prepare())
+        .filter((run): run is (sessionId: string) => Promise<void> => typeof run === 'function');
       const effectiveExecutionMode = executionModeOverride || selectedExecutionMode;
       const response = await client.post('/api/session', {
         title: 'New Session',
@@ -1701,32 +1521,10 @@ export default function SessionPage() {
       if (options?.displayText) payload.displayText = options.displayText;
       payload.executionMode = effectiveExecutionMode;
 
-      if (proPolicyEnabled) {
-        try {
-          const updated = await flocksproPolicyApi.setSessionExecutionSettings(newSessionId, {
-            permissionMode: draftPermissionMode,
-            runtimeMode: draftRuntimeMode,
-            networkMode: draftNetworkMode,
-          });
-          if (mountedRef.current && navigationRef.current.key === navigationKey) {
-            setSessionPermissionMode(updated.permissionMode);
-            setSessionRuntimeMode(updated.runtimeMode);
-            setSessionNetworkMode(updated.networkMode);
-            setSessionNetworkModeDefault(updated.networkModeDefault);
-            setSessionNetworkModeOverridden(updated.networkModeOverridden);
-            setSessionEntry(updated.entry);
-            setSessionExecutionRevision(updated.revision);
-          }
-        } catch (error: unknown) {
-          if (isSessionExecutionSettingsUnsupported(error)) {
-            // Backward compatibility: older backends may not expose execution-settings yet.
-            // Session creation and prompt sending should continue without interruption.
-          } else {
-            const message = error instanceof Error ? error.message : String(error);
-            toast.error(t('chat.error', 'Error'), message);
-            throw error;
-          }
-        }
+      // Work an extension needs done on a new session before its first
+      // prompt (session.settings); a hook that throws stops the send.
+      for (const run of sessionStartWork) {
+        await run(newSessionId);
       }
       await client.post(`/api/session/${newSessionId}/prompt_async`, payload);
 
@@ -1782,10 +1580,6 @@ export default function SessionPage() {
     selectedExecutionMode,
     selectedModelAuto,
     selectedProjectIDForCreate,
-    draftPermissionMode,
-    draftRuntimeMode,
-    draftNetworkMode,
-    proPolicyEnabled,
     toast,
     t,
   ]);
@@ -1794,9 +1588,11 @@ export default function SessionPage() {
     setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
   }, []);
 
-  const handleAlertOperationsSetup = useCallback(async () => {
-    if (installingSocWorkspace) return;
+  const handleAlertOperationsSetup = useCallback(async (sendPrompt: SendWelcomePrompt) => {
+    if (installingSocWorkspace || selectedSession?.canWrite === false) return;
 
+    const navigationKey = navigationRef.current.key;
+    const identity = currentReaIdentity();
     setInstallingSocWorkspace(true);
     let startedComponentInstall = false;
     try {
@@ -1816,20 +1612,26 @@ export default function SessionPage() {
         await hubAPI.installStream('component', SOC_WORKSPACE_COMPONENT_ID, handleSuiteInstallProgress);
       }
 
+      if (!mountedRef.current || !paneActiveRef.current || navigationRef.current.key !== navigationKey || currentReaIdentity() !== identity) return;
+      const options = { displayText: buildInstructionDisplayText(t('welcome.alertOperations')) };
+      if (selectedSessionId) {
+        await sendPrompt(t('welcome.alertOperationsSuggestion'), options);
+        return;
+      }
       await handleCreateAndSend(
         t('welcome.alertOperationsSuggestion'),
         [],
         undefined,
         selectedPromptModel,
-        { displayText: buildInstructionDisplayText(t('welcome.alertOperations')) },
+        options,
       );
     } catch (err: any) {
       const message = err?.message ?? t('welcome.socComponentInstallFailedDescription');
       if (startedComponentInstall) {
         setSuiteInstallProgress(current => failSuiteInstallProgress(current, {
           id: SOC_WORKSPACE_COMPONENT_ID,
-          name: 'SOC Workspace Component',
-          nameCn: 'SOC 工作区场景套件',
+          name: 'Alert Operations Suite',
+          nameCn: '告警运营套件',
         }, message));
       }
       toast.error(
@@ -1839,7 +1641,7 @@ export default function SessionPage() {
     } finally {
       setInstallingSocWorkspace(false);
     }
-  }, [handleCreateAndSend, handleSuiteInstallProgress, installingSocWorkspace, selectedPromptModel, t, toast]);
+  }, [handleCreateAndSend, handleSuiteInstallProgress, installingSocWorkspace, selectedPromptModel, selectedSession?.canWrite, selectedSessionId, t, toast]);
 
   // The 「REA 逆向分析」 shortcut (and the plugin square's actions): route by the
   // live plugin state. The install or the use prompt only fills the message box
@@ -1849,13 +1651,14 @@ export default function SessionPage() {
   // same way. Every await is checked against the account and the page the click
   // came from.
   const handleReaEntry = useCallback(async (requested?: ReaEntryAction) => {
-    if (startingReaRef.current) return;
+    if (startingReaRef.current || selectedSession?.canWrite === false) return;
     startingReaRef.current = true;
     setStartingRea(true);
     const identity = currentReaIdentity();
     const navigationKey = navigationRef.current.key;
     const stale = () => (
       !mountedRef.current
+      || !paneActiveRef.current
       || currentReaIdentity() !== identity
       || navigationRef.current.key !== navigationKey
     );
@@ -1927,6 +1730,7 @@ export default function SessionPage() {
     handleSelectExecutionMode,
     refreshReaStatus,
     selectSession,
+    selectedSession?.canWrite,
     t,
     toast,
   ]);
@@ -1970,34 +1774,31 @@ export default function SessionPage() {
     : t('refreshingWorkbench');
 
   return (
-    <div className="flex h-full w-full overflow-hidden bg-[#fcfcfd] text-[#202328] dark:bg-[#303842] dark:text-[#d7dee8]">
+    <div className="flex h-full w-full overflow-hidden bg-ui-canvas text-ui-text">
       {/* ── Main area ── */}
-      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[#fcfcfd] dark:bg-[#303842]">
+      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-ui-canvas">
         {/* Header */}
         <header className="relative flex h-[52px] flex-shrink-0 items-center gap-2 px-4 text-[13px]">
           <div className="flex min-w-0 items-center">
-            <h2 className="truncate text-sm font-semibold text-[#555a61] dark:text-[#c3ccd6]">
+            <h2 className="truncate text-sm font-medium text-ui-secondary">
               {selectedSession?.title || t('newSession')}
             </h2>
           </div>
 
-          {selectedSessionId && selectedSession && !activeSessionError && (
-            <CopyButton text={new URL(sessionPath(selectedSessionId), window.location.origin).href} label={t('copyLink')} />
-          )}
-
           {workbenchRefreshing && (
             <WorkbenchRefreshStatus label={workbenchRefreshLabel} />
           )}
+          {activeChatSessionId && <SSEStatusIndicator status={sseStatus} t={t} />}
 
           <div className="ml-auto flex items-center">
             <button
               type="button"
               disabled={!activeChatSessionId}
               onClick={() => setContextPanelOpen((open) => !open)}
-              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+              className={`flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 max-md:shrink-0 max-md:whitespace-nowrap ${
                 contextPanelOpen
-                  ? 'bg-violet-50 text-violet-700 dark:bg-violet-500/15 dark:text-violet-200'
-                  : 'text-[#7b8087] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.06] dark:hover:text-white'
+                  ? 'bg-ui-selected text-ui-text'
+                  : 'text-ui-secondary hover:bg-ui-hover hover:text-ui-text'
               }`}
               aria-label={t('context.title')}
               title={t('context.title')}
@@ -2005,7 +1806,7 @@ export default function SessionPage() {
               <Sparkles className="h-3.5 w-3.5" />
               <span>{t('context.title')}</span>
               {(contextSnapshot?.counts.total || 0) > 0 && (
-                <span className="rounded-full bg-current/10 px-1.5 py-0.5 text-[10px]">
+                <span className="rounded-full bg-ui-hover px-1.5 py-0.5 text-xs">
                   {contextSnapshot!.counts.total}
                 </span>
               )}
@@ -2076,12 +1877,13 @@ export default function SessionPage() {
           allowAnyUpload={reaAcceptsSamples(reaStatus)}
           composerPrefill={reaComposerPrefill?.sessionId === (activeChatSessionId ?? null) ? reaComposerPrefill : null}
           onComposerPrefillApplied={handleReaComposerPrefillApplied}
+          cacheUsageContainer={cacheUsageContainer?.dataset.sessionId === activeChatSessionId ? cacheUsageContainer : null}
           contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
           model={selectedPromptModel}
-          welcomeContent={(setInput) => (
+          welcomeContent={(setInput, sendPrompt) => (
             <WelcomeScreen
               onSuggestion={setInput}
-              onAlertOperationsSetup={() => void handleAlertOperationsSetup()}
+              onAlertOperationsSetup={() => void handleAlertOperationsSetup(sendPrompt)}
               alertOperationsBusy={installingSocWorkspace}
               reaShortcut={{
                 badge: Boolean(reaStatus?.badge),
@@ -2124,7 +1926,7 @@ export default function SessionPage() {
                 <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${showAgentOptions ? '-rotate-90' : ''}`} />
               </button>
               {showAgentOptions && (
-                <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+                <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden max-md:left-0 rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
                   <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
                     <div className="min-w-0">
                       <div className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">{t('agentPicker.title')}</div>
@@ -2331,7 +2133,7 @@ export default function SessionPage() {
                 )}
               </div>
               {!activeChatSessionId && (
-              <div className="relative" data-project-selector>
+              <div className="relative max-md:static" data-project-selector>
                 <button
                   type="button"
                   onClick={() => {
@@ -2414,8 +2216,9 @@ export default function SessionPage() {
             </div>
           }
           centerToolbarSlot={
-            // The model picker gives way first on a narrow composer (its name truncates).
-            <div className="flex min-w-0 items-center gap-1">
+            // The model picker gives way first on a narrow composer (its name truncates);
+            // on phones the permission picker can drop to the next line (longer English labels).
+            <div className="flex min-w-0 items-center gap-1 max-md:flex-wrap">
               <div ref={modelSelectorRef} className="relative w-[132px] min-w-[72px] shrink" data-model-selector>
               <button
                 type="button"
@@ -2566,109 +2369,7 @@ export default function SessionPage() {
                 </SessionComposerMenu>
               )}
               </div>
-              {proPolicyEnabled && (
-                <div ref={permissionModeSelectorRef} className="relative" data-permission-mode-selector>
-                  <button
-                    type="button"
-                    onClick={() => setShowPermissionModeOptions((open) => !open)}
-                    className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                    title={t('permissionMode.executionControlTitle')}
-                  >
-                    <Shield className="h-3 w-3 shrink-0" />
-                    <span className="max-w-[116px] truncate font-medium">
-                      {permissionModeLabels[currentPermissionMode]}
-                    </span>
-                    <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
-                  </button>
-                  {showPermissionModeOptions && (
-                    <SessionComposerMenu
-                      anchorRef={permissionModeSelectorRef}
-                      data-permission-mode-selector
-                      aria-label={t('permissionMode.executionControlTitle')}
-                      contentClassName="space-y-3 p-1.5"
-                    >
-                      <section>
-                        <div className="flex min-w-0 items-center justify-between gap-3 px-2.5 py-1.5">
-                          <div
-                            className="min-w-0 truncate text-xs font-semibold text-zinc-500 dark:text-zinc-400"
-                            title={t('permissionMode.runtimeTitle', '平台开发模式')}
-                          >
-                            {t('permissionMode.runtimeTitle', '平台开发模式')}
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setShowPermissionModeOptions(false);
-                              navigate('/settings/security-config');
-                            }}
-                            className="shrink-0 whitespace-nowrap text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-                          >
-                            {t('permissionMode.viewDetails')}
-                          </button>
-                        </div>
-                        <div className="space-y-0.5">
-                          {runtimeModeOptions.map(({ value: mode, label, description }) => (
-                            <SessionModeOption
-                              key={mode}
-                              selected={currentRuntimeMode === mode}
-                              label={label}
-                              description={description}
-                              onClick={() => {
-                                void handleRuntimeModeChange(mode);
-                                setShowPermissionModeOptions(false);
-                              }}
-                            />
-                          ))}
-                        </div>
-                      </section>
-                      <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
-                        <div
-                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
-                          title={t('permissionMode.networkTitle', '网络访问模式')}
-                        >
-                          {t('permissionMode.networkTitle', '网络访问模式')}
-                        </div>
-                        <div className="space-y-0.5">
-                          {networkModeOptions.map(({ value: mode, label, description }) => (
-                            <SessionModeOption
-                              key={mode}
-                              selected={currentNetworkMode === mode}
-                              label={label}
-                              description={description}
-                              onClick={() => {
-                                void handleNetworkModeChange(mode);
-                                setShowPermissionModeOptions(false);
-                              }}
-                            />
-                          ))}
-                        </div>
-                      </section>
-                      <section className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
-                        <div
-                          className="truncate px-2.5 py-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
-                          title={t('permissionMode.title')}
-                        >
-                          {t('permissionMode.title')}
-                        </div>
-                        <div className="space-y-0.5">
-                          {permissionModeOptions.map(({ value: mode, label, description }) => (
-                            <SessionModeOption
-                              key={mode}
-                              selected={currentPermissionMode === mode}
-                              label={label}
-                              description={description}
-                              onClick={() => {
-                                void handlePermissionModeChange(mode);
-                                setShowPermissionModeOptions(false);
-                              }}
-                            />
-                          ))}
-                        </div>
-                      </section>
-                    </SessionComposerMenu>
-                  )}
-                </div>
-              )}
+              <ExtensionSlot name="session.settings" context={sessionSettingsSlotContext} />
             </div>
           }
           />
@@ -2679,18 +2380,19 @@ export default function SessionPage() {
               role="separator"
               aria-orientation="vertical"
               onPointerDown={handleResizeContextPanel}
-              className="hidden w-1 flex-shrink-0 cursor-col-resize bg-zinc-200/70 transition-colors hover:bg-violet-300 xl:block dark:bg-zinc-700 dark:hover:bg-violet-500"
+              className="hidden w-1 flex-shrink-0 cursor-col-resize bg-ui-canvas transition-colors hover:bg-ui-control xl:block"
             />
             {/* A side column next to the chat, capped so messages and the composer keep their room
                 (40% below xl, 45% above); phones get a closable full-screen panel. */}
             <aside
               data-testid="session-context-aside"
-              className="fixed inset-0 z-50 h-full w-screen flex-shrink-0 overflow-hidden border-l border-zinc-200 bg-white sm:static sm:z-auto sm:w-[min(var(--session-context-width),40%)] xl:w-[min(var(--session-context-width),45%)] dark:border-zinc-700 dark:bg-zinc-900"
+              className="fixed inset-0 z-50 h-full w-screen flex-shrink-0 overflow-hidden border-l border-ui-border bg-ui-surface sm:static sm:z-auto sm:w-[min(var(--session-context-width),40%)] xl:w-[min(var(--session-context-width),45%)]"
               style={{ '--session-context-width': `${contextPanelWidth}px` } as React.CSSProperties}
             >
               <SessionContextPanel
                 key={`${activeChatSessionId}:${contextResetVersion}`}
                 sessionId={activeChatSessionId}
+                cacheUsageContainerRef={setCacheUsageContainer}
                 snapshot={contextSnapshot?.sessionID === activeChatSessionId ? contextSnapshot : null}
                 loading={contextLoading}
                 loadingMore={contextLoadingMore}
@@ -2763,7 +2465,7 @@ interface WelcomeReaShortcut {
   onClick: () => void;
 }
 
-const SHORTCUT_CLASS = 'inline-flex h-11 shrink-0 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white';
+const SHORTCUT_CLASS = 'inline-flex h-11 shrink-0 items-center gap-2.5 rounded-[10px] border border-ui-border bg-ui-surface px-4 text-sm font-medium text-ui-secondary transition-colors hover:border-ui-control hover:bg-ui-hover hover:text-ui-text disabled:cursor-not-allowed disabled:opacity-70';
 
 function WelcomeScreen({
   onSuggestion,
@@ -2779,11 +2481,11 @@ function WelcomeScreen({
   const { t } = useTranslation('session');
   return (
     <div className="w-full max-w-[700px] px-9 text-center max-[600px]:px-4">
-      <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-slate-800 text-white shadow-[0_3px_10px_rgba(30,41,59,0.10)] dark:bg-[#46515e]">
+      <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-ui-selected text-ui-text">
         <Sparkles className="h-[30px] w-[30px]" strokeWidth={1.7} />
       </div>
-      <h3 className="text-[22px] font-semibold tracking-[-0.01em] text-[#1f2937] dark:text-[#f0f3f7]">{t('welcome.title')}</h3>
-      <p className="mt-3 text-sm leading-6 text-[#647084] dark:text-[#aeb9c5]">{t('welcome.description')}</p>
+      <h3 className="text-[28px] font-medium tracking-tight text-ui-text">{t('welcome.title')}</h3>
+      <p className="mt-3 text-sm leading-7 text-ui-muted">{t('welcome.description')}</p>
 
       {/* One row (REA V5): narrow screens scroll it sideways instead of wrapping; the top padding keeps the 「新」 badge visible. */}
       <div

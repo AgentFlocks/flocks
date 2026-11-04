@@ -16,6 +16,7 @@ class AsyncReentrantLock:
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._owner: asyncio.Task[Any] | None = None
         self._depth = 0
 
@@ -26,6 +27,14 @@ class AsyncReentrantLock:
         if self._owner is task:
             self._depth += 1
             return
+        loop = asyncio.get_running_loop()
+        # The module-level lock outlives event loops (each test, or a restarted
+        # server loop, gets a fresh one). An asyncio.Lock binds to the loop it
+        # first had to wait on and refuses any other; while nobody holds it,
+        # start a fresh lock for the new loop instead of failing every mutation.
+        if self._loop is not loop and self._owner is None and not self._lock.locked():
+            self._lock = asyncio.Lock()
+            self._loop = loop
         await self._lock.acquire()
         self._owner = task
         self._depth = 1

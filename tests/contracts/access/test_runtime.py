@@ -310,6 +310,40 @@ def test_query_can_use_sqlite_json_driver(tmp_path: Path, monkeypatch: pytest.Mo
     assert response.body["items"][0]["entityId"] == "record:allowed"
 
 
+def test_sqlite_json_driver_takes_source_row_id_only_from_the_configured_column(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.contracts.access.driver import SOURCE_ROW_ID_FIELD, SqliteJsonDriverExecutor
+
+    store = _store(tmp_path, monkeypatch)
+    db_path = tmp_path / "contract_records.db"
+    # A stored payload claiming another row's identity must not keep that claim.
+    _write_contract_sqlite(db_path, [_contract_record(id="row-a", **{SOURCE_ROW_ID_FIELD: "row-b"})])
+    seen: list[object] = []
+    matches = SqliteJsonDriverExecutor._matches_predicates
+
+    def spy(self, record, *args, **kwargs):  # the full record, before field projection
+        seen.append(record.get(SOURCE_ROW_ID_FIELD))
+        return matches(self, record, *args, **kwargs)
+
+    monkeypatch.setattr(SqliteJsonDriverExecutor, "_matches_predicates", spy)
+
+    def run(driver_options):
+        runtime = OperationRuntime(plugins=(_plugin(
+            store, adapter_kind="builtin-sqlite-json", source_root=db_path, driver_options=driver_options,
+        ),))
+        seen.clear()
+        runtime.execute(
+            page_id=PAGE_ID, contract_id=CONTRACT_ID, operation_name="list",
+            payload={"params": {"limit": 10}}, principal=AuthUser(id="u1", username="alice", role="admin"),
+        )
+        return list(seen)
+
+    base = {"table": "records", "recordColumn": "record_json", "dateColumn": "record_date"}
+    assert run({**base, "rowIdColumn": "id"}) == ["row-a"]
+    assert run(base) == [None]
+
+
 def test_query_can_filter_sqlite_json_driver_by_event_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store = _store(tmp_path, monkeypatch)
     db_path = tmp_path / "contract_records.db"
@@ -479,6 +513,31 @@ def test_query_sqlite_json_driver_still_reports_a_broken_database(tmp_path: Path
 
     assert exc_info.value.code == "data_source_unavailable"
     assert exc_info.value.status_code == 500
+
+
+@pytest.mark.parametrize("budget,value", [("MAX_SCAN_ROWS", 1), ("MAX_SCAN_BYTES", 1)])
+def test_sqlite_contract_scan_fails_explicitly_instead_of_returning_partial_totals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget: str, value: int,
+):
+    store = _store(tmp_path, monkeypatch)
+    source = tmp_path / "logical-records.db"
+    _write_contract_sqlite(source, [_contract_record(id="one"), _contract_record(id="two")])
+    monkeypatch.setattr("flocks.contracts.access.driver." + budget, value)
+    runtime = OperationRuntime(plugins=(_plugin(
+        store, adapter_kind="builtin-sqlite-json", source_root=source,
+        driver_options={"table": "records", "recordColumn": "record_json", "dateColumn": "record_date"},
+    ),))
+    with pytest.raises(ContractRuntimeError) as error:
+        runtime.execute(page_id=PAGE_ID, contract_id=CONTRACT_ID, operation_name="list",
+                        payload={"params": {"limit": 1}}, principal=AuthUser(id="u1", username="alice", role="admin"))
+    assert error.value.code == "query_range_too_large"
+    assert error.value.status_code == 422
+    # Exhausted scans release their connection and leave source rows intact.
+    connection = sqlite3.connect(source)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 2
+    finally:
+        connection.close()
 
 
 def test_query_rejects_page_supplied_binding_or_idempotency_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

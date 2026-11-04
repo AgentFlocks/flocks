@@ -1,6 +1,7 @@
 import asyncio
 import builtins
 import threading
+import time
 
 import pytest
 from fastapi import FastAPI, Request
@@ -125,6 +126,70 @@ async def test_api_runtime_timeout_and_reload(runtime_store: WebUIPagesStore, ru
         ok_resp = await client.get("/api/contracts/webui/pages/runtime-page/api/slow")
         assert ok_resp.status_code == 200
         assert ok_resp.json() == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_sync_handler_timeout_keeps_event_loop_responsive(runtime_store, runtime_app):
+    runtime_store.save_source_file(
+        "runtime-page", "api/routes.yaml",
+        "routes:\n  - method: GET\n    path: /slow\n    handler: handlers.slow\n    timeoutMs: 10\n",
+    )
+    runtime_store.save_source_file(
+        "runtime-page", "api/handlers.py",
+        "import time\ndef slow(ctx, request):\n    time.sleep(0.15)\n    return {'ok': True}\n",
+    )
+    runtime = WebUIPageApiRuntime(runtime_store)
+    await runtime.list_routes("runtime-page")
+
+    @runtime_app.get("/slow")
+    async def dispatch(request: Request):
+        return await runtime.dispatch("runtime-page", "/slow", request, {"role": "admin"})
+
+    heartbeat = asyncio.create_task(asyncio.sleep(0.02))
+    async with AsyncClient(transport=ASGITransport(app=runtime_app), base_url="http://test") as client:
+        started = time.monotonic()
+        response = await client.get("/slow")
+        assert response.status_code == 504
+        await heartbeat
+        assert time.monotonic() - started < 0.12
+    # Let the bounded worker release its slot before the next test.
+    await asyncio.sleep(0.16)
+
+
+@pytest.mark.asyncio
+async def test_timed_out_sync_handlers_keep_capacity_until_the_worker_finishes(runtime_store):
+    from flocks.contracts.webui.api_runtime import _SYNC_HANDLER_WORKERS
+    from fastapi import HTTPException
+
+    runtime = WebUIPageApiRuntime(runtime_store)
+    release = threading.Event()
+    started = threading.Event()
+    lock = threading.Lock()
+    count = 0
+
+    def blocked(_ctx, _request):
+        nonlocal count
+        with lock:
+            count += 1
+            if count == _SYNC_HANDLER_WORKERS:
+                started.set()
+        release.wait(timeout=2)
+        return {"ok": True}
+
+    tasks = [asyncio.create_task(runtime._invoke_handler(blocked, None, None)) for _ in range(_SYNC_HANDLER_WORKERS)]
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        with pytest.raises(HTTPException) as exc:
+            await runtime._invoke_handler(lambda *_: {"ok": True}, None, None)
+        assert exc.value.status_code == 503
+        assert exc.value.headers == {"Retry-After": "1"}
+    finally:
+        release.set()
+        await asyncio.sleep(0.03)
+    assert await runtime._invoke_handler(lambda *_: {"ok": True}, None, None) == {"ok": True}
 
 
 @pytest.mark.asyncio

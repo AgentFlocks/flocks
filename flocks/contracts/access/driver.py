@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
+from collections import Counter
 from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +16,11 @@ from flocks.contracts.access.models import DriverResult, Predicate, QueryPlan, C
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 JSON_DATA_SUFFIXES = frozenset({".jsonl", ".json"})
+#: What one query may scan of a database source before it is refused as too large.
+MAX_SCAN_ROWS = 50_000
+MAX_SCAN_BYTES = 32 * 1024 * 1024
+MAX_SCAN_SECONDS = 30
+SOURCE_ROW_ID_FIELD = "__flocks_source_row_id"
 
 
 class DriverProxy:
@@ -41,6 +48,8 @@ class DriverProxy:
             )
 
         missing = plan.driver_projection - plan.binding.driver_available_fields
+        facet_fields = set(plan.binding.driver_options.get("facetFields", ()))
+        missing |= facet_fields - (plan.binding.driver_available_fields & plan.operation.filter_fields)
         if missing:
             raise ContractRuntimeError(
                 "policy_filter_not_enforceable",
@@ -60,12 +69,14 @@ class SqliteJsonDriverExecutor:
         record_column = _sqlite_identifier(options.get("recordColumn"), "record_json")
         date_column = _sqlite_identifier(options.get("dateColumn"), "record_date")
         event_time_column = _sqlite_identifier_optional(options.get("eventTimeColumn"))
+        row_id_column = _sqlite_identifier_optional(options.get("rowIdColumn"))
         # A store nobody has written to yet (no file, or an empty database
         # without the table) is an empty data source, not a broken one: the
         # SOC alert pages are opened before the first alert is ingested.
         if not db_path.is_file():
             return _empty_sqlite_result(db_path)
-        query = f"SELECT {record_column} FROM {table}"
+        projection = record_column + (f", {row_id_column}" if row_id_column else "")
+        query = f"SELECT {projection} FROM {table}"
         conditions: list[str] = []
         query_params: list[Any] = []
         start_date, end_date = JsonlDriverExecutor()._request_date_range(plan.params)
@@ -79,7 +90,7 @@ class SqliteJsonDriverExecutor:
             query_params.extend([start_time, end_time])
         if conditions:
             query += f" WHERE {' AND '.join(conditions)}"
-        query += " ORDER BY rowid"
+        query += f" ORDER BY rowid LIMIT {MAX_SCAN_ROWS + 1}"
 
         rows: list[dict[str, Any]] = []
         seen_record_ids: set[str] = set()
@@ -87,11 +98,26 @@ class SqliteJsonDriverExecutor:
         duplicates = 0
         filtered_unique = 0
         parse_errors = 0
+        facets = _FilterOptions(plan)
         try:
             connection = sqlite3.connect(db_path)
             try:
-                cursor = connection.execute(query, query_params)
-                raw_records = cursor.fetchall()
+                raw_records = []
+                started = time.monotonic()
+                scanned_bytes = 0
+                # Row by row, within a budget: a wide range must not pull a
+                # whole table into memory.
+                for count, source_row in enumerate(connection.execute(query, query_params), start=1):
+                    raw = source_row[0]
+                    scanned_bytes += len(raw.encode("utf-8")) if isinstance(raw, str) else 0
+                    if (count > MAX_SCAN_ROWS or scanned_bytes > MAX_SCAN_BYTES
+                            or time.monotonic() - started > MAX_SCAN_SECONDS):
+                        raise ContractRuntimeError(
+                            "query_range_too_large", status_code=422,
+                            user_message="Query range is too large; select a shorter time range.",
+                            admin_message="SQLite contract scan exceeded its row, byte or time budget.",
+                        )
+                    raw_records.append(source_row)
             finally:
                 connection.close()
         except sqlite3.OperationalError as exc:
@@ -114,7 +140,8 @@ class SqliteJsonDriverExecutor:
                 admin_message=f"SQLite query failed for {db_path}: {exc}",
             ) from exc
 
-        for (record_value,) in raw_records:
+        for source_row in raw_records:
+            record_value = source_row[0]
             try:
                 record = json.loads(record_value) if isinstance(record_value, str) else None
             except json.JSONDecodeError:
@@ -122,6 +149,11 @@ class SqliteJsonDriverExecutor:
             if not isinstance(record, dict):
                 parse_errors += 1
                 continue
+            # Only an explicitly configured database column can supply source
+            # identity. A JSON payload cannot impersonate another stored row.
+            record = {key: value for key, value in record.items() if key != SOURCE_ROW_ID_FIELD}
+            if row_id_column and source_row[1] is not None:
+                record[SOURCE_ROW_ID_FIELD] = str(source_row[1])
             if record.get("_type") == "file_header":
                 continue
             if not sql_event_time_filtered and not self._matches_event_time_range(record, start_time, end_time):
@@ -131,6 +163,7 @@ class SqliteJsonDriverExecutor:
             if record.get("is_duplicate") is True:
                 duplicates += 1
                 continue
+            facets.add(record)
             if not self._matches_predicates(
                 record,
                 plan.policy_plan.driver_predicates,
@@ -163,6 +196,8 @@ class SqliteJsonDriverExecutor:
             duplicates=duplicates,
             filtered_unique=filtered_unique,
             parse_errors=parse_errors,
+            filter_options=facets.options(),
+            scope_total=facets.total,
         )
 
     def _assert_allowed(self, path: Path, allowlist_roots: tuple[Path, ...]) -> None:
@@ -189,6 +224,7 @@ class JsonlDriverExecutor:
         duplicates = 0
         filtered_unique = 0
         parse_errors = 0
+        facets = _FilterOptions(plan)
         start_time, end_time = self._request_event_time_range(plan.params)
         for path in files:
             self._assert_allowed(path, plan.binding.driver_allowlist_roots)
@@ -205,6 +241,7 @@ class JsonlDriverExecutor:
                 if record.get("is_duplicate") is True:
                     duplicates += 1
                     continue
+                facets.add(record)
                 if not self._matches_predicates(
                     record,
                     plan.policy_plan.driver_predicates,
@@ -237,6 +274,8 @@ class JsonlDriverExecutor:
             duplicates=duplicates,
             filtered_unique=filtered_unique,
             parse_errors=parse_errors,
+            filter_options=facets.options(),
+            scope_total=facets.total,
         )
 
     def _resolve_source_files(self, plan: QueryPlan) -> Iterable[Path]:
@@ -359,6 +398,48 @@ class JsonlDriverExecutor:
         if record_time is None:
             return False
         return start_time <= record_time <= end_time
+
+
+class _FilterOptions:
+    """Time- and policy-scoped facets, independent of UI filters and row limits.
+
+    Fields are opted in by the server-side binding and validated by DriverProxy.
+    Never use request-supplied field names or broaden the caller's policy scope.
+    """
+
+    def __init__(self, plan: QueryPlan) -> None:
+        self.plan = plan
+        self.counts: dict[str, Counter[str]] = {
+            name: Counter() for name in plan.binding.driver_options.get("facetFields", ())
+        }
+        self.seen: set[str] = set()
+        self.total = 0
+
+    def add(self, record: dict[str, Any]) -> None:
+        if not self.counts:
+            return
+        resolver = self.plan.binding.predicate_value_resolver
+        if not JsonlDriverExecutor()._matches_predicates(record, self.plan.policy_plan.policy_predicates, resolver):
+            return
+        record_id = _read_string(record.get("id"), "")
+        if record_id:
+            if record_id in self.seen:
+                return
+            self.seen.add(record_id)
+        self.total += 1
+        for name, counts in self.counts.items():
+            value = resolver(record, name) if resolver else record.get(name)
+            if value is None or isinstance(value, (dict, list)):
+                continue
+            text = str(value).strip()
+            if text and text.lower() != "none":
+                counts[text] += 1
+
+    def options(self) -> dict[str, list[str]]:
+        return {
+            name: [value for value, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:80]]
+            for name, counts in self.counts.items()
+        }
 
 
 def _data_file_date(root: Path, path: Path) -> str:

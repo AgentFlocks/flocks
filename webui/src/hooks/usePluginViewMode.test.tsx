@@ -41,6 +41,26 @@ describe('usePluginViewMode', () => {
     expect(window.localStorage.getItem('flocks:plugin-view:tool-api')).toBeNull();
   });
 
+  it('starts phones on cards unless the user chose a view, and leaves desktop defaults alone', () => {
+    const matchMedia = vi.fn((query: string) => ({ matches: query === '(max-width: 767px)' }));
+    vi.stubGlobal('matchMedia', matchMedia);
+    try {
+      const phone = renderHook(() => usePluginViewMode('tools.all', 'list'));
+      expect(phone.result.current[0]).toBe('cards');
+      expect(window.localStorage.length).toBe(0);
+
+      window.localStorage.setItem('flocks:plugin-view:skill', 'list');
+      const chosen = renderHook(() => usePluginViewMode('skill', 'list'));
+      expect(chosen.result.current[0]).toBe('list');
+
+      matchMedia.mockImplementation(() => ({ matches: false }));
+      const desktop = renderHook(() => usePluginViewMode('tools.mcp', 'list'));
+      expect(desktop.result.current[0]).toBe('list');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('continues in memory when reading or writing browser storage fails', () => {
     vi.spyOn(window.localStorage, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
     vi.spyOn(window.localStorage, 'setItem').mockImplementation(() => { throw new Error('quota'); });

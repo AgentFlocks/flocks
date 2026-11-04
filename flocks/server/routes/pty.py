@@ -4,17 +4,27 @@ PTY routes - API endpoints for PTY session management
 Matches Flocks' ported src/server/routes/pty.ts
 """
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
+import os
+
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
-from flocks.server.auth import apply_auth_for_request, clear_auth_context
+from flocks.server.auth import apply_auth_for_request, clear_auth_context, require_admin
 from flocks.hooks.execution import execution_context_scope, execution_lifecycle_scope
 from flocks.identity import reset_current_subject, set_current_subject
 from flocks.utils.log import Log
-from flocks.pty.pty import Pty, PtyInfo, CreateInput, UpdateInput, PtyStatus
+from flocks.pty.pty import Pty, PtyInfo, PtyLimitExceeded, CreateInput, UpdateInput, PtyStatus
+from flocks.updater.deploy import declared_managed
 
 
 router = APIRouter()
+
+
+def interactive_pty_allowed() -> bool:
+    """Whether a managed install offers interactive terminals (``FLOCKS_PTY_INTERACTIVE``)."""
+    return os.environ.get("FLOCKS_PTY_INTERACTIVE", "").strip().lower() in {"1", "true", "yes", "allow"}
+
+
 log = Log.create(service="pty-routes")
 
 
@@ -52,7 +62,7 @@ def _to_response(info: PtyInfo) -> PtyInfoResponse:
     summary="List PTY sessions",
     description="Get a list of all active pseudo-terminal (PTY) sessions.",
 )
-async def list_sessions():
+async def list_sessions(_admin: object = Depends(require_admin)):
     """List all PTY sessions - operationId: pty.list"""
     sessions = Pty.list()
     return [_to_response(s) for s in sessions]
@@ -64,11 +74,19 @@ async def list_sessions():
     summary="Create PTY session",
     description="Create a new pseudo-terminal (PTY) session for running shell commands.",
 )
-async def create_session(input_data: CreateInput):
+async def create_session(input_data: CreateInput, _admin: object = Depends(require_admin)):
     """Create a new PTY session - operationId: pty.create"""
     try:
         info = await Pty.create(input_data)
         return _to_response(info)
+    except PtyLimitExceeded as e:
+        # Not a bad request: the caller has to close a session (or the operator
+        # raise FLOCKS_PTY_MAX_SESSIONS) before this can succeed.
+        log.warn("pty.create.limit", {"error": str(e)})
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(e)
+        )
     except Exception as e:
         log.error("pty.create.error", {"error": str(e)})
         raise HTTPException(
@@ -83,7 +101,7 @@ async def create_session(input_data: CreateInput):
     summary="Get PTY session",
     description="Retrieve detailed information about a specific PTY session.",
 )
-async def get_session(pty_id: str):
+async def get_session(pty_id: str, _admin: object = Depends(require_admin)):
     """Get PTY session info - operationId: pty.get"""
     info = Pty.get(pty_id)
     if not info:
@@ -100,7 +118,7 @@ async def get_session(pty_id: str):
     summary="Update PTY session",
     description="Update properties of an existing PTY session.",
 )
-async def update_session(pty_id: str, input_data: UpdateInput):
+async def update_session(pty_id: str, input_data: UpdateInput, _admin: object = Depends(require_admin)):
     """Update PTY session - operationId: pty.update"""
     info = await Pty.update(pty_id, input_data)
     if not info:
@@ -117,7 +135,7 @@ async def update_session(pty_id: str, input_data: UpdateInput):
     summary="Remove PTY session",
     description="Remove and terminate a specific PTY session.",
 )
-async def remove_session(pty_id: str):
+async def remove_session(pty_id: str, _admin: object = Depends(require_admin)):
     """Remove PTY session - operationId: pty.remove"""
     if not Pty.get(pty_id):
         raise HTTPException(
@@ -144,11 +162,19 @@ async def connect_session(websocket: WebSocket, pty_id: str):
         with execution_lifecycle_scope():
             try:
                 _blocked, token, _user = await apply_auth_for_request(websocket)
+                # PTYs are process-wide and have no per-user owner. Match the
+                # administrator boundary of create/update/delete before lookup
+                # or acceptance; login alone must not grant shell access.
+                require_admin(websocket)
             except HTTPException as exc:
                 close_code = (
                     4403 if exc.status_code == status.HTTP_403_FORBIDDEN else 4401
                 )
                 await websocket.close(code=close_code, reason=str(exc.detail))
+                return
+            except Exception as exc:
+                log.error("pty.ws.auth.error", {"error": str(exc)})
+                await websocket.close(code=1011, reason="Authentication unavailable")
                 return
 
             subject = getattr(websocket.state, "subject", None)
@@ -163,14 +189,26 @@ async def connect_session(websocket: WebSocket, pty_id: str):
                         await websocket.close(code=4004, reason="Session not found")
                         return
 
+                    # A managed install's tool policy cannot follow an interactive
+                    # terminal keystroke by keystroke: it is off there unless the
+                    # deployment turns it on, and then every input goes through the
+                    # tool lifecycle as ``pty.input`` -- checked and audited like
+                    # any command.  Elsewhere the administrator's terminal stays as
+                    # it is (authenticated above, not an execution action).
+                    managed = declared_managed()
+                    if managed and not interactive_pty_allowed():
+                        await websocket.close(
+                            code=4403,
+                            reason="interactive terminals are off on a managed install",
+                        )
+                        return
+
                     await websocket.accept()
 
-                    # HTTP/WebSocket ingress is authenticated separately and
-                    # must not enter the execution action lifecycle.
                     handlers = await Pty.connect(
                         pty_id,
                         websocket,
-                        use_action_lifecycle=False,
+                        use_action_lifecycle=managed,
                     )
                     if not handlers:
                         await websocket.close(code=4004, reason="Session not found")

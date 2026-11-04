@@ -12,6 +12,7 @@ from typing import Optional
 from flocks.config.config import Config
 from flocks.hub.models import InstalledPluginRecord, PluginType
 from flocks.project.instance import Instance
+from flocks.config.config import get_user_plugins_root
 
 
 _payload_cache = ContextVar("hub_payload_snapshot", default=None)
@@ -36,7 +37,7 @@ def _remember_tree(tree):
 
 
 def _user_plugins_root() -> Path:
-    return Path.home() / ".flocks" / "plugins"
+    return get_user_plugins_root()
 
 
 def _project_plugins_root() -> Path:

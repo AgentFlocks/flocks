@@ -37,13 +37,44 @@ function getStoredApiToken(): string | undefined {
   }
 }
 
+function hasAuthHeader(headers: Headers) {
+  return (
+    headers.has("authorization") ||
+    headers.has("x-flocks-api-token") ||
+    (headers.get("cookie") ?? "").includes("flocks_session=")
+  )
+}
+
+// Who the calls are made as, besides this machine's stored service token:
+// FLOCKS_SESSION is a login session (the user's own identity and permissions,
+// as in the WebUI); FLOCKS_API_TOKEN is a token given explicitly. Read on every
+// request, like the stored token, so a changed value applies at once.
+function envSession(): string | undefined {
+  if (typeof process === "undefined") return undefined
+  const value = process.env.FLOCKS_SESSION?.trim()
+  return value || undefined
+}
+
+function envApiToken(): string | undefined {
+  if (typeof process === "undefined") return undefined
+  const value = process.env.FLOCKS_API_TOKEN?.trim()
+  return value || undefined
+}
+
+function applyAuth(headers: Headers) {
+  const session = envSession()
+  if (session) {
+    headers.set("Cookie", `flocks_session=${session}`)
+    headers.delete("Authorization")
+    return
+  }
+  const apiToken = envApiToken() ?? getStoredApiToken() // secret-guard: allow 误报：从环境变量或本机存储读取
+  if (apiToken) headers.set("Authorization", `Bearer ${apiToken}`)
+}
+
 function withAuthHeaders(config?: Config & { directory?: string }) {
   const headers = new Headers(config?.headers as HeadersInit | undefined)
-  const apiToken = getStoredApiToken()
-  const hasAuth = headers.has("authorization") || headers.has("x-flocks-api-token")
-  if (apiToken && !hasAuth) {
-    headers.set("Authorization", `Bearer ${apiToken}`)
-  }
+  if (!hasAuthHeader(headers)) applyAuth(headers)
   return headers
 }
 
@@ -60,6 +91,7 @@ export function createFlocksClient(config?: Config & { directory?: string }) {
     }
   }
 
+  const callerHasAuth = hasAuthHeader(new Headers(config?.headers as HeadersInit | undefined))
   const headers = withAuthHeaders(config)
 
   if (config?.directory) {
@@ -68,5 +100,13 @@ export function createFlocksClient(config?: Config & { directory?: string }) {
   config = { ...config, headers: Object.fromEntries(headers.entries()) }
 
   const client = createClient(config)
+  if (!callerHasAuth) {
+    // token 轮换（.secret.json 被改写、mtime 变化）后新请求要带新 token：
+    // 创建 client 时只读一次会让运行中的 TUI 一直用旧 token 报 401，直到重启
+    client.interceptors.request.use((request) => {
+      applyAuth(request.headers)
+      return request
+    })
+  }
   return new FlocksClient({ client })
 }

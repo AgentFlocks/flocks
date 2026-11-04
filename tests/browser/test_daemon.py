@@ -219,7 +219,7 @@ def test_get_ws_url_skips_unreachable_profile_and_uses_next_candidate(tmp_path, 
     monkeypatch.delenv("BU_CDP_WS", raising=False)
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.setattr(daemon, "profile_dirs", lambda: [stale_profile, healthy_profile])
-    monkeypatch.setattr(daemon.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(daemon, "_open_direct", fake_urlopen)
 
     assert daemon.get_ws_url() == "ws://127.0.0.1:2222/devtools/browser/healthy"
 
@@ -248,7 +248,7 @@ def test_get_ws_url_skips_malformed_profile_and_uses_next_candidate(tmp_path, mo
     monkeypatch.delenv("BU_CDP_WS", raising=False)
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.setattr(daemon, "profile_dirs", lambda: [malformed_profile, healthy_profile])
-    monkeypatch.setattr(daemon.urllib.request, "urlopen", lambda _url, timeout: FakeHttpResponse())
+    monkeypatch.setattr(daemon, "_open_direct", lambda _url, timeout: FakeHttpResponse())
 
     assert daemon.get_ws_url() == "ws://127.0.0.1:2222/devtools/browser/healthy"
 
@@ -286,7 +286,7 @@ def test_get_ws_url_skips_open_non_cdp_port_and_uses_next_candidate(tmp_path, mo
     monkeypatch.delenv("BU_CDP_WS", raising=False)
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.setattr(daemon, "profile_dirs", lambda: [stale_profile, healthy_profile])
-    monkeypatch.setattr(daemon.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(daemon, "_open_direct", fake_urlopen)
 
     assert daemon.get_ws_url() == "ws://127.0.0.1:2222/devtools/browser/healthy"
 
@@ -305,7 +305,7 @@ def test_get_ws_url_uses_devtools_active_port_path_when_version_endpoint_returns
     monkeypatch.delenv("BU_CDP_WS", raising=False)
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.setattr(daemon, "profile_dirs", lambda: [profile])
-    monkeypatch.setattr(daemon.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(daemon, "_open_direct", fake_urlopen)
     monkeypatch.setattr(daemon.time, "sleep", lambda _seconds: pytest.fail("404 response must not be retried"))
 
     assert daemon.get_ws_url() == "ws://127.0.0.1:9222/devtools/browser/current"
@@ -334,7 +334,7 @@ def test_get_ws_url_uses_devtools_active_port_path_when_version_omits_websocket_
     monkeypatch.delenv("BU_CDP_WS", raising=False)
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.setattr(daemon, "profile_dirs", lambda: [profile])
-    monkeypatch.setattr(daemon.urllib.request, "urlopen", lambda _url, timeout: FakeHttpResponse())
+    monkeypatch.setattr(daemon, "_open_direct", lambda _url, timeout: FakeHttpResponse())
     monkeypatch.setattr(daemon.time, "sleep", lambda _seconds: pytest.fail("missing field must not be retried"))
 
     assert daemon.get_ws_url() == "ws://127.0.0.1:9222/devtools/browser/current"

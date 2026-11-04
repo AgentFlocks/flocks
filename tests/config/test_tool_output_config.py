@@ -155,12 +155,16 @@ class TestRuntimeLimitsHelpers:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         """When ``Config._cached_config`` is empty, the helper should still
-        pick up overrides by parsing ``~/.flocks/flocks.json`` synchronously.
-        This is the path exercised by CLI one-shot mode before
+        pick up overrides by parsing the real config file
+        (``<FLOCKS_ROOT>/config/flocks.json``, i.e. ``~/.flocks/config/flocks.json``)
+        synchronously. This is the path exercised by CLI one-shot mode before
         ``Config.get()`` has been awaited.
+
+        The fallback used to look at ``~/.flocks/flocks.json`` — a location
+        ``Config`` never reads — so overrides were silently ignored there.
         """
         fake_home = tmp_path / "home"
-        flocks_dir = fake_home / ".flocks"
+        flocks_dir = fake_home / ".flocks" / "config"
         flocks_dir.mkdir(parents=True)
         (flocks_dir / "flocks.json").write_text(
             json.dumps(
@@ -174,6 +178,8 @@ class TestRuntimeLimitsHelpers:
             encoding="utf-8",
         )
         monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.delenv("FLOCKS_ROOT", raising=False)
+        monkeypatch.delenv("FLOCKS_CONFIG_DIR", raising=False)
         # Force the cached path to miss so the JSON fallback runs.
         Config._cached_config = None
 

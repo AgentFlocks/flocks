@@ -11,24 +11,37 @@ import {
   Container,
   HardDrive,
   BellOff,
+  ShieldCheck,
 } from 'lucide-react';
 import NoticeCard, { NoticePrimaryAction } from './NoticeCard';
 import { useTranslation } from 'react-i18next';
-import { checkUpdate, applyUpdate, VersionInfo, UpdateProgress, type UpdateEdition } from '@/api/update';
+import {
+  checkUpdate,
+  applyUpdate,
+  IncompleteUpdateError,
+  UpdateStreamTimeoutError,
+  VersionInfo,
+  UpdateProgress,
+  DEFAULT_UPDATE_CHANNEL,
+  type UpgradeHandoffProgress,
+} from '@/api/update';
 import { checkRestartReadiness } from '@/utils/restartPolling';
+import UpgradeHandoffSteps, { useHandoffFailureMessage } from './UpgradeHandoffSteps';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
 
 // ------------------------------------------------------------------ //
 
 const HEALTH_POLL_INTERVAL = 2000;
 const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
+// Upper bound while the upgrade handoff keeps answering; each of its steps times out within 5 minutes.
+const HANDOFF_MAX_WAIT = 30 * 60 * 1000;
 
 export { UPDATE_DISMISSED_KEY };
 
 function formatUpdateVersion(version?: string | null): string {
   const raw = (version || '').trim();
   if (!raw) return '—';
-  return /^(pro-)?v/i.test(raw) ? raw : `v${raw}`;
+  return /^\d/.test(raw) ? `v${raw}` : raw;
 }
 
 function clampPercent(value?: number | null): number | null {
@@ -56,7 +69,8 @@ function formatBytes(value?: number | null): string {
 interface UpdateModalProps {
   initialInfo?: VersionInfo | null;
   forceInitialCheck?: boolean;
-  edition?: UpdateEdition;
+  /** Update channel to check and apply; unset means the default channel. */
+  channel?: string;
   canUpgrade?: boolean;
   onClose: () => void;
   onDismiss?: () => void;
@@ -66,7 +80,7 @@ interface UpdateModalProps {
 export default function UpdateModal({
   initialInfo,
   forceInitialCheck = false,
-  edition = 'flocks',
+  channel = DEFAULT_UPDATE_CHANNEL,
   canUpgrade = true,
   onClose,
   onDismiss,
@@ -77,16 +91,18 @@ export default function UpdateModal({
   const [info, setInfo] = useState<VersionInfo | null>(initialInfo ?? null);
   const [checking, setChecking] = useState(false);
   const [upgrading, setUpgrading] = useState(false);
+  // Keeps the progress card up after an upgrade that failed before any step
+  // arrived, so its error stays on screen.
+  const [upgradeAttempted, setUpgradeAttempted] = useState(false);
   const [steps, setSteps] = useState<UpdateProgress[]>([]);
   const [error, setError] = useState<string | null>(initialInfo?.error ?? null);
   const [restarting, setRestarting] = useState(false);
-  const modalTitle = edition === 'flockspro' ? t('proTitle') : t('title');
-  const currentDisplayVersion = edition === 'flockspro'
-    ? info?.current_bundle_version || null
-    : info?.current_version || null;
-  const latestDisplayVersion = edition === 'flockspro'
-    ? info?.latest_bundle_version || null
-    : info?.latest_version || null;
+  const [handoffProgress, setHandoffProgress] = useState<UpgradeHandoffProgress | null>(null);
+  const describeHandoffFailure = useHandoffFailureMessage();
+  const progressTokenRef = useRef<string | null>(null);
+  const modalTitle = t('title');
+  const currentDisplayVersion = info?.current_version || null;
+  const latestDisplayVersion = info?.latest_version || null;
   // useRef avoids stale closure: the `restarting` value inside async callbacks
   // always reflects the latest state even after re-renders.
   const restartingRef = useRef(false);
@@ -100,7 +116,7 @@ export default function UpdateModal({
     setChecking(true);
     setError(null);
     try {
-      const data = await checkUpdate(i18n.language, edition, force);
+      const data = await checkUpdate(i18n.language, channel, force);
       setInfo(data);
       if (data.error) setError(data.error);
     } catch (e: any) {
@@ -108,7 +124,7 @@ export default function UpdateModal({
     } finally {
       setChecking(false);
     }
-  }, [edition, i18n.language, t]);
+  }, [channel, i18n.language, t]);
 
   useEffect(() => {
     if (!initialInfo) {
@@ -117,8 +133,9 @@ export default function UpdateModal({
   }, [fetchVersion, forceInitialCheck, initialInfo]);
 
   const handleUpgrade = useCallback(async () => {
-    if (!info?.has_update) return;
+    if (!info?.has_update || !canUpgrade || info.update_allowed === false) return;
     setUpgrading(true);
+    setUpgradeAttempted(true);
     setSteps([]);
     setError(null);
 
@@ -136,10 +153,12 @@ export default function UpdateModal({
         });
         if (progress.stage === 'restarting') {
           restartFailureReasonRef.current = '';
+          progressTokenRef.current = progress.progress_token ?? null;
+          setHandoffProgress(null);
           setRestartingSync(true);
           pollUntilReady();
         }
-      }, i18n.language, edition);
+      }, i18n.language, channel);
       // The stream can close without an error or a restart (e.g. nothing to upgrade):
       // stop showing the upgrade as running.
       if (!restartingRef.current) {
@@ -149,25 +168,30 @@ export default function UpdateModal({
       // Use the ref to avoid stale closure — restarting may have been set
       // to true by the progress callback before this catch fires.
       if (!restartingRef.current) {
-        setError(e.message ?? t('upgradeFailed'));
+        setError(e instanceof IncompleteUpdateError ? t('streamInterrupted')
+          : e instanceof UpdateStreamTimeoutError ? t('streamTimeout') : e.message ?? t('upgradeFailed'));
         setUpgrading(false);
       } else if (e?.message) {
         restartFailureReasonRef.current = e.message;
       }
     }
-  }, [edition, i18n.language, info, t]);
+  }, [canUpgrade, channel, i18n.language, info, t]);
 
   const isBusy = upgrading || restarting;
-  const showProgressDialog = upgrading || restarting || steps.length > 0;
+  const showProgressDialog = upgradeAttempted || upgrading || restarting || steps.length > 0;
   const safeClose = () => {
     if (!isBusy) onClose();
   };
 
   const pollUntilReady = () => {
-    const start = Date.now();
+    // A handoff that answers is still working (a WebUI build alone can take minutes), so
+    // each answer restarts the wait for the service, up to HANDOFF_MAX_WAIT in total.
+    const restartStartedAt = Date.now();
+    let lastAnswerAt = restartStartedAt;
     let lastPollFailure = '';
     const poll = async () => {
-      if (Date.now() - start > HEALTH_POLL_TIMEOUT) {
+      const now = Date.now();
+      if (now - lastAnswerAt > HEALTH_POLL_TIMEOUT || now - restartStartedAt > HANDOFF_MAX_WAIT) {
         const reason = restartFailureReasonRef.current || lastPollFailure || t('restartUnknown');
         setError(t('restartTimeout', { reason }));
         setRestartingSync(false);
@@ -175,10 +199,21 @@ export default function UpdateModal({
         return;
       }
 
-      const readiness = await checkRestartReadiness();
+      const readiness = await checkRestartReadiness(progressTokenRef.current);
       if (readiness.ready) {
         window.location.reload();
         return;
+      }
+      const upgrade = readiness.upgrade;
+      if (upgrade) {
+        setHandoffProgress(upgrade);
+        if (upgrade.phase === 'failed') {
+          setError(describeHandoffFailure(upgrade));
+          setRestartingSync(false);
+          setUpgrading(false);
+          return;
+        }
+        lastAnswerAt = Date.now();
       }
       lastPollFailure = readiness.reason || lastPollFailure;
 
@@ -192,14 +227,13 @@ export default function UpdateModal({
   };
 
   const renderStep = (step: UpdateProgress, index: number) => {
-    const label = edition === 'flockspro' && step.stage === 'fetching'
-      ? t('stageLabels.fetchingPro')
-      : t(`stageLabels.${step.stage}`, { defaultValue: step.stage });
-    const isError = step.stage === 'error';
-    const isSpinning = step.stage === 'restarting';
+    const label = t(`stageLabels.${step.stage}`, { defaultValue: step.stage });
+    const restartFailed = step.stage === 'restarting' && handoffProgress?.phase === 'failed';
+    const isError = step.stage === 'error' || restartFailed;
+    const isSpinning = step.stage === 'restarting' && restarting && !restartFailed;
     const downloadPercent = clampPercent(step.percent);
     const hasDownloadProgress = step.stage === 'fetching' && typeof step.downloaded_bytes === 'number';
-    const detail = step.pro_component_filename || step.bundle_filename || step.message;
+    const detail = step.bundle_filename || step.message;
     return (
       <div key={index} className="flex items-start gap-2.5 py-1 text-sm">
         {isError
@@ -215,6 +249,7 @@ export default function UpdateModal({
               <span className="min-w-0 truncate text-xs text-gray-400">{detail}</span>
             )}
           </div>
+          {step.stage === 'restarting' && handoffProgress && <UpgradeHandoffSteps progress={handoffProgress} />}
           {hasDownloadProgress && (
             <div className="mt-1.5 max-w-xs space-y-1">
               <div className="text-xs text-gray-500">
@@ -253,7 +288,7 @@ export default function UpdateModal({
 
         <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
           <div
-            className="pointer-events-auto w-full max-w-md mx-4 bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden"
+            className="pointer-events-auto w-full max-w-md mx-4 max-h-[calc(100dvh-2rem)] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-gray-200"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
@@ -310,7 +345,7 @@ export default function UpdateModal({
               <div className="px-4 pb-3">
                 <div className="flex items-start gap-2 text-xs text-red-600 bg-red-50 rounded-lg p-2.5">
                   <XCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-                  <span>{error}</span>
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{error}</span>
                 </div>
               </div>
             )}
@@ -368,7 +403,18 @@ export default function UpdateModal({
             {/* The deploy-mode notice does not depend on has_update: an offline package
                 deployment usually cannot reach the update server at all, and the answer to
                 "how do I upgrade" is the .run either way. */}
-            {info?.update_allowed === false && (
+            {info?.update_allowed === false && info.deploy_mode === 'managed' && (
+              // Managed install: its supervisor owns package upgrades, so the
+              // Docker guidance would be misleading.
+              <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-700">
+                <div className="flex items-center gap-1.5 font-medium">
+                  <ShieldCheck className="w-4 h-4 flex-shrink-0" />
+                  {t('managedModeTitle')}
+                </div>
+                <p className="mt-1">{t('managedModeDesc')}</p>
+              </div>
+            )}
+            {info?.update_allowed === false && info.deploy_mode !== 'managed' && (
               <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-800">
                 <div className="flex items-center gap-1.5 font-medium">
                   {info.deploy_mode === 'offline' ? (

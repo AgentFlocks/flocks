@@ -37,6 +37,15 @@ Follow these steps to test the skill.
 
 
 @pytest.fixture(autouse=True)
+def _no_ambient_flocks_root(monkeypatch):
+    """Skill discovery follows FLOCKS_ROOT (default ~/.flocks); these tests isolate
+    the user-level root by patching ``os.path.expanduser``, so a root exported by
+    the developer's shell (a running instance's directory) must not leak in --
+    and must never receive test writes."""
+    monkeypatch.delenv("FLOCKS_ROOT", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def clear_cache():
     """Clear skill cache before each test"""
     Skill.clear_cache()
@@ -345,11 +354,14 @@ def _write_skill_md(path: Path, name: str, description: str = "A test skill") ->
 
 
 @pytest.mark.asyncio
-async def test_discover_user_source_for_global_plugins(tmp_path):
-    """Skills under ~/.flocks/plugins/skills/ must get source='user'."""
+async def test_discover_user_source_for_global_plugins(tmp_path, monkeypatch):
+    """Skills under <flocks root>/plugins/skills/ must get source='user'."""
     home = tmp_path
     global_plugins = home / ".flocks" / "plugins" / "skills" / "my-user-skill"
     _write_skill_md(global_plugins / "SKILL.md", "my-user-skill")
+    # The user-level root follows FLOCKS_ROOT (default ~/.flocks); a root exported
+    # by the developer's shell must not leak into this isolated tree.
+    monkeypatch.setenv("FLOCKS_ROOT", str(home / ".flocks"))
 
     with (
         patch("os.path.expanduser", return_value=str(home)),
@@ -479,11 +491,12 @@ async def test_discover_flocks_source_for_builtin_skills(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_discover_user_plugin_overrides_project_bundle(tmp_path):
+async def test_discover_user_plugin_overrides_project_bundle(tmp_path, monkeypatch):
     """User plugin skills must override project-bundled skills of the same name."""
     fake_home = tmp_path / "home"
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
+    monkeypatch.setenv("FLOCKS_ROOT", str(fake_home / ".flocks"))
 
     # Same name in both global and project plugins
     global_skill = fake_home / ".flocks" / "plugins" / "skills" / "shared-skill"
@@ -563,9 +576,11 @@ def test_watcher_start_stop_no_crash(tmp_path):
     assert watcher._observer is None
 
 
-def test_watcher_collects_only_skill_discovery_roots(tmp_path):
+def test_watcher_collects_only_skill_discovery_roots(tmp_path, monkeypatch):
     """Skill watcher should not recursively watch the entire .flocks tree."""
     from flocks.skill.skill import SkillFileWatcher
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "home" / ".flocks"))
 
     project_dir = tmp_path / "project"
     current_dir = project_dir / "src"

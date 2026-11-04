@@ -44,8 +44,14 @@ def rea_isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(runtime, "unpatched_java_home_candidates", runtime.java_home_candidates, raising=False)
     monkeypatch.setattr(runtime, "java_home_candidates", lambda: [os.environ["FLOCKS_REA_JAVA_HOME"]])
     monkeypatch.setattr(components, "_RETRY_DELAY_SECONDS", 0.0)
+    from flocks.storage.storage import Storage
+
     Config._global_config = None
     Config._cached_config = None
+    # REA keeps a value in the key-value store (the task reference salt): each
+    # test gets its own database under its data dir, as it gets its own HOME.
+    Storage._initialized = False
+    Storage._db_path = None
     original_workspace = WorkspaceManager._instance
     WorkspaceManager._instance = None
     runtime.reset_environment_cache()
@@ -55,6 +61,8 @@ def rea_isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     yield home
     ReaInstaller.reset_for_testing()
     ReaUninstaller.reset_for_testing()
+    Storage._initialized = False
+    Storage._db_path = None
     runtime.reset_environment_cache()
     Skill.clear_cache()
     WorkspaceManager._instance = original_workspace
@@ -151,6 +159,7 @@ class FakeMcp:
 
     def __init__(self):
         self.statuses: dict = {}
+        self.configs: dict = {}
         self.connects: list = []
         self.disconnects: list = []
         self.removed: list = []
@@ -168,6 +177,7 @@ class FakeMcp:
 
     async def connect(self, name, config):
         self.connects.append((name, config))
+        self.configs[name] = config
         if self.connect_ok:
             self.statuses[name] = self._info("connected", self.tools_count)
         else:
@@ -184,7 +194,18 @@ class FakeMcp:
     async def remove(self, name):
         self.removed.append(name)
         self.statuses.pop(name, None)
+        self.configs.pop(name, None)
         return True
+
+    def server_config(self, name):
+        if name in self.configs:
+            return self.configs[name]
+        if name in self.statuses:
+            from flocks.rea import runtime
+
+            # A status set by hand: as if this process connected the current registration at startup.
+            return runtime.current_mcp_config()
+        return None
 
     async def status(self):
         return dict(self.statuses)
@@ -201,4 +222,5 @@ def fake_mcp(monkeypatch: pytest.MonkeyPatch) -> FakeMcp:
     for name in ("connect", "disconnect", "remove", "status"):
         monkeypatch.setattr(MCP, name, getattr(fake, name))
     monkeypatch.setattr(MCP, "status_snapshot", fake.status_snapshot)
+    monkeypatch.setattr(MCP, "server_config", fake.server_config)
     return fake

@@ -55,9 +55,18 @@ def temp_dir():
     shutil.rmtree(temp_path, ignore_errors=True)
 
 
+async def _persist_tool_session(session_id: str) -> None:
+    from flocks.session.session import SessionInfo
+    from flocks.storage.storage import Storage
+
+    session = SessionInfo(id=session_id, project_id="tool-test", directory="/tmp")
+    await Storage.set(f"session:{session.project_id}:{session.id}", session)
+
+
 @pytest.fixture
-def tool_context():
+async def tool_context():
     """Create a tool context for testing"""
+    await _persist_tool_session("test-session-001")
     return ToolContext(
         session_id="test-session-001",
         message_id="test-message-001",
@@ -85,19 +94,11 @@ def tool_context_with_permission():
 
 @pytest.fixture
 async def clean_todo_storage():
-    """Clear persistent todo storage before and after todo tool tests."""
+    """Use the per-test PostgreSQL schema and retain its rows for inspection."""
     from flocks.storage.storage import Storage
 
     await Storage.init()
-    keys = await Storage.list_keys(prefix="todo:")
-    for key in keys:
-        await Storage.delete(key)
-
     yield
-
-    keys = await Storage.list_keys(prefix="todo:")
-    for key in keys:
-        await Storage.delete(key)
 
 
 @pytest.fixture
@@ -244,8 +245,8 @@ class TestReadTool:
         assert "not found" in result.error.lower()
     
     @pytest.mark.asyncio
-    async def test_read_permission_requested(self, tool_context_with_permission, test_files):
-        """Test that read requests permission"""
+    async def test_read_does_not_prompt_for_permission(self, tool_context_with_permission, test_files):
+        """Reads are governed by the filesystem control hooks, not by a prompt of the tool itself."""
         result = await ToolRegistry.execute(
             "read",
             ctx=tool_context_with_permission,
@@ -254,8 +255,7 @@ class TestReadTool:
         
         assert result.success
         permissions = tool_context_with_permission._permissions_requested
-        assert len(permissions) > 0
-        assert any(p.permission == "read" for p in permissions)
+        assert not any(p.permission == "read" for p in permissions)
 
 
 class TestWriteTool:
@@ -720,6 +720,7 @@ class TestTodoTools:
         from flocks.session.features.todo import Todo
 
         session_id = f"test-session-{uuid.uuid4()}"
+        await _persist_tool_session(session_id)
         ctx = ToolContext(
             session_id=session_id,
             message_id="test-message-persist",
@@ -743,6 +744,7 @@ class TestTodoTools:
         from flocks.session.features.todo import Todo
 
         session_id = f"test-session-{uuid.uuid4()}"
+        await _persist_tool_session(session_id)
         ctx = ToolContext(
             session_id=session_id,
             message_id="test-message-terminal",

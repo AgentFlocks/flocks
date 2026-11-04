@@ -199,6 +199,46 @@ export default function Page() {
 
 For Chinese pages, use Chinese copy inside the component, e.g. `{ready ? '页面已就绪' : '加载中...'}`.
 
+## Layout Inside the Host
+
+The page is rendered into the WebUI content area: below the fixed 56px top bar and to the right of the left navigation. The host adds no padding or scrollbar around a page under Home and clips anything taller than that area. The page is not in an iframe, so `100vh` and `position: fixed` refer to the whole browser window, not to the content area.
+
+- Give the root element `height: '100%'`; it then fills the content area exactly. Scroll inside panels (`minHeight: 0` plus `overflowY: 'auto'`). Never size the page with `100vh`, `h-screen` or `min-h-screen`: the page ends up 56px taller than the area, its bottom strip is cut off, and older Flocks versions may scroll the whole page up under the top bar.
+- Do not pin page parts (detail drawers, side panels, toolbars) with `position: fixed`. A fixed element at `top: 0` with a z-index below 50 sits under the top bar, which hides its first 56px. Give the root `position: 'relative'` and place the drawer with `position: 'absolute', top: 0, right: 0, bottom: 0`.
+- A dialog meant to cover the whole window may use `position: 'fixed', inset: 0, zIndex: 60`: above the top bar (50) and the navigation (40), below Flocks' own dialogs (70 and up).
+
+```tsx
+export default function Page() {
+  return (
+    <div style={{ position: 'relative', height: '100%', display: 'flex' }}>
+      <div style={{ width: 320, overflowY: 'auto' }}>{/* list */}</div>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        <div>{/* title and actions */}</div>
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>{/* details */}</div>
+      </div>
+      {/* a drawer: <div style={{ position: 'absolute', top: 0, right: 0, bottom: 0, width: 480 }}> */}
+    </div>
+  );
+}
+```
+
+## Light and Dark Theme
+
+The page follows the theme the user picked in Settings (light, dark, or follow system). The host switches it by putting the `dark` class on `<html>`; the page gets no other signal.
+
+- Common light Tailwind utilities that the WebUI itself uses (`bg-white`, `bg-slate-50`, `text-slate-900`, `border-slate-200`, …) are remapped in dark mode. Nothing else is: colours in `style={{ ... }}`, in a `<style>` string, in SVG `fill` / `stroke`, and arbitrary classes such as `bg-[#f5f7fb]` (the host never compiles those) stay exactly as written.
+- Give those colours a dark value. The host's theme tokens are RGB channels that already switch with the theme: `rgb(var(--ui-canvas))` for the page background, `--ui-surface` for cards and controls, `--ui-subtle` and `--ui-hover` for soft fills, `--ui-border`, `--ui-text`, `--ui-secondary`, `--ui-muted`.
+- A page with its own palette declares it as variables on its root and overrides them under `.dark`:
+
+```tsx
+const CSS = `
+.alert-board { --page-bg: #f6f7fb; --page-card: #fff; --page-text: #111827; --page-grid: #dbe3ef; background: var(--page-bg); color: var(--page-text); }
+.dark .alert-board { --page-bg: rgb(var(--ui-canvas)); --page-card: rgb(var(--ui-surface)); --page-text: rgb(var(--ui-text)); --page-grid: rgb(var(--ui-border)); }
+.alert-board .card { background: var(--page-card); }
+`;
+// In SVG use <line style={{ stroke: 'var(--page-grid)' }} /> instead of stroke="#dbe3ef".
+```
+
 ## Development Flow
 
 1. After scaffold creation, tell the user the nav label, route, and directory path.
@@ -274,11 +314,17 @@ routes:
     path: /ack
     handler: handlers.ack_alert
     timeoutMs: 10000
+
+# Secret ids the handlers read through ctx.secrets. Only these are readable;
+# asking for any other id raises an error.
+secrets:
+  - tdp_api_key
 ```
 
 Rules:
 
 - `path` must start with `/` and is always scoped under `/api/contracts/webui/pages/<pageId>/api`.
+- List every secret id a handler reads under `secrets`; `ctx.secrets.get()` refuses ids that are not listed.
 - `handler` points to a callable in `api/handlers.py`.
 - Keep route count small and page-specific.
 - Prefer read-only `GET` for dashboards; use `POST` for actions.
@@ -310,7 +356,7 @@ Implementation expectations for the runtime:
 - Route module loading is controlled by Flocks, not by arbitrary `include_router`.
 - Handlers run as trusted local plugins, not as a security sandbox.
 - Runtime enforces auth, page ID validation, route validation, request/response size limits, timeout, and structured error reporting.
-- Secrets are read server-side through `ctx.secrets` or `get_secret_manager()`; never return secrets to the page.
+- Secrets are read server-side through `ctx.secrets`, limited to the ids listed under `secrets` in `api/routes.yaml`; never return secrets to the page.
 - Watcher should monitor `api/routes.yaml` and `api/*.py`; API changes should hot-reload without restarting Flocks.
 - API runtime errors should be visible in page diagnostics (for example `dist/meta.json` or a dedicated API meta file).
 
@@ -481,6 +527,7 @@ Do not declare "done" until all are true:
 - Nav item visible under Home with expected title/icon/order.
 - Route works: `/contracts/webui/<pageId>`.
 - Frontend behavior matches user requirements.
+- Page stays readable with the theme switched to dark (see **Light and Dark Theme**).
 - If custom backend is used, page API routes work under `/api/contracts/webui/pages/<pageId>/api/*`.
 - Backup command provided.
 - Hide/delete options provided.
@@ -504,6 +551,8 @@ Rex should ask only the minimum needed in this order:
 | Blank / error page | Check `GET /api/contracts/webui/pages/<id>` → `build.error` |
 | Build failed | Fix TSX syntax; only import `react` and `@flocks/webui-contract-sdk` |
 | Changes not visible | Confirm file saved under `src/`; try `POST .../build` |
+| Top of the page or a drawer hidden under the top bar; bottom of the page cut off | Root uses `100vh` / `h-screen`, or the part uses `position: fixed`; follow **Layout Inside the Host** |
+| Page stays light, or its text is unreadable, in dark mode | Colours are hard-coded in `style`, a `<style>` string or SVG attributes; follow **Light and Dark Theme** |
 | 401 Unauthorized (WebUI) | User not logged in or session expired — re-login |
 | 401 Unauthorized (curl/script) | Add `Authorization: Bearer <server_api_token>`; run `flocks admin generate-api-token` if missing |
 | Page `api` calls fail | User must stay logged in; do not put API Token in page source |
@@ -518,6 +567,8 @@ Rex should ask only the minimum needed in this order:
 - Leave generated user page source, API handlers, assets, or drafts anywhere outside `~/.flocks/plugins/contracts/webui/<pageId>/`
 - Modify files under `dist/`
 - Import non-whitelisted npm packages into page code
+- Size the page with `100vh` / `h-screen` / `min-h-screen`, or pin page parts with `position: fixed` (see **Layout Inside the Host**)
+- Hard-code a light-only palette in `style`, `<style>` strings or SVG `fill` / `stroke` without a dark value (see **Light and Dark Theme**)
 - Skip `pageId` format validation
 - Hardcode `server_api_token` or other secrets in page source (`src/*.tsx`)
 - Ask users to paste API tokens into chat

@@ -61,7 +61,7 @@ export namespace McpOAuthCallback {
 
     const running = await isPortInUse()
     if (running) {
-      log.info("oauth callback server already running on another instance", { port: OAUTH_CALLBACK_PORT })
+      log.info("oauth callback server already running in another process", { port: OAUTH_CALLBACK_PORT })
       return
     }
 

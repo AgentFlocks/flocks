@@ -362,7 +362,7 @@ export function MCPServerDetailPanel({
         ) : (
           <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-100 table-fixed">
+              <table className="min-w-full divide-y divide-gray-100 table-fixed max-md:min-w-[36rem]">
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="w-[25%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableResourceName')}</th>
@@ -982,7 +982,7 @@ export function APIServiceDetailPanel({
         ) : (
           <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-100 table-fixed">
+              <table className="min-w-full divide-y divide-gray-100 table-fixed max-md:min-w-[36rem]">
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="w-[30%] px-5 py-2.5 text-left text-xs font-medium text-gray-500 uppercase">{t('detail.tableToolName')}</th>

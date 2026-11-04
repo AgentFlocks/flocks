@@ -11,9 +11,14 @@ Key features:
 """
 
 import asyncio
+import json
+import time
+import uuid
 from collections import OrderedDict
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Union
-from datetime import datetime
+from datetime import datetime, timezone
+from urllib.parse import quote
 from pydantic import BaseModel, Field, ConfigDict
 from enum import Enum
 
@@ -587,6 +592,11 @@ class Message:
     def get_parts_revision(cls, session_id: str, message_id: str) -> int:
         """Return the current in-memory parts revision for a message."""
         return int(cls._parts_revision_cache.get(session_id, {}).get(message_id, 0))
+
+    @classmethod
+    def get_parts_cache_version(cls, session_id: str, message_id: str) -> tuple[int, int, int]:
+        """What a prompt built from this message's parts was built from; it changes with them."""
+        return (*cls._cache_token(session_id), cls.get_parts_revision(session_id, message_id))
 
     @classmethod
     def _prepare_tool_output_cache(cls, part: PartType) -> PartType:
@@ -1218,7 +1228,12 @@ class Message:
     ) -> List[PartType]:
         """Best-effort deserialize a stored parts list without dropping the session."""
         parts: List[PartType] = []
-        for raw_part in parts_data:
+        for index, raw_part in enumerate(parts_data):
+            if isinstance(raw_part, dict) and not raw_part.get("id"):
+                # An exported or legacy part without an id gets the same one on
+                # every load, so a link or a client naming it keeps working.
+                raw_part = dict(raw_part, id="part_" + uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"flocks:{session_id}:{message_id}:{index}").hex)
             if not isinstance(raw_part, dict):
                 log.warn("message.part.skipped_non_dict", {
                     "session_id": session_id,
@@ -1341,54 +1356,70 @@ class Message:
         Existing legacy sessions keep writing the aggregated
         ``message_parts:<session_id>`` blob.  New sessions write each message's
         parts to ``message_parts:<session_id>:<message_id>`` so hot-path part
-        updates no longer rewrite the full session blob.
+        updates no longer rewrite the full session blob.  The serialized copies
+        change only once the write went through (_write_parts).
         """
         all_parts = cls._parts_cache.get(session_id, {})
         serialized = cls._parts_serialized_cache.setdefault(session_id, {})
         storage_format = cls._parts_storage_format.setdefault(session_id, "per_message")
 
         if storage_format == "legacy":
-            parts_key = cls._parts_blob_key(session_id)
             if message_id is not None:
-                serialized[message_id] = cls._serialize_message_parts(all_parts.get(message_id, []))
+                blob = dict(serialized)
+                blob[message_id] = cls._serialize_message_parts(all_parts.get(message_id, []))
             else:
-                serialized = {
+                blob = {
                     mid: cls._serialize_message_parts(mparts)
                     for mid, mparts in list(all_parts.items())
                 }
-                cls._parts_serialized_cache[session_id] = serialized
-            cls._parts_persisted_mids[session_id] = set(serialized.keys())
-            await Storage.set(parts_key, serialized, "message_parts")
+            await cls._write_parts([(cls._parts_blob_key(session_id), blob, "message_parts")])
+            cls._parts_serialized_cache[session_id] = blob
+            cls._parts_persisted_mids[session_id] = set(blob.keys())
             return
 
         if message_id is not None:
             serialized_one = cls._serialize_message_parts(all_parts.get(message_id, []))
-            serialized[message_id] = serialized_one
-            await Storage.set(
-                cls._parts_item_key(session_id, message_id),
-                serialized_one,
-                "message_part",
+            await cls._write_parts(
+                [(cls._parts_item_key(session_id, message_id), serialized_one, "message_part")],
             )
+            serialized[message_id] = serialized_one
             cls._parts_persisted_mids.setdefault(session_id, set()).add(message_id)
             return
 
         persisted_mids = cls._parts_persisted_mids.setdefault(session_id, set())
-        current_mids = set(all_parts.keys())
+        changed: Dict[str, List[Dict[str, Any]]] = {}
         for mid, mparts in list(all_parts.items()):
             serialized_one = cls._serialize_message_parts(mparts)
             if serialized.get(mid) != serialized_one or mid not in persisted_mids:
-                await Storage.set(
-                    cls._parts_item_key(session_id, mid),
-                    serialized_one,
-                    "message_part",
-                )
-            serialized[mid] = serialized_one
+                changed[mid] = serialized_one
+        stale = sorted(persisted_mids - set(all_parts.keys()))
+        await cls._write_parts(
+            [(cls._parts_item_key(session_id, mid), parts, "message_part") for mid, parts in changed.items()],
+            delete_keys=[cls._parts_item_key(session_id, mid) for mid in stale],
+        )
+        for mid, parts in changed.items():
+            serialized[mid] = parts
             persisted_mids.add(mid)
+        for mid in stale:
+            serialized.pop(mid, None)
+            persisted_mids.discard(mid)
 
-        for stale_mid in list(persisted_mids - current_mids):
-            await Storage.delete(cls._parts_item_key(session_id, stale_mid))
-            serialized.pop(stale_mid, None)
-            persisted_mids.discard(stale_mid)
+    @staticmethod
+    async def _write_parts(
+        set_entries: List[tuple],
+        *,
+        delete_keys: Sequence[str] = (),
+    ) -> None:
+        """Write parts in one transaction that also checks the uploads they newly name."""
+        if not set_entries and not delete_keys:
+            return
+        written = [(key, value) for key, value, _value_type in set_entries]
+        await Storage.mutate_many(
+            set_entries=set_entries,
+            delete_keys=list(delete_keys),
+            pre_transaction_hook=(lambda db: _refuse_removed_uploads(db, written)) if written else None,
+            invalidate_caches=False,
+        )
 
     @classmethod
     async def _persist_indexed_state(
@@ -1420,29 +1451,30 @@ class Message:
             session_id,
             "per_message",
         )
+        # Parts written, by key, for the upload check; the serialized copies
+        # change only once the write went through (below).
+        written: List[tuple] = []
         if include_parts:
             all_parts = cls._parts_cache.get(session_id, {})
-            serialized = cls._parts_serialized_cache.setdefault(session_id, {})
             if storage_format == "legacy":
-                serialized = {
+                blob = {
                     mid: cls._serialize_message_parts(message_parts)
                     for mid, message_parts in all_parts.items()
                 }
-                cls._parts_serialized_cache[session_id] = serialized
                 set_entries.append(
                     (
                         cls._parts_blob_key(session_id),
-                        serialized,
+                        blob,
                         "message_parts",
                     )
                 )
+                written.append((cls._parts_blob_key(session_id), blob))
             elif delete_message:
                 delete_keys.append(cls._parts_item_key(session_id, message_id))
             else:
                 serialized_one = cls._serialize_message_parts(
                     all_parts.get(message_id, [])
                 )
-                serialized[message_id] = serialized_one
                 set_entries.append(
                     (
                         cls._parts_item_key(session_id, message_id),
@@ -1450,6 +1482,7 @@ class Message:
                         "message_part",
                     )
                 )
+                written.append((cls._parts_item_key(session_id, message_id), serialized_one))
 
         from flocks.session.session import Session
         from flocks.storage.session_search import (
@@ -1490,11 +1523,16 @@ class Message:
         await Storage.mutate_many(
             set_entries=set_entries,
             delete_keys=delete_keys,
+            pre_transaction_hook=(lambda db: _refuse_removed_uploads(db, written)) if written else None,
             transaction_hook=_sync_search_index,
             invalidate_caches=False,
         )
 
         if include_parts:
+            if storage_format == "legacy":
+                cls._parts_serialized_cache[session_id] = blob
+            elif not delete_message:
+                cls._parts_serialized_cache.setdefault(session_id, {})[message_id] = serialized_one
             persisted_mids = cls._parts_persisted_mids.setdefault(
                 session_id,
                 set(),
@@ -1504,6 +1542,43 @@ class Message:
             else:
                 persisted_mids.add(message_id)
     
+    @classmethod
+    def _restore_parts(cls, session_id: str, message_id: str, before: List[PartType]) -> None:
+        """Put a message's cached parts back as they were before a change whose write failed.
+
+        Left in the cache, the change would ride along with the next write or
+        flush of this message after its caller was told it failed.
+        """
+        parts = cls._parts_cache.get(session_id, {}).get(message_id)
+        if parts is not None:
+            parts[:] = before
+            cls._touch_parts_revision(session_id, message_id)
+
+    @staticmethod
+    async def _require_claimed_agent(session_id: str, message: MessageInfo) -> None:
+        """Refuse another agent's new user message in a session dedicated to one agent.
+
+        The entry points check this already (``Session.run_active_write``);
+        this is the last word for any path that writes a user message.
+        """
+        from flocks.session.session import (
+            DEDICATED_AGENT_POLICY_METADATA_KEY,
+            Session,
+            SessionAgentMismatchError,
+        )
+
+        session = await Session.get_by_id_unfiltered(session_id)
+        metadata = getattr(session, "metadata", None)
+        policy = metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY) if isinstance(metadata, dict) else None
+        if (
+            isinstance(policy, dict)
+            and policy.get("version") == 1
+            and policy.get("agent") != getattr(message, "agent", None)
+        ):
+            raise SessionAgentMismatchError(
+                f"Session {session_id} is dedicated to agent {policy.get('agent')!r}"
+            )
+
     @classmethod
     async def create(
         cls,
@@ -1558,6 +1633,8 @@ class Message:
                     time=kwargs.pop("time"),
                     **kwargs
                 )
+                # Refused before the cache sees it.
+                await cls._require_claimed_agent(session_id, message)
             else:  # ASSISTANT or SYSTEM
                 # Provide required fields for AssistantMessageInfo
                 message = AssistantMessageInfo(
@@ -1605,17 +1682,33 @@ class Message:
             # Store part in cache
             if session_id not in cls._parts_cache:
                 cls._parts_cache[session_id] = {}
-            if message.id not in cls._parts_cache[session_id]:
+            had_parts = message.id in cls._parts_cache[session_id]
+            if not had_parts:
                 cls._parts_cache[session_id][message.id] = []
+            parts_before = list(cls._parts_cache[session_id][message.id])
             cls._parts_cache[session_id][message.id].append(part)
             
             # Persist to storage
-            await cls._persist_indexed_state(
-                session_id,
-                message.id,
-                include_messages=True,
-                include_parts=True,
-            )
+            try:
+                await cls._persist_indexed_state(
+                    session_id,
+                    message.id,
+                    include_messages=True,
+                    include_parts=True,
+                )
+            except BaseException:
+                # Left in the cache, the unwritten message would ride along
+                # with the next write of this session's message list.
+                messages = cls._messages_cache.get(session_id, [])
+                if messages and messages[-1] is message:
+                    messages.pop()
+                cls._rebuild_id_index(session_id)
+                if had_parts:
+                    cls._restore_parts(session_id, message.id, parts_before)
+                else:
+                    cls._parts_cache[session_id].pop(message.id, None)
+                    cls._parts_serialized_cache.get(session_id, {}).pop(message.id, None)
+                raise
             
             log.info("message.created", {
                 "id": message.id,
@@ -1695,6 +1788,13 @@ class Message:
         return list(parts)
     
     @classmethod
+    async def parts_many(cls, session_id: str, message_ids: List[str]) -> Dict[str, List[PartType]]:
+        """Read one coherent cache snapshot for prompt construction."""
+        await cls._ensure_cache(session_id)
+        cached = cls._parts_cache.get(session_id, {})
+        return {message_id: list(cached.get(message_id, [])) for message_id in message_ids}
+
+    @classmethod
     def _cap_tool_part_output(cls, part: PartType) -> PartType:
         """Apply hard size cap to ToolPart output before persistence.
 
@@ -1765,6 +1865,7 @@ class Message:
                 cls._parts_cache[session_id][message_id] = []
             
             parts_list = cls._parts_cache[session_id][message_id]
+            before = list(parts_list)
             
             updated = False
             for i, existing in enumerate(parts_list):
@@ -1799,11 +1900,15 @@ class Message:
                 cls._schedule_parts_flush(session_id, message_id=message_id)
             else:
                 cls._cancel_parts_flush_task(session_id)
-                await cls._persist_indexed_state(
-                    session_id,
-                    message_id,
-                    include_parts=True,
-                )
+                try:
+                    await cls._persist_indexed_state(
+                        session_id,
+                        message_id,
+                        include_parts=True,
+                    )
+                except BaseException:
+                    cls._restore_parts(session_id, message_id, before)
+                    raise
             
             log.debug("message.part.stored" if not updated else "message.part.updated", {
                 "session_id": session_id,
@@ -1850,17 +1955,28 @@ class Message:
 
             messages = cls._messages_cache[session_id]
             idx = cls._msg_id_index.get(session_id, {}).get(message_info.id)
+            previous = None
             if idx is not None and idx < len(messages) and messages[idx].id == message_info.id:
+                previous = messages[idx]
                 messages[idx] = message_info
             else:
                 messages.append(message_info)
                 cls._rebuild_id_index(session_id)
 
-            await cls._persist_indexed_state(
-                session_id,
-                message_info.id,
-                include_messages=True,
-            )
+            try:
+                await cls._persist_indexed_state(
+                    session_id,
+                    message_info.id,
+                    include_messages=True,
+                )
+            except BaseException:
+                # Not written: the cache keeps what storage has.
+                if previous is not None:
+                    messages[idx] = previous
+                elif messages and messages[-1] is message_info:
+                    messages.pop()
+                    cls._rebuild_id_index(session_id)
+                raise
 
         log.debug("message.upserted", {
             "id": message_info.id,
@@ -2013,6 +2129,63 @@ class Message:
         return result, has_more, next_before
 
     @classmethod
+    async def list_page_with_parts(
+        cls,
+        session_id: str,
+        *,
+        limit: int = 50,
+        before: Optional[str] = None,
+        after: Optional[str] = None,
+        around: Optional[str] = None,
+        include_archived: bool = True,
+    ) -> tuple[List[MessageWithParts], bool, Optional[str], bool, Optional[str]]:
+        """One page of messages in creation order, loading only that page's parts.
+
+        ``before`` / ``after`` page back or forward from a message, ``around``
+        centres a page on one; at most one of them.  A cursor naming no message
+        of the session raises LookupError.  Returns the page, whether older
+        messages exist and the id to page back from, and the same for newer.
+        """
+        page_size = max(1, min(int(limit), 200))
+        if sum(bool(cursor) for cursor in (before, after, around)) > 1:
+            raise ValueError("Only one message cursor may be supplied")
+
+        def order(message: MessageInfo) -> tuple[int, str]:
+            created = (message.time or {}).get("created") if isinstance(message.time, dict) else None
+            return int(created or 0), message.id
+
+        ordered = sorted(await cls.list(session_id, include_archived=True), key=order)
+        cursor_id = before or after or around
+        cursor = None
+        if cursor_id:
+            cursor = next((order(message) for message in ordered if message.id == cursor_id), None)
+            if cursor is None:
+                raise LookupError("Message cursor not found")
+        candidates = ordered if include_archived else [
+            message for message in ordered if not getattr(message, "compacted", None)
+        ]
+        if around:
+            left = [message for message in candidates if order(message) <= cursor][-max(1, page_size // 2):]
+            start = order(left[0]) if left else cursor
+            page = [message for message in candidates if order(message) >= start][:page_size]
+        elif before:
+            page = [message for message in candidates if order(message) < cursor][-page_size:]
+        elif after:
+            page = [message for message in candidates if order(message) > cursor][:page_size]
+        else:
+            page = candidates[-page_size:]
+        if not page:
+            return [], False, None, False, None
+        first, last = order(page[0]), order(page[-1])
+        older = any(order(message) < first for message in candidates)
+        newer = any(order(message) > last for message in candidates)
+        result = [
+            MessageWithParts(info=message, parts=await cls._load_parts_for_message(session_id, message.id))
+            for message in page
+        ]
+        return result, older, page[0].id if older else None, newer, page[-1].id if newer else None
+
+    @classmethod
     async def get_with_parts_lazy(cls, session_id: str, message_id: str) -> Optional[MessageWithParts]:
         """Get one message with parts without hydrating all session parts."""
         message = await cls.get(session_id, message_id)
@@ -2123,6 +2296,7 @@ class Message:
         selector: "Callable[[List[Dict[str, Any]], Optional[Any]], Iterable[str]]",
         *,
         is_busy: "Optional[Callable[[Any], bool]]" = None,
+        sweep_uploads: bool = True,
     ) -> int:
         """Delete the messages ``selector`` picks, decided under the session lock.
 
@@ -2135,6 +2309,11 @@ class Message:
         ``is_busy(session)`` is the authoritative "leave it alone" check (a
         running loop, or a non-idle status such as compacting/dreaming that has
         no live loop). Without it, only a running loop is treated as busy.
+
+        The uploads the deleted messages brought go once nothing names them any
+        more (UploadSweep): they are recorded as candidates with the delete,
+        and swept here -- or, ``sweep_uploads=False``, by the caller once it
+        deleted from all its sessions.
         """
         from flocks.session.session import Session
         from flocks.session.session_loop import SessionLoop
@@ -2157,7 +2336,9 @@ class Message:
                 target_ids = {mid for mid in selector(stored, session) if mid}
                 if not target_ids:
                     return 0
-                return await cls._delete_ids_locked(session_id, target_ids, stored=stored)
+                return await cls._delete_ids_locked(
+                    session_id, target_ids, stored=stored, sweep_uploads=sweep_uploads,
+                )
 
     @classmethod
     async def _delete_ids_locked(
@@ -2166,8 +2347,14 @@ class Message:
         targets: set[str],
         *,
         stored: Optional[List[Dict[str, Any]]] = None,
+        sweep_uploads: bool = True,
     ) -> int:
-        """Delete ``targets`` from a session, computing from storage. Lock held by caller."""
+        """Delete ``targets`` from a session, computing from storage. Lock held by caller.
+
+        The uploads the deleted messages named go with them once nothing else
+        names them: recorded as candidates in the deleting transaction, so none
+        is lost to a later failure, then swept (unless ``sweep_uploads`` is off).
+        """
         if stored is None:
             stored = await Storage.get(f"{cls._MESSAGE_PREFIX}:{session_id}")
         if not isinstance(stored, list):
@@ -2190,12 +2377,22 @@ class Message:
         if isinstance(stored_blob, dict):
             remaining_blob = {mid: parts for mid, parts in stored_blob.items() if mid not in targets}
             set_entries.append((cls._parts_blob_key(session_id), remaining_blob, "message_parts"))
+            removed_parts = [stored_blob.get(message_id) for message_id in removed_ids]
         else:
             delete_keys.extend(cls._parts_item_key(session_id, message_id) for message_id in removed_ids)
+            removed = set(removed_ids)
+            removed_parts = [
+                parts
+                for key, parts in await Storage.list_entries(prefix=cls._parts_item_prefix(session_id))
+                if key[len(cls._parts_item_prefix(session_id)):] in removed
+            ]
+        removed_uploads = cls._uploads_of(session_id, removed_parts)
 
         from flocks.storage.session_search import delete_message_document
 
         async def _delete_search_documents(db) -> None:
+            if removed_uploads:
+                await register_upload_candidates(db, session_id, removed_uploads)
             if not Storage.session_search_available():
                 return
             for message_id in removed_ids:
@@ -2222,8 +2419,30 @@ class Message:
         # idle sessions, which have no pending part flush.)
         cls._drop_cached_session(session_id, discard_lock=False)
 
+        if removed_uploads and sweep_uploads:
+            await UploadSweep(sessions=[session_id]).run()
         log.info("message.deleted_many", {"session_id": session_id, "count": len(removed_ids)})
         return len(removed_ids)
+
+    @staticmethod
+    def _uploads_of(session_id: str, parts_lists: Iterable[Any]) -> List[str]:
+        """The session's own uploads these parts point at (stored paths)."""
+        from flocks.session.files import session_upload_part_path, uploads_mirror
+
+        uploads: List[str] = []
+        mirror = uploads_mirror()
+        for parts in parts_lists:
+            for part in parts if isinstance(parts, list) else []:
+                if not isinstance(part, dict) or part.get("type") != "file":
+                    continue
+                path = session_upload_part_path(session_id, SimpleNamespace(url=part.get("url")))
+                if path is None:
+                    continue
+                try:
+                    uploads.append(mirror.relative(path))
+                except ValueError:
+                    continue
+        return list(dict.fromkeys(uploads))
 
     @classmethod
     async def archive(cls, session_id: str, message_id: str) -> bool:
@@ -2248,7 +2467,11 @@ class Message:
             for i, message in enumerate(messages):
                 if message.id == message_id:
                     messages[i] = message.model_copy(update={"compacted": True})
-                    await cls._persist_messages(session_id)
+                    try:
+                        await cls._persist_messages(session_id)
+                    except BaseException:
+                        messages[i] = message  # not written: keep what storage has
+                        raise
 
                     log.info("message.archived", {
                         "id": message_id,
@@ -2272,14 +2495,6 @@ class Message:
 
         async with _session_locks.get(session_id):
             count = len(cls._messages_cache.get(session_id, []))
-            cls._messages_cache[session_id] = []
-            cls._parts_cache[session_id] = {}
-            cls._parts_revision_cache[session_id] = {}
-            cls._parts_serialized_cache[session_id] = {}
-            cls._parts_persisted_mids[session_id] = set()
-            cls._parts_storage_format[session_id] = "per_message"
-            cls._parts_fully_loaded.add(session_id)
-            cls._cancel_parts_flush_task(session_id)
 
             from flocks.storage.session_search import delete_session_documents
 
@@ -2297,6 +2512,17 @@ class Message:
                 transaction_hook=_delete_search_index,
                 invalidate_caches=False,
             )
+            # Emptied only once storage is: after a failed write the next one
+            # would otherwise store an empty history over the real one.
+            cls._messages_cache[session_id] = []
+            cls._msg_id_index[session_id] = {}
+            cls._parts_cache[session_id] = {}
+            cls._parts_revision_cache[session_id] = {}
+            cls._parts_serialized_cache[session_id] = {}
+            cls._parts_persisted_mids[session_id] = set()
+            cls._parts_storage_format[session_id] = "per_message"
+            cls._parts_fully_loaded.add(session_id)
+            cls._cancel_parts_flush_task(session_id)
 
             log.info("messages.cleared", {
                 "session_id": session_id,
@@ -2356,21 +2582,22 @@ class Message:
         log.debug("message.cache.invalidated", {"session_id": session_id})
     
     @classmethod
-    async def get_text_content(cls, message: MessageInfo) -> str:
+    async def get_text_content(cls, message: MessageInfo, *, parts: Optional[List[PartType]] = None) -> str:
         """
         Extract text content from message
         
         Args:
             message: Message info
+            parts: The message's parts, when the caller already read them
             
         Returns:
             Combined text content
         """
-        # Get parts from cache
-        session_id = message.sessionID
-        message_id = message.id
-        await cls._ensure_cache(session_id)
-        parts = cls._parts_cache.get(session_id, {}).get(message_id, [])
+        if parts is None:
+            session_id = message.sessionID
+            message_id = message.id
+            await cls._ensure_cache(session_id)
+            parts = cls._parts_cache.get(session_id, {}).get(message_id, [])
         
         texts = []
         for part in parts:
@@ -2390,10 +2617,16 @@ class Message:
             List of messages in LLM format
         """
         result = []
-        
+        by_session: Dict[str, List[str]] = {}
+        for message in messages:
+            by_session.setdefault(message.sessionID, []).append(message.id)
+        snapshots = {}
+        for sid, ids in by_session.items():
+            snapshots[sid] = await cls.parts_many(sid, ids)
+
         for message in messages:
             # Simple text format for now
-            content = await cls.get_text_content(message)
+            content = await cls.get_text_content(message, parts=snapshots[message.sessionID][message.id])
             
             # role is already a string in Flocks format
             role = message.role.value if hasattr(message.role, 'value') else message.role
@@ -2640,11 +2873,15 @@ class Message:
             updated = message.model_copy(update=patch)
             messages[msg_index] = updated
             
-            await cls._persist_indexed_state(
-                session_id,
-                message_id,
-                include_messages=True,
-            )
+            try:
+                await cls._persist_indexed_state(
+                    session_id,
+                    message_id,
+                    include_messages=True,
+                )
+            except BaseException:
+                messages[msg_index] = message  # not written: keep what storage has
+                raise
             
             log.info("message.updated", {
                 "id": message_id,
@@ -2682,15 +2919,20 @@ class Message:
             if message_id not in cls._parts_cache[session_id]:
                 cls._parts_cache[session_id][message_id] = []
             
+            before = list(cls._parts_cache[session_id][message_id])
             cls._parts_cache[session_id][message_id].append(part)
             cls._touch_parts_revision(session_id, message_id)
             
             cls._cancel_parts_flush_task(session_id)
-            await cls._persist_indexed_state(
-                session_id,
-                message_id,
-                include_parts=True,
-            )
+            try:
+                await cls._persist_indexed_state(
+                    session_id,
+                    message_id,
+                    include_parts=True,
+                )
+            except BaseException:
+                cls._restore_parts(session_id, message_id, before)
+                raise
             
             log.info("message.part_added", {
                 "message_id": message_id,
@@ -2729,15 +2971,20 @@ class Message:
                     updated_part = cls.deserialize_part(part_data)
                     updated_part = cls._cap_tool_part_output(updated_part)
                     updated_part = cls._prepare_tool_output_cache(updated_part)
+                    before = list(parts)
                     parts[i] = updated_part
                     cls._touch_parts_revision(session_id, message_id)
                     
                     cls._cancel_parts_flush_task(session_id)
-                    await cls._persist_indexed_state(
-                        session_id,
-                        message_id,
-                        include_parts=True,
-                    )
+                    try:
+                        await cls._persist_indexed_state(
+                            session_id,
+                            message_id,
+                            include_parts=True,
+                        )
+                    except BaseException:
+                        cls._restore_parts(session_id, message_id, before)
+                        raise
                     
                     log.info("message.part_updated", {
                         "message_id": message_id,
@@ -2768,15 +3015,20 @@ class Message:
             
             for i, part in enumerate(parts):
                 if part.id == part_id:
+                    before = list(parts)
                     parts.pop(i)
                     cls._touch_parts_revision(session_id, message_id)
                     
                     cls._cancel_parts_flush_task(session_id)
-                    await cls._persist_indexed_state(
-                        session_id,
-                        message_id,
-                        include_parts=True,
-                    )
+                    try:
+                        await cls._persist_indexed_state(
+                            session_id,
+                            message_id,
+                            include_parts=True,
+                        )
+                    except BaseException:
+                        cls._restore_parts(session_id, message_id, before)
+                        raise
                     
                     log.info("message.part_removed", {
                         "message_id": message_id,
@@ -2914,3 +3166,203 @@ class MessageSync:
     def remove_part(cls, session_id: str, message_id: str, part_id: str) -> bool:
         """Sync version"""
         return cls._run_async(Message.remove_part(session_id, message_id, part_id))
+
+
+_CANDIDATE_PREFIX = "upload_candidate:"
+# Fragment conditions per query: SQLite caps an expression's depth.
+_FRAGMENTS_PER_QUERY = 100
+
+
+def _tokens(relative: str) -> set:
+    # The URL holds the path as written, or percent-encoded (``Path.as_uri``).
+    return {f"/{relative}", f"/{quote(relative)}"}
+
+
+def _named_uploads(parts: Any) -> set:
+    """The session uploads (stored paths) file parts point at, whichever session they belong to."""
+    from flocks.session.files import upload_relative_of
+
+    found = set()
+    for part in parts or ():
+        if isinstance(part, dict) and part.get("type") == "file":
+            relative = upload_relative_of(part.get("url"))
+            if relative:
+                found.add(relative)
+    return found
+
+
+class UploadRemoved(ValueError):
+    """A message names an upload that a sweep removed (UploadSweep)."""
+
+
+async def guard_new_upload_references(db: Any, stored: Any, merged: Any) -> None:
+    """In the transaction that stores parts: an upload they newly name must not be removed.
+
+    "Newly" against the parts stored now, read in this transaction.  The
+    removal takes a write transaction too (UploadSweep._remove), and SQLite
+    runs one writer at a time: either this write commits first and the
+    removal's last look sees the new reference, or the removal commits first
+    and this write finds its tombstone and is refused.
+    """
+    from flocks.session.files import REMOVED_UPLOAD_PREFIX
+
+    new = sorted(_named_uploads(merged) - _named_uploads(stored))
+    if not new:
+        return
+    keys = [REMOVED_UPLOAD_PREFIX + relative for relative in new]
+    async with db.execute(
+        f"SELECT key FROM storage WHERE key IN ({','.join('?' for _ in keys)}) LIMIT 1", keys,
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is not None:
+        raise UploadRemoved(f"the attachment {row[0][len(REMOVED_UPLOAD_PREFIX):]} was removed; upload it again")
+
+
+def _parts_in(value: Any) -> List[Any]:
+    """The parts a stored parts value holds: one message's list, or a legacy blob of them."""
+    if isinstance(value, dict):
+        return [part for parts in value.values() if isinstance(parts, list) for part in parts]
+    return value if isinstance(value, list) else []
+
+
+async def _refuse_removed_uploads(db: Any, written: Sequence[tuple]) -> None:
+    """In the transaction writing *written* ((key, parts value) pairs): no newly named upload is removed."""
+    new_parts = [part for _key, value in written for part in _parts_in(value)]
+    if not _named_uploads(new_parts):
+        return
+    keys = [key for key, _value in written]
+    async with db.execute(
+        f"SELECT value FROM storage WHERE key IN ({','.join('?' for _ in keys)})", keys,
+    ) as cursor:
+        stored = [part for (value,) in await cursor.fetchall() for part in _parts_in(json.loads(value))]
+    await guard_new_upload_references(db, stored, new_parts)
+
+
+async def register_upload_candidates(db: Any, session_id: str, relatives: Sequence[str]) -> None:
+    """In the caller's transaction (``Storage.mutate_many``): these uploads of *session_id* lost a message that named them."""
+    now = datetime.now(timezone.utc).isoformat()
+    record = json.dumps({"sessionID": session_id, "since": int(time.time() * 1000)})
+    await db.executemany(
+        "INSERT OR IGNORE INTO storage (key, value, type, created_at, updated_at) VALUES (?, ?, 'json', ?, ?)",
+        [(_CANDIDATE_PREFIX + relative, record, now, now) for relative in dict.fromkeys(relatives)],
+    )
+
+
+_sweep_lock: Optional[asyncio.Lock] = None
+_sweep_lock_loop: Any = None
+
+
+def _one_sweep_at_a_time() -> asyncio.Lock:
+    global _sweep_lock, _sweep_lock_loop
+    loop = asyncio.get_running_loop()
+    if _sweep_lock is None or _sweep_lock_loop is not loop:
+        _sweep_lock, _sweep_lock_loop = asyncio.Lock(), loop
+    return _sweep_lock
+
+
+class UploadSweep:
+    """Candidate uploads go once no message anywhere names them.
+
+    A retry sends the same upload again in a later message, and a fork or a
+    copy imported before they had uploads of their own still points at the
+    original's file -- from any session, related to it or not.  So whether a
+    candidate is still named is looked up across every session's message
+    parts, in one pass for all of them.  The ones that are not are removed in
+    one write transaction that looks again and gives them their tombstone;
+    their files go after it.  A write that newly names one of them
+    (guard_new_upload_references) either committed before, and is seen by the
+    second look, or comes after and is refused.  Anything that names the file
+    -- a part's URL or a tool's output -- keeps it; a candidate still named
+    stays one, for a later sweep.
+    """
+
+    def __init__(self, sessions: Optional[Iterable[str]] = None) -> None:
+        self._sessions = None if sessions is None else sorted(set(sessions))
+
+    async def run(self) -> int:
+        """Remove the candidates nothing names any more; returns how many."""
+        async with _one_sweep_at_a_time():
+            candidates = await self._candidates()
+            if not candidates:
+                return 0
+            named = await self._still_named(candidates)
+            unnamed = {relative: session_id for relative, session_id in candidates.items() if relative not in named}
+            if not unnamed:
+                return 0
+            return await self._remove(unnamed)
+
+    async def _candidates(self) -> Dict[str, str]:
+        found: Dict[str, str] = {}
+        for key, value in await Storage.list_entries(prefix=_CANDIDATE_PREFIX):
+            session_id = value.get("sessionID") if isinstance(value, dict) else None
+            if not session_id or (self._sessions is not None and session_id not in self._sessions):
+                continue
+            found[key[len(_CANDIDATE_PREFIX):]] = session_id
+        return found
+
+    @staticmethod
+    async def _named_in(candidates: Dict[str, str]) -> set:
+        """The candidates some message part names: only parts that mention their sessions are read."""
+        await Storage._ensure_init()
+        async with Storage.connect() as db:
+            return await UploadSweep._named_on(db, candidates)
+
+    @staticmethod
+    async def _named_on(db: Any, candidates: Dict[str, str]) -> set:
+        tokens = {relative: _tokens(relative) for relative in candidates}
+        fragments = sorted({f"/{session_id}/" for session_id in candidates.values()})
+        named: set = set()
+        for start in range(0, len(fragments), _FRAGMENTS_PER_QUERY):
+            chunk = fragments[start:start + _FRAGMENTS_PER_QUERY]
+            mentions = " OR ".join("instr(value, ?) > 0" for _ in chunk)
+            async with db.execute(
+                f"SELECT value FROM storage WHERE {Storage._like_prefix_clause()} AND ({mentions})",
+                (Storage._like_prefix_pattern(f"{Message._PARTS_PREFIX}:"), *chunk),
+            ) as cursor:
+                async for (body,) in cursor:
+                    for relative, forms in tokens.items():
+                        if relative not in named and any(form in body for form in forms):
+                            named.add(relative)
+        return named
+
+    async def _still_named(self, candidates: Dict[str, str]) -> set:
+        return await self._named_in(candidates)
+
+    async def _remove(self, unnamed: Dict[str, str]) -> int:
+        from flocks.session.files import REMOVED_UPLOAD_PREFIX, uploads_mirror
+
+        gone: List[str] = []
+
+        async def _tombstone(db) -> None:
+            # Looked at again in the write transaction: a message written
+            # meanwhile keeps its upload, one written after is refused.
+            named_now = await self._named_on(db, unnamed)
+            gone[:] = sorted(relative for relative in unnamed if relative not in named_now)
+            now = datetime.now(timezone.utc).isoformat()
+            await db.executemany(
+                "INSERT OR REPLACE INTO storage (key, value, type, created_at, updated_at) VALUES (?, ?, 'json', ?, ?)",
+                [
+                    (REMOVED_UPLOAD_PREFIX + relative, json.dumps({"sessionID": unnamed[relative]}), now, now)
+                    for relative in gone
+                ],
+            )
+            await db.executemany(
+                "DELETE FROM storage WHERE key = ?", [(_CANDIDATE_PREFIX + relative,) for relative in gone],
+            )
+
+        await Storage.mutate_many(transaction_hook=_tombstone)
+        if not gone:
+            return 0
+        mirror = uploads_mirror()
+        for relative in gone:
+            try:
+                local = mirror.local(relative)
+                if not mirror.is_linked(relative) and local.is_file():
+                    await asyncio.to_thread(local.unlink)
+            except Exception as exc:
+                # No message names it any more, nor can one again; a file left
+                # behind here is reported, not a reason to fail the delete that freed it.
+                log.warning("message.upload_forget_failed", {
+                    "session_id": unnamed.get(relative), "error_type": type(exc).__name__,
+                })
+        return len(gone)

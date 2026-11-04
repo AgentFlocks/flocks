@@ -767,8 +767,10 @@ class TestEstimateToolResultTokens:
 
 async def _assistant_answer_in_memory(session_id: str, answer: str):
     """An assistant message as the runner leaves it after streaming: the
-    answer is stored as a text part and also set as ``content`` on the
-    in-memory message (``Message.update`` does not persist ``content``)."""
+    answer is stored as a text part and the runner also passes it as
+    ``content`` to ``Message.update``. Messages are read back from
+    PostgreSQL, which keeps the text part only, so the answer must still be
+    counted exactly once."""
     from flocks.session.message import Message, MessageRole, TextPart
 
     msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
@@ -778,9 +780,7 @@ async def _assistant_answer_in_memory(session_id: str, answer: str):
         TextPart(sessionID=session_id, messageID=msg.id, text=answer),
     )
     await Message.update(session_id, msg.id, content=answer, finish="stop")
-    messages = await Message.list(session_id)
-    assert getattr(messages[-1], "content", "") == answer
-    return messages
+    return await Message.list(session_id)
 
 
 @pytest.mark.asyncio

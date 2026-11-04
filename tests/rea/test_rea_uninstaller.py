@@ -472,3 +472,105 @@ async def test_a_busy_conversation_that_cannot_be_read_counts_and_none_is_titled
     tasks = await uninstaller.sessions_using_rea()
     assert sorted((task["id"], task["unknown"]) for task in tasks) == [("ses_broken", True), ("ses_private", False)]
     assert all("title" not in task for task in tasks)
+
+
+@pytest.mark.asyncio
+async def test_an_uninstall_does_not_start_while_another_process_changes_rea(installed, no_tasks):
+    from flocks.rea import operation
+
+    other = operation.acquire("reainst_other")  # another Flocks process on this host runs an REA job
+    assert other is not None
+    try:
+        with pytest.raises(uninstaller.OperationRunning):
+            await ReaUninstaller.start(stop_tasks=True)
+    finally:
+        other.release()
+    assert runtime.installed_skill_dir().exists() and installed["mcp"].removed == []
+    assert service.install_state() == "ready"
+
+
+@pytest.mark.asyncio
+async def test_the_uninstall_holds_the_hosts_rea_lock_while_it_removes(installed, no_tasks, monkeypatch):
+    from flocks.mcp import MCP
+    from flocks.rea import operation
+
+    held = []
+    remove = MCP.remove
+
+    async def remove_and_check(name):
+        held.append(operation.acquire("reainst_other"))  # what another process's install would try now
+        return await remove(name)
+
+    monkeypatch.setattr(MCP, "remove", remove_and_check)
+    await ReaUninstaller.start(stop_tasks=False)
+    job = await ReaUninstaller.wait()
+    assert job.status == "succeeded" and held == [None]
+    assert operation.holder() is None
+
+
+@pytest.mark.asyncio
+async def test_conversations_another_process_runs_count_and_are_not_taken_for_stopped(monkeypatch):
+    import flocks.server.routes.session as session_routes
+    from flocks.session.core.status import SessionStatus
+    from flocks.session.message import Message
+    from flocks.session.session import Session
+
+    def message(role, message_id, *parts):
+        return SimpleNamespace(info=SimpleNamespace(role=role, id=message_id), parts=list(parts))
+
+    typed = SimpleNamespace(type="text", text="分析这个样本", synthetic=False)
+    remote = [message("user", "msg_1", typed), message("assistant", "msg_2", SimpleNamespace(type="tool", tool="rea_open_binary"))]
+
+    async def list_with_parts(session_id, include_archived=False):
+        return remote
+
+    async def elsewhere():
+        return ["ses_remote"]  # busy in another Flocks process, idle here
+
+    async def get_session(session_id):
+        return SimpleNamespace(title="分析样本 R")
+
+    async def abort(session_id):
+        return False  # stops it in this process only
+
+    async def owned(session_id):
+        return session_id == "ses_remote"  # its runner still holds the lease
+
+    monkeypatch.setattr(SessionStatus, "list", classmethod(lambda cls: {}))
+    monkeypatch.setattr(SessionStatus, "get", classmethod(lambda cls, sid: SimpleNamespace(type="idle")))
+    monkeypatch.setattr(Message, "list_with_parts", list_with_parts)
+    monkeypatch.setattr(Session, "get_by_id_unfiltered", get_session)
+    monkeypatch.setattr(uninstaller, "_sessions_running_elsewhere", elsewhere)
+    monkeypatch.setattr(uninstaller, "is_owned", owned)
+    monkeypatch.setattr(session_routes, "_abort_session_processing", abort)
+    monkeypatch.setattr(uninstaller, "_STOP_WAIT_SECONDS", 0.3)
+
+    # The install check cannot confirm or stop it from here.
+    assert await uninstaller.sessions_using_rea() == [
+        {"kind": "session", "id": "ses_remote", "turn": "msg_1:msg_2", "unknown": True},
+    ]
+    tasks = await uninstaller.related_tasks()
+    assert tasks == [{"kind": "session", "id": "ses_remote", "title": "分析样本 R"}]
+    assert await uninstaller._stop(tasks) == ["ses_remote"]
+
+
+@pytest.mark.asyncio
+async def test_a_busy_conversation_that_cannot_be_read_keeps_the_uninstall_from_starting(installed, monkeypatch):
+    from flocks.session.message import Message
+
+    async def busy():
+        return {"ses_unreadable": True}
+
+    async def unreadable(session_id, include_archived=False):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(uninstaller, "_busy_sessions", busy)
+    monkeypatch.setattr(Message, "list_with_parts", unreadable)
+
+    with pytest.raises(TasksRunning) as running:
+        await ReaUninstaller.start(stop_tasks=False)
+    assert running.value.tasks == [
+        {"kind": "session", "id": "ses_unreadable", "title": "ses_unreadable", "unknown": True},
+    ]
+    assert runtime.installed_skill_dir().exists()
+

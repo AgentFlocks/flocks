@@ -1,5 +1,6 @@
 import { render, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { Clipboard } from "@tui/util/clipboard"
+import { isRootSession } from "@tui/util/session-root"
 import { TextAttributes } from "@opentui/core"
 import { RouteProvider, useRoute } from "@tui/context/route"
 import { Switch, Match, createEffect, untrack, ErrorBoundary, createSignal, onMount, batch, Show, on } from "solid-js"
@@ -263,7 +264,7 @@ function App() {
     if (continued || sync.status === "loading" || !args.continue) return
     const match = sync.data.session
       .toSorted((a, b) => b.time.updated - a.time.updated)
-      .find((x) => x.parentID === undefined)?.id
+      .find(isRootSession)?.id
     if (match) {
       continued = true
       route.navigate({ type: "session", sessionID: match })
@@ -660,7 +661,7 @@ function App() {
     toast.show({
       variant: "info",
       title: "Update Available",
-      message: `Flocks v${evt.properties.version} is available. Run 'flocks upgrade' to update manually.`,
+      message: `Flocks v${evt.properties.version} is available. Run 'flocks update' to update manually.`,
       duration: 10000,
     })
   })

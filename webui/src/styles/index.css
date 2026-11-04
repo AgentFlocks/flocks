@@ -1,10 +1,50 @@
+@import './tokens.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --ui-canvas: 255 255 255;
+    --ui-sidebar: 255 255 255;
+    --ui-surface: 255 255 255;
+    --ui-subtle: 255 255 255;
+    --ui-hover: 241 245 249;
+    --ui-selected: 226 232 240;
+    --ui-text: 15 23 42;
+    --ui-secondary: 71 85 105;
+    --ui-muted: 100 116 139;
+    --ui-border: 226 232 240;
+    --ui-control: 100 116 139;
+    --ui-focus: 220 38 38;
+    --ui-action: 220 38 38;
+    --ui-on-action: 255 255 255;
+    --ui-shadow-input: 0 2px 10px rgb(15 23 42 / 0.04);
+    --ui-shadow-panel: 0 12px 32px rgb(15 23 42 / 0.16);
+  }
+
+  .dark {
+    --ui-canvas: 37 44 53;
+    --ui-sidebar: 33 40 48;
+    --ui-surface: 48 56 66;
+    --ui-subtle: 58 67 78;
+    --ui-hover: 64 73 85;
+    --ui-selected: 70 81 94;
+    --ui-text: 215 222 232;
+    --ui-secondary: 188 198 208;
+    --ui-muted: 161 172 184;
+    --ui-border: 74 85 99;
+    --ui-control: 125 135 148;
+    --ui-focus: 135 183 246;
+    --ui-action: 222 227 234;
+    --ui-on-action: 37 44 53;
+    --ui-shadow-input: 0 4px 20px rgb(0 0 0 / 0.1);
+    --ui-shadow-panel: 0 12px 36px rgb(0 0 0 / 0.24);
+  }
+
   body {
-    @apply bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100;
+    @apply bg-ui-canvas text-ui-text antialiased;
   }
 }
 
@@ -193,6 +233,43 @@
   }
 }
 
+/* Legacy light-mode text shares the UI reading tiers without recoloring
+   disabled controls, code/diff surfaces, or hover/focus/semantic colors. */
+:where(html:not(.dark)) :is(
+  .text-gray-300, .text-gray-400,
+  .text-zinc-300, .text-zinc-400,
+  .text-slate-300, .text-slate-400
+) {
+  --ui-legacy-text: var(--ui-muted);
+}
+
+:where(html:not(.dark)) :is(.text-gray-500, .text-zinc-500, .text-slate-500) {
+  --ui-legacy-text: var(--ui-secondary);
+}
+
+:where(html:not(.dark)) :is(
+  .text-gray-300, .text-gray-400, .text-gray-500,
+  .text-zinc-300, .text-zinc-400, .text-zinc-500,
+  .text-slate-300, .text-slate-400, .text-slate-500
+):not(:where(
+  :is(
+    :disabled, [aria-disabled="true"], pre, code, [data-theme="dark"],
+    .bg-gray-800, .bg-gray-900, .bg-zinc-950, .bg-slate-950, .bg-slate-900,
+    [class~="bg-slate-900/70"], [class~="bg-slate-900/80"], [class~="bg-slate-900/95"],
+    [class~="bg-[#252c35]"], [class~="bg-emerald-950/40"], [class~="bg-emerald-950/70"],
+    [class~="bg-red-950/45"], [class~="bg-red-950/70"]
+  ),
+  :is(
+    :disabled, [aria-disabled="true"], pre, code, [data-theme="dark"],
+    .bg-gray-800, .bg-gray-900, .bg-zinc-950, .bg-slate-950, .bg-slate-900,
+    [class~="bg-slate-900/70"], [class~="bg-slate-900/80"], [class~="bg-slate-900/95"],
+    [class~="bg-[#252c35]"], [class~="bg-emerald-950/40"], [class~="bg-emerald-950/70"],
+    [class~="bg-red-950/45"], [class~="bg-red-950/70"]
+  ) *
+)) {
+  color: rgb(var(--ui-legacy-text));
+}
+
 /* VS Code / GitHub Dark Dimmed inspired compatibility for existing Tailwind utilities. */
 .dark {
   --flocks-dark-accent: #539bf5;
@@ -300,10 +377,13 @@
   background-color: var(--flocks-dark-surface-raised);
 }
 
+/* Inverted controls (bg-zinc-950 + dark:bg-zinc-100 dark:text-zinc-950, e.g.
+   the selected preference option) keep their own light dark-mode fill: forcing
+   the surface here put their dark label on a dark background (1.7:1). */
 .dark .bg-zinc-900,
 .dark .bg-gray-900,
 .dark .bg-slate-900,
-.dark .bg-zinc-950,
+.dark .bg-zinc-950:not(.dark\:bg-zinc-100),
 .dark .bg-gray-950,
 .dark .bg-slate-950 {
   background-color: var(--flocks-dark-surface) !important;
@@ -1436,6 +1516,41 @@
   background-clip: padding-box;
 }
 
+/* Keep the history gutter stable; show its thumb only while scrolling. */
+.session-history-scrollbar,
+.dark .session-history-scrollbar {
+  --history-scrollbar-thumb: transparent;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--history-scrollbar-thumb) transparent !important;
+}
+
+.session-history-scrollbar[data-scrolling='true'] {
+  --history-scrollbar-thumb: rgb(var(--ui-muted) / 0.55);
+}
+
+.session-history-scrollbar::-webkit-scrollbar,
+.dark .session-history-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+  background: transparent;
+}
+
+.session-history-scrollbar::-webkit-scrollbar-track,
+.dark .session-history-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.session-history-scrollbar::-webkit-scrollbar-thumb,
+.session-history-scrollbar::-webkit-scrollbar-thumb:hover,
+.dark .session-history-scrollbar::-webkit-scrollbar-thumb,
+.dark .session-history-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--history-scrollbar-thumb);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
 .dark table {
   color: var(--flocks-dark-text-muted);
 }
@@ -1523,6 +1638,102 @@
   color: #6cb6ff;
 }
 
+/* Chat typography is scoped separately from document and file previews. */
+.prose.chat-prose {
+  --tw-prose-body: rgb(var(--ui-text));
+  --tw-prose-headings: rgb(var(--ui-text));
+  --tw-prose-bold: rgb(var(--ui-text));
+  --tw-prose-bullets: rgb(var(--ui-muted));
+  --tw-prose-counters: rgb(var(--ui-muted));
+  color: rgb(var(--ui-text));
+  font-size: inherit;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+.prose.chat-prose :is(h1, h2, h3, h4) {
+  margin-top: 1.5em;
+  margin-bottom: 0.6em;
+  color: rgb(var(--ui-text));
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.prose.chat-prose h1 { font-size: 1.375em; }
+.prose.chat-prose h2 { font-size: 1.125em; border: 0; padding-bottom: 0; }
+.prose.chat-prose h3, .prose.chat-prose h4 { font-size: 1em; }
+.prose.chat-prose > :first-child { margin-top: 0; }
+.prose.chat-prose > :last-child { margin-bottom: 0; }
+.prose.chat-prose p { margin: 0.75em 0; }
+.prose.chat-prose :is(ul, ol) { margin: 0.75em 0; padding-left: 1.5em; }
+.prose.chat-prose li { margin: 0.35em 0; }
+.prose.chat-prose li > :is(ul, ol) { margin-top: 0.35em; }
+.prose.chat-prose strong { color: inherit; font-weight: 600; }
+
+.prose.chat-prose .chat-inline-code {
+  border-radius: 5px;
+  background: rgb(var(--ui-subtle));
+  padding: 0.15em 0.35em;
+  color: rgb(var(--ui-secondary));
+  font-size: 0.875em;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
+.prose.chat-prose .chat-inline-code::before,
+.prose.chat-prose .chat-inline-code::after {
+  content: none;
+}
+
+.prose.chat-prose pre {
+  margin: 1em 0;
+  border-radius: 10px;
+  padding: 1em;
+  font-size: 0.875em;
+  line-height: 1.65;
+}
+
+.prose.chat-prose blockquote {
+  margin: 1em 0;
+  border-left: 2px solid rgb(var(--ui-control));
+  padding-left: 1em;
+  color: rgb(var(--ui-secondary));
+  font-style: normal;
+  font-weight: 400;
+}
+
+.prose.chat-prose .chat-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 1em 0;
+  border: 1px solid rgb(var(--ui-border));
+  border-radius: 10px;
+}
+
+.prose.chat-prose .chat-table-scroll:focus-visible {
+  outline: 2px solid rgb(var(--ui-focus));
+  outline-offset: 2px;
+}
+
+.prose.chat-prose table {
+  margin: 0;
+  font-size: 0.875em;
+  line-height: 1.6;
+  overflow-wrap: normal;
+}
+
+.prose.chat-prose thead { background: rgb(var(--ui-subtle)); }
+.prose.chat-prose :is(th, td) {
+  border: 0;
+  border-bottom: 1px solid rgb(var(--ui-border));
+  padding: 0.75em 1em;
+  color: rgb(var(--ui-text));
+  vertical-align: top;
+}
+.prose.chat-prose th { font-weight: 500; white-space: nowrap; }
+.prose.chat-prose tr:last-child td { border-bottom: 0; }
+.prose.chat-prose tr:nth-child(even) td { background: rgb(var(--ui-subtle) / 0.5); }
+
 .dark .react-flow,
 .dark .react-flow__renderer,
 .dark .react-flow__pane {
@@ -1581,4 +1792,117 @@
 
 .dark .device-room-actions-fade[data-selected='true'] {
   --device-room-action-fade: rgb(37 99 235 / 0.16);
+}
+
+/* v2 新增界面（dev 没有对应页面）用的组件类，取值来自 tokens.css，已对齐 dev 的配色 */
+@layer components {
+  .ui-btn {
+    @apply inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-control border border-line-control bg-surface px-3 text-sm font-medium text-fg transition-colors duration-fast;
+    min-height: var(--control-md);
+    line-height: 20px;
+    align-self: center;
+  }
+  .ui-btn:hover:not(:disabled, [aria-disabled='true']) { background-color: var(--bg-hover); }
+  .ui-btn:disabled, .ui-btn[aria-disabled='true'] {
+    @apply cursor-not-allowed border-line bg-disabled text-fg-disabled;
+  }
+  .ui-btn-primary { @apply border-transparent bg-action text-action-fg; }
+  /* Disabled keeps the disabled colours under the pointer (same specificity, later rule). */
+  .ui-btn-primary:hover:not(:disabled, [aria-disabled='true']) { background-color: var(--action-hover); }
+  .ui-btn-primary:active:not(:disabled, [aria-disabled='true']) { background-color: var(--action-pressed); }
+  .ui-btn-danger { @apply border-transparent bg-action-danger text-action-danger-fg; }
+  .ui-btn-danger:hover:not(:disabled, [aria-disabled='true']) { background-color: var(--action-pressed); }
+  .ui-btn-ghost { @apply border-transparent bg-transparent; }
+  .ui-btn-sm { min-height: var(--control-sm); @apply px-2.5 text-xs; }
+  .ui-btn-lg { min-height: var(--control-lg); @apply px-4; }
+  .ui-btn-icon { @apply px-0; width: var(--control-md); min-height: var(--control-md); }
+  .ui-btn-icon.ui-btn-sm { width: var(--control-sm); min-height: var(--control-sm); }
+
+  .ui-input {
+    @apply w-full rounded-control border border-line-control bg-surface px-3 text-sm text-fg placeholder:text-fg-placeholder;
+    height: var(--control-md);
+  }
+  .ui-input:disabled { @apply cursor-not-allowed border-line bg-disabled text-fg-disabled; }
+  .ui-input[aria-invalid='true'], .ui-input.is-error { border-color: var(--status-danger); }
+  .ui-textarea { @apply ui-input h-auto py-2; min-height: 84px; resize: vertical; }
+  .ui-select { @apply ui-input pr-8; }
+
+  .ui-label { @apply mb-2 block text-sm font-medium text-fg; }
+  .ui-label-required::after { content: ' *'; color: var(--status-danger); }
+  .ui-hint { @apply mt-1 text-xs text-fg-secondary; }
+  .ui-error { @apply mt-1 text-xs text-danger; }
+
+  .ui-card { @apply rounded-card border border-line bg-surface p-4; }
+  .ui-card-interactive { @apply ui-card cursor-pointer transition-colors duration-fast; }
+  .ui-card-interactive:hover { background-color: var(--bg-hover); }
+  .ui-card-selected { border-color: var(--focus-ring); box-shadow: inset 0 0 0 1px var(--focus-ring); background-color: var(--bg-selected); }
+
+  .ui-tag { @apply inline-flex items-center whitespace-nowrap rounded-tag bg-subtle px-2 text-xs leading-5 text-fg-secondary; }
+  .ui-badge { @apply inline-flex items-center gap-1 whitespace-nowrap rounded-tag px-2 text-xs leading-5; }
+  .ui-badge-success { @apply bg-success-soft text-success; }
+  .ui-badge-warning { @apply bg-warning-soft text-warning; }
+  .ui-badge-danger { @apply bg-danger-soft text-danger; }
+  .ui-badge-info { @apply bg-info-soft text-info; }
+  .ui-badge-ai { @apply bg-ai-soft text-ai; }
+  .ui-badge-data { @apply bg-data-soft text-data; }
+  .ui-badge-brand { @apply bg-brand-soft text-brand; }
+
+  /* 分段切换：外框 8px 圆角、内项 32px 高 */
+  .ui-segmented { @apply inline-flex gap-1 rounded-control bg-subtle p-1; }
+  .ui-segmented > * { @apply rounded-segment px-3 text-xs text-fg-secondary; min-height: var(--control-sm); }
+  .ui-segmented > [aria-selected='true'], .ui-segmented > [aria-pressed='true'] { @apply bg-selected font-semibold text-fg; }
+
+  /* 分类 Tab：44px 高，选中项底部 2px 品牌红 */
+  .ui-tabs { @apply flex gap-1 border-b border-line; }
+  .ui-tab { @apply border-b-2 border-transparent px-3 text-sm text-fg-secondary; min-height: 44px; }
+  .ui-tab[aria-selected='true'] { @apply border-action font-semibold text-fg; }
+
+  /* 开关：轨道 32×18，滑块 12 */
+  /* Same shape as dev's toggles (h-5 w-9, white thumb, slate-500 when on). */
+  .ui-switch { @apply relative inline-block shrink-0 rounded-full border-2 border-transparent bg-gray-200 transition-colors duration-150; width: 36px; height: 20px; }
+  .dark .ui-switch { background-color: var(--flocks-dark-surface-raised); }
+  .ui-switch::before { content: ''; @apply absolute left-0 top-0 rounded-full shadow transition-transform duration-150; width: 16px; height: 16px; background-color: var(--switch-thumb); }
+  .ui-switch[aria-checked='true'] { background-color: var(--switch-on); }
+  .ui-switch[aria-checked='true']::before { transform: translateX(16px); }
+  .ui-switch:disabled, .ui-switch[aria-disabled='true'] { @apply cursor-not-allowed opacity-50; }
+
+  /* 弹层：弹窗 560、抽屉 480，标题 20/28，内容内边距 24 */
+  .ui-overlay-backdrop { @apply fixed inset-0 z-50 bg-overlay-backdrop; }
+  .ui-modal { @apply w-full max-w-modal rounded-overlay border border-line bg-surface p-6 shadow-overlay; }
+  .ui-drawer { @apply flex h-full w-full max-w-drawer flex-col border-l border-line bg-surface shadow-overlay; }
+  .ui-overlay-title { @apply text-xl font-semibold text-fg; }
+  .ui-overlay-footer { @apply flex justify-end gap-2 pt-6; }
+
+  .ui-empty { @apply flex min-h-[200px] flex-col items-center justify-center text-center; }
+  .ui-empty-icon { @apply mb-3 flex h-8 w-8 items-center justify-center rounded-control bg-subtle text-fg-secondary; }
+
+  .ui-table { @apply w-full border-collapse text-sm; }
+  .ui-table th { @apply border-b border-line bg-subtle px-3 py-2 text-left text-xs font-medium text-fg-secondary; }
+  .ui-table td { @apply border-b border-line px-3 py-2 text-fg; }
+  .ui-table tbody tr:hover { background-color: var(--bg-hover); }
+
+  @media (max-width: 767px), (pointer: coarse) {
+    .ui-btn, .ui-btn-sm, .ui-btn-lg, .ui-btn-icon, .ui-btn-icon.ui-btn-sm,
+    .ui-input, .ui-select, .ui-tab, .ui-segmented > * {
+      min-height: var(--control-touch);
+    }
+    .ui-btn-icon, .ui-btn-icon.ui-btn-sm { min-width: var(--control-touch); }
+  }
+}
+
+/* Phones only: wide content scrolls sideways instead of being squeezed into a
+   one-character column or cut off at the screen edge. Desktop is untouched. */
+@media (max-width: 767px) {
+  /* Markdown tables (chat replies, previews, workflow docs). */
+  .prose table {
+    display: block;
+    width: max-content;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .prose th,
+  .prose td {
+    white-space: nowrap;
+  }
 }

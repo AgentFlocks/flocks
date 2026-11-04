@@ -32,6 +32,92 @@ def _normalize_requirements(reqs: Iterable[str]) -> List[str]:
     return sorted(out)
 
 
+def unsatisfied_requirements(requirements: Iterable[str]) -> List[str]:
+    """The requirements this interpreter does not already meet, as written.
+
+    One that cannot be parsed, names a URL, asks for extras whose dependencies are not all
+    installed, or whose version cannot be read or checked here counts as unmet: callers only
+    skip what is certainly installed.
+    """
+    from importlib import metadata
+
+    reqs = _normalize_requirements(requirements)
+    try:
+        from packaging.requirements import InvalidRequirement, Requirement
+        from packaging.utils import canonicalize_name
+    except ImportError:
+        return reqs
+
+    def met(req: Any, seen: set) -> bool:
+        if req.url:
+            return False
+        try:
+            installed = metadata.version(req.name)
+            if req.specifier and not req.specifier.contains(installed, prereleases=True):
+                return False
+        except Exception:  # not installed, or a version this cannot read
+            return False
+        extras = {canonicalize_name(extra) for extra in req.extras}
+        key = (canonicalize_name(req.name), frozenset(extras))
+        if not extras or key in seen:
+            return True
+        seen.add(key)
+        # An extra is met when what it adds to the package's own dependencies is.
+        try:
+            declared = [Requirement(dep) for dep in metadata.requires(req.name) or []]
+        except Exception:
+            return False
+        for dep in declared:
+            if dep.marker is None:
+                continue
+            try:
+                added = not dep.marker.evaluate({"extra": ""}) and any(
+                    dep.marker.evaluate({"extra": extra}) for extra in extras
+                )
+            except Exception:
+                return False
+            if added and not met(dep, seen):
+                return False
+        return True
+
+    missing: List[str] = []
+    for raw in reqs:
+        try:
+            req = Requirement(raw)
+        except InvalidRequirement:
+            missing.append(raw)
+            continue
+        if req.marker is not None:
+            try:
+                if not req.marker.evaluate({"extra": ""}):
+                    continue
+            except Exception:
+                pass
+        if not met(req, set()):
+            missing.append(raw)
+    return missing
+
+
+def refuse_unmet_when_managed(requirements: Iterable[str]) -> bool:
+    """In a managed install, whether ``requirements`` are already met; raises when they are not.
+
+    A managed install runs the release's own verified tree: packages installed into it are files
+    the supervisor refuses to start with (where the service account can write the tree at all),
+    so the release has to ship them. Returns False outside a managed install.
+    """
+    from flocks.updater.deploy import declared_managed
+
+    if not declared_managed():
+        return False
+    missing = unsatisfied_requirements(requirements)
+    if missing:
+        raise RuntimeError(
+            "A managed install does not install Python packages into its runtime; "
+            f"not provided by this release: {', '.join(missing)}"
+        )
+    return True
+
+
 def _is_cn_region(value: Optional[str]) -> bool:
     normalized = (value or "").strip().lower().replace("_", "-")
     return normalized in {"cn", "china", "zh", "zh-cn"}
@@ -110,6 +196,8 @@ class RequirementsInstaller:
     def ensure_installed(self, requirements: Sequence[str]) -> bool:
         reqs = _normalize_requirements(requirements)
         if not reqs:
+            return False
+        if refuse_unmet_when_managed(reqs):
             return False
         key = requirements_cache_key(reqs)
         marker = self._marker_path(key)

@@ -383,8 +383,12 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const [starting, setStarting] = useState(false);
   const [startStatus, setStartStatus] = useState<SectionStatus | null>(null);
   const [skipConfirm, setSkipConfirm] = useState<SkipTarget>(null);
+  const [draftSaving, setDraftSaving] = useState(false);
+  const [draftPrimaryProviderId, setDraftPrimaryProviderId] = useState<string | null>(null);
+  const [draftIntelRegion, setDraftIntelRegion] = useState<OnboardingRegion | null>(null);
 
   const [resolvedDefaultModel, setResolvedDefaultModel] = useState<ResolvedDefaultModel | null>(null);
+  const [resolvedPrimaryBaseUrl, setResolvedPrimaryBaseUrl] = useState('');
   const [primaryProviderId, setPrimaryProviderId] = useState<string>('threatbook-cn-llm');
   const [primaryModelId, setPrimaryModelId] = useState('');
   const [primaryApiKey, setPrimaryApiKey] = useState('');
@@ -411,26 +415,38 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const [intelSkipped, setIntelSkipped] = useState(false);
   const [intelRuntimeStatus, setIntelRuntimeStatus] = useState<ThreatBookIntelStatus | null>(null);
 
-  const refreshOnboardingStatus = useCallback(async (silent = false) => {
+  const refreshOnboardingStatus = useCallback(async (silent = false, section?: OnboardingStep) => {
     if (!silent) setStatusLoading(true);
     try {
       const res = await onboardingAPI.getStatus();
       const defaultModel = res.data.default_model;
-      setHasLLM(res.data.completed);
-      setPrimaryConfigured(Boolean(res.data.has_default_model));
-      setResolvedDefaultModel(defaultModel
-        ? {
-            providerId: defaultModel.provider_id,
-            modelId: defaultModel.model_id,
+      if (section !== 'intel') {
+        setHasLLM(res.data.completed);
+        setPrimaryConfigured(Boolean(res.data.has_default_model));
+        setResolvedDefaultModel(defaultModel
+          ? {
+              providerId: defaultModel.provider_id,
+              modelId: defaultModel.model_id,
+            }
+          : null);
+        if (defaultModel) {
+          setPrimaryProviderId(defaultModel.provider_id);
+          setPrimaryModelId(defaultModel.model_id);
+          setModelRegion(regionForProvider(defaultModel.provider_id));
+          setPrimaryEditing(false);
+          if (!isThreatBookProvider(defaultModel.provider_id)) {
+            try {
+              const credentials = await providerAPI.getCredentials(defaultModel.provider_id);
+              const baseUrl = credentials.data.base_url || '';
+              setPrimaryBaseUrl(baseUrl);
+              setResolvedPrimaryBaseUrl(baseUrl);
+            } catch {
+              // Keep the current endpoint if credential metadata is temporarily unavailable.
+            }
           }
-        : null);
-      if (defaultModel) {
-        setPrimaryProviderId(defaultModel.provider_id);
-        setPrimaryModelId(defaultModel.model_id);
-        setModelRegion(regionForProvider(defaultModel.provider_id));
-        setPrimaryEditing(false);
+        }
       }
-      if (res.data.threatbook_intel) {
+      if (section !== 'model' && res.data.threatbook_intel) {
         const intel = res.data.threatbook_intel;
         setIntelRuntimeStatus(intel);
         setIntelConfigured(intel.configured);
@@ -438,6 +454,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
         if (intel.configured) setIntelEditing(false);
       }
     } catch {
+      if (section === 'intel') return;
       try {
         const resolved = await defaultModelAPI.getResolved();
         setHasLLM(true);
@@ -461,14 +478,50 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   }, [defaultIntelRegion]);
 
   useEffect(() => {
-    refreshOnboardingStatus();
-    catalogAPI.list()
-      .then((res) => {
-        setCatalog(res.data.providers || []);
-      })
-      .catch(() => {
-        setCatalog([]);
-      });
+    let cancelled = false;
+    const load = async () => {
+      await Promise.all([
+        refreshOnboardingStatus(true),
+        catalogAPI.list()
+          .then((res) => setCatalog(res.data.providers || []))
+          .catch(() => setCatalog([])),
+      ]);
+      if (cancelled) return;
+      setStatusLoading(true);
+      try {
+        const { data } = await onboardingAPI.getDraft();
+        if (cancelled) return;
+        if (data.model) {
+          const draft = data.model;
+          setPrimaryProviderId(draft.use_threatbook_model
+            ? providerIdForRegion(draft.region)
+            : draft.third_party_llm?.provider_id || '');
+          setPrimaryModelId(draft.third_party_llm?.model_id || '');
+          setPrimaryBaseUrl(draft.third_party_llm?.base_url || '');
+          setModelRegion(draft.region);
+          setPrimaryEditing(true);
+          setPrimaryApiKey('');
+          if (data.model_has_key) {
+            setDraftPrimaryProviderId(draft.use_threatbook_model
+              ? providerIdForRegion(draft.region)
+              : draft.third_party_llm?.provider_id || null);
+          }
+          setPrimaryStatus({ tone: 'warning', message: t('onboarding.bootstrap.draftSaved') });
+        }
+        if (data.intel) {
+          setIntelRegion(data.intel.region);
+          setIntelEditing(true);
+          setIntelApiKey('');
+          if (data.intel_has_key) setDraftIntelRegion(data.intel.region);
+        }
+      } catch {
+        // Existing runtime configuration remains available if the draft cannot be loaded.
+      } finally {
+        if (!cancelled) setStatusLoading(false);
+      }
+    };
+    void load();
+    return () => { cancelled = true; };
   }, [refreshOnboardingStatus]);
 
   const primaryProviders = useMemo(() => {
@@ -497,6 +550,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     () => isThreatBookProvider(primaryProviderId),
     [primaryProviderId]
   );
+  const primaryProviderIsAzure = primaryProviderId === 'azure' || primaryProviderId === 'azure-openai';
 
   const selectedPrimaryProvider = useMemo(
     () => primaryProviders.find((provider) => provider.id === primaryProviderId) || null,
@@ -550,7 +604,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       return;
     }
     const hasModels = selectedPrimaryProvider.models.length > 0;
-    if (hasModels) {
+    if (hasModels && !primaryProviderIsAzure) {
       const firstModelId = selectedPrimaryProvider.models[0]?.id || '';
       if (!selectedPrimaryProvider.models.some((model) => model.id === primaryModelId)) {
         setPrimaryModelId(firstModelId);
@@ -567,6 +621,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     primaryConfigured,
     primaryModelId,
     primaryProviderIsThreatBook,
+    primaryProviderIsAzure,
     selectedPrimaryProvider,
   ]);
 
@@ -627,24 +682,27 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     return ['api', 'mcp'].filter((capability) => configuredCapabilities.has(capability));
   }, [intelRegion, intelRuntimeStatus?.service_matrix]);
 
-  const canSavePrimary = primaryProviderIsThreatBook
-    ? Boolean(primaryApiKey.trim())
-    : Boolean(primaryProviderId && primaryModelId && primaryApiKey.trim());
-  const canSaveIntel = Boolean(intelApiKey.trim());
   const showPrimaryConfiguredDetails = primaryConfigured && !primaryEditing;
   const showIntelConfiguredDetails = intelConfigured && !intelEditing;
   const hasStoredPrimaryKey = Boolean(
-    primaryConfigured
+    draftPrimaryProviderId === primaryProviderId
+    || (primaryConfigured
     && primaryEditing
     && resolvedDefaultModel
-    && primaryProviderId === resolvedDefaultModel.providerId,
+    && primaryProviderId === resolvedDefaultModel.providerId),
   );
   const hasStoredIntelKey = Boolean(
-    intelConfigured
+    draftIntelRegion === intelRegion
+    || (intelConfigured
     && intelEditing
     && intelRuntimeStatus?.region === intelRegion
-    && (intelRuntimeStatus.api_configured || intelRuntimeStatus.mcp_configured),
+    && (intelRuntimeStatus.api_configured || intelRuntimeStatus.mcp_configured)),
   );
+  const intelKeyServiceId = intelRuntimeStatus?.region === intelRegion
+    ? intelRuntimeStatus.api_service_id || THREATBOOK_REGION_CONFIG[intelRegion].apiServiceId
+    : THREATBOOK_REGION_CONFIG[intelRegion].apiServiceId;
+  const canSavePrimary = Boolean(primaryProviderId && (primaryApiKey.trim() || hasStoredPrimaryKey));
+  const canSaveIntel = Boolean(intelApiKey.trim() || hasStoredIntelKey);
 
   const buildPrimaryPayload = (): OnboardingRequest => {
     if (primaryProviderIsThreatBook) {
@@ -663,7 +721,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       third_party_llm: {
         provider_id: primaryProviderId,
         api_key: primaryApiKey.trim(),
-        model_id: primaryModelId,
+        model_id: primaryModelId.trim(),
         base_url: primaryBaseUrl.trim() || undefined,
         provider_name: selectedPrimaryProvider?.name,
       },
@@ -676,6 +734,41 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     threatbook_api_key: intelApiKey.trim() || null,
     threatbook_services_only: true,
   });
+
+  const saveCurrentDraft = async (dismissed?: boolean) => {
+    await onboardingAPI.saveDraft({
+      ...(!statusLoading && !showPrimaryConfiguredDetails ? { model: buildPrimaryPayload() } : {}),
+      ...(!statusLoading && !showIntelConfiguredDetails ? { intel: buildIntelPayload() } : {}),
+      ...(dismissed === undefined ? {} : { dismissed }),
+    });
+  };
+
+  const handleLeave = async (dismissed?: boolean, destination?: string) => {
+    setDraftSaving(true);
+    setStartStatus(null);
+    try {
+      await saveCurrentDraft(dismissed);
+      onClose();
+      if (destination) navigate(destination);
+    } catch (err: any) {
+      setStartStatus({ tone: 'error', message: err?.response?.data?.detail || t('onboarding.bootstrap.saveError') });
+    } finally {
+      setDraftSaving(false);
+    }
+  };
+
+  const handleNext = async () => {
+    setDraftSaving(true);
+    setStartStatus(null);
+    try {
+      if (!showPrimaryConfiguredDetails) await onboardingAPI.saveDraft({ model: buildPrimaryPayload() });
+      setStep('intel');
+    } catch (err: any) {
+      setStartStatus({ tone: 'error', message: err?.response?.data?.detail || t('onboarding.bootstrap.saveError') });
+    } finally {
+      setDraftSaving(false);
+    }
+  };
 
   const buildSuccessStatus = (
     validation: OnboardingValidateResponse,
@@ -704,6 +797,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       setPrimaryProviderId(providerId);
     }
     setPrimaryApiKey('');
+    setPrimaryModelId('');
     setPrimaryKeyVisible(false);
     setPrimaryKeyRevealed(false);
     setPrimaryBaseUrl('');
@@ -750,16 +844,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       try {
         setIntelKeyRevealing(true);
         setIntelStatus(null);
-        let apiKey: string | null | undefined;
-        if (intelRuntimeStatus?.api_configured) {
-          const serviceId = intelRuntimeStatus.api_service_id
-            || THREATBOOK_REGION_CONFIG[intelRegion].apiServiceId;
-          const response = await providerAPI.revealServiceCredentials(serviceId);
-          apiKey = response.data.api_key;
-        } else if (intelRuntimeStatus?.mcp_configured && intelRuntimeStatus.mcp_name) {
-          const response = await mcpAPI.revealCredentials(intelRuntimeStatus.mcp_name);
-          apiKey = response.data.api_key;
-        }
+        const apiKey = await revealStoredIntelKey();
         if (!apiKey) throw new Error(t('onboarding.bootstrap.revealIntelKeyError'));
         setIntelApiKey(apiKey);
         setIntelKeyRevealed(true);
@@ -777,15 +862,36 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     setIntelKeyVisible(true);
   };
 
+  const revealStoredIntelKey = async () => {
+    if (draftIntelRegion === intelRegion || intelRuntimeStatus?.api_configured) {
+      const response = await providerAPI.revealServiceCredentials(intelKeyServiceId);
+      return response.data.api_key;
+    }
+    if (intelRuntimeStatus?.region === intelRegion && intelRuntimeStatus.mcp_configured && intelRuntimeStatus.mcp_name) {
+      const response = await mcpAPI.revealCredentials(intelRuntimeStatus.mcp_name);
+      return response.data.api_key;
+    }
+    return undefined;
+  };
+
   const handleSavePrimary = async () => {
     if (!canSavePrimary) return;
 
     setPrimarySaving(true);
     setPrimaryStatus(null);
     setStartStatus(null);
+    let draftSaved = false;
 
     try {
       let payload = buildPrimaryPayload();
+      await onboardingAPI.saveDraft({ model: payload });
+      draftSaved = true;
+      if (hasStoredPrimaryKey && !primaryApiKey.trim()) {
+        const { data } = await providerAPI.revealCredentials(primaryProviderId);
+        if (!data.api_key) throw new Error(t('onboarding.bootstrap.revealModelKeyError'));
+        if (payload.use_threatbook_model) payload.threatbook_api_key = data.api_key;
+        else if (payload.third_party_llm) payload.third_party_llm.api_key = data.api_key;
+      }
       let validateRes = await onboardingAPI.validate(payload);
       let validateData = validateRes.data;
 
@@ -798,12 +904,16 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
           ...payload,
           region: validateData.suggested_region,
         };
+        await onboardingAPI.saveDraft({ model: payload });
         validateRes = await onboardingAPI.validate(payload);
         validateData = validateRes.data;
       }
 
       if (!validateData.can_apply) {
-        setPrimaryStatus(buildErrorStatus(validateData, t('onboarding.bootstrap.testFailed')));
+        setPrimaryStatus({
+          ...buildErrorStatus(validateData, t('onboarding.bootstrap.testFailed')),
+          message: `${t('onboarding.bootstrap.draftSavedTestFailed')} ${validateData.message || t('onboarding.bootstrap.testFailed')}`,
+        });
         return;
       }
 
@@ -828,6 +938,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       setPrimaryApiKey('');
       setPrimaryKeyVisible(false);
       setPrimaryKeyRevealed(false);
+      setDraftPrimaryProviderId(null);
       setModelSkipped(false);
       setHasLLM(true);
 
@@ -839,11 +950,11 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
           });
 
       setPrimaryStatus(buildSuccessStatus(validateData, applyData, successMessage));
-      refreshOnboardingStatus(true);
+      await refreshOnboardingStatus(true, 'model');
     } catch (err: any) {
       setPrimaryStatus({
         tone: 'error',
-        message: err?.response?.data?.message || err?.response?.data?.detail || err?.message || t('onboarding.bootstrap.saveError'),
+        message: `${draftSaved ? `${t('onboarding.bootstrap.draftSavedTestFailed')} ` : ''}${err?.response?.data?.message || err?.response?.data?.detail || err?.message || t('onboarding.bootstrap.saveError')}`,
       });
     } finally {
       setPrimarySaving(false);
@@ -859,6 +970,12 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
 
     try {
       let payload = buildIntelPayload();
+      await onboardingAPI.saveDraft({ intel: payload });
+      if (hasStoredIntelKey && !intelApiKey.trim()) {
+        const apiKey = await revealStoredIntelKey();
+        if (!apiKey) throw new Error(t('onboarding.bootstrap.revealIntelKeyError'));
+        payload.threatbook_api_key = apiKey;
+      }
       let validateRes = await onboardingAPI.validate(payload);
       let validateData = validateRes.data;
 
@@ -884,6 +1001,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       setIntelApiKey('');
       setIntelKeyVisible(false);
       setIntelKeyRevealed(false);
+      setDraftIntelRegion(null);
       setIntelSkipped(false);
       setIntelStatus(buildSuccessStatus(
         validateData,
@@ -892,7 +1010,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
           ? t('onboarding.bootstrap.intelChinaSuccess')
           : t('onboarding.bootstrap.intelGlobalSuccess'),
       ));
-      refreshOnboardingStatus(true);
+      await refreshOnboardingStatus(true, 'intel');
     } catch (err: any) {
       setIntelStatus({
         tone: 'error',
@@ -907,6 +1025,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     setStarting(true);
     setStartStatus(null);
     try {
+      await saveCurrentDraft();
       const session = await sessionApi.create({ title: t('onboarding.sessionTitle') });
       const initialMessage = t('onboarding.initialMessage');
       client.post(`/api/session/${session.id}/prompt_async`, {
@@ -924,17 +1043,17 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
     }
   };
 
-  const handleConfirmSkip = () => {
+  const handleConfirmSkip = async () => {
     if (skipConfirm === 'model') {
       setModelSkipped(true);
-      setStep('intel');
       setSkipConfirm(null);
+      await handleNext();
       return;
     }
     if (skipConfirm === 'intel') {
       setIntelSkipped(true);
       setSkipConfirm(null);
-      handleStart();
+      await handleStart();
     }
   };
 
@@ -943,6 +1062,19 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       <div>
         <h3 className="text-base font-semibold text-gray-900">{t('onboarding.bootstrap.modelPageTitle')}</h3>
         <p className="mt-2 text-sm leading-6 text-gray-600">{t('onboarding.bootstrap.modelPageDescription')}</p>
+      </div>
+
+      <div className="rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3">
+        <p className="text-sm leading-6 text-gray-600">{t('onboarding.bootstrap.modelListHint')}</p>
+        <button
+          type="button"
+          onClick={() => handleLeave(undefined, '/models')}
+          disabled={draftSaving || primarySaving || intelSaving || statusLoading}
+          className="mt-2 inline-flex items-center gap-1 text-sm font-medium text-blue-700 hover:underline disabled:opacity-50"
+        >
+          {t('onboarding.bootstrap.openModelList')}
+          <ArrowRight className="h-4 w-4" />
+        </button>
       </div>
 
       {statusLoading && (
@@ -1018,7 +1150,25 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
             </select>
           </div>
 
-          {!primaryProviderIsThreatBook && (selectedPrimaryProvider?.models?.length ? (
+          {!primaryProviderIsThreatBook && (primaryProviderIsAzure ? (
+            <div>
+              <label htmlFor="onboarding-azure-deployment" className="mb-1.5 block text-xs font-medium text-gray-600">
+                {t('onboarding.bootstrap.azureDeploymentName')}
+              </label>
+              <input
+                id="onboarding-azure-deployment"
+                type="text"
+                value={primaryModelId}
+                onChange={(event) => {
+                  setPrimaryModelId(event.target.value);
+                  setPrimaryStatus(null);
+                }}
+                placeholder={t('onboarding.bootstrap.azureDeploymentPlaceholder')}
+                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-400/50"
+              />
+              <p className="mt-1.5 text-xs leading-5 text-gray-500">{t('onboarding.bootstrap.azureDeploymentHint')}</p>
+            </div>
+          ) : selectedPrimaryProvider?.models?.length ? (
             <div>
               <label className="mb-1.5 block text-xs font-medium text-gray-600">
                 {t('onboarding.bootstrap.modelLabel')}
@@ -1077,7 +1227,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                   setPrimaryApiKey('');
                   setPrimaryKeyVisible(false);
                   setPrimaryKeyRevealed(false);
-                  setPrimaryBaseUrl('');
+                  setPrimaryBaseUrl(resolvedPrimaryBaseUrl);
                   setPrimaryStatus(null);
                   setPrimaryEditing(false);
                 }}
@@ -1337,12 +1487,12 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
   const footerPrimaryAction = step === 'model'
     ? {
         label: t('onboarding.bootstrap.nextStep'),
-        disabled: statusLoading || primarySaving || primaryKeyRevealing,
-        onClick: () => setStep('intel'),
+        disabled: statusLoading || primarySaving || primaryKeyRevealing || draftSaving,
+        onClick: handleNext,
       }
     : {
         label: starting ? t('onboarding.startingButton') : t('onboarding.startButton'),
-        disabled: starting || primarySaving || intelSaving || intelKeyRevealing,
+        disabled: starting || primarySaving || intelSaving || intelKeyRevealing || draftSaving,
         onClick: handleStart,
       };
 
@@ -1352,7 +1502,10 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
         <div className="relative px-6 pb-4 pt-5">
           <div className="absolute left-0 right-0 top-0 h-1 bg-green-500" />
           <button
-            onClick={onClose}
+            type="button"
+            aria-label={t('close')}
+            onClick={() => handleLeave()}
+            disabled={draftSaving || primarySaving || intelSaving || starting}
             className="absolute right-4 top-4 rounded-lg p-1 text-gray-300 transition-colors hover:bg-gray-100 hover:text-gray-500"
           >
             <X className="h-4 w-4" />
@@ -1374,24 +1527,32 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-4">
-          <div className="space-y-5">
+          <fieldset disabled={statusLoading || draftSaving || primarySaving || intelSaving || starting} className="min-w-0 space-y-5">
             {step === 'model' ? renderModelStep() : renderIntelStep()}
-          </div>
+          </fieldset>
         </div>
 
-        <div className="border-t border-gray-100 bg-gray-50/80 px-6 py-4">
+        <div className="border-t border-gray-100 bg-gray-50/80 px-6 py-4 max-md:px-4">
           {startStatus && (
             <div className="mb-3">
               <ValidationPanel t={t} status={startStatus} />
             </div>
           )}
 
-          <div className="flex items-center justify-end gap-3">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={() => handleLeave(true)}
+              disabled={draftSaving || primarySaving || intelSaving || starting || primaryKeyRevealing || intelKeyRevealing}
+              className="rounded-lg px-2 py-2 text-sm font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40"
+            >
+              {t('onboarding.bootstrap.dontShowAgain')}
+            </button>
+            <div className="flex flex-wrap items-center gap-2 max-md:justify-end max-md:[&>button]:whitespace-nowrap">
               <button
                 type="button"
                 onClick={() => setSkipConfirm(step)}
-                disabled={starting || primarySaving || intelSaving || primaryKeyRevealing || intelKeyRevealing || statusLoading}
+                disabled={draftSaving || starting || primarySaving || intelSaving || primaryKeyRevealing || intelKeyRevealing || statusLoading}
                 className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {t('onboarding.bootstrap.skipPage')}
@@ -1400,7 +1561,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                 <button
                   type="button"
                   onClick={() => setStep('model')}
-                  disabled={starting || primarySaving || intelSaving || primaryKeyRevealing || intelKeyRevealing}
+                  disabled={draftSaving || starting || primarySaving || intelSaving || primaryKeyRevealing || intelKeyRevealing}
                   className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {t('onboarding.bootstrap.previousStep')}

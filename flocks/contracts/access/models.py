@@ -166,6 +166,8 @@ class DriverResult:
     duplicates: int
     filtered_unique: int
     parse_errors: int = 0
+    filter_options: dict[str, list[str]] = field(default_factory=dict)
+    scope_total: int = 0
 
 
 @dataclass(frozen=True)
