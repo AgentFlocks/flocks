@@ -81,6 +81,25 @@ def _require_sqlite_recover() -> None:
         pytest.skip(f"sqlite3 .recover is unavailable: {reason}")
 
 
+def _use_defensive_sqlite_cli(tmp_path, monkeypatch) -> None:
+    """Make `sqlite3` open in defensive mode, as Ubuntu 26.04's CLI does by default."""
+    if os.name == "nt":
+        pytest.skip("the defensive CLI stand-in is a POSIX shell script")
+    sqlite_bin = shutil.which("sqlite3")
+    assert sqlite_bin is not None
+    wrapper_dir = tmp_path / "defensive-cli"
+    wrapper_dir.mkdir()
+    wrapper = wrapper_dir / "sqlite3"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'exec "{sqlite_bin}" -cmd ".output /dev/null" -cmd ".dbconfig defensive on" '
+        '-cmd ".output" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{wrapper_dir}{os.pathsep}{os.environ['PATH']}")
+
+
 @pytest.fixture
 async def storage():
     """Create a temporary storage for testing"""
@@ -523,6 +542,35 @@ def test_try_sqlite_recover_installs_recovered_db(tmp_path):
         assert recovered.execute("SELECT value FROM lost_and_found").fetchone() == (
             "business-data",
         )
+    finally:
+        recovered.close()
+
+
+def test_try_sqlite_recover_keeps_fts_table_on_defensive_cli(tmp_path, monkeypatch):
+    """A CLI that opens in defensive mode must still restore virtual tables."""
+    _require_sqlite_recover()
+    _use_defensive_sqlite_cli(tmp_path, monkeypatch)
+
+    quarantined = tmp_path / "flocks.db.corrupt.test"
+    target = tmp_path / "flocks.db"
+    conn = sqlite3.connect(quarantined)
+    try:
+        try:
+            conn.execute("CREATE VIRTUAL TABLE memory_fts USING fts5(text)")
+        except sqlite3.OperationalError:
+            pytest.skip("SQLite was built without FTS5")
+        conn.execute("INSERT INTO memory_fts(text) VALUES ('recoverable memory')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert Storage._try_sqlite_recover_sync(quarantined, target) == target
+    recovered = sqlite3.connect(target)
+    try:
+        assert recovered.execute(
+            "SELECT text FROM memory_fts WHERE memory_fts MATCH 'recoverable'"
+        ).fetchone() == ("recoverable memory",)
+        assert recovered.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     finally:
         recovered.close()
 
