@@ -10,6 +10,12 @@ export interface PreviousEdition {
   license_status: string | null;
   pro_enabled: boolean;
   expires_at: string | number | null;
+  max_admins?: number | null;
+  max_members?: number | null;
+  /** When the licence last heard from Console; when it came to this machine, if nothing since. */
+  last_sync_at?: string | number | null;
+  install_id?: string | null;
+  fingerprint?: string | null;
 }
 
 /** The last upgrade started from the page (flocks.updater.enterprise.read_state). */

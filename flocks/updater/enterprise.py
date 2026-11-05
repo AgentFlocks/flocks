@@ -20,6 +20,7 @@ open edition's offline package) is switched by root; the page gives the command.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import importlib.metadata
@@ -166,6 +167,38 @@ def previous_licence_id(status: dict[str, Any] | None = None) -> str:
     return str((status or {}).get("license_id") or "").strip()
 
 
+def _licence_file_terms() -> dict[str, Any]:
+    """What the licence file on this machine says of itself, for the page: a licence taken here has
+    no Python package to answer for it. Read, not verified; the enterprise core judges the licence
+    when the machine moves."""
+    for path in _previous_licence_files():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        terms = dict(data["payload"]) if isinstance(data.get("payload"), dict) else {}
+        for field in ("key", "token", "activate_key"):
+            parts = str(data.get(field) or "").split(".")
+            if len(parts) != 3:
+                continue
+            try:
+                claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if isinstance(claims, dict):
+                terms = {**claims, **terms}
+            break
+        return {
+            **terms,
+            "activated_at": data.get("activated_at"),
+            "install_id": data.get("install_id"),
+            "fingerprint": data.get("fingerprint"),
+        }
+    return {}
+
+
 def _previous_installed() -> bool:
     try:
         importlib.metadata.version(PREVIOUS_DISTRIBUTION)
@@ -198,12 +231,18 @@ def previous_edition() -> dict[str, Any] | None:
     licence_id = previous_licence_id(status)
     if version is None and not licence_id:
         return None
+    terms = _licence_file_terms() if licence_id else {}
     return {
         "version": version,
         "license_id": licence_id or None,
-        "license_status": status.get("license_status"),
+        "license_status": status.get("license_status") or terms.get("status"),
         "pro_enabled": bool(status.get("pro_enabled")),
-        "expires_at": status.get("expires_at"),
+        "expires_at": status.get("expires_at") or terms.get("expires_at"),
+        "max_admins": status.get("max_admins") or terms.get("max_admins"),
+        "max_members": status.get("max_members") or terms.get("max_members"),
+        "last_sync_at": status.get("last_sync_at") or status.get("last_heartbeat_ok_at") or terms.get("activated_at"),
+        "install_id": status.get("install_id") or terms.get("install_id"),
+        "fingerprint": status.get("fingerprint") or terms.get("fingerprint"),
     }
 
 
@@ -370,7 +409,8 @@ async def fetch_offer() -> InstallerOffer:
         raise EnterpriseUpgradeError("这台机器上没有企业版授权，Console 不知道该给哪个安装包；请联系我们获取授权和安装包")
     channel = (os.environ.get("FLOCKS_UPDATE_CHANNEL") or "flockspro").strip() or "flockspro"
     url = f"{base}/v1/manifest/latest?{urlencode({'channel': channel, 'license_id': licence_id})}"
-    headers = {"x-license-id": licence_id}
+    # Licence ids are free-form and a header only carries ASCII: the query above names it either way.
+    headers = {"x-license-id": licence_id} if licence_id.isascii() else {}
     token = await _console_session_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -383,7 +423,7 @@ async def fetch_offer() -> InstallerOffer:
         if token:
             # Console no longer takes this sign-in: forget it, so the page offers to sign in again.
             await _forget_console_session(token)
-        raise EnterpriseUpgradeError("Console 要先登录才给安装包：点「登录 Console」后再检查")
+        raise EnterpriseUpgradeError("Console 要先登录才给安装包：点「云账号登录」后再检查")
     if resp.status_code == 403:
         # A sign-in Console takes, refused this (a licence of another account, say): it stays.
         raise EnterpriseUpgradeError(f"Console 不给这台机器安装包：{_detail(resp) or 'HTTP 403'}")

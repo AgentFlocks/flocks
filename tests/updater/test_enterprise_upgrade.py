@@ -30,6 +30,7 @@ Case list (编号 | 场景):
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -143,6 +144,83 @@ async def test_eu1b_the_page_and_console_go_by_one_licence(machine: Path, monkey
     assert enterprise.previous_edition()["license_id"] == "lic-status-2"
     await enterprise.fetch_offer()
     assert seen[-1].headers["x-license-id"] == "lic-status-2"
+
+
+@pytest.mark.parametrize("licence_id", ["ubuntu-nn", "zj6.29-centos9", "new-pro-7.1zj", "lic_ee11597f36ec4e4b", "Ubuntu 22/测试 授权"])
+async def test_eu1c_a_licence_id_is_whatever_console_issued(machine: Path, monkeypatch: pytest.MonkeyPatch, licence_id: str):
+    """Old licences have no fixed format: the page and Console go by the id as it is, whatever it looks like."""
+    seen = console(monkeypatch, lambda request: httpx.Response(200, json=manifest_with(b"x")))
+    monkeypatch.setattr(enterprise, "_console_session_token", _token("session-token"))
+    write_licence(machine, licence_id)
+
+    assert enterprise.previous_edition()["license_id"] == licence_id
+    offer = await enterprise.fetch_offer()
+
+    assert offer.version == "2026.11.5"
+    assert seen[-1].url.params["license_id"] == licence_id
+    # A header carries only ASCII: an id that is not goes by the query alone, instead of failing the request.
+    if licence_id.isascii():
+        assert seen[-1].headers["x-license-id"] == licence_id
+    else:
+        assert "x-license-id" not in seen[-1].headers
+
+
+def _unsigned_token(claims: dict) -> str:
+    def part(value: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+
+    return f"{part({'alg': 'ES256', 'kid': 'flocks-license-test'})}.{part(claims)}.c2ln"
+
+
+def test_eu1d_the_page_reads_the_terms_of_a_licence_with_no_package_to_answer_for_it(machine: Path):
+    """A licence taken here keeps an empty payload beside its token (enterprise_application.take)."""
+    path = machine / "flockspro" / "license.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "license_id": "ubuntu-nn",
+        "key": _unsigned_token({"license_id": "ubuntu-nn", "status": "commercial", "expires_at": 1825321652, "max_admins": 3, "max_members": 20}),
+        "payload": {},
+        "activated_at": 1793811952,
+        "install_id": "inst-1",
+        "fingerprint": "fp-1",
+    }))
+
+    previous = enterprise.previous_edition()
+
+    assert previous == {
+        "version": None, "license_id": "ubuntu-nn", "license_status": "commercial", "pro_enabled": False,
+        "expires_at": 1825321652, "max_admins": 3, "max_members": 20, "last_sync_at": 1793811952,
+        "install_id": "inst-1", "fingerprint": "fp-1",
+    }
+
+
+@pytest.mark.parametrize("content", ["not json", "[]", json.dumps({"license_id": "x", "key": "only.two"}), json.dumps({"license_id": "x", "key": "a.%%%.c"})])
+def test_eu1e_a_licence_file_that_does_not_read_leaves_its_terms_out(machine: Path, content: str):
+    path = machine / "flockspro" / "license.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(content)
+
+    previous = enterprise.previous_edition()
+
+    if previous is not None:  # the file named an id, and nothing more that reads
+        assert previous["license_id"] == "x" and previous["license_status"] is None and previous["expires_at"] is None
+
+
+def test_eu1f_the_python_packages_word_on_its_licence_comes_first(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    """What an old package reports (/api/flockspro/license/status on 2026.10.19) fills the licence card."""
+    write_licence(machine, "zj6.29-centos9")
+    monkeypatch.setattr(enterprise, "PREVIOUS_DISTRIBUTION", "pytest")
+    monkeypatch.setattr(enterprise, "_previous_status", lambda: {
+        "license_id": "zj6.29-centos9", "license_status": "poc", "pro_enabled": True, "expires_at": 1825321652,
+        "max_admins": 5, "max_members": 50, "fingerprint": "fp-old", "install_id": "inst-old", "last_heartbeat_ok_at": 1793811952,
+    })
+
+    previous = enterprise.previous_edition()
+
+    assert previous["license_id"] == "zj6.29-centos9" and previous["license_status"] == "poc"
+    assert (previous["max_admins"], previous["max_members"]) == (5, 50)
+    assert previous["last_sync_at"] == 1793811952
+    assert (previous["install_id"], previous["fingerprint"]) == ("inst-old", "fp-old")
 
 
 def test_eu2_an_account_that_cannot_write_the_default_directory_gets_its_own(machine: Path, monkeypatch: pytest.MonkeyPatch) -> None:

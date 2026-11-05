@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { FormEvent } from 'react';
-import { ClipboardList, KeyRound, Loader2, LogIn, Undo2 } from 'lucide-react';
+import type { FormEvent, ReactNode } from 'react';
+import { KeyRound, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import type { ConsoleLoginSessionStatus } from '@/api/auth';
 import {
   enterpriseUpgradeApi,
   type EnterpriseSituation,
@@ -11,11 +10,13 @@ import {
   type LicenceApplications,
 } from '@/api/enterpriseUpgrade';
 import { extractErrorMessage } from '@/utils/error';
-import { CARD, ERROR, INPUT, LABEL, NOTE, PRIMARY, SECONDARY, formatDate } from './styles';
+import MachineHeading from './MachineHeading';
+import { CARD, DANGER, ERROR, GO, INPUT, NOTE, PRIMARY, SECONDARY, formatDateTime } from './styles';
 
 // The application for a licence, on a machine that has none (flocks/updater/enterprise_application.py):
 // the form goes to Console for review; an approved licence is taken here, and the page moves on to
-// the upgrade as for a machine that had the Python enterprise package.
+// the upgrade as for a machine that had the Python enterprise package. The form opens in a dialog and
+// the application shows as the current request, as on the enterprise edition's page.
 
 /** Waiting for review, or approved and not taken: no second application meanwhile. */
 const OPEN = new Set(['pending', 'reviewing', 'approved']);
@@ -52,31 +53,30 @@ function check(form: LicenceApplicationForm): Partial<Record<Field, string>> {
   return problems;
 }
 
-const CHIP: Record<string, string> = {
-  pending: 'bg-amber-100 text-amber-800',
-  reviewing: 'bg-amber-100 text-amber-800',
-  approved: 'bg-green-100 text-green-700',
-  activated: 'bg-green-100 text-green-700',
-  rejected: 'bg-red-100 text-red-700',
-};
-
 interface Props {
-  consoleLogin: ConsoleLoginSessionStatus | null;
-  /** Why starting the Console sign-in failed. */
-  loginError?: string | null;
-  onLogin: () => void;
+  title: string;
+  description: string;
+  /** What the machine should know about the enterprise edition before applying. */
+  note: string;
+  signedIn: boolean;
+  /** The sign-in has been read: only then does "sign in first" mean anything. */
+  loginKnown: boolean;
   onTaken: (situation: EnterpriseSituation) => void;
   /** After a Console call failed: the sign-in may be gone, the page reads it again. */
   onConsoleRefused?: () => void;
+  /** The way to the enterprise edition, below the applications. */
+  children: ReactNode;
 }
 
-export default function LicenceApplicationSection({ consoleLogin, loginError, onLogin, onTaken, onConsoleRefused }: Props) {
+export default function LicenceApplicationCard({ title, description, note, signedIn, loginKnown, onTaken, onConsoleRefused, children }: Props) {
   const { t } = useTranslation('flockspro');
   const [applications, setApplications] = useState<LicenceApplications | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [form, setForm] = useState<LicenceApplicationForm>(EMPTY);
   const [problems, setProblems] = useState<Partial<Record<Field, string>>>({});
+  const [dialog, setDialog] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [acting, setActing] = useState<string | null>(null);
 
@@ -97,10 +97,10 @@ export default function LicenceApplicationSection({ consoleLogin, loginError, on
     void load();
   }, [load]);
 
-  const signedIn = Boolean(consoleLogin?.logged_in);
   const items = applications?.items ?? [];
   // One at a time: no new application while one is under way or a licence waits to be taken.
   const outstanding = items.find((item) => OPEN.has(item.status) || item.can_take);
+  const canApply = Boolean(applications) && !outstanding && signedIn;
 
   const set = (field: keyof LicenceApplicationForm, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -113,7 +113,7 @@ export default function LicenceApplicationSection({ consoleLogin, loginError, on
     setProblems(found);
     if (Object.keys(found).length > 0) return;
     setSubmitting(true);
-    setActionError(null);
+    setSubmitError(null);
     try {
       await enterpriseUpgradeApi.apply({
         ...form,
@@ -121,9 +121,10 @@ export default function LicenceApplicationSection({ consoleLogin, loginError, on
         notes: form.notes?.trim() || null,
       });
       setForm(EMPTY);
+      setDialog(false);
       await load();
     } catch (err) {
-      setActionError(extractErrorMessage(err, t('apply.errors.submit')));
+      setSubmitError(extractErrorMessage(err, t('apply.errors.submit')));
       onConsoleRefused?.();
     } finally {
       setSubmitting(false);
@@ -164,32 +165,32 @@ export default function LicenceApplicationSection({ consoleLogin, loginError, on
     problems[field] ? <p className="mt-1 text-xs text-red-600">{t(`apply.problems.${problems[field]}`)}</p> : null;
 
   return (
-    <section className={CARD} aria-labelledby="flockspro-apply">
-      <div className="flex items-center gap-2">
-        <ClipboardList className="h-5 w-5 text-gray-500" aria-hidden="true" />
-        <h2 id="flockspro-apply" className="text-lg font-semibold text-gray-900">{t('apply.title')}</h2>
-      </div>
-      <p className="text-sm text-gray-600">{t('apply.intro')}</p>
-
-      {consoleLogin && !signedIn && (
-        <div className={`${NOTE} flex flex-wrap items-center justify-between gap-3`}>
-          <span>{t('apply.signInFirst')}</span>
-          <button type="button" onClick={onLogin} className={SECONDARY}>
-            <LogIn className="h-4 w-4" aria-hidden="true" />
-            {t('upgrade.loginConsole')}
+    <section className={CARD} aria-labelledby="flockspro-machine">
+      <MachineHeading
+        title={title}
+        description={description}
+        action={
+          <button
+            type="button"
+            onClick={() => {
+              setSubmitError(null);
+              setDialog(true);
+            }}
+            disabled={!canApply}
+            className={PRIMARY}
+          >
+            {t('apply.open')}
           </button>
-        </div>
-      )}
-      {signedIn && consoleLogin?.account_name && (
-        <div className="text-xs text-gray-500">{t('upgrade.consoleAccount', { account: consoleLogin.account_name })}</div>
-      )}
-      {loginError && <div className={ERROR}>{loginError}</div>}
+        }
+      />
+
+      {loginKnown && !signedIn && <div className={NOTE}>{t('apply.signInFirst')}</div>}
       {loadError && <div className={ERROR}>{loadError}</div>}
       {applications?.note && <div className={NOTE}>{applications.note}</div>}
       {applications?.pending_submission && !outstanding && <div className={NOTE}>{t('apply.pendingSubmission')}</div>}
       {actionError && <div className={ERROR}>{actionError}</div>}
 
-      {items.length > 0 && (
+      {items.length > 0 ? (
         <ul className="space-y-3" aria-label={t('apply.listLabel')}>
           {items.map((item) => (
             <ApplicationRow
@@ -197,126 +198,144 @@ export default function LicenceApplicationSection({ consoleLogin, loginError, on
               item={item}
               acting={acting === item.request_id}
               disabled={acting !== null}
+              onRefresh={() => void load()}
               onWithdraw={() => void withdraw(item)}
               onTake={() => void take(item)}
             />
           ))}
         </ul>
+      ) : applications && (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">{t('apply.none')}</div>
       )}
 
-      {applications && !outstanding && (
-        <form className="space-y-4 border-t border-gray-100 pt-4" onSubmit={(event) => void submit(event)} noValidate>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="sm:col-span-2">
-              <label htmlFor="apply-company" className={LABEL}>{t('apply.fields.company')}</label>
-              <input id="apply-company" className={INPUT} value={form.company} maxLength={200}
-                onChange={(e) => set('company', e.target.value)} aria-invalid={Boolean(problems.company)} />
-              {fieldError('company')}
-            </div>
-            <div>
-              <label htmlFor="apply-type" className={LABEL}>{t('apply.fields.licenseType')}</label>
-              <select id="apply-type" className={`${INPUT} bg-white`} value={form.license_type}
-                onChange={(e) => set('license_type', e.target.value)}>
-                <option value="poc">{t('licenceStatus.poc')}</option>
-                <option value="commercial">{t('licenceStatus.commercial')}</option>
-              </select>
-            </div>
-            <div>
-              <label htmlFor="apply-name" className={LABEL}>{t('apply.fields.applicantName')}</label>
-              <input id="apply-name" className={INPUT} value={form.applicant_name} maxLength={100}
-                onChange={(e) => set('applicant_name', e.target.value)} aria-invalid={Boolean(problems.applicant_name)} />
-              {fieldError('applicant_name')}
-            </div>
-            <div>
-              <label htmlFor="apply-email" className={LABEL}>{t('apply.fields.email')}</label>
-              <input id="apply-email" type="email" className={INPUT} value={form.applicant_email} maxLength={200}
-                onChange={(e) => set('applicant_email', e.target.value)} aria-invalid={Boolean(problems.applicant_email)} />
-              {fieldError('applicant_email')}
-            </div>
-            <div>
-              <label htmlFor="apply-phone" className={LABEL}>{t('apply.fields.phone')}</label>
-              <input id="apply-phone" type="tel" className={INPUT} value={form.applicant_phone} maxLength={40}
-                placeholder="+86 138 0000 0000"
-                onChange={(e) => set('applicant_phone', e.target.value)} aria-invalid={Boolean(problems.applicant_phone)} />
-              {fieldError('applicant_phone')}
-            </div>
-            <div>
-              <label htmlFor="apply-sales" className={LABEL}>{t('apply.fields.salesRep')}</label>
+      {children}
+
+      <div className={NOTE}>{note}</div>
+
+      {dialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="flockspro-apply-title"
+            className="max-h-[90vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-xl border border-gray-200 bg-white p-6 shadow-xl"
+            onSubmit={(event) => void submit(event)}
+            noValidate
+          >
+            <h3 id="flockspro-apply-title" className="text-lg font-semibold text-gray-900">{t('apply.title')}</h3>
+            <div className="space-y-3">
+              <div>
+                <label htmlFor="apply-type" className="mb-1 block text-sm text-gray-600">{t('apply.fields.licenseType')}</label>
+                <select id="apply-type" className={INPUT} value={form.license_type}
+                  onChange={(e) => set('license_type', e.target.value)}>
+                  <option value="poc">{t('apply.licenseTypes.poc')}</option>
+                  <option value="commercial">{t('apply.licenseTypes.commercial')}</option>
+                </select>
+              </div>
+              <div>
+                <input id="apply-company" className={INPUT} value={form.company} maxLength={200}
+                  aria-label={t('apply.fields.company')} placeholder={t('apply.placeholders.company')}
+                  onChange={(e) => set('company', e.target.value)} aria-invalid={Boolean(problems.company)} />
+                {fieldError('company')}
+              </div>
+              <div>
+                <input id="apply-name" className={INPUT} value={form.applicant_name} maxLength={100}
+                  aria-label={t('apply.fields.applicantName')} placeholder={t('apply.placeholders.applicantName')}
+                  onChange={(e) => set('applicant_name', e.target.value)} aria-invalid={Boolean(problems.applicant_name)} />
+                {fieldError('applicant_name')}
+              </div>
+              <div>
+                <input id="apply-email" type="email" className={INPUT} value={form.applicant_email} maxLength={200}
+                  aria-label={t('apply.fields.email')} placeholder={t('apply.placeholders.email')}
+                  onChange={(e) => set('applicant_email', e.target.value)} aria-invalid={Boolean(problems.applicant_email)} />
+                {fieldError('applicant_email')}
+              </div>
+              <div>
+                <input id="apply-phone" type="tel" className={INPUT} value={form.applicant_phone} maxLength={40}
+                  aria-label={t('apply.fields.phone')} placeholder={t('apply.placeholders.phone')}
+                  onChange={(e) => set('applicant_phone', e.target.value)} aria-invalid={Boolean(problems.applicant_phone)} />
+                {fieldError('applicant_phone')}
+              </div>
               <input id="apply-sales" className={INPUT} value={form.sales_rep_name ?? ''} maxLength={100}
+                aria-label={t('apply.fields.salesRep')} placeholder={t('apply.placeholders.salesRep')}
                 onChange={(e) => set('sales_rep_name', e.target.value)} />
-            </div>
-            <div className="sm:col-span-2">
-              <label htmlFor="apply-notes" className={LABEL}>{t('apply.fields.notes')}</label>
               <textarea id="apply-notes" className={INPUT} rows={3} value={form.notes ?? ''} maxLength={2000}
+                aria-label={t('apply.fields.notes')} placeholder={t('apply.placeholders.notes')}
                 onChange={(e) => set('notes', e.target.value)} />
             </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <button type="submit" disabled={submitting || !signedIn} className={PRIMARY}>
-              {submitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
-              {t('apply.submit')}
-            </button>
-            {!signedIn && <span className="text-xs text-gray-500">{t('apply.submitNeedsSignIn')}</span>}
-          </div>
-        </form>
+            {submitError && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{submitError}</div>}
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setDialog(false)} className={SECONDARY}>{t('apply.cancel')}</button>
+              <button type="submit" disabled={submitting} className={PRIMARY}>
+                {submitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+                {t('apply.submit')}
+              </button>
+            </div>
+          </form>
+        </div>
       )}
     </section>
   );
 }
 
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="shrink-0 text-xs text-gray-500">{label}</div>
+      <div className="min-w-0 break-all text-right text-sm text-gray-700">{children}</div>
+    </div>
+  );
+}
+
 function ApplicationRow({
-  item, acting, disabled, onWithdraw, onTake,
+  item, acting, disabled, onRefresh, onWithdraw, onTake,
 }: {
   item: LicenceApplication;
   acting: boolean;
   disabled: boolean;
+  onRefresh: () => void;
   onWithdraw: () => void;
   onTake: () => void;
 }) {
   const { t } = useTranslation('flockspro');
-  const created = formatDate(item.created_at);
-  const expires = formatDate(item.expires_at);
   // Console's words on it once reviewed (the page of 2026.10.19 kept the applicant's notes there before).
   const reviewed = REVIEWED.has(item.status);
+  const rejected = item.status === 'rejected';
   // What was issued once it was, what was asked for before.
   const kind = item.license_status || item.license_type;
+  const expires = formatDateTime(item.expires_at);
+  const changed = formatDateTime(item.updated_at || item.created_at);
   return (
-    <li className="rounded-lg border border-gray-200 px-4 py-3 text-sm">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 space-y-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${CHIP[item.status] ?? 'bg-gray-100 text-gray-600'}`}>
-              {t(`apply.status.${item.status}`, { defaultValue: item.status })}
-            </span>
-            <span className="font-medium text-gray-900 break-all">{item.company ?? '-'}</span>
-            {kind && <span className="text-xs text-gray-500">{t(`licenceStatus.${kind}`, { defaultValue: kind })}</span>}
-          </div>
-          <div className="text-xs text-gray-500">
-            {created ? t('apply.sentOn', { date: created }) : null}
-            {item.applicant_name ? ` · ${item.applicant_name}` : ''}
-          </div>
-          {item.license_id && (
-            <div className="text-xs text-gray-700 break-all">
-              {expires ? t('apply.issuedUntil', { id: item.license_id, date: expires }) : t('apply.issued', { id: item.license_id })}
-            </div>
-          )}
-          {reviewed && item.reason && <div className="text-xs text-gray-600 break-words">{t('apply.reason', { text: item.reason })}</div>}
-          {reviewed && item.suggestion && <div className="text-xs text-gray-600 break-words">{t('apply.suggestion', { text: item.suggestion })}</div>}
+    <li className={`space-y-2 rounded-lg border p-3 ${rejected ? 'border-red-200 bg-red-50/30' : 'border-gray-200'}`}>
+      <Row label={t('apply.current')}><span className="font-medium text-gray-900">{item.request_id}</span></Row>
+      <Row label={t('apply.statusLabel')}>
+        <span className="font-semibold text-slate-700">{t(`apply.status.${item.status}`, { defaultValue: item.status })}</span>
+      </Row>
+      {item.company && <Row label={t('apply.fields.company')}>{item.company}</Row>}
+      {item.applicant_name && <Row label={t('apply.fields.applicantName')}>{item.applicant_name}</Row>}
+      {kind && <Row label={t('apply.fields.licenseType')}>{t(`licenceStatus.${kind}`, { defaultValue: kind })}</Row>}
+      {changed && <Row label={t('apply.updatedAt')}>{changed}</Row>}
+      {item.license_id && (
+        <Row label={t('licence.id')}>{expires ? t('apply.issuedUntil', { id: item.license_id, date: expires }) : item.license_id}</Row>
+      )}
+      {reviewed && (item.reason || item.suggestion) && (
+        <div className={`rounded-lg border px-3 py-2 text-xs ${rejected ? 'border-red-200 bg-red-50 text-red-700' : 'border-gray-200 bg-gray-50 text-gray-700'}`}>
+          {rejected && <div className="font-medium">{t('apply.rejectedTitle')}</div>}
+          {item.reason && <div className="mt-1 break-words">{t('apply.reason', { text: item.reason })}</div>}
+          {item.suggestion && <div className="mt-1 break-words">{t('apply.suggestion', { text: item.suggestion })}</div>}
         </div>
-        <div className="flex shrink-0 flex-wrap gap-2">
-          {item.can_take && (
-            <button type="button" onClick={onTake} disabled={disabled} className={PRIMARY}>
-              {acting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <KeyRound className="h-4 w-4" aria-hidden="true" />}
-              {t('apply.take')}
-            </button>
-          )}
-          {item.can_withdraw && (
-            <button type="button" onClick={onWithdraw} disabled={disabled} className={SECONDARY}>
-              <Undo2 className="h-4 w-4" aria-hidden="true" />
-              {t('apply.withdraw')}
-            </button>
-          )}
-        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2 pt-1">
+        <button type="button" onClick={onRefresh} disabled={disabled} className={SECONDARY}>{t('apply.refresh')}</button>
+        {item.can_withdraw && (
+          <button type="button" onClick={onWithdraw} disabled={disabled} className={DANGER}>{t('apply.withdraw')}</button>
+        )}
+        {item.can_take && (
+          <button type="button" onClick={onTake} disabled={disabled} className={`${GO} ml-auto`}>
+            {acting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <KeyRound className="h-4 w-4" aria-hidden="true" />}
+            {t('apply.take')}
+          </button>
+        )}
       </div>
     </li>
   );

@@ -747,6 +747,32 @@ describe('Layout chrome', () => {
     const licensed = { available: true, previous: { license_id: 'lic-1', version: '2026.10.19' }, install_root: '/home/me/flockspro', can_start: true };
     const offered = { has_update: true, current_version: '2026.10.30', latest_version: '2026.11.04.31', channel: 'enterprise' };
 
+    it('asks about the new enterprise edition before the first-run guide, which comes back after', async () => {
+      enterpriseSituation.mockResolvedValue({ ...licensed, previous: { license_id: 'ubuntu-nn', version: '2026.10.19' } });
+      enterpriseVersionInfo.mockResolvedValue(offered);
+      onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });
+      renderAt('/');
+
+      await waitFor(() => expect(screen.getByRole('dialog', { name: 'update-modal' })).toBeInTheDocument());
+      expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
+
+      act(() => { (updateModalProps.at(-1)?.onClose as () => void)(); });
+      expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+      expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+    });
+
+    it('keeps the first-run guide when Console has nothing to offer', async () => {
+      enterpriseSituation.mockResolvedValue(licensed);
+      enterpriseVersionInfo.mockResolvedValue({ has_update: false, current_version: '2026.10.30', latest_version: null, error: '要先登录' });
+      onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });
+      renderAt('/');
+
+      expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+      await waitFor(() => expect(enterpriseVersionInfo).toHaveBeenCalled());
+      expect(screen.getByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+      expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+    });
+
     it('reminds of the new enterprise edition, from Console, and its dialog upgrades to it', async () => {
       enterpriseSituation.mockResolvedValue(licensed);
       enterpriseVersionInfo.mockResolvedValue(offered);

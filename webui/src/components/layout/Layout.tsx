@@ -236,8 +236,11 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   // Onboarding writes model credentials and the default model, so only admins get it
   // (and a session that drops to member does not keep the dialog).
   const canOnboard = user?.role === 'admin';
-  const onboardingOpen = showOnboarding && canOnboard;
   const [updateState, setUpdateState] = useState<'idle' | 'pending' | 'visible'>('idle');
+  const [enterpriseUpdate, setEnterpriseUpdate] = useState<EnterpriseUpdate | null>(null);
+  // The move to the new enterprise edition comes first on a machine with a licence: a guide to a
+  // model nobody has set up yet would hide it. The guide comes back when the dialog is closed.
+  const onboardingOpen = showOnboarding && canOnboard && !(updateState !== 'idle' && enterpriseUpdate !== null);
   // Whether the open dialog was asked for explicitly. Inferring it from
   // "we have no cached version info" was fragile: a background refresh landing
   // while the dialog was open filled the cache and silently turned the forced
@@ -259,7 +262,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<VersionInfo | null>(null);
-  const [enterpriseUpdate, setEnterpriseUpdate] = useState<EnterpriseUpdate | null>(null);
   const [currentRelease, setCurrentRelease] = useState<{ userId: string; info: VersionInfo | null } | null>(null);
   const [hasCompletedUpdateCheck, setHasCompletedUpdateCheck] = useState(false);
   const lastUpdateCheckAtRef = useRef(0);
