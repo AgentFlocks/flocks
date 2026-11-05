@@ -14,10 +14,6 @@ import stat
 from flocks.updater.handoff_progress import redact_credentials, summarize_error
 
 MAX_RECORD_BYTES = 16_384
-_CREDENTIAL_ASSIGNMENT = re.compile(  # secret-guard: allow - compiled redaction expression, not a credential
-    r"(?i)(\b(?:password|passwd|pwd|token|api[_-]?key|secret)\s*=\s*)"
-    r"(?:'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|[^\s;&]+)"
-)
 # A name that says what it holds, however it is written: PGPASSWORD=, "password": , api_key: , auth_token=.
 _CREDENTIAL_NAMED = re.compile(  # secret-guard: allow - compiled redaction expression, not a credential
     r"""(?i)(["']?\b[a-z0-9_.-]*(?:password|passwd|pwd|token|api[_-]?key|secret|credential|authorization)[a-z0-9_.-]*["']?\s*[=:]\s*)"""
@@ -28,7 +24,6 @@ _CREDENTIAL_SCHEME = re.compile(r"(?i)\b(bearer|basic)\s+[a-z0-9._~+/=-]{8,}")  
 
 def scrub_credentials(value: str) -> str:
     """Mask credentials wherever an install's output has them: what is shown of it keeps its lines."""
-    value = _CREDENTIAL_ASSIGNMENT.sub(lambda match: match.group(1) + "***", value)
     value = _CREDENTIAL_NAMED.sub(lambda match: match.group(1) + "***", value)
     value = _CREDENTIAL_SCHEME.sub(lambda match: match.group(1) + " ***", value)
     return redact_credentials(value)
@@ -41,6 +36,19 @@ def _display_text(value: str) -> str:
 def installation_result_path() -> Path:
     root = Path(os.environ.get("FLOCKS_ROOT") or Path.home() / ".flocks").expanduser()
     return root / "run" / "installation-result.json"
+
+
+def installation_result_id() -> str | None:
+    """The id of the record there is, whatever it says (each one the installer writes has its own);
+    None when there is none. Raises when there is one that cannot be read."""
+    path = installation_result_path()
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as stream:
+        record = json.loads(stream.read(MAX_RECORD_BYTES + 1))
+    return str(record.get("id")) if isinstance(record, dict) else ""
 
 
 def read_installation_result(locale: str = "zh-CN") -> dict | None:

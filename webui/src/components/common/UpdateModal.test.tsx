@@ -25,6 +25,7 @@ vi.mock('@/utils/restartPolling', () => ({ checkRestartReadiness }));
 
 vi.mock('@/api/enterpriseUpgrade', () => ({
   ENTERPRISE_UPGRADE_PAGE: '/settings/flockspro',
+  EnterpriseUpgradeRefused: class EnterpriseUpgradeRefused extends Error {},
   enterpriseUpgradeApi: { start: enterpriseStart, situation: enterpriseSituation },
   enterpriseVersionInfo,
 }));
@@ -432,6 +433,8 @@ describe('UpdateModal restart stage', () => {
   });
 });
 
+const refused = (message: string) => Object.assign(new Error(message), { refused: true });
+
 describe('UpdateModal on a machine with an enterprise licence', () => {
   const enterprise = { installRoot: '/home/me/flockspro', canStart: true };
   const offered = { ...currentVersion, current_version: '2026.10.30', latest_version: '2026.11.04.31', has_update: true, channel: 'enterprise' };
@@ -582,7 +585,7 @@ describe('UpdateModal on a machine with an enterprise licence', () => {
     enterpriseStart.mockImplementation((onEvent: (event: unknown) => void) => {
       onEvent({ stage: 'started', attempt: 'a1' });
       onEvent({ stage: 'downloading', received: 10, total: 100 });
-      return Promise.reject(new Error('下载中断'));
+      return Promise.reject(refused('下载中断'));
     });
     enterpriseSituation.mockResolvedValue({ available: true, upgrade: { attempt: 'a1', phase: 'failed', failed_step: 'download', message: '下载中断', reason: '下载中断', recovery: 'unchanged' } });
     const user = await opened();
@@ -596,7 +599,7 @@ describe('UpdateModal on a machine with an enterprise licence', () => {
   it('shows the failed install step even when it failed as it began', async () => {
     enterpriseStart.mockImplementation((onEvent: (event: unknown) => void) => {
       onEvent({ stage: 'started', attempt: 'a1' });
-      return Promise.reject(new Error('安装包没有起来'));
+      return Promise.reject(refused('安装包没有起来'));
     });
     enterpriseSituation.mockResolvedValue({ available: true, upgrade: { attempt: 'a1', phase: 'failed', failed_step: 'install', message: '安装包没有起来' } });
     const user = await opened();
@@ -606,7 +609,7 @@ describe('UpdateModal on a machine with an enterprise licence', () => {
   });
 
   it('says what the server said when it was refused before it began, and asks nothing else', async () => {
-    enterpriseStart.mockRejectedValue(new Error('已经在升级了'));
+    enterpriseStart.mockRejectedValue(refused('已经在升级了'));
     const user = await opened();
     await user.click(screen.getByRole('button', { name: 'confirmAction' }));
     expect(await screen.findByTestId('upgrade-failure-reason')).toHaveTextContent('已经在升级了');
@@ -617,7 +620,7 @@ describe('UpdateModal on a machine with an enterprise licence', () => {
   it('does not take the failure of an earlier attempt for this one', async () => {
     enterpriseStart.mockImplementation((onEvent: (event: unknown) => void) => {
       onEvent({ stage: 'started', attempt: 'a2' });
-      return Promise.reject(new Error('请先完成云账号登录'));
+      return Promise.reject(refused('请先完成云账号登录'));
     });
     enterpriseSituation.mockResolvedValue({
       available: true,
@@ -630,6 +633,45 @@ describe('UpdateModal on a machine with an enterprise licence', () => {
     expect(screen.queryByTestId('upgrade-failure-log')).not.toBeInTheDocument();
     expect(screen.getByText('failure.recovery.unchanged')).toBeInTheDocument();
     expect(screen.getByText('failure.stoppedAt')).toBeInTheDocument();
+  });
+
+  it('follows the attempt when the stream goes and the install goes on', async () => {
+    enterpriseStart.mockImplementation((onEvent: (event: unknown) => void) => {
+      onEvent({ stage: 'started', attempt: 'a1' });
+      return Promise.reject(new Error('the upgrade stream ended early'));
+    });
+    enterpriseSituation
+      .mockResolvedValueOnce({ available: true, upgrade: { attempt: 'a1', phase: 'installing', log: '/x/install.log' } })
+      .mockResolvedValue({ available: false, upgrade: null });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    expect(await screen.findByText('enterpriseStageLabels.restarting')).toBeInTheDocument();
+    expect(screen.queryByTestId('upgrade-failure')).not.toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(location.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('cannot say how it ended when the stream goes and nothing answers', async () => {
+    enterpriseStart.mockImplementation((onEvent: (event: unknown) => void) => {
+      onEvent({ stage: 'started', attempt: 'a1' });
+      return Promise.reject(new Error('the upgrade stream ended early'));
+    });
+    enterpriseSituation.mockRejectedValue(new Error('no answer'));
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    expect(await screen.findByText('failure.recovery.unknown')).toBeInTheDocument();
+    expect(screen.queryByText('failure.recovery.unchanged')).not.toBeInTheDocument();
+  });
+
+  it('does not take how another attempt ended for how this one did', async () => {
+    enterpriseStart.mockResolvedValue({ phase: 'installing', attempt: 'a1', log: '/x/install.log' });
+    enterpriseSituation.mockResolvedValue({ available: true, upgrade: { attempt: 'a2', phase: 'failed', failed_step: 'install', reason: '另一次的原因', recovery: 'restored' } });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(await screen.findByTestId('upgrade-failure-reason')).toHaveTextContent('failure.superseded');
+    expect(screen.queryByText('另一次的原因')).not.toBeInTheDocument();
+    expect(screen.getByText('failure.recovery.unknown')).toBeInTheDocument();
   });
 
   it('does not say the machine was left alone when nothing says so', async () => {

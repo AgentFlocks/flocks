@@ -626,7 +626,7 @@ def test_eu5e_what_the_installer_recorded_of_this_run_says_how_the_machine_was_l
     result.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "version": 1,
-        "id": "a",
+        "id": "an-earlier-run",
         "phase": "failed",
         "recovery": "restored",
         "updated_at": "2026-11-05T00:00:00Z",
@@ -634,13 +634,12 @@ def test_eu5e_what_the_installer_recorded_of_this_run_says_how_the_machine_was_l
         "messages": {"zh-CN": {"title": "t", "message": "m"}, "en-US": {"title": "t", "message": "m"}},
     }
     result.write_text(json.dumps(record), encoding="utf-8")
-    # From before this run: another run's.
-    os.utime(result, (1, 1))
+    # There before this run, a moment ago or not: another run's.
     ended = _finished_run(machine, "echo nothing of use\nexit 1\n")
     assert ended["recovery"] == "unchanged" and ended["reason"] is None
 
     script = f"""cat > {result} <<'EOF'
-{json.dumps(record)}
+{json.dumps({**record, "id": "this-run"})}
 EOF
 exit 1
 """
@@ -650,12 +649,29 @@ exit 1
 
     # It recorded that it was switching the machine over, and no more: nobody can say how it stands.
     script = f"""cat > {result} <<'EOF'
-{json.dumps({**record, "phase": "running"})}
+{json.dumps({**record, "id": "a-third-run", "phase": "running"})}
 EOF
 exit 1
 """
     ended = _finished_run(machine, script)
     assert ended["recovery"] == "unknown"
+
+    # A record that does not read: nobody can say either.
+    result.write_text("not json", encoding="utf-8")
+    enterprise._write_state({"phase": "failed", "failed_step": "install", "pid": 1, "exit_code": 1, "prior_result": "this-run"})
+    assert enterprise.read_state()["recovery"] == "unknown"
+    # Nor from a run that did not note what was there.
+    enterprise._write_state({"phase": "failed", "failed_step": "install", "pid": 1, "exit_code": 1})
+    assert enterprise.read_state()["recovery"] == "unknown"
+
+
+def test_eu5e2_what_is_shown_of_a_failure_has_no_credential_in_it(machine: Path):
+    enterprise._write_state({"phase": "failed", "failed_step": "download", "message": "GET https://x/r.run?token=s3cret: 403"})  # secret-guard: allow
+    state = enterprise.read_state()
+    assert "s3cret" not in state["message"] and "s3cret" not in state["reason"]
+    enterprise._write_state({"phase": "failed", "failed_step": "install", "recovery": "unknown", "message": "token=Bearer s3cret12345 refused"})  # secret-guard: allow
+    state = enterprise.read_state()
+    assert "s3cret" not in state["message"] and "s3cret" not in state["reason"] and state["recovery"] == "unknown"
 
 
 def test_eu5f_a_process_gone_without_an_exit_code_is_not_given_its_last_line_for_a_reason(machine: Path):
@@ -685,6 +701,7 @@ def test_eu5g_a_run_from_the_terminal_failed_at_the_install(machine: Path):
     ('{"password": "s3cret", "user": "a"}', '"password": ***, "user": "a"'),  # secret-guard: allow
     ("password: s3cret", "password: ***"),  # secret-guard: allow
     ("Authorization: Bearer s3cret12345", "Authorization: ***"),  # secret-guard: allow
+    ("token=Bearer s3cret12345 next", "token=*** next"),  # secret-guard: allow
     ("curl -H 'x: Bearer s3cret12345' url", "Bearer ***"),  # secret-guard: allow
     ("postgresql://flocks:s3cret@127.0.0.1/db", "postgresql://***@127.0.0.1/db"),  # secret-guard: allow
 ])
@@ -695,6 +712,14 @@ def test_eu5h_no_credential_is_shown_however_it_is_written(machine: Path, line: 
     log_file.write_text(f"== start\n{line}\n", encoding="utf-8")
     shown = enterprise._log_tail(log_file)
     assert "s3cret" not in "\n".join(shown) and kept in shown[-1]
+
+
+def test_eu5h2_a_value_on_the_line_after_its_name_is_masked_too(machine: Path):
+    work = enterprise.work_dir()
+    work.mkdir(parents=True, exist_ok=True)
+    log_file = work / "install.log"
+    log_file.write_text('== start\n{\n  "token":\n  "s3cret"\n}\n', encoding="utf-8")  # secret-guard: allow
+    assert "s3cret" not in "\n".join(enterprise._log_tail(log_file))
 
 
 def test_eu5b_a_finished_install_that_went_back_is_no_upgrade_any_more(machine: Path):

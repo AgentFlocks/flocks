@@ -31,7 +31,7 @@ import UpgradeFailureDetails, { failureOfEnterpriseUpgrade, failureOfReleaseUpda
 import { ENTERPRISE_UPDATE_CHANNEL, UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
 import { withReleaseUpdate, type ReleaseUpdateSource } from '@/utils/releaseUpdate';
 import { extractErrorMessage } from '@/utils/error';
-import { ENTERPRISE_UPGRADE_PAGE, enterpriseUpgradeApi, enterpriseVersionInfo, type EnterpriseUpgradeState } from '@/api/enterpriseUpgrade';
+import { ENTERPRISE_UPGRADE_PAGE, EnterpriseUpgradeRefused, enterpriseUpgradeApi, enterpriseVersionInfo, type EnterpriseUpgradeState } from '@/api/enterpriseUpgrade';
 
 // ------------------------------------------------------------------ //
 
@@ -195,6 +195,11 @@ export default function UpdateModal({
           window.location.reload();
           return;
         }
+        // Another window or the terminal started another: how that one ends is not how this one did.
+        if (started.attempt && situation.upgrade && situation.upgrade.attempt !== started.attempt) {
+          unlock({ ...failureOfEnterpriseUpgrade(lastKnown), step: 'install', reason: t('failure.superseded'), recovery: 'unknown' });
+          return;
+        }
         if (situation.upgrade) lastKnown = situation.upgrade;
         if (situation.upgrade?.phase === 'failed') {
           const ended = failureOfEnterpriseUpgrade(situation.upgrade);
@@ -272,23 +277,36 @@ export default function UpdateModal({
     setFailure(null);
     setFailedStage(null);
     // What the server recorded of this attempt says more than the message its stream ended with; an
-    // earlier attempt's record is not this one's. One that began and recorded nothing stopped asking
-    // Console, before anything was touched; one that never began was refused, as it says.
+    // earlier attempt's record is not this one's.
     let attempt: string | null = null;
-    const stopped = async (message?: string | null) => {
+    const stopped = async (message: string | null | undefined, refused: boolean) => {
       let recorded: EnterpriseUpgradeState | null = null;
+      let answered = false;
       if (attempt) {
         try {
           const { upgrade } = await enterpriseUpgradeApi.situation();
-          if (upgrade?.phase === 'failed' && upgrade.attempt === attempt) recorded = upgrade;
+          answered = true;
+          if (upgrade?.attempt === attempt) recorded = upgrade;
         } catch {
           // Not answering just now: what the stream said is all there is.
         }
       }
+      // The stream went and the attempt goes on: how it ends is still to come.
+      if (recorded && recorded.phase !== 'failed') {
+        setSteps((prev) => (prev.some((step) => step.stage === 'restarting') ? prev : [...prev, { stage: 'restarting', message: '', success: null }]));
+        setRestartingSync(true);
+        pollEnterpriseUntilReady(recorded);
+        return;
+      }
       const reason = message || t('upgradeFailed');
-      const ended: UpgradeFailure = recorded
-        ? failureOfEnterpriseUpgrade(recorded, reason)
-        : attempt ? { step: 'check', reason, recovery: 'unchanged' } : { reason };
+      let ended: UpgradeFailure;
+      if (recorded) ended = failureOfEnterpriseUpgrade(recorded, reason);
+      // It began, the server said it stopped, and recorded nothing: it stopped asking Console.
+      else if (attempt && refused && answered) ended = { step: 'check', reason, recovery: 'unchanged' };
+      // Refused before it began: what the server said is the whole of it.
+      else if (!attempt && refused) ended = { reason };
+      // Nobody has said how it ended.
+      else ended = { reason, recovery: 'unknown' };
       showFailure(ended, ENTERPRISE_FAILED_STAGE[ended.step ?? ''] ?? (lastStageRef.current || null));
       setUpgrading(false);
     };
@@ -325,10 +343,10 @@ export default function UpdateModal({
         // Downloaded, and root has to run it: that page shows what to run.
         window.location.assign(ENTERPRISE_UPGRADE_PAGE);
       } else {
-        await stopped(state.message);
+        await stopped(state.message, true);
       }
     } catch (e: any) {
-      await stopped(e?.message);
+      await stopped(e?.message, e instanceof EnterpriseUpgradeRefused || e?.refused === true);
     }
   };
 

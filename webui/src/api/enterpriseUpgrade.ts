@@ -120,6 +120,9 @@ export interface EnterpriseUpgradeEvent {
   state?: EnterpriseUpgradeState;
 }
 
+/** The server said it stopped, and why; a stream that merely ended says neither. */
+export class EnterpriseUpgradeRefused extends Error {}
+
 export const enterpriseUpgradeApi = {
   situation: async (): Promise<EnterpriseSituation> => (await client.get('/api/enterprise-upgrade')).data,
 
@@ -148,7 +151,7 @@ export const enterpriseUpgradeApi = {
       // The server's refusal says why (signed out, already upgrading...); the status alone does not.
       const said = await res.json().catch(() => null) as { detail?: unknown; message?: unknown } | null;
       const detail = typeof said?.detail === 'string' ? said.detail : typeof said?.message === 'string' ? said.message : '';
-      throw new Error(detail || `HTTP ${res.status}`);
+      throw new EnterpriseUpgradeRefused(detail || `HTTP ${res.status}`);
     }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -163,7 +166,7 @@ export const enterpriseUpgradeApi = {
         return;
       }
       onEvent(event);
-      if (event.stage === 'error') throw new Error(event.message || 'upgrade failed');
+      if (event.stage === 'error') throw new EnterpriseUpgradeRefused(event.message || 'upgrade failed');
       if (event.stage === 'done' && event.state) finalState = event.state;
     };
     try {

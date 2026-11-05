@@ -105,6 +105,7 @@
       "unpack": "Unpack the release bundle",
       "preflight": "Check the new release",
       "start": "Start the new release"
-    }
+    },
+    "superseded": "Another upgrade was started on this machine (from another window or the terminal), so this one is no longer followed. See the Flocks Pro page for the result."
   }
 }
