@@ -663,6 +663,11 @@ exit 1
     # Nor from a run that did not note what was there.
     enterprise._write_state({"phase": "failed", "failed_step": "install", "pid": 1, "exit_code": 1})
     assert enterprise.read_state()["recovery"] == "unknown"
+    # Nor from one that could not read it then, whatever is there now: it may be the same record.
+    result.write_text(json.dumps(record), encoding="utf-8")
+    enterprise._write_state({"phase": "failed", "failed_step": "install", "pid": 1, "exit_code": 1, "prior_result": "unreadable"})
+    state = enterprise.read_state()
+    assert state["recovery"] == "unknown" and "password" not in str(state["reason"])
 
 
 def test_eu5e2_what_is_shown_of_a_failure_has_no_credential_in_it(machine: Path):

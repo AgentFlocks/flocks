@@ -157,6 +157,10 @@ export default function UpdateModal({
     }
   }, [fetchVersion, forceInitialCheck, initialInfo]);
 
+  const addInstallStep = () => {
+    setSteps((prev) => (prev.some((step) => step.stage === 'restarting') ? prev : [...prev, { stage: 'restarting', message: '', success: null }]));
+  };
+
   const showFailure = (ended: UpgradeFailure, stage: UpdateProgress['stage'] | null) => {
     setFailure(ended);
     setError(ended.reason || t('upgradeFailed'));
@@ -174,7 +178,7 @@ export default function UpdateModal({
     const startedAt = Date.now();
     let lastKnown = started;
     const unlock = (ended: UpgradeFailure) => {
-      showFailure(ended, 'restarting');
+      showFailure(ended, ENTERPRISE_FAILED_STAGE[ended.step ?? ''] ?? 'restarting');
       setRestartingSync(false);
       setUpgrading(false);
     };
@@ -206,6 +210,7 @@ export default function UpdateModal({
           unlock(ended);
           return;
         }
+        if (situation.upgrade?.phase === 'installing') addInstallStep();
       } catch (e: any) {
         // Refused rather than out of reach: another build answers here now (a new sign-in, say).
         const refused = typeof e?.response?.status === 'number' && e.response.status < 500;
@@ -293,7 +298,7 @@ export default function UpdateModal({
       }
       // The stream went and the attempt goes on: how it ends is still to come.
       if (recorded && recorded.phase !== 'failed') {
-        setSteps((prev) => (prev.some((step) => step.stage === 'restarting') ? prev : [...prev, { stage: 'restarting', message: '', success: null }]));
+        if (recorded.phase === 'installing') addInstallStep();
         setRestartingSync(true);
         pollEnterpriseUntilReady(recorded);
         return;

@@ -557,7 +557,8 @@ def _installation_outcome(state: dict[str, Any]) -> dict[str, Any] | None:
     """What the installer recorded of this run: it records that it is switching the machine over
     before it stops anything, and how far the machine was put back if that fails. None when it has
     recorded nothing since the run began; recovery unknown when nobody can tell."""
-    if "prior_result" not in state:
+    # Not noted, or not readable when it was: another id does not show this run wrote it.
+    if state.get("prior_result", "unreadable") == "unreadable":
         return {"recovery": "unknown"}
     try:
         if installation_result_id() == state["prior_result"]:

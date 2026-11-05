@@ -651,6 +651,25 @@ describe('UpdateModal on a machine with an enterprise licence', () => {
     expect(location.reload).toHaveBeenCalledTimes(1);
   });
 
+  it('marks the download when the stream went during it and that is where it failed', async () => {
+    enterpriseStart.mockImplementation((onEvent: (event: unknown) => void) => {
+      onEvent({ stage: 'started', attempt: 'a1' });
+      onEvent({ stage: 'downloading', received: 10, total: 100 });
+      return Promise.reject(new Error('the upgrade stream ended early'));
+    });
+    enterpriseSituation
+      .mockResolvedValueOnce({ available: true, upgrade: { attempt: 'a1', phase: 'downloading', received: 10, total: 100 } })
+      .mockResolvedValue({ available: true, upgrade: { attempt: 'a1', phase: 'failed', failed_step: 'download', message: '下载中断', reason: '下载中断', recovery: 'unchanged' } });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    expect(await screen.findByText('enterpriseStageLabels.fetching')).toBeInTheDocument();
+    expect(screen.queryByText('enterpriseStageLabels.restarting')).not.toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(await screen.findByTestId('upgrade-failure-reason')).toHaveTextContent('下载中断');
+    expect(screen.getByText('enterpriseStageLabels.fetching')).toHaveClass('text-red-600');
+    expect(screen.queryByText('enterpriseStageLabels.restarting')).not.toBeInTheDocument();
+  });
+
   it('cannot say how it ended when the stream goes and nothing answers', async () => {
     enterpriseStart.mockImplementation((onEvent: (event: unknown) => void) => {
       onEvent({ stage: 'started', attempt: 'a1' });
