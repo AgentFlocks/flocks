@@ -848,6 +848,26 @@ describe('Layout chrome', () => {
     ]);
   });
 
+  it('announces a release an update channel installed, which has no separate core or component version', async () => {
+    Object.assign(productNameContextValue, { productName: 'Acme Suite', configuredDisplayName: null, logoUrl: '/favicon.svg' });
+    getCurrentRelease.mockResolvedValue({
+      ...bundleRelease('2026.11.5', '这一版的发布说明'),
+      channel: 'acme',
+      current_version: '2026.11.5',
+      latest_version: null,
+      current_bundle_version: '2026.11.5',
+      current_core_version: null,
+      current_component_version: null,
+    });
+    getNotificationAckStatus.mockResolvedValue({ acknowledged: false });
+    renderAt('/');
+    await waitFor(() => expect(notificationModal).toHaveBeenCalled());
+    expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-acme-v2026.11.5');
+    expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
+      expect.objectContaining({ title: 'Acme Suite v2026.11.5 更新内容', body: '这一版的发布说明', version: 'v2026.11.5' }),
+    ]);
+  });
+
   it('reads a bundle version an installer recorded under its edition prefix', async () => {
     Object.assign(productNameContextValue, { productName: 'Acme Suite', configuredDisplayName: null, logoUrl: '/favicon.svg' });
     getCurrentRelease.mockResolvedValue({ ...bundleRelease('acme-v2026.10.16', '说明'), current_bundle_version: 'acme-v2026.10.16' });

@@ -50,6 +50,7 @@ export interface InstallerOffer {
   release_id: string;
   version: string;
   size: number | null;
+  release_notes?: string | null;
   filename: string;
 }
 

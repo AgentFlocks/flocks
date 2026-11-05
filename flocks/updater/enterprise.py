@@ -53,6 +53,9 @@ INSTALL_ROOT = (
 INSTALLER_SUFFIX = ".exe" if _WINDOWS else ".run"
 #: The Python enterprise package of before.
 PREVIOUS_DISTRIBUTION = "flockspro"
+#: Under the data directory's run/: what Console says of the release the installer puts in place, for
+#: that edition's "what's new" notice (flockspro.updater.managed reads this file, in this format).
+RELEASE_NOTES_FILE = "managed-release-notes.json"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RELEASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -73,6 +76,8 @@ class InstallerOffer:
     release_id: str
     version: str
     size: int | None = None
+    #: What Console tells customers of this release; None when it says nothing (an older Console).
+    release_notes: str | None = None
 
     @property
     def filename(self) -> str:
@@ -341,6 +346,7 @@ def offered_installer(manifest: dict[str, Any], base_url: str) -> InstallerOffer
             release_id=str(entry.get("release_id") or "").strip(),
             version=str(entry.get("version") or "").strip(),
             size=entry.get("size") if isinstance(entry.get("size"), int) else None,
+            release_notes=entry.get("release_notes") if isinstance(entry.get("release_notes"), str) else None,
         )
         scheme = urlparse(url).scheme
         # Over https; plain http only from a Console that is itself reached that way (a test one).
@@ -614,6 +620,28 @@ def read_state() -> dict[str, Any] | None:
     return state
 
 
+def _keep_release_notes(offer: InstallerOffer) -> None:
+    """Leave what Console says of the release in the data the enterprise edition takes over: it may
+    start without the Console sign-in this edition has. Not worth stopping an upgrade for."""
+    if offer.release_notes is None:
+        return
+    path = runtime_root() / "run" / RELEASE_NOTES_FILE
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(
+            json.dumps({"release_id": offer.release_id, "version": offer.version, "release_notes": offer.release_notes}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        # Whoever the edition runs as reads it; the notes are what customers read anyway.
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        log.warning("enterprise.release_notes_not_kept", {"release_id": offer.release_id, "error": str(exc)})
+
+
 async def download(offer: InstallerOffer, progress: Callable[[int, int | None], Awaitable[None]] | None = None) -> Path:
     """Download the installer into work_dir and check its digest; the path of the checked file."""
     work = work_dir()
@@ -648,6 +676,7 @@ async def download(offer: InstallerOffer, progress: Callable[[int, int | None], 
         raise EnterpriseUpgradeError("下载的安装包校验不对（sha256 和 Console 给的不一样），没有运行")
     os.replace(part, final)
     os.chmod(final, 0o700)
+    _keep_release_notes(offer)
     return final
 
 
