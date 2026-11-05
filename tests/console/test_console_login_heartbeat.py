@@ -181,3 +181,102 @@ def test_heartbeat_without_extensions_sends_the_plain_identity(tmp_path, monkeyp
     assert captured["json"]["edition"] == "oss"
     # The heartbeat and nothing else: reports are an extension's to send.
     assert captured["urls"] == ["https://console.example.com/v1/heartbeats"]
+
+
+def _receipt_console(monkeypatch, tmp_path, *, receipt_status=200, receipt_error=None):
+    """A Console for the heartbeat and the receipt, and the receipt the old updater left. The requests it saw."""
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(ConsoleLoginService, "_runtime_version", staticmethod(lambda: "2026.11.4.3"))
+
+    async def _require_session(cls):
+        return {"console_session_token": "cs_core", "fingerprint": "fp_core", "install_id": "inst_core"}
+
+    seen: list[tuple[str, dict]] = []
+
+    class _Response:
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            seen.append((url, json))
+            if url.endswith("/v1/heartbeats"):
+                return _Response(200)
+            assert headers == {"Authorization": "Bearer cs_core"}
+            if receipt_error:
+                raise receipt_error
+            return _Response(receipt_status)
+
+    monkeypatch.setattr(ConsoleLoginService, "_require_session", classmethod(_require_session))
+    monkeypatch.setattr(login_mod.httpx, "AsyncClient", _Client)
+    return seen
+
+
+def _write_receipt(tmp_path, content='{"release_id": "rel_1", "bundle_version": "2026.11.01.2", "license_id": "ubuntu-nn", "install_result": "success"}'):
+    path = tmp_path / "run" / "pro-bundle-install-receipt-pending.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def test_the_old_updaters_receipt_goes_with_the_next_heartbeat_once(tmp_path, monkeypatch):
+    seen = _receipt_console(monkeypatch, tmp_path)
+    path = _write_receipt(tmp_path)
+
+    asyncio.run(ConsoleLoginService.send_heartbeat())
+
+    assert [url.rsplit("/", 1)[-1] for url, _ in seen] == ["heartbeats", "installations"]
+    assert seen[1][1] == {"release_id": "rel_1", "bundle_version": "2026.11.01.2", "license_id": "ubuntu-nn", "install_result": "success",
+                          "fingerprint": "fp_core", "install_id": "inst_core"}
+    assert not path.exists()
+
+    asyncio.run(ConsoleLoginService.send_heartbeat())
+    assert [url.rsplit("/", 1)[-1] for url, _ in seen] == ["heartbeats", "installations", "heartbeats"]
+
+
+@pytest.mark.parametrize("kwargs", [{"receipt_status": 500}, {"receipt_status": 401}, {"receipt_error": login_mod.httpx.ConnectError("down")}])
+def test_a_receipt_console_did_not_take_stays_for_the_next_heartbeat(tmp_path, monkeypatch, kwargs):
+    seen = _receipt_console(monkeypatch, tmp_path, **kwargs)
+    path = _write_receipt(tmp_path)
+
+    asyncio.run(ConsoleLoginService.send_heartbeat())
+
+    assert [url.rsplit("/", 1)[-1] for url, _ in seen] == ["heartbeats", "installations"]
+    assert path.exists()
+
+
+def test_a_receipt_that_does_not_read_does_not_stop_the_heartbeat(tmp_path, monkeypatch):
+    seen = _receipt_console(monkeypatch, tmp_path)
+    path = _write_receipt(tmp_path, "not json")
+
+    asyncio.run(ConsoleLoginService.send_heartbeat())
+
+    assert [url.rsplit("/", 1)[-1] for url, _ in seen] == ["heartbeats"]
+    assert path.exists()
+
+
+def test_an_extension_reports_what_it_owes_itself(tmp_path, monkeypatch, node_extension):
+    node_extension(identity={"status": "commercial", "license_id": "ubuntu-nn"})
+    seen = _receipt_console(monkeypatch, tmp_path)
+    path = _write_receipt(tmp_path)
+
+    asyncio.run(ConsoleLoginService.send_heartbeat())
+
+    assert [url.rsplit("/", 1)[-1] for url, _ in seen] == ["heartbeats"]
+    assert path.exists()

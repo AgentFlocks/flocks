@@ -29,6 +29,38 @@ def _shared_console_session_path() -> Path:
     return Path(raw).expanduser() / "run" / "console-session.json"
 
 
+def _previous_install_receipt_path() -> Path:
+    raw = os.getenv("FLOCKS_ROOT", str(Path.home() / ".flocks"))
+    return Path(raw).expanduser() / "run" / "pro-bundle-install-receipt-pending.json"
+
+
+async def _report_previous_install_receipt(client: httpx.AsyncClient, session: dict[str, Any], console_base: str) -> None:
+    """What the updater of the Python enterprise package left when it brought this machine to this
+    release (the transition package), for the next heartbeat to send. Its own code sent it before
+    this release replaced that code; without this Console never hears the machine arrived. It stays
+    for the next heartbeat when Console does not take it."""
+    path = _previous_install_receipt_path()
+    token = str(session.get("console_session_token") or "").strip()  # secret-guard: allow (read from the session)
+    if not console_base or not token:
+        return
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(receipt, dict):
+        return
+    try:
+        resp = await client.post(
+            f"{console_base}/v1/pro-bundles/installations",
+            json={**receipt, "fingerprint": session.get("fingerprint"), "install_id": session.get("install_id")},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    except httpx.HTTPError:
+        return
+    if resp.status_code in {200, 201, 202}:
+        path.unlink(missing_ok=True)
+
+
 class ConsoleNodeExtension(Protocol):
     """What an installed extension adds to this node's reports to the console."""
 
@@ -465,6 +497,9 @@ class ConsoleLoginService:
                     console_base=console_base_for_session,
                     report_pending=report_pending,
                 )
+            # An extension that reports what it owes the console has this one among them.
+            if report_pending and not _node_extensions:
+                await _report_previous_install_receipt(client, session, console_base_for_session)
             return data
 
     @classmethod
