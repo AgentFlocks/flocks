@@ -206,6 +206,31 @@ def test_eu1e_a_licence_file_that_does_not_read_leaves_its_terms_out(machine: Pa
         assert previous["license_id"] == "x" and previous["license_status"] is None and previous["expires_at"] is None
 
 
+def test_eu1e2_the_terms_shown_are_those_of_the_licence_shown(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    """Another licence named by the environment: the file's terms are not that licence's."""
+    path = machine / "flockspro" / "license.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"license_id": "lic-file", "key": _unsigned_token({"status": "expired", "expires_at": 1, "max_admins": 9}), "payload": {}}))
+    monkeypatch.setenv("FLOCKSPRO_LICENSE_ID", "ubuntu-nn")
+
+    previous = enterprise.previous_edition()
+
+    assert previous["license_id"] == "ubuntu-nn"
+    assert (previous["license_status"], previous["expires_at"], previous["max_admins"]) == (None, None, None)
+
+
+def test_eu1e3_a_file_with_no_licence_does_not_hide_the_one_after_it(machine: Path, tmp_path: Path):
+    (machine / "flockspro").mkdir(parents=True)
+    (machine / "flockspro" / "license.json").write_text("{}")
+    home = tmp_path / "home" / ".flocks" / "flockspro"
+    home.mkdir(parents=True)
+    (home / "license.json").write_text(json.dumps({"license_id": "ubuntu-nn", "key": _unsigned_token({"status": "commercial", "max_members": 7}), "payload": {}}))
+
+    previous = enterprise.previous_edition()
+
+    assert (previous["license_id"], previous["license_status"], previous["max_members"]) == ("ubuntu-nn", "commercial", 7)
+
+
 def test_eu1f_the_python_packages_word_on_its_licence_comes_first(machine: Path, monkeypatch: pytest.MonkeyPatch):
     """What an old package reports (/api/flockspro/license/status on 2026.10.19) fills the licence card."""
     write_licence(machine, "zj6.29-centos9")

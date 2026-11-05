@@ -238,9 +238,18 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const canOnboard = user?.role === 'admin';
   const [updateState, setUpdateState] = useState<'idle' | 'pending' | 'visible'>('idle');
   const [enterpriseUpdate, setEnterpriseUpdate] = useState<EnterpriseUpdate | null>(null);
-  // The move to the new enterprise edition comes first on a machine with a licence: a guide to a
-  // model nobody has set up yet would hide it. The guide comes back when the dialog is closed.
-  const onboardingOpen = showOnboarding && canOnboard && !(updateState !== 'idle' && enterpriseUpdate !== null);
+  // Whether this machine has an enterprise licence is known once asked; a build with its own update
+  // channel never asks.
+  const [enterpriseRead, setEnterpriseRead] = useState(Boolean(registry.updateChannel));
+  const [hasCompletedUpdateCheck, setHasCompletedUpdateCheck] = useState(false);
+  // Once on screen the guide stays there (it holds what the person is typing); asked for by hand, it opens.
+  const [onboardingPresented, setOnboardingPresented] = useState(false);
+  // On a machine with a licence the move to the new enterprise edition comes first: a guide to a
+  // model nobody has set up yet would hide it. The guide opens when the check has nothing to offer,
+  // or when its dialog is closed.
+  const onboardingWaits = !onboardingPresented && !registry.updateChannel
+    && (!enterpriseRead || (enterpriseUpdate !== null && (!hasCompletedUpdateCheck || updateState !== 'idle')));
+  const onboardingOpen = showOnboarding && canOnboard && !onboardingWaits;
   // Whether the open dialog was asked for explicitly. Inferring it from
   // "we have no cached version info" was fragile: a background refresh landing
   // while the dialog was open filled the cache and silently turned the forced
@@ -263,7 +272,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<VersionInfo | null>(null);
   const [currentRelease, setCurrentRelease] = useState<{ userId: string; info: VersionInfo | null } | null>(null);
-  const [hasCompletedUpdateCheck, setHasCompletedUpdateCheck] = useState(false);
   const lastUpdateCheckAtRef = useRef(0);
   const checkingUpdateRef = useRef(false);
   const lastPromptedVersionRef = useRef<string | null>(null);
@@ -354,9 +362,14 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const handleOpenOnboarding = useCallback(() => {
     if (canOnboard) {
       onboardingCheckGeneration.current += 1;
+      setOnboardingPresented(true);
       setShowOnboarding(true);
     }
   }, [canOnboard]);
+
+  useEffect(() => {
+    if (onboardingOpen) setOnboardingPresented(true);
+  }, [onboardingOpen]);
 
   const handleCloseOnboarding = useCallback(() => {
     onboardingCheckGeneration.current += 1;
@@ -376,6 +389,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const findEnterpriseUpdate = useCallback(async () => {
     if (registry.updateChannel) return null;
     const situation = await enterpriseUpgradeApi.situation().catch(() => undefined);
+    setEnterpriseRead(true);
     // Not answering just now says nothing about the machine: what was known stands.
     if (situation === undefined) return enterpriseUpdateRef.current;
     const found = situation.available && situation.previous?.license_id

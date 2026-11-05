@@ -67,6 +67,7 @@ export default function FlocksproUpgradePage() {
   const [runError, setRunError] = useState<string | null>(null);
   const [upgrade, setUpgrade] = useState<EnterpriseUpgradeState | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
   // The open edition stopped under the page (the installer took the machine over).
   const [serverGone, setServerGone] = useState(false);
   const mounted = useRef(true);
@@ -198,7 +199,13 @@ export default function FlocksproUpgradePage() {
   // then what the machine says of its licence now.
   const syncLicence = async () => {
     setSyncing(true);
-    await client.post('/api/flockspro/license/refresh').catch(() => undefined);
+    setSyncError(null);
+    try {
+      await client.post('/api/flockspro/license/refresh');
+    } catch (err) {
+      const notThere = (err as { response?: { status?: number } })?.response?.status === 404;
+      if (!notThere && mounted.current) setSyncError(extractErrorMessage(err, t('errors.sync')));
+    }
     await load();
     if (mounted.current) setSyncing(false);
   };
@@ -353,6 +360,7 @@ export default function FlocksproUpgradePage() {
               onSync={() => void syncLicence()}
             />
           )}
+          {syncError && <div className={ERROR}>{syncError}</div>}
           <div className={NOTE}>{machineNote}</div>
         </section>
       )}

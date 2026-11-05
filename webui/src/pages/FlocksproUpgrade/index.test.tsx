@@ -475,9 +475,21 @@ describe('Flocks Pro page of the open edition', () => {
     expect(await screen.findByText('licence.adminQuota 9 / licence.memberQuota 20')).toBeInTheDocument();
   });
 
+  it('FP14c a sync that fails says so, and what the machine says stays', async () => {
+    situation.mockResolvedValue(base);
+    clientPost.mockRejectedValue({ response: { status: 502, data: { detail: '连不上 Console' } } });
+    render(<FlocksproUpgradePage />);
+    await screen.findByTestId('licence-card');
+
+    await userEvent.click(screen.getByRole('button', { name: 'licence.sync' }));
+
+    expect(await screen.findByText('连不上 Console')).toBeInTheDocument();
+    expect(screen.getByTestId('licence-card')).toBeInTheDocument();
+  });
+
   it('FP14b a machine with no package to sync still reads its situation again', async () => {
     situation.mockResolvedValue(base);
-    clientPost.mockRejectedValue(new Error('404'));
+    clientPost.mockRejectedValue({ response: { status: 404 } });
     render(<FlocksproUpgradePage />);
     await screen.findByTestId('licence-card');
 
@@ -485,6 +497,7 @@ describe('Flocks Pro page of the open edition', () => {
     await userEvent.click(screen.getByRole('button', { name: 'licence.sync' }));
     await waitFor(() => expect(situation.mock.calls.length).toBe(before + 1));
     expect(await screen.findByRole('button', { name: 'licence.sync' })).toBeEnabled();
+    expect(screen.queryByText('errors.sync')).not.toBeInTheDocument();
   });
 
   it('FP15 signs out of the cloud account', async () => {

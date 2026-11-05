@@ -167,8 +167,8 @@ def previous_licence_id(status: dict[str, Any] | None = None) -> str:
     return str((status or {}).get("license_id") or "").strip()
 
 
-def _licence_file_terms() -> dict[str, Any]:
-    """What the licence file on this machine says of itself, for the page: a licence taken here has
+def _licence_file_terms(licence_id: str) -> dict[str, Any]:
+    """What the licence file of *licence_id* says of itself, for the page: a licence taken here has
     no Python package to answer for it. Read, not verified; the enterprise core judges the licence
     when the machine moves."""
     for path in _previous_licence_files():
@@ -179,6 +179,8 @@ def _licence_file_terms() -> dict[str, Any]:
         if not isinstance(data, dict):
             continue
         terms = dict(data["payload"]) if isinstance(data.get("payload"), dict) else {}
+        if str(data.get("license_id") or terms.get("license_id") or "").strip() != licence_id:
+            continue
         for field in ("key", "token", "activate_key"):
             parts = str(data.get(field) or "").split(".")
             if len(parts) != 3:
@@ -231,7 +233,7 @@ def previous_edition() -> dict[str, Any] | None:
     licence_id = previous_licence_id(status)
     if version is None and not licence_id:
         return None
-    terms = _licence_file_terms() if licence_id else {}
+    terms = _licence_file_terms(licence_id) if licence_id else {}
     return {
         "version": version,
         "license_id": licence_id or None,

@@ -150,7 +150,8 @@
     "check": "The check failed",
     "start": "The upgrade failed",
     "login": "Could not start the Console sign-in",
-    "logout": "Could not log out of the console account"
+    "logout": "Could not log out of the console account",
+    "sync": "Could not sync the licence"
   },
   "callback": {
     "processing": "Finishing the Console sign-in...",

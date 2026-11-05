@@ -761,6 +761,39 @@ describe('Layout chrome', () => {
       expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
     });
 
+    it('holds the first-run guide back while Console is being asked, so nothing typed into it is lost', async () => {
+      enterpriseSituation.mockResolvedValue(licensed);
+      let answer: (info: unknown) => void = () => {};
+      enterpriseVersionInfo.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+      onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });
+      renderAt('/');
+
+      await waitFor(() => expect(enterpriseVersionInfo).toHaveBeenCalled());
+      expect(onboardingAPI.getStatus).toHaveBeenCalled();
+      expect(screen.queryByRole('dialog', { name: 'onboarding' })).not.toBeInTheDocument();
+
+      await act(async () => { answer({ has_update: false, current_version: '2026.10.30', latest_version: null, error: 'Console 没有给' }); });
+      expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+    });
+
+    it('leaves the first-run guide on screen when something is found later: the dialog waits for it', async () => {
+      enterpriseSituation.mockResolvedValue(licensed);
+      enterpriseVersionInfo.mockResolvedValue({ has_update: false, current_version: '2026.10.30', latest_version: null, error: null });
+      onboardingAPI.getStatus.mockResolvedValue({ data: { completed: false } });
+      renderAt('/');
+      expect(await screen.findByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+
+      enterpriseVersionInfo.mockResolvedValue(offered);
+      fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal:admin' }));
+      fireEvent.click(within(screen.getByRole('menu', { name: 'accountAndGlobal:admin' })).getByRole('menuitem', { name: 'checkUpdate' }));
+      await waitFor(() => expect(enterpriseSituation).toHaveBeenCalledTimes(2));
+      expect(screen.getByRole('dialog', { name: 'onboarding' })).toBeInTheDocument();
+      expect(screen.queryByRole('dialog', { name: 'update-modal' })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'close-onboarding' }));
+      expect(await screen.findByRole('dialog', { name: 'update-modal' })).toBeInTheDocument();
+    });
+
     it('keeps the first-run guide when Console has nothing to offer', async () => {
       enterpriseSituation.mockResolvedValue(licensed);
       enterpriseVersionInfo.mockResolvedValue({ has_update: false, current_version: '2026.10.30', latest_version: null, error: '要先登录' });
