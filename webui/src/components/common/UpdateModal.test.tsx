@@ -693,6 +693,21 @@ describe('UpdateModal on a machine with an enterprise licence', () => {
     expect(screen.getByText('failure.recovery.unknown')).toBeInTheDocument();
   });
 
+  it('does not take something else answering on the port for this server', async () => {
+    enterpriseStart.mockResolvedValue({ phase: 'installing', attempt: 'a1', log: '/x/install.log' });
+    enterpriseSituation
+      .mockResolvedValueOnce('hello')
+      .mockResolvedValue({ available: true, upgrade: { attempt: 'a1', phase: 'failed', failed_step: 'install', reason: 'something still listens', recovery: 'restored' } });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(location.reload).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2_100);
+    expect(await screen.findByTestId('upgrade-failure-reason')).toHaveTextContent('something still listens');
+    expect(screen.getByText('failure.recovery.restored')).toBeInTheDocument();
+    expect(location.reload).not.toHaveBeenCalled();
+  });
+
   it('says where the log is while it installs, and when nothing comes back says that and where to look', async () => {
     enterpriseStart.mockResolvedValue({ phase: 'installing', attempt: 'a1', log: '/x/install.log' });
     enterpriseSituation.mockRejectedValue(new Error('no answer'));

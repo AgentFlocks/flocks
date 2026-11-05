@@ -197,23 +197,24 @@ export default function UpdateModal({
       }
       try {
         const situation = await enterpriseUpgradeApi.situation();
-        if (!situation.available || situation.upgrade?.phase === 'finished') {
+        // Something else answering on the port (what is holding it, say) is no answer: only this server says so.
+        if (situation?.available === false || situation?.upgrade?.phase === 'finished') {
           window.location.reload();
           return;
         }
         // Another window or the terminal started another: how that one ends is not how this one did.
-        if (started.attempt && situation.upgrade && situation.upgrade.attempt !== started.attempt) {
+        if (started.attempt && situation?.upgrade && situation.upgrade.attempt !== started.attempt) {
           unlock({ ...failureOfEnterpriseUpgrade(lastKnown), step: 'install', reason: t('failure.superseded'), recovery: 'unknown' });
           return;
         }
-        if (situation.upgrade) lastKnown = situation.upgrade;
-        if (situation.upgrade?.log) setInstallLog(situation.upgrade.log);
-        if (situation.upgrade?.phase === 'failed') {
+        if (situation?.upgrade) lastKnown = situation.upgrade;
+        if (situation?.upgrade?.log) setInstallLog(situation.upgrade.log);
+        if (situation?.upgrade?.phase === 'failed') {
           const ended = failureOfEnterpriseUpgrade(situation.upgrade);
           unlock(ended);
           return;
         }
-        if (situation.upgrade?.phase === 'installing') addInstallStep();
+        if (situation?.upgrade?.phase === 'installing') addInstallStep();
       } catch (e: any) {
         // Refused rather than out of reach: another build answers here now (a new sign-in, say).
         const refused = typeof e?.response?.status === 'number' && e.response.status < 500;
