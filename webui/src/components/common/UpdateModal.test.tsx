@@ -580,10 +580,11 @@ describe('UpdateModal on a machine with an enterprise licence', () => {
 
   it('marks the download when that is where it stopped, and no later step', async () => {
     enterpriseStart.mockImplementation((onEvent: (event: unknown) => void) => {
+      onEvent({ stage: 'started', attempt: 'a1' });
       onEvent({ stage: 'downloading', received: 10, total: 100 });
       return Promise.reject(new Error('下载中断'));
     });
-    enterpriseSituation.mockResolvedValue({ available: true, upgrade: { phase: 'failed', failed_step: 'download', message: '下载中断', reason: '下载中断' } });
+    enterpriseSituation.mockResolvedValue({ available: true, upgrade: { attempt: 'a1', phase: 'failed', failed_step: 'download', message: '下载中断', reason: '下载中断', recovery: 'unchanged' } });
     const user = await opened();
     await user.click(screen.getByRole('button', { name: 'confirmAction' }));
     expect(await screen.findByTestId('upgrade-failure-reason')).toHaveTextContent('下载中断');
@@ -593,21 +594,52 @@ describe('UpdateModal on a machine with an enterprise licence', () => {
   });
 
   it('shows the failed install step even when it failed as it began', async () => {
-    enterpriseStart.mockRejectedValue(new Error('安装包没有起来'));
-    enterpriseSituation.mockResolvedValue({ available: true, upgrade: { phase: 'failed', failed_step: 'install', message: '安装包没有起来' } });
+    enterpriseStart.mockImplementation((onEvent: (event: unknown) => void) => {
+      onEvent({ stage: 'started', attempt: 'a1' });
+      return Promise.reject(new Error('安装包没有起来'));
+    });
+    enterpriseSituation.mockResolvedValue({ available: true, upgrade: { attempt: 'a1', phase: 'failed', failed_step: 'install', message: '安装包没有起来' } });
     const user = await opened();
     await user.click(screen.getByRole('button', { name: 'confirmAction' }));
     expect(await screen.findByText('enterpriseStageLabels.restarting')).toHaveClass('text-red-600');
     expect(screen.getByTestId('upgrade-failure-reason')).toHaveTextContent('安装包没有起来');
   });
 
-  it('says what the server said when nothing of the attempt was recorded', async () => {
+  it('says what the server said when it was refused before it began, and asks nothing else', async () => {
     enterpriseStart.mockRejectedValue(new Error('已经在升级了'));
-    enterpriseSituation.mockResolvedValue({ available: true, upgrade: null });
     const user = await opened();
     await user.click(screen.getByRole('button', { name: 'confirmAction' }));
     expect(await screen.findByTestId('upgrade-failure-reason')).toHaveTextContent('已经在升级了');
     expect(screen.getByText('upgradeFailed', { selector: 'span' })).toBeInTheDocument();
+    expect(enterpriseSituation).not.toHaveBeenCalled();
+  });
+
+  it('does not take the failure of an earlier attempt for this one', async () => {
+    enterpriseStart.mockImplementation((onEvent: (event: unknown) => void) => {
+      onEvent({ stage: 'started', attempt: 'a2' });
+      return Promise.reject(new Error('请先完成云账号登录'));
+    });
+    enterpriseSituation.mockResolvedValue({
+      available: true,
+      upgrade: { attempt: 'a1', phase: 'failed', failed_step: 'install', exit_code: 1, reason: '上一次的原因', recovery: 'restored', log: '/x/install.log', log_tail: ['old'] },
+    });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    expect(await screen.findByTestId('upgrade-failure-reason')).toHaveTextContent('请先完成云账号登录');
+    expect(screen.queryByText('上一次的原因')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('upgrade-failure-log')).not.toBeInTheDocument();
+    expect(screen.getByText('failure.recovery.unchanged')).toBeInTheDocument();
+    expect(screen.getByText('failure.stoppedAt')).toBeInTheDocument();
+  });
+
+  it('does not say the machine was left alone when nothing says so', async () => {
+    enterpriseStart.mockResolvedValue({ phase: 'installing', log: '/x/install.log' });
+    enterpriseSituation.mockResolvedValue({ available: true, upgrade: { phase: 'failed', failed_step: 'install', log: '/x/install.log' } });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(await screen.findByTestId('upgrade-failure')).toBeInTheDocument();
+    expect(screen.queryByText('failure.recovery.unchanged')).not.toBeInTheDocument();
   });
 
   it('keeps to the way the shown version came when the machine changes under it', async () => {
@@ -625,9 +657,9 @@ describe('UpdateModal on a machine with an enterprise licence', () => {
     const user = await opened();
     await user.click(screen.getByRole('button', { name: 'confirmAction' }));
     expect(await screen.findByText('下载安装包失败')).toBeInTheDocument();
-    // Asked once, for what it recorded of the attempt: nothing is running to wait for.
+    // Nothing is running to wait for.
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(enterpriseSituation).toHaveBeenCalledTimes(1);
+    expect(enterpriseSituation).not.toHaveBeenCalled();
   });
 
   it('leaves what root has to run to the Flocks Pro page', async () => {

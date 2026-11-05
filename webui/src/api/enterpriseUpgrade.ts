@@ -31,6 +31,8 @@ export interface EnterpriseUpgradeState {
   message?: string;
   exit_code?: number;
   started_at?: string;
+  /** The attempt this record is of (the upgrade stream's started event says which that is). */
+  attempt?: string;
   /** The installer's log on the machine, once it has started. */
   log?: string;
   log_tail?: string[];
@@ -38,7 +40,7 @@ export interface EnterpriseUpgradeState {
   failed_step?: 'download' | 'install';
   /** Once it has failed: why, in the installer's words. */
   reason?: string | null;
-  /** Once it has failed: how the installer left the machine (restored, unchanged, retained, failed). */
+  /** Once it has failed: how the machine was left (restored, unchanged, retained, failed, unknown). */
   recovery?: string | null;
 }
 
@@ -107,7 +109,8 @@ export interface LicenceApplicationForm {
 }
 
 export interface EnterpriseUpgradeEvent {
-  stage: 'downloading' | 'downloaded' | 'installing' | 'done' | 'error';
+  stage: 'started' | 'downloading' | 'downloaded' | 'installing' | 'done' | 'error';
+  attempt?: string;
   version?: string;
   release_id?: string;
   received?: number;

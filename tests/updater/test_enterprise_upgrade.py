@@ -330,7 +330,7 @@ async def test_eu2_an_installer_for_the_default_directory_only_asks_root_for_it(
     started: list[Path] = []
     monkeypatch.setattr(enterprise, "fetch_offer", fetch)
     monkeypatch.setattr(enterprise, "download", download)
-    monkeypatch.setattr(enterprise, "start_installer", lambda path, _offer: started.append(path) or {"phase": "installing"})
+    monkeypatch.setattr(enterprise, "start_installer", lambda path, _offer, attempt=None: started.append(path) or {"phase": "installing"})
 
     async def progress(_event) -> None:
         return None
@@ -607,13 +607,17 @@ def test_eu5c_a_failed_install_says_where_it_stopped_and_why(machine: Path):
     shown = "\n".join(ended["log_tail"])
     assert ended["log_tail"][0].startswith("== ") and "an earlier run" not in shown
     assert "step one" in shown and "s3cret" not in shown and "\x1b" not in shown and "red" in shown
-    assert "recovery" not in ended
+    # It said how it ended, and recorded nothing of switching the machine over: nothing was stopped.
+    assert ended["recovery"] == "unchanged"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the installer is a shell one")
-def test_eu5d_the_reason_is_the_last_thing_printed_when_it_refused_nothing_by_name(machine: Path):
-    ended = _finished_run(machine, 'echo step one\necho "install-managed: the core did not come up"\necho\nexit 1\n')
+def test_eu5d_the_reason_is_the_last_line_that_reads_as_an_error(machine: Path):
+    ended = _finished_run(machine, 'echo step one\necho "install-managed: the core did not come up"\necho cleaning up\necho\nexit 1\n')
     assert ended["reason"] == "install-managed: the core did not come up"
+    # No line that reads as an error: no reason, rather than the last thing it happened to print.
+    ended = _finished_run(machine, "echo cleaning up\nexit 1\n")
+    assert ended["reason"] is None
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the installer is a shell one")
@@ -633,7 +637,7 @@ def test_eu5e_what_the_installer_recorded_of_this_run_says_how_the_machine_was_l
     # From before this run: another run's.
     os.utime(result, (1, 1))
     ended = _finished_run(machine, "echo nothing of use\nexit 1\n")
-    assert "recovery" not in ended and ended["reason"] == "nothing of use"
+    assert ended["recovery"] == "unchanged" and ended["reason"] is None
 
     script = f"""cat > {result} <<'EOF'
 {json.dumps(record)}
@@ -643,6 +647,15 @@ exit 1
     ended = _finished_run(machine, script)
     assert ended["recovery"] == "restored"
     assert ended["reason"] == "the core did not come up: password=*** refused"
+
+    # It recorded that it was switching the machine over, and no more: nobody can say how it stands.
+    script = f"""cat > {result} <<'EOF'
+{json.dumps({**record, "phase": "running"})}
+EOF
+exit 1
+"""
+    ended = _finished_run(machine, script)
+    assert ended["recovery"] == "unknown"
 
 
 def test_eu5f_a_process_gone_without_an_exit_code_is_not_given_its_last_line_for_a_reason(machine: Path):
@@ -654,6 +667,34 @@ def test_eu5f_a_process_gone_without_an_exit_code_is_not_given_its_last_line_for
     state = enterprise.read_state()
     assert state["phase"] == "failed" and state["failed_step"] == "install"
     assert "退出码" in state["reason"] and "stopping the open edition" in state["log_tail"]
+    assert state["recovery"] == "unknown"
+
+
+def test_eu5g_a_run_from_the_terminal_failed_at_the_install(machine: Path):
+    enterprise.work_dir().mkdir(parents=True, exist_ok=True)
+    (enterprise.work_dir() / "exit-status").write_text("1\n", encoding="utf-8")
+    enterprise._write_state({"phase": "installing", "pid": 1234, "installer": "/x/r.run", "from": "terminal"})
+    state = enterprise.read_state()
+    assert state["phase"] == "failed" and state["failed_step"] == "install" and state["exit_code"] == 1
+    assert "终端" in state["reason"] and "log_tail" not in state
+
+
+@pytest.mark.parametrize("line, kept", [
+    ("export PGPASSWORD=s3cret", "PGPASSWORD=***"),  # secret-guard: allow
+    ("FLOCKS_DB_PASSWORD=s3cret started", "FLOCKS_DB_PASSWORD=*** started"),  # secret-guard: allow
+    ('{"password": "s3cret", "user": "a"}', '"password": ***, "user": "a"'),  # secret-guard: allow
+    ("password: s3cret", "password: ***"),  # secret-guard: allow
+    ("Authorization: Bearer s3cret12345", "Authorization: ***"),  # secret-guard: allow
+    ("curl -H 'x: Bearer s3cret12345' url", "Bearer ***"),  # secret-guard: allow
+    ("postgresql://flocks:s3cret@127.0.0.1/db", "postgresql://***@127.0.0.1/db"),  # secret-guard: allow
+])
+def test_eu5h_no_credential_is_shown_however_it_is_written(machine: Path, line: str, kept: str):
+    work = enterprise.work_dir()
+    work.mkdir(parents=True, exist_ok=True)
+    log_file = work / "install.log"
+    log_file.write_text(f"== start\n{line}\n", encoding="utf-8")
+    shown = enterprise._log_tail(log_file)
+    assert "s3cret" not in "\n".join(shown) and kept in shown[-1]
 
 
 def test_eu5b_a_finished_install_that_went_back_is_no_upgrade_any_more(machine: Path):
@@ -691,7 +732,7 @@ async def test_eu6_a_systemd_machine_ends_with_roots_command(machine: Path, monk
     assert installer.read_bytes() == body
     expected = f"bash {installer}" if os.geteuid() == 0 else f"sudo bash {installer}"
     assert state["command"] == expected
-    assert [e["stage"] for e in events][0] == "downloading" and events[-1]["stage"] == "downloaded"
+    assert [e["stage"] for e in events][:2] == ["started", "downloading"] and events[-1]["stage"] == "downloaded"
     assert enterprise.read_state()["phase"] == "command"
 
 
@@ -725,7 +766,34 @@ async def test_eu6b_a_download_that_does_not_check_out_is_recorded_as_the_downlo
         await enterprise.upgrade(progress)
     state = enterprise.read_state()
     assert state["phase"] == "failed" and state["failed_step"] == "download"
-    assert state["reason"] == str(refused.value)
+    assert state["reason"] == str(refused.value) and state["recovery"] == "unchanged"
+
+
+async def test_eu6b_an_attempt_says_which_it_is_and_what_it_records_goes_by_that(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    write_licence(machine)
+    console(monkeypatch, lambda request: httpx.Response(200, json=manifest_with(b"the real one")) if "manifest" in request.url.path else httpx.Response(200, content=b"another file"))
+    monkeypatch.setattr(enterprise, "_console_session_token", _token(""))
+    heard: list[dict] = []
+
+    async def progress(event: dict) -> None:
+        heard.append(event)
+
+    with pytest.raises(enterprise.EnterpriseUpgradeError):
+        await enterprise.upgrade(progress)
+    assert heard[0]["stage"] == "started"
+    assert enterprise.read_state()["attempt"] == heard[0]["attempt"]
+
+    # Refused before the download: nothing recorded, the earlier failure stays that attempt's.
+    heard.clear()
+
+    async def refused() -> None:
+        raise enterprise.EnterpriseUpgradeError("请先完成云账号登录")
+
+    monkeypatch.setattr(enterprise, "fetch_offer", refused)
+    earlier = enterprise.read_state()["attempt"]
+    with pytest.raises(enterprise.EnterpriseUpgradeError):
+        await enterprise.upgrade(progress)
+    assert heard[0]["attempt"] != earlier and enterprise.read_state()["attempt"] == earlier
 
 
 async def test_eu6c_an_installer_that_does_not_start_is_no_failed_download(machine: Path, monkeypatch: pytest.MonkeyPatch):
@@ -734,7 +802,7 @@ async def test_eu6c_an_installer_that_does_not_start_is_no_failed_download(machi
     console(monkeypatch, lambda request: httpx.Response(200, json=manifest_with(body)) if "manifest" in request.url.path else httpx.Response(200, content=body))
     monkeypatch.setattr(enterprise, "_console_session_token", _token(""))
 
-    def will_not_start(_path, _offer):
+    def will_not_start(_path, _offer, _attempt=None):
         raise enterprise.EnterpriseUpgradeError("安装包没有起来，看 install.log")
 
     monkeypatch.setattr(enterprise, "start_installer", will_not_start)

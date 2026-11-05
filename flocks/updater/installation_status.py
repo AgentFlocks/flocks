@@ -18,15 +18,24 @@ _CREDENTIAL_ASSIGNMENT = re.compile(  # secret-guard: allow - compiled redaction
     r"(?i)(\b(?:password|passwd|pwd|token|api[_-]?key|secret)\s*=\s*)"
     r"(?:'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|[^\s;&]+)"
 )
+# A name that says what it holds, however it is written: PGPASSWORD=, "password": , api_key: , auth_token=.
+_CREDENTIAL_NAMED = re.compile(  # secret-guard: allow - compiled redaction expression, not a credential
+    r"""(?i)(["']?\b[a-z0-9_.-]*(?:password|passwd|pwd|token|api[_-]?key|secret|credential|authorization)[a-z0-9_.-]*["']?\s*[=:]\s*)"""
+    r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:(?:bearer|basic|token)\s+)?[^\s;&,}\]]+)"""
+)
+_CREDENTIAL_SCHEME = re.compile(r"(?i)\b(bearer|basic)\s+[a-z0-9._~+/=-]{8,}")  # secret-guard: allow - compiled redaction expression
 
 
 def scrub_credentials(value: str) -> str:
-    """Mask passwords in assignments and in URLs: what is shown of an install's output keeps its lines."""
-    return redact_credentials(_CREDENTIAL_ASSIGNMENT.sub(lambda match: match.group(1) + "***", value))
+    """Mask credentials wherever an install's output has them: what is shown of it keeps its lines."""
+    value = _CREDENTIAL_ASSIGNMENT.sub(lambda match: match.group(1) + "***", value)
+    value = _CREDENTIAL_NAMED.sub(lambda match: match.group(1) + "***", value)
+    value = _CREDENTIAL_SCHEME.sub(lambda match: match.group(1) + " ***", value)
+    return redact_credentials(value)
 
 
 def _display_text(value: str) -> str:
-    return summarize_error(_CREDENTIAL_ASSIGNMENT.sub(lambda match: match.group(1) + "***", value))
+    return summarize_error(scrub_credentials(value))
 
 
 def installation_result_path() -> Path:

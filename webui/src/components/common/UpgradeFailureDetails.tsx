@@ -25,9 +25,7 @@ export function failureOfEnterpriseUpgrade(state: EnterpriseUpgradeState | null 
     step: state.failed_step ?? (state.log ? 'install' : 'download'),
     reason: state.reason ?? state.message ?? fallback ?? null,
     exitCode: state.exit_code ?? null,
-    // The open edition answering is how this came to be read: the record of an install that got as
-    // far as switching the machine says more, and without one it was never touched.
-    recovery: state.recovery ?? 'unchanged',
+    recovery: state.recovery ?? null,
     logPath: state.log ?? null,
     logTail: state.log_tail ?? null,
   };

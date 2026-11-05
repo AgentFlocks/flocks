@@ -185,7 +185,7 @@ export default function UpdateModal({
           ...failureOfEnterpriseUpgrade(lastKnown),
           step: 'install',
           reason: t('restartTimeout', { reason: t('restartUnknown') }),
-          recovery: 'failed',
+          recovery: 'unknown',
         });
         return;
       }
@@ -229,7 +229,7 @@ export default function UpdateModal({
     };
     const poll = async () => {
       if (Date.now() - startedAt > HANDOFF_MAX_WAIT) {
-        unlock({ reason: t('restartTimeout', { reason: t('restartUnknown') }), recovery: 'failed' });
+        unlock({ reason: t('restartTimeout', { reason: t('restartUnknown') }), recovery: 'unknown' });
         return;
       }
       try {
@@ -271,24 +271,31 @@ export default function UpdateModal({
     setError(null);
     setFailure(null);
     setFailedStage(null);
-    // What the server recorded of the attempt says more than the message its stream ended with.
+    // What the server recorded of this attempt says more than the message its stream ended with; an
+    // earlier attempt's record is not this one's. One that began and recorded nothing stopped asking
+    // Console, before anything was touched; one that never began was refused, as it says.
+    let attempt: string | null = null;
     const stopped = async (message?: string | null) => {
       let recorded: EnterpriseUpgradeState | null = null;
-      try {
-        const { upgrade } = await enterpriseUpgradeApi.situation();
-        if (upgrade?.phase === 'failed') recorded = upgrade;
-      } catch {
-        // Not answering just now: what the stream said is all there is.
+      if (attempt) {
+        try {
+          const { upgrade } = await enterpriseUpgradeApi.situation();
+          if (upgrade?.phase === 'failed' && upgrade.attempt === attempt) recorded = upgrade;
+        } catch {
+          // Not answering just now: what the stream said is all there is.
+        }
       }
+      const reason = message || t('upgradeFailed');
       const ended: UpgradeFailure = recorded
-        ? failureOfEnterpriseUpgrade(recorded, message)
-        : { reason: message || t('upgradeFailed') };
+        ? failureOfEnterpriseUpgrade(recorded, reason)
+        : attempt ? { step: 'check', reason, recovery: 'unchanged' } : { reason };
       showFailure(ended, ENTERPRISE_FAILED_STAGE[ended.step ?? ''] ?? (lastStageRef.current || null));
       setUpgrading(false);
     };
     lastStageRef.current = null;
     try {
       const state = await enterpriseUpgradeApi.start((event) => {
+        if (event.attempt) attempt = event.attempt;
         if (event.stage !== 'downloading') return;
         const received = event.received ?? 0;
         const total = event.total ?? null;

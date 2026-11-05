@@ -32,6 +32,7 @@ import shlex
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -69,6 +70,10 @@ _FAILED_LOG_LINES = 200
 #: The line start_installer writes in the log ahead of each run.
 _RUN_HEADER = "== "
 _TERMINAL_CODES = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_ERROR_LINE = re.compile(
+    r"失败|错误|无法|建不了|取不出|error|fail|fatal|panic|traceback|exception|cannot|can't|could not|couldn't|did not|not found|no such|denied|refus|no space",
+    re.IGNORECASE,
+)
 
 
 class EnterpriseUpgradeError(Exception):
@@ -527,51 +532,67 @@ def _log_tail(path: Path, lines: int = _LOG_TAIL_LINES) -> list[str]:
 
 
 def _installer_reason(lines: list[str]) -> str | None:
-    """The installer's own last word on why it stopped: its refusal, else the last thing it printed."""
-    last = None
-    for line in reversed(lines):
-        text = line.strip()
-        if not text or text.startswith(_RUN_HEADER):
-            continue
+    """Why the installer stopped, where it says: its refusal, else the last line that reads as an
+    error. Not simply the last line, which may be it cleaning up: no reason is better than a wrong one."""
+    found = [line.strip() for line in lines if line.strip() and not line.startswith(_RUN_HEADER)]
+    for text in reversed(found):
         if text.startswith("安装失败："):
             return summarize_error(text)
-        last = last or text
-    return summarize_error(last) if last else None
+    for text in reversed(found):
+        if _ERROR_LINE.search(text):
+            return summarize_error(text)
+    return None
 
 
 def _installation_outcome(since: float) -> dict[str, Any] | None:
-    """What the installer recorded of this run, once it had started switching the machine over:
-    how far the machine was put back. A record older than the run is another run's."""
+    """What the installer recorded of this run: it records that it is switching the machine over
+    before it stops anything, and how far the machine was put back if that fails. None when it has
+    recorded nothing since the run began."""
     try:
         if installation_result_path().stat().st_mtime < since:
             return None
     except OSError:
         return None
-    return read_installation_result()
+    # A record of this run that is no failure's: it stopped in the middle of switching the machine over.
+    return read_installation_result() or {"recovery": "unknown"}
 
 
 def _explain_failure(state: dict[str, Any]) -> None:
     """Where a failed upgrade stopped and why, for whoever reads it: the step, the reason in the
     installer's words, how the machine was left and the end of the log."""
+    installing = bool(state.get("log") or state.get("pid"))
+    step = state.setdefault("failed_step", "install" if installing else "download")
     log_file = state.get("log")
-    if not isinstance(log_file, str) or not log_file:
-        state.setdefault("failed_step", "download")
-        state.setdefault("reason", state.get("message"))
+    lines = _log_tail(Path(log_file), _FAILED_LOG_LINES) if isinstance(log_file, str) and log_file else []
+    if lines:
+        state["log_tail"] = lines
+    if step != "install":
+        # Nothing of the machine is touched before the installer runs.
+        state["recovery"] = "unchanged"
+        state["reason"] = state.get("message")
         return
-    state.setdefault("failed_step", "install")
-    lines = _log_tail(Path(log_file), _FAILED_LOG_LINES)
-    state["log_tail"] = lines
+    ended = "exit_code" in state or bool(state.get("message"))
     reason = state.get("message")
     if reason is None:
-        # Without an exit code the last thing it printed is not why it stopped.
-        reason = _installer_reason(lines) if "exit_code" in state else "安装程序中途退出了，没有留下退出码（机器或服务可能重启过）"
-    try:
-        started = _state_file().stat().st_mtime
-    except OSError:
-        started = None
-    outcome = _installation_outcome(started) if started is not None else None
-    if outcome:
-        state["recovery"] = outcome.get("recovery")
+        if state.get("from") == "terminal":
+            reason = "这次是在终端里运行的，原因在终端的输出里"
+        elif "exit_code" in state:
+            reason = _installer_reason(lines)
+        else:
+            reason = "安装程序中途退出了，没有留下退出码（机器或服务可能重启过）"
+    since = state.get("started_unix")
+    if not isinstance(since, (int, float)):
+        try:
+            since = _state_file().stat().st_mtime
+        except OSError:
+            since = None
+    # A second's slack: some filesystems keep whole seconds.
+    outcome = _installation_outcome(since - 1.0) if since is not None else None
+    if outcome is None:
+        # Nothing recorded: it never got as far as stopping anything, if it said how it ended.
+        state["recovery"] = "unchanged" if ended else "unknown"
+    else:
+        state["recovery"] = outcome.get("recovery") or "unknown"
         reason = outcome.get("detail") or reason
     state["reason"] = reason
 
@@ -817,6 +838,7 @@ def run_installer(path: Path, offer: InstallerOffer) -> int:
     # Windows: the installer asks for an administrator and runs in the window that opens; it tells
     # how it ended there, not here.
     argv = [str(path), "--no-pause", "--exit-status", str(exit_file), *_windows_open_edition_args()] if _WINDOWS else ["bash", str(path)]
+    began = time.time()
     process = subprocess.Popen(argv, cwd=str(path.parent), env=_installer_environment())
     _write_state({
         "phase": "installing",
@@ -825,6 +847,7 @@ def run_installer(path: Path, offer: InstallerOffer) -> int:
         "version": offer.version,
         "installer": str(path),
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "started_unix": began,
         "from": "terminal",
     })
     code = process.wait()
@@ -855,9 +878,10 @@ _WINDOWS_DETACH = (
 )
 
 
-def _start_windows_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
+def _start_windows_installer(path: Path, offer: InstallerOffer, attempt: str | None = None) -> dict[str, Any]:
     """start_installer on Windows: the installer, apart from this server, asks Windows for an
     administrator and writes its log and exit status where the page reads them."""
+    began = time.time()
     work = work_dir()
     log_file = work / "install.log"
     exit_file = work / "exit-status"
@@ -888,23 +912,26 @@ def _start_windows_installer(path: Path, offer: InstallerOffer) -> dict[str, Any
         "installer": str(path),
         "log": str(log_file),
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "started_unix": began,
+        **({"attempt": attempt} if attempt else {}),
     }
     _write_state(state)
     log.info("enterprise.installer_started", {"pid": pid, "release_id": offer.release_id})
     return state
 
 
-def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
+def start_installer(path: Path, offer: InstallerOffer, attempt: str | None = None) -> dict[str, Any]:
     """Run the installer apart from this server: install-managed stops this open install's
     supervisor, and this process with it, before the enterprise edition starts."""
     if not available():
         raise EnterpriseUpgradeError("这台机器已经是企业版")
     if _WINDOWS:
-        return _start_windows_installer(path, offer)
+        return _start_windows_installer(path, offer, attempt)
     if run_by_systemd():
         raise EnterpriseUpgradeError(f"这台机器由 systemd 管，要以 root 执行：{installer_command(str(path))}")
     if not install_root_ready():
         raise EnterpriseUpgradeError(f"先用 root 执行一次：{prepare_command()}")
+    began = time.time()
     work = work_dir()
     work.mkdir(parents=True, exist_ok=True)
     os.chmod(work, 0o700)
@@ -942,6 +969,8 @@ def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
         "installer": str(path),
         "log": str(log_file),
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "started_unix": began,
+        **({"attempt": attempt} if attempt else {}),
     }
     _write_state(state)
     log.info("enterprise.installer_started", {"pid": pid, "release_id": offer.release_id})
@@ -965,8 +994,11 @@ async def _upgrade(progress: Callable[[dict[str, Any]], Awaitable[None]]) -> dic
     current = read_state()
     if current is not None and current.get("phase") == "installing":
         raise EnterpriseUpgradeError("安装包已经在运行了")
+    # What this attempt records goes by this: the page must not take an earlier failure for this one's.
+    attempt = uuid.uuid4().hex
+    await progress({"stage": "started", "attempt": attempt})
     offer = await fetch_offer()
-    base = {"release_id": offer.release_id, "version": offer.version, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    base = {"attempt": attempt, "release_id": offer.release_id, "version": offer.version, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     _write_state({**base, "phase": "downloading", "received": 0, "total": offer.size})
     await progress({"stage": "downloading", "version": offer.version, "release_id": offer.release_id})
     recorded = 0.0
@@ -997,7 +1029,7 @@ async def _upgrade(progress: Callable[[dict[str, Any]], Awaitable[None]]) -> dic
         _write_state(state)
         return state
     try:
-        state = start_installer(path, offer)
+        state = start_installer(path, offer, attempt)
     except BaseException as exc:
         _write_state({**base, "phase": "failed", "failed_step": "install", "installer": str(path), "message": str(exc) or "安装包没有起来"})
         raise
