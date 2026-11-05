@@ -79,5 +79,30 @@
     "fetching": "下载新企业版安装包",
     "restarting": "安装新企业版"
   },
-  "enterpriseOpenPage": "去 Flocks Pro 页"
+  "enterpriseOpenPage": "去 Flocks Pro 页",
+  "failure": {
+    "stoppedAt": "升级停在「{{step}}」这一步",
+    "reason": "原因：",
+    "noReason": "没有留下具体原因，看下面的日志。",
+    "exitCode": "安装程序的退出码是 {{code}}。",
+    "logPath": "完整日志：",
+    "logTail": "日志的最后 {{count}} 行",
+    "copy": "复制错误信息",
+    "copied": "已复制",
+    "recovery": {
+      "unchanged": "原来的版本没有动，可以接着用。把原因处理掉之后可以重新升级。",
+      "restored": "已经恢复到升级之前的安装，数据都在，可以接着用。把原因处理掉之后可以重新升级。",
+      "rolled_back": "已经自动回到升级之前的版本，可以接着用。把原因处理掉之后可以重新升级。",
+      "retained": "这台机器已经在用 PostgreSQL，为了不丢新数据没有切回旧安装。修好 PostgreSQL 或服务之后重启服务，不要重新导入旧数据。",
+      "failed": "原来的服务还没有确认恢复。先到服务器上看服务状态，不要同时启动两个实例。"
+    },
+    "steps": {
+      "download": "下载新企业版安装包",
+      "install": "安装新企业版",
+      "bundle": "校验发布包",
+      "unpack": "解开发布包",
+      "preflight": "检查新版本",
+      "start": "启动新版本"
+    }
+  }
 }

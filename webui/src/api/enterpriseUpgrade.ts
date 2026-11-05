@@ -31,7 +31,15 @@ export interface EnterpriseUpgradeState {
   message?: string;
   exit_code?: number;
   started_at?: string;
+  /** The installer's log on the machine, once it has started. */
+  log?: string;
   log_tail?: string[];
+  /** Once it has failed: the step it stopped at. */
+  failed_step?: 'download' | 'install';
+  /** Once it has failed: why, in the installer's words. */
+  reason?: string | null;
+  /** Once it has failed: how the installer left the machine (restored, unchanged, retained, failed). */
+  recovery?: string | null;
 }
 
 export interface EnterpriseSituation {
@@ -133,7 +141,12 @@ export const enterpriseUpgradeApi = {
   /** Downloads, checks and starts the installer; each event of the stream goes to onEvent. */
   start: async (onEvent: (event: EnterpriseUpgradeEvent) => void): Promise<EnterpriseUpgradeState> => {
     const res = await fetch('/api/enterprise-upgrade/start', { method: 'POST', credentials: 'same-origin' }); // secret-guard: allow (fetch's credentials mode)
-    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok || !res.body) {
+      // The server's refusal says why (signed out, already upgrading...); the status alone does not.
+      const said = await res.json().catch(() => null) as { detail?: unknown; message?: unknown } | null;
+      const detail = typeof said?.detail === 'string' ? said.detail : typeof said?.message === 'string' ? said.message : '';
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';

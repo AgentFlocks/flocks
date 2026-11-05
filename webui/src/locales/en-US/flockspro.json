@@ -140,7 +140,6 @@
     "restarting": "The open edition has stopped and the enterprise edition is starting for the first time (moving the data). The page reloads if it listens on this address; otherwise open the address the installer printed.",
     "finished": "The new enterprise edition {{version}} is installed; reload the page.",
     "failed": "The install did not finish and the open edition keeps running; the installer output below says why.",
-    "failedCode": "The install did not finish (exit code {{code}}) and the open edition keeps running; the installer output below says why.",
     "command": "The installer is downloaded. Run, as root:",
     "commandPrepare": "The installer is downloaded. First let this account have the install directory (as root), then run the installer:",
     "log": "Installer output"

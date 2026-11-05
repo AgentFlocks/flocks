@@ -27,10 +27,11 @@ import {
 } from '@/api/update';
 import { checkRestartReadiness } from '@/utils/restartPolling';
 import UpgradeHandoffSteps, { useHandoffFailureMessage } from './UpgradeHandoffSteps';
+import UpgradeFailureDetails, { failureOfEnterpriseUpgrade, failureOfReleaseUpdate, type UpgradeFailure } from './UpgradeFailureDetails';
 import { ENTERPRISE_UPDATE_CHANNEL, UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
 import { withReleaseUpdate, type ReleaseUpdateSource } from '@/utils/releaseUpdate';
 import { extractErrorMessage } from '@/utils/error';
-import { ENTERPRISE_UPGRADE_PAGE, enterpriseUpgradeApi, enterpriseVersionInfo } from '@/api/enterpriseUpgrade';
+import { ENTERPRISE_UPGRADE_PAGE, enterpriseUpgradeApi, enterpriseVersionInfo, type EnterpriseUpgradeState } from '@/api/enterpriseUpgrade';
 
 // ------------------------------------------------------------------ //
 
@@ -38,6 +39,8 @@ const HEALTH_POLL_INTERVAL = 2000;
 const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
 // Upper bound while the upgrade handoff keeps answering; each of its steps times out within 5 minutes.
 const HANDOFF_MAX_WAIT = 30 * 60 * 1000;
+// The row of the dialog each step of a failed upgrade to the enterprise edition belongs to.
+const ENTERPRISE_FAILED_STAGE: Record<string, UpdateProgress['stage']> = { download: 'fetching', install: 'restarting' };
 
 export { UPDATE_DISMISSED_KEY };
 
@@ -112,6 +115,10 @@ export default function UpdateModal({
   const [upgradeAttempted, setUpgradeAttempted] = useState(false);
   const [steps, setSteps] = useState<UpdateProgress[]>([]);
   const [error, setError] = useState<string | null>(initialInfo?.error ?? null);
+  // Where a failed upgrade stopped, when what failed said; `error` is the plain text of the rest.
+  const [failure, setFailure] = useState<UpgradeFailure | null>(null);
+  const [failedStage, setFailedStage] = useState<UpdateProgress['stage'] | null>(null);
+  const lastStageRef = useRef<UpdateProgress['stage'] | null>(null);
   const [restarting, setRestarting] = useState(false);
   const [handoffProgress, setHandoffProgress] = useState<UpgradeHandoffProgress | null>(null);
   const describeHandoffFailure = useHandoffFailureMessage();
@@ -150,19 +157,36 @@ export default function UpdateModal({
     }
   }, [fetchVersion, forceInitialCheck, initialInfo]);
 
+  const showFailure = (ended: UpgradeFailure, stage: UpdateProgress['stage'] | null) => {
+    setFailure(ended);
+    setError(ended.reason || t('upgradeFailed'));
+    setFailedStage(stage);
+    if (stage) {
+      // The step that failed is on screen, as a failed step, even when it failed as it began.
+      setSteps((prev) => (prev.some((step) => step.stage === stage) ? prev : [...prev, { stage, message: '', success: false }]));
+    }
+  };
+
   // The installer runs apart from this server and stops it on the way. What answers here next says
   // how it went: this open edition again, with why it failed, or the enterprise edition, for which
   // this machine is no longer one to upgrade. Not answering just now says neither.
-  const pollEnterpriseUntilReady = () => {
+  const pollEnterpriseUntilReady = (started: EnterpriseUpgradeState) => {
     const startedAt = Date.now();
-    const unlock = (message: string) => {
-      setError(message);
+    let lastKnown = started;
+    const unlock = (ended: UpgradeFailure) => {
+      showFailure(ended, 'restarting');
       setRestartingSync(false);
       setUpgrading(false);
     };
     const poll = async () => {
       if (Date.now() - startedAt > HANDOFF_MAX_WAIT) {
-        unlock(t('restartTimeout', { reason: t('restartUnknown') }));
+        // Whatever it was doing when last heard of, and where its log is: the server is not answering.
+        unlock({
+          ...failureOfEnterpriseUpgrade(lastKnown),
+          step: 'install',
+          reason: t('restartTimeout', { reason: t('restartUnknown') }),
+          recovery: 'failed',
+        });
         return;
       }
       try {
@@ -171,8 +195,10 @@ export default function UpdateModal({
           window.location.reload();
           return;
         }
+        if (situation.upgrade) lastKnown = situation.upgrade;
         if (situation.upgrade?.phase === 'failed') {
-          unlock(situation.upgrade.message ?? t('upgradeFailed'));
+          const ended = failureOfEnterpriseUpgrade(situation.upgrade);
+          unlock(ended);
           return;
         }
       } catch (e: any) {
@@ -196,14 +222,14 @@ export default function UpdateModal({
   // says nothing. The source says how it went; asked through the restart, as the Flocks Pro page does.
   const pollReleaseUntilEnded = (source: ReleaseUpdateSource, token: string) => {
     const startedAt = Date.now();
-    const unlock = (message: string) => {
-      setError(message);
+    const unlock = (ended: UpgradeFailure) => {
+      showFailure(ended, 'restarting');
       setRestartingSync(false);
       setUpgrading(false);
     };
     const poll = async () => {
       if (Date.now() - startedAt > HANDOFF_MAX_WAIT) {
-        unlock(t('restartTimeout', { reason: t('restartUnknown') }));
+        unlock({ reason: t('restartTimeout', { reason: t('restartUnknown') }), recovery: 'failed' });
         return;
       }
       try {
@@ -213,7 +239,7 @@ export default function UpdateModal({
           return;
         }
         if (outcome.state === 'failed' || outcome.state === 'stalled' || outcome.state === 'unknown') {
-          unlock(outcome.detail || t('upgradeFailed'));
+          unlock(failureOfReleaseUpdate(outcome, t('upgradeFailed')));
           return;
         }
       } catch (e: any) {
@@ -221,7 +247,7 @@ export default function UpdateModal({
         // The service's own refusal (signed out, say) will not change.
         const code = e?.response?.status;
         if (typeof code === 'number' && code >= 400 && code < 500) {
-          unlock(extractErrorMessage(e, t('upgradeFailed')));
+          unlock({ reason: extractErrorMessage(e, t('upgradeFailed')) });
           return;
         }
       }
@@ -243,11 +269,30 @@ export default function UpdateModal({
     setUpgradeAttempted(true);
     setSteps([]);
     setError(null);
+    setFailure(null);
+    setFailedStage(null);
+    // What the server recorded of the attempt says more than the message its stream ended with.
+    const stopped = async (message?: string | null) => {
+      let recorded: EnterpriseUpgradeState | null = null;
+      try {
+        const { upgrade } = await enterpriseUpgradeApi.situation();
+        if (upgrade?.phase === 'failed') recorded = upgrade;
+      } catch {
+        // Not answering just now: what the stream said is all there is.
+      }
+      const ended: UpgradeFailure = recorded
+        ? failureOfEnterpriseUpgrade(recorded, message)
+        : { reason: message || t('upgradeFailed') };
+      showFailure(ended, ENTERPRISE_FAILED_STAGE[ended.step ?? ''] ?? (lastStageRef.current || null));
+      setUpgrading(false);
+    };
+    lastStageRef.current = null;
     try {
       const state = await enterpriseUpgradeApi.start((event) => {
         if (event.stage !== 'downloading') return;
         const received = event.received ?? 0;
         const total = event.total ?? null;
+        lastStageRef.current = 'fetching';
         setSteps([{
           stage: 'fetching',
           message: '',
@@ -266,19 +311,17 @@ export default function UpdateModal({
           { stage: 'restarting', message: '', success: null },
         ]);
         setRestartingSync(true);
-        pollEnterpriseUntilReady();
+        pollEnterpriseUntilReady(state);
       } else if (state.phase === 'finished') {
         window.location.reload();
       } else if (state.phase === 'command') {
         // Downloaded, and root has to run it: that page shows what to run.
         window.location.assign(ENTERPRISE_UPGRADE_PAGE);
       } else {
-        setError(state.message ?? t('upgradeFailed'));
-        setUpgrading(false);
+        await stopped(state.message);
       }
     } catch (e: any) {
-      setError(e.message ?? t('upgradeFailed'));
-      setUpgrading(false);
+      await stopped(e?.message);
     }
   };
 
@@ -293,10 +336,14 @@ export default function UpdateModal({
     setUpgradeAttempted(true);
     setSteps([]);
     setError(null);
+    setFailure(null);
+    setFailedStage(null);
+    lastStageRef.current = null;
 
     const viaRelease = info.deploy_mode === 'managed' ? releaseUpdate : undefined;
     try {
       const onProgress = (progress: UpdateProgress) => {
+        if (progress.stage !== 'error') lastStageRef.current = progress.stage;
         setSteps((prev) => {
           const existingIndex = prev.findIndex((item) => item.stage === progress.stage);
           if (existingIndex === -1) {
@@ -335,6 +382,8 @@ export default function UpdateModal({
       if (!restartingRef.current) {
         setError(e instanceof IncompleteUpdateError ? t('streamInterrupted')
           : e instanceof UpdateStreamTimeoutError ? t('streamTimeout') : e.message ?? t('upgradeFailed'));
+        // The row it stopped at shows as failed; a stream's error names no step of its own.
+        setFailedStage(lastStageRef.current);
         setUpgrading(false);
       } else if (e?.message) {
         restartFailureReasonRef.current = e.message;
@@ -397,7 +446,7 @@ export default function UpdateModal({
       ? t(`enterpriseStageLabels.${step.stage}`, { defaultValue: step.stage })
       : t(`stageLabels.${step.stage}`, { defaultValue: step.stage });
     const restartFailed = step.stage === 'restarting' && handoffProgress?.phase === 'failed';
-    const isError = step.stage === 'error' || restartFailed;
+    const isError = step.stage === 'error' || restartFailed || step.stage === failedStage;
     const isSpinning = step.stage === 'restarting' && restarting && !restartFailed;
     const downloadPercent = clampPercent(step.percent);
     const hasDownloadProgress = step.stage === 'fetching' && typeof step.downloaded_bytes === 'number';
@@ -456,7 +505,7 @@ export default function UpdateModal({
 
         <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
           <div
-            className="pointer-events-auto w-full max-w-md mx-4 max-h-[calc(100dvh-2rem)] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-gray-200"
+            className={`pointer-events-auto w-full ${failure ? 'max-w-2xl' : 'max-w-md'} mx-4 max-h-[calc(100dvh-2rem)] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-gray-200`}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
@@ -509,7 +558,11 @@ export default function UpdateModal({
               </div>
             )}
 
-            {error && (
+            {failure ? (
+              <div className="px-4 pb-3">
+                <UpgradeFailureDetails failure={failure} />
+              </div>
+            ) : error && (
               <div className="px-4 pb-3">
                 <div className="flex items-start gap-2 text-xs text-red-600 bg-red-50 rounded-lg p-2.5">
                   <XCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />

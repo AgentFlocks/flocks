@@ -548,6 +548,68 @@ describe('UpdateModal on a machine with an enterprise licence', () => {
     expect(location.reload).not.toHaveBeenCalled();
   });
 
+  it('says where it stopped and why when the installer ended with no message of its own', async () => {
+    const log = '/home/me/.flocks/enterprise/install.log';
+    enterpriseStart.mockResolvedValue({ phase: 'installing', log });
+    enterpriseSituation.mockResolvedValue({
+      available: true,
+      upgrade: {
+        phase: 'failed',
+        failed_step: 'install',
+        exit_code: 1,
+        reason: 'the core did not come up',
+        recovery: 'restored',
+        log,
+        log_tail: ['== bash flockspro.run', 'install-managed: stopping the open edition', 'the core did not come up'],
+      },
+    });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(await screen.findByTestId('upgrade-failure-reason')).toHaveTextContent('the core did not come up');
+    expect(screen.getByText('failure.stoppedAt')).toBeInTheDocument();
+    expect(screen.getByText('failure.exitCode')).toBeInTheDocument();
+    expect(screen.getByText('failure.recovery.restored')).toBeInTheDocument();
+    expect(screen.getByText(log)).toBeInTheDocument();
+    expect(screen.getByTestId('upgrade-failure-log')).toHaveTextContent('install-managed: stopping the open edition');
+    // The step it stopped at is no step that went through.
+    expect(screen.getByText('enterpriseStageLabels.restarting')).toHaveClass('text-red-600');
+    expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
+    expect(location.reload).not.toHaveBeenCalled();
+  });
+
+  it('marks the download when that is where it stopped, and no later step', async () => {
+    enterpriseStart.mockImplementation((onEvent: (event: unknown) => void) => {
+      onEvent({ stage: 'downloading', received: 10, total: 100 });
+      return Promise.reject(new Error('下载中断'));
+    });
+    enterpriseSituation.mockResolvedValue({ available: true, upgrade: { phase: 'failed', failed_step: 'download', message: '下载中断', reason: '下载中断' } });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    expect(await screen.findByTestId('upgrade-failure-reason')).toHaveTextContent('下载中断');
+    expect(screen.getByText('enterpriseStageLabels.fetching')).toHaveClass('text-red-600');
+    expect(screen.queryByText('enterpriseStageLabels.restarting')).not.toBeInTheDocument();
+    expect(screen.getByText('failure.recovery.unchanged')).toBeInTheDocument();
+  });
+
+  it('shows the failed install step even when it failed as it began', async () => {
+    enterpriseStart.mockRejectedValue(new Error('安装包没有起来'));
+    enterpriseSituation.mockResolvedValue({ available: true, upgrade: { phase: 'failed', failed_step: 'install', message: '安装包没有起来' } });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    expect(await screen.findByText('enterpriseStageLabels.restarting')).toHaveClass('text-red-600');
+    expect(screen.getByTestId('upgrade-failure-reason')).toHaveTextContent('安装包没有起来');
+  });
+
+  it('says what the server said when nothing of the attempt was recorded', async () => {
+    enterpriseStart.mockRejectedValue(new Error('已经在升级了'));
+    enterpriseSituation.mockResolvedValue({ available: true, upgrade: null });
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    expect(await screen.findByTestId('upgrade-failure-reason')).toHaveTextContent('已经在升级了');
+    expect(screen.getByText('upgradeFailed', { selector: 'span' })).toBeInTheDocument();
+  });
+
   it('keeps to the way the shown version came when the machine changes under it', async () => {
     // The dialog shows Console's version; a check that could not ask has taken the machine's kind away.
     enterpriseStart.mockResolvedValue({ phase: 'installing' });
@@ -563,7 +625,9 @@ describe('UpdateModal on a machine with an enterprise licence', () => {
     const user = await opened();
     await user.click(screen.getByRole('button', { name: 'confirmAction' }));
     expect(await screen.findByText('下载安装包失败')).toBeInTheDocument();
-    expect(enterpriseSituation).not.toHaveBeenCalled();
+    // Asked once, for what it recorded of the attempt: nothing is running to wait for.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(enterpriseSituation).toHaveBeenCalledTimes(1);
   });
 
   it('leaves what root has to run to the Flocks Pro page', async () => {
@@ -657,6 +721,24 @@ describe('UpdateModal on a release its own core installs', () => {
     expect(location.reload).not.toHaveBeenCalled();
   });
 
+  it('shows where a release that did not come up stopped, what it printed and how the machine was left', async () => {
+    await started(vi.fn().mockResolvedValue({
+      state: 'failed',
+      detail: 'release r2 did not come up (no answer); rolled back to r1, which is serving',
+      failed_step: 'start',
+      recovery: 'rolled_back',
+      log: '/opt/flockspro/run/upgrade.log',
+      log_tail: ['upgrade: current -> r2', 'Traceback (most recent call last):', 'ModuleNotFoundError: No module named x'],
+    }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(await screen.findByTestId('upgrade-failure-reason')).toHaveTextContent('rolled back to r1');
+    expect(screen.getByText('failure.stoppedAt')).toBeInTheDocument();
+    expect(screen.getByText('failure.recovery.rolled_back')).toBeInTheDocument();
+    expect(screen.getByText('/opt/flockspro/run/upgrade.log')).toBeInTheDocument();
+    expect(screen.getByTestId('upgrade-failure-log')).toHaveTextContent('ModuleNotFoundError: No module named x');
+    expect(screen.getByText('stageLabels.restarting')).toHaveClass('text-red-600');
+  });
+
   it('stops at the service refusing the question, which will not change', async () => {
     const outcome = vi.fn().mockRejectedValue({ response: { status: 401, data: { detail: '请重新登录' } } });
     await started(outcome);
@@ -673,6 +755,18 @@ describe('UpdateModal on a release its own core installs', () => {
     await user.click(screen.getByRole('button', { name: 'confirmAction' }));
     expect(await screen.findByText('Console 没有这个平台的发布包')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'laterAction' })).toBeEnabled();
+  });
+
+  it('marks the step a stream stopped at', async () => {
+    const start = vi.fn().mockImplementation((onProgress: (progress: unknown) => void) => {
+      onProgress({ stage: 'fetching', message: '', downloaded_bytes: 10, total_bytes: 100, percent: 10 });
+      return Promise.reject(new Error('下载发布包失败：连接被重置'));
+    });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={managed} channel="flockspro" releaseUpdate={{ status: vi.fn(), start, outcome: vi.fn() }} onClose={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    expect(await screen.findByText('下载发布包失败：连接被重置')).toBeInTheDocument();
+    expect(screen.getByText('stageLabels.fetching')).toHaveClass('text-red-600');
   });
 
   it('a managed install that is not a release install keeps the notice and no button', async () => {

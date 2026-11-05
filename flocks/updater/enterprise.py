@@ -40,6 +40,8 @@ from urllib.parse import urlencode, urlparse
 import httpx
 
 from flocks.updater.deploy import declared_managed, detect_deploy_mode
+from flocks.updater.handoff_progress import summarize_error
+from flocks.updater.installation_status import installation_result_path, read_installation_result, scrub_credentials
 from flocks.utils.log import Log
 
 log = Log.create(service="updater.enterprise")
@@ -62,6 +64,11 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RELEASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _VERSION_RE = re.compile(r"^\d+(\.\d+){1,3}$")
 _LOG_TAIL_LINES = 40
+#: What is shown of the installer's output once it has failed: the page and the dialog scroll it.
+_FAILED_LOG_LINES = 200
+#: The line start_installer writes in the log ahead of each run.
+_RUN_HEADER = "== "
+_TERMINAL_CODES = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
 class EnterpriseUpgradeError(Exception):
@@ -501,7 +508,8 @@ def _windows_pid_alive(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
-def _log_tail(path: Path) -> list[str]:
+def _log_tail(path: Path, lines: int = _LOG_TAIL_LINES) -> list[str]:
+    """The end of the installer's log, of its last run only: the log is added to run after run."""
     try:
         with path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -510,7 +518,62 @@ def _log_tail(path: Path) -> list[str]:
             text = handle.read().decode("utf-8", errors="replace")
     except OSError:
         return []
-    return text.splitlines()[-_LOG_TAIL_LINES:]
+    found = [scrub_credentials(_TERMINAL_CODES.sub("", line)) for line in text.splitlines()]
+    for index in range(len(found) - 1, -1, -1):
+        if found[index].startswith(_RUN_HEADER):
+            found = found[index:]
+            break
+    return found[-lines:]
+
+
+def _installer_reason(lines: list[str]) -> str | None:
+    """The installer's own last word on why it stopped: its refusal, else the last thing it printed."""
+    last = None
+    for line in reversed(lines):
+        text = line.strip()
+        if not text or text.startswith(_RUN_HEADER):
+            continue
+        if text.startswith("安装失败："):
+            return summarize_error(text)
+        last = last or text
+    return summarize_error(last) if last else None
+
+
+def _installation_outcome(since: float) -> dict[str, Any] | None:
+    """What the installer recorded of this run, once it had started switching the machine over:
+    how far the machine was put back. A record older than the run is another run's."""
+    try:
+        if installation_result_path().stat().st_mtime < since:
+            return None
+    except OSError:
+        return None
+    return read_installation_result()
+
+
+def _explain_failure(state: dict[str, Any]) -> None:
+    """Where a failed upgrade stopped and why, for whoever reads it: the step, the reason in the
+    installer's words, how the machine was left and the end of the log."""
+    log_file = state.get("log")
+    if not isinstance(log_file, str) or not log_file:
+        state.setdefault("failed_step", "download")
+        state.setdefault("reason", state.get("message"))
+        return
+    state.setdefault("failed_step", "install")
+    lines = _log_tail(Path(log_file), _FAILED_LOG_LINES)
+    state["log_tail"] = lines
+    reason = state.get("message")
+    if reason is None:
+        # Without an exit code the last thing it printed is not why it stopped.
+        reason = _installer_reason(lines) if "exit_code" in state else "安装程序中途退出了，没有留下退出码（机器或服务可能重启过）"
+    try:
+        started = _state_file().stat().st_mtime
+    except OSError:
+        started = None
+    outcome = _installation_outcome(started) if started is not None else None
+    if outcome:
+        state["recovery"] = outcome.get("recovery")
+        reason = outcome.get("detail") or reason
+    state["reason"] = reason
 
 
 @contextlib.contextmanager
@@ -642,6 +705,7 @@ def read_state() -> dict[str, Any] | None:
     if state.get("phase") == "downloading" and not _run_lock.locked() and not _upgrade_lock_held():
         # The process that downloaded it is gone (the server restarted under it).
         state["phase"] = "failed"
+        state["failed_step"] = "download"
         state["message"] = "下载没有完成（服务中途重启了），请重新点升级"
     if state.get("phase") == "installing":
         exit_file = work_dir() / "exit-status"
@@ -660,7 +724,9 @@ def read_state() -> dict[str, Any] | None:
         # to refresh the page into any more.
         return None
     log_file = state.get("log")
-    if isinstance(log_file, str) and log_file:
+    if state.get("phase") == "failed":
+        _explain_failure(state)
+    elif isinstance(log_file, str) and log_file:
         state["log_tail"] = _log_tail(Path(log_file))
     return state
 
@@ -915,7 +981,7 @@ async def _upgrade(progress: Callable[[dict[str, Any]], Awaitable[None]]) -> dic
     try:
         path = await download(offer, downloaded)
     except BaseException as exc:
-        _write_state({**base, "phase": "failed", "message": str(exc) or "下载没有完成"})
+        _write_state({**base, "phase": "failed", "failed_step": "download", "message": str(exc) or "下载没有完成"})
         raise
     await progress({"stage": "downloaded", "installer": str(path)})
     fixed_root = not _WINDOWS and not installer_relocatable(path) and not _default_root_ready()
@@ -930,7 +996,11 @@ async def _upgrade(progress: Callable[[dict[str, Any]], Awaitable[None]]) -> dic
         }
         _write_state(state)
         return state
-    state = start_installer(path, offer)
+    try:
+        state = start_installer(path, offer)
+    except BaseException as exc:
+        _write_state({**base, "phase": "failed", "failed_step": "install", "installer": str(path), "message": str(exc) or "安装包没有起来"})
+        raise
     await progress({"stage": "installing", **state})
     return state
 

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowUpCircle, CheckCircle, ChevronDown, Loader2, LogIn, XCircle } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle, ChevronDown, Loader2, LogIn } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
+import UpgradeFailureDetails, { failureOfEnterpriseUpgrade } from '@/components/common/UpgradeFailureDetails';
 import { authApi, type ConsoleLoginSessionStatus } from '@/api/auth';
 import client from '@/api/client';
 import {
@@ -498,15 +499,7 @@ function UpgradeProgress({ upgrade, serverGone }: { upgrade: EnterpriseUpgradeSt
           {t('progress.finished', { version: upgrade.version ?? '' })}
         </div>
       )}
-      {upgrade.phase === 'failed' && (
-        <div className="flex items-start gap-2 text-red-700">
-          <XCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-          <span>
-            {upgrade.message
-              ?? (upgrade.exit_code !== undefined ? t('progress.failedCode', { code: upgrade.exit_code }) : t('progress.failed'))}
-          </span>
-        </div>
-      )}
+      {upgrade.phase === 'failed' && <UpgradeFailureDetails failure={failureOfEnterpriseUpgrade(upgrade, t('progress.failed'))} />}
       {upgrade.phase === 'command' && (
         <div className="text-gray-700">
           {upgrade.prepare_command ? t('progress.commandPrepare') : t('progress.command')}
@@ -514,8 +507,8 @@ function UpgradeProgress({ upgrade, serverGone }: { upgrade: EnterpriseUpgradeSt
           {upgrade.command && <Command text={upgrade.command} />}
         </div>
       )}
-      {upgrade.log_tail && upgrade.log_tail.length > 0 && upgrade.phase !== 'downloading' && (
-        <details className="text-xs" open={upgrade.phase === 'failed'}>
+      {upgrade.log_tail && upgrade.log_tail.length > 0 && upgrade.phase !== 'downloading' && upgrade.phase !== 'failed' && (
+        <details className="text-xs">
           <summary className="cursor-pointer text-gray-500">{t('progress.log')}</summary>
           <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-gray-50 p-2 font-mono text-gray-700">
             {upgrade.log_tail.join('\n')}

@@ -578,6 +578,82 @@ def test_eu5_a_run_whose_process_is_gone_without_a_word_failed(machine: Path):
     enterprise._write_state({"phase": "downloading", "received": 10})
     state = enterprise.read_state()
     assert state["phase"] == "failed" and "重新点升级" in state["message"]
+    assert state["failed_step"] == "download" and state["reason"] == state["message"]
+
+
+def _finished_run(machine: Path, script: str) -> dict:
+    offer = enterprise.InstallerOffer(url="https://x/r.run", sha256="0" * 64, release_id="r1", version="2026.11.5")
+    enterprise.start_installer(fake_installer(machine, script), offer)
+    return wait_for(lambda: (s := enterprise.read_state()) and s["phase"] != "installing" and s)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the installer is a shell one")
+def test_eu5c_a_failed_install_says_where_it_stopped_and_why(machine: Path):
+    """What the dialog and the page show: the step, the installer's own words, its exit code and the
+    end of the log, of this run only, with no password in it."""
+    _finished_run(machine, "echo an earlier run\nexit 0\n")
+    ended = _finished_run(
+        machine,
+        'echo step one\n'
+        'echo "connecting to postgresql://flocks:s3cret@127.0.0.1/db password=s3cret"\n'  # secret-guard: allow
+        'printf "\\033[31mred\\033[0m\\n"\n'
+        'echo "安装失败：建不了 /opt/flockspro" >&2\n'
+        'echo "cleaning up"\n'
+        'exit 7\n',
+    )
+    assert ended["phase"] == "failed" and ended["failed_step"] == "install" and ended["exit_code"] == 7
+    assert ended["reason"] == "安装失败：建不了 /opt/flockspro"
+    assert ended["log"].endswith("install.log")
+    shown = "\n".join(ended["log_tail"])
+    assert ended["log_tail"][0].startswith("== ") and "an earlier run" not in shown
+    assert "step one" in shown and "s3cret" not in shown and "\x1b" not in shown and "red" in shown
+    assert "recovery" not in ended
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the installer is a shell one")
+def test_eu5d_the_reason_is_the_last_thing_printed_when_it_refused_nothing_by_name(machine: Path):
+    ended = _finished_run(machine, 'echo step one\necho "install-managed: the core did not come up"\necho\nexit 1\n')
+    assert ended["reason"] == "install-managed: the core did not come up"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the installer is a shell one")
+def test_eu5e_what_the_installer_recorded_of_this_run_says_how_the_machine_was_left(machine: Path):
+    result = machine / "run" / "installation-result.json"
+    result.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "version": 1,
+        "id": "a",
+        "phase": "failed",
+        "recovery": "restored",
+        "updated_at": "2026-11-05T00:00:00Z",
+        "detail": "the core did not come up: password=s3cret refused",  # secret-guard: allow
+        "messages": {"zh-CN": {"title": "t", "message": "m"}, "en-US": {"title": "t", "message": "m"}},
+    }
+    result.write_text(json.dumps(record), encoding="utf-8")
+    # From before this run: another run's.
+    os.utime(result, (1, 1))
+    ended = _finished_run(machine, "echo nothing of use\nexit 1\n")
+    assert "recovery" not in ended and ended["reason"] == "nothing of use"
+
+    script = f"""cat > {result} <<'EOF'
+{json.dumps(record)}
+EOF
+exit 1
+"""
+    ended = _finished_run(machine, script)
+    assert ended["recovery"] == "restored"
+    assert ended["reason"] == "the core did not come up: password=*** refused"
+
+
+def test_eu5f_a_process_gone_without_an_exit_code_is_not_given_its_last_line_for_a_reason(machine: Path):
+    work = enterprise.work_dir()
+    work.mkdir(parents=True, exist_ok=True)
+    log_file = work / "install.log"
+    log_file.write_text("== start\nstopping the open edition\n", encoding="utf-8")
+    enterprise._write_state({"phase": "installing", "pid": 2**22 + 12345, "log": str(log_file)})
+    state = enterprise.read_state()
+    assert state["phase"] == "failed" and state["failed_step"] == "install"
+    assert "退出码" in state["reason"] and "stopping the open edition" in state["log_tail"]
 
 
 def test_eu5b_a_finished_install_that_went_back_is_no_upgrade_any_more(machine: Path):
@@ -635,6 +711,42 @@ async def test_eu6_an_accounts_own_install_runs_the_installer_once(machine: Path
         await enterprise.upgrade(progress)
     ended = wait_for(lambda: (s := enterprise.read_state()) and s["phase"] != "installing" and s)
     assert ended["phase"] == "finished"
+
+
+async def test_eu6b_a_download_that_does_not_check_out_is_recorded_as_the_download(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    write_licence(machine)
+    console(monkeypatch, lambda request: httpx.Response(200, json=manifest_with(b"the real one")) if "manifest" in request.url.path else httpx.Response(200, content=b"another file"))
+    monkeypatch.setattr(enterprise, "_console_session_token", _token(""))
+
+    async def progress(event: dict) -> None:
+        pass
+
+    with pytest.raises(enterprise.EnterpriseUpgradeError) as refused:
+        await enterprise.upgrade(progress)
+    state = enterprise.read_state()
+    assert state["phase"] == "failed" and state["failed_step"] == "download"
+    assert state["reason"] == str(refused.value)
+
+
+async def test_eu6c_an_installer_that_does_not_start_is_no_failed_download(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    write_licence(machine)
+    body = b"#!/bin/bash\nexit 0\n"
+    console(monkeypatch, lambda request: httpx.Response(200, json=manifest_with(body)) if "manifest" in request.url.path else httpx.Response(200, content=body))
+    monkeypatch.setattr(enterprise, "_console_session_token", _token(""))
+
+    def will_not_start(_path, _offer):
+        raise enterprise.EnterpriseUpgradeError("安装包没有起来，看 install.log")
+
+    monkeypatch.setattr(enterprise, "start_installer", will_not_start)
+
+    async def progress(event: dict) -> None:
+        pass
+
+    with pytest.raises(enterprise.EnterpriseUpgradeError):
+        await enterprise.upgrade(progress)
+    state = enterprise.read_state()
+    assert state["phase"] == "failed" and state["failed_step"] == "install"
+    assert state["reason"] == "安装包没有起来，看 install.log"
 
 
 def test_eu7_what_downgrades_kept_is_listed_and_left_alone(machine: Path, tmp_path: Path):

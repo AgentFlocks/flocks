@@ -12,6 +12,11 @@ export interface ReleaseUpdateStatus {
 export interface ReleaseUpdateOutcome {
   state: string;
   detail?: string | null;
+  /** Once it has failed: the step it stopped at, how the machine was left, the log. */
+  failed_step?: string | null;
+  recovery?: string | null;
+  log?: string | null;
+  log_tail?: string[] | null;
 }
 
 /**

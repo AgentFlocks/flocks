@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import stat
 
-from flocks.updater.handoff_progress import summarize_error
+from flocks.updater.handoff_progress import redact_credentials, summarize_error
 
 MAX_RECORD_BYTES = 16_384
 _CREDENTIAL_ASSIGNMENT = re.compile(  # secret-guard: allow - compiled redaction expression, not a credential
@@ -20,13 +20,22 @@ _CREDENTIAL_ASSIGNMENT = re.compile(  # secret-guard: allow - compiled redaction
 )
 
 
+def scrub_credentials(value: str) -> str:
+    """Mask passwords in assignments and in URLs: what is shown of an install's output keeps its lines."""
+    return redact_credentials(_CREDENTIAL_ASSIGNMENT.sub(lambda match: match.group(1) + "***", value))
+
+
 def _display_text(value: str) -> str:
     return summarize_error(_CREDENTIAL_ASSIGNMENT.sub(lambda match: match.group(1) + "***", value))
 
 
-def read_installation_result(locale: str = "zh-CN") -> dict | None:
+def installation_result_path() -> Path:
     root = Path(os.environ.get("FLOCKS_ROOT") or Path.home() / ".flocks").expanduser()
-    path = root / "run" / "installation-result.json"
+    return root / "run" / "installation-result.json"
+
+
+def read_installation_result(locale: str = "zh-CN") -> dict | None:
+    path = installation_result_path()
     try:
         if path.is_symlink():
             return None
