@@ -231,6 +231,17 @@ def test_eu1e3_a_file_with_no_licence_does_not_hide_the_one_after_it(machine: Pa
     assert (previous["license_id"], previous["license_status"], previous["max_members"]) == ("ubuntu-nn", "commercial", 7)
 
 
+def test_eu1e4_the_packages_word_on_another_licence_is_not_shown_as_this_ones(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FLOCKSPRO_LICENSE_ID", "ubuntu-nn")
+    monkeypatch.setattr(enterprise, "PREVIOUS_DISTRIBUTION", "pytest")
+    monkeypatch.setattr(enterprise, "_previous_status", lambda: {"license_id": "lic-other", "license_status": "poc", "pro_enabled": True, "max_admins": 9, "expires_at": 1})
+
+    previous = enterprise.previous_edition()
+
+    assert previous["license_id"] == "ubuntu-nn" and previous["pro_enabled"] is True
+    assert (previous["license_status"], previous["max_admins"], previous["expires_at"]) == (None, None, None)
+
+
 def test_eu1f_the_python_packages_word_on_its_licence_comes_first(machine: Path, monkeypatch: pytest.MonkeyPatch):
     """What an old package reports (/api/flockspro/license/status on 2026.10.19) fills the licence card."""
     write_licence(machine, "zj6.29-centos9")

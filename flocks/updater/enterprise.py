@@ -234,6 +234,9 @@ def previous_edition() -> dict[str, Any] | None:
     if version is None and not licence_id:
         return None
     terms = _licence_file_terms(licence_id) if licence_id else {}
+    # The package's word on another licence than the one named here says nothing of this one.
+    if status.get("license_id") and status.get("license_id") != licence_id:
+        status = {"pro_enabled": status.get("pro_enabled")}
     return {
         "version": version,
         "license_id": licence_id or None,
