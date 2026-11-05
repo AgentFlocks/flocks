@@ -11,6 +11,9 @@ Case list (编号 | 场景):
       session when there is one); a sign-in asked for, no installer, an incomplete one, one not over
       https are each said as they are
   EU4 the download is checked against Console's digest: a mismatch leaves nothing to run
+  EU4b what Console says of the release is kept for the edition the installer puts in place, once
+       the download is checked; nothing is kept of what Console says nothing about, and not being
+       able to keep it does not stop the upgrade
   EU5 the installer runs apart, without this runtime's Python settings, and the page reads how it
       ended (exit status, log), also after this server is gone
   EU5b a finished install the enterprise edition has since gone back from (its downgrade record is
@@ -327,6 +330,72 @@ async def test_eu4_the_download_is_checked_against_consoles_digest(machine: Path
     with pytest.raises(enterprise.EnterpriseUpgradeError, match="校验不对"):
         await enterprise.download(bad)
     assert sorted(p.name for p in enterprise.work_dir().iterdir()) == []
+
+
+def _notes_file(machine: Path) -> Path:
+    return machine / "run" / "managed-release-notes.json"
+
+
+async def test_eu3_the_offer_says_what_console_says_of_the_release(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    write_licence(machine)
+    manifest = manifest_with(b"installer", release_notes="## 更新内容\n- 新功能")
+    console(monkeypatch, lambda request: httpx.Response(200, json=manifest))
+    assert (await enterprise.fetch_offer()).release_notes == "## 更新内容\n- 新功能"
+
+
+@pytest.mark.parametrize("given", [{}, {"release_notes": 42}, {"release_notes": None}])
+async def test_eu3_nothing_said_of_the_release_is_no_notes(machine: Path, monkeypatch: pytest.MonkeyPatch, given):
+    write_licence(machine)
+    manifest = manifest_with(b"installer", **given)
+    console(monkeypatch, lambda request: httpx.Response(200, json=manifest))
+    assert (await enterprise.fetch_offer()).release_notes is None
+
+
+def _offer_of(body: bytes, **changes) -> enterprise.InstallerOffer:
+    return enterprise.InstallerOffer(url="https://console.example/r.run", sha256=hashlib.sha256(body).hexdigest(),
+                                     release_id="r1", version="2026.11.5", **changes)
+
+
+async def test_eu4b_the_notes_are_kept_for_the_edition_it_installs(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    body = b"installer"
+    console(monkeypatch, lambda request: httpx.Response(200, content=body))
+    await enterprise.download(_offer_of(body, release_notes="这一版的说明"))
+    kept = _notes_file(machine)
+    # flockspro.updater.managed reads this: the same file and fields on both sides.
+    assert json.loads(kept.read_text(encoding="utf-8")) == {"release_id": "r1", "version": "2026.11.5", "release_notes": "这一版的说明"}
+    assert (kept.stat().st_mode & 0o777) == 0o644
+    assert [path.name for path in kept.parent.iterdir() if path.name.endswith(".tmp")] == []
+
+
+async def test_eu4b_a_download_that_does_not_check_out_keeps_nothing(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    console(monkeypatch, lambda request: httpx.Response(200, content=b"tampered"))
+    with pytest.raises(enterprise.EnterpriseUpgradeError):
+        await enterprise.download(_offer_of(b"installer", release_notes="说明"))
+    assert not _notes_file(machine).exists()
+
+
+async def test_eu4b_an_older_console_leaves_it_to_the_edition_to_ask(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    body = b"installer"
+    console(monkeypatch, lambda request: httpx.Response(200, content=body))
+    await enterprise.download(_offer_of(body))
+    assert not _notes_file(machine).exists()
+
+
+async def test_eu4b_a_release_published_without_notes_says_so(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    body = b"installer"
+    console(monkeypatch, lambda request: httpx.Response(200, content=body))
+    await enterprise.download(_offer_of(body, release_notes=""))
+    assert json.loads(_notes_file(machine).read_text(encoding="utf-8"))["release_notes"] == ""
+
+
+async def test_eu4b_notes_that_cannot_be_kept_do_not_stop_the_upgrade(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    body = b"installer"
+    console(monkeypatch, lambda request: httpx.Response(200, content=body))
+    (machine / "run").mkdir(exist_ok=True)
+    _notes_file(machine).mkdir()  # os.replace onto it fails
+    path = await enterprise.download(_offer_of(body, release_notes="说明"))
+    assert path.read_bytes() == body
+    assert not (machine / "run" / "managed-release-notes.json.tmp").exists()
 
 
 def fake_installer(machine: Path, script: str) -> Path:
