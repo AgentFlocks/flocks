@@ -118,6 +118,7 @@ export default function UpdateModal({
   // Where a failed upgrade stopped, when what failed said; `error` is the plain text of the rest.
   const [failure, setFailure] = useState<UpgradeFailure | null>(null);
   const [failedStage, setFailedStage] = useState<UpdateProgress['stage'] | null>(null);
+  const [installLog, setInstallLog] = useState<string | null>(null);
   const lastStageRef = useRef<UpdateProgress['stage'] | null>(null);
   const [restarting, setRestarting] = useState(false);
   const [handoffProgress, setHandoffProgress] = useState<UpgradeHandoffProgress | null>(null);
@@ -177,6 +178,7 @@ export default function UpdateModal({
   const pollEnterpriseUntilReady = (started: EnterpriseUpgradeState) => {
     const startedAt = Date.now();
     let lastKnown = started;
+    setInstallLog(started.log ?? null);
     const unlock = (ended: UpgradeFailure) => {
       showFailure(ended, ENTERPRISE_FAILED_STAGE[ended.step ?? ''] ?? 'restarting');
       setRestartingSync(false);
@@ -205,6 +207,7 @@ export default function UpdateModal({
           return;
         }
         if (situation.upgrade) lastKnown = situation.upgrade;
+        if (situation.upgrade?.log) setInstallLog(situation.upgrade.log);
         if (situation.upgrade?.phase === 'failed') {
           const ended = failureOfEnterpriseUpgrade(situation.upgrade);
           unlock(ended);
@@ -584,6 +587,10 @@ export default function UpdateModal({
                 </div>
                 {restarting && (
                   <p className="mt-2 text-xs text-gray-400">{t('restarting')}</p>
+                )}
+                {/* The service is down while it installs: if it does not come back, this is where to look on the machine. */}
+                {restarting && installLog && (
+                  <p className="mt-1 text-xs text-gray-400 [overflow-wrap:anywhere]">{t('failure.logPath')}{installLog}</p>
                 )}
               </div>
             )}

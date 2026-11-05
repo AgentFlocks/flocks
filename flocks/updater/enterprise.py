@@ -536,9 +536,10 @@ def _installer_reason(lines: list[str]) -> str | None:
     """Why the installer stopped, where it says: its refusal, else the last line that reads as an
     error. Not simply the last line, which may be it cleaning up: no reason is better than a wrong one."""
     found = [line.strip() for line in lines if line.strip() and not line.startswith(_RUN_HEADER)]
-    for text in reversed(found):
-        if text.startswith("安装失败："):
-            return summarize_error(text)
+    for index in range(len(found) - 1, -1, -1):
+        if found[index].startswith("安装失败："):
+            # All of it: a refusal can say what to run on the lines after, and it exits right after saying it.
+            return summarize_error(" ".join(found[index:]))
     for text in reversed(found):
         if _ERROR_LINE.search(text):
             return summarize_error(text)
@@ -808,7 +809,10 @@ async def download(offer: InstallerOffer, progress: Callable[[int, int | None], 
                             await progress(received, total)
     except httpx.HTTPError as exc:
         part.unlink(missing_ok=True)
-        raise EnterpriseUpgradeError(f"下载安装包失败：{exc}") from exc
+        # Some of these say nothing of themselves (a connection reset has no message).
+        said = str(exc) or type(exc).__name__
+        got = f"，已下载 {received // (1 << 20)} MB" + (f" / {offer.size // (1 << 20)} MB" if offer.size else "") if received else ""
+        raise EnterpriseUpgradeError(f"下载安装包失败：{said}{got}") from exc
     except BaseException:
         part.unlink(missing_ok=True)
         raise

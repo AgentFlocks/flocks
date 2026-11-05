@@ -693,6 +693,23 @@ describe('UpdateModal on a machine with an enterprise licence', () => {
     expect(screen.getByText('failure.recovery.unknown')).toBeInTheDocument();
   });
 
+  it('says where the log is while it installs, and when nothing comes back says that and where to look', async () => {
+    enterpriseStart.mockResolvedValue({ phase: 'installing', attempt: 'a1', log: '/x/install.log' });
+    enterpriseSituation.mockRejectedValue(new Error('no answer'));
+    const user = await opened();
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(screen.getByText('failure.logPath/x/install.log')).toBeInTheDocument();
+    expect(screen.queryByTestId('upgrade-failure')).not.toBeInTheDocument();
+    vi.setSystemTime(Date.now() + 31 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(await screen.findByTestId('upgrade-failure-reason')).toHaveTextContent('restartTimeout');
+    expect(screen.getByText('/x/install.log')).toBeInTheDocument();
+    expect(screen.getByText('failure.recovery.unknown')).toBeInTheDocument();
+    expect(screen.getByText('enterpriseStageLabels.restarting')).toHaveClass('text-red-600');
+    expect(location.reload).not.toHaveBeenCalled();
+  });
+
   it('does not say the machine was left alone when nothing says so', async () => {
     enterpriseStart.mockResolvedValue({ phase: 'installing', log: '/x/install.log' });
     enterpriseSituation.mockResolvedValue({ available: true, upgrade: { phase: 'failed', failed_step: 'install', log: '/x/install.log' } });

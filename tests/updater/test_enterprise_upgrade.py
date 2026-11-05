@@ -598,7 +598,6 @@ def test_eu5c_a_failed_install_says_where_it_stopped_and_why(machine: Path):
         'echo "connecting to postgresql://flocks:s3cret@127.0.0.1/db password=s3cret"\n'  # secret-guard: allow
         'printf "\\033[31mred\\033[0m\\n"\n'
         'echo "安装失败：建不了 /opt/flockspro" >&2\n'
-        'echo "cleaning up"\n'
         'exit 7\n',
     )
     assert ended["phase"] == "failed" and ended["failed_step"] == "install" and ended["exit_code"] == 7
@@ -615,6 +614,9 @@ def test_eu5c_a_failed_install_says_where_it_stopped_and_why(machine: Path):
 def test_eu5d_the_reason_is_the_last_line_that_reads_as_an_error(machine: Path):
     ended = _finished_run(machine, 'echo step one\necho "install-managed: the core did not come up"\necho cleaning up\necho\nexit 1\n')
     assert ended["reason"] == "install-managed: the core did not come up"
+    # A refusal says what to do on the lines after it: all of it.
+    ended = _finished_run(machine, 'echo "安装失败：/x 还没有交给 me。先用 root 执行一次：" >&2\necho "  sudo install -d /x" >&2\necho "然后再运行" >&2\nexit 1\n')
+    assert ended["reason"] == "安装失败：/x 还没有交给 me。先用 root 执行一次： sudo install -d /x 然后再运行"
     # No line that reads as an error: no reason, rather than the last thing it happened to print.
     ended = _finished_run(machine, "echo cleaning up\nexit 1\n")
     assert ended["reason"] is None
@@ -824,6 +826,21 @@ async def test_eu6b_an_attempt_says_which_it_is_and_what_it_records_goes_by_that
     with pytest.raises(enterprise.EnterpriseUpgradeError):
         await enterprise.upgrade(progress)
     assert heard[0]["attempt"] != earlier and enterprise.read_state()["attempt"] == earlier
+
+
+async def test_eu6b2_a_connection_lost_during_the_download_says_so(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    write_licence(machine)
+    offer = enterprise.InstallerOffer(url="https://x/r.run", sha256="0" * 64, release_id="r1", version="2026.11.5", size=4 << 20)
+
+    class Lost(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"x" * (2 << 20)
+            raise httpx.ReadError("")
+
+    console(monkeypatch, lambda request: httpx.Response(200, stream=Lost()))
+    with pytest.raises(enterprise.EnterpriseUpgradeError) as refused:
+        await enterprise.download(offer)
+    assert "ReadError" in str(refused.value) and "2 MB / 4 MB" in str(refused.value)
 
 
 async def test_eu6c_an_installer_that_does_not_start_is_no_failed_download(machine: Path, monkeypatch: pytest.MonkeyPatch):
