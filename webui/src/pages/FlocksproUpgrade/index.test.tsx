@@ -23,12 +23,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 //        again, and no second application is offered beside it
 //   FP12 a licence id in no particular format (old licences): shown whole, cut only in the line
 //   FP13 a licence no longer valid: the card says so, red
-//   FP14 syncing the licence: the package's own sync, then what the machine says now
+//   FP14 syncing the licence: the package's own sync where it is there, this edition's otherwise,
+//        then what the machine says now; whether the terms changed is said, and so is what stopped it
 //   FP15 signing out of the cloud account: the check goes, the sign-in comes back
 //   FP16 the backend has no such page: the old version came back after a failed upgrade
+//   FP17 a licence no longer valid: the machine may apply again, and the card stays to sync it
 
-const { situation, check, start, progress, applications, apply, withdraw, take, consoleLoginSession } = vi.hoisted(() => ({
+const { situation, check, start, progress, applications, apply, withdraw, take, syncLicence, consoleLoginSession } = vi.hoisted(() => ({
   situation: vi.fn(),
+  syncLicence: vi.fn(),
   check: vi.fn(),
   start: vi.fn(),
   progress: vi.fn(),
@@ -40,7 +43,7 @@ const { situation, check, start, progress, applications, apply, withdraw, take, 
 }));
 
 vi.mock('@/api/enterpriseUpgrade', () => ({
-  enterpriseUpgradeApi: { situation, check, start, progress, applications, apply, withdraw, take },
+  enterpriseUpgradeApi: { situation, check, start, progress, applications, apply, withdraw, take, syncLicence },
 }));
 const { startConsoleLogin, logoutConsoleLogin, clientPost } = vi.hoisted(() => ({
   startConsoleLogin: vi.fn(),
@@ -489,17 +492,139 @@ describe('Flocks Pro page of the open edition', () => {
     expect(screen.getByTestId('licence-card')).toBeInTheDocument();
   });
 
-  it('FP14b a machine with no package to sync still reads its situation again', async () => {
+  const noPackage = { ...previous, version: null };
+
+  it('FP14b a machine with no package syncs through this edition: no call to a route it does not have', async () => {
+    situation.mockResolvedValue({ ...base, previous: noPackage });
+    syncLicence.mockResolvedValue({ changed: true });
+    render(<FlocksproUpgradePage />);
+    await screen.findByTestId('licence-card');
+
+    situation.mockResolvedValue({ ...base, previous: { ...noPackage, expires_at: 1801367245 } });
+    await userEvent.click(screen.getByRole('button', { name: 'licence.sync' }));
+
+    expect(await screen.findByText('licence.syncChanged')).toBeInTheDocument();
+    expect(syncLicence).toHaveBeenCalledTimes(1);
+    expect(clientPost).not.toHaveBeenCalled();
+    expect(within(screen.getByTestId('licence-card')).getByText(new Date(1801367245 * 1000).getFullYear() + '-01-31', { exact: false })).toBeInTheDocument();
+  });
+
+  it('FP14d a package that did not load (no route of its own): the same', async () => {
     situation.mockResolvedValue(base);
     clientPost.mockRejectedValue({ response: { status: 404 } });
+    syncLicence.mockResolvedValue({ changed: false });
     render(<FlocksproUpgradePage />);
     await screen.findByTestId('licence-card');
 
     const before = situation.mock.calls.length;
     await userEvent.click(screen.getByRole('button', { name: 'licence.sync' }));
+
+    expect(await screen.findByText('licence.syncUnchanged')).toBeInTheDocument();
+    expect(clientPost).toHaveBeenCalledWith('/api/flockspro/license/refresh');
+    expect(syncLicence).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(situation.mock.calls.length).toBe(before + 1));
-    expect(await screen.findByRole('button', { name: 'licence.sync' })).toBeEnabled();
-    expect(screen.queryByText('errors.sync')).not.toBeInTheDocument();
+  });
+
+  it('FP14e what stopped this edition\'s sync is said, and the sign-in is read again', async () => {
+    situation.mockResolvedValue({ ...base, previous: noPackage });
+    syncLicence.mockRejectedValue({ response: { status: 409, data: { detail: '云账号登录已失效：点「云账号登录」后再试' } } });
+    render(<FlocksproUpgradePage />);
+    await screen.findByTestId('licence-card');
+
+    const before = consoleLoginSession.mock.calls.length;
+    consoleLoginSession.mockResolvedValue({ logged_in: false });
+    await userEvent.click(screen.getByRole('button', { name: 'licence.sync' }));
+
+    expect(await screen.findByText('云账号登录已失效：点「云账号登录」后再试')).toBeInTheDocument();
+    await waitFor(() => expect(consoleLoginSession.mock.calls.length).toBeGreaterThan(before));
+    expect(await screen.findByText('consoleLogin.unbound')).toBeInTheDocument();
+    expect(screen.queryByText('licence.syncUnchanged')).not.toBeInTheDocument();
+  });
+
+  it('FP14f the package says nothing of what changed: no word from the page either', async () => {
+    situation.mockResolvedValue(base);
+    render(<FlocksproUpgradePage />);
+    await screen.findByTestId('licence-card');
+
+    await userEvent.click(screen.getByRole('button', { name: 'licence.sync' }));
+
+    await waitFor(() => expect(clientPost).toHaveBeenCalled());
+    expect(syncLicence).not.toHaveBeenCalled();
+    expect(screen.queryByText('licence.syncChanged')).not.toBeInTheDocument();
+    expect(screen.queryByText('licence.syncUnchanged')).not.toBeInTheDocument();
+  });
+
+  const lapsed = { ...noPackage, license_status: 'poc', expires_at: 1790740045, lapsed: true };
+
+  it('FP17 a licence no longer valid: apply again, sync, and no word of it being carried over', async () => {
+    situation.mockResolvedValue({ ...base, previous: lapsed });
+    render(<FlocksproUpgradePage />);
+
+    const card = await screen.findByTestId('licence-card');
+    expect(card.className).toContain('border-red-200');
+    expect(screen.getByText('licence.invalidHint')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'apply.open' })).toBeEnabled();
+    expect(within(card).getByRole('button', { name: 'licence.sync' })).toBeInTheDocument();
+    expect(screen.getByText('machine.lapsedNote')).toBeInTheDocument();
+    expect(screen.queryByText('machine.licensedNote')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'upgrade.check' })).toBeInTheDocument();
+  });
+
+  it('FP17b renewed at Console: a sync brings it back to a machine with a licence, no application', async () => {
+    situation.mockResolvedValue({ ...base, previous: lapsed });
+    syncLicence.mockResolvedValue({ changed: true });
+    render(<FlocksproUpgradePage />);
+    await screen.findByRole('button', { name: 'apply.open' });
+
+    situation.mockResolvedValue({ ...base, previous: { ...lapsed, expires_at: 4102444800, lapsed: false } });
+    await userEvent.click(screen.getByRole('button', { name: 'licence.sync' }));
+
+    expect(await screen.findByText('licence.syncChanged')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('licence-card')).toHaveClass('border-emerald-200'));
+    expect(screen.queryByRole('button', { name: 'apply.open' })).not.toBeInTheDocument();
+    expect(screen.getByText('machine.licensedNote')).toBeInTheDocument();
+  });
+
+  it('FP17c still over after a sync: the machine can still apply, and the page says Console had nothing new', async () => {
+    situation.mockResolvedValue({ ...base, previous: lapsed });
+    syncLicence.mockResolvedValue({ changed: false });
+    render(<FlocksproUpgradePage />);
+    await screen.findByRole('button', { name: 'apply.open' });
+
+    await userEvent.click(screen.getByRole('button', { name: 'licence.sync' }));
+
+    expect(await screen.findByText('licence.syncUnchanged')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'apply.open' })).toBeEnabled();
+  });
+
+  it('FP17e an approved application that cannot be taken stands in nothing\'s way; one that can, does', async () => {
+    situation.mockResolvedValue({ ...base, previous: lapsed });
+    const approved = { ...pending, status: 'approved', license_id: 'zj-remote login', can_withdraw: true };
+    applications.mockResolvedValue({ items: [{ ...approved, can_take: false }], note: null });
+    const { unmount } = render(<FlocksproUpgradePage />);
+    await screen.findByText('req_1');
+    expect(screen.getByRole('button', { name: 'apply.open' })).toBeEnabled();
+    unmount();
+
+    applications.mockResolvedValue({ items: [{ ...approved, can_take: true }], note: null });
+    const second = render(<FlocksproUpgradePage />);
+    await screen.findByRole('button', { name: 'apply.take' });
+    expect(screen.getByRole('button', { name: 'apply.open' })).toBeDisabled();
+    second.unmount();
+
+    // Over by the terms it was issued with: it can be taken (it may have been renewed), and waits on nothing.
+    applications.mockResolvedValue({ items: [{ ...approved, can_take: true, licence_over: true }], note: null });
+    render(<FlocksproUpgradePage />);
+    await screen.findByRole('button', { name: 'apply.take' });
+    expect(screen.getByRole('button', { name: 'apply.open' })).toBeEnabled();
+  });
+
+  it('FP17d not lapsed by the server\'s word (a clock of its own in the browser): no application', async () => {
+    situation.mockResolvedValue({ ...base, previous: { ...noPackage, expires_at: 1790740045, lapsed: false } });
+    render(<FlocksproUpgradePage />);
+
+    expect(await screen.findByText('licence.invalidHint')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'apply.open' })).not.toBeInTheDocument();
   });
 
   it('FP15 signs out of the cloud account', async () => {

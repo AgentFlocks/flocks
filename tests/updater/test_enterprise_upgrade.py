@@ -5,6 +5,8 @@ Case list (编号 | 场景):
       nothing in an install the enterprise core runs, nothing on a plain open install
   EU1b the licence the page shows is the one Console is asked for: under FLOCKS_ROOT, under the
        home's .flocks (the old offline checker), or only in the old package's own status
+  EU1g a renewal the heartbeat kept in the file is what the page shows: the patch in force over the
+       token, the last sync the heartbeat wrote, and whether the licence is over by those terms
   EU2 how this account may install: root's one-time command for /opt/flockspro, root for a
       systemd machine, the page itself otherwise
   EU3 Console's manifest: this platform's installer, asked with the licence id (and the Console
@@ -184,7 +186,7 @@ def test_eu1d_the_page_reads_the_terms_of_a_licence_with_no_package_to_answer_fo
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({
         "license_id": "ubuntu-nn",
-        "key": _unsigned_token({"license_id": "ubuntu-nn", "status": "commercial", "expires_at": 1825321652, "max_admins": 3, "max_members": 20}),
+        "key": _unsigned_token({"license_id": "ubuntu-nn", "status": "commercial", "expires_at": 4102444800, "max_admins": 3, "max_members": 20}),
         "payload": {},
         "activated_at": 1793811952,
         "install_id": "inst-1",
@@ -195,8 +197,8 @@ def test_eu1d_the_page_reads_the_terms_of_a_licence_with_no_package_to_answer_fo
 
     assert previous == {
         "version": None, "license_id": "ubuntu-nn", "license_status": "commercial", "pro_enabled": False,
-        "expires_at": 1825321652, "max_admins": 3, "max_members": 20, "last_sync_at": 1793811952,
-        "install_id": "inst-1", "fingerprint": "fp-1",
+        "expires_at": 4102444800, "max_admins": 3, "max_members": 20, "last_sync_at": 1793811952,
+        "install_id": "inst-1", "fingerprint": "fp-1", "lapsed": False,
     }
 
 
@@ -263,6 +265,79 @@ def test_eu1f_the_python_packages_word_on_its_licence_comes_first(machine: Path,
     assert (previous["max_admins"], previous["max_members"]) == (5, 50)
     assert previous["last_sync_at"] == 1793811952
     assert (previous["install_id"], previous["fingerprint"]) == ("inst-old", "fp-old")
+
+
+def _old_licence(root: Path, *patches, **fields) -> Path:
+    """The file an old POC licence left, as the screenshot of 2026-11-06 had it: over since September."""
+    claims = {"license_id": "zj-remote login", "status": "poc", "expires_at": 1790740045, "max_admins": 3, "max_members": 20, "issued_at": 1782964045}
+    path = root / "flockspro" / "license.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "license_id": "zj-remote login", "key": _unsigned_token(claims), "payload": claims, "patches": list(patches),
+        "activated_at": 1782964285, "install_id": "inst-1", "fingerprint": "fp-1", **fields,
+    }))
+    return path
+
+
+def _renewal(root_path: Path, **claims) -> str:
+    token = json.loads(root_path.read_text())["key"]  # secret-guard: allow 误报：变量名，不是凭证
+    now = int(time.time())
+    return _unsigned_token({
+        "serial": 1, "license_id": "zj-remote login", "dynamic_status": "poc", "dynamic_expires_at": now + 90 * 86400,
+        "dynamic_max_admins": 3, "dynamic_max_members": 20, "issued_at": now - 60, "iat": now - 60, "patch_ttl_days": 91,
+        "token_binding": hashlib.sha256(token.rsplit(".", 1)[0].encode()).hexdigest()[:32], **claims,
+    })
+
+
+def test_eu1g_a_renewal_the_heartbeat_kept_is_what_the_page_shows(machine: Path):
+    path = _old_licence(machine)
+    over = enterprise.previous_edition()
+    assert over["expires_at"] == 1790740045 and over["lapsed"] is True and over["last_sync_at"] == 1782964285
+    assert enterprise.standing_licence_id() == ""
+    # The licence is still what Console is asked about.
+    assert enterprise.previous_licence_id() == "zj-remote login"
+
+    patch = _renewal(path, dynamic_max_admins=5)
+    _old_licence(machine, patch, last_sync_at=1793952484, last_heartbeat_ok_at=1793952484)
+    renewed = enterprise.previous_edition()
+    assert renewed["expires_at"] == json.loads(base64.urlsafe_b64decode(patch.split(".")[1] + "=="))["dynamic_expires_at"]
+    assert renewed["license_status"] == "poc" and renewed["max_admins"] == 5 and renewed["max_members"] == 20
+    assert renewed["lapsed"] is False and renewed["last_sync_at"] == 1793952484
+    assert enterprise.standing_licence_id() == "zj-remote login"
+
+    # One revoked since: over, whatever date it names.
+    _old_licence(machine, patch, _renewal(path, serial=2, dynamic_status="revoked"))
+    revoked = enterprise.previous_edition()
+    assert revoked["license_status"] == "revoked" and revoked["lapsed"] is True
+    assert enterprise.standing_licence_id() == ""
+
+
+@pytest.mark.parametrize("status, expires_at, lapsed", [
+    ("revoked", 4102444800, True), ("EXPIRED", None, True), ("superseded", 4102444800, True),
+    ("poc", 1, True), ("commercial", "2026-09-30T11:47:25+08:00", True), ("poc", 4102444800, False),
+    ("commercial", "2100-01-01T00:00:00+00:00", False), (None, None, False), ("poc", None, False), ("poc", "nonsense", False),
+])
+def test_eu1h_whether_a_licence_is_over(status, expires_at, lapsed):
+    assert enterprise.licence_lapsed(status, expires_at) is lapsed
+
+
+def test_eu1i_a_licence_whose_terms_are_not_known_is_not_called_over(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    assert enterprise.previous_edition() is None and enterprise.standing_licence_id() == ""
+    write_licence(machine, "lic-unread")
+    assert enterprise.previous_edition()["lapsed"] is False
+    assert enterprise.standing_licence_id() == "lic-unread"
+
+    # In an install the enterprise core runs there is no previous edition: what the file names, as before.
+    monkeypatch.setenv("FLOCKS_DEPLOY_MODE", "managed")
+    enterprise.detect_deploy_mode.cache_clear()
+    assert enterprise.standing_licence_id() == "lic-unread"
+
+
+def test_eu1j_the_python_packages_word_says_whether_its_licence_is_over(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    _old_licence(machine)
+    monkeypatch.setattr(enterprise, "PREVIOUS_DISTRIBUTION", "pytest")
+    monkeypatch.setattr(enterprise, "_previous_status", lambda: {"license_id": "zj-remote login", "license_status": "commercial", "expires_at": 4102444800})
+    assert enterprise.previous_edition()["lapsed"] is False
 
 
 def test_eu2_an_account_that_cannot_write_the_default_directory_gets_its_own(machine: Path, monkeypatch: pytest.MonkeyPatch) -> None:
