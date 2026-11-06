@@ -1043,3 +1043,10 @@ def test_eu8_on_windows_a_run_is_looked_at_and_the_lock_held_across_processes(ma
         assert other.returncode == 3
     with enterprise.upgrade_lock():
         pass
+
+
+def test_eu5k_a_size_in_a_failure_rounds_as_the_progress_bar_does():
+    # 226.5 MiB: the bar's toFixed(0) says 227, and round() would say 226.
+    assert enterprise._megabytes(237502464) == 227
+    assert enterprise._megabytes(237671367) == 227
+    assert enterprise._megabytes(47332946) == 45

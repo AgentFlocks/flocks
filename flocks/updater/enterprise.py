@@ -782,6 +782,11 @@ def _keep_release_notes(offer: InstallerOffer) -> None:
         log.warning("enterprise.release_notes_not_kept", {"release_id": offer.release_id, "error": str(exc)})
 
 
+def _megabytes(count: int) -> int:
+    """Rounded as the progress bar beside it rounds: half up."""
+    return (count + (1 << 19)) >> 20
+
+
 async def download(offer: InstallerOffer, progress: Callable[[int, int | None], Awaitable[None]] | None = None) -> Path:
     """Download the installer into work_dir and check its digest; the path of the checked file."""
     work = work_dir()
@@ -809,8 +814,7 @@ async def download(offer: InstallerOffer, progress: Callable[[int, int | None], 
         part.unlink(missing_ok=True)
         # Some of these say nothing of themselves (a connection reset has no message).
         said = str(exc) or type(exc).__name__
-        # Rounded as the progress bar above it rounds.
-        got = f"，已下载 {round(received / (1 << 20))} MB" + (f" / {round(offer.size / (1 << 20))} MB" if offer.size else "") if received else ""
+        got = f"，已下载 {_megabytes(received)} MB" + (f" / {_megabytes(offer.size)} MB" if offer.size else "") if received else ""
         raise EnterpriseUpgradeError(f"下载安装包失败：{said}{got}") from exc
     except BaseException:
         part.unlink(missing_ok=True)
