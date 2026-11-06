@@ -430,7 +430,13 @@ export default function UpdateModal({
   const enterpriseShown = info?.channel === ENTERPRISE_UPDATE_CHANNEL;
   const showProgressDialog = upgradeAttempted || upgrading || restarting || steps.length > 0;
   const safeClose = () => {
-    if (!isBusy) onClose();
+    if (isBusy) return;
+    // The service restarted under this page: what is behind the dialog was loaded while it was away.
+    if (handoffProgress?.recovery === 'restored') {
+      window.location.reload();
+      return;
+    }
+    onClose();
   };
 
   const pollUntilReady = () => {

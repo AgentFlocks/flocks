@@ -414,6 +414,10 @@ describe('UpdateModal restart stage', () => {
 
       await vi.advanceTimersByTimeAsync(10_000);
       expect(checkRestartReadiness).toHaveBeenCalledTimes(3);
+
+      // Closing it brings the page back up to date: it was loaded while the service was away.
+      await user.click(screen.getByRole('button', { name: 'laterAction' }));
+      expect(reload).toHaveBeenCalledOnce();
     });
 
     it('stops at once when the previous version could not be put back', async () => {
