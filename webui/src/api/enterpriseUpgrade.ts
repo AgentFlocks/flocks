@@ -1,4 +1,7 @@
 import client from './client';
+import { getCurrentRelease, type VersionInfo } from './update';
+import { extractErrorMessage } from '@/utils/error';
+import { ENTERPRISE_UPDATE_CHANNEL } from '@/utils/updateDismissal';
 
 /** The Python enterprise package of before, still on this machine. */
 export interface PreviousEdition {
@@ -7,6 +10,12 @@ export interface PreviousEdition {
   license_status: string | null;
   pro_enabled: boolean;
   expires_at: string | number | null;
+  max_admins?: number | null;
+  max_members?: number | null;
+  /** When the licence last heard from Console; when it came to this machine, if nothing since. */
+  last_sync_at?: string | number | null;
+  install_id?: string | null;
+  fingerprint?: string | null;
 }
 
 /** The last upgrade started from the page (flocks.updater.enterprise.read_state). */
@@ -22,7 +31,17 @@ export interface EnterpriseUpgradeState {
   message?: string;
   exit_code?: number;
   started_at?: string;
+  /** The attempt this record is of (the upgrade stream's started event says which that is). */
+  attempt?: string;
+  /** The installer's log on the machine, once it has started. */
+  log?: string;
   log_tail?: string[];
+  /** Once it has failed: the step it stopped at. */
+  failed_step?: 'download' | 'install';
+  /** Once it has failed: why, in the installer's words. */
+  reason?: string | null;
+  /** Once it has failed: how the machine was left (restored, unchanged, retained, failed, unknown). */
+  recovery?: string | null;
 }
 
 export interface EnterpriseSituation {
@@ -37,7 +56,6 @@ export interface EnterpriseSituation {
   prepare_command: string | null;
   can_start: boolean;
   /** Empty where the installer cannot run (not a Unix machine). */
-  manual_command: string;
   upgrade: EnterpriseUpgradeState | null;
 }
 
@@ -47,6 +65,7 @@ export interface InstallerOffer {
   release_id: string;
   version: string;
   size: number | null;
+  release_notes?: string | null;
   filename: string;
 }
 
@@ -89,7 +108,8 @@ export interface LicenceApplicationForm {
 }
 
 export interface EnterpriseUpgradeEvent {
-  stage: 'downloading' | 'downloaded' | 'installing' | 'done' | 'error';
+  stage: 'started' | 'downloading' | 'downloaded' | 'installing' | 'done' | 'error';
+  attempt?: string;
   version?: string;
   release_id?: string;
   received?: number;
@@ -98,6 +118,9 @@ export interface EnterpriseUpgradeEvent {
   message?: string;
   state?: EnterpriseUpgradeState;
 }
+
+/** The server said it stopped, and why; a stream that merely ended says neither. */
+export class EnterpriseUpgradeRefused extends Error {}
 
 export const enterpriseUpgradeApi = {
   situation: async (): Promise<EnterpriseSituation> => (await client.get('/api/enterprise-upgrade')).data,
@@ -123,7 +146,12 @@ export const enterpriseUpgradeApi = {
   /** Downloads, checks and starts the installer; each event of the stream goes to onEvent. */
   start: async (onEvent: (event: EnterpriseUpgradeEvent) => void): Promise<EnterpriseUpgradeState> => {
     const res = await fetch('/api/enterprise-upgrade/start', { method: 'POST', credentials: 'same-origin' }); // secret-guard: allow (fetch's credentials mode)
-    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok || !res.body) {
+      // The server's refusal says why (signed out, already upgrading...); the status alone does not.
+      const said = await res.json().catch(() => null) as { detail?: unknown; message?: unknown } | null;
+      const detail = typeof said?.detail === 'string' ? said.detail : typeof said?.message === 'string' ? said.message : '';
+      throw new EnterpriseUpgradeRefused(detail || `HTTP ${res.status}`);
+    }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -137,7 +165,7 @@ export const enterpriseUpgradeApi = {
         return;
       }
       onEvent(event);
-      if (event.stage === 'error') throw new Error(event.message || 'upgrade failed');
+      if (event.stage === 'error') throw new EnterpriseUpgradeRefused(event.message || 'upgrade failed');
       if (event.stage === 'done' && event.state) finalState = event.state;
     };
     try {
@@ -159,4 +187,30 @@ export const enterpriseUpgradeApi = {
     if (!finalState) throw new Error('the upgrade stream ended early');
     return finalState;
   },
+};
+
+/** Where the page for the enterprise upgrade is: applications, Console login, what root has to run. */
+export const ENTERPRISE_UPGRADE_PAGE = '/settings/flockspro';
+
+/**
+ * The version check of a machine with an enterprise licence, in the terms of any other: its update
+ * is the new enterprise edition, which Console has for it. A Console that will not say is an error
+ * to show, not "up to date".
+ */
+export const enterpriseVersionInfo = async (checkFailed?: string): Promise<VersionInfo> => {
+  const current = await getCurrentRelease().catch(() => null);
+  const base = {
+    current_version: current?.current_version ?? '',
+    channel: ENTERPRISE_UPDATE_CHANNEL,
+    release_notes: null,
+    release_url: null,
+    ...(current?.deploy_mode ? { deploy_mode: current.deploy_mode } : {}),
+    ...(current?.update_allowed === false ? { update_allowed: false } : {}),
+  };
+  try {
+    const offer = await enterpriseUpgradeApi.check();
+    return { ...base, latest_version: offer.version, has_update: true, error: null };
+  } catch (err) {
+    return { ...base, latest_version: null, has_update: false, error: extractErrorMessage(err, checkFailed) };
+  }
 };

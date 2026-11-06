@@ -306,6 +306,37 @@ def test_update_delegates_stop_install_build_and_restart_to_handoff(monkeypatch,
     assert "已执行 flocks stop" not in output.getvalue()
 
 
+def test_update_calls_perform_update_with_what_it_takes(monkeypatch, tmp_path) -> None:
+    """The fakes around here take any keyword; the real one does not, and a wrong one is a crash on every machine with an update."""
+    import asyncio
+    import inspect
+
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path))
+    real = inspect.signature(updater_pkg.perform_update)
+    called: list[dict] = []
+
+    async def fake_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        return VersionInfo(
+            current_version="2026.4.1", latest_version="2026.4.2", has_update=True,
+            tarball_url="https://example.com/flocks.tar.gz", bundle_sha256="a" * 64, bundle_format="tar.gz",
+            deploy_mode="source", update_allowed=True,
+        )
+
+    async def fake_perform_update(*args, **kwargs):
+        real.bind(*args, **kwargs)
+        called.append(kwargs)
+        yield UpdateProgress(stage="done", message="ok", success=True)
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    monkeypatch.setattr(updater_pkg, "perform_update", fake_perform_update)
+    monkeypatch.setattr(updater_pkg, "detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(update_cmd.typer, "confirm", lambda prompt, default=False: True)
+
+    asyncio.run(update_cmd._update(check=False, yes=True, force=False, region=None))
+
+    assert called and called[0]["tarball_url"] == "https://example.com/flocks.tar.gz"
+
+
 def test_update_reports_handoff_preparation_failure(monkeypatch, tmp_path) -> None:
     output = StringIO()
     monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path))
@@ -634,13 +665,14 @@ def test_update_says_where_the_previous_enterprise_edition_went(monkeypatch, tmp
     output = StringIO()
     monkeypatch.setattr(update_cmd, "console", Console(file=output, force_terminal=False, width=200))
     monkeypatch.setattr(enterprise, "previous_edition", lambda: {"version": "2026.10.19", "license_id": "lic-old-7"})
-    monkeypatch.setattr(enterprise, "situation", lambda: {"manual_command": "bash flockspro-<版本>-linux-arm64.run"})
 
     update_cmd._print_previous_edition_notice()
 
     text = output.getvalue()
     assert "老企业版（Python 版 2026.10.19）" in text and "授权 lic-old-7" in text
-    assert "账号菜单 → Flocks Pro" in text and "bash flockspro-<版本>-linux-arm64.run" in text
+    assert "账号菜单 → Flocks Pro" in text and "flocks enterprise upgrade" in text
+    # No installing by hand: the page and that command do it, and go back if it fails.
+    assert ".run" not in text and "拷到" not in text
 
     output.truncate(0)
     monkeypatch.setattr(enterprise, "previous_edition", lambda: None)

@@ -51,7 +51,10 @@ const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/On
 const UpdateModal = lazyLayoutComponent(() => import('@/components/common/UpdateModal'), ['update']);
 const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
 const TokenPolicyNotice = lazyLayoutComponent(() => import('@/components/common/TokenPolicyNotice'), ['notification']);
-import { DEFAULT_UPDATE_CHANNEL, checkUpdate, getCurrentRelease, type VersionInfo } from '@/api/update';
+import { DEFAULT_UPDATE_CHANNEL, checkUpdate, getCurrentRelease, noteOlderBackend, type VersionInfo } from '@/api/update';
+import { enterpriseUpgradeApi, enterpriseVersionInfo } from '@/api/enterpriseUpgrade';
+import { withReleaseUpdate } from '@/utils/releaseUpdate';
+import type { EnterpriseUpdate } from '@/components/common/UpdateModal';
 import {
   ackNotification,
   getActiveNotifications,
@@ -233,8 +236,20 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   // Onboarding writes model credentials and the default model, so only admins get it
   // (and a session that drops to member does not keep the dialog).
   const canOnboard = user?.role === 'admin';
-  const onboardingOpen = showOnboarding && canOnboard;
   const [updateState, setUpdateState] = useState<'idle' | 'pending' | 'visible'>('idle');
+  const [enterpriseUpdate, setEnterpriseUpdate] = useState<EnterpriseUpdate | null>(null);
+  // Whether this machine has an enterprise licence is known once asked; a build with its own update
+  // channel never asks.
+  const [enterpriseRead, setEnterpriseRead] = useState(Boolean(registry.updateChannel));
+  const [hasCompletedUpdateCheck, setHasCompletedUpdateCheck] = useState(false);
+  // Once on screen the guide stays there (it holds what the person is typing); asked for by hand, it opens.
+  const [onboardingPresented, setOnboardingPresented] = useState(false);
+  // On a machine with a licence the move to the new enterprise edition comes first: a guide to a
+  // model nobody has set up yet would hide it. The guide opens when the check has nothing to offer,
+  // or when its dialog is closed.
+  const onboardingWaits = !onboardingPresented && !registry.updateChannel
+    && (!enterpriseRead || (enterpriseUpdate !== null && (!hasCompletedUpdateCheck || updateState !== 'idle')));
+  const onboardingOpen = showOnboarding && canOnboard && !onboardingWaits;
   // Whether the open dialog was asked for explicitly. Inferring it from
   // "we have no cached version info" was fragile: a background refresh landing
   // while the dialog was open filled the cache and silently turned the forced
@@ -257,7 +272,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<VersionInfo | null>(null);
   const [currentRelease, setCurrentRelease] = useState<{ userId: string; info: VersionInfo | null } | null>(null);
-  const [hasCompletedUpdateCheck, setHasCompletedUpdateCheck] = useState(false);
   const lastUpdateCheckAtRef = useRef(0);
   const checkingUpdateRef = useRef(false);
   const lastPromptedVersionRef = useRef<string | null>(null);
@@ -348,9 +362,14 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const handleOpenOnboarding = useCallback(() => {
     if (canOnboard) {
       onboardingCheckGeneration.current += 1;
+      setOnboardingPresented(true);
       setShowOnboarding(true);
     }
   }, [canOnboard]);
+
+  useEffect(() => {
+    if (onboardingOpen) setOnboardingPresented(true);
+  }, [onboardingOpen]);
 
   const handleCloseOnboarding = useCallback(() => {
     onboardingCheckGeneration.current += 1;
@@ -361,6 +380,31 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     window.addEventListener('flocks:open-onboarding', handleOpenOnboarding);
     return () => window.removeEventListener('flocks:open-onboarding', handleOpenOnboarding);
   }, [handleOpenOnboarding]);
+
+  // A machine with an enterprise licence (the old enterprise edition after the page brought it to
+  // this open edition, or a licence taken here) is updated to the new enterprise edition, from
+  // Console, as the old edition's own reminder did. A release's own channel, when there is one, has
+  // the machine already; the open edition's releases stay on `flocks update`.
+  const enterpriseUpdateRef = useRef<EnterpriseUpdate | null>(null);
+  const findEnterpriseUpdate = useCallback(async () => {
+    if (registry.updateChannel) return null;
+    const situation = await enterpriseUpgradeApi.situation().catch((err) => {
+      if (err?.response?.status === 404) noteOlderBackend();
+      return undefined;
+    });
+    setEnterpriseRead(true);
+    // Not answering just now says nothing about the machine: what was known stands.
+    if (situation === undefined) return enterpriseUpdateRef.current;
+    const found = situation.available && situation.previous?.license_id
+      ? { installRoot: situation.install_root, canStart: situation.can_start }
+      : null;
+    const known = enterpriseUpdateRef.current;
+    if (!(known && found && known.installRoot === found.installRoot && known.canStart === found.canStart)) {
+      enterpriseUpdateRef.current = found;
+      setEnterpriseUpdate(found);
+    }
+    return enterpriseUpdateRef.current;
+  }, []);
 
   const refreshUpdateStatus = useCallback(async (bypassMinGap = false) => {
     if (!canManageUpdates) return;
@@ -373,7 +417,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     lastUpdateCheckAtRef.current = now;
 
     try {
-      const info = await checkUpdate(i18n.language, registry.updateChannel);
+      const info = await findEnterpriseUpdate()
+        ? await enterpriseVersionInfo()
+        : await withReleaseUpdate(await checkUpdate(i18n.language, registry.updateChannel), registry.releaseUpdate);
       setUpdateInfo(info);
 
       const displayCurrentVersion = currentProductVersion(info);
@@ -410,7 +456,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       checkingUpdateRef.current = false;
       setHasCompletedUpdateCheck(true);
     }
-  }, [canManageUpdates, i18n.language, requestUpdate]);
+  }, [canManageUpdates, findEnterpriseUpdate, i18n.language, requestUpdate]);
 
   useEffect(() => {
     if (!canManageUpdates) return undefined;
@@ -883,8 +929,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const openManualUpdateCheck = useCallback(() => {
     setUpdateInfo(null);
     setUpdateCheckForced(true);
-    requestUpdate();
-  }, [requestUpdate]);
+    void findEnterpriseUpdate().finally(requestUpdate);
+  }, [findEnterpriseUpdate, requestUpdate]);
 
   const handleLogout = useCallback(async () => {
     const ok = await confirm({
@@ -1035,6 +1081,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
               forceInitialCheck={updateCheckForced || updateInfo === null}
               // The channel the reminder checked; a stock build leaves it to the server.
               {...(registry.updateChannel ? { channel: registry.updateChannel } : {})}
+              enterprise={enterpriseUpdate}
+              {...(registry.releaseUpdate ? { releaseUpdate: registry.releaseUpdate } : {})}
               canUpgrade={canManageUpdates}
               onPresented={handleUpdatePresented}
               onClose={closeUpdate}

@@ -22,11 +22,108 @@ import httpx
 
 from flocks import __version__
 from flocks.storage.storage import Storage
+from flocks.utils.log import Log
+
+log = Log.create(service="console.login")
 
 
 def _shared_console_session_path() -> Path:
     raw = os.getenv("FLOCKS_ROOT", str(Path.home() / ".flocks"))
     return Path(raw).expanduser() / "run" / "console-session.json"
+
+
+def _previous_install_receipt_path() -> Path:
+    raw = os.getenv("FLOCKS_ROOT", str(Path.home() / ".flocks"))
+    return Path(raw).expanduser() / "run" / "pro-bundle-install-receipt-pending.json"
+
+
+async def _report_previous_install_receipt(client: httpx.AsyncClient, session: dict[str, Any], console_base: str) -> None:
+    """What the updater of the Python enterprise package left when it brought this machine to this
+    release (the transition package), for the next heartbeat to send. Its own code sent it before
+    this release replaced that code; without this Console never hears the machine arrived. It stays
+    for the next heartbeat when Console does not take it."""
+    path = _previous_install_receipt_path()
+    token = str(session.get("console_session_token") or "").strip()  # secret-guard: allow (read from the session)
+    if not console_base or not token:
+        return
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(receipt, dict):
+        return
+    try:
+        resp = await client.post(
+            f"{console_base}/v1/pro-bundles/installations",
+            json={**receipt, "fingerprint": session.get("fingerprint"), "install_id": session.get("install_id")},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    except httpx.HTTPError:
+        return
+    if resp.status_code in {200, 201, 202}:
+        path.unlink(missing_ok=True)
+
+
+def _previous_licence_path() -> Path:
+    raw = os.getenv("FLOCKS_ROOT", str(Path.home() / ".flocks"))
+    return Path(raw).expanduser() / "flockspro" / "license.json"
+
+
+def _read_previous_licence() -> dict[str, Any]:
+    try:
+        state = json.loads(_previous_licence_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _previous_licence_identity() -> tuple[str, str]:
+    state = _read_previous_licence()
+    payload = state.get("payload") if isinstance(state.get("payload"), dict) else {}
+    status = state.get("license_status") or state.get("status") or payload.get("license_status") or payload.get("status")
+    return str(status or "").strip(), str(state.get("license_id") or payload.get("license_id") or "").strip()
+
+
+def _keep_previous_licence_current(data: dict[str, Any]) -> None:
+    """The Python enterprise package still running on this release (the transition package) takes its
+    licence for dead a week after its last heartbeat, and it has no heartbeat of its own here: the
+    code that did this for it went with the older release. So the machines waiting on the transition
+    package for the new enterprise edition keep their licence. An extension that reports for itself
+    has this among what it does, and a machine with no such licence has nothing here."""
+    state = _read_previous_licence()
+    if not state:
+        return
+    path = _previous_licence_path()
+    now = int(datetime.now(UTC).timestamp())
+    state["last_sync_at"] = now
+    state["last_heartbeat_ok_at"] = now
+    patch = data.get("license_patch") or data.get("latest_patch")
+    if isinstance(patch, str) and patch:
+        patches = state.get("patches") if isinstance(state.get("patches"), list) else []
+        if patch not in patches:
+            state["patches"] = [*patches, patch]
+    _write_private_json(path, state)
+    revoked = data.get("revoked_license_ids")
+    if isinstance(revoked, list):
+        _write_private_json(path.with_name("revocation.json"), {"revoked_license_ids": sorted({str(item) for item in revoked})})
+
+
+def _write_private_json(path: Path, value: dict[str, Any]) -> None:
+    """Over the file as it was, keeping who may read it, and never wider while it is being written."""
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = 0o600
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode & 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as out:
+            out.write(json.dumps(value, ensure_ascii=False, indent=2))
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 class ConsoleNodeExtension(Protocol):
@@ -465,6 +562,14 @@ class ConsoleLoginService:
                     console_base=console_base_for_session,
                     report_pending=report_pending,
                 )
+            if not _node_extensions:
+                try:
+                    _keep_previous_licence_current(data)
+                except OSError as exc:
+                    log.warning("console.previous_licence_not_kept", {"error": str(exc)})
+            # An extension that reports what it owes the console has this one among them.
+            if report_pending and not _node_extensions:
+                await _report_previous_install_receipt(client, session, console_base_for_session)
             return data
 
     @classmethod
@@ -476,6 +581,10 @@ class ConsoleLoginService:
             identity = extension.heartbeat_identity() or {}
             status = identity.get("status") or status
             license_id = identity.get("license_id") or license_id
+        if not _node_extensions:
+            previous_status, previous_id = _previous_licence_identity()
+            status = previous_status or status
+            license_id = previous_id or license_id
         return await cls.send_heartbeat_for_session(
             session=session,
             status=status,

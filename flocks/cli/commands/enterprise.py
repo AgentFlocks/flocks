@@ -34,8 +34,11 @@ def upgrade_command(
     yes: bool = typer.Option(False, "--yes", "-y", help="不再确认"),
 ) -> None:
     """问 Console 要这台机器平台的企业版安装包（.run；Windows 上是 .exe，会弹管理员确认），下载、校验后运行：开源版停下，换成企业版。"""
+    from flocks.cli.service_manager import apply_console_default
     from flocks.updater import enterprise
 
+    # The same Console the page asks: a shell has no address of its own.
+    apply_console_default()
     situation = enterprise.situation()
     if not situation["available"]:
         console.print("[yellow]这台机器已经是企业版了：升级用 flocks update，回到开源版用 flocks downgrade[/yellow]")

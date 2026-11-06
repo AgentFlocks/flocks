@@ -91,3 +91,17 @@ describe('update transport contract', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe('over a backend older than this interface', () => {
+  it('asks for the enterprise line by the name that backend knows', async () => {
+    vi.resetModules();
+    const fresh = await import('./update');
+    const freshClient = (await import('./client')).default;
+    vi.mocked(freshClient.get).mockResolvedValue({ data: {} });
+    await fresh.checkUpdate('zh-CN');
+    expect(freshClient.get).toHaveBeenLastCalledWith('/api/update/check', { params: { locale: 'zh-CN' } });
+    fresh.noteOlderBackend();
+    await fresh.checkUpdate('zh-CN');
+    expect(freshClient.get).toHaveBeenLastCalledWith('/api/update/check', { params: { locale: 'zh-CN', edition: 'flockspro' } });
+  });
+});

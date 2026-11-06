@@ -44,3 +44,20 @@ describe('update dismissal keys', () => {
     expect(isUpdateDismissed(versionInfo(), null)).toBe(false);
   });
 });
+
+describe('the enterprise channel', () => {
+  const info = { current_version: '2026.10.30', latest_version: '2026.11.04', channel: 'enterprise', has_update: true, release_notes: null, release_url: null, error: null };
+
+  it('is dismissed by its own record only', () => {
+    expect(isUpdateDismissed(info, 'enterprise:2026.11.04')).toBe(true);
+    expect(isUpdateDismissed(info, 'default:2026.11.04')).toBe(false);
+    expect(isUpdateDismissed(info, '2026.11.04')).toBe(false);
+    expect(isUpdateDismissed(info, '2026.10.30')).toBe(false);
+  });
+
+  it('dismisses nothing of another channel', () => {
+    for (const channel of [undefined, 'default', 'flockspro']) {
+      expect(isUpdateDismissed({ ...info, channel }, 'enterprise:2026.11.04')).toBe(false);
+    }
+  });
+});

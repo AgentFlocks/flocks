@@ -54,12 +54,25 @@ class UpgradeProgress:
         self._step: str | None = None
         self._failed_step: str | None = None
         self._error: str | None = None
+        # After a failure: "restoring" then "restored", "restarting" then "restarted" (the service
+        # is back but what the upgrade changed could not be undone), or "failed".
+        self._recovery: str | None = None
         self._on_change = on_change
 
     @property
     def current_step(self) -> str | None:
         with self._lock:
             return self._step
+
+    @property
+    def recovery(self) -> str | None:
+        with self._lock:
+            return self._recovery
+
+    def reached(self, step: str) -> bool:
+        """Whether *step* began, however it ended."""
+        with self._lock:
+            return any(entry["id"] == step and entry["status"] in {"running", "done", "failed"} for entry in self._steps)
 
     def _entry(self, step: str) -> dict[str, Any]:
         for entry in self._steps:
@@ -87,7 +100,9 @@ class UpgradeProgress:
             self._step = step
         self._changed()
 
-    def fail(self, error: str, step: str | None = None) -> None:
+    def fail(self, error: str, step: str | None = None, *, recovery: str | None = None) -> None:
+        """Mark the step failed. *recovery* comes with it: a reader must never see a failure
+        that is being recovered from as one that is over."""
         now = time.time()
         with self._lock:
             failed = step or self._step or "unknown"
@@ -98,6 +113,13 @@ class UpgradeProgress:
             self._failed_step = failed
             self._step = failed
             self._error = summarize_error(error)
+            if recovery is not None:
+                self._recovery = recovery
+        self._changed()
+
+    def set_recovery(self, state: str) -> None:
+        with self._lock:
+            self._recovery = state
         self._changed()
 
     def finish(self) -> None:
@@ -121,6 +143,8 @@ class UpgradeProgress:
                 payload["failed_step"] = self._failed_step
             if include_error and self._error:
                 payload["error"] = self._error
+            if self._recovery is not None:
+                payload["recovery"] = self._recovery
             return payload
 
     def _changed(self) -> None:
@@ -256,6 +280,14 @@ class ProgressResponder:
         server.server_close()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
+
+    def wait_for_delivery(self, timeout: float) -> bool:
+        """Wait until the upgrade dialog has read the failure, at most *timeout* seconds."""
+        return self.failure_delivered.wait(timeout)
+
+    def outcome_changed(self) -> None:
+        """What the dialog read so far is no longer the last word: it has to read again."""
+        self.failure_delivered.clear()
 
     def linger_for_failure(self, *, timeout: float, grace: float = 3.0) -> None:
         """Keep serving a failure until the upgrade dialog has read it, at most *timeout* seconds."""

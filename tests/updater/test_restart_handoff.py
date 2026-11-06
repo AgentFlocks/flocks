@@ -342,10 +342,11 @@ def test_upgrade_stop_forces_captured_daemon_after_graceful_timeout(
     ]
 
 
-def test_upgrade_install_failure_keeps_backup_and_temp_without_restart_or_rollback(
+def test_upgrade_install_failure_with_an_unreadable_backup_leaves_the_manual_path(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    """Nothing to go back to: no restart, and the backup and the staged files stay for whoever repairs it."""
     events: list[str] = []
     results: list[dict[str, object]] = []
     cleanup_dir = tmp_path / "cleanup"
@@ -1420,6 +1421,14 @@ class _FakeResponder:
     def stop(self) -> None:
         self.events.append("stop")
 
+    def wait_for_delivery(self, timeout: float) -> bool:
+        self.events.append(f"wait:{timeout}")
+        self.seen_when_told = self.progress.snapshot()
+        return True
+
+    def outcome_changed(self) -> None:
+        self.outcome_changes = getattr(self, "outcome_changes", 0) + 1
+
     def linger_for_failure(self, *, timeout: float, grace: float = 3.0) -> None:
         self.events.append(f"linger:{timeout}")
 
@@ -1507,7 +1516,7 @@ def test_upgrade_handoff_failure_names_the_step_and_lingers_for_the_dialog(
     monkeypatch.setattr(
         restart_handoff,
         "_start_service_after_upgrade",
-        lambda _args: pytest.fail("a failed upgrade must not start the service"),
+        lambda _args: pytest.fail("with an unreadable backup there is nothing to start"),
     )
     monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
 
@@ -1638,13 +1647,18 @@ def test_upgrade_handoff_serves_a_stop_timeout_when_the_port_is_free(
         results,
         _stop_services_before_upgrade=lambda _args: False,
         _apply_new_source=lambda _args: pytest.fail("source must stay untouched"),
+        _start_service_after_upgrade=lambda _args: (False, "", "port still in use"),
     )
 
     assert restart_handoff.run(_simple_upgrade_handoff_args(tmp_path)) == 1
 
     assert results[-1]["failed_stage"] == "stop"
     assert _statuses(results[-1]["progress"])["stop"] == "failed"
-    assert fake_responder.instances[0].events == ["start", f"linger:{restart_handoff.PROGRESS_FAILURE_LINGER_SECONDS}"]
+    # It made way for the start that did not work, and says so again once the port is free.
+    assert [instance.events for instance in fake_responder.instances] == [
+        ["start", f"wait:{restart_handoff.RECOVERY_NOTICE_WAIT_SECONDS}", "stop"],
+        ["start", f"linger:{restart_handoff.PROGRESS_FAILURE_LINGER_SECONDS}"],
+    ]
 
 
 def test_upgrade_handoff_reports_an_unexpected_crash_at_the_current_step(
@@ -1760,19 +1774,71 @@ def test_component_restart_failure_is_served_to_the_dialog(
     monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda _port: True)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", run_tasks)
     monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
-    monkeypatch.setattr(
-        restart_handoff.subprocess,
-        "Popen",
-        lambda *_args, **_kwargs: pytest.fail("a failed install must not start the service"),
-    )
+    # The service was stopped for this and the local source did not change: it has to run again.
+    starts: list[list[str]] = []
+
+    def run_start(argv, **_kwargs):
+        starts.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, b"", b"address in use")
+
+    monkeypatch.setattr(restart_handoff.subprocess, "run", run_start)
 
     assert restart_handoff.run(_component_restart_args(tmp_path)) == 1
 
+    assert len(starts) == 1
     assert results[-1]["phase"] == "failed"
     assert results[-1]["failed_stage"] == "install"
     assert results[-1]["error"] == "Component install failed (component.whl): hash mismatch"
     assert _statuses(results[-1]["progress"])["install_components"] == "failed"
-    assert fake_responder.instances[0].events == ["start", f"linger:{restart_handoff.PROGRESS_FAILURE_LINGER_SECONDS}"]
+    assert results[-1]["progress"]["recovery"] == "failed"
+    # It made way for the start that did not work, and says so again once the port is free.
+    assert [instance.events for instance in fake_responder.instances] == [
+        ["start", f"wait:{restart_handoff.RECOVERY_NOTICE_WAIT_SECONDS}", "stop"],
+        ["start", f"linger:{restart_handoff.PROGRESS_FAILURE_LINGER_SECONDS}"],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("reached", "while_restarting", "afterwards"),
+    [
+        # Nothing had begun to change the runtime.
+        (("check_runtime",), "restoring", "restored"),
+        # The wheel is in and there is no backup of the one before: the service is back, not the old component.
+        (("install_components", "finalize"), "restarting", "restarted"),
+    ],
+)
+def test_component_restart_failure_brings_the_service_back(
+    monkeypatch,
+    tmp_path: Path,
+    fake_responder,
+    reached,
+    while_restarting,
+    afterwards,
+) -> None:
+    results: list[dict[str, object]] = []
+    monkeypatch.setenv(restart_handoff.handoff_progress.UPGRADE_PROGRESS_TOKEN_ENV, "tok-123")  # secret-guard: allow - a made-up token for the test
+
+    def run_tasks(handoff_args) -> str:
+        for step in reached:
+            handoff_args.upgrade_step_callback(step)
+        return "it went wrong"
+
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
+    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
+    monkeypatch.setattr(restart_handoff, "_stop_supervisor_before_restart", lambda **_kwargs: True)
+    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda _port: True)
+    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", run_tasks)
+    monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
+    monkeypatch.setattr(restart_handoff.subprocess, "run", lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, b"", b""))
+
+    assert restart_handoff.run(_component_restart_args(tmp_path)) == 1
+
+    assert results[-1]["failed_stage"] == "install"
+    assert results[-1]["progress"]["recovery"] == afterwards
+    responder = fake_responder.instances[0]
+    assert responder.seen_when_told["recovery"] == while_restarting
+    assert responder.events == ["start", f"wait:{restart_handoff.RECOVERY_NOTICE_WAIT_SECONDS}", "stop"]
+    assert len(fake_responder.instances) == 1
 
 
 def test_component_restart_serves_a_start_command_that_exits_with_an_error(

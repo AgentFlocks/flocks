@@ -81,6 +81,14 @@ def pytest_runtest_setup(item):
 
 
 @pytest.fixture(autouse=True)
+def _node_only_where_a_test_says(monkeypatch):
+    """A test says what PATH holds; a Node.js the machine running it has elsewhere is no answer."""
+    from flocks.cli import service_manager
+
+    monkeypatch.setattr(service_manager, "_node_install_dirs_outside_path", lambda: [])
+
+
+@pytest.fixture(autouse=True)
 def _home_honors_env(monkeypatch):
     """Make ``Path.home()`` follow the ``HOME`` env var on every platform.
 

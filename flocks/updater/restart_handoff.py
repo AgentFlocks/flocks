@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Sequence
 
 from flocks.cli import service_manager
-from flocks.updater import handoff_progress
+from flocks.updater import handoff_progress, installation_status
 from flocks.updater import updater as updater_module
 from flocks.utils.log import append_upgrade_text_log
 
@@ -26,6 +26,8 @@ FORCED_SUPERVISOR_STOP_TIMEOUT_SECONDS = 5.0
 LEGACY_SUPERVISOR_PREPARE_TIMEOUT_SECONDS = 300.0
 DEFAULT_POLL_INTERVAL_SECONDS = 0.25
 PROGRESS_FAILURE_LINGER_SECONDS = 60.0
+# How long a recovery holds the port for the upgrade dialog (it asks every 2 seconds) to read why.
+RECOVERY_NOTICE_WAIT_SECONDS = 6.0
 
 
 class _NullConsole:
@@ -304,6 +306,21 @@ def _stop_services_before_upgrade(args: argparse.Namespace) -> bool:
     )
 
 
+def _stop_services_after_failed_start(args: argparse.Namespace) -> bool:
+    """Stop what a failed start left running before the tree goes back.
+
+    Not the daemon captured before the upgrade: minutes later its pid may be another process's.
+    """
+    try:
+        service_manager.stop_all(_NullConsole())
+    except service_manager.ServiceError as exc:
+        _record_handoff_log(f"service_graceful_stop_failed error={exc}")
+    return _stop_supervisor_before_restart(
+        backend_port=args.backend_port,
+        service_ports=_service_ports(args),
+    )
+
+
 def _apply_new_source(args: argparse.Namespace) -> None:
     """Replace the active source tree with the staged source tree."""
     if not args.content_root:
@@ -319,20 +336,108 @@ def _restore_install_from_backup(backup_path: Path, install_root: Path) -> None:
 
     备份是升级前源码的 tar.gz（排除运行时/构建目录），按升级本身同样的覆盖方式回放到安装目录，
     半替换状态里被新版本改过的文件会全部回到旧版本；备份文件本身保留，供人工核对。
+    系统临时目录写不下时（升级失败常常就因为这个）换到安装目录旁边再试一次。
     """
-    with tempfile.TemporaryDirectory(prefix="flocks-restore-") as tmp:
-        content_root = updater_module._extract_archive(backup_path, Path(tmp))
-        updater_module._replace_install_dir(content_root, install_root)
+
+    def replay(tmp_parent: Path | None) -> None:
+        with tempfile.TemporaryDirectory(prefix="flocks-restore-", dir=tmp_parent) as tmp:
+            content_root = updater_module._extract_archive(backup_path, Path(tmp))
+            updater_module._replace_install_dir(content_root, install_root)
+
+    try:
+        replay(None)
+    except OSError as exc:
+        _record_handoff_log(f"source_restore_retry_beside_install error={exc}")
+        replay(install_root.parent)
 
 
 def _restore_after_failed_replace(args: argparse.Namespace, backup_path: Path) -> tuple[bool, str | None]:
-    """Roll the install back after a failed source replacement; returns (restored, error)."""
+    """Roll the source tree back; returns (restored, error)."""
     try:
         _restore_install_from_backup(backup_path, Path(args.install_root))
     except Exception as exc:  # 还原也失败：留人工路径（backup_path）
         _record_handoff_log(f"source_restore_failed backup={backup_path} error={exc}")
         return False, str(exc)
     _record_handoff_log(f"source_restored_from_backup backup={backup_path}")
+    return True, None
+
+
+def _preserve_webui_dist(args: argparse.Namespace) -> None:
+    """Keep a copy of the built WebUI: the backup leaves it out and replacing the source removes it.
+
+    Raises ``OSError`` when it cannot: without it a later failure could not put this version back.
+    """
+    args.preserved_webui_dist = None
+    dist = Path(args.install_root) / "webui" / "dist"
+    if not (dist / "index.html").is_file():
+        return
+    holder = Path(args.cleanup_dir) if args.cleanup_dir else Path(tempfile.mkdtemp(prefix="flocks-webui-"))
+    saved = holder / "webui-dist-before-upgrade"
+    holder.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copytree(dist, saved, symlinks=True)
+    except OSError:
+        shutil.rmtree(saved, ignore_errors=True)
+        raise
+    args.preserved_webui_dist = saved
+
+
+def _restore_webui_dist(args: argparse.Namespace) -> None:
+    saved = getattr(args, "preserved_webui_dist", None)
+    if saved is None:
+        return
+    webui = Path(args.install_root) / "webui"
+    dist = webui / "dist"
+    if dist.exists() or dist.is_symlink():
+        updater_module._safe_remove(dist)
+    webui.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(saved, dist, symlinks=True)
+    # Newer than the sources just restored: `flocks start` rebuilds a WebUI older than its sources.
+    os.utime(dist / "index.html")
+
+
+def _resync_restored_dependencies(args: argparse.Namespace) -> str | None:
+    """Bring the runtime back to the restored ``uv.lock``."""
+    try:
+        return asyncio.run(
+            updater_module._sync_project_dependencies(
+                uv_path=args.uv_path,
+                install_root=Path(args.install_root),
+                uv_default_index=args.uv_default_index,
+                sync_timeout=args.sync_timeout,
+                env=updater_module._build_uv_sync_env(),
+            )
+        )
+    except Exception as exc:
+        return str(exc)
+
+
+def _put_previous_install_back(
+    args: argparse.Namespace,
+    backup_path: Path,
+    *,
+    dependencies_changed: bool,
+    version_recorded: bool,
+) -> tuple[bool, str | None]:
+    """Source, built WebUI, runtime and version marker as they were; returns (restored, error)."""
+    restored, restore_error = _restore_after_failed_replace(args, backup_path)
+    if not restored:
+        return False, restore_error
+    try:
+        _restore_webui_dist(args)
+    except Exception as exc:
+        _record_handoff_log(f"webui_dist_restore_failed error={exc}")
+        return False, f"could not put the built WebUI back: {exc}"
+    if dependencies_changed:
+        sync_error = _resync_restored_dependencies(args)
+        if sync_error:
+            # The old code usually runs on the newer packages too: starting it says whether it does.
+            _record_handoff_log(f"dependency_resync_failed error={sync_error}")
+    if version_recorded:
+        try:
+            updater_module._write_version_marker(str(args.current_version).lstrip("v"))
+        except OSError as exc:
+            _record_handoff_log(f"version_marker_restore_failed error={exc}")
     return True, None
 
 
@@ -401,6 +506,7 @@ def _write_upgrade_result(
     stderr: str | None = None,
     restored_from_backup: bool | None = None,
     restore_error: str | None = None,
+    service_restarted: bool | None = None,
     progress: dict[str, object] | None = None,
 ) -> None:
     """Persist a result record（自动回滚的结果也记在这里：restored_from_backup / restore_error）."""
@@ -429,9 +535,13 @@ def _write_upgrade_result(
         payload["stdout"] = stdout
     if stderr:
         payload["stderr"] = stderr
+    if service_restarted is not None:
+        payload["service_restarted"] = service_restarted
     if progress is not None:
         payload["step"] = progress.get("step")
         payload["steps"] = progress.get("steps")
+        if progress.get("recovery"):
+            payload["recovery"] = progress.get("recovery")
     try:
         updater_module._write_upgrade_result_state(payload)
     except Exception as exc:
@@ -527,7 +637,7 @@ class _UpgradeReporter:
         restore_error: str | None = None,
     ) -> int:
         """Record the failed step and serve it until the upgrade dialog has read it."""
-        self.progress.fail(error)
+        self.progress.fail(error, recovery="failed" if self.progress.recovery is not None else None)
         _write_upgrade_result(
             args=self._args,
             phase="failed",
@@ -538,13 +648,70 @@ class _UpgradeReporter:
             stderr=stderr,
             restored_from_backup=restored_from_backup,
             restore_error=restore_error,
+            service_restarted=False if self.progress.recovery is not None else None,
             progress=self.progress.snapshot(),
         )
         # After a stop timeout or a failed start the port may be free again.
         self.serve()
         if self._responder is not None:
+            self._responder.outcome_changed()
             self._responder.linger_for_failure(timeout=PROGRESS_FAILURE_LINGER_SECONDS)
             self._responder = None
+        return 1
+
+    def begin_recovery(
+        self,
+        error: str,
+        *,
+        failed_stage: str,
+        backup_path: Path | None,
+        recovery: str = "restoring",
+    ) -> None:
+        """The upgrade failed and the previous install is being put back: the dialog keeps following.
+
+        ``recovery`` is ``restarting`` when all that can be done is to start the service again.
+        """
+        self.progress.fail(error, recovery=recovery)
+        _write_upgrade_result(
+            args=self._args,
+            phase="failed",
+            failed_stage=failed_stage,
+            error=error,
+            backup_path=backup_path,
+            progress=self.progress.snapshot(),
+        )
+
+    def tell_the_dialog(self) -> None:
+        """The port is about to go to the restored service, which knows nothing of this upgrade."""
+        if self._responder is not None:
+            self._responder.wait_for_delivery(RECOVERY_NOTICE_WAIT_SECONDS)
+
+    def recovered(
+        self,
+        error: str,
+        *,
+        failed_stage: str,
+        backup_path: Path | None = None,
+        stdout: str | None = None,
+        stderr: str | None = None,
+        restored_from_backup: bool | None = None,
+        recovery: str = "restored",
+    ) -> int:
+        """The service answers again on its port."""
+        self.progress.set_recovery(recovery)
+        _write_upgrade_result(
+            args=self._args,
+            phase="failed",
+            failed_stage=failed_stage,
+            error=error,
+            backup_path=backup_path,
+            stdout=stdout,
+            stderr=stderr,
+            restored_from_backup=restored_from_backup,
+            restore_error=None,
+            service_restarted=bool(self._args.was_running),
+            progress=self.progress.snapshot(),
+        )
         return 1
 
     def finish(self, *, backup_path: Path | None = None) -> None:
@@ -580,47 +747,180 @@ def _run_simple_upgrade(args: argparse.Namespace, progress_token: str = "") -> i
     except Exception as exc:
         error = f"upgrade handoff crashed: {exc}"
         _record_handoff_log(error)
-        return reporter.fail(error, failed_stage=reporter.progress.current_step or "unknown")
+        failed_stage = reporter.progress.current_step or "unknown"
+        if not reporter.progress.reached("source_replace"):
+            return reporter.fail(error, failed_stage=failed_stage)
+        try:
+            return _recover_failed_upgrade(args, reporter, error=error, failed_stage=failed_stage)
+        except Exception as recovery_exc:
+            _record_handoff_log(f"recovery_crashed error={recovery_exc}")
+            return reporter.fail(error, failed_stage=failed_stage, restore_error=str(recovery_exc))
+
+
+def _rollback_blocker(args: argparse.Namespace, reporter: _UpgradeReporter) -> str | None:
+    """What of an update channel's install the backup cannot bring back, once it has happened."""
+    progress = reporter.progress
+    if getattr(args, "extra_wheel", None) and progress.reached("install_components"):
+        return "a component was replaced"
+    if getattr(args, "prebuilt", False) and getattr(args, "dependency_wheels_dir", None) and progress.reached("sync_dependencies"):
+        return "the runtime was refreshed from wheels this machine only had for the new release"
+    if getattr(args, "success_file", None) and progress.reached("finalize"):
+        return "the channel's files may have been put in place"
+    return None
+
+
+def _note_failed_upgrade(
+    args: argparse.Namespace,
+    *,
+    error: str,
+    source: str,
+    service_running: bool,
+    backup_path: Path,
+) -> None:
+    """Leave the outcome where the next page load finds it, whoever is looking by then."""
+    try:
+        installation_status.write_source_upgrade_notice(
+            target_version=str(args.version),
+            current_version=str(args.current_version),
+            source=source,
+            service_running=service_running,
+            detail=error,
+            backup_path=str(backup_path),
+        )
+    except Exception as exc:
+        _record_handoff_log(f"upgrade_notice_write_failed error={exc}")
+
+
+def _recover_failed_upgrade(
+    args: argparse.Namespace,
+    reporter: _UpgradeReporter,
+    *,
+    error: str,
+    failed_stage: str,
+    stdout: str | None = None,
+    stderr: str | None = None,
+) -> int:
+    """Put the previous install back and start it, so one failed step does not take the service with it."""
+    backup_path = Path(args.backup_path)
+    blocker = _rollback_blocker(args, reporter)
+    if blocker is not None:
+        _record_handoff_log(f"rollback_not_possible reason={blocker}")
+        return reporter.fail(error, failed_stage=failed_stage, backup_path=backup_path, stdout=stdout, stderr=stderr)
+
+    reporter.begin_recovery(error, failed_stage=failed_stage, backup_path=backup_path)
+    if failed_stage == "start":
+        # Whatever the failed start left running must not hold on to the tree that goes back.
+        if not _stop_services_after_failed_start(args):
+            _record_handoff_log("stop_before_restore_timed_out")
+            return reporter.fail(
+                error,
+                failed_stage=failed_stage,
+                backup_path=backup_path,
+                stdout=stdout,
+                stderr=stderr,
+                restored_from_backup=False,
+                restore_error="service stop timed out",
+            )
+        reporter.serve()
+
+    restored, restore_error = _put_previous_install_back(
+        args,
+        backup_path,
+        dependencies_changed=reporter.progress.reached("sync_dependencies"),
+        version_recorded=failed_stage == "start",
+    )
+    if not restored:
+        _note_failed_upgrade(args, error=error, source="mixed", service_running=False, backup_path=backup_path)
+        return reporter.fail(
+            error,
+            failed_stage=failed_stage,
+            backup_path=backup_path,
+            stdout=stdout,
+            stderr=stderr,
+            restored_from_backup=False,
+            restore_error=restore_error,
+        )
+
+    reporter.tell_the_dialog()
+    # The restored service binds the public port the progress responder holds.
+    reporter.release_port()
+    try:
+        started, start_stdout, start_stderr = _start_service_after_upgrade(args)
+    except Exception as exc:
+        started, start_stdout, start_stderr = False, "", str(exc)
+    if not started:
+        _record_handoff_log("service_restart_after_restore_failed")
+        _note_failed_upgrade(args, error=error, source="restored", service_running=False, backup_path=backup_path)
+        return reporter.fail(
+            error,
+            failed_stage=failed_stage,
+            backup_path=backup_path,
+            stdout=start_stdout or stdout,
+            stderr=start_stderr or stderr,
+            restored_from_backup=True,
+            restore_error=_start_failure_message(start_stdout, start_stderr),
+        )
+
+    _note_failed_upgrade(args, error=error, source="restored", service_running=True, backup_path=backup_path)
+    outcome = reporter.recovered(
+        error,
+        failed_stage=failed_stage,
+        backup_path=backup_path,
+        stdout=stdout,
+        stderr=stderr,
+        restored_from_backup=True,
+    )
+    _cleanup_dir(args.cleanup_dir)
+    return outcome
+
+
+def _restart_with_nothing_changed(args: argparse.Namespace, reporter: _UpgradeReporter, *, error: str, failed_stage: str) -> int:
+    """Nothing of the install changed yet: the service only has to run again."""
+    _record_handoff_log(error)
+    backup_path = Path(args.backup_path)
+    reporter.begin_recovery(error, failed_stage=failed_stage, backup_path=backup_path)
+    # The port may be free by now, or still held by what would not stop.
+    reporter.serve()
+    reporter.tell_the_dialog()
+    reporter.release_port()
+    try:
+        started, stdout, stderr = _start_service_after_upgrade(args)
+    except Exception as exc:
+        started, stdout, stderr = False, "", str(exc)
+    _note_failed_upgrade(args, error=error, source="untouched", service_running=started, backup_path=backup_path)
+    if not started:
+        _record_handoff_log("service_restart_with_nothing_changed_failed")
+        return reporter.fail(error, failed_stage=failed_stage, backup_path=backup_path, stdout=stdout, stderr=stderr)
+    outcome = reporter.recovered(error, failed_stage=failed_stage, backup_path=backup_path)
+    _cleanup_dir(args.cleanup_dir)
+    return outcome
 
 
 def _run_reported_upgrade(args: argparse.Namespace, reporter: _UpgradeReporter) -> int:
     reporter.start("stop")
     if not _stop_services_before_upgrade(args):
-        error = "service stop timed out"
-        _record_handoff_log(error)
-        return reporter.fail(error, failed_stage="stop")
+        return _restart_with_nothing_changed(args, reporter, error="service stop timed out", failed_stage="stop")
 
     reporter.serve()
     backup_path = Path(args.backup_path)
 
     reporter.start("source_replace")
     try:
+        _preserve_webui_dist(args)
+    except OSError as exc:
+        return _restart_with_nothing_changed(
+            args,
+            reporter,
+            error=f"could not keep a copy of the built WebUI to come back to: {exc}",
+            failed_stage="source_replace",
+        )
+    try:
         _apply_new_source(args)
     except Exception as exc:
         error = str(exc)
         _record_handoff_log(f"source_replace_failed error={error}")
-        # 替换到一半失败不能留半新半旧的目录：先从备份自动还原，还原成功再把原本在跑的服务拉起来，
-        # 保证基础 OSS 能力可用；只有还原也失败才把 backup_path 留给人工处理
-        restored, restore_error = _restore_after_failed_replace(args, backup_path)
-        stdout = stderr = ""
-        if restored:
-            # The restored service binds the public port the progress responder holds.
-            reporter.release_port()
-            try:
-                _started, stdout, stderr = _start_service_after_upgrade(args)
-            except Exception as restart_exc:
-                _started, stdout, stderr = False, "", str(restart_exc)
-            if not _started:
-                _record_handoff_log("service_restart_after_restore_failed")
-        return reporter.fail(
-            error,
-            failed_stage="source_replace",
-            backup_path=backup_path,
-            stdout=stdout or None,
-            stderr=stderr or None,
-            restored_from_backup=restored,
-            restore_error=restore_error,
-        )
+        # 替换到一半失败不能留半新半旧的目录：还原后把原本在跑的服务拉起来；只有还原也失败才把 backup_path 留给人工处理
+        return _recover_failed_upgrade(args, reporter, error=error, failed_stage="source_replace")
 
     args.upgrade_step_callback = reporter.start
     try:
@@ -629,7 +929,7 @@ def _run_reported_upgrade(args: argparse.Namespace, reporter: _UpgradeReporter) 
         task_error = f"upgrade tasks crashed: {exc}"
     if task_error is not None:
         _record_handoff_log(f"install_failed error={task_error}")
-        return reporter.fail(task_error, failed_stage="install", backup_path=backup_path, stderr=task_error)
+        return _recover_failed_upgrade(args, reporter, error=task_error, failed_stage="install", stderr=task_error)
 
     reporter.start("start")
     # The upgraded service binds the same port.
@@ -640,15 +940,20 @@ def _run_reported_upgrade(args: argparse.Namespace, reporter: _UpgradeReporter) 
         _record_handoff_log(f"restart_failed error={exc}")
         started, stdout, stderr = False, "", str(exc)
     if not started:
-        return reporter.fail(
-            _start_failure_message(stdout, stderr),
+        return _recover_failed_upgrade(
+            args,
+            reporter,
+            error=_start_failure_message(stdout, stderr),
             failed_stage="start",
-            backup_path=backup_path,
             stdout=stdout,
             stderr=stderr,
         )
 
     reporter.finish(backup_path=backup_path)
+    try:
+        installation_status.clear_source_upgrade_notice()
+    except OSError as exc:
+        _record_handoff_log(f"upgrade_notice_clear_failed error={exc}")
     _cleanup_dir(args.cleanup_dir)
     return 0
 
@@ -811,6 +1116,45 @@ def _restart_failed(reporter: _UpgradeReporter | None, error: str, failed_stage:
     return reporter.fail(error, failed_stage=failed_stage) if reporter is not None else 1
 
 
+def _restart_after_failed_component(
+    args: argparse.Namespace,
+    reporter: _UpgradeReporter | None,
+    restart_argv: Sequence[str],
+    error: str,
+) -> int:
+    """The local source did not change and the service was stopped for this: it has to run again.
+
+    There is no backup of a component: past the check, what ran may have changed the runtime,
+    so the machine is only called restored when nothing had begun to change it.
+    """
+    nothing_changed = reporter is None or reporter.progress.current_step in {"stop", "check_runtime"}
+    if reporter is not None:
+        reporter.begin_recovery(
+            error,
+            failed_stage="install",
+            backup_path=None,
+            recovery="restoring" if nothing_changed else "restarting",
+        )
+        reporter.tell_the_dialog()
+        reporter.release_port()
+    try:
+        started, stdout, stderr = _run_start_command(restart_argv, cwd=Path(args.install_root))
+    except Exception as exc:
+        _record_handoff_log(f"restart_failed error={exc}")
+        started, stdout, stderr = False, "", str(exc)
+    if not started:
+        return _restart_failed(reporter, error, "install")
+    if reporter is None:
+        return 1
+    return reporter.recovered(
+        error,
+        failed_stage="install",
+        stdout=stdout,
+        stderr=stderr,
+        recovery="restored" if nothing_changed else "restarted",
+    )
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     # Only web upgrades pass a token. Take it out first so no mode hands it on to the
@@ -900,6 +1244,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     if task_error is not None:
         _record_handoff_log(f"upgrade_tasks_failed error={task_error}")
         _cleanup_dir(args.cleanup_dir)
+        if component_install:
+            return _restart_after_failed_component(args, reporter, restart_argv, task_error)
         return _restart_failed(reporter, task_error, "install")
 
     uses_legacy_protocol = bool(args.backup_path or args.prepare_handover or args.backend_pid_file)

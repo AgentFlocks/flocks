@@ -133,11 +133,11 @@ async def test_er5_the_application_for_a_licence(client: AsyncClient, monkeypatc
     assert len(sent) == 1
 
     async def refuse(*_args):
-        raise enterprise.EnterpriseUpgradeError("申请要先登录 Console：点「登录 Console」后再提交")
+        raise enterprise.EnterpriseUpgradeError("申请要先登录云账号：点「云账号登录」后再提交")
 
     monkeypatch.setattr(enterprise_application, "withdraw", refuse)
     resp = await client.post("/api/enterprise-upgrade/applications/req_1/withdraw")
-    assert resp.status_code == status.HTTP_409_CONFLICT and "登录 Console" in json.dumps(resp.json(), ensure_ascii=False)
+    assert resp.status_code == status.HTTP_409_CONFLICT and "云账号登录" in json.dumps(resp.json(), ensure_ascii=False)
     # Not an application id: refused before anything runs.
     resp = await client.post("/api/enterprise-upgrade/applications/..%2Fx/withdraw")
     assert resp.status_code in (404, 422)

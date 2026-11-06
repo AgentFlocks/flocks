@@ -13,6 +13,7 @@ import json
 import os
 import signal
 import socket
+import re
 import subprocess
 import sys
 import time
@@ -296,6 +297,75 @@ def _bundled_node_install_dir() -> Path | None:
             node_executable = node_dir / "bin" / "node"
         if node_executable.exists():
             return node_dir.resolve()
+    return node_dir_outside_path()
+
+
+def path_with_first(directory: str, current_path: str) -> str:
+    """PATH with *directory* first: npm is ``#!/usr/bin/env node``, so the first node on PATH is the one that runs."""
+    others = [entry for entry in current_path.split(os.pathsep) if entry and entry != directory]
+    return os.pathsep.join([directory, *others])
+
+
+def _node_major_of(node_executable: str) -> int | None:
+    try:
+        completed = subprocess.run(
+            [node_executable, "-v"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    major = completed.stdout.strip().lstrip("v").split(".", 1)[0]
+    return int(major) if major.isdigit() else None
+
+
+def _node_install_dirs_outside_path() -> list[Path]:
+    """Where an account's Node.js usually is when a service's PATH does not reach it, newest first."""
+    home = Path.home()
+    versioned: list[Path] = []
+    for nvm_dir in dict.fromkeys(filter(None, (os.getenv("NVM_DIR"), str(home / ".nvm")))):
+        versioned.extend((Path(nvm_dir) / "versions" / "node").glob("v*"))
+    for fnm_dir in (home / ".local" / "share" / "fnm" / "node-versions", home / ".fnm" / "node-versions"):
+        versioned.extend(path / "installation" for path in fnm_dir.glob("v*"))
+    versioned.extend((home / ".asdf" / "installs" / "nodejs").glob("*"))
+
+    def version_of(path: Path) -> tuple[int, ...]:
+        name = path.parent.name if path.name == "installation" else path.name
+        return tuple(int(part) for part in re.findall(r"\d+", name))
+
+    versioned.sort(key=version_of, reverse=True)
+    return [*versioned, home / ".volta", Path("/opt/homebrew"), Path("/usr/local"), Path("/usr")]
+
+
+def node_dir_outside_path() -> Path | None:
+    """A usable Node.js with npm that PATH does not lead to, when what PATH leads to is not usable.
+
+    ``scripts/install.sh`` installs Node.js with nvm, which only login shells have on their
+    PATH. A service started by launchd, cron or a command over ssh has it nowhere on its PATH
+    although it is on the machine, and a source upgrade would call that a missing npm.
+    """
+    if sys.platform == "win32":
+        return None
+    candidates = [
+        node_dir
+        for node_dir in _node_install_dirs_outside_path()
+        if (node_dir / "bin" / "node").exists() and (node_dir / "bin" / "npm").exists()
+    ]
+    if not candidates:
+        return None
+    node_on_path = which("node")
+    if node_on_path and which("npm"):
+        major = _node_major_of(node_on_path)
+        if major is not None and major >= MIN_NODE_MAJOR:
+            return None
+    for node_dir in candidates:
+        major = _node_major_of(str(node_dir / "bin" / "node"))
+        if major is not None and major >= MIN_NODE_MAJOR:
+            return node_dir
     return None
 
 
@@ -332,23 +402,7 @@ def get_node_major_version() -> int | None:
     if not node:
         return None
 
-    try:
-        completed = subprocess.run(
-            [node, "-v"],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except OSError:
-        return None
-
-    version = completed.stdout.strip().lstrip("v")
-    if not version:
-        return None
-    major = version.split(".", 1)[0]
-    return int(major) if major.isdigit() else None
+    return _node_major_of(node)
 
 
 def node_version_satisfies_requirement() -> bool:
@@ -1561,6 +1615,15 @@ def _backend_command_and_env(root: Path, config: ServiceConfig) -> tuple[list[st
     return command, env
 
 
+def apply_console_default() -> None:
+    """Give this process the Console ``flocks start`` gives its backend, when told of no other.
+
+    For what ``flocks start`` does not start: a ``flocks serve`` run directly by launchd, systemd
+    or the enterprise core, a command typed in a shell. Set empty means no Console and stays so.
+    """
+    os.environ.setdefault("FLOCKS_CONSOLE_BASE_URL", DEFAULT_FLOCKS_CONSOLE_BASE_URL)
+
+
 def _build_webui_dist(root: Path, config: ServiceConfig, console) -> None:
     """Build the production WebUI static bundle."""
     npm = resolve_npm_executable()
@@ -2631,10 +2694,7 @@ def build_frontend_env(config: ServiceConfig) -> dict[str, str]:
             node_bin = str(node_dir)
         else:
             node_bin = str(node_dir / "bin")
-        path_sep = os.pathsep
-        current_path = env.get("PATH", "")
-        if node_bin not in current_path.split(path_sep):
-            env["PATH"] = node_bin + path_sep + current_path
+        env["PATH"] = path_with_first(node_bin, env.get("PATH", ""))
 
     return env
 
