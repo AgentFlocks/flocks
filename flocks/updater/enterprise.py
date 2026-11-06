@@ -310,15 +310,16 @@ def prepare_command(*, default_root: bool = False) -> str | None:
     return f"sudo install -d -o {shlex.quote(user)} -g {shlex.quote(group)} -m 0755 {INSTALL_ROOT}"
 
 
-def installer_command(path_or_name: str, *, quote: bool = True) -> str:
-    """How the installer is run by hand: as root on a systemd machine, as this account otherwise;
-    on Windows from PowerShell, as an administrator (Windows asks)."""
+def installer_command(path_or_name: str) -> str:
+    """How root runs the installer on a machine the page cannot run it from (a systemd one, whose
+    service stopping would take the installer with it); on Windows from PowerShell, as an
+    administrator (Windows asks)."""
     if _WINDOWS:
         # This install's data directory and flocks command go with it, as when the page starts it:
         # the administrator who confirms may have another profile, FLOCKS_ROOT another directory.
         arguments = subprocess.list2cmdline(_windows_open_edition_args())
         return f"Start-Process -Verb RunAs -FilePath {_powershell_quote(path_or_name)} -ArgumentList {_powershell_quote(arguments)}"
-    run = f"bash {shlex.quote(path_or_name) if quote else path_or_name}"
+    run = f"bash {shlex.quote(path_or_name)}"
     return f"sudo {run}" if run_by_systemd() and _euid() != 0 else run
 
 
@@ -344,9 +345,6 @@ def situation() -> dict[str, Any]:
         "prepare_command": prepare_command(),
         # The page starts the installer itself only where this account runs the install.
         "can_start": available() and not systemd and install_root_ready(),
-        # The installer is a shell one, a program on Windows: nothing to run by hand elsewhere.
-        "manual_command": installer_command(f"flockspro-<版本>-{platform_id()}{INSTALLER_SUFFIX}", quote=False)
-        if os.name in ("posix", "nt") else "",
         "upgrade": read_state(),
     }
 
@@ -418,7 +416,7 @@ async def fetch_offer() -> InstallerOffer:
     """Ask Console for the installer built for this machine's licence."""
     base = _console_base_url()
     if not base:
-        raise EnterpriseUpgradeError("这台机器没有配置 Console（FLOCKS_CONSOLE_BASE_URL），请用手动的方法升级")
+        raise EnterpriseUpgradeError("这台机器没有配置 Console（FLOCKS_CONSOLE_BASE_URL），查不到新企业版")
     licence_id = previous_licence_id()
     if not licence_id and _previous_installed():
         licence_id = previous_licence_id(await asyncio.to_thread(_previous_status))
@@ -455,7 +453,7 @@ async def fetch_offer() -> InstallerOffer:
     offer = offered_installer(manifest, base)
     if offer is None:
         raise EnterpriseUpgradeError(
-            f"Console 还没有给授权 {licence_id} 的新企业版安装包（{platform_id()}）；请联系我们，或用手动的方法升级"
+            f"Console 还没有给授权 {licence_id} 的新企业版安装包（{platform_id()}）；请联系我们"
         )
     return offer
 
@@ -811,7 +809,8 @@ async def download(offer: InstallerOffer, progress: Callable[[int, int | None], 
         part.unlink(missing_ok=True)
         # Some of these say nothing of themselves (a connection reset has no message).
         said = str(exc) or type(exc).__name__
-        got = f"，已下载 {received // (1 << 20)} MB" + (f" / {offer.size // (1 << 20)} MB" if offer.size else "") if received else ""
+        # Rounded as the progress bar above it rounds.
+        got = f"，已下载 {round(received / (1 << 20))} MB" + (f" / {round(offer.size / (1 << 20))} MB" if offer.size else "") if received else ""
         raise EnterpriseUpgradeError(f"下载安装包失败：{said}{got}") from exc
     except BaseException:
         part.unlink(missing_ok=True)

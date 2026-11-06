@@ -80,7 +80,6 @@ const base = {
   install_root_ready: true,
   prepare_command: null,
   can_start: true,
-  manual_command: 'bash flockspro-<版本>-linux-arm64.run',
   upgrade: null,
 };
 const offer = { url: 'https://console.example/r.run', sha256: 'a'.repeat(64), release_id: '2026.11.5-linux-arm64', version: '2026.11.5', size: 10, filename: 'flockspro-2026.11.5-linux-arm64.run' };
@@ -131,7 +130,7 @@ describe('Flocks Pro page of the open edition', () => {
   });
 
   it('FP2 on a systemd machine gives root the command for the downloaded installer', async () => {
-    situation.mockResolvedValue({ ...base, systemd: true, can_start: false, manual_command: 'sudo bash flockspro-<版本>-linux-arm64.run' });
+    situation.mockResolvedValue({ ...base, systemd: true, can_start: false });
     check.mockResolvedValue(offer);
     start.mockResolvedValue({ phase: 'command', command: 'sudo bash /var/lib/flocks/.flocks/run/enterprise-upgrade/flockspro-2026.11.5-linux-arm64.run' });
     render(<FlocksproUpgradePage />);
@@ -142,7 +141,6 @@ describe('Flocks Pro page of the open edition', () => {
 
     expect(await screen.findByText('progress.command')).toBeInTheDocument();
     expect(screen.getByText(/sudo bash \/var\/lib\/flocks\/\.flocks\/run\/enterprise-upgrade\//)).toBeInTheDocument();
-    expect(screen.getByText('upgrade.manual root')).toBeInTheDocument();
   });
 
   it('FP3 asks root to hand the install directory over first', async () => {
@@ -160,7 +158,7 @@ describe('Flocks Pro page of the open edition', () => {
     await waitFor(() => expect(screen.queryByText(/sudo install -d/)).not.toBeInTheDocument());
   });
 
-  it('FP4 the open edition without a licence: the application, and the way by hand', async () => {
+  it('FP4 the open edition without a licence: the application, and no way by hand', async () => {
     situation.mockResolvedValue({ ...base, previous: null });
     render(<FlocksproUpgradePage />);
 
@@ -169,20 +167,16 @@ describe('Flocks Pro page of the open edition', () => {
     expect(await screen.findByText('apply.none')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'upgrade.check' })).not.toBeInTheDocument();
     expect(screen.queryByTestId('licence-card')).not.toBeInTheDocument();
-    expect(screen.getByText('bash flockspro-<版本>-linux-arm64.run')).toBeInTheDocument();
+    expect(screen.queryByText(/\.run\b/)).not.toBeInTheDocument();
   });
 
-  it('FP4b a Windows machine: its program and how to run the installer as an administrator', async () => {
+  it('FP4b a Windows machine: where its program goes', async () => {
     situation.mockResolvedValue({
       ...base, platform: 'windows-amd64', install_root: 'C:\\Program Files\\FlocksPro', account: 'ops',
-      manual_command: "Start-Process -Verb RunAs -FilePath 'flockspro-<版本>-windows-amd64.exe'",
     });
     render(<FlocksproUpgradePage />);
 
     expect(await screen.findByText('upgrade.whatChangesWindows C:\\Program Files\\FlocksPro')).toBeInTheDocument();
-    expect(screen.getByText('upgrade.manualWindows')).toBeInTheDocument();
-    expect(screen.getByText("Start-Process -Verb RunAs -FilePath 'flockspro-<版本>-windows-amd64.exe'")).toBeInTheDocument();
-    expect(screen.queryByText(/upgrade\.manual ops/)).not.toBeInTheDocument();
   });
 
   it('FP5 shows what Console said', async () => {

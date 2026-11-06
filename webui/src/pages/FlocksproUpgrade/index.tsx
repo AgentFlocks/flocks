@@ -290,14 +290,6 @@ export default function FlocksproUpgradePage() {
       {runError && <div className={ERROR}>{runError}</div>}
 
       {upgrade && <UpgradeProgress upgrade={upgrade} serverGone={serverGone} />}
-
-      {situation.manual_command && (
-        <div className="border-t border-gray-100 pt-3 text-sm text-gray-500">
-          <p className="font-medium text-gray-900">{t('upgrade.manualTitle')}</p>
-          <p className="mt-1">{windows ? t('upgrade.manualWindows') : t('upgrade.manual', { account: situation.systemd ? 'root' : situation.account })}</p>
-          <Command text={situation.manual_command} />
-        </div>
-      )}
     </section>
   );
 

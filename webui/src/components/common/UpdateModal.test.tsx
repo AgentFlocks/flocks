@@ -987,6 +987,21 @@ describe('UpdateModal on a release its own core installs', () => {
     expect(screen.getByText('stageLabels.restarting')).toHaveClass('text-red-600');
   });
 
+  it('has no row of its own for the failure once the details say where it stopped', async () => {
+    const start = vi.fn((onProgress: (progress: unknown) => void) => {
+      onProgress({ stage: 'restarting', message: '', success: null, progress_token: 'managed:abc' }); // secret-guard: allow (the test's own request id)
+      onProgress({ stage: 'error', message: '校验不过', success: false });
+      return Promise.resolve();
+    });
+    const outcome = vi.fn().mockResolvedValue({ state: 'failed', detail: 'does not verify', failed_step: 'bundle', recovery: 'unchanged' });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={managed} channel="flockspro" releaseUpdate={{ status: vi.fn(), start, outcome: outcome as never }} onClose={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(await screen.findByTestId('upgrade-failure')).toBeInTheDocument();
+    expect(screen.queryByText('stageLabels.error')).not.toBeInTheDocument();
+  });
+
   it('stops at the service refusing the question, which will not change', async () => {
     const outcome = vi.fn().mockRejectedValue({ response: { status: 401, data: { detail: '请重新登录' } } });
     await started(outcome);

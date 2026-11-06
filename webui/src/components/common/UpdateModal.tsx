@@ -610,7 +610,8 @@ export default function UpdateModal({
             {steps.length > 0 && (
               <div className="px-4 pb-3 pt-2">
                 <div className="space-y-0">
-                  {steps.map((s, i) => renderStep(s, i))}
+                  {/* The details below say where it stopped: no row of their own for the failure. */}
+                  {steps.filter((s) => !(failure && s.stage === 'error')).map((s, i) => renderStep(s, i))}
                 </div>
                 {restarting && !restoring && (
                   <p className="mt-2 text-xs text-gray-400">{t('restarting')}</p>

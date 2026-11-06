@@ -56,7 +56,6 @@ export interface EnterpriseSituation {
   prepare_command: string | null;
   can_start: boolean;
   /** Empty where the installer cannot run (not a Unix machine). */
-  manual_command: string;
   upgrade: EnterpriseUpgradeState | null;
 }
 

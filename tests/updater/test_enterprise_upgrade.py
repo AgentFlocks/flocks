@@ -289,7 +289,8 @@ def test_eu2_an_install_at_the_default_directory_stays_there(machine: Path, monk
 def test_eu2_how_this_account_may_install(machine: Path, monkeypatch: pytest.MonkeyPatch):
     situation = enterprise.situation()
     assert situation["can_start"] is True and situation["prepare_command"] is None
-    assert situation["manual_command"] == f"bash flockspro-<版本>-{PLATFORM}.run"
+    # The page offers no installing by hand: it does the upgrade, and goes back if it fails.
+    assert "manual_command" not in situation
 
     # /opt/flockspro not there: root makes it for this account, once.
     monkeypatch.setattr(enterprise, "INSTALL_ROOT", machine.parent / "missing")
@@ -302,7 +303,7 @@ def test_eu2_how_this_account_may_install(machine: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("INVOCATION_ID", "0123")
     situation = enterprise.situation()
     assert situation["systemd"] is True and situation["can_start"] is False and situation["prepare_command"] is None
-    assert situation["manual_command"].startswith("sudo bash ")
+    assert enterprise.installer_command("x.run").startswith("sudo bash ")
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="as an account of its own")
@@ -922,15 +923,9 @@ def test_eu8_windows_names_its_platform_and_installer(windows: Path):
     assert offer.filename == "flockspro-2026.12.30-windows-amd64.exe"
     situation = enterprise.situation()
     assert situation["available"] and situation["can_start"] and situation["prepare_command"] is None
-    # By hand too, the installer is told this install's data directory: the administrator who
-    # confirms may have another profile, FLOCKS_ROOT another directory.
-    # (A temporary directory under a profile with a space in it is quoted for the program.)
-    arguments = enterprise.subprocess.list2cmdline(["--open-data", str(enterprise.runtime_root())])
-    assert situation["manual_command"] == (
-        f"Start-Process -Verb RunAs -FilePath 'flockspro-<版本>-windows-amd64.exe' -ArgumentList '{arguments}'")
 
 
-def test_eu8_the_manual_command_quotes_as_powershell_and_windows_read_it(windows: Path, monkeypatch: pytest.MonkeyPatch):
+def test_eu8_the_installer_command_quotes_as_powershell_and_windows_read_it(windows: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("FLOCKS_ROOT", "C:\\Users\\Li Lei\\.flocks")
     command = enterprise.installer_command("C:/Users/O\u2019Neil's/x.exe")
     # Every single quote PowerShell knows is doubled; the argument with a space is quoted for the program.

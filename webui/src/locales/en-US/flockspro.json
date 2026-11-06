@@ -129,10 +129,7 @@
     "loginFirst": "Log in console account before checking for a new version.",
     "offer": "New version {{version}} ({{platform}})",
     "start": "Upgrade to {{version}}",
-    "download": "Download the installer",
-    "manualTitle": "Upgrade by hand",
-    "manual": "Copy the installer (flockspro-<version>-<platform>.run) to this machine and run, as {{account}}:",
-    "manualWindows": "Copy the installer (flockspro-<version>-windows-amd64.exe) to this machine and run this line in PowerShell: Windows asks for an administrator, and the installer is told where this open edition keeps its data and its flocks command."
+    "download": "Download the installer"
   },
   "progress": {
     "downloading": "Downloading the new enterprise edition {{version}}",

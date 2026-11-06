@@ -129,10 +129,7 @@
     "loginFirst": "请先完成云账号登录后再检查新版本。",
     "offer": "新版本 {{version}}（{{platform}}）",
     "start": "升级到 {{version}}",
-    "download": "下载安装包",
-    "manualTitle": "手动升级",
-    "manual": "把安装包（flockspro-<版本>-<平台>.run）拷到这台机器，以 {{account}} 执行：",
-    "manualWindows": "把安装包（flockspro-<版本>-windows-amd64.exe）拷到这台机器，在 PowerShell 里执行下面这行：Windows 会弹出管理员确认框，安装包也会知道这台开源版的数据目录和 flocks 命令。"
+    "download": "下载安装包"
   },
   "progress": {
     "downloading": "正在下载新企业版 {{version}}",
