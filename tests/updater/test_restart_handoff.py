@@ -1774,19 +1774,51 @@ def test_component_restart_failure_is_served_to_the_dialog(
     monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda _port: True)
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", run_tasks)
     monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
-    monkeypatch.setattr(
-        restart_handoff.subprocess,
-        "Popen",
-        lambda *_args, **_kwargs: pytest.fail("a failed install must not start the service"),
-    )
+    # The service was stopped for this and the local source did not change: it has to run again.
+    starts: list[list[str]] = []
+
+    def run_start(argv, **_kwargs):
+        starts.append(list(argv))
+        return subprocess.CompletedProcess(argv, 1, b"", b"address in use")
+
+    monkeypatch.setattr(restart_handoff.subprocess, "run", run_start)
 
     assert restart_handoff.run(_component_restart_args(tmp_path)) == 1
 
+    assert len(starts) == 1
     assert results[-1]["phase"] == "failed"
     assert results[-1]["failed_stage"] == "install"
     assert results[-1]["error"] == "Component install failed (component.whl): hash mismatch"
     assert _statuses(results[-1]["progress"])["install_components"] == "failed"
-    assert fake_responder.instances[0].events == ["start", f"linger:{restart_handoff.PROGRESS_FAILURE_LINGER_SECONDS}"]
+    assert results[-1]["progress"]["recovery"] == "failed"
+    # It made way for the start that did not work, and says so again once the port is free.
+    assert [instance.events for instance in fake_responder.instances] == [
+        ["start", f"wait:{restart_handoff.RECOVERY_NOTICE_WAIT_SECONDS}", "stop"],
+        ["start", f"linger:{restart_handoff.PROGRESS_FAILURE_LINGER_SECONDS}"],
+    ]
+
+
+def test_component_restart_failure_brings_the_service_back(
+    monkeypatch,
+    tmp_path: Path,
+    fake_responder,
+) -> None:
+    results: list[dict[str, object]] = []
+    monkeypatch.setenv(restart_handoff.handoff_progress.UPGRADE_PROGRESS_TOKEN_ENV, "tok-123")  # secret-guard: allow - a made-up token for the test
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda _message: None)
+    monkeypatch.setattr(restart_handoff, "_wait_for_parent_exit", lambda _pid: True)
+    monkeypatch.setattr(restart_handoff, "_stop_supervisor_before_restart", lambda **_kwargs: True)
+    monkeypatch.setattr(restart_handoff, "_ensure_backend_port_free", lambda _port: True)
+    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda _args: "Component install failed (component.whl): hash mismatch")
+    monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
+    monkeypatch.setattr(restart_handoff.subprocess, "run", lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, b"", b""))
+
+    assert restart_handoff.run(_component_restart_args(tmp_path)) == 1
+
+    assert results[-1]["failed_stage"] == "install"
+    assert results[-1]["progress"]["recovery"] == "restored"
+    assert fake_responder.instances[0].events == ["start", f"wait:{restart_handoff.RECOVERY_NOTICE_WAIT_SECONDS}", "stop"]
+    assert len(fake_responder.instances) == 1
 
 
 def test_component_restart_serves_a_start_command_that_exits_with_an_error(

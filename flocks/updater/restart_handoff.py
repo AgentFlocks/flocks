@@ -336,10 +336,19 @@ def _restore_install_from_backup(backup_path: Path, install_root: Path) -> None:
 
     备份是升级前源码的 tar.gz（排除运行时/构建目录），按升级本身同样的覆盖方式回放到安装目录，
     半替换状态里被新版本改过的文件会全部回到旧版本；备份文件本身保留，供人工核对。
+    系统临时目录写不下时（升级失败常常就因为这个）换到安装目录旁边再试一次。
     """
-    with tempfile.TemporaryDirectory(prefix="flocks-restore-") as tmp:
-        content_root = updater_module._extract_archive(backup_path, Path(tmp))
-        updater_module._replace_install_dir(content_root, install_root)
+
+    def replay(tmp_parent: Path | None) -> None:
+        with tempfile.TemporaryDirectory(prefix="flocks-restore-", dir=tmp_parent) as tmp:
+            content_root = updater_module._extract_archive(backup_path, Path(tmp))
+            updater_module._replace_install_dir(content_root, install_root)
+
+    try:
+        replay(None)
+    except OSError as exc:
+        _record_handoff_log(f"source_restore_retry_beside_install error={exc}")
+        replay(install_root.parent)
 
 
 def _restore_after_failed_replace(args: argparse.Namespace, backup_path: Path) -> tuple[bool, str | None]:
@@ -1096,6 +1105,27 @@ def _restart_failed(reporter: _UpgradeReporter | None, error: str, failed_stage:
     return reporter.fail(error, failed_stage=failed_stage) if reporter is not None else 1
 
 
+def _restart_after_failed_component(
+    args: argparse.Namespace,
+    reporter: _UpgradeReporter | None,
+    restart_argv: Sequence[str],
+    error: str,
+) -> int:
+    """The local source did not change and the service was stopped for this: it has to run again."""
+    if reporter is not None:
+        reporter.begin_recovery(error, failed_stage="install", backup_path=None)
+        reporter.tell_the_dialog()
+        reporter.release_port()
+    try:
+        started, stdout, stderr = _run_start_command(restart_argv, cwd=Path(args.install_root))
+    except Exception as exc:
+        _record_handoff_log(f"restart_failed error={exc}")
+        started, stdout, stderr = False, "", str(exc)
+    if not started:
+        return _restart_failed(reporter, error, "install")
+    return reporter.recovered(error, failed_stage="install", stdout=stdout, stderr=stderr) if reporter is not None else 1
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     # Only web upgrades pass a token. Take it out first so no mode hands it on to the
@@ -1185,6 +1215,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     if task_error is not None:
         _record_handoff_log(f"upgrade_tasks_failed error={task_error}")
         _cleanup_dir(args.cleanup_dir)
+        if component_install:
+            return _restart_after_failed_component(args, reporter, restart_argv, task_error)
         return _restart_failed(reporter, task_error, "install")
 
     uses_legacy_protocol = bool(args.backup_path or args.prepare_handover or args.backend_pid_file)

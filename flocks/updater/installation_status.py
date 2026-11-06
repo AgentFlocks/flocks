@@ -113,12 +113,12 @@ def write_source_upgrade_notice(
         zh = {
             "title": f"升级到 v{target} 没有完成，也没能自动恢复",
             "message": f"程序目录可能是新旧混合的状态。升级前的程序备份在 {backup_path}，数据没有动。",
-            "retry_hint": "把下面的原因处理掉之后重新运行 scripts/install.sh，或者把备份解回程序目录。",
+            "retry_hint": "到服务器上查看 ~/.flocks/run/upgrade-result.json 里的原因，处理后执行 flocks start。",
         }
         en = {
             "title": f"The upgrade to v{target} did not complete and could not be undone",
             "message": f"The program directory may hold a mix of both versions. The program from before the upgrade is backed up at {backup_path}. Data was not touched.",
-            "retry_hint": "Resolve the failure below, then run scripts/install.sh again or unpack the backup over the program directory.",
+            "retry_hint": "Check ~/.flocks/run/upgrade-result.json on the server, resolve the cause, then run flocks start.",
         }
     record = {
         "version": 1,

@@ -320,6 +320,39 @@ def test_a_previous_version_that_will_not_start_either_says_so(machine, monkeypa
     assert "程序是 v2026.3.31" in shown["message"]
 
 
+def test_a_full_temporary_directory_does_not_stop_the_restore(machine, monkeypatch) -> None:
+    """A full disk is often why the upgrade failed. Then the restore has to work beside the install."""
+    real_extract = updater._extract_archive
+    extracted_under: list[Path] = []
+
+    def extract(archive, destination):
+        extracted_under.append(Path(destination).parent)
+        if len(extracted_under) == 1:
+            raise OSError(28, "No space left on device")
+        return real_extract(archive, destination)
+
+    monkeypatch.setattr(updater, "_extract_archive", extract)
+    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", _fail_at("check_runtime"))
+
+    assert restart_handoff.run(machine.args) == 1
+
+    assert extracted_under[-1] == machine.install.parent
+    _assert_previous_install_is_back(machine.install)
+    assert machine.results[-1]["progress"]["recovery"] == "restored"
+
+
+def test_nothing_on_the_failure_notice_offers_installing_by_hand(machine, monkeypatch) -> None:
+    machine.backup.write_text("not an archive", encoding="utf-8")
+    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", _fail_at("check_runtime"))
+    restart_handoff.run(machine.args)
+
+    record = json.loads(installation_status.source_upgrade_notice_path().read_text(encoding="utf-8"))
+    for language in ("zh-CN", "en-US"):
+        text = json.dumps(record["messages"][language], ensure_ascii=False)
+        for offer in ("install.sh", "离线", "安装包", "offline", "installer"):
+            assert offer not in text
+
+
 def test_an_unreadable_backup_leaves_the_manual_path(machine, monkeypatch) -> None:
     machine.backup.write_text("not an archive", encoding="utf-8")
     monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", _fail_at("check_runtime"))
