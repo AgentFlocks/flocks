@@ -1,40 +1,83 @@
 {
-  "description": "企业版：Go 核心、自带 PostgreSQL、审计日志、安全配置、用户管理、高可用。",
+  "description": "在本地完成云账号登录、升级申请与升级执行。",
   "loading": "加载中...",
+  "consoleLogin": {
+    "title": "云账号登录",
+    "accountLabel": "云账户：",
+    "loading": "加载中...",
+    "unbound": "未登录",
+    "unknownAccount": "未知账号",
+    "loginAction": "云账号登录",
+    "logoutAction": "退出登录"
+  },
   "machine": {
-    "previousTitle": "这台机器装着老企业版",
-    "openTitle": "这台机器是开源版",
-    "licensedTitle": "这台机器有企业版授权",
-    "version": "企业版",
-    "pythonEdition": "Python 版 {{version}}",
-    "licence": "授权",
-    "status": "授权状态",
-    "expires": "到期",
-    "previousNote": "企业版换成了单独的安装包，老企业版不再更新。开源部分照常用 flocks update 升级；老企业版的审计日志、安全配置、用户管理这些页面，升级到新企业版后回来。",
+    "previousTitle": "Flocks Pro {{version}}",
+    "previousDescription": "这台机器装着老企业版（Python 版），还没有升级到新企业版。",
+    "licensedTitle": "Flocks Pro",
+    "licensedDescription": "这台机器有企业版授权，还没有升级到新企业版。",
+    "openTitle": "升级为 Flocks Pro",
+    "openDescription": "查看当前授权信息、提交申请并跟踪审批进度。",
+    "previousNote": "企业版换成了单独的安装包，老企业版不再更新。开源部分照常用 flocks update 升级；老企业版的审计日志、安全配置、用户管理、Prompt 脱敏这些页面，升级到新企业版后回来。",
     "licensedNote": "授权已经保存在这台机器上，升级到新企业版时会沿用它。",
-    "openNote": "企业版是单独的安装包：装好后开源版的数据会迁过去（第一次启动迁进自带的 PostgreSQL），用法照旧。还没有授权的话，可以在下面在线申请。"
+    "openNote": "企业版是单独的安装包：装好后开源版的数据会迁过去（第一次启动迁进自带的 PostgreSQL），用法照旧。"
   },
   "licenceStatus": {
-    "commercial": "商业版",
-    "poc": "试用",
-    "expired": "已过期",
+    "commercial": "商用授权",
+    "poc": "POC授权",
+    "trial": "试用授权",
+    "test": "测试授权",
+    "active": "有效",
+    "expired": "已到期",
     "revoked": "已吊销",
+    "superseded": "已替换",
     "unactivated": "未激活",
     "invalid": "无效"
   },
+  "licence": {
+    "noPackage": "Flocks Pro",
+    "id": "License ID",
+    "sync": "同步授权信息",
+    "syncing": "同步中...",
+    "remaining": "License 剩余时间",
+    "remainingValue": "{{count}} 天",
+    "quota": "授权额度",
+    "adminQuota": "{{count}} 管理员",
+    "memberQuota": "{{count}} 成员",
+    "expires": "License 到期时间",
+    "synced": "授权信息同步时间",
+    "showDetails": "查看 License 详情",
+    "hideDetails": "收起 License 详情",
+    "invalidHint": "当前 License 已失效，新企业版不会沿用它。请先续期，或联系我们重新签发。",
+    "fields": {
+      "license_id": "License ID",
+      "install_id": "安装 ID",
+      "fingerprint": "机器指纹"
+    }
+  },
   "apply": {
-    "title": "申请企业版授权",
-    "intro": "填好后交给 Console 审核。审核通过后在这里启用授权，再升级到企业版。",
-    "signInFirst": "申请要先登录 Console（用你的云账号）。",
+    "open": "申请升级",
+    "title": "Flocks Pro 升级申请",
+    "none": "暂无升级申请记录。",
+    "signInFirst": "请先完成云账号登录后再申请升级。",
     "listLabel": "这台机器发过的申请",
+    "current": "当前申请",
+    "statusLabel": "状态",
+    "updatedAt": "审批状态更新时间",
+    "refresh": "刷新审批状态",
+    "cancel": "取消",
+    "rejectedTitle": "申请已被拒绝",
+    "licenseTypes": {
+      "poc": "POC授权（90天）",
+      "commercial": "商用授权（365天）"
+    },
     "fields": {
       "company": "企业名称",
       "licenseType": "授权类型",
       "applicantName": "申请人",
       "email": "邮箱",
       "phone": "手机",
-      "salesRep": "对接销售（选填）",
-      "notes": "备注（选填）"
+      "salesRep": "对接销售",
+      "notes": "备注"
     },
     "problems": {
       "required": "必填",
@@ -42,48 +85,51 @@
       "phone": "手机号格式不对：6–15 位数字，国家码用 + 开头"
     },
     "submit": "提交申请",
-    "submitNeedsSignIn": "登录 Console 后才能提交",
     "pendingSubmission": "上次提交没有收到 Console 的回答，申请可能已经交上去了。再提交一次会先把它找回来，不会重复。",
     "status": {
-      "pending": "待审核",
-      "reviewing": "审核中",
+      "pending": "待审批",
+      "reviewing": "审批中",
       "approved": "已通过",
-      "activated": "已启用",
-      "rejected": "未通过",
+      "activated": "已激活",
+      "rejected": "已拒绝",
       "cancelled": "已撤回",
-      "expired_unactivated": "过期未启用"
+      "expired_unactivated": "已超时"
     },
-    "sentOn": "{{date}} 提交",
-    "issued": "授权 {{id}}",
-    "issuedUntil": "授权 {{id}}，到期 {{date}}",
+    "issuedUntil": "{{id}}，到期 {{date}}",
     "reason": "审核意见：{{text}}",
     "suggestion": "建议：{{text}}",
     "take": "启用授权",
-    "withdraw": "撤回",
+    "withdraw": "撤回申请",
     "withdrawConfirm": "撤回这份申请？撤回后要重新申请。",
     "errors": {
       "load": "读不到申请记录",
       "submit": "提交失败",
       "withdraw": "撤回失败",
       "take": "启用授权失败"
+    },
+    "placeholders": {
+      "company": "企业名称（必填）",
+      "applicantName": "申请人（必填）",
+      "email": "邮箱（必填）",
+      "phone": "手机（必填）",
+      "salesRep": "对接销售（选填）",
+      "notes": "备注（选填）"
     }
   },
   "upgrade": {
-    "title": "升级到新企业版",
+    "title": "企业版更新",
+    "currentPrevious": "当前是老企业版 {{version}}。检查 Console 给这台机器所在平台的新企业版，升级时下载、校验后交给安装包运行，服务会自动重启。",
+    "currentOpen": "当前是开源版。检查 Console 给这台机器所在平台的新企业版，升级时下载、校验后交给安装包运行，服务会自动重启。",
     "whatChanges": "升级后：程序在 {{root}}，数据还在原来的目录（第一次启动迁进自带的 PostgreSQL，原来的数据留着），授权沿用这台机器上的；之后照旧用 flocks start|stop|restart|status|logs|update。",
     "whatChangesWindows": "升级后：程序在 {{root}}，企业版作为「FlocksPro Core」服务随开机启动；开源版的数据复制一份给企业版（原来的目录留着），授权沿用这台机器上的。安装时 Windows 会弹出管理员确认框。",
     "systemd": "这台机器由 systemd 管（开源版离线包）：升级要以 root 运行安装包，这里可以把安装包下载好，再按给出的命令执行。",
     "prepare": "{{account}} 还不能写 {{root}}：先用 root 执行一次（只要这一次），再回来升级。",
     "recheck": "已执行，重新检查",
-    "check": "检查新企业版",
-    "loginConsole": "登录 Console",
-    "consoleAccount": "Console 账号：{{account}}",
-    "offer": "新企业版 {{version}}",
+    "check": "检查新版本",
+    "loginFirst": "请先完成云账号登录后再检查新版本。",
+    "offer": "新版本 {{version}}（{{platform}}）",
     "start": "升级到 {{version}}",
-    "download": "下载安装包",
-    "manualTitle": "手动升级",
-    "manual": "把安装包（flockspro-<版本>-<平台>.run）拷到这台机器，以 {{account}} 执行：",
-    "manualWindows": "把安装包（flockspro-<版本>-windows-amd64.exe）拷到这台机器，在 PowerShell 里执行下面这行：Windows 会弹出管理员确认框，安装包也会知道这台开源版的数据目录和 flocks 命令。"
+    "download": "下载安装包"
   },
   "progress": {
     "downloading": "正在下载新企业版 {{version}}",
@@ -91,16 +137,18 @@
     "restarting": "开源版已经停下，企业版正在第一次启动（迁移数据）。它监听在这个地址时，页面会自动刷新；地址不同的话，装好后打开安装输出里的地址。",
     "finished": "新企业版 {{version}} 装好了，刷新页面即可。",
     "failed": "安装没有完成，开源版照常运行；原因看下面的安装输出。",
-    "failedCode": "安装没有完成（退出码 {{code}}），开源版照常运行；原因看下面的安装输出。",
     "command": "安装包下载好了，以 root 执行：",
     "commandPrepare": "安装包下载好了。先用 root 把安装目录交给这个账号，再执行安装包：",
     "log": "安装输出"
   },
   "errors": {
+    "wentBack": "上次升级没有完成，这台机器已退回升级前的版本，数据和服务都在。想再试一次，请点左下角版本号旁的「新版本」。",
     "load": "读不到这台机器的情况",
     "check": "检查失败",
     "start": "升级失败",
-    "login": "发起 Console 登录失败"
+    "login": "发起云账号登录失败",
+    "logout": "退出云账号登录失败",
+    "sync": "同步授权信息失败"
   },
   "callback": {
     "processing": "正在完成云账号登录，请稍候...",

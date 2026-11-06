@@ -20,7 +20,9 @@ open edition's offline package) is switched by root; the page gives the command.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import functools
 import hashlib
 import importlib.metadata
 import json
@@ -31,6 +33,7 @@ import shlex
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -39,6 +42,13 @@ from urllib.parse import urlencode, urlparse
 import httpx
 
 from flocks.updater.deploy import declared_managed, detect_deploy_mode
+from flocks.updater.handoff_progress import summarize_error
+from flocks.updater.installation_status import (
+    installation_result_id,
+    installation_result_path,
+    read_installation_result,
+    scrub_credentials,
+)
 from flocks.utils.log import Log
 
 log = Log.create(service="updater.enterprise")
@@ -61,6 +71,15 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RELEASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _VERSION_RE = re.compile(r"^\d+(\.\d+){1,3}$")
 _LOG_TAIL_LINES = 40
+#: What is shown of the installer's output once it has failed: the page and the dialog scroll it.
+_FAILED_LOG_LINES = 200
+#: The line start_installer writes in the log ahead of each run.
+_RUN_HEADER = "== "
+_TERMINAL_CODES = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_ERROR_LINE = re.compile(
+    r"失败|错误|无法|建不了|取不出|error|fail|fatal|panic|traceback|exception|cannot|can't|could not|couldn't|did not|not found|no such|denied|refus|no space",
+    re.IGNORECASE,
+)
 
 
 class EnterpriseUpgradeError(Exception):
@@ -132,8 +151,50 @@ def _account() -> tuple[str, str]:
 
 
 def run_by_systemd() -> bool:
-    """This open install is a systemd service (the offline package's flocks.service)."""
-    return bool(os.environ.get("INVOCATION_ID")) or detect_deploy_mode() == "offline"
+    """This open install is a systemd service that would take an installer started from here down
+    with it (the offline package's flocks.service): root has to run the installer."""
+    if detect_deploy_mode() == "offline":
+        return True
+    return bool(os.environ.get("INVOCATION_ID")) and not _installer_outlives_service()
+
+
+@functools.lru_cache(maxsize=1)
+def _installer_outlives_service() -> bool:
+    """Whether an installer started from this service runs on when the service stops, as it does in
+    a service of KillMode=none or process, or one that stays active with its processes gone
+    (a `flocks start` run by a oneshot unit). install-managed stops the service; systemd then ends
+    what is left in its control group, the installer among it, unless told otherwise. Not knowing
+    counts as no."""
+    service = _own_service()
+    if not service:
+        return False
+    try:
+        answer = subprocess.run(
+            ["systemctl", "show", service, "--property=KillMode,Type,RemainAfterExit"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if answer.returncode != 0:
+        return False
+    properties = dict(line.split("=", 1) for line in answer.stdout.splitlines() if "=" in line)
+    if properties.get("KillMode") in ("none", "process"):
+        return True
+    # Stopped by name it takes the installer along: install-managed does that to this one unit.
+    return service != "flocks.service" and properties.get("Type") == "oneshot" and properties.get("RemainAfterExit") == "yes"
+
+
+def _own_service() -> str | None:
+    """The systemd service this process runs in, by its control group."""
+    try:
+        groups = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in groups.splitlines():
+        for part in reversed(line.rsplit(":", 1)[-1].split("/")):
+            if part.endswith(".service"):
+                return part
+    return None
 
 
 def _previous_licence_files() -> list[Path]:
@@ -164,6 +225,40 @@ def previous_licence_id(status: dict[str, Any] | None = None) -> str:
         if found:
             return found
     return str((status or {}).get("license_id") or "").strip()
+
+
+def _licence_file_terms(licence_id: str) -> dict[str, Any]:
+    """What the licence file of *licence_id* says of itself, for the page: a licence taken here has
+    no Python package to answer for it. Read, not verified; the enterprise core judges the licence
+    when the machine moves."""
+    for path in _previous_licence_files():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        terms = dict(data["payload"]) if isinstance(data.get("payload"), dict) else {}
+        if str(data.get("license_id") or terms.get("license_id") or "").strip() != licence_id:
+            continue
+        for field in ("key", "token", "activate_key"):
+            parts = str(data.get(field) or "").split(".")
+            if len(parts) != 3:
+                continue
+            try:
+                claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if isinstance(claims, dict):
+                terms = {**claims, **terms}
+            break
+        return {
+            **terms,
+            "activated_at": data.get("activated_at"),
+            "install_id": data.get("install_id"),
+            "fingerprint": data.get("fingerprint"),
+        }
+    return {}
 
 
 def _previous_installed() -> bool:
@@ -198,12 +293,21 @@ def previous_edition() -> dict[str, Any] | None:
     licence_id = previous_licence_id(status)
     if version is None and not licence_id:
         return None
+    terms = _licence_file_terms(licence_id) if licence_id else {}
+    # The package's word on another licence than the one named here says nothing of this one.
+    if status.get("license_id") and status.get("license_id") != licence_id:
+        status = {"pro_enabled": status.get("pro_enabled")}
     return {
         "version": version,
         "license_id": licence_id or None,
-        "license_status": status.get("license_status"),
+        "license_status": status.get("license_status") or terms.get("status"),
         "pro_enabled": bool(status.get("pro_enabled")),
-        "expires_at": status.get("expires_at"),
+        "expires_at": status.get("expires_at") or terms.get("expires_at"),
+        "max_admins": status.get("max_admins") or terms.get("max_admins"),
+        "max_members": status.get("max_members") or terms.get("max_members"),
+        "last_sync_at": status.get("last_sync_at") or status.get("last_heartbeat_ok_at") or terms.get("activated_at"),
+        "install_id": status.get("install_id") or terms.get("install_id"),
+        "fingerprint": status.get("fingerprint") or terms.get("fingerprint"),
     }
 
 
@@ -254,15 +358,16 @@ def prepare_command(*, default_root: bool = False) -> str | None:
     return f"sudo install -d -o {shlex.quote(user)} -g {shlex.quote(group)} -m 0755 {INSTALL_ROOT}"
 
 
-def installer_command(path_or_name: str, *, quote: bool = True) -> str:
-    """How the installer is run by hand: as root on a systemd machine, as this account otherwise;
-    on Windows from PowerShell, as an administrator (Windows asks)."""
+def installer_command(path_or_name: str) -> str:
+    """How root runs the installer on a machine the page cannot run it from (a systemd one, whose
+    service stopping would take the installer with it); on Windows from PowerShell, as an
+    administrator (Windows asks)."""
     if _WINDOWS:
         # This install's data directory and flocks command go with it, as when the page starts it:
         # the administrator who confirms may have another profile, FLOCKS_ROOT another directory.
         arguments = subprocess.list2cmdline(_windows_open_edition_args())
         return f"Start-Process -Verb RunAs -FilePath {_powershell_quote(path_or_name)} -ArgumentList {_powershell_quote(arguments)}"
-    run = f"bash {shlex.quote(path_or_name) if quote else path_or_name}"
+    run = f"bash {shlex.quote(path_or_name)}"
     return f"sudo {run}" if run_by_systemd() and _euid() != 0 else run
 
 
@@ -288,9 +393,6 @@ def situation() -> dict[str, Any]:
         "prepare_command": prepare_command(),
         # The page starts the installer itself only where this account runs the install.
         "can_start": available() and not systemd and install_root_ready(),
-        # The installer is a shell one, a program on Windows: nothing to run by hand elsewhere.
-        "manual_command": installer_command(f"flockspro-<版本>-{platform_id()}{INSTALLER_SUFFIX}", quote=False)
-        if os.name in ("posix", "nt") else "",
         "upgrade": read_state(),
     }
 
@@ -362,7 +464,7 @@ async def fetch_offer() -> InstallerOffer:
     """Ask Console for the installer built for this machine's licence."""
     base = _console_base_url()
     if not base:
-        raise EnterpriseUpgradeError("这台机器没有配置 Console（FLOCKS_CONSOLE_BASE_URL），请用手动的方法升级")
+        raise EnterpriseUpgradeError("这台机器没有配置 Console（FLOCKS_CONSOLE_BASE_URL），查不到新企业版")
     licence_id = previous_licence_id()
     if not licence_id and _previous_installed():
         licence_id = previous_licence_id(await asyncio.to_thread(_previous_status))
@@ -370,7 +472,8 @@ async def fetch_offer() -> InstallerOffer:
         raise EnterpriseUpgradeError("这台机器上没有企业版授权，Console 不知道该给哪个安装包；请联系我们获取授权和安装包")
     channel = (os.environ.get("FLOCKS_UPDATE_CHANNEL") or "flockspro").strip() or "flockspro"
     url = f"{base}/v1/manifest/latest?{urlencode({'channel': channel, 'license_id': licence_id})}"
-    headers = {"x-license-id": licence_id}
+    # Licence ids are free-form and a header only carries ASCII: the query above names it either way.
+    headers = {"x-license-id": licence_id} if licence_id.isascii() else {}
     token = await _console_session_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -383,7 +486,7 @@ async def fetch_offer() -> InstallerOffer:
         if token:
             # Console no longer takes this sign-in: forget it, so the page offers to sign in again.
             await _forget_console_session(token)
-        raise EnterpriseUpgradeError("Console 要先登录才给安装包：点「登录 Console」后再检查")
+        raise EnterpriseUpgradeError("Console 要先登录才给安装包：点「云账号登录」后再检查")
     if resp.status_code == 403:
         # A sign-in Console takes, refused this (a licence of another account, say): it stays.
         raise EnterpriseUpgradeError(f"Console 不给这台机器安装包：{_detail(resp) or 'HTTP 403'}")
@@ -398,7 +501,7 @@ async def fetch_offer() -> InstallerOffer:
     offer = offered_installer(manifest, base)
     if offer is None:
         raise EnterpriseUpgradeError(
-            f"Console 还没有给授权 {licence_id} 的新企业版安装包（{platform_id()}）；请联系我们，或用手动的方法升级"
+            f"Console 还没有给授权 {licence_id} 的新企业版安装包（{platform_id()}）；请联系我们"
         )
     return offer
 
@@ -456,7 +559,8 @@ def _windows_pid_alive(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
-def _log_tail(path: Path) -> list[str]:
+def _log_tail(path: Path, lines: int = _LOG_TAIL_LINES) -> list[str]:
+    """The end of the installer's log, of its last run only: the log is added to run after run."""
     try:
         with path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -465,7 +569,88 @@ def _log_tail(path: Path) -> list[str]:
             text = handle.read().decode("utf-8", errors="replace")
     except OSError:
         return []
-    return text.splitlines()[-_LOG_TAIL_LINES:]
+    # Credentials go first, from the whole text: a value can be on the line after its name.
+    found = scrub_credentials(_TERMINAL_CODES.sub("", text)).splitlines()
+    for index in range(len(found) - 1, -1, -1):
+        if found[index].startswith(_RUN_HEADER):
+            found = found[index:]
+            break
+    return found[-lines:]
+
+
+def _installer_reason(lines: list[str]) -> str | None:
+    """Why the installer stopped, where it says: its refusal, else the last line that reads as an
+    error. Not simply the last line, which may be it cleaning up: no reason is better than a wrong one."""
+    found = [line.strip() for line in lines if line.strip() and not line.startswith(_RUN_HEADER)]
+    for index in range(len(found) - 1, -1, -1):
+        if found[index].startswith("安装失败："):
+            # All of it: a refusal can say what to run on the lines after, and it exits right after saying it.
+            return summarize_error(" ".join(found[index:]))
+    for text in reversed(found):
+        if _ERROR_LINE.search(text):
+            return summarize_error(text)
+    return None
+
+
+def _prior_installation_result() -> str | None:
+    """The record there is as a run begins: what it records after that is another."""
+    try:
+        return installation_result_id()
+    except (OSError, ValueError):
+        return "unreadable"
+
+
+def _installation_outcome(state: dict[str, Any]) -> dict[str, Any] | None:
+    """What the installer recorded of this run: it records that it is switching the machine over
+    before it stops anything, and how far the machine was put back if that fails. None when it has
+    recorded nothing since the run began; recovery unknown when nobody can tell."""
+    # Not noted, or not readable when it was: another id does not show this run wrote it.
+    if state.get("prior_result", "unreadable") == "unreadable":
+        return {"recovery": "unknown"}
+    try:
+        if installation_result_id() == state["prior_result"]:
+            return None
+    except (OSError, ValueError):
+        return {"recovery": "unknown"}
+    # A record of this run that is no failure's: it stopped in the middle of switching the machine over.
+    return read_installation_result() or {"recovery": "unknown"}
+
+
+def _explain_failure(state: dict[str, Any]) -> None:
+    """Where a failed upgrade stopped and why, for whoever reads it: the step, the reason in the
+    installer's words, how the machine was left and the end of the log."""
+    installing = bool(state.get("log") or state.get("pid"))
+    step = state.setdefault("failed_step", "install" if installing else "download")
+    log_file = state.get("log")
+    lines = _log_tail(Path(log_file), _FAILED_LOG_LINES) if isinstance(log_file, str) and log_file else []
+    if lines:
+        state["log_tail"] = lines
+    message = state.get("message")
+    if isinstance(message, str):
+        message = state["message"] = scrub_credentials(message)
+    if step != "install":
+        # Nothing of the machine is touched before the installer runs.
+        state["recovery"] = "unchanged"
+        state["reason"] = message
+        return
+    ended = "exit_code" in state or bool(message)
+    reason = message
+    if reason is None:
+        if state.get("from") == "terminal":
+            reason = "这次是在终端里运行的，原因在终端的输出里"
+        elif "exit_code" in state:
+            reason = _installer_reason(lines)
+        else:
+            reason = "安装程序中途退出了，没有留下退出码（机器或服务可能重启过）"
+    if not state.get("recovery"):
+        outcome = _installation_outcome(state)
+        if outcome is None:
+            # Nothing recorded: it never got as far as stopping anything, if it said how it ended.
+            state["recovery"] = "unchanged" if ended else "unknown"
+        else:
+            state["recovery"] = outcome.get("recovery") or "unknown"
+            reason = outcome.get("detail") or reason
+    state["reason"] = reason
 
 
 @contextlib.contextmanager
@@ -597,6 +782,7 @@ def read_state() -> dict[str, Any] | None:
     if state.get("phase") == "downloading" and not _run_lock.locked() and not _upgrade_lock_held():
         # The process that downloaded it is gone (the server restarted under it).
         state["phase"] = "failed"
+        state["failed_step"] = "download"
         state["message"] = "下载没有完成（服务中途重启了），请重新点升级"
     if state.get("phase") == "installing":
         exit_file = work_dir() / "exit-status"
@@ -615,7 +801,9 @@ def read_state() -> dict[str, Any] | None:
         # to refresh the page into any more.
         return None
     log_file = state.get("log")
-    if isinstance(log_file, str) and log_file:
+    if state.get("phase") == "failed":
+        _explain_failure(state)
+    elif isinstance(log_file, str) and log_file:
         state["log_tail"] = _log_tail(Path(log_file))
     return state
 
@@ -640,6 +828,11 @@ def _keep_release_notes(offer: InstallerOffer) -> None:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
         log.warning("enterprise.release_notes_not_kept", {"release_id": offer.release_id, "error": str(exc)})
+
+
+def _megabytes(count: int) -> int:
+    """Rounded as the progress bar beside it rounds: half up."""
+    return (count + (1 << 19)) >> 20
 
 
 async def download(offer: InstallerOffer, progress: Callable[[int, int | None], Awaitable[None]] | None = None) -> Path:
@@ -667,7 +860,10 @@ async def download(offer: InstallerOffer, progress: Callable[[int, int | None], 
                             await progress(received, total)
     except httpx.HTTPError as exc:
         part.unlink(missing_ok=True)
-        raise EnterpriseUpgradeError(f"下载安装包失败：{exc}") from exc
+        # Some of these say nothing of themselves (a connection reset has no message).
+        said = str(exc) or type(exc).__name__
+        got = f"，已下载 {_megabytes(received)} MB" + (f" / {_megabytes(offer.size)} MB" if offer.size else "") if received else ""
+        raise EnterpriseUpgradeError(f"下载安装包失败：{said}{got}") from exc
     except BaseException:
         part.unlink(missing_ok=True)
         raise
@@ -697,6 +893,38 @@ def can_run_installer_here() -> bool:
     return available() and (not run_by_systemd() or _euid() == 0) and install_root_ready()
 
 
+_START_AGAIN = Path(__file__).with_name("start_again.py")
+
+
+def _write_start_again_plan() -> Path:
+    """How to start this service as it runs now, for start_again.py. Empty when it does not run or
+    nobody can tell: that file then says so and does nothing."""
+    plan_file = work_dir() / "start-again.json"
+    plan: dict[str, Any] = {}
+    try:
+        from flocks.updater.updater import _capture_service_snapshot
+
+        snapshot = _capture_service_snapshot()
+        if snapshot.was_running:
+            config = snapshot.config
+            command = [sys.executable, "-m", "flocks.cli.main", "start", "--host", config.frontend_host, "--port", str(config.frontend_port)]
+            if config.no_browser:
+                command.append("--no-browser")
+            if config.skip_frontend_build:
+                command.append("--skip-webui-build")
+            if config.legacy_backend_host is not None:
+                command += ["--server-host", config.legacy_backend_host]
+            if config.legacy_backend_port is not None:
+                command += ["--server-port", str(config.legacy_backend_port)]
+            plan = {"host": config.frontend_host, "port": config.frontend_port, "argv": command, "cwd": str(Path(__file__).resolve().parents[2]),
+                    "result_file": str(installation_result_path()), "prior_result": _prior_installation_result()}
+    except Exception as exc:
+        log.warning("enterprise.start_again_plan_failed", {"error": str(exc)})
+    plan_file.parent.mkdir(parents=True, exist_ok=True)
+    plan_file.write_text(json.dumps(plan), encoding="utf-8")
+    return plan_file
+
+
 def run_installer(path: Path, offer: InstallerOffer) -> int:
     """Run the installer in the foreground (flocks enterprise upgrade), its output the terminal's;
     recorded as the page records the run it starts (state.json, exit-status), so the page sees it
@@ -706,6 +934,8 @@ def run_installer(path: Path, offer: InstallerOffer) -> int:
     # Windows: the installer asks for an administrator and runs in the window that opens; it tells
     # how it ended there, not here.
     argv = [str(path), "--no-pause", "--exit-status", str(exit_file), *_windows_open_edition_args()] if _WINDOWS else ["bash", str(path)]
+    prior_result = _prior_installation_result()
+    start_again_plan = None if _WINDOWS else _write_start_again_plan()
     process = subprocess.Popen(argv, cwd=str(path.parent), env=_installer_environment())
     _write_state({
         "phase": "installing",
@@ -714,11 +944,14 @@ def run_installer(path: Path, offer: InstallerOffer) -> int:
         "version": offer.version,
         "installer": str(path),
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "prior_result": prior_result,
         "from": "terminal",
     })
     code = process.wait()
     if not (_WINDOWS and exit_file.exists()):
         exit_file.write_text(f"{code}\n", encoding="utf-8")
+    if code != 0 and start_again_plan is not None:
+        subprocess.run([sys.executable, "-I", str(_START_AGAIN), str(start_again_plan)], env=_installer_environment(), check=False)
     return code
 
 
@@ -744,9 +977,10 @@ _WINDOWS_DETACH = (
 )
 
 
-def _start_windows_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
+def _start_windows_installer(path: Path, offer: InstallerOffer, attempt: str | None = None) -> dict[str, Any]:
     """start_installer on Windows: the installer, apart from this server, asks Windows for an
     administrator and writes its log and exit status where the page reads them."""
+    prior_result = _prior_installation_result()
     work = work_dir()
     log_file = work / "install.log"
     exit_file = work / "exit-status"
@@ -777,23 +1011,26 @@ def _start_windows_installer(path: Path, offer: InstallerOffer) -> dict[str, Any
         "installer": str(path),
         "log": str(log_file),
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "prior_result": prior_result,
+        **({"attempt": attempt} if attempt else {}),
     }
     _write_state(state)
     log.info("enterprise.installer_started", {"pid": pid, "release_id": offer.release_id})
     return state
 
 
-def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
+def start_installer(path: Path, offer: InstallerOffer, attempt: str | None = None) -> dict[str, Any]:
     """Run the installer apart from this server: install-managed stops this open install's
     supervisor, and this process with it, before the enterprise edition starts."""
     if not available():
         raise EnterpriseUpgradeError("这台机器已经是企业版")
     if _WINDOWS:
-        return _start_windows_installer(path, offer)
+        return _start_windows_installer(path, offer, attempt)
     if run_by_systemd():
         raise EnterpriseUpgradeError(f"这台机器由 systemd 管，要以 root 执行：{installer_command(str(path))}")
     if not install_root_ready():
         raise EnterpriseUpgradeError(f"先用 root 执行一次：{prepare_command()}")
+    prior_result = _prior_installation_result()
     work = work_dir()
     work.mkdir(parents=True, exist_ok=True)
     os.chmod(work, 0o700)
@@ -807,9 +1044,13 @@ def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
     # The shell started here puts it in the background and exits at once, so it is no child of this
     # server: `flocks stop` takes the server's whole process tree, and install-managed stops the open
     # edition before the enterprise edition starts.
+    # When the installer fails it starts this service again itself; killed or out of memory it
+    # cannot, so the shell sees to it (start_again.py).
     launcher = subprocess.Popen(
-        ["/bin/sh", "-c", '(bash "$1"; echo "$?" > "$2") </dev/null >>"$3" 2>&1 & echo "$!"',
-         "sh", str(path), str(exit_file), str(log_file)],
+        ["/bin/sh", "-c",
+         '(bash "$1"; code=$?; echo "$code" > "$2"; if [ "$code" != 0 ]; then "$4" -I "$5" "$6" >"$6.log" 2>&1; fi) '
+         '</dev/null >>"$3" 2>&1 & echo "$!"',
+         "sh", str(path), str(exit_file), str(log_file), sys.executable, str(_START_AGAIN), str(_write_start_again_plan())],
         cwd=str(work),
         env=_installer_environment(),
         stdin=subprocess.DEVNULL,
@@ -831,6 +1072,8 @@ def start_installer(path: Path, offer: InstallerOffer) -> dict[str, Any]:
         "installer": str(path),
         "log": str(log_file),
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "prior_result": prior_result,
+        **({"attempt": attempt} if attempt else {}),
     }
     _write_state(state)
     log.info("enterprise.installer_started", {"pid": pid, "release_id": offer.release_id})
@@ -854,8 +1097,11 @@ async def _upgrade(progress: Callable[[dict[str, Any]], Awaitable[None]]) -> dic
     current = read_state()
     if current is not None and current.get("phase") == "installing":
         raise EnterpriseUpgradeError("安装包已经在运行了")
+    # What this attempt records goes by this: the page must not take an earlier failure for this one's.
+    attempt = uuid.uuid4().hex
+    await progress({"stage": "started", "attempt": attempt})
     offer = await fetch_offer()
-    base = {"release_id": offer.release_id, "version": offer.version, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    base = {"attempt": attempt, "release_id": offer.release_id, "version": offer.version, "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     _write_state({**base, "phase": "downloading", "received": 0, "total": offer.size})
     await progress({"stage": "downloading", "version": offer.version, "release_id": offer.release_id})
     recorded = 0.0
@@ -870,7 +1116,7 @@ async def _upgrade(progress: Callable[[dict[str, Any]], Awaitable[None]]) -> dic
     try:
         path = await download(offer, downloaded)
     except BaseException as exc:
-        _write_state({**base, "phase": "failed", "message": str(exc) or "下载没有完成"})
+        _write_state({**base, "phase": "failed", "failed_step": "download", "message": str(exc) or "下载没有完成"})
         raise
     await progress({"stage": "downloaded", "installer": str(path)})
     fixed_root = not _WINDOWS and not installer_relocatable(path) and not _default_root_ready()
@@ -885,7 +1131,13 @@ async def _upgrade(progress: Callable[[dict[str, Any]], Awaitable[None]]) -> dic
         }
         _write_state(state)
         return state
-    state = start_installer(path, offer)
+    try:
+        state = start_installer(path, offer, attempt)
+    except BaseException as exc:
+        # Its own refusal, or the shell that starts it saying nothing: nothing ran. Anything else, it may have.
+        recovery = "unchanged" if isinstance(exc, EnterpriseUpgradeError) else "unknown"
+        _write_state({**base, "phase": "failed", "failed_step": "install", "installer": str(path), "recovery": recovery, "message": str(exc) or "安装包没有起来"})
+        raise
     await progress({"stage": "installing", **state})
     return state
 

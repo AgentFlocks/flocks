@@ -18,7 +18,10 @@ export function useHandoffFailureMessage() {
     const stepId = progress.failed_step ?? progress.step ?? '';
     const step = t(`handoff.steps.${stepId}`, { defaultValue: stepId });
     const error = progress.error || t('handoff.noDetail');
-    return `${t('handoff.failed', { step, error })} ${t('handoff.recoveryHint')}`;
+    const hint = progress.recovery && progress.recovery !== 'failed'
+      ? t(`handoff.${progress.recovery}`)
+      : t('handoff.recoveryHint');
+    return `${t('handoff.failed', { step, error })} ${hint}`;
   }, [t]);
 }
 

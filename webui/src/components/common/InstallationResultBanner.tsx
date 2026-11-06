@@ -4,13 +4,32 @@ import { useTranslation } from 'react-i18next';
 import { getInstallationResult, type InstallationResult } from '@/api/installation';
 import { useAuth } from '@/contexts/AuthContext';
 
+const DISMISSED_KEY = 'flocks_installation_result_dismissed';
+
+function readDismissed(): string {
+  try {
+    return window.localStorage.getItem(DISMISSED_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
 /** An installer can report recovery through the same neutral record as any update. */
 export function InstallationResultBanner() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
   const { i18n } = useTranslation();
   const [result, setResult] = useState<InstallationResult | null>(null);
-  const [dismissed, setDismissed] = useState('');
+  const [dismissed, setDismissed] = useState(readDismissed);
+  const dismiss = (id: string) => {
+    setDismissed(id);
+    try {
+      // Whoever closed it has read it: a record stays until the next attempt replaces it.
+      window.localStorage.setItem(DISMISSED_KEY, id);
+    } catch {
+      // Then it comes back with the next page load.
+    }
+  };
   useEffect(() => {
     if (!isAdmin) { setResult(null); return; }
     let cancelled = false;
@@ -41,7 +60,7 @@ export function InstallationResultBanner() {
             <p className="mt-1 whitespace-pre-wrap break-all">{result.detail}</p>
           </details>}
         </div>
-        <button type="button" onClick={() => setDismissed(result.id)} className="-mr-2 -mt-1 flex h-11 w-11 shrink-0 items-center justify-center rounded hover:bg-black/5 dark:hover:bg-white/10"
+        <button type="button" onClick={() => dismiss(result.id)} className="-mr-2 -mt-1 flex h-11 w-11 shrink-0 items-center justify-center rounded hover:bg-black/5 dark:hover:bg-white/10"
           aria-label={zh ? '关闭安装提示' : 'Dismiss installation notice'}>
           <X aria-hidden="true" className="h-4 w-4" />
         </button>

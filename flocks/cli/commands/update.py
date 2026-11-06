@@ -136,9 +136,7 @@ def _print_previous_edition_notice() -> None:
             f"这台机器装着{what}{licence}。\n"
             "flocks update 只升级开源部分；企业版换成了单独的安装包（程序在 /opt/flockspro，数据和授权沿用这台机器的），"
             "老企业版不再更新。\n"
-            "升级到新企业版：网页左下角的账号菜单 → Flocks Pro，或者执行 flocks enterprise upgrade（同一条路），"
-            "或者把安装包拷到这台机器后执行\n"
-            f"  [bold]{enterprise.situation()['manual_command']}[/bold]",
+            "升级到新企业版：网页左下角的账号菜单 → Flocks Pro，或者执行 flocks enterprise upgrade（同一条路）。",
             title="企业版",
             border_style="yellow",
         )
@@ -230,6 +228,7 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
 
     console.print()
     stage_labels = {
+        "checking":    "检查运行环境",
         "fetching":    "下载最新源码包",
         "backing_up":  "备份当前版本",
         "applying":    "应用新版本",

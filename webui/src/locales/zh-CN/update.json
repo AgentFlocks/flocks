@@ -30,7 +30,7 @@
   "closeAction": "关闭",
   "streamInterrupted": "升级连接提前结束，未收到完成结果。请检查服务状态后重新检查更新。",
   "streamTimeout": "升级连接已连续 5 分钟没有响应。请检查服务状态后重新检查更新。",
-  "restartTimeout": "服务恢复确认超时：{{reason}}。请手动刷新页面确认状态。",
+  "restartTimeout": "等了 5 分钟服务还没有回应（{{reason}}）。升级可能还在进行，也可能已经失败：请到服务器上查看 ~/.flocks/run/upgrade-result.json，再刷新页面确认状态。",
   "restartUnknown": "未收到明确的健康检查结果",
   "dismissAction": "不再提醒",
   "dockerModeTitle": "Docker 部署",
@@ -41,6 +41,7 @@
   "offlineUpgradeHint": "sudo bash /var/tmp/flocks-offline.run",
   "offlineNotChecked": "离线部署，未查询远端版本",
   "stageLabels": {
+    "checking": "检查运行环境",
     "fetching": "下载最新源码包",
     "backing_up": "备份当前版本",
     "applying": "应用新版本",
@@ -71,7 +72,12 @@
     },
     "failed": "升级在「{{step}}」这一步失败：{{error}}",
     "noDetail": "具体原因只显示在发起升级的页面上。",
-    "recoveryHint": "服务还没有恢复：请在服务器上查看 ~/.flocks/run/upgrade-result.json 和 ~/.flocks/logs/ 下当天的 errors.log，处理后执行 flocks start。"
+    "recoveryHint": "服务还没有恢复：请在服务器上查看 ~/.flocks/run/upgrade-result.json 和 ~/.flocks/logs/ 下当天的 errors.log，处理后执行 flocks start。",
+    "restoringTitle": "升级失败，正在恢复",
+    "restoring": "正在恢复到升级之前的版本，好了这里会告诉你。",
+    "restored": "已经恢复到升级之前的版本，服务已重新启动，数据没有动，可以接着用。把原因处理掉之后可以重新升级。",
+    "restarting": "正在把服务起回来，好了这里会告诉你。",
+    "restarted": "服务已重新启动，数据没有动。这次升级装的组件没有办法还原，可能已经是新的：到服务器上查看 ~/.flocks/run/upgrade-result.json，把原因处理掉之后重新升级。"
   },
   "enterpriseDesc": "这台机器有企业版授权，这次升级到新企业版：程序装到 {{root}}，数据和授权沿用，网页地址不变。开源版会先停下，第一次启动要迁移数据，可能要几分钟。",
   "enterpriseInstalling": "开源版会先停下，企业版第一次启动要迁移数据，可能要几分钟。装好后这个页面会自动刷新。",
@@ -79,5 +85,34 @@
     "fetching": "下载新企业版安装包",
     "restarting": "安装新企业版"
   },
-  "enterpriseOpenPage": "去 Flocks Pro 页"
+  "enterpriseOpenPage": "去 Flocks Pro 页",
+  "failure": {
+    "stoppedAt": "升级停在「{{step}}」这一步",
+    "reason": "原因：",
+    "noReason": "没有留下明确的原因，看看日志。",
+    "exitCode": "安装程序的退出码是 {{code}}。",
+    "logPath": "完整日志：",
+    "logTail": "日志的最后 {{count}} 行",
+    "copy": "复制错误信息",
+    "copied": "已复制",
+    "recovery": {
+      "unchanged": "原来的版本没有动，可以接着用。把原因处理掉之后可以重新升级。",
+      "restored": "已经恢复到升级之前的安装，数据都在，可以接着用。把原因处理掉之后可以重新升级。",
+      "rolled_back": "已经自动回到升级之前的版本，可以接着用。把原因处理掉之后可以重新升级。",
+      "restored_partly": "原来的服务已经起来了，数据都在，但退回时有没做完的地方，见上面的原因。",
+      "retained": "这台机器已经在用 PostgreSQL，为了不丢新数据没有切回旧安装。修好 PostgreSQL 或服务之后重启服务，不要重新导入旧数据。",
+      "failed": "原来的服务还没有确认恢复。先到服务器上看服务状态，不要同时启动两个实例。",
+      "unknown": "现在还不能确认机器的状态。先到服务器上执行 flocks status 看服务和版本，再决定要不要重试。"
+    },
+    "steps": {
+      "check": "向 Console 查询新企业版",
+      "download": "下载新企业版安装包",
+      "install": "安装新企业版",
+      "bundle": "校验发布包",
+      "unpack": "解开发布包",
+      "preflight": "检查新版本",
+      "start": "启动新版本"
+    },
+    "superseded": "这台机器又发起了一次升级（另一个窗口或终端），这里不再跟踪。结果看 Flocks Pro 页。"
+  }
 }

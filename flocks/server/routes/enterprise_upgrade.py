@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from flocks.server.auth import require_admin
 from flocks.updater import enterprise, enterprise_application
+from flocks.updater.installation_status import scrub_credentials
 
 router = APIRouter()
 
@@ -68,10 +69,10 @@ async def start_upgrade(request: Request) -> StreamingResponse:
             state = await enterprise.upgrade(progress)
             await queue.put({"stage": "done", "state": state})
         except enterprise.EnterpriseUpgradeError as exc:
-            await queue.put({"stage": "error", "message": str(exc)})
+            await queue.put({"stage": "error", "message": scrub_credentials(str(exc))})
         except Exception as exc:  # reported, not raised into a stream already started
-            enterprise.log.error("enterprise.upgrade_failed", {"error": str(exc)})
-            await queue.put({"stage": "error", "message": f"升级没有完成：{exc}"})
+            enterprise.log.error("enterprise.upgrade_failed", {"error": scrub_credentials(str(exc))})
+            await queue.put({"stage": "error", "message": f"升级没有完成：{scrub_credentials(str(exc))}"})
         finally:
             await queue.put(None)
 

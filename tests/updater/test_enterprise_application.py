@@ -162,7 +162,7 @@ async def test_ea1_an_application_goes_to_console_and_its_id_is_kept(machine: Pa
         raise ValueError("云账号未登录")
 
     monkeypatch.setattr(ConsoleLoginService, "require_console_session", classmethod(lambda cls: not_signed_in()))
-    with pytest.raises(enterprise.EnterpriseUpgradeError, match="登录 Console"):
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="云账号登录"):
         await application.apply(dict(FORM), "admin")
     assert len(seen) == 1
 

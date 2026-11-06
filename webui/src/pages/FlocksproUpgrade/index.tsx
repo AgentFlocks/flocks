@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowUpCircle, CheckCircle, Crown, Loader2, LogIn, RefreshCw, XCircle } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle, ChevronDown, Loader2, LogIn } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
+import UpgradeFailureDetails, { failureOfEnterpriseUpgrade } from '@/components/common/UpgradeFailureDetails';
 import { authApi, type ConsoleLoginSessionStatus } from '@/api/auth';
 import client from '@/api/client';
 import {
@@ -9,14 +10,31 @@ import {
   type EnterpriseSituation,
   type EnterpriseUpgradeState,
   type InstallerOffer,
+  type PreviousEdition,
 } from '@/api/enterpriseUpgrade';
 import { extractErrorMessage } from '@/utils/error';
-import LicenceApplicationSection from './Application';
-import { CARD, ERROR, NOTE, PRIMARY, SECONDARY, formatDate } from './styles';
+import LicenceApplicationCard from './Application';
+import MachineHeading from './MachineHeading';
+import {
+  BOX,
+  CARD,
+  DANGER,
+  ERROR,
+  GO,
+  NOTE,
+  PRIMARY,
+  SECONDARY,
+  compactIdentifier,
+  daysRemaining,
+  formatDateTime,
+} from './styles';
 
 // The open edition's Flocks Pro page: where this machine stands with the enterprise edition, the
 // application for a licence when it has none (./Application), and the move to the enterprise
-// edition (flocks/updater/enterprise.py). The enterprise build has its own page here.
+// edition (flocks/updater/enterprise.py). It looks as the enterprise edition's page does (that build
+// has its own page here), and does what this edition can: the move, not the enterprise functions.
+
+const INVALID_STATUSES = new Set(['revoked', 'expired', 'superseded']);
 
 function Command({ text }: { text: string }) {
   return (
@@ -31,27 +49,41 @@ function percent(received?: number, total?: number | null): number | null {
   return Math.min(100, Math.round((received / total) * 100));
 }
 
+function licenceInvalid(previous: PreviousEdition): boolean {
+  if (INVALID_STATUSES.has(String(previous.license_status ?? '').toLowerCase())) return true;
+  return daysRemaining(previous.expires_at) === 0;
+}
+
 export default function FlocksproUpgradePage() {
   const { t } = useTranslation('flockspro');
   const [situation, setSituation] = useState<EnterpriseSituation | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [consoleLogin, setConsoleLogin] = useState<ConsoleLoginSessionStatus | null>(null);
+  const [consoleLoginLoading, setConsoleLoginLoading] = useState(true);
+  const [consoleLoginError, setConsoleLoginError] = useState<string | null>(null);
   const [offer, setOffer] = useState<InstallerOffer | null>(null);
   const [checking, setChecking] = useState(false);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [upgrade, setUpgrade] = useState<EnterpriseUpgradeState | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
   // The open edition stopped under the page (the installer took the machine over).
   const [serverGone, setServerGone] = useState(false);
   const mounted = useRef(true);
 
   // Also after Console refused something: the server forgets a sign-in Console no longer takes,
   // and the page then offers a new one.
-  const refreshConsoleLogin = useCallback(() => {
-    authApi.consoleLoginSession()
-      .then((status) => { if (mounted.current) setConsoleLogin(status); })
-      .catch(() => { if (mounted.current) setConsoleLogin(null); });
+  const refreshConsoleLogin = useCallback(async () => {
+    try {
+      const status = await authApi.consoleLoginSession();
+      if (mounted.current) setConsoleLogin(status);
+    } catch {
+      if (mounted.current) setConsoleLogin(null);
+    } finally {
+      if (mounted.current) setConsoleLoginLoading(false);
+    }
   }, []);
 
   const load = useCallback(async () => {
@@ -62,9 +94,10 @@ export default function FlocksproUpgradePage() {
       setUpgrade(data.upgrade);
       setLoadError(null);
     } catch (err) {
-      if (mounted.current) setLoadError(extractErrorMessage(err, t('errors.load')));
+      const wentBack = (err as { response?: { status?: number } })?.response?.status === 404;
+      if (mounted.current) setLoadError(wentBack ? t('errors.wentBack') : extractErrorMessage(err, t('errors.load')));
     }
-    refreshConsoleLogin();
+    void refreshConsoleLogin();
   }, [t, refreshConsoleLogin]);
 
   useEffect(() => {
@@ -109,7 +142,7 @@ export default function FlocksproUpgradePage() {
       setOffer(await enterpriseUpgradeApi.check());
     } catch (err) {
       setCheckError(extractErrorMessage(err, t('errors.check')));
-      refreshConsoleLogin();
+      void refreshConsoleLogin();
     } finally {
       setChecking(false);
     }
@@ -135,7 +168,7 @@ export default function FlocksproUpgradePage() {
     } catch (err) {
       if (mounted.current) {
         setRunError(extractErrorMessage(err, t('errors.start')));
-        refreshConsoleLogin();
+        void refreshConsoleLogin();
         setUpgrade(await enterpriseUpgradeApi.progress().catch(() => null));
       }
     } finally {
@@ -144,19 +177,45 @@ export default function FlocksproUpgradePage() {
   };
 
   const loginConsole = async () => {
-    setCheckError(null);
+    setConsoleLoginError(null);
     try {
       const result = await authApi.startConsoleLogin(`${window.location.origin}/flockspro-upgrade/callback`);
       window.location.href = result.passport_login_url;
     } catch (err) {
-      setCheckError(extractErrorMessage(err, t('errors.login')));
+      setConsoleLoginError(extractErrorMessage(err, t('errors.login')));
     }
+  };
+
+  const logoutConsole = async () => {
+    setConsoleLoginError(null);
+    setOffer(null);
+    try {
+      await authApi.logoutConsoleLogin();
+      await refreshConsoleLogin();
+    } catch (err) {
+      setConsoleLoginError(extractErrorMessage(err, t('errors.logout')));
+    }
+  };
+
+  // The Python package's own sync with Console where it is installed (no such route otherwise),
+  // then what the machine says of its licence now.
+  const syncLicence = async () => {
+    setSyncing(true);
+    setSyncError(null);
+    try {
+      await client.post('/api/flockspro/license/refresh');
+    } catch (err) {
+      const notThere = (err as { response?: { status?: number } })?.response?.status === 404;
+      if (!notThere && mounted.current) setSyncError(extractErrorMessage(err, t('errors.sync')));
+    }
+    await load();
+    if (mounted.current) setSyncing(false);
   };
 
   if (loadError) {
     return (
-      <div className="space-y-4">
-        <PageHeader title="Flocks Pro" icon={<Crown className="h-7 w-7" />} />
+      <div className="space-y-6">
+        <PageHeader title="Flocks Pro" description={t('description')} icon={<ArrowUpCircle className="w-8 h-8" />} />
         <div className={ERROR}>{loadError}</div>
       </div>
     );
@@ -172,120 +231,232 @@ export default function FlocksproUpgradePage() {
 
   const previous = situation.previous;
   const busy = running || phase === 'installing' || phase === 'downloading';
-  const expiry = formatDate(previous?.expires_at);
-  const canDownload = Boolean(previous?.license_id) && situation.available;
+  const licensed = Boolean(previous?.license_id);
+  const canDownload = licensed && situation.available;
+  const signedIn = Boolean(consoleLogin?.logged_in);
   // The Windows installer is a program run as an administrator: other words than the .run's.
   const windows = situation.platform.startsWith('windows-');
 
-  return (
-    <div className="max-w-3xl space-y-6">
-      <PageHeader title="Flocks Pro" description={t('description')} icon={<Crown className="h-7 w-7" />} />
+  // A licence taken from an application here, with no Python package, is not the old edition.
+  const title = previous?.version
+    ? t('machine.previousTitle', { version: previous.version })
+    : t(licensed ? 'machine.licensedTitle' : 'machine.openTitle');
+  const description = t(previous?.version ? 'machine.previousDescription' : licensed ? 'machine.licensedDescription' : 'machine.openDescription');
+  const machineNote = t(previous?.version ? 'machine.previousNote' : licensed ? 'machine.licensedNote' : 'machine.openNote');
 
-      <section className={CARD} aria-labelledby="flockspro-machine">
-        <h2 id="flockspro-machine" className="text-lg font-semibold text-gray-900">
-          {/* A licence taken from an application here, with no Python package: not the old edition. */}
-          {previous ? t(previous.version ? 'machine.previousTitle' : 'machine.licensedTitle') : t('machine.openTitle')}
-        </h2>
-        {previous ? (
-          <>
-            <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
-              {previous.version && (
-                <div><dt className="text-xs text-gray-500">{t('machine.version')}</dt><dd className="font-medium text-gray-900">{t('machine.pythonEdition', { version: previous.version })}</dd></div>
-              )}
-              {previous.license_id && (
-                <div><dt className="text-xs text-gray-500">{t('machine.licence')}</dt><dd className="font-medium text-gray-900 break-all">{previous.license_id}</dd></div>
-              )}
-              {previous.license_status && (
-                <div><dt className="text-xs text-gray-500">{t('machine.status')}</dt><dd className="font-medium text-gray-900">{t(`licenceStatus.${previous.license_status}`, { defaultValue: previous.license_status })}</dd></div>
-              )}
-              {expiry && (
-                <div><dt className="text-xs text-gray-500">{t('machine.expires')}</dt><dd className="font-medium text-gray-900">{expiry}</dd></div>
-              )}
-            </dl>
-            <div className={NOTE}>{t(previous.version ? 'machine.previousNote' : 'machine.licensedNote')}</div>
-          </>
-        ) : (
-          <p className="text-sm text-gray-600">{t('machine.openNote')}</p>
+  const updateBox = (
+    <section className={BOX} aria-labelledby="flockspro-upgrade">
+      <div className="flex items-center justify-between gap-3 max-md:flex-wrap">
+        <div className="min-w-0">
+          <p id="flockspro-upgrade" className="text-sm font-medium text-gray-900">{t('upgrade.title')}</p>
+          <p className="mt-1 text-sm text-gray-500">
+            {previous?.version ? t('upgrade.currentPrevious', { version: previous.version }) : t('upgrade.currentOpen')}
+          </p>
+        </div>
+        {canDownload && (
+          <button type="button" onClick={() => void checkOffer()} disabled={checking || busy} className={SECONDARY}>
+            {checking && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+            {t('upgrade.check')}
+          </button>
         )}
+      </div>
+
+      <p className="text-sm text-gray-500">{t(windows ? 'upgrade.whatChangesWindows' : 'upgrade.whatChanges', { root: situation.install_root })}</p>
+
+      {situation.systemd && <div className={NOTE}>{t('upgrade.systemd')}</div>}
+      {situation.prepare_command && (
+        <div className={NOTE}>
+          {t('upgrade.prepare', { account: situation.account, root: situation.install_root })}
+          <Command text={situation.prepare_command} />
+          <button type="button" onClick={() => void load()} className={`${SECONDARY} mt-3`}>
+            {t('upgrade.recheck')}
+          </button>
+        </div>
+      )}
+
+      {canDownload && consoleLogin && !signedIn && <div className={NOTE}>{t('upgrade.loginFirst')}</div>}
+      {checkError && <div className={ERROR}>{checkError}</div>}
+      {offer && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 max-md:flex-wrap">
+          <div className="min-w-0">
+            <p className="text-sm text-emerald-700">{t('upgrade.offer', { version: offer.version, platform: situation.platform })}</p>
+            <p className="break-all text-xs text-emerald-700">{offer.filename}</p>
+          </div>
+          <button type="button" onClick={() => void startUpgrade()} disabled={busy} className={GO}>
+            {running ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ArrowUpCircle className="h-4 w-4" aria-hidden="true" />}
+            {situation.can_start ? t('upgrade.start', { version: offer.version }) : t('upgrade.download')}
+          </button>
+        </div>
+      )}
+      {runError && <div className={ERROR}>{runError}</div>}
+
+      {upgrade && <UpgradeProgress upgrade={upgrade} serverGone={serverGone} />}
+    </section>
+  );
+
+  return (
+    <div className="space-y-6">
+      <PageHeader title="Flocks Pro" description={t('description')} icon={<ArrowUpCircle className="w-8 h-8" />} />
+
+      <section className={CARD} aria-labelledby="flockspro-console-login">
+        <h2 id="flockspro-console-login" className="text-lg font-semibold text-gray-900">{t('consoleLogin.title')}</h2>
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
+          <div className="flex items-center justify-between gap-3 max-md:flex-wrap">
+            <div className="text-sm text-gray-800">
+              {t('consoleLogin.accountLabel')}
+              <span className="font-medium">
+                {consoleLoginLoading
+                  ? t('consoleLogin.loading')
+                  : signedIn
+                  ? consoleLogin?.account_name || t('consoleLogin.unknownAccount')
+                  : t('consoleLogin.unbound')}
+              </span>
+            </div>
+            {signedIn ? (
+              <button type="button" onClick={() => void logoutConsole()} disabled={busy} className={DANGER}>
+                {t('consoleLogin.logoutAction')}
+              </button>
+            ) : (
+              <button type="button" onClick={() => void loginConsole()} disabled={busy} className={PRIMARY}>
+                <LogIn className="h-4 w-4" aria-hidden="true" />
+                {t('consoleLogin.loginAction')}
+              </button>
+            )}
+          </div>
+        </div>
+        {consoleLoginError && <div className={ERROR}>{consoleLoginError}</div>}
       </section>
 
       {/* No licence: none at all, or the Python package without one. */}
-      {!previous?.license_id && situation.available && (
-        <LicenceApplicationSection
-          consoleLogin={consoleLogin}
-          loginError={canDownload ? null : checkError}
-          onLogin={() => void loginConsole()}
+      {!licensed && situation.available ? (
+        <LicenceApplicationCard
+          title={title}
+          description={description}
+          note={machineNote}
+          signedIn={signedIn}
+          loginKnown={consoleLogin !== null}
           onConsoleRefused={refreshConsoleLogin}
           onTaken={(next) => {
             setSituation(next);
             setUpgrade(next.upgrade);
           }}
-        />
+        >
+          {updateBox}
+        </LicenceApplicationCard>
+      ) : (
+        <section className={CARD} aria-labelledby="flockspro-machine">
+          <MachineHeading title={title} description={description} />
+          {updateBox}
+          {previous?.license_id && (
+            <LicenceCard
+              previous={previous}
+              syncing={syncing}
+              onSync={() => void syncLicence()}
+            />
+          )}
+          {syncError && <div className={ERROR}>{syncError}</div>}
+          <div className={NOTE}>{machineNote}</div>
+        </section>
       )}
+    </div>
+  );
+}
 
-      <section className={CARD} aria-labelledby="flockspro-upgrade">
-        <div className="flex items-center gap-2">
-          <ArrowUpCircle className="h-5 w-5 text-gray-500" aria-hidden="true" />
-          <h2 id="flockspro-upgrade" className="text-lg font-semibold text-gray-900">{t('upgrade.title')}</h2>
+function LicenceCard({ previous, syncing, onSync }: { previous: PreviousEdition; syncing: boolean; onSync: () => void }) {
+  const { t } = useTranslation('flockspro');
+  const [details, setDetails] = useState(false);
+  const invalid = licenceInvalid(previous);
+  const remaining = daysRemaining(previous.expires_at);
+  const status = previous.license_status ?? '';
+  const quota = [
+    previous.max_admins ? t('licence.adminQuota', { count: previous.max_admins }) : null,
+    previous.max_members ? t('licence.memberQuota', { count: previous.max_members }) : null,
+  ].filter(Boolean).join(' / ') || '-';
+  const rows = [
+    ['license_id', previous.license_id],
+    ['install_id', previous.install_id],
+    ['fingerprint', previous.fingerprint],
+  ].filter(([, value]) => Boolean(value)) as Array<[string, string]>;
+
+  return (
+    <div
+      className={`rounded-xl border p-4 text-sm ${
+        invalid ? 'border-red-200 bg-red-50 text-red-900' : 'border-emerald-200 bg-emerald-50 text-emerald-950'
+      }`}
+      data-testid="licence-card"
+    >
+      {invalid && (
+        <div className="mb-3 rounded-lg border border-red-200 bg-white/70 px-3 py-2 text-sm text-red-800">
+          {t('licence.invalidHint')}
         </div>
-        <p className="text-sm text-gray-600">{t(windows ? 'upgrade.whatChangesWindows' : 'upgrade.whatChanges', { root: situation.install_root })}</p>
-
-        {situation.systemd && <div className={NOTE}>{t('upgrade.systemd')}</div>}
-        {situation.prepare_command && (
-          <div className={NOTE}>
-            {t('upgrade.prepare', { account: situation.account, root: situation.install_root })}
-            <Command text={situation.prepare_command} />
-            <button type="button" onClick={() => void load()} className={`${SECONDARY} mt-3`}>
-              <RefreshCw className="h-4 w-4" aria-hidden="true" />
-              {t('upgrade.recheck')}
-            </button>
-          </div>
-        )}
-
-        {canDownload && (
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <button type="button" onClick={() => void checkOffer()} disabled={checking || busy} className={SECONDARY}>
-                {checking ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <RefreshCw className="h-4 w-4" aria-hidden="true" />}
-                {t('upgrade.check')}
-              </button>
-              {consoleLogin && !consoleLogin.logged_in && (
-                <button type="button" onClick={() => void loginConsole()} disabled={busy} className={SECONDARY}>
-                  <LogIn className="h-4 w-4" aria-hidden="true" />
-                  {t('upgrade.loginConsole')}
-                </button>
-              )}
-              {consoleLogin?.logged_in && consoleLogin.account_name && (
-                <span className="text-xs text-gray-500">{t('upgrade.consoleAccount', { account: consoleLogin.account_name })}</span>
-              )}
-            </div>
-            {checkError && <div className={ERROR}>{checkError}</div>}
-            {offer && (
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 px-4 py-3">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-gray-900">{t('upgrade.offer', { version: offer.version })}</div>
-                  <div className="text-xs text-gray-500 break-all">{offer.filename}</div>
-                </div>
-                <button type="button" onClick={() => void startUpgrade()} disabled={busy} className={PRIMARY}>
-                  {running && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
-                  {situation.can_start ? t('upgrade.start', { version: offer.version }) : t('upgrade.download')}
-                </button>
-              </div>
+      )}
+      <div className={`flex flex-wrap items-center justify-between gap-3 border-b pb-3 ${invalid ? 'border-red-200' : 'border-emerald-100'}`}>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="min-w-0 break-all text-base font-semibold">{previous.version ?? t('licence.noPackage')}</span>
+            {status && (
+              <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${invalid ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                {t(`licenceStatus.${status}`, { defaultValue: status })}
+              </span>
             )}
           </div>
-        )}
-        {runError && <div className={ERROR}>{runError}</div>}
-
-        {upgrade && <UpgradeProgress upgrade={upgrade} serverGone={serverGone} />}
-
-        {situation.manual_command && (
-          <div className="border-t border-gray-100 pt-4 text-sm text-gray-600">
-            <div className="font-medium text-gray-900">{t('upgrade.manualTitle')}</div>
-            <p className="mt-1">{windows ? t('upgrade.manualWindows') : t('upgrade.manual', { account: situation.systemd ? 'root' : situation.account })}</p>
-            <Command text={situation.manual_command} />
+          <div className="mt-1 truncate text-xs text-slate-500" title={previous.license_id ?? undefined}>
+            {t('licence.id')}: {compactIdentifier(previous.license_id)}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onSync}
+          disabled={syncing}
+          className={`rounded-lg border bg-white/70 px-3 py-2 text-xs font-medium disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-white/50 disabled:text-gray-400 ${
+            invalid ? 'border-red-300 text-red-700 hover:bg-red-50' : 'border-emerald-300 text-emerald-700 hover:bg-emerald-50'
+          }`}
+        >
+          {syncing ? t('licence.syncing') : t('licence.sync')}
+        </button>
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-4">
+        <div className="rounded-lg bg-white/70 px-3 py-2">
+          <div className="text-xs text-slate-500">{t('licence.remaining')}</div>
+          <div className={`mt-1 font-semibold ${invalid ? 'text-red-700' : 'text-emerald-700'}`}>
+            {remaining === null ? '-' : t('licence.remainingValue', { count: remaining })}
+          </div>
+        </div>
+        <div className="rounded-lg bg-white/70 px-3 py-2">
+          <div className="text-xs text-slate-500">{t('licence.quota')}</div>
+          <div className="mt-1 font-semibold text-slate-900">{quota}</div>
+        </div>
+        <div className="rounded-lg bg-white/70 px-3 py-2">
+          <div className="text-xs text-slate-500">{t('licence.expires')}</div>
+          <div className="mt-1 font-semibold text-slate-900">{formatDateTime(previous.expires_at) ?? '-'}</div>
+        </div>
+        <div className="rounded-lg bg-white/70 px-3 py-2">
+          <div className="text-xs text-slate-500">{t('licence.synced')}</div>
+          <div className="mt-1 font-semibold text-slate-900">{formatDateTime(previous.last_sync_at) ?? '-'}</div>
+        </div>
+      </div>
+      <div className={`mt-3 border-t pt-3 ${invalid ? 'border-red-200' : 'border-emerald-100'}`}>
+        <button
+          type="button"
+          onClick={() => setDetails((open) => !open)}
+          className={`inline-flex items-center gap-1 text-xs font-medium ${
+            invalid ? 'text-red-700 hover:text-red-900' : 'text-emerald-700 hover:text-emerald-900'
+          }`}
+        >
+          <ChevronDown className={`h-3.5 w-3.5 transition-transform ${details ? 'rotate-180' : ''}`} aria-hidden="true" />
+          {details ? t('licence.hideDetails') : t('licence.showDetails')}
+        </button>
+        {details && (
+          <div className="mt-2 grid gap-2 md:grid-cols-2">
+            {rows.map(([key, value]) => (
+              <div key={key} className="grid min-w-0 grid-cols-[150px_1fr] gap-3 rounded-lg bg-white/70 px-3 py-2">
+                <div className="text-xs text-slate-500">{t(`licence.fields.${key}`)}</div>
+                <div className="break-all font-medium text-slate-900">{value}</div>
+              </div>
+            ))}
           </div>
         )}
-      </section>
+      </div>
     </div>
   );
 }
@@ -304,7 +475,7 @@ function UpgradeProgress({ upgrade, serverGone }: { upgrade: EnterpriseUpgradeSt
           </div>
           {done !== null && (
             <div className="h-1.5 overflow-hidden rounded bg-gray-100">
-              <div className="h-full bg-slate-700" style={{ width: `${done}%` }} />
+              <div className="h-full bg-emerald-600" style={{ width: `${done}%` }} />
             </div>
           )}
         </>
@@ -316,20 +487,12 @@ function UpgradeProgress({ upgrade, serverGone }: { upgrade: EnterpriseUpgradeSt
         </div>
       )}
       {upgrade.phase === 'finished' && (
-        <div className="flex items-center gap-2 text-green-700">
+        <div className="flex items-center gap-2 text-emerald-700">
           <CheckCircle className="h-4 w-4" aria-hidden="true" />
           {t('progress.finished', { version: upgrade.version ?? '' })}
         </div>
       )}
-      {upgrade.phase === 'failed' && (
-        <div className="flex items-start gap-2 text-red-700">
-          <XCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-          <span>
-            {upgrade.message
-              ?? (upgrade.exit_code !== undefined ? t('progress.failedCode', { code: upgrade.exit_code }) : t('progress.failed'))}
-          </span>
-        </div>
-      )}
+      {upgrade.phase === 'failed' && <UpgradeFailureDetails failure={failureOfEnterpriseUpgrade(upgrade, t('progress.failed'))} />}
       {upgrade.phase === 'command' && (
         <div className="text-gray-700">
           {upgrade.prepare_command ? t('progress.commandPrepare') : t('progress.command')}
@@ -337,8 +500,8 @@ function UpgradeProgress({ upgrade, serverGone }: { upgrade: EnterpriseUpgradeSt
           {upgrade.command && <Command text={upgrade.command} />}
         </div>
       )}
-      {upgrade.log_tail && upgrade.log_tail.length > 0 && upgrade.phase !== 'downloading' && (
-        <details className="text-xs" open={upgrade.phase === 'failed'}>
+      {upgrade.log_tail && upgrade.log_tail.length > 0 && upgrade.phase !== 'downloading' && upgrade.phase !== 'failed' && (
+        <details className="text-xs">
           <summary className="cursor-pointer text-gray-500">{t('progress.log')}</summary>
           <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-gray-50 p-2 font-mono text-gray-700">
             {upgrade.log_tail.join('\n')}

@@ -665,13 +665,14 @@ def test_update_says_where_the_previous_enterprise_edition_went(monkeypatch, tmp
     output = StringIO()
     monkeypatch.setattr(update_cmd, "console", Console(file=output, force_terminal=False, width=200))
     monkeypatch.setattr(enterprise, "previous_edition", lambda: {"version": "2026.10.19", "license_id": "lic-old-7"})
-    monkeypatch.setattr(enterprise, "situation", lambda: {"manual_command": "bash flockspro-<版本>-linux-arm64.run"})
 
     update_cmd._print_previous_edition_notice()
 
     text = output.getvalue()
     assert "老企业版（Python 版 2026.10.19）" in text and "授权 lic-old-7" in text
-    assert "账号菜单 → Flocks Pro" in text and "bash flockspro-<版本>-linux-arm64.run" in text
+    assert "账号菜单 → Flocks Pro" in text and "flocks enterprise upgrade" in text
+    # No installing by hand: the page and that command do it, and go back if it fails.
+    assert ".run" not in text and "拷到" not in text
 
     output.truncate(0)
     monkeypatch.setattr(enterprise, "previous_edition", lambda: None)

@@ -100,7 +100,7 @@ async def _console_session() -> dict[str, Any]:
     try:
         return await ConsoleLoginService.require_console_session()
     except ValueError as exc:
-        raise EnterpriseUpgradeError("申请要先登录 Console：点「登录 Console」后再提交") from exc
+        raise EnterpriseUpgradeError("申请要先登录云账号：点「云账号登录」后再提交") from exc
 
 
 def _headers(session: dict[str, Any]) -> dict[str, str]:
@@ -111,7 +111,7 @@ def _console_error(exc: httpx.HTTPError, doing: str) -> EnterpriseUpgradeError:
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
         if code == 401:
-            return EnterpriseUpgradeError("Console 登录已失效：点「登录 Console」后再试")
+            return EnterpriseUpgradeError("云账号登录已失效：点「云账号登录」后再试")
         try:
             detail = exc.response.json().get("detail")
         except ValueError:
