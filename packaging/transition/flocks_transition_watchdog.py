@@ -15,9 +15,11 @@ source is not covered here.
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -221,25 +223,46 @@ def go_back(arguments: list[str], root: Path, kept: dict[str, bytes | None]) -> 
 
 
 def find_npm(install_root: Path) -> str | None:
-    """Where an old updater looks (the node it installed, then the PATH), and nvm's for a service
-    started without it. This process's PATH is what uv left of it."""
-    paths = os.environ.get("PATH", "").split(os.pathsep)
-    for tools in (flocks_root() / "tools" / "node", install_root.parent / "tools" / "node"):
-        paths += [str(tools / "bin"), str(tools)]
-    paths += sorted((str(path) for path in Path.home().glob(".nvm/versions/node/*/bin")), reverse=True)
+    """As an old updater does, the node it installed first, then the PATH (this process's is what uv
+    left of it), and nvm's newest for a service started without it."""
+    def version(path: Path) -> list[int]:
+        return [int(part) for part in re.findall(r"\d+", path.parent.name)]
+
+    installed = [Path(os.environ["FLOCKS_NODE_HOME"])] if os.environ.get("FLOCKS_NODE_HOME") else []
+    if os.environ.get("FLOCKS_INSTALL_ROOT"):
+        installed.append(Path(os.environ["FLOCKS_INSTALL_ROOT"]) / "tools" / "node")
+    installed.append(install_root.parent / "tools" / "node")
+    paths = [str(tools / where) for tools in installed for where in ("bin", "")]
+    paths += os.environ.get("PATH", "").split(os.pathsep)
+    paths += [str(path) for path in sorted(Path.home().glob(".nvm/versions/node/*/bin"), key=version, reverse=True)]
     paths += ["/usr/local/bin", "/opt/homebrew/bin"]
     return shutil.which("npm", path=os.pathsep.join(paths))
 
 
-def _interface_step(command: list[str], web: Path, env: dict[str, str], root: Path, phase: object) -> bool | None:
+def same_attempt(root: Path) -> bool:
+    """Only this file's mark writes that, and the first thing the next attempt writes has none."""
+    return "recovered_by_watchdog" in read_result(root)
+
+
+def _stop_group(process: subprocess.Popen) -> None:
+    for sent in (signal.SIGTERM, signal.SIGKILL):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, sent)
+        try:
+            process.wait(timeout=30)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _interface_step(command: list[str], web: Path, env: dict[str, str], root: Path) -> bool | None:
     """One npm command: whether it worked, None when another upgrade has begun and the tree is its now."""
     process = subprocess.Popen(command, cwd=web, env=env, stdin=subprocess.DEVNULL, start_new_session=True)
     deadline = time.monotonic() + INTERFACE_BUILD_SECONDS
     while process.poll() is None:
-        begun = read_result(root).get("phase") != phase
+        begun = not same_attempt(root)
         if begun or time.monotonic() > deadline:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait()
+            _stop_group(process)
             return None if begun else False
         time.sleep(POLL_SECONDS)
     return process.returncode == 0
@@ -247,47 +270,52 @@ def _interface_step(command: list[str], web: Path, env: dict[str, str], root: Pa
 
 def rebuild_interface(install_root: Path, root: Path) -> None:
     """The old version's own interface again, from the source that came back, where this machine has
-    what it takes (the old updater leaves webui/node_modules). Whatever goes wrong the transition
-    package's stays: the old version runs with it, and the page offers the upgrade again."""
+    what it takes (the old updater leaves webui/node_modules). Built beside the one the service is
+    showing, which stays until the new one is whole: whatever goes wrong, that one is there."""
     web = install_root / "webui"
     npm = find_npm(install_root)
     if not (web / "package.json").is_file() or npm is None:
         say(f"the old interface cannot be built here (npm: {npm}): the transition package's stays")
         return
-    phase = read_result(root).get("phase")
-    dist, kept = web / "dist", web / "dist.transition"
-    shutil.rmtree(kept, ignore_errors=True)
-    if dist.is_dir():
-        shutil.copytree(dist, kept)
+    dist, rebuilt, aside = web / "dist", web / "dist.rebuilt", web / "dist.transition"
+    shutil.rmtree(rebuilt, ignore_errors=True)
     env = service_environment()
     env["PATH"] = str(Path(npm).parent) + os.pathsep + env.get("PATH", "")
-    steps = [[npm, "run", "build"]]
+    steps = [[npm, "run", "build", "--", "--outDir", rebuilt.name]]
     if not (web / "node_modules").is_dir():
         steps.insert(0, [npm, "ci", "--no-audit", "--no-fund"])
     say(f"building the old interface: {' '.join(steps[-1])}")
     built = True
     for step in steps:
-        built = _interface_step(step, web, env, root, phase)
+        built = _interface_step(step, web, env, root)
         if built is None:
             say("another upgrade has begun: leaving the interface to it")
             return
         if not built:
             break
-    if built and (dist / "index.html").is_file():
-        shutil.rmtree(kept, ignore_errors=True)
-        say("the old interface is built again")
-    elif kept.is_dir():
-        shutil.rmtree(dist, ignore_errors=True)
-        kept.rename(dist)
+    if not (built and (rebuilt / "index.html").is_file() and same_attempt(root)):
+        shutil.rmtree(rebuilt, ignore_errors=True)
         say("the old interface did not build: the transition package's stays")
+        return
+    shutil.rmtree(aside, ignore_errors=True)
+    if dist.is_dir():
+        dist.rename(aside)
+    try:
+        rebuilt.rename(dist)
+    except OSError:
+        if aside.is_dir():
+            aside.rename(dist)
+        raise
+    shutil.rmtree(aside, ignore_errors=True)
+    say("the old interface is built again")
 
 
 def mark(root: Path, recovered: bool) -> None:
-    result = read_result(root)
-    if not result:
-        return
+    # Killed before its last word the old updater has left none: this one says at least that much.
+    result = read_result(root) or {"phase": "failed"}
     result["recovered_by_watchdog"] = recovered
     path = root / "run" / "upgrade-result.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".watchdog")
     temporary.write_text(json.dumps(result), encoding="utf-8")
     temporary.replace(path)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import http.server
 import importlib.util
 import json
@@ -263,6 +262,7 @@ def test_ts14_a_stranger_on_the_port_is_no_service(watchdog, body: bytes):
 
 
 def test_ts15_of_all_a_build_starts_one_watches(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    fcntl = pytest.importorskip("fcntl")
     root = tmp_path / ".flocks"
     (root / "run").mkdir(parents=True)
     (root / "run" / "upgrade-result.json").write_text(json.dumps({"phase": "failed"}))
@@ -305,7 +305,7 @@ def _web(tmp_path: Path, script: str | None) -> tuple[Path, Path]:
     fake npm running script. Returns the install and the data root."""
     root = tmp_path / ".flocks"
     (root / "run").mkdir(parents=True)
-    (root / "run" / "upgrade-result.json").write_text(json.dumps({"phase": "failed"}))
+    (root / "run" / "upgrade-result.json").write_text(json.dumps({"phase": "failed", "recovered_by_watchdog": True}))
     install = tmp_path / "install"
     web = install / "webui"
     (web / "dist").mkdir(parents=True)
@@ -326,24 +326,61 @@ def _npm_only_at(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
 
 
-def test_ts18_the_old_interface_is_built_again(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    install, root = _web(tmp_path, 'echo "$1 $2" > args; rm -r dist; mkdir dist; echo old > dist/index.html')
+def test_ts18_the_old_interface_is_built_beside_the_one_on_show_and_then_takes_its_place(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    install, root = _web(tmp_path, 'echo "$*" > args; test -f dist/index.html && mkdir dist.rebuilt && echo old > dist.rebuilt/index.html')
     _npm_only_at(monkeypatch, tmp_path)
     monkeypatch.setenv("FLOCKS_ROOT", str(root))
     watchdog.rebuild_interface(install, root)
-    assert (install / "webui" / "dist" / "index.html").read_text().strip() == "old"
-    assert (install / "webui" / "args").read_text().strip() == "run build"
-    assert not (install / "webui" / "dist.transition").exists()
+    web = install / "webui"
+    assert (web / "dist" / "index.html").read_text().strip() == "old"
+    assert (web / "args").read_text().strip() == "run build -- --outDir dist.rebuilt"
+    assert not (web / "dist.transition").exists() and not (web / "dist.rebuilt").exists()
 
 
-@pytest.mark.parametrize("script", ["exit 3", "rm -r dist; exit 3", "rm -r dist; exit 0"])
-def test_ts19_when_it_does_not_build_the_interface_there_was_stays(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str):
+@pytest.mark.parametrize("script", ["exit 3", "mkdir dist.rebuilt; exit 3", "mkdir dist.rebuilt; exit 0"])
+def test_ts19_when_it_does_not_build_the_interface_on_show_stays(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str):
     install, root = _web(tmp_path, script)
     _npm_only_at(monkeypatch, tmp_path)
     monkeypatch.setenv("FLOCKS_ROOT", str(root))
     watchdog.rebuild_interface(install, root)
     assert (install / "webui" / "dist" / "index.html").read_text() == "transition"
-    assert not (install / "webui" / "dist.transition").exists()
+    assert not (install / "webui" / "dist.rebuilt").exists()
+
+
+def test_ts19b_a_build_gone_by_the_time_it_is_stopped_is_no_failure(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    install, root = _web(tmp_path, "sleep 30")
+    _npm_only_at(monkeypatch, tmp_path)
+    monkeypatch.setenv("FLOCKS_ROOT", str(root))
+    monkeypatch.setattr(watchdog, "POLL_SECONDS", 0.05)
+    monkeypatch.setattr(watchdog, "INTERFACE_BUILD_SECONDS", 0)
+    real = watchdog.os.killpg
+    calls: list[int] = []
+
+    def gone(pid, sent):
+        calls.append(sent)
+        real(pid, sent)
+        raise ProcessLookupError
+
+    monkeypatch.setattr(watchdog.os, "killpg", gone)
+    watchdog.rebuild_interface(install, root)
+    assert calls and (install / "webui" / "dist" / "index.html").read_text() == "transition"
+
+
+def test_ts19c_the_new_interface_not_taking_its_place_leaves_the_old_one(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    install, root = _web(tmp_path, "mkdir dist.rebuilt && echo old > dist.rebuilt/index.html")
+    _npm_only_at(monkeypatch, tmp_path)
+    monkeypatch.setenv("FLOCKS_ROOT", str(root))
+    real = Path.rename
+
+    def refuse(self, target):
+        if self.name == "dist.rebuilt":
+            raise OSError("no")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", refuse)
+    with pytest.raises(OSError):
+        watchdog.rebuild_interface(install, root)
+    assert (install / "webui" / "dist" / "index.html").read_text() == "transition"
 
 
 def test_ts20_without_npm_or_the_old_source_nothing_is_touched(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -363,17 +400,49 @@ def test_ts20_without_npm_or_the_old_source_nothing_is_touched(watchdog, tmp_pat
     assert not (install2 / "webui" / "ran").exists()
 
 
-def test_ts21_another_upgrade_beginning_stops_the_build(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    install, root = _web(tmp_path, f"echo '{{\"phase\": \"running\"}}' > {tmp_path}/.flocks/run/upgrade-result.json; sleep 60")
+@pytest.mark.parametrize("next_attempt", ['{"phase": "running"}', '{"phase": "failed"}'])
+def test_ts21_another_attempt_stops_the_build_whatever_it_says_of_itself(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, next_attempt: str):
+    result = tmp_path / ".flocks" / "run" / "upgrade-result.json"
+    install, root = _web(tmp_path, f"echo '{next_attempt}' > {result}; sleep 60")
     _npm_only_at(monkeypatch, tmp_path)
     monkeypatch.setenv("FLOCKS_ROOT", str(root))
     monkeypatch.setattr(watchdog, "POLL_SECONDS", 0.05)
     watchdog.rebuild_interface(install, root)
-    # Nothing put back or removed: the tree is the new attempt's.
-    assert (install / "webui" / "dist.transition").exists()
+    assert (install / "webui" / "dist" / "index.html").read_text() == "transition"
+
+
+def test_ts21b_built_but_another_attempt_began_meanwhile_the_tree_is_its(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    result = tmp_path / ".flocks" / "run" / "upgrade-result.json"
+    install, root = _web(tmp_path, f"mkdir dist.rebuilt; echo old > dist.rebuilt/index.html; echo '{{\"phase\": \"running\"}}' > {result}")
+    _npm_only_at(monkeypatch, tmp_path)
+    monkeypatch.setenv("FLOCKS_ROOT", str(root))
+    monkeypatch.setattr(watchdog, "POLL_SECONDS", 5)
+    watchdog.rebuild_interface(install, root)
+    assert (install / "webui" / "dist" / "index.html").read_text() == "transition"
+
+
+def test_ts21c_npm_is_taken_as_an_old_updater_takes_it(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = tmp_path / ".flocks"
+    install = tmp_path / "install"
+    bundled = root / "tools" / "node" / "bin"
+    on_path = tmp_path / "bin"
+    newer, older = (tmp_path / ".nvm" / "versions" / "node" / name / "bin" for name in ("v22.10.0", "v22.9.0"))
+    for where in (bundled, on_path, newer, older):
+        where.mkdir(parents=True)
+        (where / "npm").write_text("#!/bin/sh\n")
+        (where / "npm").chmod(0o755)
+    monkeypatch.setenv("FLOCKS_NODE_HOME", str(root / "tools" / "node"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(on_path))
+    assert watchdog.find_npm(install) == str(bundled / "npm")
+    (bundled / "npm").unlink()
+    assert watchdog.find_npm(install) == str(on_path / "npm")
+    (on_path / "npm").unlink()
+    assert watchdog.find_npm(install) == str(newer / "npm")  # 22.10 above 22.9, where strings put it below
 
 
 def test_ts22_the_interface_is_built_after_the_service_is_back_and_no_lock_held(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    fcntl = pytest.importorskip("fcntl")
     root = tmp_path / ".flocks"
     (root / "run").mkdir(parents=True)
     (root / "run" / "upgrade-result.json").write_text(json.dumps({"phase": "failed"}))
@@ -395,6 +464,7 @@ def test_ts22_the_interface_is_built_after_the_service_is_back_and_no_lock_held(
     monkeypatch.setattr(watchdog, "rebuild_interface", build)
     assert watchdog.main(["123"]) == 0
     assert seen == [(install, root, True)]
+    (root / "run" / "upgrade-result.json").write_text(json.dumps({"phase": "failed"}))
     # Not back, nothing to build for; and a build that fails is no failure of the going back.
     monkeypatch.setattr(watchdog, "go_back", lambda *a: False)
     assert watchdog.main(["123"]) == 1
