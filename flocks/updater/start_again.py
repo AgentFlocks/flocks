@@ -8,23 +8,38 @@ whatever else is broken, the standard library is there.
 
 from __future__ import annotations
 
+import http.client
 import json
-import socket
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 _WAIT_SECONDS = 5
 
 
-def _answers(host: str, port: int) -> bool:
+def _flocks_answers(host: str, port: int) -> bool:
+    """A Flocks service there, the way a page tells: anything can hold the port."""
     host = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with socket.create_connection((host, port), timeout=3):
-            return True
-    except OSError:
+        with opener.open(f"http://{host}:{port}/api/health", timeout=3) as response:
+            body = json.loads(response.read(65536))
+    except (OSError, ValueError, http.client.HTTPException):
         return False
+    # Older versions say healthy, newer ones status.
+    return isinstance(body, dict) and (body.get("healthy") is True or body.get("status") == "healthy")
+
+
+def _installer_kept_the_machine(plan: dict) -> bool:
+    """This run's record says retained: the machine stays as the installer left it, and the record
+    says why. Not this file's to undo."""
+    try:
+        record = json.loads(Path(plan["result_file"]).read_text(encoding="utf-8"))
+    except (KeyError, TypeError, OSError, ValueError):
+        return False
+    return isinstance(record, dict) and record.get("id") != plan.get("prior_result") and record.get("recovery") == "retained"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,18 +50,23 @@ def main(argv: list[str] | None = None) -> int:
     except (IndexError, OSError, ValueError, KeyError, TypeError) as exc:
         print(f"start_again: no plan to start the service from: {exc}", flush=True)
         return 1
-    # Something answering there is the service the installer put back, or the installer's own.
+    if _installer_kept_the_machine(plan):
+        print("start_again: the installer kept the machine as it is, nothing to do", flush=True)
+        return 0
+    # A service answering there is the one the installer put back, or the installer's own.
     for _ in range(_WAIT_SECONDS):
-        if _answers(host, port):
-            print(f"start_again: {host}:{port} answers, nothing to do", flush=True)
+        if _flocks_answers(host, port):
+            print(f"start_again: flocks answers on {host}:{port}, nothing to do", flush=True)
             return 0
         time.sleep(1)
-    print(f"start_again: nothing answers on {host}:{port}: {' '.join(command)}", flush=True)
+    print(f"start_again: no flocks answers on {host}:{port}: {' '.join(command)}", flush=True)
     try:
-        return subprocess.run(command, cwd=plan.get("cwd") or None, check=False, stdin=subprocess.DEVNULL).returncode
+        code = subprocess.run(command, cwd=plan.get("cwd") or None, check=False, stdin=subprocess.DEVNULL).returncode
     except OSError as exc:
         print(f"start_again: {exc}", flush=True)
         return 1
+    print(f"start_again: exit {code}, flocks answers: {_flocks_answers(host, port)}", flush=True)
+    return code
 
 
 if __name__ == "__main__":

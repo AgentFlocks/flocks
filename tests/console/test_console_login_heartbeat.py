@@ -405,3 +405,20 @@ def test_the_heartbeat_names_the_previous_editions_licence(tmp_path, monkeypatch
     licence.write_text(json.dumps({"payload": {"license_id": "ubuntu-nn-root", "license_status": "poc"}}))
     asyncio.run(ConsoleLoginService.send_heartbeat())
     assert sent[1]["license_id"] == "ubuntu-nn-root" and sent[1]["status"] == "poc"
+
+
+def test_a_write_that_fails_leaves_the_licence_and_no_temporary(tmp_path, monkeypatch):
+    path = tmp_path / "license.json"
+    path.write_text('{"a": 1}')
+    os.chmod(path, 0o600)
+    real = os.replace
+
+    def no_room(*_a):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(login_mod.os, "replace", no_room)
+    with pytest.raises(OSError):
+        login_mod._write_private_json(path, {"a": 2})
+    monkeypatch.setattr(login_mod.os, "replace", real)
+    assert json.loads(path.read_text()) == {"a": 1}
+    assert [p.name for p in tmp_path.iterdir()] == ["license.json"]

@@ -32,11 +32,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.server
 import json
 import os
 import subprocess
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -1083,6 +1085,18 @@ def test_eu2_systemd_is_what_the_service_would_do_to_the_installer(machine: Path
     assert len(asked) == 1  # once: it does not change under a running process
 
 
+@pytest.mark.parametrize(("service", "shown", "survives"), [
+    ("flocks.service", "KillMode=control-group\nType=oneshot\nRemainAfterExit=yes\n", False),  # install-managed stops it by name
+    ("flocks.service", "KillMode=process\nType=oneshot\nRemainAfterExit=yes\n", True),
+    ("flocks-dev.service", "KillMode=control-group\nType=oneshot\nRemainAfterExit=yes\n", True),
+])
+def test_eu2_the_unit_the_installer_stops_by_name_takes_it_along(machine: Path, monkeypatch: pytest.MonkeyPatch, service: str, shown: str, survives: bool):
+    monkeypatch.setenv("INVOCATION_ID", "0123")
+    monkeypatch.setattr(enterprise, "_own_service", lambda: service)
+    monkeypatch.setattr(enterprise.subprocess, "run", lambda argv, **_k: subprocess.CompletedProcess(argv, 0, stdout=shown, stderr=""))
+    assert enterprise.run_by_systemd() is (not survives)
+
+
 def test_eu2_not_knowing_counts_as_systemd(machine: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("INVOCATION_ID", "0123")
     monkeypatch.setattr(enterprise, "_own_service", lambda: None)
@@ -1133,16 +1147,83 @@ def test_eu6d_start_again_starts_the_service_when_nothing_answers(tmp_path: Path
     assert marker.exists()
 
 
-def test_eu6d_start_again_leaves_alone_what_answers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+class _Health(http.server.BaseHTTPRequestHandler):
+    body = b"{}"
+
+    def do_GET(self):
+        self.send_response(200 if self.path == "/api/health" else 404)
+        self.end_headers()
+        self.wfile.write(self.body)
+
+    def log_message(self, *_args):
+        pass
+
+
+@pytest.mark.parametrize("body", [b'{"healthy": true}', b'{"status": "healthy"}'])
+def test_eu6d_start_again_leaves_alone_a_service_that_answers(tmp_path: Path, body: bytes):
     from flocks.updater import start_again
 
+    marker = tmp_path / "started"
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), type("Health", (_Health,), {"body": body}))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        plan = _start_again_plan(tmp_path, server.server_address[1], ["/bin/sh", "-c", f"touch {marker}"])
+        assert start_again.main([str(plan)]) == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert not marker.exists()
+
+
+def test_eu6d_start_again_takes_no_stranger_on_the_port_for_the_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from flocks.updater import start_again
+
+    monkeypatch.setattr(start_again, "_WAIT_SECONDS", 1)
+    monkeypatch.setattr(start_again.time, "sleep", lambda _s: None)
     marker = tmp_path / "started"
     with socket.socket() as server:
         server.bind(("127.0.0.1", 0))
         server.listen(1)
         plan = _start_again_plan(tmp_path, server.getsockname()[1], ["/bin/sh", "-c", f"touch {marker}"])
         assert start_again.main([str(plan)]) == 0
-    assert not marker.exists()
+    assert marker.exists()
+
+
+@pytest.mark.parametrize(("record", "starts"), [
+    ({"id": "this-run", "recovery": "retained"}, False),
+    ({"id": "this-run", "recovery": "restored"}, True),
+    ({"id": "before", "recovery": "retained"}, True),  # an earlier run's
+    (None, True),
+])
+def test_eu6d_start_again_leaves_a_machine_the_installer_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record, starts: bool):
+    from flocks.updater import start_again
+
+    monkeypatch.setattr(start_again, "_WAIT_SECONDS", 1)
+    monkeypatch.setattr(start_again.time, "sleep", lambda _s: None)
+    marker = tmp_path / "started"
+    result = tmp_path / "installation-result.json"
+    if record:
+        result.write_text(json.dumps(record))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    plan = tmp_path / "start-again.json"
+    plan.write_text(json.dumps({"host": "127.0.0.1", "port": free, "argv": ["/bin/sh", "-c", f"touch {marker}"], "result_file": str(result), "prior_result": "before"}))
+    assert start_again.main([str(plan)]) == 0
+    assert marker.exists() is starts
+
+
+def test_eu6d_the_plan_says_which_record_was_there_before(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    from types import SimpleNamespace
+
+    from flocks.updater import updater
+
+    config = SimpleNamespace(frontend_host="0.0.0.0", frontend_port=5173, no_browser=True, skip_frontend_build=False, legacy_backend_host=None, legacy_backend_port=None)
+    monkeypatch.setattr(updater, "_capture_service_snapshot", lambda: SimpleNamespace(was_running=True, config=config))
+    monkeypatch.setattr(enterprise, "installation_result_id", lambda: "before")
+    plan = json.loads(enterprise._write_start_again_plan().read_text())
+    assert plan["prior_result"] == "before"
+    assert plan["result_file"] == str(enterprise.installation_result_path())
 
 
 def test_eu6d_start_again_without_a_plan_says_so(tmp_path: Path):

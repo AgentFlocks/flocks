@@ -14,13 +14,14 @@ covered here.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
-import socket
 import subprocess
 import sys
 import tarfile
 import time
+import urllib.request
 from pathlib import Path
 
 HANDOFF = "flocks.updater.restart_handoff"
@@ -137,12 +138,29 @@ def service_environment() -> dict[str, str]:
 
 
 def answers(host: str, port: int) -> bool:
+    """A Flocks service there, the way a page tells: anything can hold the port."""
     host = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with socket.create_connection((host, port), timeout=3):
-            return True
-    except OSError:
+        with opener.open(f"http://{host}:{port}/api/health", timeout=3) as response:
+            body = json.loads(response.read(65536))
+    except (OSError, ValueError, http.client.HTTPException):
         return False
+    # Older versions say healthy, newer ones status.
+    return isinstance(body, dict) and (body.get("healthy") is True or body.get("status") == "healthy")
+
+
+def stop_what_started(python: str, install_root: Path) -> None:
+    """A service the old updater started and gave up on may still be coming up, on the source about
+    to be replaced."""
+    try:
+        done = subprocess.run(
+            [python, "-m", "flocks.cli.main", "stop"], cwd=install_root, env=service_environment(),
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=90, check=False,
+        )
+        say(f"stop exited {done.returncode}")
+    except (OSError, subprocess.SubprocessError) as exc:
+        say(f"stop: {exc}")
 
 
 def start_service(python: str, install_root: Path, host: str, port: int) -> bool:
@@ -183,6 +201,11 @@ def go_back(arguments: list[str], root: Path, kept: dict[str, bytes | None]) -> 
     if not install_root.is_dir():
         say(f"no install root in the handoff's arguments: {install_root}")
         return False
+    if answers(host, port):
+        # The old updater started it and was stopped before its last word: it runs, on this source.
+        say(f"flocks answers on {host}:{port}: leaving everything as it is")
+        return True
+    stop_what_started(python, install_root)
     if backup.is_file():
         restore_source(backup, install_root)
         say(f"source restored from {backup}")
@@ -190,9 +213,6 @@ def go_back(arguments: list[str], root: Path, kept: dict[str, bytes | None]) -> 
         say(f"no backup at {backup}: starting what is there")
     restore_records(kept)
     restore_component(python, arguments, install_root)
-    if answers(host, port):
-        say(f"{host}:{port} answers already")
-        return True
     return start_service(python, install_root, host, port)
 
 
@@ -207,6 +227,22 @@ def mark(root: Path, recovered: bool) -> None:
     temporary.replace(path)
 
 
+def only_one(root: Path):
+    """uv runs each step of a build in a process of its own, and each starts one of these: the first
+    one holds this as long as it runs, the others have nothing to do."""
+    import fcntl
+
+    path = root / "run" / "transition-watchdog.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    held = path.open("ab")
+    try:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        held.close()
+        return None
+    return held
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     start = int(args[0]) if args else os.getppid()
@@ -215,6 +251,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     handoff, arguments = found
     root = flocks_root()
+    held = only_one(root)
+    if held is None:
+        return 0
     kept = records(root)
     say(f"watching handoff {handoff}")
     while alive(handoff):

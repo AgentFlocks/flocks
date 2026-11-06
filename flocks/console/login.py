@@ -109,13 +109,21 @@ def _keep_previous_licence_current(data: dict[str, Any]) -> None:
 
 
 def _write_private_json(path: Path, value: dict[str, Any]) -> None:
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Over the file as it was, keeping who may read it, and never wider while it is being written."""
     try:
-        os.chmod(temporary, path.stat().st_mode & 0o777)
+        mode = path.stat().st_mode & 0o777
     except OSError:
-        os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
+        mode = 0o600
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode & 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as out:
+            out.write(json.dumps(value, ensure_ascii=False, indent=2))
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 class ConsoleNodeExtension(Protocol):

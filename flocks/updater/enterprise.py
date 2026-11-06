@@ -43,7 +43,12 @@ import httpx
 
 from flocks.updater.deploy import declared_managed, detect_deploy_mode
 from flocks.updater.handoff_progress import summarize_error
-from flocks.updater.installation_status import installation_result_id, read_installation_result, scrub_credentials
+from flocks.updater.installation_status import (
+    installation_result_id,
+    installation_result_path,
+    read_installation_result,
+    scrub_credentials,
+)
 from flocks.utils.log import Log
 
 log = Log.create(service="updater.enterprise")
@@ -175,7 +180,8 @@ def _installer_outlives_service() -> bool:
     properties = dict(line.split("=", 1) for line in answer.stdout.splitlines() if "=" in line)
     if properties.get("KillMode") in ("none", "process"):
         return True
-    return properties.get("Type") == "oneshot" and properties.get("RemainAfterExit") == "yes"
+    # Stopped by name it takes the installer along: install-managed does that to this one unit.
+    return service != "flocks.service" and properties.get("Type") == "oneshot" and properties.get("RemainAfterExit") == "yes"
 
 
 def _own_service() -> str | None:
@@ -910,7 +916,8 @@ def _write_start_again_plan() -> Path:
                 command += ["--server-host", config.legacy_backend_host]
             if config.legacy_backend_port is not None:
                 command += ["--server-port", str(config.legacy_backend_port)]
-            plan = {"host": config.frontend_host, "port": config.frontend_port, "argv": command, "cwd": str(Path(__file__).resolve().parents[2])}
+            plan = {"host": config.frontend_host, "port": config.frontend_port, "argv": command, "cwd": str(Path(__file__).resolve().parents[2]),
+                    "result_file": str(installation_result_path()), "prior_result": _prior_installation_result()}
     except Exception as exc:
         log.warning("enterprise.start_again_plan_failed", {"error": str(exc)})
     plan_file.parent.mkdir(parents=True, exist_ok=True)

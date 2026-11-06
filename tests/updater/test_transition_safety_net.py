@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fcntl
+import http.server
 import importlib.util
 import json
 import shutil
@@ -9,6 +11,7 @@ import socket
 import sys
 import tarfile
 import textwrap
+import threading
 import zipfile
 from pathlib import Path
 
@@ -161,6 +164,7 @@ def test_ts8_going_back_starts_the_service_from_the_old_source(watchdog, tmp_pat
     install.mkdir()
     started: list[tuple] = []
     monkeypatch.setattr(watchdog, "answers", lambda _host, _port: False)
+    monkeypatch.setattr(watchdog, "stop_what_started", lambda *_a: None)
     monkeypatch.setattr(watchdog, "start_service", lambda *a: started.append(a) or True)
     arguments = ["/venv/bin/python", "-m", watchdog.HANDOFF, "--install-root", str(install), "--backup-path", str(backup), "--frontend-host", "0.0.0.0", "--frontend-port", "5173"]
     assert watchdog.go_back(arguments, root, {}) is True
@@ -168,12 +172,19 @@ def test_ts8_going_back_starts_the_service_from_the_old_source(watchdog, tmp_pat
     assert (install / "flocks" / "__init__.py").read_text() == "old = True\n"
 
 
-def test_ts9_something_already_answering_is_left_alone(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_ts9_a_service_already_answering_is_left_alone_on_its_source(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The old updater started the new version and was stopped before its last word."""
+    root = tmp_path / ".flocks"
+    root.mkdir()
+    backup = _backup(tmp_path)
     install = tmp_path / "install"
-    install.mkdir()
+    (install / "flocks").mkdir(parents=True)
+    (install / "flocks" / "__init__.py").write_text("new = True\n")
     monkeypatch.setattr(watchdog, "answers", lambda _host, _port: True)
+    monkeypatch.setattr(watchdog, "stop_what_started", lambda *a: pytest.fail("stopped"))
     monkeypatch.setattr(watchdog, "start_service", lambda *a: pytest.fail("started"))
-    assert watchdog.go_back(["/p", "--install-root", str(install)], tmp_path, {}) is True
+    assert watchdog.go_back(["/p", "--install-root", str(install), "--backup-path", str(backup)], root, {}) is True
+    assert (install / "flocks" / "__init__.py").read_text() == "new = True\n"
 
 
 def test_ts10_no_handoff_above_it_nothing_happens(watchdog, monkeypatch: pytest.MonkeyPatch):
@@ -208,10 +219,82 @@ def test_ts12_the_handoff_is_found_among_the_ancestors(watchdog, monkeypatch: py
     assert watchdog.find_handoff(30) is None
 
 
-def test_ts13_answers(watchdog):
-    with socket.socket() as server:
-        server.bind(("127.0.0.1", 0))
-        server.listen(1)
-        port = server.getsockname()[1]
-        assert watchdog.answers("0.0.0.0", port) is True
-    assert watchdog.answers("127.0.0.1", port) is False
+class _Health(http.server.BaseHTTPRequestHandler):
+    body = b"{}"
+
+    def do_GET(self):
+        self.send_response(200 if self.path == "/api/health" else 404)
+        self.end_headers()
+        self.wfile.write(self.body)
+
+    def log_message(self, *_args):
+        pass
+
+
+def _serving(body: bytes):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), type("Health", (_Health,), {"body": body}))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize("body", [b'{"healthy": true, "version": "2026.7.1"}', b'{"status": "healthy", "version": "2026.11.4"}'])
+def test_ts13_answers_a_flocks_service_of_any_version(watchdog, body: bytes):
+    server = _serving(body)
+    try:
+        assert watchdog.answers("0.0.0.0", server.server_address[1]) is True
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert watchdog.answers("127.0.0.1", server.server_address[1]) is False
+
+
+@pytest.mark.parametrize("body", [b"<html>not flocks</html>", b'{"status": "starting"}', b"[]"])
+def test_ts14_a_stranger_on_the_port_is_no_service(watchdog, body: bytes):
+    server = _serving(body)
+    try:
+        assert watchdog.answers("127.0.0.1", server.server_address[1]) is False
+    finally:
+        server.shutdown()
+        server.server_close()
+    with socket.socket() as plain:  # holds the port, says nothing
+        plain.bind(("127.0.0.1", 0))
+        plain.listen(1)
+        assert watchdog.answers("127.0.0.1", plain.getsockname()[1]) is False
+
+
+def test_ts15_of_all_a_build_starts_one_watches(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = tmp_path / ".flocks"
+    (root / "run").mkdir(parents=True)
+    (root / "run" / "upgrade-result.json").write_text(json.dumps({"phase": "failed"}))
+    monkeypatch.setenv("FLOCKS_ROOT", str(root))
+    monkeypatch.setattr(watchdog, "find_handoff", lambda _start: (99999, ["/p"]))
+    monkeypatch.setattr(watchdog, "alive", lambda _pid: False)
+    went: list[bool] = []
+    monkeypatch.setattr(watchdog, "go_back", lambda *a: went.append(True) or True)
+    with (root / "run" / "transition-watchdog.lock").open("ab") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert watchdog.main(["123"]) == 0
+        assert went == []
+    # The first one gone, whichever comes next has it: the next attempt is watched.
+    assert watchdog.main(["123"]) == 0
+    assert went == [True]
+
+
+def test_ts16_what_is_coming_up_stops_before_the_source_changes_under_it(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = tmp_path / ".flocks"
+    root.mkdir()
+    backup = _backup(tmp_path)
+    install = tmp_path / "install"
+    install.mkdir()
+    order: list[str] = []
+    monkeypatch.setattr(watchdog, "answers", lambda _host, _port: False)
+    monkeypatch.setattr(watchdog, "stop_what_started", lambda *_a: order.append("stop"))
+    real = watchdog.restore_source
+    monkeypatch.setattr(watchdog, "restore_source", lambda *a: (order.append("restore"), real(*a))[1])
+    monkeypatch.setattr(watchdog, "start_service", lambda *_a: order.append("start") or True)
+    assert watchdog.go_back(["/p", "--install-root", str(install), "--backup-path", str(backup)], root, {}) is True
+    assert order == ["stop", "restore", "start"]
+
+
+def test_ts17_stopping_what_is_not_there_is_no_failure(watchdog, tmp_path: Path):
+    watchdog.stop_what_started(str(tmp_path / "no-such-python"), tmp_path)
