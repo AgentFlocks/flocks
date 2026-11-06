@@ -25,17 +25,31 @@ class TestSandboxConfig:
     """沙箱配置解析测试."""
 
     def test_default_config(self):
-        """默认配置: mode=off."""
+        """默认配置应隔离 Agent 工具执行."""
         from flocks.sandbox.config import resolve_sandbox_config_for_agent
 
         cfg = resolve_sandbox_config_for_agent()
-        assert cfg.mode == "off"
+        assert cfg.mode == "on"
         assert cfg.scope == "agent"
         assert cfg.workspace_access == "none"
         assert cfg.docker.image == "python:slim"
         assert cfg.docker.read_only_root is True
         assert cfg.docker.network == "none"
         assert cfg.docker.cap_drop == ["ALL"]
+
+    def test_empty_config_defaults_to_sandboxing(self):
+        from flocks.sandbox.config import resolve_sandbox_config_for_agent
+
+        cfg = resolve_sandbox_config_for_agent({})
+
+        assert cfg.mode == "on"
+
+    def test_invalid_mode_defaults_to_sandboxing(self):
+        from flocks.sandbox.config import resolve_sandbox_config_for_agent
+
+        cfg = resolve_sandbox_config_for_agent({"sandbox": {"mode": "unknown"}})
+
+        assert cfg.mode == "on"
 
     def test_global_sandbox_config(self):
         """全局 sandbox 配置."""
@@ -586,7 +600,7 @@ class TestTypes:
         from flocks.sandbox.types import SandboxConfig
 
         cfg = SandboxConfig()
-        assert cfg.mode == "off"
+        assert cfg.mode == "on"
         assert cfg.scope == "agent"
         assert cfg.workspace_access == "none"
         assert cfg.docker.image == "python:slim"

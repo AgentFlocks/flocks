@@ -132,7 +132,15 @@ async def runtime(monkeypatch, tmp_path):
 
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "state"))
     monkeypatch.setattr(Config, "_global_config", None)
-    monkeypatch.setattr(Config, "_cached_config", ConfigInfo(model="test/model", compaction={"auto": False}))
+    monkeypatch.setattr(
+        Config,
+        "_cached_config",
+        ConfigInfo(
+            model="test/model",
+            compaction={"auto": False},
+            sandbox={"mode": "off"},
+        ),
+    )
     monkeypatch.setattr(Project, "from_directory", AsyncMock(return_value={"project": SimpleNamespace(id="default"), "sandbox": str(tmp_path)}))
     monkeypatch.setattr(Agent, "get", AsyncMock(return_value=AgentInfo(name="rex", mode="primary", native=True)))
     monkeypatch.setattr(Agent, "default_agent", AsyncMock(return_value="rex"))

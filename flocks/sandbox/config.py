@@ -32,14 +32,15 @@ def resolve_sandbox_mode(mode: Optional[str] = None) -> SandboxMode:
     """
     解析 sandbox mode，统一为 off/on。
 
+    Only an explicit off value disables isolation. Missing and unknown values
+    default to on so malformed or incomplete config cannot enable host access.
+
     兼容历史值:
     - all -> on
     - non-main -> on
     """
     normalized = (mode or "").strip().lower()
-    if normalized in ("on", "all", "non-main"):
-        return "on"
-    return "off"
+    return "off" if normalized == "off" else "on"
 
 
 def resolve_sandbox_scope(
@@ -204,7 +205,7 @@ def resolve_sandbox_config_for_agent(
 
     return SandboxConfig(
         mode=resolve_sandbox_mode(
-            agent_sandbox.get("mode") or global_sandbox.get("mode", "off")
+            agent_sandbox.get("mode") or global_sandbox.get("mode", "on")
         ),
         scope=scope,
         workspace_access=(

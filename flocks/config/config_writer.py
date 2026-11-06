@@ -19,6 +19,7 @@ from flocks.utils.log import Log
 
 log = Log.create(service="config.writer")
 
+_SANDBOX_DEFAULT_MIGRATION_MARKER = ".sandbox-default-on-v1"
 
 _FALLBACK_CONFIG_TEMPLATES: Dict[str, Dict[str, Any]] = {
     "flocks.json": {
@@ -93,7 +94,44 @@ def ensure_config_files() -> None:
                 "error": str(e),
             })
 
+    _migrate_legacy_sandbox_default(config_dir)
     ConfigWriter.ensure_memory_config()
+
+
+def _migrate_legacy_sandbox_default(config_dir: Path) -> None:
+    """Enable sandboxing once for configs created with the old default."""
+    marker = config_dir / _SANDBOX_DEFAULT_MIGRATION_MARKER
+    if marker.exists():
+        return
+
+    global_config = Config.get_global()
+    if global_config.config_path or global_config.config_content:
+        return
+
+    try:
+        config_path = ConfigWriter._get_config_path()
+        data = ConfigWriter._read_path_raw(config_path, strict=True)
+        sandbox = data.get("sandbox")
+        if isinstance(sandbox, dict) and sandbox.get("mode") == "off":
+            sandbox["mode"] = "on"
+            ConfigWriter._write_raw(data, config_path)
+            log.info("config.sandbox_default_migrated", {"path": str(config_path)})
+    except Exception as e:
+        log.error("config.sandbox_default_migration_failed", {
+            "path": str(config_dir),
+            "error": str(e),
+        })
+        raise RuntimeError(
+            "Unable to migrate the legacy sandbox default; refusing to start with host execution enabled."
+        ) from e
+
+    try:
+        marker.touch(exist_ok=True)
+    except OSError as e:
+        log.warn("config.sandbox_default_migration_marker_failed", {
+            "path": str(marker),
+            "error": str(e),
+        })
 
 
 class ConfigWriter:

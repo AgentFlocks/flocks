@@ -165,7 +165,7 @@ class SandboxConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     mode: SandboxMode = Field(
-        default="off",
+        default="on",
         description="沙箱模式: off / on",
     )
     scope: SandboxScope = Field(

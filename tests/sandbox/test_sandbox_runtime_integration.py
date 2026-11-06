@@ -42,7 +42,9 @@ def _build_processor(config_data: dict) -> StreamProcessor:
 
 
 @pytest.mark.asyncio
-async def test_sandbox_tool_policy_is_opaque_metadata_not_an_oss_decision() -> None:
+async def test_sandbox_tool_policy_is_opaque_metadata_not_an_oss_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """OSS transports raw constraints and never allows or denies a tool."""
     processor = _build_processor(
         {
@@ -64,6 +66,26 @@ async def test_sandbox_tool_policy_is_opaque_metadata_not_an_oss_decision() -> N
                 }
             },
         }
+    )
+
+    from flocks.sandbox.types import SandboxContext, SandboxDockerConfig, SandboxToolPolicy
+
+    async def fake_resolve_sandbox_context(**_kwargs):
+        return SandboxContext(
+            enabled=True,
+            session_key="session-sandbox-test",
+            workspace_dir="/tmp/.flocks/sandboxes/session-sandbox-test",
+            agent_workspace_dir="/tmp",
+            workspace_access="none",
+            container_name="flocks-sbx-test",
+            container_workdir="/workspace",
+            docker=SandboxDockerConfig(),
+            tools=SandboxToolPolicy(),
+        )
+
+    monkeypatch.setattr(
+        "flocks.sandbox.context.resolve_sandbox_context",
+        fake_resolve_sandbox_context,
     )
 
     meta = await processor._resolve_sandbox_meta("bash")
@@ -119,6 +141,59 @@ async def test_sandbox_meta_injects_bash_context(monkeypatch: pytest.MonkeyPatch
     assert meta["extra"]["sandbox"]["container_name"] == "flocks-sbx-test"
     assert meta["extra"]["sandbox"]["container_workdir"] == "/workspace"
     assert meta["extra"]["sandbox"]["env"]["FOO"] == "BAR"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "config_data",
+    [{}, {"sandbox": {"mode": "on"}}],
+    ids=["default-mode", "explicit-mode"],
+)
+@pytest.mark.parametrize("context_result", ["missing", "error"])
+async def test_sandbox_context_failure_blocks_host_bash(
+    monkeypatch: pytest.MonkeyPatch,
+    config_data: dict,
+    context_result: str,
+) -> None:
+    processor = _build_processor(config_data)
+
+    async def fail_to_resolve_context(**_kwargs):
+        if context_result == "error":
+            raise RuntimeError("Docker is unavailable")
+        return None
+
+    monkeypatch.setattr(
+        "flocks.sandbox.context.resolve_sandbox_context",
+        fail_to_resolve_context,
+    )
+
+    host_commands = []
+
+    async def fake_host(**kwargs):
+        host_commands.append(kwargs["command"])
+        return ToolResult(success=True, output="host command ran")
+
+    monkeypatch.setattr("flocks.tool.code.bash._execute_host", fake_host)
+
+    async def fake_store_part(*_args, **_kwargs):
+        return None
+
+    async def fake_parts(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr("flocks.session.message.Message.store_part", fake_store_part)
+    monkeypatch.setattr("flocks.session.message.Message.parts", fake_parts)
+
+    await processor.process_event(ToolInputStartEvent(id="db-open", tool_name="bash"))
+    await processor.process_event(
+        ToolCallEvent(
+            tool_call_id="db-open",
+            tool_name="bash",
+            input={"command": "python3 -c \"import sqlite3; sqlite3.connect('/root/.flocks/data/flocks.db').close()\""},
+        )
+    )
+
+    assert host_commands == []
 
 
 @pytest.mark.asyncio

@@ -52,7 +52,7 @@
     "maxParallelSubagents": 4
   },
   "sandbox": {
-    "mode": "off",
+    "mode": "on",
     "scope": "agent",
     "workspace_access": "rw",
     "docker": {

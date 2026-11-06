@@ -3,8 +3,79 @@ Tests for config file initialization from examples.
 """
 
 import json
+from pathlib import Path
 
 import pytest
+
+
+def test_bundled_first_run_config_enables_sandbox():
+    example_path = Path(__file__).resolve().parents[2] / ".flocks" / "flocks.json.example"
+
+    config_data = json.loads(example_path.read_text(encoding="utf-8"))
+
+    assert config_data["sandbox"]["mode"] == "on"
+
+
+def test_ensure_config_files_migrates_legacy_sandbox_default_once(
+    tmp_path,
+    monkeypatch,
+):
+    config_dir = tmp_path / "home" / ".flocks" / "config"
+    example_dir = tmp_path / "examples"
+    config_dir.mkdir(parents=True)
+    example_dir.mkdir(parents=True)
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(config_dir))
+
+    config_file = config_dir / "flocks.json"
+    config_file.write_text('{"sandbox": {"mode": "off"}}', encoding="utf-8")
+
+    from flocks.config.config import Config
+    from flocks.config import config_writer
+
+    Config._global_config = None
+    Config._cached_config = None
+    monkeypatch.setattr(config_writer, "_get_example_config_dir", lambda: example_dir)
+
+    config_writer.ensure_config_files()
+
+    config_data = json.loads(config_file.read_text(encoding="utf-8"))
+    assert config_data["sandbox"]["mode"] == "on"
+
+    config_data["sandbox"]["mode"] = "off"
+    config_file.write_text(json.dumps(config_data), encoding="utf-8")
+    config_writer.ensure_config_files()
+
+    config_data = json.loads(config_file.read_text(encoding="utf-8"))
+    assert config_data["sandbox"]["mode"] == "off"
+
+
+def test_ensure_config_files_fails_if_legacy_sandbox_migration_cannot_be_saved(
+    tmp_path,
+    monkeypatch,
+):
+    config_dir = tmp_path / "home" / ".flocks" / "config"
+    example_dir = tmp_path / "examples"
+    config_dir.mkdir(parents=True)
+    example_dir.mkdir(parents=True)
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(config_dir))
+
+    config_file = config_dir / "flocks.json"
+    config_file.write_text('{"sandbox": {"mode": "off"}}', encoding="utf-8")
+
+    from flocks.config.config import Config
+    from flocks.config import config_writer
+
+    Config._global_config = None
+    Config._cached_config = None
+    monkeypatch.setattr(config_writer, "_get_example_config_dir", lambda: example_dir)
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("read-only config directory")
+
+    monkeypatch.setattr(config_writer.ConfigWriter, "_write_raw", fail_write)
+
+    with pytest.raises(RuntimeError, match="legacy sandbox default"):
+        config_writer.ensure_config_files()
 
 
 def test_ensure_config_files_creates_from_examples(tmp_path, monkeypatch):

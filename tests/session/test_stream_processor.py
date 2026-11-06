@@ -74,6 +74,7 @@ def _make_processor(
         session_id=session_id,
         assistant_message=_make_assistant_msg(session_id),
         agent=_make_agent(),
+        config_data={"sandbox": {"mode": "off"}},
         allowed_tool_names=[
             "bash",
             "ip_query",
