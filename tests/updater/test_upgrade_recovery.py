@@ -499,6 +499,9 @@ def test_handoff_failure_message_says_how_the_machine_was_left(tmp_path: Path, m
     assert "could not be brought back" in updater._handoff_failure_message(1)
     assert "upgrade-result.json" in updater._handoff_failure_message(1)
 
+    updater._write_upgrade_result_state({"last_error": "npm was not found.", "recovery": "restarted"})
+    assert "may still be in place" in updater._handoff_failure_message(1)
+
     updater._write_upgrade_result_state({"last_error": "a component was replaced"})
     assert updater._handoff_failure_message(1).endswith(f"See {updater._upgrade_result_path()}.")
     assert json.loads(updater._upgrade_result_path().read_text(encoding="utf-8"))["last_error"]

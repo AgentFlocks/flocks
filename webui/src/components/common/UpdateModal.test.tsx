@@ -420,6 +420,27 @@ describe('UpdateModal restart stage', () => {
       expect(reload).toHaveBeenCalledOnce();
     });
 
+    it('does not call a service brought back over a changed component restored', async () => {
+      checkRestartReadiness
+        .mockResolvedValueOnce({ ready: false, upgrade: { ...failed, recovery: 'restarting' } })
+        .mockResolvedValueOnce({ ready: true });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+      await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(await screen.findByText('handoff.failed handoff.restarting')).toBeInTheDocument();
+      expect(screen.getByText('handoff.restoringTitle')).toBeInTheDocument();
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await screen.findByText('handoff.failed handoff.restarted')).toBeInTheDocument();
+      expect(screen.queryByText('handoff.failed handoff.restored')).not.toBeInTheDocument();
+      expect(reload).not.toHaveBeenCalled();
+
+      await user.click(screen.getByRole('button', { name: 'laterAction' }));
+      expect(reload).toHaveBeenCalledOnce();
+    });
+
     it('stops at once when the previous version could not be put back', async () => {
       checkRestartReadiness
         .mockResolvedValueOnce({ ready: false, upgrade: { ...failed, recovery: 'restoring' } })

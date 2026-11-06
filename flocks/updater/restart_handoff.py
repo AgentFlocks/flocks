@@ -659,9 +659,19 @@ class _UpgradeReporter:
             self._responder = None
         return 1
 
-    def begin_recovery(self, error: str, *, failed_stage: str, backup_path: Path | None) -> None:
-        """The upgrade failed and the previous install is being put back: the dialog keeps following."""
-        self.progress.fail(error, recovery="restoring")
+    def begin_recovery(
+        self,
+        error: str,
+        *,
+        failed_stage: str,
+        backup_path: Path | None,
+        recovery: str = "restoring",
+    ) -> None:
+        """The upgrade failed and the previous install is being put back: the dialog keeps following.
+
+        ``recovery`` is ``restarting`` when all that can be done is to start the service again.
+        """
+        self.progress.fail(error, recovery=recovery)
         _write_upgrade_result(
             args=self._args,
             phase="failed",
@@ -685,9 +695,10 @@ class _UpgradeReporter:
         stdout: str | None = None,
         stderr: str | None = None,
         restored_from_backup: bool | None = None,
+        recovery: str = "restored",
     ) -> int:
-        """The service answers again on its port, as it did before the upgrade."""
-        self.progress.set_recovery("restored")
+        """The service answers again on its port."""
+        self.progress.set_recovery(recovery)
         _write_upgrade_result(
             args=self._args,
             phase="failed",
@@ -1111,9 +1122,19 @@ def _restart_after_failed_component(
     restart_argv: Sequence[str],
     error: str,
 ) -> int:
-    """The local source did not change and the service was stopped for this: it has to run again."""
+    """The local source did not change and the service was stopped for this: it has to run again.
+
+    There is no backup of a component: past the check, what ran may have changed the runtime,
+    so the machine is only called restored when nothing had begun to change it.
+    """
+    nothing_changed = reporter is None or reporter.progress.current_step in {"stop", "check_runtime"}
     if reporter is not None:
-        reporter.begin_recovery(error, failed_stage="install", backup_path=None)
+        reporter.begin_recovery(
+            error,
+            failed_stage="install",
+            backup_path=None,
+            recovery="restoring" if nothing_changed else "restarting",
+        )
         reporter.tell_the_dialog()
         reporter.release_port()
     try:
@@ -1123,7 +1144,15 @@ def _restart_after_failed_component(
         started, stdout, stderr = False, "", str(exc)
     if not started:
         return _restart_failed(reporter, error, "install")
-    return reporter.recovered(error, failed_stage="install", stdout=stdout, stderr=stderr) if reporter is not None else 1
+    if reporter is None:
+        return 1
+    return reporter.recovered(
+        error,
+        failed_stage="install",
+        stdout=stdout,
+        stderr=stderr,
+        recovery="restored" if nothing_changed else "restarted",
+    )
 
 
 def run(argv: Sequence[str] | None = None) -> int:

@@ -54,7 +54,8 @@ class UpgradeProgress:
         self._step: str | None = None
         self._failed_step: str | None = None
         self._error: str | None = None
-        # After a failure: "restoring", then "restored" or "failed".
+        # After a failure: "restoring" then "restored", "restarting" then "restarted" (the service
+        # is back but what the upgrade changed could not be undone), or "failed".
         self._recovery: str | None = None
         self._on_change = on_change
 

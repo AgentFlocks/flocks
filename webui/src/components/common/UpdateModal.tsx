@@ -426,13 +426,14 @@ export default function UpdateModal({
   }, [canUpgrade, channel, enterprise, i18n.language, info, releaseUpdate, t]);
 
   const isBusy = upgrading || restarting;
-  const restoring = restarting && handoffProgress?.phase === 'failed' && handoffProgress.recovery === 'restoring';
+  const restoring = restarting && handoffProgress?.phase === 'failed'
+    && (handoffProgress.recovery === 'restoring' || handoffProgress.recovery === 'restarting');
   const enterpriseShown = info?.channel === ENTERPRISE_UPDATE_CHANNEL;
   const showProgressDialog = upgradeAttempted || upgrading || restarting || steps.length > 0;
   const safeClose = () => {
     if (isBusy) return;
     // The service restarted under this page: what is behind the dialog was loaded while it was away.
-    if (handoffProgress?.recovery === 'restored') {
+    if (handoffProgress?.recovery === 'restored' || handoffProgress?.recovery === 'restarted') {
       window.location.reload();
       return;
     }
@@ -464,7 +465,10 @@ export default function UpdateModal({
       const readiness = await checkRestartReadiness(progressTokenRef.current);
       if (readiness.ready) {
         if (beingRestored) {
-          const restored: UpgradeHandoffProgress = { ...beingRestored, recovery: 'restored' };
+          const restored: UpgradeHandoffProgress = {
+            ...beingRestored,
+            recovery: beingRestored.recovery === 'restarting' ? 'restarted' : 'restored',
+          };
           setHandoffProgress(restored);
           setError(describeHandoffFailure(restored));
           ended();
@@ -478,7 +482,7 @@ export default function UpdateModal({
         setHandoffProgress(upgrade);
         if (upgrade.phase === 'failed') {
           setError(describeHandoffFailure(upgrade));
-          if (upgrade.recovery !== 'restoring') {
+          if (upgrade.recovery !== 'restoring' && upgrade.recovery !== 'restarting') {
             ended();
             return;
           }

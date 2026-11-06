@@ -70,8 +70,9 @@ export interface UpgradeHandoffProgress {
   steps: UpgradeHandoffStep[];
   failed_step?: string;
   error?: string;
-  /** After a failure: the previous version is being put back, is back and running, or could not be. */
-  recovery?: 'restoring' | 'restored' | 'failed';
+  /** After a failure: the previous version is being put back, is back and running, or could not be;
+   *  restarting and restarted when all that can be done is to start the service again. */
+  recovery?: 'restoring' | 'restored' | 'restarting' | 'restarted' | 'failed';
 }
 
 // ======================================================================

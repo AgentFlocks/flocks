@@ -75,7 +75,9 @@
     "recoveryHint": "服务还没有恢复：请在服务器上查看 ~/.flocks/run/upgrade-result.json 和 ~/.flocks/logs/ 下当天的 errors.log，处理后执行 flocks start。",
     "restoringTitle": "升级失败，正在恢复",
     "restoring": "正在恢复到升级之前的版本，好了这里会告诉你。",
-    "restored": "已经恢复到升级之前的版本，服务已重新启动，数据没有动，可以接着用。把原因处理掉之后可以重新升级。"
+    "restored": "已经恢复到升级之前的版本，服务已重新启动，数据没有动，可以接着用。把原因处理掉之后可以重新升级。",
+    "restarting": "正在把服务起回来，好了这里会告诉你。",
+    "restarted": "服务已重新启动，数据没有动。这次升级装的组件没有办法还原，可能已经是新的：到服务器上查看 ~/.flocks/run/upgrade-result.json，把原因处理掉之后重新升级。"
   },
   "enterpriseDesc": "这台机器有企业版授权，这次升级到新企业版：程序装到 {{root}}，数据和授权沿用，网页地址不变。开源版会先停下，第一次启动要迁移数据，可能要几分钟。",
   "enterpriseInstalling": "开源版会先停下，企业版第一次启动要迁移数据，可能要几分钟。装好后这个页面会自动刷新。",

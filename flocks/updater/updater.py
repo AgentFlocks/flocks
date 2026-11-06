@@ -903,6 +903,8 @@ def _handoff_failure_message(returncode: int) -> str:
         return f"Upgrade handoff failed with exit code {returncode}. See backend.log for details."
     if result.get("recovery") == "restored":
         return f"{error} The installation is as it was before the upgrade."
+    if result.get("recovery") == "restarted":
+        return f"{error} The service was restarted, but what this upgrade changed may still be in place; see {_upgrade_result_path()}."
     if result.get("recovery") == "failed":
         return f"{error} The installation could not be brought back by itself; see {_upgrade_result_path()}."
     return f"{error} See {_upgrade_result_path()}."
