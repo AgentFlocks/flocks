@@ -887,6 +887,37 @@ def can_run_installer_here() -> bool:
     return available() and (not run_by_systemd() or _euid() == 0) and install_root_ready()
 
 
+_START_AGAIN = Path(__file__).with_name("start_again.py")
+
+
+def _write_start_again_plan() -> Path:
+    """How to start this service as it runs now, for start_again.py. Empty when it does not run or
+    nobody can tell: that file then says so and does nothing."""
+    plan_file = work_dir() / "start-again.json"
+    plan: dict[str, Any] = {}
+    try:
+        from flocks.updater.updater import _capture_service_snapshot
+
+        snapshot = _capture_service_snapshot()
+        if snapshot.was_running:
+            config = snapshot.config
+            command = [sys.executable, "-m", "flocks.cli.main", "start", "--host", config.frontend_host, "--port", str(config.frontend_port)]
+            if config.no_browser:
+                command.append("--no-browser")
+            if config.skip_frontend_build:
+                command.append("--skip-webui-build")
+            if config.legacy_backend_host is not None:
+                command += ["--server-host", config.legacy_backend_host]
+            if config.legacy_backend_port is not None:
+                command += ["--server-port", str(config.legacy_backend_port)]
+            plan = {"host": config.frontend_host, "port": config.frontend_port, "argv": command, "cwd": str(Path(__file__).resolve().parents[2])}
+    except Exception as exc:
+        log.warning("enterprise.start_again_plan_failed", {"error": str(exc)})
+    plan_file.parent.mkdir(parents=True, exist_ok=True)
+    plan_file.write_text(json.dumps(plan), encoding="utf-8")
+    return plan_file
+
+
 def run_installer(path: Path, offer: InstallerOffer) -> int:
     """Run the installer in the foreground (flocks enterprise upgrade), its output the terminal's;
     recorded as the page records the run it starts (state.json, exit-status), so the page sees it
@@ -897,6 +928,7 @@ def run_installer(path: Path, offer: InstallerOffer) -> int:
     # how it ended there, not here.
     argv = [str(path), "--no-pause", "--exit-status", str(exit_file), *_windows_open_edition_args()] if _WINDOWS else ["bash", str(path)]
     prior_result = _prior_installation_result()
+    start_again_plan = None if _WINDOWS else _write_start_again_plan()
     process = subprocess.Popen(argv, cwd=str(path.parent), env=_installer_environment())
     _write_state({
         "phase": "installing",
@@ -911,6 +943,8 @@ def run_installer(path: Path, offer: InstallerOffer) -> int:
     code = process.wait()
     if not (_WINDOWS and exit_file.exists()):
         exit_file.write_text(f"{code}\n", encoding="utf-8")
+    if code != 0 and start_again_plan is not None:
+        subprocess.run([sys.executable, "-I", str(_START_AGAIN), str(start_again_plan)], env=_installer_environment(), check=False)
     return code
 
 
@@ -1003,9 +1037,13 @@ def start_installer(path: Path, offer: InstallerOffer, attempt: str | None = Non
     # The shell started here puts it in the background and exits at once, so it is no child of this
     # server: `flocks stop` takes the server's whole process tree, and install-managed stops the open
     # edition before the enterprise edition starts.
+    # When the installer fails it starts this service again itself; killed or out of memory it
+    # cannot, so the shell sees to it (start_again.py).
     launcher = subprocess.Popen(
-        ["/bin/sh", "-c", '(bash "$1"; echo "$?" > "$2") </dev/null >>"$3" 2>&1 & echo "$!"',
-         "sh", str(path), str(exit_file), str(log_file)],
+        ["/bin/sh", "-c",
+         '(bash "$1"; code=$?; echo "$code" > "$2"; if [ "$code" != 0 ]; then "$4" -I "$5" "$6" >"$6.log" 2>&1; fi) '
+         '</dev/null >>"$3" 2>&1 & echo "$!"',
+         "sh", str(path), str(exit_file), str(log_file), sys.executable, str(_START_AGAIN), str(_write_start_again_plan())],
         cwd=str(work),
         env=_installer_environment(),
         stdin=subprocess.DEVNULL,

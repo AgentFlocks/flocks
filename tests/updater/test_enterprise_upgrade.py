@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import subprocess
+import socket
 import sys
 import time
 from pathlib import Path
@@ -1111,3 +1112,92 @@ def test_eu2_the_service_is_read_from_the_control_group(machine: Path, monkeypat
     ]:
         monkeypatch.setattr(Path, "read_text", lambda self, *a, content=content, **k: content if str(self) == "/proc/self/cgroup" else real(self, *a, **k))
         assert enterprise._own_service() == want
+
+
+def _start_again_plan(tmp_path: Path, port: int, command: list[str]) -> Path:
+    plan = tmp_path / "start-again.json"
+    plan.write_text(json.dumps({"host": "0.0.0.0", "port": port, "argv": command, "cwd": str(tmp_path)}))
+    return plan
+
+
+def test_eu6d_start_again_starts_the_service_when_nothing_answers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from flocks.updater import start_again
+
+    monkeypatch.setattr(start_again, "_WAIT_SECONDS", 1)
+    monkeypatch.setattr(start_again.time, "sleep", lambda _s: None)
+    marker = tmp_path / "started"
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    assert start_again.main([str(_start_again_plan(tmp_path, free, ["/bin/sh", "-c", f"touch {marker}"]))]) == 0
+    assert marker.exists()
+
+
+def test_eu6d_start_again_leaves_alone_what_answers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from flocks.updater import start_again
+
+    marker = tmp_path / "started"
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        plan = _start_again_plan(tmp_path, server.getsockname()[1], ["/bin/sh", "-c", f"touch {marker}"])
+        assert start_again.main([str(plan)]) == 0
+    assert not marker.exists()
+
+
+def test_eu6d_start_again_without_a_plan_says_so(tmp_path: Path):
+    from flocks.updater import start_again
+
+    plan = tmp_path / "start-again.json"
+    plan.write_text("{}")
+    assert start_again.main([str(plan)]) == 1
+    assert start_again.main([]) == 1
+
+
+def test_eu6d_the_shell_starts_the_service_again_when_the_installer_fails_only(machine: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """The whole of it: a killed installer, the shell the page started it from, the plan it left."""
+    monkeypatch.setattr(enterprise, "available", lambda: True)
+    monkeypatch.setattr(enterprise, "install_root_ready", lambda: True)
+    monkeypatch.setattr(enterprise, "run_by_systemd", lambda: False)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    for body, started in ((b"kill -9 $$\n", True), (b"exit 0\n", False)):
+        marker = tmp_path / "started"
+        marker.unlink(missing_ok=True)
+        monkeypatch.setattr(enterprise, "_write_start_again_plan", lambda m=marker: _start_again_plan(tmp_path, free, ["/bin/sh", "-c", f"touch {m}"]))
+        installer = tmp_path / "flockspro.run"
+        installer.write_bytes(b"#!/bin/sh\n" + body)
+        offer = enterprise.InstallerOffer(url="https://x/i", sha256="0" * 64, release_id="r", version="v")
+        enterprise.start_installer(installer, offer)
+        exit_file = enterprise.work_dir() / "exit-status"
+        deadline = time.monotonic() + (20 if started else 5)
+        while time.monotonic() < deadline and not (marker.exists() if started else exit_file.exists()):
+            time.sleep(0.1)
+        assert exit_file.exists()
+        if started:
+            assert marker.exists()
+        else:
+            time.sleep(1)
+            assert not marker.exists()
+
+
+def test_eu6d_the_plan_is_how_this_service_runs(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    from flocks.cli.service_config import ServiceConfig
+    from flocks.updater import updater
+
+    snapshot = updater.ServiceSnapshot(config=ServiceConfig(frontend_host="0.0.0.0", frontend_port=5173, no_browser=True), daemon_pid=7, was_running=True)
+    monkeypatch.setattr(updater, "_capture_service_snapshot", lambda: snapshot)
+    plan = json.loads(enterprise._write_start_again_plan().read_text())
+    assert plan["host"] == "0.0.0.0" and plan["port"] == 5173
+    assert plan["argv"][1:8] == ["-m", "flocks.cli.main", "start", "--host", "0.0.0.0", "--port", "5173"]
+    assert "--no-browser" in plan["argv"]
+
+    monkeypatch.setattr(updater, "_capture_service_snapshot", lambda: updater.ServiceSnapshot(config=ServiceConfig(), daemon_pid=None, was_running=False))
+    assert json.loads(enterprise._write_start_again_plan().read_text()) == {}
+
+    def nobody_knows():
+        raise RuntimeError("no supervisor")
+
+    monkeypatch.setattr(updater, "_capture_service_snapshot", nobody_knows)
+    assert json.loads(enterprise._write_start_again_plan().read_text()) == {}

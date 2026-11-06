@@ -99,6 +99,7 @@
       "unchanged": "The version you had was not touched and stays in use. Upgrade again once the reason is dealt with.",
       "restored": "The installation from before the upgrade is back, with its data, and stays in use. Upgrade again once the reason is dealt with.",
       "rolled_back": "The service went back to the version from before the upgrade by itself and stays in use. Upgrade again once the reason is dealt with.",
+      "restored_partly": "The original service is running again and your data is there, but going back did not finish: see the reason above.",
       "retained": "This machine already uses PostgreSQL, so to keep new data it was not switched back to the old installation. Repair PostgreSQL or the service, then restart it. Do not import the old data again.",
       "failed": "Recovery of the original service has not been confirmed. Check the service on the server first, and do not start two instances.",
       "unknown": "The state of the machine cannot be confirmed yet. Run flocks status on the server to see the service and its version before trying again."
