@@ -1,4 +1,7 @@
 import asyncio
+import json
+import os
+import time
 
 import pytest
 
@@ -280,3 +283,125 @@ def test_an_extension_reports_what_it_owes_itself(tmp_path, monkeypatch, node_ex
 
     assert [url.rsplit("/", 1)[-1] for url, _ in seen] == ["heartbeats"]
     assert path.exists()
+
+
+# --- the Python enterprise package still on this release (the transition package) ---
+
+
+class _Answered:
+    status_code = 200
+
+    def __init__(self, body):
+        self._body = body
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._body
+
+
+def _console_answers(monkeypatch, body, sent):
+    class _Client:
+        def __init__(self, *_a, **_k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            sent.append(json)
+            return _Answered(body)
+
+    monkeypatch.setattr(login_mod.httpx, "AsyncClient", _Client)
+
+
+_SESSION = {"console_session_token": "cs", "fingerprint": "fp", "install_id": "inst"}
+
+
+def test_a_heartbeat_keeps_the_previous_editions_licence_alive(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(login_mod, "_node_extensions", [])
+    licence = tmp_path / "flockspro" / "license.json"
+    licence.parent.mkdir(parents=True)
+    licence.write_text(json.dumps({"license_id": "lic-old", "status": "commercial", "last_sync_at": 1, "last_heartbeat_ok_at": 1, "patches": ["p1"]}))
+    os.chmod(licence, 0o600)
+    _console_answers(monkeypatch, {"license_patch": "p2", "revoked_license_ids": ["b", "a"]}, [])
+
+    asyncio.run(ConsoleLoginService.send_heartbeat_for_session(session=_SESSION))
+
+    state = json.loads(licence.read_text())
+    now = time.time()
+    assert abs(state["last_sync_at"] - now) < 60 and abs(state["last_heartbeat_ok_at"] - now) < 60
+    assert state["patches"] == ["p1", "p2"] and state["license_id"] == "lic-old"
+    assert licence.stat().st_mode & 0o777 == 0o600
+    assert json.loads((tmp_path / "flockspro" / "revocation.json").read_text()) == {"revoked_license_ids": ["a", "b"]}
+    assert [p.name for p in licence.parent.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_a_machine_with_no_such_licence_gets_no_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(login_mod, "_node_extensions", [])
+    _console_answers(monkeypatch, {"revoked_license_ids": ["a"]}, [])
+
+    asyncio.run(ConsoleLoginService.send_heartbeat_for_session(session=_SESSION))
+
+    assert not (tmp_path / "flockspro").exists()
+
+
+def test_an_extension_keeps_its_own_licence_and_this_file_stays(tmp_path, monkeypatch, node_extension):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    node_extension(identity={"status": "poc", "license_id": "lic_core"})
+    licence = tmp_path / "flockspro" / "license.json"
+    licence.parent.mkdir(parents=True)
+    licence.write_text(json.dumps({"license_id": "lic-old", "last_sync_at": 1}))
+    _console_answers(monkeypatch, {}, [])
+
+    asyncio.run(ConsoleLoginService.send_heartbeat_for_session(session=_SESSION))
+
+    assert json.loads(licence.read_text())["last_sync_at"] == 1
+
+
+def test_a_file_that_cannot_be_written_does_not_fail_the_heartbeat(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(login_mod, "_node_extensions", [])
+    licence = tmp_path / "flockspro" / "license.json"
+    licence.parent.mkdir(parents=True)
+    licence.write_text(json.dumps({"license_id": "lic-old"}))
+    _console_answers(monkeypatch, {"ok": True}, [])
+
+    def no_room(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(login_mod, "_write_private_json", no_room)
+    assert asyncio.run(ConsoleLoginService.send_heartbeat_for_session(session=_SESSION)) == {"ok": True}
+
+
+def test_the_heartbeat_names_the_previous_editions_licence(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(login_mod, "_node_extensions", [])
+    licence = tmp_path / "flockspro" / "license.json"
+    licence.parent.mkdir(parents=True)
+    licence.write_text(json.dumps({"license_id": "lic-old", "status": "commercial"}))
+    sent: list[dict] = []
+    _console_answers(monkeypatch, {}, sent)
+
+    async def _require_session(cls):
+        return _SESSION
+
+    monkeypatch.setattr(ConsoleLoginService, "_require_session", classmethod(_require_session))
+    asyncio.run(ConsoleLoginService.send_heartbeat())
+    assert sent[0]["license_id"] == "lic-old" and sent[0]["status"] == "commercial"
+
+    # The way a licence signed by the older Console keeps these.
+    licence.write_text(json.dumps({"payload": {"license_id": "ubuntu-nn-root", "license_status": "poc"}}))
+    asyncio.run(ConsoleLoginService.send_heartbeat())
+    assert sent[1]["license_id"] == "ubuntu-nn-root" and sent[1]["status"] == "poc"
