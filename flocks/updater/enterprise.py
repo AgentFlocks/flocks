@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import functools
 import hashlib
 import importlib.metadata
 import json
@@ -145,8 +146,49 @@ def _account() -> tuple[str, str]:
 
 
 def run_by_systemd() -> bool:
-    """This open install is a systemd service (the offline package's flocks.service)."""
-    return bool(os.environ.get("INVOCATION_ID")) or detect_deploy_mode() == "offline"
+    """This open install is a systemd service that would take an installer started from here down
+    with it (the offline package's flocks.service): root has to run the installer."""
+    if detect_deploy_mode() == "offline":
+        return True
+    return bool(os.environ.get("INVOCATION_ID")) and not _installer_outlives_service()
+
+
+@functools.lru_cache(maxsize=1)
+def _installer_outlives_service() -> bool:
+    """Whether an installer started from this service runs on when the service stops, as it does in
+    a service of KillMode=none or process, or one that stays active with its processes gone
+    (a `flocks start` run by a oneshot unit). install-managed stops the service; systemd then ends
+    what is left in its control group, the installer among it, unless told otherwise. Not knowing
+    counts as no."""
+    service = _own_service()
+    if not service:
+        return False
+    try:
+        answer = subprocess.run(
+            ["systemctl", "show", service, "--property=KillMode,Type,RemainAfterExit"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if answer.returncode != 0:
+        return False
+    properties = dict(line.split("=", 1) for line in answer.stdout.splitlines() if "=" in line)
+    if properties.get("KillMode") in ("none", "process"):
+        return True
+    return properties.get("Type") == "oneshot" and properties.get("RemainAfterExit") == "yes"
+
+
+def _own_service() -> str | None:
+    """The systemd service this process runs in, by its control group."""
+    try:
+        groups = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in groups.splitlines():
+        for part in reversed(line.rsplit(":", 1)[-1].split("/")):
+            if part.endswith(".service"):
+                return part
+    return None
 
 
 def _previous_licence_files() -> list[Path]:

@@ -34,6 +34,7 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -56,6 +57,7 @@ def machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 "FLOCKS_CONSOLE_BASE_URL", "FLOCKS_UPDATE_CHANNEL"):
         monkeypatch.delenv(key, raising=False)
     enterprise.detect_deploy_mode.cache_clear()
+    enterprise._installer_outlives_service.cache_clear()
     install_root = tmp_path / "opt-flockspro"
     install_root.mkdir()
     monkeypatch.setattr(enterprise, "INSTALL_ROOT", install_root)
@@ -63,6 +65,7 @@ def machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(enterprise, "_previous_status", lambda: {})
     yield root
     enterprise.detect_deploy_mode.cache_clear()
+    enterprise._installer_outlives_service.cache_clear()
 
 
 def write_licence(root: Path, licence_id: str = "lic-old-7") -> None:
@@ -1050,3 +1053,61 @@ def test_eu5k_a_size_in_a_failure_rounds_as_the_progress_bar_does():
     assert enterprise._megabytes(237502464) == 227
     assert enterprise._megabytes(237671367) == 227
     assert enterprise._megabytes(47332946) == 45
+
+
+@pytest.mark.parametrize(
+    ("shown", "runs_on"),
+    [
+        ("KillMode=control-group\nType=simple\nRemainAfterExit=no\n", False),  # takes the installer down with it
+        ("KillMode=mixed\nType=forking\nRemainAfterExit=no\n", False),
+        ("KillMode=none\nType=oneshot\nRemainAfterExit=yes\n", True),  # flocks start run by a oneshot unit
+        ("KillMode=process\nType=simple\nRemainAfterExit=no\n", True),
+        ("KillMode=control-group\nType=oneshot\nRemainAfterExit=yes\n", True),  # stays active with its processes gone
+        ("", False),
+    ],
+)
+def test_eu2_systemd_is_what_the_service_would_do_to_the_installer(machine: Path, monkeypatch: pytest.MonkeyPatch, shown: str, runs_on: bool):
+    monkeypatch.setenv("INVOCATION_ID", "0123")
+    monkeypatch.setattr(enterprise, "_own_service", lambda: "flocks-dev.service")
+    asked: list[list[str]] = []
+
+    def show(argv, **_kwargs):
+        asked.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=shown, stderr="")
+
+    monkeypatch.setattr(enterprise.subprocess, "run", show)
+    assert enterprise.run_by_systemd() is (not runs_on)
+    assert enterprise.situation()["systemd"] is (not runs_on)
+    assert asked[0][:3] == ["systemctl", "show", "flocks-dev.service"]
+    assert len(asked) == 1  # once: it does not change under a running process
+
+
+def test_eu2_not_knowing_counts_as_systemd(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("INVOCATION_ID", "0123")
+    monkeypatch.setattr(enterprise, "_own_service", lambda: None)
+    assert enterprise.run_by_systemd() is True
+    enterprise._installer_outlives_service.cache_clear()
+    monkeypatch.setattr(enterprise, "_own_service", lambda: "x.service")
+
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError("systemctl")
+
+    monkeypatch.setattr(enterprise.subprocess, "run", missing)
+    assert enterprise.run_by_systemd() is True
+    # The offline package is run by systemd whatever its unit says.
+    monkeypatch.delenv("INVOCATION_ID")
+    assert enterprise.run_by_systemd() is False
+    monkeypatch.setenv("FLOCKS_OFFLINE_INSTALL", "1")
+    enterprise.detect_deploy_mode.cache_clear()
+    assert enterprise.run_by_systemd() is True
+
+
+def test_eu2_the_service_is_read_from_the_control_group(machine: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    real = Path.read_text
+    for content, want in [
+        ("0::/system.slice/flocks-dev.service\n", "flocks-dev.service"),
+        ("0::/user.slice/user-1000.slice/session-3.scope\n", None),
+        ("12:pids:/system.slice/flocks.service/x\n", "flocks.service"),
+    ]:
+        monkeypatch.setattr(Path, "read_text", lambda self, *a, content=content, **k: content if str(self) == "/proc/self/cgroup" else real(self, *a, **k))
+        assert enterprise._own_service() == want
