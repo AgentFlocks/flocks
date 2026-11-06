@@ -1226,6 +1226,35 @@ def test_eu6d_the_plan_says_which_record_was_there_before(machine: Path, monkeyp
     assert plan["result_file"] == str(enterprise.installation_result_path())
 
 
+def test_eu6d_start_again_tries_again_while_a_command_holds_the_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Seen on a real machine: the killed installer's `flocks stop` was still running."""
+    from flocks.updater import start_again
+
+    monkeypatch.setattr(start_again, "_WAIT_SECONDS", 1)
+    monkeypatch.setattr(start_again.time, "sleep", lambda _s: None)
+    tries = tmp_path / "tries"
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    script = f'echo x >> {tries}; [ "$(wc -l < {tries})" -ge 3 ]'
+    monkeypatch.setattr(start_again, "_flocks_answers", lambda *_a: False)
+    assert start_again.main([str(_start_again_plan(tmp_path, free, ["/bin/sh", "-c", script]))]) == 0
+    assert len(tries.read_text().splitlines()) == 3
+
+
+def test_eu6d_start_again_gives_up_in_the_end_and_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
+    from flocks.updater import start_again
+
+    monkeypatch.setattr(start_again, "_WAIT_SECONDS", 1)
+    monkeypatch.setattr(start_again.time, "sleep", lambda _s: None)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    monkeypatch.setattr(start_again, "_flocks_answers", lambda *_a: False)
+    assert start_again.main([str(_start_again_plan(tmp_path, free, ["/bin/sh", "-c", "exit 7"]))]) == 7
+    assert capsys.readouterr().out.count("start_again: exit 7") == start_again._START_ATTEMPTS
+
+
 def test_eu6d_start_again_without_a_plan_says_so(tmp_path: Path):
     from flocks.updater import start_again
 

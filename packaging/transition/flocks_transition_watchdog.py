@@ -32,6 +32,8 @@ from pathlib import Path
 HANDOFF = "flocks.updater.restart_handoff"
 POLL_SECONDS = 1.0
 START_ANSWER_SECONDS = 120
+START_ATTEMPTS = 4
+BETWEEN_START_ATTEMPTS_SECONDS = 15
 INTERFACE_BUILD_SECONDS = 900
 
 
@@ -172,11 +174,19 @@ def stop_what_started(python: str, install_root: Path) -> None:
 def start_service(python: str, install_root: Path, host: str, port: int) -> bool:
     command = [python, "-m", "flocks.cli.main", "start", "--host", host, "--port", str(port), "--no-browser", "--skip-webui-build"]
     say(f"starting the service: {' '.join(command)}")
-    done = subprocess.run(command, cwd=install_root, env=service_environment(), stdin=subprocess.DEVNULL, check=False)
-    if done.returncode == 2:
-        # A version that does not know the option: it finds the interface there and leaves it.
-        done = subprocess.run(command[:-1], cwd=install_root, env=service_environment(), stdin=subprocess.DEVNULL, check=False)
-    say(f"start exited {done.returncode}")
+    # Tried again while something else holds the command lock: a stop that has not ended, say.
+    for attempt in range(START_ATTEMPTS):
+        if attempt:
+            time.sleep(BETWEEN_START_ATTEMPTS_SECONDS)
+        done = subprocess.run(command, cwd=install_root, env=service_environment(), stdin=subprocess.DEVNULL, check=False)
+        if done.returncode == 2:
+            # A version that does not know the option: it finds the interface there and leaves it.
+            done = subprocess.run(command[:-1], cwd=install_root, env=service_environment(), stdin=subprocess.DEVNULL, check=False)
+        say(f"start exited {done.returncode}")
+        if done.returncode == 0:
+            break
+        if answers(host, port):
+            return True
     deadline = time.monotonic() + START_ANSWER_SECONDS
     while time.monotonic() < deadline:
         if answers(host, port):
