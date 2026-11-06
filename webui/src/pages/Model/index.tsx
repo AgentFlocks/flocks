@@ -1499,7 +1499,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       setSavedProviderName(displayName);
       setStep('success');
     } catch (err: any) {
-      toast.error(t('configFailed'), err.response?.data?.detail || err.message);
+      toast.error(t('configFailed'), extractErrorMessage(err));
     } finally {
       setSaving(false);
     }

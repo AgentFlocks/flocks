@@ -147,3 +147,31 @@ async def test_models_dev_fetch_is_bounded(monkeypatch):
     data = await cp_routes._fetch_models_dev()
     assert data is None
     assert time.monotonic() - started < 1.0
+
+
+def test_create_provider_refuses_a_key_that_cannot_be_sent(custom_provider_config):
+    resp = _client("admin").post(
+        "/api/custom/providers",
+        json={"name": "cn-key", "base_url": "https://api.example.test/v1", "api_key": "请在这里填写密钥"},
+    )
+    assert resp.status_code == 422, resp.text
+    from flocks.config.config_writer import ConfigWriter
+
+    assert ConfigWriter.get_provider_raw("custom-cn-key") is None
+
+
+def test_create_provider_saves_the_key_without_surrounding_whitespace(custom_provider_config, monkeypatch):
+    saved: dict = {}
+    from flocks import security
+
+    monkeypatch.setattr(
+        security,
+        "get_secret_manager",
+        lambda: type("Secrets", (), {"set": staticmethod(saved.__setitem__)})(),
+    )
+    resp = _client("admin").post(
+        "/api/custom/providers",
+        json={"name": "pasted", "base_url": "https://api.example.test/v1", "api_key": " sk-pasted-key\n"},
+    )
+    assert resp.status_code == 201, resp.text
+    assert saved == {"custom-pasted_llm_key": "sk-pasted-key"}

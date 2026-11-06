@@ -3155,7 +3155,7 @@ function ProviderCredentialsCard({ providerId, onTestingStart, onTestingEnd }: {
       setApiKey('');
       await loadCredentials();
     } catch (err: any) {
-      alert(t('alert.saveFailed', { error: err.message || t('alert.unknownError') }));
+      alert(t('alert.saveFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setSaving(false);
     }

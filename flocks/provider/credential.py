@@ -15,6 +15,37 @@ from flocks.utils.log import Log
 
 log = Log.create(service="credential")
 
+#: Refusing a key that is being saved.
+UNSENDABLE_API_KEY_MESSAGE = (
+    "API Key 只能包含英文字母、数字和英文符号，不能有中文、全角符号或换行，请检查后重新填写。"
+)
+#: Explaining a request that could not be sent, whatever key got stored earlier.
+UNSENDABLE_HEADER_MESSAGE = (
+    "请求发不出去：API Key（或自定义请求头）里有中文、全角符号等非 ASCII 字符。请重新填写后再试。"
+)
+
+
+def api_key_is_sendable(api_key: str) -> bool:
+    """Whether a key can travel in an HTTP header, which httpx encodes as ASCII."""
+    return api_key.isascii() and api_key.isprintable()
+
+
+def is_unsendable_header_error(error: BaseException) -> bool:
+    """Whether the HTTP client refused a request because a header is not ASCII.
+
+    Only the client's own encoding counts: any other ``UnicodeEncodeError`` in a
+    model step (a hook, a log stream) says nothing about the credentials.
+    """
+    if not isinstance(error, UnicodeEncodeError) or error.encoding != "ascii":
+        return False
+    frame = error.__traceback__
+    while frame is not None:
+        module = frame.tb_frame.f_globals.get("__name__", "")
+        if module.partition(".")[0] in {"httpx", "httpcore", "h11"}:
+            return True
+        frame = frame.tb_next
+    return False
+
 
 def has_credential(provider_id: str) -> bool:
     """Check if a provider has an API key configured in .secret.json.
