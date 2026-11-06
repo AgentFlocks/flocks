@@ -142,6 +142,7 @@
     "log": "Installer output"
   },
   "errors": {
+    "wentBack": "The last upgrade did not finish, so this machine went back to the version it had before. Its data and its service are intact. To try again, click the new-version mark next to the version at the bottom left.",
     "load": "Could not read this machine's state",
     "check": "The check failed",
     "start": "The upgrade failed",

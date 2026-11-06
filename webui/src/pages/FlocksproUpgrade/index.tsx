@@ -94,7 +94,8 @@ export default function FlocksproUpgradePage() {
       setUpgrade(data.upgrade);
       setLoadError(null);
     } catch (err) {
-      if (mounted.current) setLoadError(extractErrorMessage(err, t('errors.load')));
+      const wentBack = (err as { response?: { status?: number } })?.response?.status === 404;
+      if (mounted.current) setLoadError(wentBack ? t('errors.wentBack') : extractErrorMessage(err, t('errors.load')));
     }
     void refreshConsoleLogin();
   }, [t, refreshConsoleLogin]);

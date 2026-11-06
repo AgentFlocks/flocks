@@ -79,6 +79,15 @@ export interface UpgradeHandoffProgress {
 // API
 // ======================================================================
 
+// This interface over a backend older than it: what the old updater leaves when it fails installing
+// the transition package and the old version comes back, its own interface gone. That backend knows
+// the enterprise line as an edition, and asked nothing else offers the open edition's releases.
+let olderBackend = false;
+
+export const noteOlderBackend = (): void => {
+  olderBackend = true;
+};
+
 export const checkUpdate = async (
   locale?: string,
   channel?: string,
@@ -89,6 +98,7 @@ export const checkUpdate = async (
       ...(locale ? { locale } : {}),
       ...(channel && channel !== DEFAULT_UPDATE_CHANNEL ? { channel } : {}),
       ...(force ? { force: true } : {}),
+      ...(olderBackend ? { edition: 'flockspro' } : {}),
     },
   });
   return response.data;
@@ -131,6 +141,7 @@ export const applyUpdate = async (
   const params = new URLSearchParams({ target_version: targetVersion });
   if (locale) params.set('locale', locale);
   if (channel && channel !== DEFAULT_UPDATE_CHANNEL) params.set('channel', channel);
+  if (olderBackend) params.set('edition', 'flockspro');
   const url = `/api/update/apply?${params.toString()}`;
   const controller = new AbortController();
   // Long-running updates may take many minutes, but each silent wait is bounded.

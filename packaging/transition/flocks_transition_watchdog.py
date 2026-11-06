@@ -6,10 +6,11 @@ sync`` by hand does nothing here. Everything it needs it reads from that handoff
 ends: where the source is, the backup the old updater made of it, how the service was started.
 
 What goes back: the source from the backup, the version records as they were at this point, the
-service. What cannot: the interface. The old updater deleted the old one and did not back it up, so
-the old version runs with the transition package's, which is built already. Before ``uv sync`` the
-old updater runs nothing of ours: a failure to stop the service or to replace the source is not
-covered here.
+service, and the interface as far as this machine can build it. The old updater deleted the old one
+and did not back it up, so the old version starts with the transition package's, which is built
+already, and its own is built from the source that came back, the service running meanwhile. Before
+``uv sync`` the old updater runs nothing of ours: a failure to stop the service or to replace the
+source is not covered here.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -27,6 +30,7 @@ from pathlib import Path
 HANDOFF = "flocks.updater.restart_handoff"
 POLL_SECONDS = 1.0
 START_ANSWER_SECONDS = 120
+INTERFACE_BUILD_SECONDS = 900
 
 
 def say(message: str) -> None:
@@ -216,6 +220,68 @@ def go_back(arguments: list[str], root: Path, kept: dict[str, bytes | None]) -> 
     return start_service(python, install_root, host, port)
 
 
+def find_npm(install_root: Path) -> str | None:
+    """Where an old updater looks (the node it installed, then the PATH), and nvm's for a service
+    started without it. This process's PATH is what uv left of it."""
+    paths = os.environ.get("PATH", "").split(os.pathsep)
+    for tools in (flocks_root() / "tools" / "node", install_root.parent / "tools" / "node"):
+        paths += [str(tools / "bin"), str(tools)]
+    paths += sorted((str(path) for path in Path.home().glob(".nvm/versions/node/*/bin")), reverse=True)
+    paths += ["/usr/local/bin", "/opt/homebrew/bin"]
+    return shutil.which("npm", path=os.pathsep.join(paths))
+
+
+def _interface_step(command: list[str], web: Path, env: dict[str, str], root: Path, phase: object) -> bool | None:
+    """One npm command: whether it worked, None when another upgrade has begun and the tree is its now."""
+    process = subprocess.Popen(command, cwd=web, env=env, stdin=subprocess.DEVNULL, start_new_session=True)
+    deadline = time.monotonic() + INTERFACE_BUILD_SECONDS
+    while process.poll() is None:
+        begun = read_result(root).get("phase") != phase
+        if begun or time.monotonic() > deadline:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait()
+            return None if begun else False
+        time.sleep(POLL_SECONDS)
+    return process.returncode == 0
+
+
+def rebuild_interface(install_root: Path, root: Path) -> None:
+    """The old version's own interface again, from the source that came back, where this machine has
+    what it takes (the old updater leaves webui/node_modules). Whatever goes wrong the transition
+    package's stays: the old version runs with it, and the page offers the upgrade again."""
+    web = install_root / "webui"
+    npm = find_npm(install_root)
+    if not (web / "package.json").is_file() or npm is None:
+        say(f"the old interface cannot be built here (npm: {npm}): the transition package's stays")
+        return
+    phase = read_result(root).get("phase")
+    dist, kept = web / "dist", web / "dist.transition"
+    shutil.rmtree(kept, ignore_errors=True)
+    if dist.is_dir():
+        shutil.copytree(dist, kept)
+    env = service_environment()
+    env["PATH"] = str(Path(npm).parent) + os.pathsep + env.get("PATH", "")
+    steps = [[npm, "run", "build"]]
+    if not (web / "node_modules").is_dir():
+        steps.insert(0, [npm, "ci", "--no-audit", "--no-fund"])
+    say(f"building the old interface: {' '.join(steps[-1])}")
+    built = True
+    for step in steps:
+        built = _interface_step(step, web, env, root, phase)
+        if built is None:
+            say("another upgrade has begun: leaving the interface to it")
+            return
+        if not built:
+            break
+    if built and (dist / "index.html").is_file():
+        shutil.rmtree(kept, ignore_errors=True)
+        say("the old interface is built again")
+    elif kept.is_dir():
+        shutil.rmtree(dist, ignore_errors=True)
+        kept.rename(dist)
+        say("the old interface did not build: the transition package's stays")
+
+
 def mark(root: Path, recovered: bool) -> None:
     result = read_result(root)
     if not result:
@@ -272,6 +338,14 @@ def main(argv: list[str] | None = None) -> int:
         recovered = False
     say("the service is running again" if recovered else "the service did not come back")
     mark(root, recovered)
+    # What is left is no reason to stop the next attempt being watched.
+    held.close()
+    install_root = option(arguments, "--install-root")
+    if recovered and install_root:
+        try:
+            rebuild_interface(Path(install_root), root)
+        except Exception as exc:  # noqa: BLE001 - said; the service runs
+            say(f"building the old interface failed: {exc}")
     return 0 if recovered else 1
 
 

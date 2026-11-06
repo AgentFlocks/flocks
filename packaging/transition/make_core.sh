@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The open-edition archive the transition package (old format zip: this archive + the old wheel) is built from on Console.
-# - A built interface and no webui/package.json, package-lock.json: an old updater then neither looks for npm nor builds (updater.py in
-#   every old version only builds where webui/package.json exists).
+# - Of webui only the built interface: an old updater then neither looks for npm nor builds (updater.py in every old version only builds
+#   where webui/package.json exists), and when the old version goes back its own sources are what is there to build its interface from.
 # - Its own build backend in place of hatchling and the lock's index configured: an old updater's `uv sync` then needs no network
 #   on a machine that has the locked packages, and that backend starts the watchdog that puts the old version back if the old
 #   updater fails (flocks_transition_build.py).
@@ -15,7 +15,7 @@ git -C "$checkout" archive --prefix=flocks/ "$core" | tar -x -C "$work"
 ( cd "$work/flocks/webui"
   npm_config_registry=https://registry.npmmirror.com npm ci --no-audit --no-fund
   npm run build
-  rm -r node_modules package.json package-lock.json
+  find . -mindepth 1 -maxdepth 1 ! -name dist -exec rm -r {} +
 )
 test -f "$work/flocks/webui/dist/index.html"
 cp "$here/flocks_transition_build.py" "$here/flocks_transition_watchdog.py" "$work/flocks/"

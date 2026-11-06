@@ -25,6 +25,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 //   FP13 a licence no longer valid: the card says so, red
 //   FP14 syncing the licence: the package's own sync, then what the machine says now
 //   FP15 signing out of the cloud account: the check goes, the sign-in comes back
+//   FP16 the backend has no such page: the old version came back after a failed upgrade
 
 const { situation, check, start, progress, applications, apply, withdraw, take, consoleLoginSession } = vi.hoisted(() => ({
   situation: vi.fn(),
@@ -127,6 +128,13 @@ describe('Flocks Pro page of the open edition', () => {
     // While it runs, nothing starts a second one.
     expect(screen.getByRole('button', { name: 'upgrade.check' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'consoleLogin.logoutAction' })).toBeDisabled();
+  });
+
+  it('FP16 over the older backend the old version came back with, it says the machine went back', async () => {
+    situation.mockRejectedValue({ response: { status: 404, data: { detail: 'Not Found' } } });
+    render(<FlocksproUpgradePage />);
+    expect(await screen.findByText('errors.wentBack')).toBeInTheDocument();
+    expect(screen.queryByText('Not Found')).not.toBeInTheDocument();
   });
 
   it('FP2 on a systemd machine gives root the command for the downloaded installer', async () => {

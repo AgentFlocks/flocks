@@ -51,7 +51,7 @@ const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/On
 const UpdateModal = lazyLayoutComponent(() => import('@/components/common/UpdateModal'), ['update']);
 const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
 const TokenPolicyNotice = lazyLayoutComponent(() => import('@/components/common/TokenPolicyNotice'), ['notification']);
-import { DEFAULT_UPDATE_CHANNEL, checkUpdate, getCurrentRelease, type VersionInfo } from '@/api/update';
+import { DEFAULT_UPDATE_CHANNEL, checkUpdate, getCurrentRelease, noteOlderBackend, type VersionInfo } from '@/api/update';
 import { enterpriseUpgradeApi, enterpriseVersionInfo } from '@/api/enterpriseUpgrade';
 import { withReleaseUpdate } from '@/utils/releaseUpdate';
 import type { EnterpriseUpdate } from '@/components/common/UpdateModal';
@@ -388,7 +388,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const enterpriseUpdateRef = useRef<EnterpriseUpdate | null>(null);
   const findEnterpriseUpdate = useCallback(async () => {
     if (registry.updateChannel) return null;
-    const situation = await enterpriseUpgradeApi.situation().catch(() => undefined);
+    const situation = await enterpriseUpgradeApi.situation().catch((err) => {
+      if (err?.response?.status === 404) noteOlderBackend();
+      return undefined;
+    });
     setEnterpriseRead(true);
     // Not answering just now says nothing about the machine: what was known stands.
     if (situation === undefined) return enterpriseUpdateRef.current;
