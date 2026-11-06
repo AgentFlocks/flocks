@@ -60,6 +60,32 @@ def test_progress_failure_keeps_step_and_hides_error_unless_asked() -> None:
     assert "error" not in progress.snapshot(include_error=False)
 
 
+def test_progress_says_how_recovery_is_going_and_which_steps_began() -> None:
+    progress = handoff_progress.UpgradeProgress(["stop", "source_replace", "sync_dependencies", "start"])
+    progress.start("stop")
+    progress.start("source_replace")
+    progress.fail("disk full")
+
+    assert "recovery" not in progress.snapshot()
+    assert progress.reached("stop") is True  # done
+    assert progress.reached("source_replace") is True  # failed
+    assert progress.reached("sync_dependencies") is False
+    assert progress.reached("nonsense") is False
+
+    seen: list[dict] = []
+    progress = handoff_progress.UpgradeProgress(["stop"], on_change=seen.append)
+    progress.start("stop")
+    seen.clear()
+    # One step: a reader in between would take the failure for the end of it and stop following.
+    progress.fail("disk full", recovery="restoring")
+    assert [snapshot.get("recovery") for snapshot in seen] == ["restoring"]
+    # Anyone reaching the port may see this much; the error stays for the token.
+    assert progress.snapshot(include_error=False)["recovery"] == "restoring"
+    assert "error" not in progress.snapshot(include_error=False)
+    progress.set_recovery("restored")
+    assert progress.recovery == "restored"
+
+
 def test_progress_finish_marks_running_step_done() -> None:
     progress = handoff_progress.UpgradeProgress(["start"])
     progress.start("start")
@@ -170,6 +196,35 @@ def test_linger_stops_shortly_after_the_dialog_read_the_failure() -> None:
     assert time.monotonic() - started < 5.0
     with pytest.raises(httpx.ConnectError):
         httpx.get(f"http://127.0.0.1:{port}/api/health", trust_env=False, timeout=1.0)
+
+
+def test_wait_for_delivery_returns_once_the_dialog_read_the_failure() -> None:
+    progress = handoff_progress.UpgradeProgress(["stop"])
+    progress.start("stop")
+    progress.fail("stuck")
+    progress.set_recovery("restoring")
+    port = _free_port()
+    responder = handoff_progress.ProgressResponder(progress, "127.0.0.1", port, "tok-123")
+    assert responder.start()
+    try:
+        assert responder.wait_for_delivery(0.05) is False
+        answer = httpx.get(
+            f"http://127.0.0.1:{port}/api/health",
+            headers={handoff_progress.UPGRADE_PROGRESS_TOKEN_HEADER: "tok-123"},  # secret-guard: allow - a made-up token for the test
+            timeout=5,
+        )
+        assert answer.status_code == 503
+        body = answer.json()
+        assert body["upgrade"]["recovery"] == "restoring"
+        assert body["upgrade"]["error"] == "stuck"
+        assert responder.wait_for_delivery(2.0) is True
+
+        # The final word comes later: having read "restoring" is not having read that.
+        progress.set_recovery("failed")
+        responder.outcome_changed()
+        assert responder.wait_for_delivery(0.05) is False
+    finally:
+        responder.stop()
 
 
 def test_linger_gives_up_when_nobody_reads_the_failure() -> None:

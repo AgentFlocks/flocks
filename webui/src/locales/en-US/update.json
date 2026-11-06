@@ -30,7 +30,7 @@
   "closeAction": "Close",
   "streamInterrupted": "The update connection ended before completion. Check the service status before checking for updates again.",
   "streamTimeout": "The update connection has not responded for 5 minutes. Check the service status before checking for updates again.",
-  "restartTimeout": "Service readiness check timed out: {{reason}}. Please refresh manually to confirm status.",
+  "restartTimeout": "The service has not answered for 5 minutes ({{reason}}). The upgrade may still be running or may have failed: check ~/.flocks/run/upgrade-result.json on the server, then refresh to confirm the status.",
   "restartUnknown": "No explicit health-check result was received",
   "dismissAction": "Don't remind me again",
   "dockerModeTitle": "Docker Deployment",
@@ -41,6 +41,7 @@
   "offlineUpgradeHint": "sudo bash /var/tmp/flocks-offline.run",
   "offlineNotChecked": "Offline deployment: remote versions are not checked",
   "stageLabels": {
+    "checking": "Check the runtime",
     "fetching": "Downloading latest source archive",
     "backing_up": "Backing up current version",
     "applying": "Applying new version",
@@ -71,7 +72,10 @@
     },
     "failed": "The upgrade failed at \"{{step}}\": {{error}}",
     "noDetail": "The detailed reason is only shown on the page that started the upgrade.",
-    "recoveryHint": "The service has not come back: check ~/.flocks/run/upgrade-result.json and today's errors.log under ~/.flocks/logs/ on the server, fix the cause, then run flocks start."
+    "recoveryHint": "The service has not come back: check ~/.flocks/run/upgrade-result.json and today's errors.log under ~/.flocks/logs/ on the server, fix the cause, then run flocks start.",
+    "restoringTitle": "Upgrade failed, restoring",
+    "restoring": "Putting the previous version back; this page will say when it is done.",
+    "restored": "The previous version is back and the service was restarted. Data was not touched, and you can keep working. Resolve the cause, then upgrade again."
   },
   "enterpriseDesc": "This machine has an enterprise licence, so this upgrades it to the new enterprise edition: the program goes to {{root}}, its data and licence stay, and the web address stays the same. The open edition stops first, and the first start migrates data, which can take minutes.",
   "enterpriseInstalling": "The open edition stops first, and the first start of the enterprise edition migrates data, which can take minutes. This page refreshes by itself when it is done.",

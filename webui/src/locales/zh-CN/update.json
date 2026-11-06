@@ -30,7 +30,7 @@
   "closeAction": "关闭",
   "streamInterrupted": "升级连接提前结束，未收到完成结果。请检查服务状态后重新检查更新。",
   "streamTimeout": "升级连接已连续 5 分钟没有响应。请检查服务状态后重新检查更新。",
-  "restartTimeout": "服务恢复确认超时：{{reason}}。请手动刷新页面确认状态。",
+  "restartTimeout": "等了 5 分钟服务还没有回应（{{reason}}）。升级可能还在进行，也可能已经失败：请到服务器上查看 ~/.flocks/run/upgrade-result.json，再刷新页面确认状态。",
   "restartUnknown": "未收到明确的健康检查结果",
   "dismissAction": "不再提醒",
   "dockerModeTitle": "Docker 部署",
@@ -41,6 +41,7 @@
   "offlineUpgradeHint": "sudo bash /var/tmp/flocks-offline.run",
   "offlineNotChecked": "离线部署，未查询远端版本",
   "stageLabels": {
+    "checking": "检查运行环境",
     "fetching": "下载最新源码包",
     "backing_up": "备份当前版本",
     "applying": "应用新版本",
@@ -71,7 +72,10 @@
     },
     "failed": "升级在「{{step}}」这一步失败：{{error}}",
     "noDetail": "具体原因只显示在发起升级的页面上。",
-    "recoveryHint": "服务还没有恢复：请在服务器上查看 ~/.flocks/run/upgrade-result.json 和 ~/.flocks/logs/ 下当天的 errors.log，处理后执行 flocks start。"
+    "recoveryHint": "服务还没有恢复：请在服务器上查看 ~/.flocks/run/upgrade-result.json 和 ~/.flocks/logs/ 下当天的 errors.log，处理后执行 flocks start。",
+    "restoringTitle": "升级失败，正在恢复",
+    "restoring": "正在恢复到升级之前的版本，好了这里会告诉你。",
+    "restored": "已经恢复到升级之前的版本，服务已重新启动，数据没有动，可以接着用。把原因处理掉之后可以重新升级。"
   },
   "enterpriseDesc": "这台机器有企业版授权，这次升级到新企业版：程序装到 {{root}}，数据和授权沿用，网页地址不变。开源版会先停下，第一次启动要迁移数据，可能要几分钟。",
   "enterpriseInstalling": "开源版会先停下，企业版第一次启动要迁移数据，可能要几分钟。装好后这个页面会自动刷新。",

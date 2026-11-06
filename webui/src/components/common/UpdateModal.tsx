@@ -426,6 +426,7 @@ export default function UpdateModal({
   }, [canUpgrade, channel, enterprise, i18n.language, info, releaseUpdate, t]);
 
   const isBusy = upgrading || restarting;
+  const restoring = restarting && handoffProgress?.phase === 'failed' && handoffProgress.recovery === 'restoring';
   const enterpriseShown = info?.channel === ENTERPRISE_UPDATE_CHANNEL;
   const showProgressDialog = upgradeAttempted || upgrading || restarting || steps.length > 0;
   const safeClose = () => {
@@ -438,18 +439,31 @@ export default function UpdateModal({
     const restartStartedAt = Date.now();
     let lastAnswerAt = restartStartedAt;
     let lastPollFailure = '';
+    // The upgrade failed and the previous version is being put back: what answers next is that version.
+    let beingRestored: UpgradeHandoffProgress | null = null;
+    const ended = () => {
+      setRestartingSync(false);
+      setUpgrading(false);
+    };
     const poll = async () => {
       const now = Date.now();
       if (now - lastAnswerAt > HEALTH_POLL_TIMEOUT || now - restartStartedAt > HANDOFF_MAX_WAIT) {
-        const reason = restartFailureReasonRef.current || lastPollFailure || t('restartUnknown');
+        // The upgrade stream always breaks here, when the old service exits: what the polling saw says more.
+        const reason = lastPollFailure || restartFailureReasonRef.current || t('restartUnknown');
         setError(t('restartTimeout', { reason }));
-        setRestartingSync(false);
-        setUpgrading(false);
+        ended();
         return;
       }
 
       const readiness = await checkRestartReadiness(progressTokenRef.current);
       if (readiness.ready) {
+        if (beingRestored) {
+          const restored: UpgradeHandoffProgress = { ...beingRestored, recovery: 'restored' };
+          setHandoffProgress(restored);
+          setError(describeHandoffFailure(restored));
+          ended();
+          return;
+        }
         window.location.reload();
         return;
       }
@@ -458,9 +472,11 @@ export default function UpdateModal({
         setHandoffProgress(upgrade);
         if (upgrade.phase === 'failed') {
           setError(describeHandoffFailure(upgrade));
-          setRestartingSync(false);
-          setUpgrading(false);
-          return;
+          if (upgrade.recovery !== 'restoring') {
+            ended();
+            return;
+          }
+          beingRestored = upgrade;
         }
         lastAnswerAt = Date.now();
       }
@@ -564,14 +580,14 @@ export default function UpdateModal({
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-semibold text-amber-950">
-                      {isBusy ? t('upgrading') : error ? t('upgradeFailed') : t('newVersionTitle')}
+                      {restoring ? t('handoff.restoringTitle') : isBusy ? t('upgrading') : error ? t('upgradeFailed') : t('newVersionTitle')}
                     </div>
                     {latestDisplayVersion && (
                       <div className="mt-1 text-2xl font-bold text-amber-900 dark:text-amber-200">
                         {formatUpdateVersion(latestDisplayVersion)}
                       </div>
                     )}
-                    {(isBusy || !error) && (
+                    {!restoring && (isBusy || !error) && (
                       <p className="mt-2 text-sm leading-6 text-amber-800">
                         {enterpriseShown ? t('enterpriseInstalling') : t('confirmUpgradeDesc')}
                       </p>
@@ -586,7 +602,7 @@ export default function UpdateModal({
                 <div className="space-y-0">
                   {steps.map((s, i) => renderStep(s, i))}
                 </div>
-                {restarting && (
+                {restarting && !restoring && (
                   <p className="mt-2 text-xs text-gray-400">{t('restarting')}</p>
                 )}
                 {/* The service is down while it installs: if it does not come back, this is where to look on the machine. */}

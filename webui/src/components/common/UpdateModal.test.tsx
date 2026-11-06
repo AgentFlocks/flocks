@@ -367,6 +367,104 @@ describe('UpdateModal restart stage', () => {
     expect(checkRestartReadiness).toHaveBeenCalledTimes(2);
   });
 
+  describe('when the upgrade fails and the previous version is put back', () => {
+    const failed = {
+      phase: 'failed',
+      step: 'check_runtime',
+      failed_step: 'check_runtime',
+      error: 'npm was not found.',
+      steps: [step('stop', 'done'), step('source_replace', 'done'), step('check_runtime', 'failed'), step('start', 'pending')],
+    };
+    const reload = vi.fn();
+
+    beforeEach(() => {
+      reload.mockClear();
+      vi.stubGlobal('location', { ...window.location, reload });
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('says why while it is restored, then that the previous version is back, without reloading', async () => {
+      checkRestartReadiness
+        .mockResolvedValueOnce({ ready: false, upgrade: { ...failed, recovery: 'restoring' } })
+        // The port on its way from the handoff to the restored service.
+        .mockResolvedValueOnce({ ready: false, reason: 'health check failed' })
+        .mockResolvedValueOnce({ ready: true });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+      await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(await screen.findByText('handoff.failed handoff.restoring')).toBeInTheDocument();
+      expect(screen.getByText('handoff.restoringTitle')).toBeInTheDocument();
+      expect(screen.getByText('waitingRestart')).toBeInTheDocument();
+      expect(screen.queryByText('restarting')).not.toBeInTheDocument();
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(screen.getByText('handoff.failed handoff.restoring')).toBeInTheDocument();
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await screen.findByText('handoff.failed handoff.restored')).toBeInTheDocument();
+      expect(screen.getByText('upgradeFailed')).toBeInTheDocument();
+      expect(screen.queryByText('waitingRestart')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'laterAction' })).toBeInTheDocument();
+      expect(reload).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(checkRestartReadiness).toHaveBeenCalledTimes(3);
+    });
+
+    it('stops at once when the previous version could not be put back', async () => {
+      checkRestartReadiness
+        .mockResolvedValueOnce({ ready: false, upgrade: { ...failed, recovery: 'restoring' } })
+        .mockResolvedValueOnce({ ready: false, upgrade: { ...failed, recovery: 'failed' } });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+      await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+      await vi.advanceTimersByTimeAsync(1_500);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(await screen.findByText('handoff.failed handoff.recoveryHint')).toBeInTheDocument();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(checkRestartReadiness).toHaveBeenCalledTimes(2);
+    });
+
+    it('still reloads a service that came up from an upgrade that worked', async () => {
+      checkRestartReadiness
+        .mockResolvedValueOnce({ ready: false, upgrade: running('build_webui') })
+        .mockResolvedValueOnce({ ready: true });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+      await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+      await vi.advanceTimersByTimeAsync(1_500);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      await waitFor(() => expect(reload).toHaveBeenCalledOnce());
+    });
+  });
+
+  it('shows a refusal before the service is touched on the step that refused', async () => {
+    applyUpdate.mockImplementation(async (_version: string, onProgress: (progress: unknown) => void) => {
+      onProgress({ stage: 'fetching', message: 'Downloading source archive...', success: null });
+      onProgress({ stage: 'checking', message: 'Checking Node.js and npm...', success: null });
+      onProgress({ stage: 'error', message: '这台机器上找不到 npm。升级没有开始，服务和程序都没有动，可以接着用。', success: false });
+      throw new Error('这台机器上找不到 npm。升级没有开始，服务和程序都没有动，可以接着用。');
+    });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={updatable} onClose={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+
+    expect(await screen.findByText(/升级没有开始，服务和程序都没有动/)).toBeInTheDocument();
+    expect(screen.getByText('stageLabels.checking').className).toContain('text-red-600');
+    expect(screen.getByText('stageLabels.fetching').className).not.toContain('text-red-600');
+    expect(checkRestartReadiness).not.toHaveBeenCalled();
+  });
+
   it('keeps waiting while the handoff answers, even when one step outlasts the restart timeout', async () => {
     let polls = 0;
     const failed = {

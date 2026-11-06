@@ -342,10 +342,11 @@ def test_upgrade_stop_forces_captured_daemon_after_graceful_timeout(
     ]
 
 
-def test_upgrade_install_failure_keeps_backup_and_temp_without_restart_or_rollback(
+def test_upgrade_install_failure_with_an_unreadable_backup_leaves_the_manual_path(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    """Nothing to go back to: no restart, and the backup and the staged files stay for whoever repairs it."""
     events: list[str] = []
     results: list[dict[str, object]] = []
     cleanup_dir = tmp_path / "cleanup"
@@ -1420,6 +1421,14 @@ class _FakeResponder:
     def stop(self) -> None:
         self.events.append("stop")
 
+    def wait_for_delivery(self, timeout: float) -> bool:
+        self.events.append(f"wait:{timeout}")
+        self.seen_when_told = self.progress.snapshot()
+        return True
+
+    def outcome_changed(self) -> None:
+        self.outcome_changes = getattr(self, "outcome_changes", 0) + 1
+
     def linger_for_failure(self, *, timeout: float, grace: float = 3.0) -> None:
         self.events.append(f"linger:{timeout}")
 
@@ -1507,7 +1516,7 @@ def test_upgrade_handoff_failure_names_the_step_and_lingers_for_the_dialog(
     monkeypatch.setattr(
         restart_handoff,
         "_start_service_after_upgrade",
-        lambda _args: pytest.fail("a failed upgrade must not start the service"),
+        lambda _args: pytest.fail("with an unreadable backup there is nothing to start"),
     )
     monkeypatch.setattr(restart_handoff, "_write_upgrade_result", lambda **kwargs: results.append(kwargs))
 
@@ -1638,13 +1647,18 @@ def test_upgrade_handoff_serves_a_stop_timeout_when_the_port_is_free(
         results,
         _stop_services_before_upgrade=lambda _args: False,
         _apply_new_source=lambda _args: pytest.fail("source must stay untouched"),
+        _start_service_after_upgrade=lambda _args: (False, "", "port still in use"),
     )
 
     assert restart_handoff.run(_simple_upgrade_handoff_args(tmp_path)) == 1
 
     assert results[-1]["failed_stage"] == "stop"
     assert _statuses(results[-1]["progress"])["stop"] == "failed"
-    assert fake_responder.instances[0].events == ["start", f"linger:{restart_handoff.PROGRESS_FAILURE_LINGER_SECONDS}"]
+    # It made way for the start that did not work, and says so again once the port is free.
+    assert [instance.events for instance in fake_responder.instances] == [
+        ["start", f"wait:{restart_handoff.RECOVERY_NOTICE_WAIT_SECONDS}", "stop"],
+        ["start", f"linger:{restart_handoff.PROGRESS_FAILURE_LINGER_SECONDS}"],
+    ]
 
 
 def test_upgrade_handoff_reports_an_unexpected_crash_at_the_current_step(

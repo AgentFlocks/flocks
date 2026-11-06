@@ -230,6 +230,7 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
 
     console.print()
     stage_labels = {
+        "checking":    "检查运行环境",
         "fetching":    "下载最新源码包",
         "backing_up":  "备份当前版本",
         "applying":    "应用新版本",

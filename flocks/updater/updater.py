@@ -179,7 +179,10 @@ def _bundled_node_install_dir() -> Path | None:
         node_executable = node_dir / ("node.exe" if sys.platform == "win32" else "bin/node")
         if node_executable.exists():
             return node_dir.resolve()
-    return None
+
+    from flocks.cli.service_manager import node_dir_outside_path
+
+    return node_dir_outside_path()
 
 
 def _windows_paths_match(left: str, right: str) -> bool:
@@ -321,6 +324,31 @@ async def _validate_restart_runtime(
     return None
 
 
+def _frontend_toolchain_refusal(*, chinese: bool) -> str | None:
+    """Why this machine cannot build the WebUI of a source release, else ``None``."""
+    from flocks.cli import service_manager
+
+    script = "scripts/install.ps1" if sys.platform == "win32" else "scripts/install.sh"
+    minimum = service_manager.MIN_NODE_MAJOR
+    if service_manager.resolve_npm_executable() is None:
+        found_zh, found_en = "这台机器上找不到 npm", "npm was not found on this machine"
+    elif not service_manager.node_version_satisfies_requirement():
+        major = service_manager.get_node_major_version()
+        found_zh = f"这台机器上的 Node.js 是 {major}，低于要求的 {minimum}" if major else "这台机器上找不到 Node.js"
+        found_en = f"Node.js {major} is older than the required {minimum}" if major else "Node.js was not found on this machine"
+    else:
+        return None
+    if chinese:
+        return (
+            f"{found_zh}，这个版本的界面要在机器上构建。升级没有开始，服务和程序都没有动，可以接着用。"
+            f"先运行 {script} 装好 Node.js {minimum}+ 和 npm，再重新升级。"
+        )
+    return (
+        f"{found_en}, and this release builds its WebUI on the machine. The upgrade did not start: the service "
+        f"and the program are untouched. Run {script} to install Node.js {minimum}+ and npm, then upgrade again."
+    )
+
+
 def _running_as_systemd_service_main_process() -> bool:
     """Return whether this process is the main process of a systemd service.
 
@@ -403,11 +431,10 @@ def _build_frontend_subprocess_env_for_node_dir(
         env["npm_config_registry"] = npm_registry
 
     if node_dir is not None:
+        from flocks.cli.service_manager import path_with_first
+
         node_bin = str(node_dir if sys.platform == "win32" else node_dir / "bin")
-        current_path = os.environ.get("PATH", "")
-        path_entries = current_path.split(os.pathsep) if current_path else []
-        if node_bin not in path_entries:
-            env["PATH"] = node_bin if not current_path else node_bin + os.pathsep + current_path
+        env["PATH"] = path_with_first(node_bin, os.environ.get("PATH", ""))
 
     return env or None
 
@@ -428,6 +455,56 @@ def _reset_frontend_workspace(webui_dir: Path) -> None:
             _safe_remove(target)
 
 
+def _set_node_modules_aside(webui_dir: Path) -> Path | None:
+    """Rename node_modules out of the way of a build that starts over; the rename is instant, whatever its size."""
+    current = webui_dir / "node_modules"
+    if not current.is_dir():
+        return None
+    aside = webui_dir / "node_modules.before-npm-ci"
+    try:
+        if aside.exists():
+            _safe_remove(aside)
+        current.rename(aside)
+    except OSError as exc:
+        log.warning("updater.frontend.node_modules_aside_failed", {"error": str(exc)})
+        return None
+    return aside
+
+
+def _finish_node_modules_aside(webui_dir: Path, aside: Path | None, *, built: bool) -> None:
+    """Once the build is over: drop what was set aside when it worked, put it back when it did not."""
+    if aside is None:
+        return
+    try:
+        if built:
+            _safe_remove(aside)
+            return
+        current = webui_dir / "node_modules"
+        if current.exists():
+            _safe_remove(current)
+        aside.rename(current)
+    except OSError as exc:
+        log.warning("updater.frontend.node_modules_restore_failed", {"error": str(exc)})
+
+
+class _KeptNodeModules:
+    """What npm ci and a change of npm candidate would empty, for when all of them fail.
+
+    The machine then keeps what it had: the plugin compiler lives there.
+    """
+
+    def __init__(self, webui_dir: Path) -> None:
+        self._webui_dir = webui_dir
+        self._aside: Path | None = None
+
+    def keep(self) -> None:
+        if self._aside is None:
+            self._aside = _set_node_modules_aside(self._webui_dir)
+
+    def finish(self, *, built: bool) -> None:
+        _finish_node_modules_aside(self._webui_dir, self._aside, built=built)
+
+
 async def _build_frontend_workspace(
     webui_dir: Path,
     *,
@@ -444,6 +521,21 @@ async def _build_frontend_workspace(
         )
         return "Frontend dependency install failed: npm was not found."
 
+    kept_node_modules = _KeptNodeModules(webui_dir)
+    built = False
+    try:
+        error = await _build_with_npm_candidates(webui_dir, npm_candidates, kept_node_modules)
+        built = error is None
+        return error
+    finally:
+        kept_node_modules.finish(built=built)
+
+
+async def _build_with_npm_candidates(
+    webui_dir: Path,
+    npm_candidates: Sequence[_FrontendNpmCandidate],
+    kept_node_modules: _KeptNodeModules,
+) -> str | None:
     has_package_lock = (webui_dir / "package-lock.json").exists()
     install_subcommands = ["install"]
     if has_package_lock:
@@ -457,6 +549,8 @@ async def _build_frontend_workspace(
         for install_attempt_index, install_subcommand in enumerate(install_subcommands):
             install_label = f"npm {install_subcommand}"
             install_cmd = [candidate.npm, install_subcommand]
+            if install_subcommand == "ci":
+                kept_node_modules.keep()
             try:
                 code, _, err = await _run_async(
                     install_cmd,
@@ -488,6 +582,7 @@ async def _build_frontend_workspace(
         if not install_succeeded:
             if is_last_attempt:
                 break
+            kept_node_modules.keep()
             _reset_frontend_workspace(webui_dir)
             _record_update_journal(
                 "WARN "
@@ -509,6 +604,7 @@ async def _build_frontend_workspace(
             )
             if is_last_attempt:
                 break
+            kept_node_modules.keep()
             _reset_frontend_workspace(webui_dir)
             _record_update_journal(
                 "WARN "
@@ -527,6 +623,7 @@ async def _build_frontend_workspace(
             final_frontend_error = f"Frontend build failed: {err}"
             if is_last_attempt:
                 break
+            kept_node_modules.keep()
             _reset_frontend_workspace(webui_dir)
             _record_update_journal(
                 "WARN "
@@ -538,14 +635,9 @@ async def _build_frontend_workspace(
         final_frontend_error = None
         break
 
-    if final_frontend_error is not None:
-        return final_frontend_error
-
-    dist_index = webui_dir / "dist" / "index.html"
-    if not dist_index.exists():
-        return "Frontend build output is missing after npm run build."
-
-    return None
+    if final_frontend_error is None and not (webui_dir / "dist" / "index.html").exists():
+        final_frontend_error = "Frontend build output is missing after npm run build."
+    return final_frontend_error
 
 
 async def build_updated_frontend(
@@ -798,6 +890,22 @@ def _upgrade_run_dir() -> Path:
 
 def _upgrade_result_path() -> Path:
     return _upgrade_run_dir() / "upgrade-result.json"
+
+
+def _handoff_failure_message(returncode: int) -> str:
+    """What the finished handoff recorded, for whoever waited for it (``flocks update``)."""
+    try:
+        result = json.loads(_upgrade_result_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        result = {}
+    error = result.get("last_error") if isinstance(result, dict) else None
+    if not error:
+        return f"Upgrade handoff failed with exit code {returncode}. See backend.log for details."
+    if result.get("recovery") == "restored":
+        return f"{error} The installation is as it was before the upgrade."
+    if result.get("recovery") == "failed":
+        return f"{error} The installation could not be brought back by itself; see {_upgrade_result_path()}."
+    return f"{error} See {_upgrade_result_path()}."
 
 
 def _write_upgrade_result_state(payload: dict[str, Any]) -> None:
@@ -2627,6 +2735,21 @@ async def perform_update(
             yield UpdateProgress(stage="error", message=blocker, success=False)
             return
 
+    # A release that ships only its sources builds its WebUI on this machine, once the service
+    # is down and the old WebUI gone. Whether it can is known now: say so while nothing changed.
+    installed_tree = install_root if skip_core_replace else plan.source_root
+    if not plan.prebuilt and (installed_tree / "webui" / "package.json").is_file():
+        toolchain_refusal = _frontend_toolchain_refusal(
+            chinese=(locale or "").lower().startswith("zh") or profile.region == _UPDATE_REGION_CN,
+        )
+        if toolchain_refusal is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            log.warning("updater.frontend.toolchain_refused", {"reason": toolchain_refusal})
+            _record_update_journal(f"ERROR {toolchain_refusal}")
+            yield UpdateProgress(stage="checking", message="Checking Node.js and npm...")
+            yield UpdateProgress(stage="error", message=toolchain_refusal, success=False)
+            return
+
     sync_timeout = _dependency_sync_timeout_seconds()
 
     # ------------------------------------------------------------------ #
@@ -2696,7 +2819,7 @@ async def perform_update(
 
         yield UpdateProgress(
             stage="applying",
-            message=f"Staging v{latest_tag} for handoff...",
+            message=f"Staging {_version_label(latest_tag)} for handoff...",
         )
 
     try:
@@ -2768,11 +2891,7 @@ async def perform_update(
         if wait_for_handoff:
             returncode = await asyncio.to_thread(handoff_process.wait)
             if returncode != 0:
-                yield UpdateProgress(
-                    stage="error",
-                    message=f"Upgrade handoff failed with exit code {returncode}. See backend.log for details.",
-                    success=False,
-                )
+                yield UpdateProgress(stage="error", message=_handoff_failure_message(returncode), success=False)
                 return
             yield UpdateProgress(
                 stage="done",

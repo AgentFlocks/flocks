@@ -2244,7 +2244,8 @@ async def test_build_frontend_workspace_retries_npm_ci_before_switching_candidat
             partial_modules.mkdir(parents=True, exist_ok=True)
             return 1, "", "install failed"
         if cmd == [bundled_npm, "ci"]:
-            assert (webui_dir / "node_modules").exists()
+            # Kept for a failed npm ci to fall back on; npm ci itself starts from nothing.
+            assert (webui_dir / "node_modules.before-npm-ci").exists()
             return 0, "", ""
         if cmd == [bundled_npm, "run", "build"]:
             dist_dir = webui_dir / "dist"
@@ -2385,7 +2386,7 @@ async def test_frontend_build_retries_system_npm_after_bundled_timeouts(
             (bundled_modules / "bundled.txt").write_text("bundled", encoding="utf-8")
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
         if cmd == [str(bundled_npm), "ci"]:
-            assert (install_webui / "node_modules").exists()
+            assert (install_webui / "node_modules.before-npm-ci").exists()
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
         if cmd == [system_npm, "install"]:
             assert not (install_webui / "node_modules").exists()

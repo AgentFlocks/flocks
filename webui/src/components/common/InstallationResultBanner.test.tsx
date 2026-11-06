@@ -12,7 +12,7 @@ const restored = {
   title: '升级未完成', message: '已恢复原来的 SQLite 安装，原数据已保留，可以继续使用。',
   retry_hint: '处理原因后重新运行原升级命令。', detail: '外部数据库安装包校验失败',
 };
-beforeEach(() => { vi.clearAllMocks(); auth.user.role = 'admin'; getResult.mockResolvedValue(null); });
+beforeEach(() => { vi.clearAllMocks(); window.localStorage.clear(); auth.user.role = 'admin'; getResult.mockResolvedValue(null); });
 
 describe('installation recovery notice', () => {
   it('shows that the old installation is usable, preserves detail, and can be dismissed', async () => {
@@ -25,6 +25,23 @@ describe('installation recovery notice', () => {
     expect(screen.queryByRole('alert')).toBeNull();
     getResult.mockResolvedValue({ ...restored, id: 'attempt-2' });
     fireEvent.focus(window);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+  });
+
+  it('stays closed across page loads once closed, until there is a newer record', async () => {
+    getResult.mockResolvedValue(restored);
+    const first = render(<InstallationResultBanner />);
+    await screen.findByRole('alert');
+    fireEvent.click(screen.getByRole('button', { name: '关闭安装提示' }));
+    first.unmount();
+
+    const second = render(<InstallationResultBanner />);
+    await waitFor(() => expect(getResult).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('alert')).toBeNull();
+    second.unmount();
+
+    getResult.mockResolvedValue({ ...restored, id: 'attempt-2' });
+    render(<InstallationResultBanner />);
     expect(await screen.findByRole('alert')).toBeInTheDocument();
   });
 
