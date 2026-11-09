@@ -23,6 +23,12 @@ from flocks.audit import emit_audit_event
 from flocks.auth.context import AuthUser
 from flocks.utils.log import Log
 from flocks.provider.base_url import BaseURLValidationError, validate_provider_base_url
+from flocks.provider.credential import (
+    UNSENDABLE_API_KEY_MESSAGE,
+    UNSENDABLE_HEADER_MESSAGE,
+    api_key_is_sendable,
+    is_unsendable_header_error,
+)
 from flocks.provider.provider import BaseProvider, Provider, ModelInfo as ProviderModelInfo
 from flocks.security.secrets import SecretManager
 from flocks.server.auth import get_request_ip, get_request_user_agent, require_admin, require_user
@@ -2054,6 +2060,8 @@ async def set_provider_credentials(
                 "base_url": request.base_url,
             })
         else:
+            if not api_key_is_sendable(effective_api_key):
+                raise HTTPException(status_code=400, detail=UNSENDABLE_API_KEY_MESSAGE)
             secrets.set(secret_id, effective_api_key)
             if _is_placeholder_api_key(effective_api_key):
                 masked = _NO_API_KEY_LOG_MARKER
@@ -2718,6 +2726,8 @@ def _credential_test_error_code(error: Exception) -> str:
     import httpx
     from openai import APIConnectionError, APITimeoutError
 
+    if is_unsendable_header_error(error):
+        return "authentication_failed"
     if isinstance(error, (APITimeoutError, httpx.TimeoutException, TimeoutError)):
         return "connection_timeout"
     if isinstance(error, (APIConnectionError, httpx.TransportError)):
@@ -2770,6 +2780,12 @@ def _without_credential(text: str, api_key: Optional[str]) -> str:
     if api_key and len(api_key) >= 4:
         return text.replace(api_key, "***")
     return text
+
+
+def _credential_test_error_text(error: Exception, api_key: Optional[str]) -> str:
+    if is_unsendable_header_error(error):
+        return UNSENDABLE_HEADER_MESSAGE
+    return _without_credential(str(error), api_key)
 
 
 async def _test_provider_credentials_impl(
@@ -2952,7 +2968,7 @@ async def _test_provider_credentials_impl(
                 return response
             except Exception as chat_err:
                 latency = int((time.time() - start) * 1000)
-                error_msg = _without_credential(str(chat_err), api_key)
+                error_msg = _credential_test_error_text(chat_err, api_key)
                 response = {
                     "success": False,
                     "message": f"API 调用失败: {error_msg}",
@@ -3377,7 +3393,7 @@ async def _test_provider_credentials_impl(
             await _save_api_service_status(provider_id, response)
             return response
     except Exception as e:
-        error_msg = _without_credential(str(e), api_key)
+        error_msg = _credential_test_error_text(e, api_key)
         return {
             "success": False,
             "message": f"Credentials test failed: {error_msg}",

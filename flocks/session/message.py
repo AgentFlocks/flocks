@@ -15,8 +15,10 @@ import json
 import time
 import uuid
 from collections import OrderedDict
+from contextlib import asynccontextmanager
+from itertools import islice
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Union
+from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Union
 from datetime import datetime, timezone
 from urllib.parse import quote
 from pydantic import BaseModel, Field, ConfigDict
@@ -35,30 +37,65 @@ class MessageCacheInvalidatedError(RuntimeError):
     """Raised when a full cache load cannot stabilize after invalidation."""
 
 
+class _SessionLock(asyncio.Lock):
+    """``asyncio.Lock`` that also knows whether a task holds it or waits for it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._users = 0
+
+    @property
+    def in_use(self) -> bool:
+        return self._users > 0
+
+    async def acquire(self) -> bool:
+        self._users += 1
+        try:
+            return await super().acquire()
+        except BaseException:
+            self._users -= 1
+            raise
+
+    def release(self) -> None:
+        super().release()
+        self._users -= 1
+
+
 class _SessionLockManager:
-    """Per-session asyncio.Lock manager with LRU eviction.
+    """Per-session lock manager with LRU eviction.
 
     Replaces the two global locks (``_message_lock`` / ``_parts_lock``) so that
     operations on different sessions never block each other.
+
+    A lock in use is not forgotten, whatever the cap: the next caller would get
+    a second lock for the same session and run alongside the holder.
     """
 
     _MAX_LOCKS = 200
 
     def __init__(self) -> None:
-        self._locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
+        self._locks: OrderedDict[str, _SessionLock] = OrderedDict()
 
-    def get(self, session_id: str) -> asyncio.Lock:
+    def get(self, session_id: str) -> _SessionLock:
         if session_id in self._locks:
             self._locks.move_to_end(session_id)
             return self._locks[session_id]
-        while len(self._locks) >= self._MAX_LOCKS:
-            self._locks.popitem(last=False)
-        lock = asyncio.Lock()
+        excess = len(self._locks) - self._MAX_LOCKS + 1
+        if excess > 0:
+            idle = (sid for sid, lock in self._locks.items() if not lock.in_use)
+            for stale_id in list(islice(idle, excess)):
+                del self._locks[stale_id]
+        lock = _SessionLock()
         self._locks[session_id] = lock
         return lock
 
+    def in_use(self, session_id: str) -> bool:
+        lock = self._locks.get(session_id)
+        return lock is not None and lock.in_use
+
     def discard(self, session_id: str) -> None:
-        self._locks.pop(session_id, None)
+        if not self.in_use(session_id):
+            self._locks.pop(session_id, None)
 
     def clear(self) -> None:
         self._locks.clear()
@@ -542,15 +579,31 @@ class Message:
             _session_locks.discard(session_id)
 
     @classmethod
+    def _make_room_in_lru(cls) -> None:
+        """Evict the oldest sessions until one more fits.
+
+        A session whose lock is held or awaited stays, even past the limit: its
+        load would be thrown away and retried, and a pass over every session can
+        do that until the load gives up.  The limit holds again once those
+        callers are done.
+        """
+        if len(cls._lru) < cls._MAX_CACHED_SESSIONS:
+            return
+        for evict_id in list(cls._lru):
+            if len(cls._lru) < cls._MAX_CACHED_SESSIONS:
+                return
+            if _session_locks.in_use(evict_id):
+                continue
+            cls._drop_cached_session(evict_id)
+            log.debug("message.cache.evicted", {"session_id": evict_id})
+
+    @classmethod
     def _touch_lru(cls, session_id: str) -> None:
         if session_id in cls._lru:
             cls._lru.move_to_end(session_id)
             return
 
-        while len(cls._lru) >= cls._MAX_CACHED_SESSIONS:
-            evict_id, _ = cls._lru.popitem(last=False)
-            cls._drop_cached_session(evict_id)
-            log.debug("message.cache.evicted", {"session_id": evict_id})
+        cls._make_room_in_lru()
         cls._lru[session_id] = True
 
     @classmethod
@@ -729,6 +782,31 @@ class Message:
                 return
 
     @classmethod
+    @asynccontextmanager
+    async def _locked_cache(cls, session_id: str) -> AsyncIterator[None]:
+        """Hold the session lock with the session's cache loaded.
+
+        Loading first and locking second leaves a gap: a delete or an
+        invalidation that runs while this caller queues for the lock drops the
+        cache, and a writer going on from there would store the history as if it
+        were empty.  So the check is made again once the lock is held.
+        """
+        for _attempt in range(cls._CACHE_RELOAD_RETRY_LIMIT):
+            await cls._ensure_cache(session_id)
+            lock = _session_locks.get(session_id)
+            await lock.acquire()
+            if session_id in cls._parts_fully_loaded and cls._has_message_cache(session_id):
+                try:
+                    yield
+                finally:
+                    lock.release()
+                return
+            lock.release()
+        raise MessageCacheInvalidatedError(
+            f"Message cache for {session_id} was invalidated during load"
+        )
+
+    @classmethod
     async def _ensure_message_cache(cls, session_id: str) -> None:
         """Ensure message metadata is cached without loading every part.
 
@@ -750,10 +828,7 @@ class Message:
             if session_id in cls._lru:
                 cls._drop_cached_session(session_id, discard_lock=False)
 
-            while len(cls._lru) >= cls._MAX_CACHED_SESSIONS:
-                evict_id, _ = cls._lru.popitem(last=False)
-                cls._drop_cached_session(evict_id)
-                log.debug("message.cache.evicted", {"session_id": evict_id})
+            cls._make_room_in_lru()
 
             storage_key = f"{cls._MESSAGE_PREFIX}:{session_id}"
             stored_data = await Storage.get(storage_key)
@@ -1599,9 +1674,7 @@ class Message:
         Returns:
             Message info
         """
-        await cls._ensure_cache(session_id)
-        
-        async with _session_locks.get(session_id):
+        async with cls._locked_cache(session_id):
             message_id = kwargs.pop("id", None) or Identifier.ascending("message")
             
             # Create timestamps if not provided
@@ -1856,9 +1929,7 @@ class Message:
         part = cls._cap_tool_part_output(part)
         part = cls._prepare_tool_output_cache(part)
 
-        await cls._ensure_cache(session_id)
-        
-        async with _session_locks.get(session_id):
+        async with cls._locked_cache(session_id):
             if session_id not in cls._parts_cache:
                 cls._parts_cache[session_id] = {}
             if message_id not in cls._parts_cache[session_id]:
@@ -1947,9 +2018,7 @@ class Message:
         Returns:
             The upserted message info
         """
-        await cls._ensure_cache(session_id)
-
-        async with _session_locks.get(session_id):
+        async with cls._locked_cache(session_id):
             if session_id not in cls._messages_cache:
                 cls._messages_cache[session_id] = []
 
@@ -2006,9 +2075,7 @@ class Message:
         Returns:
             True if a fallback part was created, False if one already existed
         """
-        await cls._ensure_cache(session_id)
-
-        async with _session_locks.get(session_id):
+        async with cls._locked_cache(session_id):
             existing_parts = cls._parts_cache.get(session_id, {}).get(message_id, [])
             has_text = any(
                 getattr(p, "type", None) == "text" and getattr(p, "text", "")
@@ -2206,9 +2273,7 @@ class Message:
         Returns:
             True if deleted
         """
-        await cls._ensure_cache(session_id)
-        
-        async with _session_locks.get(session_id):
+        async with cls._locked_cache(session_id):
             idx = cls._msg_id_index.get(session_id, {}).get(message_id)
             if idx is None:
                 return False
@@ -2460,9 +2525,7 @@ class Message:
         Returns:
             True if archived
         """
-        await cls._ensure_cache(session_id)
-
-        async with _session_locks.get(session_id):
+        async with cls._locked_cache(session_id):
             messages = cls._messages_cache.get(session_id, [])
             for i, message in enumerate(messages):
                 if message.id == message_id:
@@ -2842,9 +2905,7 @@ class Message:
         Returns:
             Updated message or None
         """
-        await cls._ensure_cache(session_id)
-        
-        async with _session_locks.get(session_id):
+        async with cls._locked_cache(session_id):
             messages = cls._messages_cache.get(session_id, [])
             message = None
             msg_index = -1
@@ -2903,9 +2964,7 @@ class Message:
         Returns:
             Updated message or None
         """
-        await cls._ensure_cache(session_id)
-        
-        async with _session_locks.get(session_id):
+        async with cls._locked_cache(session_id):
             message = next(
                 (m for m in cls._messages_cache.get(session_id, []) if m.id == message_id),
                 None,
@@ -2956,9 +3015,7 @@ class Message:
         Returns:
             Updated part or None
         """
-        await cls._ensure_cache(session_id)
-        
-        async with _session_locks.get(session_id):
+        async with cls._locked_cache(session_id):
             parts = cls._parts_cache.get(session_id, {}).get(message_id, [])
             
             for i, part in enumerate(parts):
@@ -3008,9 +3065,7 @@ class Message:
         Returns:
             True if removed
         """
-        await cls._ensure_cache(session_id)
-        
-        async with _session_locks.get(session_id):
+        async with cls._locked_cache(session_id):
             parts = cls._parts_cache.get(session_id, {}).get(message_id, [])
             
             for i, part in enumerate(parts):

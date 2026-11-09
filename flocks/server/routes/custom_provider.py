@@ -19,7 +19,11 @@ from pydantic import BaseModel, Field, StrictBool
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.provider.base_url import BaseURLValidationError, validate_provider_base_url
-from flocks.provider.credential import get_api_key
+from flocks.provider.credential import (
+    UNSENDABLE_API_KEY_MESSAGE,
+    api_key_is_sendable,
+    get_api_key,
+)
 from flocks.provider.provider import (
     BaseProvider,
     ModelCapabilities,
@@ -202,6 +206,9 @@ async def create_provider(body: CreateProviderReq, _admin: object = Depends(requ
         base_url = validate_provider_base_url(body.base_url)
     except BaseURLValidationError as exc:
         raise HTTPException(422, str(exc)) from exc
+    supplied_key = (body.api_key or "").strip() or None
+    if supplied_key and not api_key_is_sendable(supplied_key):
+        raise HTTPException(422, UNSENDABLE_API_KEY_MESSAGE)
 
     # Check if already exists
     if ConfigWriter.get_provider_raw(pid) is not None:
@@ -230,12 +237,12 @@ async def create_provider(body: CreateProviderReq, _admin: object = Depends(requ
     try:
         from flocks.security import get_secret_manager
         secrets = get_secret_manager()
-        secrets.set(f"{pid}_llm_key", body.api_key or "not-needed")
+        secrets.set(f"{pid}_llm_key", supplied_key or "not-needed")
     except Exception as e:
         log.warning("custom_provider.secret_save_failed", {"id": pid, "error": str(e)})
 
     # Register in runtime
-    _register_provider(pid, body.name, base_url, body.api_key)
+    _register_provider(pid, body.name, base_url, supplied_key)
 
     log.info("custom_provider.created", {"id": pid})
     return ProviderResp(

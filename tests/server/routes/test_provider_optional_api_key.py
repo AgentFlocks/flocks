@@ -67,6 +67,49 @@ def patched_runtime(monkeypatch: pytest.MonkeyPatch):
     }
 
 
+class TestUnsendableApiKey:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("api_key", ["请在这里填写密钥", "sk-全角ａｂｃ", "sk-abc\ndef", "sk\u200b-abc"])
+    async def test_key_that_cannot_be_sent_is_refused_before_anything_is_saved(
+        self, patched_runtime, api_key
+    ):
+        with pytest.raises(HTTPException) as caught:
+            await provider_routes.set_provider_credentials(
+                "custom-local-gateway",
+                provider_routes.ProviderCredentialRequest(api_key=api_key),
+            )
+
+        assert caught.value.status_code == 400
+        assert caught.value.detail == provider_routes.UNSENDABLE_API_KEY_MESSAGE
+        patched_runtime["secrets"].set.assert_not_called()
+        provider_routes.ConfigWriter.update_provider_field.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stored_bad_key_does_not_block_other_changes(self, patched_runtime):
+        """A blank key means "keep the stored one": only a new key is checked."""
+        patched_runtime["secrets"].get.return_value = "请在这里填写密钥"
+
+        result = await provider_routes.set_provider_credentials(
+            "custom-local-gateway",
+            provider_routes.ProviderCredentialRequest(base_url="http://127.0.0.1:8317/v1"),
+        )
+
+        assert result["success"] is True
+        patched_runtime["secrets"].set.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ordinary_key_with_symbols_is_still_saved(self, patched_runtime):
+        result = await provider_routes.set_provider_credentials(
+            "custom-local-gateway",
+            provider_routes.ProviderCredentialRequest(api_key="  sk-AbC_123.~+/=|email@example.test  "),  # secret-guard: allow
+        )
+
+        assert result["success"] is True
+        patched_runtime["secrets"].set.assert_called_once_with(
+            "custom-local-gateway_llm_key", "sk-AbC_123.~+/=|email@example.test"  # secret-guard: allow
+        )
+
+
 class TestOptionalApiKey:
     @pytest.mark.asyncio
     async def test_saving_credentials_invalidates_resolved_config_cache(

@@ -1008,6 +1008,44 @@ class TestTestCredentialsHideTheKeyInErrors:
         assert "***" in result["error"]
 
     @pytest.mark.asyncio
+    async def test_key_that_cannot_be_sent_is_reported_as_a_bad_key(self):
+        import httpx
+
+        from flocks.server.routes.provider import (
+            UNSENDABLE_HEADER_MESSAGE,
+            test_provider_credentials,
+        )
+
+        key = "请在这里填写您的模型接口访问密钥吧"
+
+        async def real_client_refusal(*_args, **_kwargs):
+            httpx.Headers({"Authorization": f"Bearer {key}"})
+
+        provider = MagicMock()
+        provider.chat = real_client_refusal
+        model = MagicMock()
+        model.id = "gateway-model"
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = key
+
+        with (
+            patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+            patch(_PATCH_CONFIG_GET, new_callable=AsyncMock, return_value=MagicMock()),
+            patch(_PATCH_PROVIDER) as mock_provider_cls,
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+            mock_provider_cls.apply_config = AsyncMock()
+            mock_provider_cls.get.return_value = provider
+            mock_provider_cls.list_models.return_value = [model]
+
+            result = await test_provider_credentials("gateway")
+
+        assert result["success"] is False
+        assert result["code"] == "authentication_failed"
+        assert result["error"] == UNSENDABLE_HEADER_MESSAGE
+        assert "ascii" not in result["message"]
+
+    @pytest.mark.asyncio
     async def test_echoed_key_is_hidden_when_the_test_itself_fails(self):
         from flocks.server.routes.provider import test_provider_credentials
 

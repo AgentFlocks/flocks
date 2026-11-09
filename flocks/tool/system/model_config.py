@@ -170,12 +170,17 @@ async def add_provider_tool(
 ) -> ToolResult:
     try:
         from flocks.config.config_writer import ConfigWriter
+        from flocks.provider.credential import UNSENDABLE_API_KEY_MESSAGE, api_key_is_sendable
         from flocks.provider.provider import Provider, ProviderConfig, ModelInfo
         from flocks.security import get_secret_manager
 
         name = (name or "").strip()
         if not name:
             return ToolResult(success=False, error="Provider name is required.")
+
+        supplied_key = (api_key or "").strip()
+        if not api_key_is_sendable(supplied_key):
+            return ToolResult(success=False, error=UNSENDABLE_API_KEY_MESSAGE)
 
         pid = "custom-" + name.lower().replace(" ", "-").replace("_", "-")
 
@@ -200,10 +205,10 @@ async def add_provider_tool(
         ConfigWriter.add_provider(pid, config_dict)
 
         secrets = get_secret_manager()
-        secrets.set(f"{pid}_api_key", api_key)
+        secrets.set(f"{pid}_api_key", supplied_key)
 
         from flocks.server.routes.custom_provider import _register_provider
-        _register_provider(pid, name, base_url, api_key)
+        _register_provider(pid, name, base_url, supplied_key)
 
         _publish_provider_event(pid, "added")
 
@@ -213,7 +218,7 @@ async def add_provider_tool(
             output=(
                 f"已成功添加供应商 {name}（ID: {pid}）。\n"
                 f"Base URL: {base_url}\n"
-                f"API Key: {_mask_api_key(api_key)}\n"
+                f"API Key: {_mask_api_key(supplied_key)}\n"
                 f"接下来请使用 add_model 工具为该供应商添加模型。"
             ),
         )
