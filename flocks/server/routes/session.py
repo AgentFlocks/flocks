@@ -754,19 +754,41 @@ async def _get_session_by_id_unfiltered(session_id: str) -> Optional[SessionMode
     return await Session.get_by_id_unfiltered(session_id)
 
 
+def _working_directory_unavailable_reason(directory: Path) -> Optional[str]:
+    """Why *directory* cannot be a session cwd, or ``None`` when it can.
+
+    ``Path.is_dir()`` is not a safe predicate on Python 3.12: it only turns
+    "not found" style errors into ``False``.  When the path exists but a parent
+    directory denies search (x) permission, as happens after an install moves
+    to another service account, ``stat()`` raises ``PermissionError``.  That
+    means "unavailable", not a failed request.
+    """
+
+    try:
+        if not directory.is_dir():
+            return "missing"
+    except OSError as exc:
+        return exc.strerror or type(exc).__name__
+    if not os.access(directory, os.R_OK | os.X_OK):
+        return "unreadable"
+    return None
+
+
 async def _resolve_session_working_directory(session: SessionModel) -> str:
     """Keep a valid historical cwd, otherwise use the request context."""
 
+    stored_unavailable_reason = "unset"
     if session.directory:
         directory = Path(session.directory).expanduser()
-        if directory.is_dir() and os.access(directory, os.R_OK | os.X_OK):
+        stored_unavailable_reason = _working_directory_unavailable_reason(directory)
+        if stored_unavailable_reason is None:
             return str(directory.resolve())
 
     from flocks.project.instance import Instance
 
     fallback_directory = Instance.get_directory() or os.getcwd()
     fallback_path = Path(fallback_directory).expanduser()
-    if not fallback_path.is_dir() or not os.access(fallback_path, os.R_OK | os.X_OK):
+    if _working_directory_unavailable_reason(fallback_path) is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="The session directory and current request directory are unavailable",
@@ -778,6 +800,7 @@ async def _resolve_session_working_directory(session: SessionModel) -> str:
         {
             "sessionID": session.id,
             "stored_directory": session.directory,
+            "reason": stored_unavailable_reason,
             "fallback_directory": fallback_directory,
         },
     )

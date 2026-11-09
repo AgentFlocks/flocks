@@ -316,6 +316,43 @@ class TestExceptionToErrorDict:
         assert result["data"]["isRetryable"] is True
         assert result["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
 
+    def test_key_that_cannot_be_sent_is_explained_and_not_retried(self):
+        runner = _make_runner()
+        with pytest.raises(UnicodeEncodeError) as caught:
+            httpx.Headers({"Authorization": "Bearer 请在这里填写您的模型接口访问密钥吧"})
+
+        result = runner._exception_to_error_dict(caught.value)
+
+        assert result["data"]["displayMessage"] == runner_mod.UNSENDABLE_HEADER_MESSAGE
+        assert result["data"]["isRetryable"] is False
+        assert runner_mod.SessionRetry.retryable(result) is None
+
+    def test_other_unicode_errors_keep_their_own_text(self):
+        runner = _make_runner()
+        with pytest.raises(UnicodeEncodeError) as caught:
+            "中文".encode("ascii")
+
+        result = runner._exception_to_error_dict(caught.value)
+
+        assert "displayMessage" not in result["data"]
+        assert "ascii" in result["data"]["message"]
+
+    def test_failed_step_does_not_log_the_header_holding_the_key(self):
+        key = "中文sk-real-looking-secret-value"
+        with pytest.raises(UnicodeEncodeError) as caught:
+            httpx.Headers({"Authorization": f"Bearer {key}"})
+
+        context = SessionRunner._error_log_context(caught.value)
+
+        assert context["error_type"] == "UnicodeEncodeError"
+        assert not any(key in str(value) for value in context.values())
+        assert "real-looking" not in str(context)
+
+    def test_failed_step_logs_the_repr_of_other_errors(self):
+        context = SessionRunner._error_log_context(ValueError("boom"))
+
+        assert context["error_repr"] == "ValueError('boom')"
+
     def test_stream_tool_arguments_truncated_exception_is_not_retryable(self):
         runner = _make_runner()
         exc = StreamToolArgumentsTruncatedError(

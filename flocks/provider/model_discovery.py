@@ -21,6 +21,7 @@ import httpx
 
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
+from flocks.provider.credential import UNSENDABLE_API_KEY_MESSAGE, api_key_is_sendable
 from flocks.provider.model_catalog import get_raw_catalog
 from flocks.provider.provider import Provider
 from flocks.provider.sdk.openai_base import _coerce_bool, resolve_verify_ssl
@@ -550,6 +551,8 @@ async def discover_models(
                 url = _endpoint(_validate_base_url(url), protocol)
                 if not key and not _no_auth_allowed(provider_id, raw, protocol):
                     raise DiscoveryError("missing_credentials", "Configure credentials before fetching models.")
+                if key and not api_key_is_sendable(key):
+                    raise DiscoveryError("authentication_failed", UNSENDABLE_API_KEY_MESSAGE)
                 headers = {"Accept": "application/json", "Accept-Encoding": "identity"}
                 if key and key not in {"not-needed", "ollama"}:
                     headers[

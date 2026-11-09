@@ -251,6 +251,8 @@ class SessionRevertManager:
         
         # Revert file changes
         if patches:
+            if not revert_info.get("snapshot"):
+                raise ValueError("Cannot revert files without a recovery snapshot")
             await Snapshot.revert(project_id, worktree, patches)
         
         # Get diff if we have a snapshot
@@ -302,7 +304,9 @@ class SessionRevertManager:
         
         # Restore files from snapshot
         if session.revert.snapshot:
-            await Snapshot.restore(project_id, worktree, session.revert.snapshot)
+            if not await Snapshot.restore(project_id, worktree, session.revert.snapshot):
+                log.warn("unrevert.restore_failed", {"session_id": session_id})
+                raise ValueError("Failed to restore the recovery snapshot")
         
         # Clear revert state
         updated_session = await Session.clear_revert(project_id, session_id)

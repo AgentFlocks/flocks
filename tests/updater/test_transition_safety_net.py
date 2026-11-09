@@ -472,3 +472,22 @@ def test_ts22_the_interface_is_built_after_the_service_is_back_and_no_lock_held(
     monkeypatch.setattr(watchdog, "go_back", lambda *a: True)
     monkeypatch.setattr(watchdog, "rebuild_interface", lambda *a: (_ for _ in ()).throw(OSError("no room")))
     assert watchdog.main(["123"]) == 0
+
+
+def test_ts23_starting_tries_again_while_a_command_holds_the_lock(watchdog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    runs: list[list[str]] = []
+
+    class Done:
+        def __init__(self, code):
+            self.returncode = code
+
+    def run(command, **_kwargs):
+        runs.append(command)
+        return Done(1 if len(runs) < 3 else 0)
+
+    answered = iter([False, False, True])
+    monkeypatch.setattr(watchdog.subprocess, "run", run)
+    monkeypatch.setattr(watchdog.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(watchdog, "answers", lambda _h, _p: next(answered))
+    assert watchdog.start_service("/p", tmp_path, "127.0.0.1", 5173) is True
+    assert len(runs) == 3

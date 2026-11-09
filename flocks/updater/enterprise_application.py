@@ -1,5 +1,6 @@
 """
-The application for an enterprise licence from the Flocks Pro page of an open install that has none.
+The application for an enterprise licence from the Flocks Pro page of an open install that has none it
+can go by.
 
 The page fills a form; Console (``POST /v1/upgrade-requests``) records it for review under the
 Console account signed in here. Console lists applications to its operators only, so this install
@@ -17,6 +18,10 @@ Taking it writes the licence where the Python enterprise package kept its own
 on the machine is one with a licence: the page moves it to the enterprise edition as it moves one that
 had the Python package (flocks.updater.enterprise), and the enterprise core reads that file as the
 Python package wrote it.
+
+A licence no longer valid is no licence here: the machine may apply again, and the licence taken
+replaces the old one. One Console renewed needs none of that: a sync with Console brings the renewal
+into the file (sync_licence), as the hourly heartbeat does.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import tempfile
 import time
 from datetime import UTC, datetime
@@ -33,6 +39,7 @@ from uuid import uuid4
 
 import httpx
 
+from flocks.console.previous_licence import find_licence_file, licence_token
 from flocks.storage.storage import Storage
 from flocks.updater import enterprise
 from flocks.updater.enterprise import EnterpriseUpgradeError
@@ -50,6 +57,8 @@ _PENDING_KEY = "console:upgrade_request_pending"
 _REFRESH_SECONDS = 8
 #: Waiting for Console's review, or approved and not yet taken: asked for again on every listing.
 OPEN_STATES = frozenset({"pending", "reviewing", "approved"})
+#: Console holds one of these per node; an approved one takes up no such place.
+REVIEW_STATES = frozenset({"pending", "reviewing"})
 _RESEND = "申请可能已经交上去了，再提交一次会找回这份申请，不会重复"
 #: What Console lets the applicant withdraw.
 WITHDRAWABLE_STATES = frozenset({"pending", "reviewing", "approved"})
@@ -117,7 +126,8 @@ def _console_error(exc: httpx.HTTPError, doing: str) -> EnterpriseUpgradeError:
         except ValueError:
             detail = None
         return EnterpriseUpgradeError(f"{doing}：Console 回答 HTTP {code}{f'（{detail}）' if detail else ''}")
-    return EnterpriseUpgradeError(f"{doing}：连不上 Console（{exc}）")
+    # A timeout has no words of its own.
+    return EnterpriseUpgradeError(f"{doing}：连不上 Console（{str(exc) or type(exc).__name__}）")
 
 
 async def _console_failure(exc: httpx.HTTPError, doing: str, session: dict[str, Any]) -> EnterpriseUpgradeError:
@@ -144,7 +154,35 @@ def _merge(record: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def public(record: dict[str, Any], licence_id: str = "") -> dict[str, Any]:
+def _on_machine() -> tuple[str, str]:
+    """The licence this machine goes by, and the token in its licence file, whatever that one is worth."""
+    found = find_licence_file()
+    return enterprise.standing_licence_id(), licence_token(found[1])[0] if found else ""
+
+
+def _can_take(record: dict[str, Any], standing: str, held_token: str) -> bool:
+    """Approved with its licence, and this machine has none it can go by. Not the token it already
+    holds: that gains nothing. Its date is no reason against: a renewal Console signed does not show on
+    the application, and once the token is on the machine a sync brings it in."""
+    token = str(record.get("activate_key") or "").strip()  # secret-guard: allow 误报：变量名，取值来自 Console 的审批结果
+    return (
+        _status(record) in {"approved", "activated"} and bool(token) and bool(record.get("license_id"))
+        and not standing and token != held_token
+    )
+
+
+def _licence_over(record: dict[str, Any]) -> bool:
+    return enterprise.licence_lapsed(record.get("license_status"), record.get("expires_at"))
+
+
+def _in_the_way(record: dict[str, Any], standing: str, held_token: str) -> bool:
+    """One application at a time: one under review, or a licence to take that is good by its own
+    terms. One over by them may be dead or renewed, nobody here can tell, and the machine must be able
+    to apply past it."""
+    return _status(record) in REVIEW_STATES or (_can_take(record, standing, held_token) and not _licence_over(record))
+
+
+def public(record: dict[str, Any], licence_id: str = "", held_token: str = "") -> dict[str, Any]:
     """What the page shows of an application: everything but the licence token."""
     details = record.get("details") if isinstance(record.get("details"), dict) else {}
     status = _status(record)
@@ -165,10 +203,9 @@ def public(record: dict[str, Any], licence_id: str = "") -> dict[str, Any]:
         "updated_at": record.get("updated_at"),
         # Approved and not taken here can still be withdrawn, as Console allows.
         "can_withdraw": status in WITHDRAWABLE_STATES and not (licence_id and licence_id == issued),
-        # Approved with its licence, and this machine has none yet (taken here once already but
-        # gone from the machine, it can be taken again).
-        "can_take": status in {"approved", "activated"} and bool(record.get("activate_key")) and bool(issued)
-        and not licence_id,
+        "can_take": _can_take(record, licence_id, held_token),
+        # Over by the terms it was issued with: it may be taken, and stands in no new application's way.
+        "licence_over": _licence_over(record),
     }
 
 
@@ -187,7 +224,7 @@ async def applications() -> dict[str, Any]:
     address, not signed in, unreachable, too slow) the kept ones, with why; and whether a
     submission still waits for an answer."""
     async with _lock:
-        licence_id = enterprise.previous_licence_id()
+        licence_id, held_token = await asyncio.to_thread(_on_machine)
         ids = list(reversed(await _known_ids()))
         records = [r for r in [await Storage.get(_record_key(i)) for i in ids] if isinstance(r, dict)]
         note: str | None = None
@@ -218,7 +255,7 @@ async def applications() -> dict[str, Any]:
             except TimeoutError:
                 note = f"Console 回答太慢（超过 {_REFRESH_SECONDS} 秒），先显示这台机器记下的状态"
         pending = isinstance(await Storage.get(_PENDING_KEY), dict)
-    return {"items": [public(r, licence_id) for r in records], "note": note, "pending_submission": pending}
+    return {"items": [public(r, licence_id, held_token) for r in records], "note": note, "pending_submission": pending}
 
 
 async def apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
@@ -230,10 +267,11 @@ async def apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
 async def _apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
     if not enterprise.available():
         raise EnterpriseUpgradeError("这台机器不能在这里申请：它已经是企业版，或者不是 Linux / macOS")
-    if enterprise.previous_licence_id():
+    standing, held_token = await asyncio.to_thread(_on_machine)
+    if standing:
         raise EnterpriseUpgradeError("这台机器已经有企业版授权，直接升级即可")
     for kept in [await Storage.get(_record_key(i)) for i in await _known_ids()]:
-        if isinstance(kept, dict) and _status(kept) in OPEN_STATES:
+        if isinstance(kept, dict) and _in_the_way(kept, standing, held_token):
             raise EnterpriseUpgradeError("已经有一份申请在审核或等着启用，处理完再申请")
     base, session = _console_base(), await _console_session()
     try:
@@ -250,6 +288,8 @@ async def _apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
         "product": "Flocks Pro",
         "license_type": form["license_type"],
         "request_kind": "new",
+        # The licence no longer valid this one is to take the place of, for whoever reviews it.
+        "replaces_license_id": enterprise.previous_licence_id() or None,
         "company": form["company"],
         "enterprise_name": form["company"],
         "applicant_name": form["applicant_name"],
@@ -349,7 +389,7 @@ async def _withdraw(request_id: str) -> dict[str, Any]:
         raise await _console_failure(exc, "撤回失败", session) from exc
     record = _merge(record, data if isinstance(data, dict) else {})
     await _remember(record)
-    return public(record, enterprise.previous_licence_id())
+    return public(record, *await asyncio.to_thread(_on_machine))
 
 
 def licence_file() -> Path:
@@ -373,6 +413,21 @@ def _write_licence(path: Path, content: dict[str, Any]) -> None:
         raise
 
 
+def _keep_replaced_licence(path: Path, now: int) -> None:
+    """A copy of the file a licence is about to replace (one no longer valid, or an older token of
+    the same licence), beside it and never over an earlier copy: the patches and the record of how it
+    came are in no other place. Created private, as the licence is."""
+    if not path.exists():
+        return
+    fd, copy = tempfile.mkstemp(dir=path.parent, prefix=f"license.replaced-{now}-", suffix=".json")
+    os.close(fd)
+    try:
+        shutil.copyfile(path, copy)
+    except BaseException:
+        Path(copy).unlink(missing_ok=True)
+        raise
+
+
 async def take(request_id: str) -> dict[str, Any]:
     """Write the licence of an approved application on this machine and tell Console it was taken."""
     async with _lock:
@@ -393,21 +448,25 @@ async def _take(request_id: str) -> dict[str, Any]:
     issued = str(record.get("license_id") or "").strip()
     if _status(record) not in {"approved", "activated"} or not token or not issued:
         raise EnterpriseUpgradeError("这份申请还没有审核通过，没有可启用的授权")
-    present = enterprise.previous_licence_id()
+    present, held_token = await asyncio.to_thread(_on_machine)
     if present and present != issued:
         raise EnterpriseUpgradeError(f"这台机器已经有授权 {present}，不覆盖")
-    now = int(time.time())
-    _write_licence(licence_file(), {
-        "license_id": issued,
-        "key": token,
-        "payload": {},
-        "patches": [],
-        "activated_at": now,
-        "install_id": session.get("install_id"),
-        "fingerprint": session.get("fingerprint"),
-        "request_id": request_id,
-    })
-    log.info("enterprise.licence_taken", {"request_id": request_id, "license_id": issued})
+    # This very token on the machine already (taken twice, or a retry): the file stands, with the
+    # patches it has gathered; Console still hears of it below.
+    if token != held_token:
+        now = int(time.time())
+        _keep_replaced_licence(licence_file(), now)
+        _write_licence(licence_file(), {
+            "license_id": issued,
+            "key": token,
+            "payload": {},
+            "patches": [],
+            "activated_at": now,
+            "install_id": session.get("install_id"),
+            "fingerprint": session.get("fingerprint"),
+            "request_id": request_id,
+        })
+        log.info("enterprise.licence_taken", {"request_id": request_id, "license_id": issued})
     if _status(record) == "approved":
         try:
             async with httpx.AsyncClient(timeout=15) as client:
@@ -419,4 +478,50 @@ async def _take(request_id: str) -> dict[str, Any]:
             # The licence is on the machine; Console hears of it the next time it is taken or listed.
             log.warning("enterprise.licence_taken_unreported", {"request_id": request_id, "error": str(exc)})
         await _remember(record)
-    return public(record, issued)
+    return public(record, issued, token)
+
+
+async def sync_licence() -> dict[str, bool]:
+    """Ask Console for this machine's licence now, with the page waiting: what the hourly heartbeat
+    does (its answer carries the latest patch Console signed: a renewal, new quotas, a revocation,
+    and the file keeps it), with what went wrong said; and whether the terms changed."""
+    async with _lock:
+        return await _sync_licence()
+
+
+async def _sync_licence() -> dict[str, bool]:
+    from flocks.console.login import ConsoleLoginService, ConsoleSessionRefused, keep_previous_licence_current
+
+    if not enterprise.available():
+        raise EnterpriseUpgradeError("这台机器已经是企业版")
+    before = await asyncio.to_thread(enterprise.previous_edition)
+    if not before or not before["license_id"]:
+        raise EnterpriseUpgradeError("这台机器上没有授权，不用同步")
+    if not enterprise._console_base_url():
+        raise EnterpriseUpgradeError("这台机器没有配置 Console（FLOCKS_CONSOLE_BASE_URL），同步不了授权")
+    try:
+        session = await ConsoleLoginService.require_console_session()
+    except ValueError as exc:
+        raise EnterpriseUpgradeError("同步授权要先登录云账号：点「云账号登录」后再试") from exc
+    try:
+        answer = await ConsoleLoginService.send_heartbeat()
+    except ConsoleSessionRefused as exc:
+        if exc.status_code == 401:
+            await enterprise._forget_console_session(str(session.get("console_session_token") or ""))
+            raise EnterpriseUpgradeError("云账号登录已失效：点「云账号登录」后再试") from exc
+        raise EnterpriseUpgradeError("Console 不接受这台机器的云账号登录（HTTP 403）：退出登录后重新登录再试") from exc
+    except httpx.HTTPError as exc:
+        raise _console_error(exc, "同步授权失败") from exc
+    except ValueError as exc:
+        raise EnterpriseUpgradeError("同步授权失败：Console 的回答读不懂") from exc
+    # The heartbeat wrote this and only logged a failure (a heartbeat goes on without the file); here
+    # someone is waiting to hear of it.
+    try:
+        keep_previous_licence_current(answer)
+    except OSError as exc:
+        raise EnterpriseUpgradeError(f"Console 答复了，但写不进这台机器的授权文件：{exc}") from exc
+    after = await asyncio.to_thread(enterprise.previous_edition)
+    terms = ("license_status", "expires_at", "max_admins", "max_members")
+    changed = after is not None and any(before.get(term) != after.get(term) for term in terms)
+    log.info("enterprise.licence_synced", {"license_id": before["license_id"], "changed": changed})
+    return {"changed": changed}

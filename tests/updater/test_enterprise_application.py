@@ -19,13 +19,27 @@ Case list (编号 | 场景):
       or refused with a 4xx, leaves no key behind
   EA6 two administrators sending at once: one application goes to Console, the other is told one
       is open; a record whose id the index lost is listed and the index mended
+  EA7 a licence no longer valid is no licence here: the machine applies again, naming the one it is
+      to replace, and the licence taken replaces it with a copy of the old file kept, never over an
+      earlier copy; one still good is never replaced; the token already on the machine neither offers
+      itself nor blocks a new one (approved or activated), even by a date its application still has;
+      taking the same token twice leaves the file and what it gathered; a licence over by its
+      application's terms can still be taken, over another one no longer valid or with the file gone
+      (a renewal does not show on the application, and a sync then brings it), and blocks nothing
+  EA8 a sync with Console while the page waits: the renewal in its answer reaches the file and the
+      page hears the terms changed; no news is said as such; everything that stops it is said
+      (no licence, no address, no sign-in, a sign-in refused, Console out of reach or not making
+      sense, a file that cannot be written), and only a 401 forgets the sign-in
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import os
 import stat
+import time
 from pathlib import Path
 
 import httpx
@@ -115,7 +129,7 @@ def console(monkeypatch: pytest.MonkeyPatch, handler) -> list[httpx.Request]:
 
 def approved(request_id: str = "req_1", license_id: str = "lic_1") -> dict:
     return {"request_id": request_id, "status": "approved", "activate_key": "h.p.s", "license_id": license_id,
-            "license_status": "poc", "expires_at": 1798761600, "reason": "ok"}
+            "license_status": "poc", "expires_at": 4102444800, "reason": "ok"}
 
 
 async def test_ea1_an_application_goes_to_console_and_its_id_is_kept(machine: Path, monkeypatch: pytest.MonkeyPatch):
@@ -418,3 +432,398 @@ async def test_ea7_every_refusal_of_a_listing_is_looked_at(machine: Path, monkey
     console(monkeypatch, lambda r: httpx.Response(503) if r.url.path.endswith("req_b") else httpx.Response(401))
     listing = await application.applications()
     assert listing["note"] and forgotten == ["tok-1"]
+
+
+def _token(claims: dict) -> str:
+    def part(value: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+
+    return f"{part({'alg': 'ES256'})}.{part(claims)}.c2ln"
+
+
+LAPSED_CLAIMS = {"license_id": "zj-remote login", "status": "poc", "expires_at": 1790740045, "max_admins": 3, "max_members": 20}
+
+
+def _lapsed_licence(root: Path) -> Path:
+    path = root / "flockspro" / "license.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"license_id": "zj-remote login", "key": _token(LAPSED_CLAIMS), "payload": LAPSED_CLAIMS, "patches": [], "activated_at": 1782964285}))
+    return path
+
+
+async def test_ea7_a_machine_whose_licence_is_over_applies_again(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    licence = _lapsed_licence(machine)
+    seen = console(monkeypatch, lambda r: httpx.Response(200, json={"request_id": "req_7", "status": "pending"}))
+    monkeypatch.setattr(application, "machine_fingerprint", lambda: "0123456789abcdef0123456789abcdef")
+
+    sent = await application.apply(dict(FORM), "admin")
+
+    assert sent["request_id"] == "req_7"
+    assert json.loads(seen[0].content)["form_data"]["replaces_license_id"] == "zj-remote login"
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/activate"):
+            return httpx.Response(200, json={"request_id": "req_7", "status": "activated"})
+        return httpx.Response(200, json=approved("req_7", "lic_new"))
+
+    console(monkeypatch, answer)
+    listed = (await application.applications())["items"][0]
+    assert listed["can_take"] is True
+
+    before = licence.read_bytes()
+    taken = await application.take("req_7")
+
+    assert taken["status"] == "activated" and not taken["can_take"]
+    assert json.loads(licence.read_text())["license_id"] == "lic_new"
+    assert enterprise.standing_licence_id() == "lic_new"
+    # What it replaced stays beside it, as private as it was.
+    kept = list(licence.parent.glob("license.replaced-*.json"))
+    assert len(kept) == 1 and kept[0].read_bytes() == before
+
+
+async def test_ea7b_no_new_application_while_the_licence_is_good(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    good = {**LAPSED_CLAIMS, "expires_at": 4102444800}
+    path = machine / "flockspro" / "license.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"license_id": "zj-remote login", "key": _token(good), "payload": good}))
+    seen = console(monkeypatch, lambda r: httpx.Response(200, json=approved("req_8", "lic_other")))
+    await Storage.set("console:upgrade_request:req_8", {"request_id": "req_8", "status": "approved", "details": {}, "activate_key": "h.p.s", "license_id": "lic_other"}, "json")
+    await Storage.set("console:upgrade_request_ids", ["req_8"], "json")
+
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="已经有企业版授权"):
+        await application.apply(dict(FORM), "admin")
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="zj-remote login"):
+        await application.take("req_8")
+    assert json.loads(path.read_text())["license_id"] == "zj-remote login"
+    assert not list(path.parent.glob("license.replaced-*"))
+    assert seen  # Console was asked; nothing came of it
+
+
+@pytest.mark.parametrize("status", ["activated", "approved"])
+async def test_ea7c_the_token_already_on_the_machine_stands_in_nothings_way(machine: Path, monkeypatch: pytest.MonkeyPatch, status: str):
+    """The machine took this licence here once and it ran out; approved is one Console never heard was taken."""
+    licence = _lapsed_licence(machine)
+    over = {"request_id": "req_9", "status": status, "details": {}, "activate_key": _token(LAPSED_CLAIMS),
+            "license_id": "zj-remote login", "license_status": "poc", "expires_at": 1790740045}
+    await Storage.set("console:upgrade_request:req_9", over, "json")
+    await Storage.set("console:upgrade_request_ids", ["req_9"], "json")
+
+    answers: dict[str, httpx.Response] = {"get": httpx.Response(200, json=over)}
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/upgrade-requests":
+            return httpx.Response(200, json={"request_id": "req_10", "status": "pending"})
+        if request.url.path.endswith("/activate"):
+            return httpx.Response(200, json={"request_id": "req_9", "status": "activated"})
+        return answers["get"]
+
+    seen = console(monkeypatch, answer)
+    assert (await application.applications())["items"][0]["can_take"] is False
+
+    # It was never going to be taken: a new application goes through.
+    monkeypatch.setattr(application, "machine_fingerprint", lambda: "0123456789abcdef0123456789abcdef")
+    assert (await application.apply(dict(FORM), "admin"))["request_id"] == "req_10"
+
+    # Taking it all the same changes nothing on the machine, and Console hears of it if it had not.
+    before = licence.read_bytes()
+    await application.take("req_9")
+    assert licence.read_bytes() == before and not list(licence.parent.glob("license.replaced-*"))
+    assert any(r.url.path.endswith("/activate") for r in seen) is (status == "approved")
+
+
+async def test_ea7d_a_licence_renewed_at_console_comes_over_another_no_longer_valid(machine: Path, monkeypatch: pytest.MonkeyPatch, heartbeats):
+    """The application keeps the date it was issued with; the patch that renews it is for its own token."""
+    licence = _lapsed_licence(machine)
+    old = licence.read_bytes()
+    other_claims = {**LAPSED_CLAIMS, "license_id": "lic-other"}
+    other = {"request_id": "req_9", "status": "activated", "details": {}, "activate_key": _token(other_claims),
+             "license_id": "lic-other", "license_status": "poc", "expires_at": 1790740045}
+    await Storage.set("console:upgrade_request:req_9", other, "json")
+    await Storage.set("console:upgrade_request_ids", ["req_9"], "json")
+
+    listed = (await application.applications())["items"][0]
+    assert listed["can_take"] is True and listed["licence_over"] is True
+
+    # It waits on nobody: the machine can apply past it.
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/upgrade-requests":
+            return httpx.Response(200, json={"request_id": "req_10", "status": "pending"})
+        return httpx.Response(200, json=other)
+
+    console(monkeypatch, answer)
+    monkeypatch.setattr(application, "machine_fingerprint", lambda: "0123456789abcdef0123456789abcdef")
+    assert (await application.apply(dict(FORM), "admin"))["request_id"] == "req_10"
+
+    await application.take("req_9")
+    assert json.loads(licence.read_text())["license_id"] == "lic-other"
+    kept = list(licence.parent.glob("license.replaced-*.json"))
+    assert len(kept) == 1 and kept[0].read_bytes() == old
+    assert enterprise.previous_edition()["lapsed"] is True
+
+    patch = _renewal(licence, license_id="lic-other")
+    heartbeats(lambda r: httpx.Response(200, json={"ok": True, "license_patch": patch}))
+    assert await application.sync_licence() == {"changed": True}
+    assert enterprise.previous_edition()["lapsed"] is False
+
+
+async def test_ea7d2_a_good_licence_to_take_still_waits(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    _lapsed_licence(machine)
+    good = {"request_id": "req_9", "status": "approved", "details": {}, "activate_key": "new.token.here",
+            "license_id": "lic-other", "license_status": "poc", "expires_at": 4102444800}
+    await Storage.set("console:upgrade_request:req_9", good, "json")
+    await Storage.set("console:upgrade_request_ids", ["req_9"], "json")
+    console(monkeypatch, lambda r: httpx.Response(200, json=good))
+
+    listed = (await application.applications())["items"][0]
+    assert listed["can_take"] is True and listed["licence_over"] is False
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="已经有一份申请"):
+        await application.apply(dict(FORM), "admin")
+
+
+async def test_ea7e_the_same_token_taken_twice_keeps_the_only_copy_and_what_the_file_gathered(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    licence = _lapsed_licence(machine)
+    old = licence.read_bytes()
+    await Storage.set("console:upgrade_request:req_7", {"request_id": "req_7", "status": "approved", "details": {}}, "json")
+    await Storage.set("console:upgrade_request_ids", ["req_7"], "json")
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/activate"):
+            return httpx.Response(200, json={"request_id": "req_7", "status": "activated"})
+        return httpx.Response(200, json={**approved("req_7", "lic_new"), "activate_key": _token({"license_id": "lic_new"})})
+
+    console(monkeypatch, answer)
+    monkeypatch.setattr(application.time, "time", lambda: 1793950000.0)  # the same second
+    await application.take("req_7")
+
+    held = json.loads(licence.read_text())
+    held["patches"] = ["gathered.by.heartbeat"]
+    licence.write_text(json.dumps(held))
+    await application.take("req_7")
+
+    assert json.loads(licence.read_text())["patches"] == ["gathered.by.heartbeat"]
+    kept = list(licence.parent.glob("license.replaced-*.json"))
+    assert len(kept) == 1 and kept[0].read_bytes() == old
+
+
+async def test_ea7f_copies_of_what_was_replaced_never_overwrite_each_other(machine: Path):
+    path = machine / "flockspro" / "license.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("first")
+    application._keep_replaced_licence(path, 1793950000)
+    path.write_text("second")
+    application._keep_replaced_licence(path, 1793950000)
+
+    copies = sorted(p.read_text() for p in path.parent.glob("license.replaced-1793950000-*.json"))
+    assert copies == ["first", "second"]
+    assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in path.parent.glob("license.replaced-*.json")) or os.name == "nt"
+    # No file, no copy.
+    path.unlink()
+    application._keep_replaced_licence(path, 1793950001)
+    assert not list(path.parent.glob("license.replaced-1793950001-*"))
+
+
+async def test_ea7g_with_the_file_gone_a_licence_renewed_at_console_comes_back(machine: Path, monkeypatch: pytest.MonkeyPatch, heartbeats):
+    """The application keeps the terms it was issued with; a renewal is a patch Console gives by heartbeat."""
+    token = _token(LAPSED_CLAIMS)  # secret-guard: allow 误报：变量名，不是凭证
+    gone = {"request_id": "req_9", "status": "activated", "details": {}, "activate_key": token,
+            "license_id": "zj-remote login", "license_status": "poc", "expires_at": 1790740045}
+    await Storage.set("console:upgrade_request:req_9", gone, "json")
+    await Storage.set("console:upgrade_request_ids", ["req_9"], "json")
+
+    assert (await application.applications())["items"][0]["can_take"] is True
+    console(monkeypatch, lambda r: httpx.Response(200, json=gone))
+    await application.take("req_9")
+    licence = machine / "flockspro" / "license.json"
+    assert json.loads(licence.read_text())["key"] == token
+    assert enterprise.previous_edition()["lapsed"] is True
+
+    # Back on the machine it no longer offers itself, and a sync brings the renewal.
+    assert (await application.applications())["items"][0]["can_take"] is False
+    heartbeats(lambda r: httpx.Response(200, json={"ok": True, "license_patch": _renewal(licence)}))
+    assert await application.sync_licence() == {"changed": True}
+    assert enterprise.previous_edition()["lapsed"] is False
+
+
+async def test_ea7h_a_token_a_patch_revoked_does_not_offer_itself_by_its_own_date(machine: Path, monkeypatch: pytest.MonkeyPatch):
+    """The application still has the date it was issued with; taking the token again would change nothing."""
+    good = {**LAPSED_CLAIMS, "expires_at": 4102444800}
+    token = _token(good)  # secret-guard: allow 误报：变量名，不是凭证
+    path = machine / "flockspro" / "license.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"license_id": "zj-remote login", "key": token, "payload": good}))  # secret-guard: allow 误报：变量名，不是凭证
+    held = json.loads(path.read_text())
+    held["patches"] = [_renewal(path, dynamic_status="revoked")]
+    path.write_text(json.dumps(held))
+    assert enterprise.previous_edition()["lapsed"] is True
+    record = {"request_id": "req_9", "status": "activated", "details": {}, "activate_key": token,
+              "license_id": "zj-remote login", "license_status": "poc", "expires_at": 4102444800}
+    await Storage.set("console:upgrade_request:req_9", record, "json")
+    await Storage.set("console:upgrade_request_ids", ["req_9"], "json")
+
+    assert (await application.applications())["items"][0]["can_take"] is False
+
+    console(monkeypatch, lambda r: httpx.Response(200, json={"request_id": "req_10", "status": "pending"}))
+    monkeypatch.setattr(application, "machine_fingerprint", lambda: "0123456789abcdef0123456789abcdef")
+    assert (await application.apply(dict(FORM), "admin"))["request_id"] == "req_10"
+
+
+def _sign_in_refused(monkeypatch: pytest.MonkeyPatch, forgotten: list[str]) -> None:
+    async def forget(token: str) -> None:
+        forgotten.append(token)
+
+    monkeypatch.setattr(enterprise, "_forget_console_session", forget)
+
+
+@pytest.fixture
+def heartbeats(monkeypatch: pytest.MonkeyPatch):
+    from flocks.console.login import ConsoleLoginService, _node_extensions
+
+    async def session(cls=None):
+        return dict(SESSION)
+
+    monkeypatch.setattr(ConsoleLoginService, "_require_session", classmethod(lambda cls: session()))
+    assert not _node_extensions
+
+    def answering(handler) -> list[httpx.Request]:
+        seen: list[httpx.Request] = []
+
+        def record(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return handler(request)
+
+        class Client(_REAL_CLIENT):  # type: ignore[misc,valid-type]
+            def __init__(self, *args, **kwargs):
+                kwargs["transport"] = httpx.MockTransport(record)
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr("flocks.console.login.httpx.AsyncClient", Client)
+        return seen
+
+    return answering
+
+
+def _renewal(licence: Path, **claims) -> str:
+    import hashlib
+
+    token = json.loads(licence.read_text())["key"]  # secret-guard: allow 误报：变量名，不是凭证
+    now = int(time.time())
+    return _token({
+        "serial": 1, "license_id": "zj-remote login", "dynamic_status": "poc", "dynamic_expires_at": now + 90 * 86400,
+        "issued_at": now - 60, "iat": now - 60, "patch_ttl_days": 91,
+        "token_binding": hashlib.sha256(token.rsplit(".", 1)[0].encode()).hexdigest()[:32], **claims,
+    })
+
+
+async def test_ea8_a_sync_brings_the_renewal_into_the_file(machine: Path, heartbeats):
+    licence = _lapsed_licence(machine)
+    patch = _renewal(licence)
+    seen = heartbeats(lambda r: httpx.Response(200, json={"ok": True, "license_patch": patch, "revoked_license_ids": []}))
+    assert enterprise.previous_edition()["lapsed"] is True
+
+    assert await application.sync_licence() == {"changed": True}
+
+    # The heartbeat, naming the licence: that is how Console knows which renewal to give.
+    assert seen[0].url == "https://console.example/v1/heartbeats"
+    assert json.loads(seen[0].content)["license_id"] == "zj-remote login"
+    assert json.loads(licence.read_text())["patches"] == [patch]
+    now = enterprise.previous_edition()
+    assert now["lapsed"] is False and now["expires_at"] > time.time()
+    assert abs(now["last_sync_at"] - time.time()) < 60
+
+    # Once more: nothing new, the patch not kept twice.
+    assert await application.sync_licence() == {"changed": False}
+    assert json.loads(licence.read_text())["patches"] == [patch]
+
+
+async def test_ea8b_no_news_from_console_is_said_as_such(machine: Path, heartbeats):
+    licence = _lapsed_licence(machine)
+    heartbeats(lambda r: httpx.Response(200, json={"ok": True, "license_patch": None}))
+
+    assert await application.sync_licence() == {"changed": False}
+
+    assert json.loads(licence.read_text())["patches"] == []
+    assert abs(enterprise.previous_edition()["last_sync_at"] - time.time()) < 60
+    assert enterprise.previous_edition()["lapsed"] is True
+
+
+async def test_ea8c_a_patch_for_another_token_changes_nothing(machine: Path, heartbeats):
+    """Console issued the licence again under the same id: this machine's token is not that one."""
+    licence = _lapsed_licence(machine)
+    heartbeats(lambda r: httpx.Response(200, json={"ok": True, "license_patch": _renewal(licence, token_binding="0" * 32)}))
+
+    assert await application.sync_licence() == {"changed": False}
+    assert enterprise.previous_edition()["lapsed"] is True
+
+
+@pytest.mark.parametrize("answer, said, forgets", [
+    (httpx.Response(401), "云账号登录已失效", True),
+    (httpx.Response(403), "HTTP 403", False),
+    (httpx.Response(502), "HTTP 502", False),
+    (httpx.Response(200, content=b"<html>not json</html>"), "读不懂", False),
+])
+async def test_ea8d_what_console_says_is_said(machine: Path, heartbeats, monkeypatch: pytest.MonkeyPatch, answer, said, forgets):
+    _lapsed_licence(machine)
+    forgotten: list[str] = []
+    _sign_in_refused(monkeypatch, forgotten)
+    heartbeats(lambda r: answer)
+
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match=said):
+        await application.sync_licence()
+
+    assert forgotten == (["tok-1"] if forgets else [])
+
+
+async def test_ea8e_console_out_of_reach(machine: Path, heartbeats):
+    licence = _lapsed_licence(machine)
+    before = licence.read_bytes()
+
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route", request=request)
+
+    heartbeats(unreachable)
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="连不上 Console"):
+        await application.sync_licence()
+    assert licence.read_bytes() == before
+
+
+async def test_ea8f_nothing_to_sync_or_nobody_to_ask(machine: Path, heartbeats, monkeypatch: pytest.MonkeyPatch):
+    seen = heartbeats(lambda r: httpx.Response(200, json={}))
+    with pytest.raises(enterprise.EnterpriseUpgradeError, match="没有授权"):
+        await application.sync_licence()
+
+    _lapsed_licence(machine)
+    from flocks.console.login import ConsoleLoginService
+
+    async def not_signed_in(cls=None):
+        raise ValueError("云账号未登录")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(ConsoleLoginService, "require_console_session", classmethod(lambda cls: not_signed_in()))
+        with pytest.raises(enterprise.EnterpriseUpgradeError, match="先登录云账号"):
+            await application.sync_licence()
+
+    with monkeypatch.context() as patched:
+        patched.delenv("FLOCKS_CONSOLE_BASE_URL")
+        with pytest.raises(enterprise.EnterpriseUpgradeError, match="没有配置 Console"):
+            await application.sync_licence()
+
+    with monkeypatch.context() as patched:
+        patched.setenv("FLOCKS_DEPLOY_MODE", "managed")
+        enterprise.detect_deploy_mode.cache_clear()
+        with pytest.raises(enterprise.EnterpriseUpgradeError, match="已经是企业版"):
+            await application.sync_licence()
+    enterprise.detect_deploy_mode.cache_clear()
+    assert seen == []
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="no such permission here, or root writes anywhere")
+async def test_ea8g_a_file_that_cannot_be_written_is_said(machine: Path, heartbeats):
+    """A heartbeat goes on without the file; someone waiting on a sync hears of it."""
+    licence = _lapsed_licence(machine)
+    heartbeats(lambda r: httpx.Response(200, json={"ok": True, "license_patch": _renewal(licence)}))
+    os.chmod(licence.parent, 0o500)
+    try:
+        with pytest.raises(enterprise.EnterpriseUpgradeError, match="写不进"):
+            await application.sync_licence()
+    finally:
+        os.chmod(licence.parent, 0o700)

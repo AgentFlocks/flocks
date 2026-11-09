@@ -13,13 +13,13 @@ import { extractErrorMessage } from '@/utils/error';
 import MachineHeading from './MachineHeading';
 import { CARD, DANGER, ERROR, GO, INPUT, NOTE, PRIMARY, SECONDARY, formatDateTime } from './styles';
 
-// The application for a licence, on a machine that has none (flocks/updater/enterprise_application.py):
+// The application for a licence, on a machine that has none it can go by (flocks/updater/enterprise_application.py):
 // the form goes to Console for review; an approved licence is taken here, and the page moves on to
 // the upgrade as for a machine that had the Python enterprise package. The form opens in a dialog and
 // the application shows as the current request, as on the enterprise edition's page.
 
-/** Waiting for review, or approved and not taken: no second application meanwhile. */
-const OPEN = new Set(['pending', 'reviewing', 'approved']);
+/** Waiting for review: no second application meanwhile, nor while a good licence waits to be taken. */
+const IN_REVIEW = new Set(['pending', 'reviewing']);
 const REVIEWED = new Set(['approved', 'activated', 'rejected']);
 // As the server checks them (flocks/server/routes/enterprise_upgrade.py).
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -99,7 +99,7 @@ export default function LicenceApplicationCard({ title, description, note, signe
 
   const items = applications?.items ?? [];
   // One at a time: no new application while one is under way or a licence waits to be taken.
-  const outstanding = items.find((item) => OPEN.has(item.status) || item.can_take);
+  const outstanding = items.find((item) => IN_REVIEW.has(item.status) || (item.can_take && !item.licence_over));
   const canApply = Boolean(applications) && !outstanding && signedIn;
 
   const set = (field: keyof LicenceApplicationForm, value: string) => {

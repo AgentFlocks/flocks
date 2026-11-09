@@ -86,6 +86,7 @@ from flocks.agent.agent import AgentInfo
 from flocks.agent.toolset import agent_declares_tool
 from flocks.provider.llm_budget import llm_slot
 from flocks.provider import output_limits
+from flocks.provider.credential import UNSENDABLE_HEADER_MESSAGE, is_unsendable_header_error
 from flocks.provider.provider import Provider, ChatMessage
 from flocks.provider.reasoning_replay import prepare_reasoning_for_replay
 from flocks.provider.token_usage import (
@@ -2202,12 +2203,7 @@ class SessionRunner:
 
             except Exception as e:
                 error_attempt += 1
-                error_log_context = {
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "error_module": type(e).__module__,
-                    "error_repr": repr(e)[:1000],
-                }
+                error_log_context = self._error_log_context(e)
                 # Convert exception to error dict for retry check
                 error_dict = self._exception_to_error_dict(e)
 
@@ -2309,7 +2305,7 @@ class SessionRunner:
                             "attempt": error_attempt,
                         })
 
-                    final_error_message = str(e)
+                    final_error_message = error_dict["data"].get("displayMessage") or str(e)
                     if SessionRetry.is_connection_error(error_dict):
                         final_error_message = CONNECTION_ERROR_DISPLAY_MESSAGE
                         error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
@@ -3139,6 +3135,18 @@ class SessionRunner:
             "reason": reason,
         })
 
+    @staticmethod
+    def _error_log_context(exception: Exception) -> Dict[str, Any]:
+        """What a failed step logs about its exception."""
+        return {
+            "error": str(exception),
+            "error_type": type(exception).__name__,
+            "error_module": type(exception).__module__,
+            # The repr of a UnicodeError carries the whole string it stopped on;
+            # for a request that is the header holding the API key.
+            "error_repr": str(exception) if isinstance(exception, UnicodeError) else repr(exception)[:1000],
+        }
+
     def _exception_to_error_dict(self, exception: Exception) -> Dict[str, Any]:
         """
         Convert exception to error dict for retry checking.
@@ -3160,6 +3168,14 @@ class SessionRunner:
             # Retry on the same model: the next attempt is rebuilt with the
             # configured output limit, which the provider accepted before.
             error_dict["data"]["isRetryable"] = True
+            return error_dict
+
+        if is_unsendable_header_error(exception):
+            # Nothing was sent, and the same key would fail the same way.
+            error_dict["data"].update({
+                "isRetryable": False,
+                "displayMessage": UNSENDABLE_HEADER_MESSAGE,
+            })
             return error_dict
 
         if type(exception).__name__ == "StreamToolArgumentsTruncatedError":

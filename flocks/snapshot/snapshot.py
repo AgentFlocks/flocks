@@ -10,6 +10,7 @@ to track file changes independently of the project's main Git repository.
 
 import asyncio
 import os
+import signal
 from pathlib import Path
 from typing import Optional, List
 from pydantic import BaseModel, Field
@@ -22,6 +23,7 @@ log = Log.create(service="snapshot")
 # Constants
 PRUNE_DAYS = "7.days"
 CLEANUP_INTERVAL_HOURS = 1
+MAX_SNAPSHOT_BYTES = 2 * 1024**3
 
 
 class SnapshotPatch(BaseModel):
@@ -76,7 +78,7 @@ class Snapshot:
             worktree: Working tree directory
         """
         cfg = await Config.get()
-        if cfg.snapshot is False:
+        if cfg.snapshot is not True:
             return
         
         git_dir = cls._gitdir(project_id)
@@ -129,8 +131,7 @@ class Snapshot:
         if vcs != "git":
             return None
         
-        cfg = await Config.get()
-        if cfg.snapshot is False:
+        if not await cls._capture_allowed():
             return None
         
         git_dir = cls._gitdir(project_id)
@@ -140,13 +141,8 @@ class Snapshot:
             os.makedirs(git_dir, exist_ok=True)
             
             # Initialize bare-like git repo
-            process = await asyncio.create_subprocess_exec(
-                "git", "init",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, "GIT_DIR": git_dir, "GIT_WORK_TREE": worktree},
-            )
-            await process.communicate()
+            if await cls._run_git(["init"], git_dir, worktree) is None:
+                return None
             
             # Configure git to not convert line endings
             await cls._run_git(
@@ -156,8 +152,9 @@ class Snapshot:
             
             log.info("snapshot.initialized", {"git_dir": git_dir})
         
-        # Add all files
-        await cls._run_git(["add", "."], git_dir, worktree)
+        # Never write a tree from a stale or partially staged index.
+        if await cls._run_git(["add", "."], git_dir, worktree) is None:
+            return None
         
         # Create tree object
         result = await cls._run_git(["write-tree"], git_dir, worktree)
@@ -183,11 +180,15 @@ class Snapshot:
         Returns:
             Patch information with changed files
         """
+        if not await cls._capture_allowed():
+            return SnapshotPatch(hash=hash, files=[])
+
         git_dir = cls._gitdir(project_id)
-        
+
         # Add all files first
-        await cls._run_git(["add", "."], git_dir, worktree)
-        
+        if await cls._run_git(["add", "."], git_dir, worktree) is None:
+            return SnapshotPatch(hash=hash, files=[])
+
         # Get changed files
         result = await cls._run_git(
             ["-c", "core.autocrlf=false", "diff", "--no-ext-diff", "--name-only", hash, "--", "."],
@@ -270,7 +271,10 @@ class Snapshot:
                         git_dir, worktree
                     )
                     
-                    if check_result and check_result.strip():
+                    if check_result is None:
+                        log.warn("snapshot.revert.ls_tree_failed", {"file": file, "hash": patch.hash})
+                        continue
+                    if check_result.strip():
                         log.info("snapshot.revert.file_existed_but_failed", {"file": file})
                     else:
                         # File didn't exist in snapshot, delete it
@@ -295,11 +299,15 @@ class Snapshot:
         Returns:
             Diff text
         """
+        if not await cls._capture_allowed():
+            return ""
+
         git_dir = cls._gitdir(project_id)
-        
+
         # Add all files first
-        await cls._run_git(["add", "."], git_dir, worktree)
-        
+        if await cls._run_git(["add", "."], git_dir, worktree) is None:
+            return ""
+
         # Get diff
         result = await cls._run_git(
             ["-c", "core.autocrlf=false", "diff", "--no-ext-diff", hash, "--", "."],
@@ -393,6 +401,41 @@ class Snapshot:
         return result
     
     @classmethod
+    async def _capture_allowed(cls) -> bool:
+        cfg = await Config.get()
+        if cfg.snapshot is not True:
+            return False
+
+        # A refusal guard only: never remove repositories or snapshot objects.
+        root = Path(Config.get_data_path()) / "snapshot"
+
+        def within_limit(retries: int = 2) -> bool:
+            def onerror(error: OSError) -> None:
+                raise error
+
+            total = 0
+            try:
+                if not root.exists():
+                    return True
+                for directory, _, files in os.walk(root, onerror=onerror):
+                    for name in files:
+                        total += (Path(directory) / name).lstat().st_size
+                        if total >= MAX_SNAPSHOT_BYTES:
+                            log.warn("snapshot.capture.limit_reached", {
+                                "limit_bytes": MAX_SNAPSHOT_BYTES,
+                                "message": "Snapshot storage limit reached; manual cleanup required. Capture refused.",
+                            })
+                            return False
+            except OSError as exc:
+                if isinstance(exc, FileNotFoundError) and retries:
+                    return within_limit(retries - 1)
+                log.warn("snapshot.capture.size_check_failed", {"error": str(exc)})
+                return False
+            return True
+
+        return await asyncio.to_thread(within_limit)
+
+    @classmethod
     def _gitdir(cls, project_id: str) -> str:
         """
         Get git directory path for project
@@ -434,12 +477,41 @@ class Snapshot:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=worktree,
+                start_new_session=(os.name == "posix"),
             )
             
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout
-            )
+            communication = asyncio.create_task(process.communicate())
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    asyncio.shield(communication), timeout=timeout
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                # Cancelling communicate alone leaves Git running (and its index locked).
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(asyncio.shield(communication), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if os.name == "posix":
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.wait_for(communication, timeout=1.0)
+                    except asyncio.TimeoutError:
+                        pass
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
+                raise
             
             if process.returncode != 0:
                 log.debug("snapshot.git.error", {

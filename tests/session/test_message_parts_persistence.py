@@ -696,3 +696,326 @@ async def test_clear_keeps_sibling_caches_warm() -> None:
     assert Message._messages_cache[session_id] == []
     assert [m.id for m in Message._messages_cache[sibling_id]] == ["msg_c"]
     assert sibling_id in _session_locks._locks
+
+
+async def _touch_other_sessions(prefix: str) -> None:
+    """A pass over enough other sessions to push anything out of the cache."""
+    for index in range(Message._MAX_CACHED_SESSIONS + 5):
+        await Message.list(f"{prefix}_{index}")
+
+
+@pytest.mark.asyncio
+async def test_pass_over_many_sessions_does_not_fail_a_load_in_progress(monkeypatch) -> None:
+    """A slow load must survive a background pass, such as the startup orphan scan."""
+    session_id = "ses_lru_load_in_progress"
+    await _write_legacy_session(session_id, {"msg_a": "keeps loading"})
+
+    original_load_all_parts_locked = Message._load_all_parts_locked
+    loads = 0
+
+    async def slow_load(cls, sid: str, *, message_times: dict) -> None:
+        nonlocal loads
+        loads += 1
+        await _touch_other_sessions(f"ses_lru_load_other_{loads}")
+        await original_load_all_parts_locked(sid, message_times=message_times)
+
+    monkeypatch.setattr(Message, "_load_all_parts_locked", classmethod(slow_load))
+
+    await Message._ensure_cache(session_id)
+
+    assert loads == 1
+    assert session_id in Message._parts_fully_loaded
+    assert [message.id for message in await Message.list(session_id)] == ["msg_a"]
+    assert len(Message._lru) <= Message._MAX_CACHED_SESSIONS
+
+
+@pytest.mark.asyncio
+async def test_writer_waiting_for_the_lock_keeps_the_history() -> None:
+    """Evicted while it waits, ``create`` would store a history of only its own message."""
+    from flocks.session.message import _session_locks
+
+    session_id = "ses_lru_waiting_writer"
+    await Message.create(session_id, MessageRole.USER, "first", id="msg_first", part_id="part_first")
+
+    lock = _session_locks.get(session_id)
+    await lock.acquire()
+    writer = asyncio.create_task(
+        Message.create(session_id, MessageRole.USER, "second", id="msg_second", part_id="part_second")
+    )
+    try:
+        await asyncio.sleep(0)
+        await _touch_other_sessions("ses_lru_waiting_other")
+    finally:
+        lock.release()
+    await writer
+
+    stored = await Storage.get(f"message:{session_id}")
+    assert [message["id"] for message in stored] == ["msg_first", "msg_second"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("discard_lock", [True, False])
+async def test_writer_queued_behind_an_invalidation_keeps_the_history(discard_lock: bool) -> None:
+    from flocks.session.message import _session_locks
+
+    session_id = f"ses_invalidate_waiting_writer_{discard_lock}"
+    await Message.create(session_id, MessageRole.USER, "first", id="msg_first", part_id="part_first")
+
+    lock = _session_locks.get(session_id)
+    await lock.acquire()
+    writer = asyncio.create_task(
+        Message.create(session_id, MessageRole.USER, "second", id="msg_second", part_id="part_second")
+    )
+    try:
+        await asyncio.sleep(0)
+        Message.invalidate_cache(session_id, discard_lock=discard_lock)
+    finally:
+        lock.release()
+    await writer
+
+    stored = await Storage.get(f"message:{session_id}")
+    assert [message["id"] for message in stored] == ["msg_first", "msg_second"]
+
+
+@pytest.mark.asyncio
+async def test_writer_queued_behind_a_delete_keeps_what_was_not_deleted() -> None:
+    session_id = "ses_delete_waiting_writer"
+    await Message.create(session_id, MessageRole.USER, "old", id="msg_old", part_id="part_old")
+    await Message.create(session_id, MessageRole.USER, "keep", id="msg_keep", part_id="part_keep")
+
+    delete = asyncio.create_task(Message.delete_many(session_id, ["msg_old"]))
+    await asyncio.sleep(0)
+    writer = asyncio.create_task(
+        Message.create(session_id, MessageRole.USER, "new", id="msg_new", part_id="part_new")
+    )
+    assert await delete == 1
+    await writer
+
+    stored = await Storage.get(f"message:{session_id}")
+    assert [message["id"] for message in stored] == ["msg_keep", "msg_new"]
+    assert [message.id for message in await Message.list(session_id)] == ["msg_keep", "msg_new"]
+
+
+@pytest.mark.asyncio
+async def test_part_writer_queued_behind_an_invalidation_keeps_the_other_parts() -> None:
+    from flocks.session.message import _session_locks
+
+    session_id = "ses_invalidate_waiting_part_writer"
+    await Message.create(session_id, MessageRole.USER, "first", id="msg_a", part_id="part_first")
+
+    lock = _session_locks.get(session_id)
+    await lock.acquire()
+    second = TextPart(id="part_second", sessionID=session_id, messageID="msg_a", text="second")
+    writer = asyncio.create_task(Message.store_part(session_id, "msg_a", second))
+    try:
+        await asyncio.sleep(0)
+        Message.invalidate_cache(session_id)
+    finally:
+        lock.release()
+    await writer
+
+    stored = await Storage.get(f"message_parts:{session_id}:msg_a")
+    assert [part["id"] for part in stored] == ["part_first", "part_second"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("call", "effect"),
+    [
+        (lambda sid: Message.update(sid, "msg_a", agent="reviewed"), "updated"),
+        (lambda sid: Message.archive(sid, "msg_a"), "archived"),
+        (lambda sid: Message.delete(sid, "msg_a"), "deleted"),
+        (lambda sid: Message.update_part(sid, "msg_a", "part_a", text="edited"), "part_edited"),
+        (lambda sid: Message.remove_part(sid, "msg_a", "part_a"), "part_removed"),
+        (lambda sid: Message.add_part(sid, "msg_a", _text_part(sid, "msg_b", "more")), "part_added"),
+        (lambda sid: Message.upsert_message_info(sid, _user_message(sid, "msg_b")), "message_upserted"),
+    ],
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+async def test_queued_change_is_not_lost_to_an_invalidation(call, effect: str) -> None:
+    """Without the reload these find nothing in the dropped cache and quietly do nothing."""
+    from flocks.session.message import _session_locks
+
+    session_id = f"ses_invalidate_waiting_change_{effect}"
+    await Message.create(session_id, MessageRole.USER, "text", id="msg_a", part_id="part_a")
+
+    lock = _session_locks.get(session_id)
+    await lock.acquire()
+    change = asyncio.create_task(call(session_id))
+    try:
+        await asyncio.sleep(0)
+        Message.invalidate_cache(session_id)
+    finally:
+        lock.release()
+    assert await change not in (None, False)
+
+    stored = await Storage.get(f"message:{session_id}")
+    stored_parts = await Storage.get(f"message_parts:{session_id}:msg_a")
+    if effect == "updated":
+        assert stored[0]["agent"] == "reviewed"
+    elif effect == "archived":
+        assert stored[0]["compacted"] is True
+    elif effect == "deleted":
+        assert stored == []
+    elif effect == "part_edited":
+        assert stored_parts[0]["text"] == "edited"
+    elif effect == "part_removed":
+        assert stored_parts == []
+    elif effect == "part_added":
+        assert [part["id"] for part in stored_parts] == ["part_a", "part_msg_b"]
+    else:
+        assert [message["id"] for message in stored] == ["msg_a", "msg_b"]
+
+
+@pytest.mark.asyncio
+async def test_queued_ensure_text_part_still_sees_the_existing_text() -> None:
+    """Reading the dropped cache as empty would add a fallback next to the real text."""
+    from flocks.session.message import _session_locks
+
+    session_id = "ses_invalidate_waiting_ensure_text"
+    await Message.create(session_id, MessageRole.USER, "text", id="msg_a", part_id="part_a")
+
+    lock = _session_locks.get(session_id)
+    await lock.acquire()
+    change = asyncio.create_task(Message.ensure_text_part(session_id, "msg_a", "fallback"))
+    try:
+        await asyncio.sleep(0)
+        Message.invalidate_cache(session_id)
+    finally:
+        lock.release()
+
+    assert await change is False
+    stored_parts = await Storage.get(f"message_parts:{session_id}:msg_a")
+    assert [part["id"] for part in stored_parts] == ["part_a"]
+
+
+@pytest.mark.asyncio
+async def test_writer_gives_up_rather_than_write_when_the_cache_keeps_going(monkeypatch) -> None:
+    session_id = "ses_invalidate_never_stable"
+    await Message.create(session_id, MessageRole.USER, "first", id="msg_first", part_id="part_first")
+    original_ensure_cache = Message._ensure_cache.__func__
+
+    async def ensure_then_invalidate(cls, sid: str) -> None:
+        await original_ensure_cache(cls, sid)
+        Message.invalidate_cache(sid)
+
+    monkeypatch.setattr(Message, "_ensure_cache", classmethod(ensure_then_invalidate))
+
+    with pytest.raises(MessageCacheInvalidatedError):
+        await Message.create(session_id, MessageRole.USER, "second", id="msg_second", part_id="part_second")
+
+    monkeypatch.undo()
+    stored = await Storage.get(f"message:{session_id}")
+    assert [message["id"] for message in stored] == ["msg_first"]
+    from flocks.session.message import _session_locks
+
+    assert not _session_locks.in_use(session_id)
+
+
+@pytest.mark.asyncio
+async def test_lock_is_released_when_a_write_fails(monkeypatch) -> None:
+    from flocks.session.message import _session_locks
+
+    session_id = "ses_locked_cache_write_fails"
+    await Message.create(session_id, MessageRole.USER, "first", id="msg_first", part_id="part_first")
+    monkeypatch.setattr(Message, "_persist_indexed_state", AsyncMock(side_effect=RuntimeError("disk full")))
+
+    with pytest.raises(RuntimeError):
+        await Message.create(session_id, MessageRole.USER, "second", id="msg_second", part_id="part_second")
+
+    assert not _session_locks.in_use(session_id)
+
+
+@pytest.mark.asyncio
+async def test_lru_goes_over_the_limit_only_while_sessions_are_in_use(monkeypatch) -> None:
+    from flocks.session.message import _session_locks
+
+    monkeypatch.setattr(Message, "_MAX_CACHED_SESSIONS", 3)
+    Message.invalidate_cache()
+    busy = [f"ses_lru_busy_{index}" for index in range(3)]
+    locks = [_session_locks.get(session_id) for session_id in busy]
+    for session_id in busy:
+        await Message.list(session_id)
+    for lock in locks:
+        await lock.acquire()
+
+    await Message.list("ses_lru_fourth")
+    assert set(busy) <= set(Message._lru)
+    assert len(Message._lru) == 4
+
+    for lock in locks:
+        lock.release()
+    await Message.list("ses_lru_fifth")
+
+    # Oldest first once nothing is in use, back within the limit.
+    assert list(Message._lru) == [busy[2], "ses_lru_fourth", "ses_lru_fifth"]
+    assert busy[0] not in Message._messages_cache
+
+
+@pytest.mark.asyncio
+async def test_lock_in_use_is_not_forgotten_at_the_cap() -> None:
+    from flocks.session.message import _SessionLockManager
+
+    manager = _SessionLockManager()
+    manager._MAX_LOCKS = 2
+    held = manager.get("held")
+    idle = manager.get("idle")
+    await held.acquire()
+
+    manager.get("new")
+    assert manager.get("held") is held
+    assert manager.get("idle") is not idle
+
+    # Every lock in use: the cap gives way rather than hand out a second lock.
+    other = manager.get("other")
+    await other.acquire()
+    manager.get("third")
+    assert manager.get("held") is held
+    assert manager.get("other") is other
+
+    held.release()
+    other.release()
+
+
+@pytest.mark.asyncio
+async def test_discard_keeps_a_lock_in_use() -> None:
+    from flocks.session.message import _SessionLockManager
+
+    manager = _SessionLockManager()
+    lock = manager.get("ses")
+    await lock.acquire()
+
+    manager.discard("ses")
+    assert manager.get("ses") is lock
+
+    lock.release()
+    manager.discard("ses")
+    assert manager.get("ses") is not lock
+
+
+@pytest.mark.asyncio
+async def test_session_lock_in_use_counts_holder_and_waiters() -> None:
+    from flocks.session.message import _SessionLock
+
+    lock = _SessionLock()
+    assert not lock.in_use
+
+    await lock.acquire()
+    waiting = asyncio.create_task(lock.acquire())
+    cancelled = asyncio.create_task(lock.acquire())
+    await asyncio.sleep(0)
+
+    cancelled.cancel()
+    await asyncio.gather(cancelled, return_exceptions=True)
+    lock.release()
+    # The waiter still counts between the release and its turn on the loop.
+    assert lock.in_use
+
+    await waiting
+    assert lock.locked() and lock.in_use
+    lock.release()
+    assert not lock.in_use
+
+    async with lock:
+        assert lock.in_use
+    assert not lock.in_use
