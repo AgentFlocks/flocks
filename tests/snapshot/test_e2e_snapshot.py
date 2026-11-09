@@ -266,6 +266,22 @@ class TestCLISnapshotCommands:
         # Should not raise
 
 
+@pytest.mark.asyncio
+async def test_failed_unrevert_preserves_state(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    session = await Session.create("test", str(tmp_path), title="restore failure")
+    await Session.set_revert("test", session.id, message_id="msg_001", snapshot="missing")
+    before = await Session.get("test", session.id)
+    clear = AsyncMock()
+    monkeypatch.setattr(Session, "clear_revert", clear)
+    with pytest.raises(ValueError, match="Failed to restore"):
+        await SessionRevertManager.unrevert("test", session.id, str(tmp_path))
+    clear.assert_not_called()
+    after = await Session.get("test", session.id)
+    assert after.revert == before.revert
+
+
 # Run tests
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -13,6 +13,9 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -86,6 +89,126 @@ async def test_missing_session_directory_uses_cwd_and_publishes_notice(
             "fallbackDirectory": str(tmp_path),
         },
     )
+
+
+_needs_search_permission_checks = pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="needs POSIX directory search permission enforced for this account",
+)
+
+
+@contextlib.contextmanager
+def _without_search_permission(directory: Path):
+    """Drop the x bit so paths below *directory* exist but cannot be reached."""
+
+    directory.chmod(0o600)
+    try:
+        yield
+    finally:
+        directory.chmod(0o700)
+
+
+@_needs_search_permission_checks
+@pytest.mark.asyncio
+async def test_unreachable_session_directory_falls_back_and_publishes_notice(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Issue #805: a parent without x permission makes ``Path.is_dir()`` raise."""
+
+    from flocks.server.routes import event as event_routes
+
+    old_home = tmp_path / "svc-old"
+    stored = old_home / "flocks-v2026.11.6"
+    stored.mkdir(parents=True)
+    new_install = tmp_path / "new-install"
+    new_install.mkdir()
+    monkeypatch.chdir(new_install)
+    publish_event = AsyncMock()
+    monkeypatch.setattr(event_routes, "publish_event", publish_event)
+
+    with _without_search_permission(old_home):
+        working_directory = await session_routes._resolve_session_working_directory(
+            SimpleNamespace(id="ses_unreachable", directory=str(stored)),
+        )
+
+    assert working_directory == str(new_install.resolve())
+    publish_event.assert_awaited_once_with(
+        "session.notice",
+        {
+            "sessionID": "ses_unreachable",
+            "kind": "directory-fallback",
+            "storedDirectory": str(stored),
+            "fallbackDirectory": str(new_install.resolve()),
+        },
+    )
+
+
+@_needs_search_permission_checks
+@pytest.mark.asyncio
+async def test_unreachable_session_and_request_directories_are_409(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    old_home = tmp_path / "svc-old"
+    stored = old_home / "session-dir"
+    request_dir = old_home / "request-dir"
+    stored.mkdir(parents=True)
+    request_dir.mkdir()
+    monkeypatch.setattr(
+        "flocks.project.instance.Instance.get_directory",
+        staticmethod(lambda: str(request_dir)),
+    )
+
+    with _without_search_permission(old_home):
+        with pytest.raises(HTTPException) as err:
+            await session_routes._resolve_session_working_directory(
+                SimpleNamespace(id="ses_unreachable", directory=str(stored)),
+            )
+
+    assert err.value.status_code == status.HTTP_409_CONFLICT
+    assert err.value.detail == "The session directory and current request directory are unavailable"
+
+
+@_needs_search_permission_checks
+@pytest.mark.asyncio
+async def test_send_message_to_session_with_unreachable_directory_is_not_500(
+    client: AsyncClient,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The page keeps working after the install moves; it does not get a 500."""
+
+    from flocks.server.routes import event as event_routes
+
+    old_home = tmp_path / "svc-old"
+    stored = old_home / "flocks-v2026.11.6"
+    stored.mkdir(parents=True)
+    created = await client.post(
+        "/api/session",
+        params={"directory": str(stored)},
+        json={"title": "moved install"},
+    )
+    assert created.status_code == status.HTTP_200_OK, created.text
+    session_id = created.json()["id"]
+    assert created.json()["directory"] == str(stored.resolve())
+    publish_event = AsyncMock()
+    monkeypatch.setattr(event_routes, "publish_event", publish_event)
+
+    with _without_search_permission(old_home):
+        response = await client.post(
+            f"/api/session/{session_id}/message",
+            json={"parts": [{"type": "text", "text": "hello after move"}], "noReply": True},
+        )
+
+    assert response.status_code == status.HTTP_200_OK, response.text
+    notices = [
+        call.args[1]
+        for call in publish_event.await_args_list
+        if call.args and call.args[0] == "session.notice"
+    ]
+    assert [notice["kind"] for notice in notices] == ["directory-fallback"]
+    assert notices[0]["storedDirectory"] == str(stored.resolve())
 
 
 @pytest.mark.asyncio

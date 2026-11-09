@@ -779,3 +779,14 @@ async def test_invalid_compressed_response_is_a_structured_error(discovery_runti
     assert result["status"] == "error"
     assert result["code"] == "invalid_response"
     assert result["models"] == []
+
+
+@pytest.mark.asyncio
+async def test_key_that_cannot_be_sent_is_reported_without_a_request(discovery_runtime, upstream):
+    result = await discovery_runtime.module.discover_models(
+        "openai-compatible", api_key="请在这里填写密钥", base_url="https://gateway.test/v1"
+    )
+
+    assert result["status"] == "error"
+    assert result["code"] == "authentication_failed"
+    assert upstream.requests == []

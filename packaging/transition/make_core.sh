@@ -18,6 +18,9 @@ git -C "$checkout" archive --prefix=flocks/ "$core" | tar -x -C "$work"
   find . -mindepth 1 -maxdepth 1 ! -name dist -exec rm -r {} +
 )
 test -f "$work/flocks/webui/dist/index.html"
+# An updater since 10-30 runs this after installing, if it is there, and it needs what was just taken out (webui/package-lock.json, the
+# locked esbuild). This package only carries a machine on to the enterprise edition: without the script such an updater goes on.
+rm "$work/flocks/scripts/check_webui_runtime.py"
 cp "$here/flocks_transition_build.py" "$here/flocks_transition_watchdog.py" "$work/flocks/"
 python3 - "$work/flocks/pyproject.toml" <<'PY'
 import re, sys

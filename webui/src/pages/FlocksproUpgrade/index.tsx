@@ -19,6 +19,7 @@ import {
   BOX,
   CARD,
   DANGER,
+  DONE,
   ERROR,
   GO,
   NOTE,
@@ -30,8 +31,8 @@ import {
 } from './styles';
 
 // The open edition's Flocks Pro page: where this machine stands with the enterprise edition, the
-// application for a licence when it has none (./Application), and the move to the enterprise
-// edition (flocks/updater/enterprise.py). It looks as the enterprise edition's page does (that build
+// application for a licence when it has none it can go by (./Application), and the move to the
+// enterprise edition (flocks/updater/enterprise.py). It looks as the enterprise edition's page does (that build
 // has its own page here), and does what this edition can: the move, not the enterprise functions.
 
 const INVALID_STATUSES = new Set(['revoked', 'expired', 'superseded']);
@@ -50,6 +51,7 @@ function percent(received?: number, total?: number | null): number | null {
 }
 
 function licenceInvalid(previous: PreviousEdition): boolean {
+  if (previous.lapsed) return true;
   if (INVALID_STATUSES.has(String(previous.license_status ?? '').toLowerCase())) return true;
   return daysRemaining(previous.expires_at) === 0;
 }
@@ -69,6 +71,8 @@ export default function FlocksproUpgradePage() {
   const [upgrade, setUpgrade] = useState<EnterpriseUpgradeState | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  // What the last sync came to, where that is known (this edition's sync says; the package's does not).
+  const [syncChanged, setSyncChanged] = useState<boolean | null>(null);
   // The open edition stopped under the page (the installer took the machine over).
   const [serverGone, setServerGone] = useState(false);
   const mounted = useRef(true);
@@ -197,16 +201,29 @@ export default function FlocksproUpgradePage() {
     }
   };
 
-  // The Python package's own sync with Console where it is installed (no such route otherwise),
-  // then what the machine says of its licence now.
+  // The Python package's own sync where it is installed and loaded; otherwise this edition's.
+  const syncWithConsole = async (): Promise<boolean | null> => {
+    if (situation?.previous?.version) {
+      try {
+        await client.post('/api/flockspro/license/refresh');
+        return null;
+      } catch (err) {
+        if ((err as { response?: { status?: number } })?.response?.status !== 404) throw err;
+      }
+    }
+    return (await enterpriseUpgradeApi.syncLicence()).changed;
+  };
+
+  // Then what the machine says of its licence now, and of the sign-in Console may have refused.
   const syncLicence = async () => {
     setSyncing(true);
     setSyncError(null);
+    setSyncChanged(null);
     try {
-      await client.post('/api/flockspro/license/refresh');
+      const changed = await syncWithConsole();
+      if (mounted.current) setSyncChanged(changed);
     } catch (err) {
-      const notThere = (err as { response?: { status?: number } })?.response?.status === 404;
-      if (!notThere && mounted.current) setSyncError(extractErrorMessage(err, t('errors.sync')));
+      if (mounted.current) setSyncError(extractErrorMessage(err, t('errors.sync')));
     }
     await load();
     if (mounted.current) setSyncing(false);
@@ -232,6 +249,8 @@ export default function FlocksproUpgradePage() {
   const previous = situation.previous;
   const busy = running || phase === 'installing' || phase === 'downloading';
   const licensed = Boolean(previous?.license_id);
+  // No longer valid: renewed at Console it comes back with a sync; otherwise the machine applies again.
+  const lapsed = licensed && previous?.lapsed === true;
   const canDownload = licensed && situation.available;
   const signedIn = Boolean(consoleLogin?.logged_in);
   // The Windows installer is a program run as an administrator: other words than the .run's.
@@ -242,7 +261,7 @@ export default function FlocksproUpgradePage() {
     ? t('machine.previousTitle', { version: previous.version })
     : t(licensed ? 'machine.licensedTitle' : 'machine.openTitle');
   const description = t(previous?.version ? 'machine.previousDescription' : licensed ? 'machine.licensedDescription' : 'machine.openDescription');
-  const machineNote = t(previous?.version ? 'machine.previousNote' : licensed ? 'machine.licensedNote' : 'machine.openNote');
+  const machineNote = t(previous?.version ? 'machine.previousNote' : lapsed ? 'machine.lapsedNote' : licensed ? 'machine.licensedNote' : 'machine.openNote');
 
   const updateBox = (
     <section className={BOX} aria-labelledby="flockspro-upgrade">
@@ -294,6 +313,15 @@ export default function FlocksproUpgradePage() {
     </section>
   );
 
+  const licenceBox = previous?.license_id && (
+    <>
+      <LicenceCard previous={previous} syncing={syncing} onSync={() => void syncLicence()} />
+      {syncError && <div className={ERROR}>{syncError}</div>}
+      {syncChanged === true && <div className={DONE} role="status">{t('licence.syncChanged')}</div>}
+      {syncChanged === false && <div className={NOTE} role="status">{t('licence.syncUnchanged')}</div>}
+    </>
+  );
+
   return (
     <div className="space-y-6">
       <PageHeader title="Flocks Pro" description={t('description')} icon={<ArrowUpCircle className="w-8 h-8" />} />
@@ -327,8 +355,8 @@ export default function FlocksproUpgradePage() {
         {consoleLoginError && <div className={ERROR}>{consoleLoginError}</div>}
       </section>
 
-      {/* No licence: none at all, or the Python package without one. */}
-      {!licensed && situation.available ? (
+      {/* No licence it can go by: none at all, the Python package without one, or one no longer valid. */}
+      {(!licensed || lapsed) && situation.available ? (
         <LicenceApplicationCard
           title={title}
           description={description}
@@ -339,22 +367,17 @@ export default function FlocksproUpgradePage() {
           onTaken={(next) => {
             setSituation(next);
             setUpgrade(next.upgrade);
+            setSyncChanged(null);
           }}
         >
           {updateBox}
+          {licenceBox}
         </LicenceApplicationCard>
       ) : (
         <section className={CARD} aria-labelledby="flockspro-machine">
           <MachineHeading title={title} description={description} />
           {updateBox}
-          {previous?.license_id && (
-            <LicenceCard
-              previous={previous}
-              syncing={syncing}
-              onSync={() => void syncLicence()}
-            />
-          )}
-          {syncError && <div className={ERROR}>{syncError}</div>}
+          {licenceBox}
           <div className={NOTE}>{machineNote}</div>
         </section>
       )}
@@ -381,12 +404,12 @@ function LicenceCard({ previous, syncing, onSync }: { previous: PreviousEdition;
   return (
     <div
       className={`rounded-xl border p-4 text-sm ${
-        invalid ? 'border-red-200 bg-red-50 text-red-900' : 'border-emerald-200 bg-emerald-50 text-emerald-950'
+        invalid ? 'border-red-200 bg-red-50 text-red-900 dark:text-red-200' : 'border-emerald-200 bg-emerald-50 text-emerald-950'
       }`}
       data-testid="licence-card"
     >
       {invalid && (
-        <div className="mb-3 rounded-lg border border-red-200 bg-white/70 px-3 py-2 text-sm text-red-800">
+        <div className="mb-3 rounded-lg border border-red-200 bg-white/70 px-3 py-2 text-sm text-red-800 dark:text-red-200">
           {t('licence.invalidHint')}
         </div>
       )}
@@ -395,7 +418,7 @@ function LicenceCard({ previous, syncing, onSync }: { previous: PreviousEdition;
           <div className="flex flex-wrap items-center gap-2">
             <span className="min-w-0 break-all text-base font-semibold">{previous.version ?? t('licence.noPackage')}</span>
             {status && (
-              <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${invalid ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}>
+              <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${invalid ? 'bg-red-100 text-red-700 dark:bg-red-500/15' : 'bg-emerald-100 text-emerald-700'}`}>
                 {t(`licenceStatus.${status}`, { defaultValue: status })}
               </span>
             )}

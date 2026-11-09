@@ -20,7 +20,6 @@ open edition's offline package) is switched by root; the page gives the command.
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import functools
 import hashlib
@@ -41,6 +40,14 @@ from urllib.parse import urlencode, urlparse
 
 import httpx
 
+from flocks.console.previous_licence import (
+    licence_files,
+    licence_id_of,
+    licence_token,
+    moment,
+    read_licence_file,
+    terms_in_force,
+)
 from flocks.updater.deploy import declared_managed, detect_deploy_mode
 from flocks.updater.handoff_progress import summarize_error
 from flocks.updater.installation_status import (
@@ -63,6 +70,8 @@ INSTALL_ROOT = (
 INSTALLER_SUFFIX = ".exe" if _WINDOWS else ".run"
 #: The Python enterprise package of before.
 PREVIOUS_DISTRIBUTION = "flockspro"
+#: A licence with one of these is over whatever its date says (the page goes by the same).
+LAPSED_STATUSES = frozenset({"revoked", "expired", "superseded"})
 #: Under the data directory's run/: what Console says of the release the installer puts in place, for
 #: that edition's "what's new" notice (flockspro.updater.managed reads this file, in this format).
 RELEASE_NOTES_FILE = "managed-release-notes.json"
@@ -197,64 +206,35 @@ def _own_service() -> str | None:
     return None
 
 
-def _previous_licence_files() -> list[Path]:
-    """Where the Python enterprise package kept its licence: under FLOCKS_ROOT (its cloud
-    checker), or under the home's .flocks whatever FLOCKS_ROOT says (its offline checker)."""
-    files = [runtime_root() / "flockspro" / "license.json"]
-    home = Path.home() / ".flocks" / "flockspro" / "license.json"
-    if home not in files:
-        files.append(home)
-    return files
-
-
 def previous_licence_id(status: dict[str, Any] | None = None) -> str:
     """The licence id the Python enterprise package recorded on this machine, if any: what the
     page shows and what Console is asked for, one answer for both."""
     override = (os.environ.get("FLOCKSPRO_LICENSE_ID") or "").strip()
     if override:
         return override
-    for path in _previous_licence_files():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
-        found = str(data.get("license_id") or payload.get("license_id") or "").strip()
+    for path in licence_files():
+        data = read_licence_file(path)
+        found = licence_id_of(data) if data else ""
         if found:
             return found
     return str((status or {}).get("license_id") or "").strip()
 
 
 def _licence_file_terms(licence_id: str) -> dict[str, Any]:
-    """What the licence file of *licence_id* says of itself, for the page: a licence taken here has
-    no Python package to answer for it. Read, not verified; the enterprise core judges the licence
-    when the machine moves."""
-    for path in _previous_licence_files():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+    """What the licence file of *licence_id* says of itself, for the page: a licence with no Python
+    package to answer for it (flocks.console.previous_licence says how it is read)."""
+    for path in licence_files():
+        data = read_licence_file(path)
+        if not data or licence_id_of(data) != licence_id:
             continue
-        if not isinstance(data, dict):
-            continue
-        terms = dict(data["payload"]) if isinstance(data.get("payload"), dict) else {}
-        if str(data.get("license_id") or terms.get("license_id") or "").strip() != licence_id:
-            continue
-        for field in ("key", "token", "activate_key"):
-            parts = str(data.get(field) or "").split(".")
-            if len(parts) != 3:
-                continue
-            try:
-                claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
-            except (ValueError, UnicodeDecodeError):
-                continue
-            if isinstance(claims, dict):
-                terms = {**claims, **terms}
-            break
+        kept = dict(data["payload"]) if isinstance(data.get("payload"), dict) else {}
         return {
-            **terms,
+            **licence_token(data)[1],
+            **kept,
+            **terms_in_force(data),
             "activated_at": data.get("activated_at"),
+            # A heartbeat writes these; a licence that has had none yet came to the machine then.
+            "last_sync_at": data.get("last_sync_at") or data.get("last_heartbeat_ok_at") or data.get("activated_at"),
             "install_id": data.get("install_id"),
             "fingerprint": data.get("fingerprint"),
         }
@@ -297,18 +277,38 @@ def previous_edition() -> dict[str, Any] | None:
     # The package's word on another licence than the one named here says nothing of this one.
     if status.get("license_id") and status.get("license_id") != licence_id:
         status = {"pro_enabled": status.get("pro_enabled")}
+    licence_status = status.get("license_status") or terms.get("status")
+    expires_at = status.get("expires_at") or terms.get("expires_at")
     return {
         "version": version,
         "license_id": licence_id or None,
-        "license_status": status.get("license_status") or terms.get("status"),
+        "license_status": licence_status,
         "pro_enabled": bool(status.get("pro_enabled")),
-        "expires_at": status.get("expires_at") or terms.get("expires_at"),
+        "expires_at": expires_at,
         "max_admins": status.get("max_admins") or terms.get("max_admins"),
         "max_members": status.get("max_members") or terms.get("max_members"),
-        "last_sync_at": status.get("last_sync_at") or status.get("last_heartbeat_ok_at") or terms.get("activated_at"),
+        "last_sync_at": status.get("last_sync_at") or status.get("last_heartbeat_ok_at") or terms.get("last_sync_at"),
         "install_id": status.get("install_id") or terms.get("install_id"),
         "fingerprint": status.get("fingerprint") or terms.get("fingerprint"),
+        "lapsed": bool(licence_id) and licence_lapsed(licence_status, expires_at),
     }
+
+
+def licence_lapsed(status: Any, expires_at: Any) -> bool:
+    """A licence that is no longer good for anything by its terms: expired, revoked, replaced."""
+    if str(status or "").strip().lower() in LAPSED_STATUSES:
+        return True
+    expires = moment(expires_at)
+    return bool(expires) and expires <= time.time()
+
+
+def standing_licence_id() -> str:
+    """The licence this machine goes by: one no longer valid does not count, and a new application
+    may take its place."""
+    previous = previous_edition()
+    if previous is None:
+        return previous_licence_id()
+    return "" if previous["lapsed"] else str(previous["license_id"] or "")
 
 
 def install_dir() -> Path:

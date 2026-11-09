@@ -5,6 +5,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
+import { extractErrorMessage } from '@/utils/error';
 
 interface Credentials {
   // Backend returns JSON ``null`` (not ``undefined``) for empty fields,
@@ -92,7 +93,7 @@ export default function CredentialsCard({
       setApiKey('');
       await loadCredentials();
     } catch (err: any) {
-      toast.error(t('credentials.saveFailedTitle'), err.message || t('alert.unknownError'));
+      toast.error(t('credentials.saveFailedTitle'), extractErrorMessage(err, t('alert.unknownError')));
     } finally {
       setSaving(false);
     }

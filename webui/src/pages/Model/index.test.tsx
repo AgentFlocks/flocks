@@ -415,6 +415,26 @@ describe('ModelPage add provider dialog', () => {
     });
   });
 
+  it('shows why the backend refused the API key instead of the HTTP status', async () => {
+    const user = userEvent.setup();
+    mocks.createProvider.mockRejectedValue(Object.assign(
+      new Error('Request failed with status code 422'),
+      { response: { status: 422, data: { error: 'HTTPException', message: 'API Key 只能包含英文字母、数字和英文符号' } } },
+    ));
+
+    renderWithRouter(<ModelPage />);
+
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await user.click(await screen.findByRole('button', { name: /OpenAI Compatible/i }));
+    await user.type(screen.getByPlaceholderText('e.g. SiliconFlow, LM Studio, My API'), 'My API');
+    await user.type(screen.getByPlaceholderText('https://api.example.com/v1'), 'https://gateway.example.com/v1');
+    await user.click(screen.getByRole('button', { name: 'Save Provider' }));
+
+    await waitFor(() => {
+      expect(mocks.toast.error).toHaveBeenCalledWith('configFailed', 'API Key 只能包含英文字母、数字和英文符号');
+    });
+  });
+
   async function openThreatBook(user: ReturnType<typeof userEvent.setup>) {
     renderWithRouter(<ModelPage />);
     await user.click(screen.getByRole('button', { name: 'Add Provider' }));

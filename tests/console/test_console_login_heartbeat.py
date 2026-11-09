@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import time
@@ -405,6 +406,64 @@ def test_the_heartbeat_names_the_previous_editions_licence(tmp_path, monkeypatch
     licence.write_text(json.dumps({"payload": {"license_id": "ubuntu-nn-root", "license_status": "poc"}}))
     asyncio.run(ConsoleLoginService.send_heartbeat())
     assert sent[1]["license_id"] == "ubuntu-nn-root" and sent[1]["status"] == "poc"
+
+    # A file that keeps them only inside the token: Console could not answer for a licence not named.
+    claims = base64.urlsafe_b64encode(json.dumps({"license_id": "token-only", "status": "commercial"}).encode()).rstrip(b"=").decode()
+    licence.write_text(json.dumps({"license_id": None, "key": f"h.{claims}.s"}))
+    asyncio.run(ConsoleLoginService.send_heartbeat())
+    assert sent[2]["license_id"] == "token-only" and sent[2]["status"] == "commercial"
+
+
+def test_a_heartbeat_keeps_the_licence_where_the_page_found_it(tmp_path, monkeypatch):
+    """The old offline checker kept it under the home's .flocks, whatever FLOCKS_ROOT says."""
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(login_mod, "_node_extensions", [])
+    licence = tmp_path / "home" / ".flocks" / "flockspro" / "license.json"
+    licence.parent.mkdir(parents=True)
+    licence.write_text(json.dumps({"license_id": "lic-home"}))
+    sent: list[dict] = []
+    _console_answers(monkeypatch, {"license_patch": "p1"}, sent)
+
+    async def _require_session(cls):
+        return _SESSION
+
+    monkeypatch.setattr(ConsoleLoginService, "_require_session", classmethod(_require_session))
+    asyncio.run(ConsoleLoginService.send_heartbeat())
+
+    assert sent[0]["license_id"] == "lic-home"
+    assert json.loads(licence.read_text())["patches"] == ["p1"]
+    assert not (tmp_path / "root").exists()
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_a_refused_sign_in_says_which_refusal_and_is_still_a_value_error(tmp_path, monkeypatch, code):
+    """The scheduler passes over a ValueError; the page says what happened."""
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(login_mod, "_node_extensions", [])
+
+    class _Refused(_Answered):
+        status_code = code
+
+    class _Client:
+        def __init__(self, *_a, **_k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            return _Refused({})
+
+    monkeypatch.setattr(login_mod.httpx, "AsyncClient", _Client)
+    with pytest.raises(login_mod.ConsoleSessionRefused) as refused:
+        asyncio.run(ConsoleLoginService.send_heartbeat_for_session(session=_SESSION))
+    assert refused.value.status_code == code and isinstance(refused.value, ValueError)
 
 
 def test_a_write_that_fails_leaves_the_licence_and_no_temporary(tmp_path, monkeypatch):

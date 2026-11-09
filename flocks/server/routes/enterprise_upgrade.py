@@ -1,7 +1,7 @@
 """
 Routes of the Flocks Pro page: where this open install stands, the application for a licence when
-it has none (flocks.updater.enterprise_application), and the move to the enterprise edition
-(flocks.updater.enterprise).
+it has none it can go by and the sync of the one it has (flocks.updater.enterprise_application), and
+the move to the enterprise edition (flocks.updater.enterprise).
 """
 
 from __future__ import annotations
@@ -177,6 +177,15 @@ async def take_licence(request: Request, request_id: str = _REQUEST_ID) -> dict[
     except enterprise.EnterpriseUpgradeError as exc:
         raise _refused(exc) from exc
     return {"application": application, "situation": await asyncio.to_thread(enterprise.situation)}
+
+
+@router.post("/licence/sync", summary="向 Console 同步这台机器的授权：续期、额度变更落到本机")
+async def sync_licence(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    try:
+        return await enterprise_application.sync_licence()
+    except enterprise.EnterpriseUpgradeError as exc:
+        raise _refused(exc) from exc
 
 
 @router.get("/progress", summary="上一次从页面启动的升级现在到哪了")

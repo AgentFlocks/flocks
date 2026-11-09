@@ -19,6 +19,7 @@
     "openDescription": "Review the current license information, submit applications, and track approval status.",
     "previousNote": "The enterprise edition is a separate installer now, and the previous one gets no more releases. The open part keeps upgrading with flocks update; the previous edition's audit logs, security configuration, user management and prompt redaction pages come back with the new enterprise edition.",
     "licensedNote": "The licence is kept on this machine; the new enterprise edition takes it over when you upgrade.",
+    "lapsedNote": "The licence on this machine is no longer valid. Once it is renewed or a new one is issued, the new enterprise edition goes by that one.",
     "openNote": "The enterprise edition is a separate installer: it takes this install's data over (moved into its own PostgreSQL on its first start) and is used the same way."
   },
   "licenceStatus": {
@@ -38,6 +39,8 @@
     "id": "License ID",
     "sync": "Sync License Info",
     "syncing": "Syncing...",
+    "syncChanged": "Synced with Console: the new licence terms are in effect.",
+    "syncUnchanged": "Synced with Console: nothing has changed for this licence.",
     "remaining": "License Remaining",
     "remainingValue": "{{count}} days",
     "quota": "Quota",
@@ -47,7 +50,7 @@
     "synced": "License Synced At",
     "showDetails": "Show License Details",
     "hideDetails": "Hide License Details",
-    "invalidHint": "The current license is no longer valid, and the new enterprise edition will not take it over. Renew it first, or contact us to have it issued again.",
+    "invalidHint": "This licence is no longer valid and the new enterprise edition will not carry it over. If it was renewed at Console, sync to get the new expiry; otherwise apply again or contact us to have it reissued.",
     "fields": {
       "license_id": "License ID",
       "install_id": "Install ID",

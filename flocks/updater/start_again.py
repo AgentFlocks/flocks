@@ -17,6 +17,9 @@ import urllib.request
 from pathlib import Path
 
 _WAIT_SECONDS = 5
+# What the killed installer started may still be running (its `flocks stop` holds the command lock).
+_START_ATTEMPTS = 8
+_BETWEEN_ATTEMPTS_SECONDS = 15
 
 
 def _flocks_answers(host: str, port: int) -> bool:
@@ -60,12 +63,19 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         time.sleep(1)
     print(f"start_again: no flocks answers on {host}:{port}: {' '.join(command)}", flush=True)
-    try:
-        code = subprocess.run(command, cwd=plan.get("cwd") or None, check=False, stdin=subprocess.DEVNULL).returncode
-    except OSError as exc:
-        print(f"start_again: {exc}", flush=True)
-        return 1
-    print(f"start_again: exit {code}, flocks answers: {_flocks_answers(host, port)}", flush=True)
+    code = 1
+    for attempt in range(_START_ATTEMPTS):
+        if attempt:
+            time.sleep(_BETWEEN_ATTEMPTS_SECONDS)
+        try:
+            code = subprocess.run(command, cwd=plan.get("cwd") or None, check=False, stdin=subprocess.DEVNULL).returncode
+        except OSError as exc:
+            print(f"start_again: {exc}", flush=True)
+            return 1
+        answers = _flocks_answers(host, port)
+        print(f"start_again: exit {code}, flocks answers: {answers}", flush=True)
+        if code == 0 or answers:
+            return 0 if answers else code
     return code
 
 

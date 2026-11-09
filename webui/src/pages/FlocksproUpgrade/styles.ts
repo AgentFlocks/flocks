@@ -3,6 +3,7 @@
 
 export const NOTE = 'rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800';
 export const ERROR = 'rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700';
+export const DONE = 'rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700';
 export const CARD = 'bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-4 max-md:p-4';
 export const BOX = 'rounded-lg border border-gray-200 px-4 py-3 space-y-3';
 // What moves the machine forward: an upgrade, or taking a licence.

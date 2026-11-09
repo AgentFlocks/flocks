@@ -21,6 +21,7 @@ from uuid import uuid4
 import httpx
 
 from flocks import __version__
+from flocks.console.previous_licence import find_licence_file, licence_id_of, licence_token
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -64,36 +65,31 @@ async def _report_previous_install_receipt(client: httpx.AsyncClient, session: d
         path.unlink(missing_ok=True)
 
 
-def _previous_licence_path() -> Path:
-    raw = os.getenv("FLOCKS_ROOT", str(Path.home() / ".flocks"))
-    return Path(raw).expanduser() / "flockspro" / "license.json"
-
-
-def _read_previous_licence() -> dict[str, Any]:
-    try:
-        state = json.loads(_previous_licence_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return state if isinstance(state, dict) else {}
-
-
 def _previous_licence_identity() -> tuple[str, str]:
-    state = _read_previous_licence()
+    found = find_licence_file()
+    if found is None:
+        return "", ""
+    state = found[1]
     payload = state.get("payload") if isinstance(state.get("payload"), dict) else {}
-    status = state.get("license_status") or state.get("status") or payload.get("license_status") or payload.get("status")
-    return str(status or "").strip(), str(state.get("license_id") or payload.get("license_id") or "").strip()
+    status = (
+        state.get("license_status") or state.get("status") or payload.get("license_status") or payload.get("status")
+        or licence_token(state)[1].get("status")
+    )
+    return str(status or "").strip(), licence_id_of(state)
 
 
-def _keep_previous_licence_current(data: dict[str, Any]) -> None:
+def keep_previous_licence_current(data: dict[str, Any]) -> None:
     """The Python enterprise package still running on this release (the transition package) takes its
     licence for dead a week after its last heartbeat, and it has no heartbeat of its own here: the
     code that did this for it went with the older release. So the machines waiting on the transition
-    package for the new enterprise edition keep their licence. An extension that reports for itself
-    has this among what it does, and a machine with no such licence has nothing here."""
-    state = _read_previous_licence()
-    if not state:
+    package for the new enterprise edition keep their licence, and a renewal Console signed (the
+    patch in its answer) reaches the file whether the package is there or not: the Flocks Pro page
+    reads it, and the enterprise core takes it when the machine moves. An extension that reports for
+    itself has this among what it does, and a machine with no such licence has nothing here."""
+    found = find_licence_file()
+    if found is None:
         return
-    path = _previous_licence_path()
+    path, state = found
     now = int(datetime.now(UTC).timestamp())
     state["last_sync_at"] = now
     state["last_heartbeat_ok_at"] = now
@@ -124,6 +120,15 @@ def _write_private_json(path: Path, value: dict[str, Any]) -> None:
     except OSError:
         temporary.unlink(missing_ok=True)
         raise
+
+
+class ConsoleSessionRefused(ValueError):
+    """Console refused the sign-in a request went with: 401 it is no longer valid, 403 it is but
+    not for this. A ValueError as every sign-in that will not do is here."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__("console 会话已失效，请重新登录")
+        self.status_code = status_code
 
 
 class ConsoleNodeExtension(Protocol):
@@ -550,7 +555,7 @@ class ConsoleLoginService:
                 headers={"Authorization": f"Bearer {token}"},
             )
             if resp.status_code in {401, 403}:
-                raise ValueError("console 会话已失效，请重新登录")
+                raise ConsoleSessionRefused(resp.status_code)
             resp.raise_for_status()
             data = resp.json()
             console_base_for_session = cls._console_base_url_for_session(session)
@@ -564,7 +569,7 @@ class ConsoleLoginService:
                 )
             if not _node_extensions:
                 try:
-                    _keep_previous_licence_current(data)
+                    keep_previous_licence_current(data)
                 except OSError as exc:
                     log.warning("console.previous_licence_not_kept", {"error": str(exc)})
             # An extension that reports what it owes the console has this one among them.
