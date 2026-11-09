@@ -201,6 +201,10 @@ class ChatResponse(BaseModel):
     usage: Dict[str, Any]
     tool_calls: Optional[List[Dict[str, Any]]] = None
     reasoning: Optional[str] = None
+    # Where the reasoning came from and its structured form, so a reply replayed
+    # into a stream keeps what the next tool round must send back.
+    reasoning_source: Optional[str] = None
+    reasoning_details: Optional[List[Dict[str, Any]]] = None
 
 
 class ToolCallInfo(BaseModel):
