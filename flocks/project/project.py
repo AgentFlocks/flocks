@@ -361,11 +361,25 @@ class Project:
     @staticmethod
     def _path_status(worktree: str) -> Literal["available", "missing", "unreadable"]:
         path = Path(worktree)
-        if not path.is_dir():
-            return "missing"
+        try:
+            if not path.is_dir():
+                return "missing"
+        except OSError:
+            # Python 3.12 raises instead of returning False when a parent
+            # directory denies search (x) permission; the folder may still
+            # exist, this account just cannot reach it.
+            return "unreadable"
         if not os.access(path, os.R_OK | os.X_OK):
             return "unreadable"
         return "available"
+
+    @staticmethod
+    def _detect_vcs(worktree: str) -> Optional[str]:
+        try:
+            return "git" if (Path(worktree) / ".git").exists() else None
+        except OSError:
+            # Same as _path_status: an unreachable worktree has no known VCS.
+            return None
 
     @classmethod
     def allowed_roots(cls, default_worktree: Optional[str] = None) -> List[Path]:
@@ -515,7 +529,7 @@ class Project:
             name=entry.name,
             sourceKind=entry.source_kind,
             scope=entry.scope or WORKBENCH_PROJECT_SCOPE,
-            vcs="git" if (Path(entry.worktree) / ".git").exists() else None,
+            vcs=cls._detect_vcs(entry.worktree),
             time=ProjectTime(created=entry.created_at, updated=entry.updated_at),
             pathStatus=cls._path_status(entry.worktree),
             ownerUserID=entry.owner_user_id,

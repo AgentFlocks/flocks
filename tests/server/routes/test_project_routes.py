@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -500,6 +501,42 @@ async def test_duplicate_project_directory_returns_existing_project(
     assert second.status_code == status.HTTP_200_OK
     assert second.json()["id"] == first.json()["id"]
     assert len((await client.get("/api/project")).json()) == 1
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="needs POSIX directory search permission enforced for this account",
+)
+@pytest.mark.asyncio
+async def test_project_list_reports_unreachable_worktree_as_unreadable(
+    client: AsyncClient,
+    tmp_path: Path,
+):
+    """Issue #805: a parent without x permission must not turn the list into a 500."""
+
+    old_home = tmp_path / "svc-old"
+    worktree = old_home / "project-a"
+    (worktree / ".git").mkdir(parents=True)
+    created = await client.post(
+        "/api/project",
+        json={"name": "Moved", "worktree": str(worktree)},
+    )
+    assert created.status_code == status.HTTP_200_OK, created.text
+    assert created.json()["vcs"] == "git"
+
+    old_home.chmod(0o600)
+    try:
+        listed = await client.get("/api/project")
+        fetched = await client.get(f"/api/project/{created.json()['id']}")
+    finally:
+        old_home.chmod(0o700)
+
+    assert listed.status_code == status.HTTP_200_OK, listed.text
+    assert [(item["id"], item["pathStatus"], item["vcs"]) for item in listed.json()] == [
+        (created.json()["id"], "unreadable", None),
+    ]
+    assert fetched.status_code == status.HTTP_200_OK, fetched.text
+    assert fetched.json()["pathStatus"] == "unreadable"
 
 
 @pytest.mark.asyncio
