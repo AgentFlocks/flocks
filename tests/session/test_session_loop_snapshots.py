@@ -24,7 +24,11 @@ def _part_type(part) -> str:
 
 
 @pytest.fixture
-def worktree(tmp_path: Path) -> Path:
+def worktree(tmp_path: Path, monkeypatch) -> Path:
+    from unittest.mock import AsyncMock
+    from flocks.config.config import Config, ConfigInfo
+
+    monkeypatch.setattr(Config, "get", AsyncMock(return_value=ConfigInfo(snapshot=True)))
     tree = tmp_path / "proj"
     (tree / "docs").mkdir(parents=True)
     (tree / "docs" / "note.txt").write_text("v1\n")
@@ -82,7 +86,8 @@ async def test_turn_snapshot_patch_and_diff_are_recorded(worktree: Path):
 
 
 @pytest.mark.asyncio
-async def test_revert_restores_files_from_recorded_patch_parts(worktree: Path):
+@pytest.mark.parametrize("capacity_reached", [False, True])
+async def test_revert_restores_files_from_recorded_patch_parts(worktree: Path, monkeypatch, capacity_reached):
     session, user1, ctx = await _make_turn(worktree)
     callbacks = LoopCallbacks()
     snap1 = await SessionLoop._track_turn_snapshot(ctx, user1)
@@ -95,6 +100,18 @@ async def test_revert_restores_files_from_recorded_patch_parts(worktree: Path):
     (worktree / "docs" / "note.txt").write_text("v3\n")
     await Message.create(session.id, MessageRole.ASSISTANT, "done", parentID=user2.id)
     await SessionLoop._record_step_patch(ctx, callbacks, user2, snap2)
+
+    if capacity_reached:
+        from flocks.snapshot import snapshot as module
+
+        monkeypatch.setattr(module, "MAX_SNAPSHOT_BYTES", 1)
+        with pytest.raises(ValueError, match="without a recovery snapshot"):
+            await SessionRevertManager.revert(
+                session.project_id, RevertInput(session_id=session.id, message_id=user2.id), str(worktree)
+            )
+        assert (worktree / "docs" / "note.txt").read_text() == "v3\n"
+        assert (await Session.get_by_id(session.id)).revert is None
+        return
 
     updated = await SessionRevertManager.revert(
         project_id=session.project_id,

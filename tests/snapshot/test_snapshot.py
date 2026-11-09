@@ -338,6 +338,158 @@ class TestSnapshotModel:
         assert diff.deletions == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [None, False])
+async def test_disabled_capture_never_runs_git(tmp_path, monkeypatch, enabled):
+    from unittest.mock import AsyncMock
+    from flocks.config.config import Config, ConfigInfo
+
+    monkeypatch.setattr(Config, "get", AsyncMock(return_value=ConfigInfo(snapshot=enabled)))
+    run = AsyncMock()
+    monkeypatch.setattr(Snapshot, "_run_git", run)
+    assert await Snapshot.track("disabled", str(tmp_path)) is None
+    assert not (await Snapshot.patch("disabled", str(tmp_path), "old")).files
+    assert await Snapshot.diff("disabled", str(tmp_path), "old") == ""
+    run.assert_not_called()
+    assert not (Config.get_data_path() / "snapshot").exists()
+
+
+@pytest.mark.asyncio
+async def test_global_capacity_guard_refuses_all_staging(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from flocks.config.config import Config
+    from flocks.snapshot import snapshot as module
+
+    other = Config.get_data_path() / "snapshot" / "other-project"
+    other.mkdir(parents=True)
+    sentinel = other / "object"
+    sentinel.write_bytes(b"1234")
+    monkeypatch.setattr(module, "MAX_SNAPSHOT_BYTES", 4)
+    run = AsyncMock()
+    monkeypatch.setattr(Snapshot, "_run_git", run)
+    assert await Snapshot.track("new", str(tmp_path)) is None
+    assert not (await Snapshot.patch("new", str(tmp_path), "old")).files
+    assert await Snapshot.diff("new", str(tmp_path), "old") == ""
+    run.assert_not_called()
+    assert sentinel.read_bytes() == b"1234"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit,renames,allowed", [(5, 1, True), (4, 1, False), (5, 3, False)])
+async def test_capacity_scan_retries_concurrent_object_rename(tmp_path, monkeypatch, limit, renames, allowed):
+    from flocks.config.config import Config
+    from flocks.snapshot import snapshot as module
+
+    directory = Config.get_data_path() / "snapshot" / "other" / "objects"
+    directory.mkdir(parents=True)
+    current = directory / "tmp_obj"
+    current.write_bytes(b"1234")
+    real_walk = os.walk
+    renamed = 0
+
+    def racing_walk(*args, **kwargs):
+        nonlocal current, renamed
+        for path, dirs, files in real_walk(*args, **kwargs):
+            if Path(path) == directory and current.name in files and renamed < renames:
+                destination = directory / f"object_{renamed}"
+                current.rename(destination)
+                current = destination
+                renamed += 1
+            yield path, dirs, files
+
+    monkeypatch.setattr(module, "MAX_SNAPSHOT_BYTES", limit)
+    monkeypatch.setattr(os, "walk", racing_walk)
+    assert await Snapshot._capture_allowed() is allowed
+    assert renamed == renames
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["track", "patch", "diff"])
+async def test_failed_add_stops_capture(tmp_path, monkeypatch, operation):
+    from unittest.mock import AsyncMock
+
+    git_dir = Path(Snapshot._gitdir("test"))
+    git_dir.mkdir(parents=True)
+    run = AsyncMock(return_value=None)
+    monkeypatch.setattr(Snapshot, "_run_git", run)
+    args = ("test", str(tmp_path)) if operation == "track" else ("test", str(tmp_path), "old")
+    await getattr(Snapshot, operation)(*args)
+    run.assert_awaited_once_with(["add", "."], str(git_dir), str(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_missing_tree_does_not_unlink(tmp_path):
+    file = tmp_path / "keep.txt"
+    file.write_text("keep me")
+    await Snapshot.revert("missing", str(tmp_path), [SnapshotPatch(hash="missing", files=[str(file)])])
+    assert file.read_text() == "keep me"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("check_result", [None, "100644 blob abc\\tkeep.txt\\n"])
+async def test_failed_checkout_does_not_unlink_on_uncertain_tree(tmp_path, monkeypatch, check_result):
+    from unittest.mock import AsyncMock
+
+    file = tmp_path / "keep.txt"
+    file.write_text("keep me")
+    monkeypatch.setattr(Snapshot, "_run_git", AsyncMock(side_effect=[None, check_result]))
+    await Snapshot.revert("test", str(tmp_path), [SnapshotPatch(hash="old", files=[str(file)])])
+    assert file.read_text() == "keep me"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("ignore_terminate", [False, True])
+@pytest.mark.parametrize("inherited_pipe", [False, pytest.param(True, marks=pytest.mark.skipif(os.name != "posix", reason="POSIX process groups"))])
+async def test_git_child_reaped_on_timeout_or_cancel(tmp_path, monkeypatch, cancel, ignore_terminate, inherited_pipe):
+    if ignore_terminate and os.name != "posix":
+        pytest.skip("Ignoring SIGTERM requires POSIX")
+    import sys
+    from unittest.mock import Mock
+
+    create = asyncio.create_subprocess_exec
+    ready = tmp_path / "ready"
+    code = (
+        "import signal, time; from pathlib import Path; "
+        + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if ignore_terminate else "")
+        + ("import subprocess, sys; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); " if inherited_pipe else "")
+        + f"Path({str(ready)!r}).touch(); time.sleep(60)"
+    )
+    child = await create(sys.executable, "-c", code, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                         start_new_session=(os.name == "posix"))
+    try:
+        async with asyncio.timeout(5):
+            while not ready.exists():
+                await asyncio.sleep(0.01)
+        child.terminate = Mock(wraps=child.terminate)
+        child.kill = Mock(wraps=child.kill)
+
+        async def spawn(*args, **kwargs):
+            return child
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        task = asyncio.create_task(Snapshot._run_git(["status"], str(tmp_path / "git"), str(tmp_path), timeout=0.05))
+        if cancel:
+            await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=5)
+        else:
+            assert await asyncio.wait_for(task, timeout=5) is None
+        assert child.returncode is not None
+        child.terminate.assert_called_once()
+        assert child.kill.call_count == int(ignore_terminate or inherited_pipe)
+    finally:
+        if inherited_pipe:
+            try:
+                os.killpg(child.pid, 9)
+            except ProcessLookupError:
+                pass
+        if child.returncode is None:
+            child.kill()
+        await child.wait()
+
+
 # Run tests
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
