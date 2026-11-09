@@ -19,6 +19,7 @@
     "openDescription": "查看当前授权信息、提交申请并跟踪审批进度。",
     "previousNote": "企业版换成了单独的安装包，老企业版不再更新。开源部分照常用 flocks update 升级；老企业版的审计日志、安全配置、用户管理、Prompt 脱敏这些页面，升级到新企业版后回来。",
     "licensedNote": "授权已经保存在这台机器上，升级到新企业版时会沿用它。",
+    "lapsedNote": "这台机器上的授权已失效；续期或重新申请之后，升级到新企业版时沿用新的授权。",
     "openNote": "企业版是单独的安装包：装好后开源版的数据会迁过去（第一次启动迁进自带的 PostgreSQL），用法照旧。"
   },
   "licenceStatus": {
@@ -38,6 +39,8 @@
     "id": "License ID",
     "sync": "同步授权信息",
     "syncing": "同步中...",
+    "syncChanged": "已向 Console 同步，新的授权信息已经生效。",
+    "syncUnchanged": "已向 Console 同步，这份授权没有新的变更。",
     "remaining": "License 剩余时间",
     "remainingValue": "{{count}} 天",
     "quota": "授权额度",
@@ -47,7 +50,7 @@
     "synced": "授权信息同步时间",
     "showDetails": "查看 License 详情",
     "hideDetails": "收起 License 详情",
-    "invalidHint": "当前 License 已失效，新企业版不会沿用它。请先续期，或联系我们重新签发。",
+    "invalidHint": "当前 License 已失效，新企业版不会沿用它。已在 Console 续期的，点「同步授权信息」取回新的到期时间；没有续期的，重新申请或联系我们重新签发。",
     "fields": {
       "license_id": "License ID",
       "install_id": "安装 ID",

@@ -16,6 +16,8 @@ export interface PreviousEdition {
   last_sync_at?: string | number | null;
   install_id?: string | null;
   fingerprint?: string | null;
+  /** No longer valid by its terms, as the server judges it: it may be replaced by a new application. */
+  lapsed?: boolean;
 }
 
 /** The last upgrade started from the page (flocks.updater.enterprise.read_state). */
@@ -87,6 +89,8 @@ export interface LicenceApplication {
   updated_at: string | null;
   can_withdraw: boolean;
   can_take: boolean;
+  /** Over by the terms it was issued with (Console may have renewed it since): no new application waits on it. */
+  licence_over?: boolean;
 }
 
 export interface LicenceApplications {
@@ -105,6 +109,12 @@ export interface LicenceApplicationForm {
   applicant_phone: string;
   sales_rep_name?: string | null;
   notes?: string | null;
+}
+
+/** What a sync with Console came to (flocks.updater.enterprise_application.sync_licence). */
+export interface LicenceSync {
+  /** The licence's terms are not what they were before it. */
+  changed: boolean;
 }
 
 export interface EnterpriseUpgradeEvent {
@@ -129,6 +139,8 @@ export const enterpriseUpgradeApi = {
 
   progress: async (): Promise<EnterpriseUpgradeState | null> =>
     (await client.get('/api/enterprise-upgrade/progress')).data.upgrade,
+
+  syncLicence: async (): Promise<LicenceSync> => (await client.post('/api/enterprise-upgrade/licence/sync')).data,
 
   applications: async (): Promise<LicenceApplications> =>
     (await client.get('/api/enterprise-upgrade/applications')).data,

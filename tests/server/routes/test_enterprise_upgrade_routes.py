@@ -9,6 +9,8 @@ Case list (编号 | 场景):
   ER5 the application for a licence: the form checked as the page of 2026.10.19 checked it, an
       application id that is not one refused before anything runs, refusals as a 409 with their
       words, and taking a licence answers with the machine's new situation
+  ER6 syncing the licence with Console: whether the terms changed; what stopped it as a 409 with its
+      words
 """
 
 from __future__ import annotations
@@ -42,7 +44,8 @@ async def test_er1_administrators_only(client: AsyncClient, monkeypatch: pytest.
     monkeypatch.setattr(routes, "require_admin", _member)
     for method, path in (("get", ""), ("post", "/check"), ("post", "/start"), ("get", "/progress"),
                          ("get", "/applications"), ("post", "/applications"),
-                         ("post", "/applications/req_1/withdraw"), ("post", "/applications/req_1/take")):
+                         ("post", "/applications/req_1/withdraw"), ("post", "/applications/req_1/take"),
+                         ("post", "/licence/sync")):
         resp = await getattr(client, method)(f"/api/enterprise-upgrade{path}")
         assert resp.status_code == status.HTTP_403_FORBIDDEN, path
 
@@ -157,3 +160,22 @@ async def test_er5_the_application_for_a_licence(client: AsyncClient, monkeypatc
     monkeypatch.setattr(enterprise_application, "applications", listing)
     resp = await client.get("/api/enterprise-upgrade/applications")
     assert resp.status_code == 200 and resp.json()["items"][0]["status"] == "pending"
+
+
+async def test_er6_syncing_the_licence(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(routes, "require_admin", _admin)
+
+    async def synced():
+        return {"changed": True}
+
+    monkeypatch.setattr(enterprise_application, "sync_licence", synced)
+    resp = await client.post("/api/enterprise-upgrade/licence/sync")
+    assert resp.status_code == 200
+    assert resp.json() == {"changed": True}
+
+    async def stopped():
+        raise enterprise.EnterpriseUpgradeError("同步授权要先登录云账号：点「云账号登录」后再试")
+
+    monkeypatch.setattr(enterprise_application, "sync_licence", stopped)
+    resp = await client.post("/api/enterprise-upgrade/licence/sync")
+    assert resp.status_code == status.HTTP_409_CONFLICT and "先登录云账号" in json.dumps(resp.json(), ensure_ascii=False)
