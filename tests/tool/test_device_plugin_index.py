@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -498,3 +500,357 @@ async def test_auto_creating_user_device_instances_is_serialized(monkeypatch, tm
     assert insert_attempts == 1
     assert len(devices) == 1
     assert devices[0].storage_key == "custom_demo_api_v0_1_0"
+
+
+def _patch_empty_template_sources(monkeypatch, plugin_index) -> None:
+    monkeypatch.setattr(plugin_index.hub_catalog, "list_catalog", lambda **kw: [])
+    monkeypatch.setattr(plugin_index, "_device_tool_counts", lambda: {})
+
+
+class _CountingCondition(threading.Condition):
+    """Condition that counts its waiters, so a test can wait for them deterministically."""
+
+    waiting = 0
+
+    def wait(self, timeout=None):
+        self.waiting += 1
+        try:
+            return super().wait(timeout)
+        finally:
+            self.waiting -= 1
+
+
+def _counting_refresh_cond(monkeypatch, plugin_index) -> _CountingCondition:
+    cond = _CountingCondition()
+    # raising=False keeps the test runnable (and red) against the pre-fix module.
+    monkeypatch.setattr(plugin_index, "_runtime_refresh_cond", cond, raising=False)
+    return cond
+
+
+def _wait_until(predicate, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_overlapping_forced_template_refreshes_share_reloads(monkeypatch):
+    """INC-5959A657: queued page syncs each reloaded every plugin tool."""
+    from flocks.tool.device import plugin_index
+
+    _patch_empty_template_sources(monkeypatch, plugin_index)
+    cond = _counting_refresh_cond(monkeypatch, plugin_index)
+    monkeypatch.setattr(plugin_index, "discover_api_service_descriptors", lambda **kw: [])
+    events: list[str] = []
+    events_lock = threading.Lock()
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    def slow_refresh_plugin_tools(cls):
+        with events_lock:
+            run = sum(event.startswith("start-") for event in events) + 1
+            events.append(f"start-{run}")
+        if run == 1:
+            first_started.set()
+            assert release_first.wait(5)
+        with events_lock:
+            events.append(f"end-{run}")
+        return []
+
+    monkeypatch.setattr(
+        plugin_index.ToolRegistry, "refresh_plugin_tools", classmethod(slow_refresh_plugin_tools),
+    )
+
+    def call(name: str) -> None:
+        assert plugin_index.list_device_templates(refresh=True) == []
+        with events_lock:
+            events.append(f"return-{name}")
+
+    first = threading.Thread(target=call, args=("first",))
+    first.start()
+    assert first_started.wait(5)
+    late = [threading.Thread(target=call, args=(f"late{index}",)) for index in range(5)]
+    for thread in late:
+        thread.start()
+    # Every late caller asks while the first reload still runs.
+    assert _wait_until(lambda: cond.waiting == 5), "late callers did not wait for the running reload"
+    release_first.set()
+    for thread in [first, *late]:
+        thread.join(5)
+        assert not thread.is_alive()
+
+    assert [event for event in events if event.startswith("start-")] == ["start-1", "start-2"]
+    assert events.index("return-first") > events.index("end-1")
+    for index in range(5):
+        # A caller that asked during reload 1 must see a reload that began after it asked.
+        assert events.index(f"return-late{index}") > events.index("end-2")
+
+
+def test_caller_of_a_finished_reload_does_not_wait_for_the_next_one(monkeypatch):
+    """The first of two overlapping forced refreshes returns after its own reload.
+
+    Building the index reads the tool registry, whose lock a running reload
+    holds, so a caller that rebuilt only after giving up the reload would sit
+    through the reload queued behind it (17 s -> 34 s, past the WebUI timeout).
+    """
+    from flocks.tool.device import plugin_index
+
+    monkeypatch.setattr(plugin_index.hub_catalog, "list_catalog", lambda **kw: [])
+    monkeypatch.setattr(plugin_index, "discover_api_service_descriptors", lambda **kw: [])
+    cond = _counting_refresh_cond(monkeypatch, plugin_index)
+    registry_lock = threading.RLock()  # stands in for ToolRegistry._refresh_lock
+    first_returned = threading.Event()
+    events: list[str] = []
+    events_lock = threading.Lock()
+
+    def device_tool_counts():
+        with registry_lock:  # ToolRegistry.list_tools() takes the refresh lock
+            return {}
+
+    def refresh_plugin_tools(cls):
+        with registry_lock:
+            with events_lock:
+                run = sum(event.startswith("start-") for event in events) + 1
+                events.append(f"start-{run}")
+            if run == 1:
+                assert _wait_until(lambda: cond.waiting == 1), "second caller never waited"
+            else:
+                first_returned.wait(5)
+            with events_lock:
+                events.append(f"end-{run}")
+        return []
+
+    monkeypatch.setattr(plugin_index, "_device_tool_counts", device_tool_counts)
+    monkeypatch.setattr(plugin_index.ToolRegistry, "refresh_plugin_tools", classmethod(refresh_plugin_tools))
+
+    def first_caller() -> None:
+        plugin_index.list_device_templates(refresh=True)
+        # Like a device sync reading the index again under its instance lock:
+        # by then the queued reload has started and holds the registry lock.
+        assert _wait_until(lambda: "start-2" in events), "second reload never started"
+        plugin_index.list_device_templates()
+        with events_lock:
+            events.append("return-first")
+        first_returned.set()
+
+    def second_caller() -> None:
+        plugin_index.list_device_templates(refresh=True)
+        with events_lock:
+            events.append("return-second")
+
+    first = threading.Thread(target=first_caller)
+    first.start()
+    assert _wait_until(lambda: "start-1" in events)
+    second = threading.Thread(target=second_caller)
+    second.start()
+    for thread in (first, second):
+        thread.join(15)
+        assert not thread.is_alive()
+
+    assert events.index("return-first") < events.index("end-2")
+    assert events.index("return-second") > events.index("end-2")
+
+
+def test_failed_forced_template_refresh_is_not_shared(monkeypatch):
+    from flocks.tool.device import plugin_index
+
+    _patch_empty_template_sources(monkeypatch, plugin_index)
+    monkeypatch.setattr(plugin_index.ToolRegistry, "refresh_plugin_tools", classmethod(lambda cls: []))
+    scans = 0
+
+    def flaky_discover(*, refresh: bool = False):
+        nonlocal scans
+        if refresh:
+            scans += 1
+            if scans == 1:
+                raise RuntimeError("descriptor scan failed")
+        return []
+
+    monkeypatch.setattr(plugin_index, "discover_api_service_descriptors", flaky_discover)
+
+    with pytest.raises(RuntimeError, match="descriptor scan failed"):
+        plugin_index.list_device_templates(refresh=True)
+    assert plugin_index.list_device_templates(refresh=True) == []
+    assert scans == 2
+
+
+def test_failed_tool_reload_is_not_shared_with_waiters(monkeypatch):
+    """A tool reload that failed (logged, not raised) must not satisfy waiting callers."""
+    from flocks.tool.device import plugin_index
+
+    _patch_empty_template_sources(monkeypatch, plugin_index)
+    cond = _counting_refresh_cond(monkeypatch, plugin_index)
+    failed_runner: list[str] = []
+    monkeypatch.setattr(plugin_index, "discover_api_service_descriptors", lambda **kw: [])
+    events: list[str] = []
+    events_lock = threading.Lock()
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    def flaky_refresh_plugin_tools(cls):
+        with events_lock:
+            run = sum(event.startswith("start-") for event in events) + 1
+            events.append(f"start-{run}")
+        if run == 1:
+            first_started.set()
+            assert release_first.wait(5)
+        if run == 2:
+            with events_lock:
+                events.append("fail-2")
+                failed_runner.append(threading.current_thread().name)
+            raise RuntimeError("plugin load failed")
+        with events_lock:
+            events.append(f"end-{run}")
+        return []
+
+    monkeypatch.setattr(
+        plugin_index.ToolRegistry, "refresh_plugin_tools", classmethod(flaky_refresh_plugin_tools),
+    )
+
+    def call(name: str) -> None:
+        plugin_index.list_device_templates(refresh=True)
+        with events_lock:
+            events.append(f"return-{name}")
+
+    first = threading.Thread(target=call, args=("first",), name="first")
+    first.start()
+    assert first_started.wait(5)
+    late_names = [f"late{index}" for index in range(3)]
+    late = [threading.Thread(target=call, args=(name,), name=name) for name in late_names]
+    for thread in late:
+        thread.start()
+    assert _wait_until(lambda: cond.waiting == 3), "late callers did not wait for the running reload"
+    release_first.set()
+    for thread in [first, *late]:
+        thread.join(5)
+        assert not thread.is_alive()
+
+    assert [event for event in events if event.startswith("start-")] == ["start-1", "start-2", "start-3"]
+    # The caller that ran the failed reload 2 has its failure logged; the other
+    # two must not take that reload as theirs and only return after reload 3.
+    waiters = [name for name in late_names if name not in failed_runner]
+    assert len(waiters) == 2
+    for name in waiters:
+        assert events.index(f"return-{name}") > events.index("end-3")
+
+
+def test_index_build_failure_after_a_reload_drops_the_old_index(monkeypatch):
+    from flocks.tool.device import plugin_index
+
+    monkeypatch.setattr(plugin_index, "_device_tool_counts", lambda: {})
+    monkeypatch.setattr(plugin_index, "discover_api_service_descriptors", lambda **kw: [])
+    monkeypatch.setattr(plugin_index.ToolRegistry, "refresh_plugin_tools", classmethod(lambda cls: []))
+    monkeypatch.setattr(plugin_index.hub_catalog, "list_catalog", lambda **kw: [])
+    plugin_index.clear_device_template_cache()
+    assert plugin_index.list_device_templates() == []
+    assert plugin_index._template_cache == []
+
+    def broken_catalog(**kwargs):
+        raise RuntimeError("catalog unreadable")
+
+    monkeypatch.setattr(plugin_index.hub_catalog, "list_catalog", broken_catalog)
+    with pytest.raises(RuntimeError, match="catalog unreadable"):
+        plugin_index.list_device_templates(refresh=True)
+    assert plugin_index._template_cache is None
+
+
+def test_forced_template_refresh_from_inside_a_reload_does_not_deadlock(monkeypatch):
+    from flocks.tool.device import plugin_index
+
+    _patch_empty_template_sources(monkeypatch, plugin_index)
+    monkeypatch.setattr(plugin_index, "discover_api_service_descriptors", lambda **kw: [])
+    reloads: list[bool] = []
+
+    def reentrant_refresh_plugin_tools(cls):
+        reloads.append(True)
+        if len(reloads) == 1:
+            plugin_index.list_device_templates(refresh=True)
+        return []
+
+    monkeypatch.setattr(
+        plugin_index.ToolRegistry, "refresh_plugin_tools", classmethod(reentrant_refresh_plugin_tools),
+    )
+
+    worker = threading.Thread(target=plugin_index.list_device_templates, kwargs={"refresh": True})
+    worker.start()
+    worker.join(5)
+
+    assert not worker.is_alive()
+    assert len(reloads) == 2
+
+
+def test_template_rebuild_overtaken_by_a_cache_clear_is_not_stored(monkeypatch):
+    from flocks.tool.device import plugin_index
+
+    monkeypatch.setattr(plugin_index, "_device_tool_counts", lambda: {})
+    monkeypatch.setattr(plugin_index, "discover_api_service_descriptors", lambda **kw: [])
+
+    def list_catalog_racing_a_plugin_change(**kwargs):
+        plugin_index.clear_device_template_cache()  # a Hub install lands mid-rebuild
+        return []
+
+    monkeypatch.setattr(plugin_index.hub_catalog, "list_catalog", list_catalog_racing_a_plugin_change)
+    plugin_index.clear_device_template_cache()
+
+    assert plugin_index.list_device_templates() == []
+    assert plugin_index._template_cache is None
+
+
+@pytest.mark.asyncio
+async def test_overlapping_forced_device_syncs_share_the_plugin_reload(monkeypatch, tmp_path):
+    """INC-5959A657: each queued /api/devices/sync?refresh=true reloaded all plugins."""
+    from flocks.storage.storage import Storage
+    from flocks.tool.device import intake, plugin_index
+    from flocks.tool.device.store import list_devices
+
+    home, _data, _project = _reset_env(monkeypatch, tmp_path)
+    await Storage.init()
+    root = home / ".flocks" / "plugins" / "tools" / "device" / "custom_demo"
+    _write_provider(
+        root,
+        {
+            "name": "Custom Demo",
+            "service_id": "custom_demo_api",
+            "version": "0.1.0",
+            "integration_type": "device",
+            "credential_fields": [],
+        },
+    )
+    _write_tool(root, "custom_demo_ping")
+    reloads = 0
+    reloads_lock = threading.Lock()
+    cond = _counting_refresh_cond(monkeypatch, plugin_index)
+
+    def slow_refresh_plugin_tools(cls):
+        nonlocal reloads
+        with reloads_lock:
+            reloads += 1
+            run = reloads
+        if run == 1:
+            # Hold the first reload until the other four syncs are waiting on it.
+            _wait_until(lambda: cond.waiting >= 4)
+        return []
+
+    async def fake_sync_service_tool_state(service_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(plugin_index.hub_catalog, "list_catalog", lambda plugin_type=None: [])
+    monkeypatch.setattr(plugin_index.hub_catalog, "system_plugin_root", lambda plugin_type, plugin_id: None)
+    monkeypatch.setattr(
+        plugin_index.ToolRegistry, "refresh_plugin_tools", classmethod(slow_refresh_plugin_tools),
+    )
+    monkeypatch.setattr(plugin_index.ToolRegistry, "init", classmethod(lambda cls: None))
+    monkeypatch.setattr(plugin_index.ToolRegistry, "list_tools", classmethod(lambda cls: []))
+    monkeypatch.setattr(intake, "sync_service_tool_state", fake_sync_service_tool_state)
+
+    created_counts = await asyncio.gather(
+        *(intake.ensure_user_device_instances(refresh_templates=True) for _ in range(5)),
+    )
+    devices = await list_devices()
+
+    assert sorted(created_counts) == [0, 0, 0, 0, 1]
+    assert [device.storage_key for device in devices] == ["custom_demo_api_v0_1_0"]
+    assert reloads == 2
+    plugin_index.clear_device_template_cache()

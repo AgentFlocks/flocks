@@ -121,20 +121,23 @@ async def ensure_user_device_instances(*, refresh_templates: bool = False) -> in
     added an instance. Auto-provision one editable instance per user-level
     template when no instance for the same storage_key exists yet.
     """
+    if refresh_templates:
+        from flocks.tool.device.plugin_index import list_device_templates
+
+        # The forced rebuild reloads every plugin tool and is the slow part.
+        # Run it before taking the lock so overlapping syncs share one rebuild
+        # instead of each queuing a full reload behind the lock; the lock only
+        # has to cover the existence check and the inserts below.
+        await asyncio.to_thread(list_device_templates, refresh=True)
     async with _auto_instance_lock():
-        return await _ensure_user_device_instances_unlocked(
-            refresh_templates=refresh_templates,
-        )
+        return await _ensure_user_device_instances_unlocked()
 
 
-async def _ensure_user_device_instances_unlocked(*, refresh_templates: bool = False) -> int:
+async def _ensure_user_device_instances_unlocked() -> int:
     await ensure_default_group()
     existing_storage_keys = {device.storage_key for device in await list_devices()}
     ignored_storage_keys = await _load_auto_instance_ignored_storage_keys()
-    user_template_storage_keys = await asyncio.to_thread(
-        _user_device_template_storage_keys,
-        refresh_templates=refresh_templates,
-    )
+    user_template_storage_keys = await asyncio.to_thread(_user_device_template_storage_keys)
     created = 0
 
     from flocks.tool.device.plugin_index import list_device_templates

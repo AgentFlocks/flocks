@@ -1,8 +1,9 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
+import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
 import DeviceIntegrationPage from './index';
 
 const mocks = vi.hoisted(() => ({
@@ -483,7 +484,7 @@ describe('DeviceIntegrationPage', () => {
     expect(mocks.createGroup).not.toHaveBeenCalled();
   });
 
-  it('refreshes templates and syncs devices when the window regains focus', async () => {
+  it('rebuilds the template index once when the window regains focus', async () => {
     render(<DeviceIntegrationPage />);
 
     await screen.findByText('设备接入');
@@ -498,10 +499,106 @@ describe('DeviceIntegrationPage', () => {
 
     await waitFor(() => {
       expect(mocks.listDevices).toHaveBeenCalledWith();
-      expect(mocks.listTemplates).toHaveBeenCalledWith({ refresh: true });
+      expect(mocks.listTemplates).toHaveBeenCalledWith();
       expect(mocks.listGroups).toHaveBeenCalled();
     });
-    expect(mocks.syncDevices).toHaveBeenCalledWith({ refresh: true });
+    // One forced sync picks up plugin changes; reading the index must not force a second rebuild.
+    expect(mocks.syncDevices).toHaveBeenCalledExactlyOnceWith({ refresh: true });
+    expect(mocks.listTemplates).not.toHaveBeenCalledWith({ refresh: true });
+  });
+
+  it('defers the resume refresh until its keep-alive tab is on screen again', async () => {
+    const { rerender } = render(
+      <PaneActiveContext.Provider value={false}><DeviceIntegrationPage /></PaneActiveContext.Provider>,
+    );
+    await screen.findByText('设备接入');
+    await waitFor(() => expect(mocks.listDevices).toHaveBeenCalledTimes(1));
+    mocks.listDevices.mockClear();
+    mocks.listTemplates.mockClear();
+
+    window.dispatchEvent(new Event('focus'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(mocks.syncDevices).not.toHaveBeenCalled();
+    expect(mocks.listDevices).not.toHaveBeenCalled();
+    expect(mocks.listTemplates).not.toHaveBeenCalled();
+
+    rerender(<PaneActiveContext.Provider value><DeviceIntegrationPage /></PaneActiveContext.Provider>);
+
+    await waitFor(() => expect(mocks.listDevices).toHaveBeenCalledTimes(1));
+    expect(mocks.syncDevices).toHaveBeenCalledExactlyOnceWith({ refresh: true });
+    expect(mocks.listTemplates).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it('keeps a deferred resume refresh even right after another refresh', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      const { rerender } = render(
+        <PaneActiveContext.Provider value><DeviceIntegrationPage /></PaneActiveContext.Provider>,
+      );
+      await screen.findByText('设备接入');
+      await waitFor(() => expect(mocks.listDevices).toHaveBeenCalledTimes(1));
+
+      window.dispatchEvent(new Event('focus'));
+      await waitFor(() => expect(mocks.listDevices).toHaveBeenCalledTimes(2));
+      expect(mocks.syncDevices).toHaveBeenCalledTimes(1);
+
+      // Within the 1 s focus throttle: hidden, the window comes back, then the tab is shown.
+      now.mockReturnValue(10_300);
+      rerender(<PaneActiveContext.Provider value={false}><DeviceIntegrationPage /></PaneActiveContext.Provider>);
+      window.dispatchEvent(new Event('focus'));
+      now.mockReturnValue(10_500);
+      rerender(<PaneActiveContext.Provider value><DeviceIntegrationPage /></PaneActiveContext.Provider>);
+
+      await waitFor(() => expect(mocks.syncDevices).toHaveBeenCalledTimes(2));
+      expect(mocks.syncDevices).toHaveBeenLastCalledWith({ refresh: true });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('does not stack a resume refresh on top of one still running', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      render(<DeviceIntegrationPage />);
+      await screen.findByText('设备接入');
+      await waitFor(() => expect(mocks.listDevices).toHaveBeenCalledTimes(1));
+      mocks.listDevices.mockClear();
+      let releaseSync: (value: unknown) => void = () => {};
+      mocks.syncDevices.mockImplementationOnce(() => new Promise((resolve) => { releaseSync = resolve; }));
+
+      window.dispatchEvent(new Event('focus'));
+      await waitFor(() => expect(mocks.syncDevices).toHaveBeenCalledTimes(1));
+      // Well past the 1 s throttle: only the running sync may hold the next one back.
+      now.mockReturnValue(60_000);
+      window.dispatchEvent(new Event('focus'));
+      document.dispatchEvent(new Event('visibilitychange'));
+      await act(async () => { await Promise.resolve(); });
+      expect(mocks.syncDevices).toHaveBeenCalledTimes(1);
+
+      await act(async () => { releaseSync({ data: { created: 0 } }); });
+      await waitFor(() => expect(mocks.listDevices).toHaveBeenCalledTimes(1));
+
+      now.mockReturnValue(120_000);
+      window.dispatchEvent(new Event('focus'));
+      await waitFor(() => expect(mocks.syncDevices).toHaveBeenCalledTimes(2));
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('rebuilds the template index only once when refresh is clicked', async () => {
+    render(<DeviceIntegrationPage />);
+    await screen.findByText('设备接入');
+    await waitFor(() => expect(mocks.listTemplates).toHaveBeenCalledTimes(1));
+    mocks.listTemplates.mockClear();
+
+    fireEvent.click(screen.getByTitle('刷新'));
+
+    await waitFor(() => expect(mocks.listTemplates).toHaveBeenCalledTimes(1));
+    expect(mocks.syncDevices).toHaveBeenCalledExactlyOnceWith({ refresh: true });
+    expect(mocks.listTemplates).toHaveBeenCalledWith();
   });
 
   it('shows custom guidance and example entries on the add-device workbench', async () => {
@@ -910,7 +1007,9 @@ describe('DeviceIntegrationPage', () => {
       expect(mocks.hubInstall).toHaveBeenCalledWith('device', 'onesig_v2_5_3_D20250710');
     });
     expect(mocks.syncDevices).toHaveBeenCalledWith({ refresh: true });
-    expect(mocks.listTemplates).toHaveBeenLastCalledWith({ refresh: true });
+    // The forced sync already rebuilt the index; reading it must not force a second rebuild.
+    expect(mocks.listTemplates).toHaveBeenLastCalledWith();
+    expect(mocks.listTemplates).not.toHaveBeenCalledWith({ refresh: true });
     expect(mocks.navigate).not.toHaveBeenCalled();
     await waitFor(() => expect(mocks.createAndSend).toHaveBeenCalledWith(expect.objectContaining({
       text: expect.stringContaining('我要接入设备「onesig」'),
