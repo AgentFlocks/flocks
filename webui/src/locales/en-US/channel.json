@@ -78,6 +78,13 @@
   "restartHint": "Manually stop and re-establish the long connection",
   "restartSuccess": "{{channel}} restarted",
   "restartFailed": "Restart failed",
+  "secretInput": {
+    "saved": "Saved",
+    "savedPlaceholder": "Saved. Type a new value to replace it",
+    "envPlaceholder": "From environment variable {{name}}. Type a new value to replace it",
+    "filePlaceholder": "From file {{name}}. Type a new value to replace it",
+    "savedTitle": "Stored on the server and not shown here. Type a new value and save to replace it; leave it empty to keep it."
+  },
   "security": {
     "defaultAgent": "Default Agent",
     "defaultAgentHint": "Must be one of visible agents; falls back to system default when unset",
