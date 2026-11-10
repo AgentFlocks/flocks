@@ -1536,14 +1536,31 @@ def _task_center_task_rows(limit=12):
         return 0, [], 0, 0, 0
 
 
+_WORKFLOW_ROOTS = (
+    Path.home() / ".flocks" / "plugins" / "workflows",
+    Path.home() / ".flocks" / "workspace" / "workflows",
+    Path(__file__).resolve().parents[4] / "workflows",
+)
+_MANIFEST_MAP_CACHE = {"fingerprint": None, "value": {}}
+_NODE_COUNT_CACHE = {}
+
+
+def _workflow_roots_fingerprint():
+    parts = []
+    for root in _WORKFLOW_ROOTS:
+        try:
+            parts.append(f"{root.name}:{int(root.stat().st_mtime_ns)}")
+        except OSError:
+            parts.append(f"{root.name}:absent")
+    return "|".join(parts)
+
+
 def _workflow_manifest_name_map():
-    roots = [
-        Path.home() / ".flocks" / "plugins" / "workflows",
-        Path.home() / ".flocks" / "workspace" / "workflows",
-        Path(__file__).resolve().parents[4] / "workflows",
-    ]
+    fingerprint = _workflow_roots_fingerprint()
+    if _MANIFEST_MAP_CACHE["fingerprint"] == fingerprint and _MANIFEST_MAP_CACHE["value"]:
+        return _MANIFEST_MAP_CACHE["value"]
     names = {}
-    for root in roots:
+    for root in _WORKFLOW_ROOTS:
         if not root.is_dir():
             continue
         for manifest_path in root.glob("*/manifest.json"):
@@ -1562,6 +1579,8 @@ def _workflow_manifest_name_map():
             if isinstance(name_i18n, dict):
                 name = name_i18n.get("zh-CN") or name_i18n.get("zh") or name
             names.setdefault(workflow_id, str(name))
+    _MANIFEST_MAP_CACHE["fingerprint"] = fingerprint
+    _MANIFEST_MAP_CACHE["value"] = names
     return names
 
 
@@ -1656,20 +1675,25 @@ def _workflow_execution_column_expr(columns, column_name, fallback):
 
 
 def _workflow_node_count(workflow_id):
-    roots = [
-        Path.home() / ".flocks" / "plugins" / "workflows",
-        Path.home() / ".flocks" / "workspace" / "workflows",
-        Path(__file__).resolve().parents[4] / "workflows",
-    ]
-    for root in roots:
-        workflow_path = root / str(workflow_id) / "workflow.json"
+    workflow_key = str(workflow_id)
+    cached = _NODE_COUNT_CACHE.get(workflow_key)
+    for root in _WORKFLOW_ROOTS:
+        workflow_path = root / workflow_key / "workflow.json"
         if not workflow_path.is_file():
             continue
+        try:
+            mtime_ns = workflow_path.stat().st_mtime_ns
+        except OSError:
+            continue
+        if cached and cached[0] == mtime_ns:
+            return cached[1]
         try:
             workflow_json = _safe_json_object(workflow_path.read_text(encoding="utf-8"))
             nodes = workflow_json.get("nodes")
             if isinstance(nodes, list):
-                return max(len(nodes), 0)
+                count = max(len(nodes), 0)
+                _NODE_COUNT_CACHE[workflow_key] = (mtime_ns, count)
+                return count
         except Exception:
             continue
     return 0
