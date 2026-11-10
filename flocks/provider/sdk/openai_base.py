@@ -855,6 +855,87 @@ def extract_reasoning_details(delta) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
+def message_tool_call_chunks(message: Any) -> Optional[List[Dict[str, Any]]]:
+    """A non-streaming message's tool calls, shaped like streamed tool-call deltas."""
+    calls: List[Dict[str, Any]] = []
+    for call in getattr(message, "tool_calls", None) or []:
+        function = getattr(call, "function", None)
+        name = getattr(function, "name", None)
+        if not isinstance(name, str) or not name:
+            continue
+        arguments = getattr(function, "arguments", None)
+        call_id = getattr(call, "id", None)
+        calls.append({
+            "index": len(calls),
+            # The tool-call accumulator mints an id when the provider gave none.
+            "id": call_id if isinstance(call_id, str) and call_id else None,
+            "type": "function",
+            # Kept as sent: an empty or partial string may be a cut-off call.
+            "function": {"name": name, "arguments": arguments if isinstance(arguments, str) else ""},
+        })
+    return calls or None
+
+
+def message_reasoning(
+    message: Any,
+) -> tuple[Optional[str], Optional[str], Optional[List[Dict[str, Any]]]]:
+    """Reasoning text, the field it came from, and structured reasoning details."""
+    reasoning, source = extract_reasoning_content_with_source(message)
+    if not isinstance(reasoning, str) or not reasoning:
+        reasoning, source = None, None
+    details = [item for item in extract_reasoning_details(message) or [] if isinstance(item, dict)]
+    return reasoning, source if isinstance(source, str) else None, details or None
+
+
+def chat_fallback_tool_call_chunks(
+    response: ChatResponse,
+    *,
+    provider_id: str,
+    model_id: str,
+) -> List[StreamChunk]:
+    """Replay a non-streaming answer that made tool calls as stream chunks.
+
+    The empty-stream fallback kept only ``content``: an answer made of tool
+    calls alone (content null) counted as empty, and the request was then sent
+    again without its tools, so the model reported it had none.
+    """
+    chunks: List[StreamChunk] = []
+    # As the streaming path does: details alone (e.g. encrypted reasoning) still
+    # make a reasoning chunk, since the next tool round has to send them back.
+    if response.reasoning is not None or response.reasoning_details:
+        chunks.append(StreamChunk(
+            event_type="reasoning",
+            reasoning=response.reasoning or "",
+            finish_reason=None,
+            metadata=build_reasoning_metadata(
+                provider_id=provider_id,
+                model_id=model_id,
+                reasoning_content=response.reasoning,
+                reasoning_source=response.reasoning_source,
+                reasoning_details=response.reasoning_details,
+            ),
+        ))
+    if response.content:
+        chunks.append(StreamChunk(delta=response.content, finish_reason=None))
+    finish_reason = response.finish_reason or "tool_calls"
+    truncated = finish_reason in ("length", "max_tokens")
+    tool_calls = []
+    for call in response.tool_calls or []:
+        function = dict(call.get("function") or {})
+        if not truncated and not function.get("arguments"):
+            # A finished answer with no arguments is a call without parameters.
+            # A cut-off one stays empty so the accumulator refuses to run it.
+            function["arguments"] = "{}"
+        tool_calls.append({**call, "function": function})
+    chunks.append(StreamChunk(
+        delta="",
+        finish_reason=finish_reason,
+        tool_calls=tool_calls,
+        usage=response.usage or None,
+    ))
+    return chunks
+
+
 def build_reasoning_metadata(
     *,
     provider_id: str,
@@ -1115,12 +1196,17 @@ class OpenAIBaseProvider(BaseProvider):
                 f"{self.name} API returned choice with null message. "
                 f"model={model_id}, detail={err_detail}"
             )
+        reasoning, reasoning_source, reasoning_details = message_reasoning(msg)
         return ChatResponse(
             id=response.id,
             model=response.model,
             content=msg.content or "",
             finish_reason=choice.finish_reason or "stop",
             usage=normalize_usage(response.usage, response_id=response.id) or {},
+            tool_calls=message_tool_call_chunks(msg),
+            reasoning=reasoning,
+            reasoning_source=reasoning_source,
+            reasoning_details=reasoning_details,
         )
 
     async def chat_stream(
@@ -1406,6 +1492,16 @@ class OpenAIBaseProvider(BaseProvider):
             fallback_error: Optional[Exception] = None
             try:
                 fallback = await self.chat(model_id, messages, **kwargs)
+                if fallback.tool_calls:
+                    log.warn("openai_base.stream.empty_response_recovered_tool_calls", {
+                        "model": model_id,
+                        "tool_calls": len(fallback.tool_calls),
+                    })
+                    for chunk in chat_fallback_tool_call_chunks(
+                        fallback, provider_id=self.id, model_id=model_id,
+                    ):
+                        yield chunk
+                    return
                 fallback_content = fallback.content or ""
                 if fallback_content:
                     yield StreamChunk(
@@ -1417,30 +1513,12 @@ class OpenAIBaseProvider(BaseProvider):
             except Exception as exc:
                 fallback_error = exc
 
-            if kwargs.get("tools"):
-                log.warn("openai_base.stream.retry_without_tools", {
-                    "model": model_id,
-                    "reason": str(fallback_error) if fallback_error else "empty_fallback_content",
-                })
-                no_tool_kwargs = dict(kwargs)
-                no_tool_kwargs.pop("tools", None)
-                try:
-                    fallback = await self.chat(model_id, messages, **no_tool_kwargs)
-                    fallback_content = fallback.content or ""
-                    if fallback_content:
-                        yield StreamChunk(
-                            delta=fallback_content,
-                            finish_reason=fallback.finish_reason or "stop",
-                            usage=fallback.usage or None,
-                        )
-                        return
-                except Exception as exc:
-                    if fallback_error is None:
-                        fallback_error = exc
-
+            # Not retried without the tools: a model asked to act with none
+            # writes its calls as text or says it has no tools. The empty
+            # response error is retryable, so the turn is retried with them.
             if fallback_error:
                 raise fallback_error
             raise ValueError(
                 f"{self.name} API returned an empty streaming response and empty fallback response. "
-                f"model={model_id}"
+                f"model={model_id}, tools_declared={bool(kwargs.get('tools'))}"
             )
