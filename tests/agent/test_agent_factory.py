@@ -825,6 +825,64 @@ class TestBuildAvailableAgents:
 
 
 # ===========================================================================
+# Runtime-registered agents as delegation candidates
+# ===========================================================================
+
+class TestRegisteredDelegationCandidates:
+
+    def test_registered_agents_join_the_candidates_like_the_registry_merge(self):
+        from flocks.agent.registry import _build_available_agents, _delegation_candidates
+
+        loaded = {
+            "rex": AgentInfo(name="rex", mode="primary", native=True),
+            "explore": AgentInfo(name="explore", mode="subagent", delegatable=True, native=True),
+        }
+        registered = {
+            "ext-auditor": AgentInfo(name="ext-auditor", mode="subagent", delegatable=True),
+            "ext-hidden": AgentInfo(name="ext-hidden", mode="subagent", delegatable=True, hidden=True),
+            "ext-primary": AgentInfo(name="ext-primary", mode="primary"),
+            "managed-one": AgentInfo(name="managed-one", mode="subagent", delegatable=True),
+        }
+
+        candidates = _delegation_candidates(loaded, registered, {"managed-one"}, None)
+        assert [agent.name for agent in _build_available_agents(candidates)] == ["explore", "ext-auditor"]
+        # Like the merge itself: nothing is added to the loaded agents here.
+        assert set(loaded) == {"rex", "explore"}
+
+        allowed = _delegation_candidates(loaded, registered, set(), ["rex", "explore"])
+        assert [agent.name for agent in _build_available_agents(allowed)] == ["explore"]
+
+    @pytest.mark.asyncio
+    async def test_rex_prompt_offers_a_registered_delegatable_subagent(self):
+        from flocks.agent.agent import AgentPromptMetadata, DelegationTrigger
+        from flocks.agent.registry import Agent
+
+        name = "ext-code-auditor"
+        Agent.register(name, AgentInfo(
+            name=name,
+            description="Audits source code for vulnerabilities. Also reviews fixes.",
+            mode="subagent",
+            delegatable=True,
+            prompt_metadata=AgentPromptMetadata(
+                category="security",
+                cost="medium",
+                triggers=[DelegationTrigger(domain="源码安全审计", trigger='"代码审计", "code audit"')],
+            ),
+        ))
+        try:
+            await Agent.refresh()
+            rex = await Agent.get("rex")
+            assert rex is not None
+            # The agent table and the security routing both name it.
+            assert f"| `{name}` | medium | Audits source code for vulnerabilities |" in rex.prompt
+            assert f"| 源码安全审计 | `{name}` |" in rex.prompt
+        finally:
+            Agent.unregister(name)
+            await Agent.refresh()
+        assert name not in (await Agent.get("rex")).prompt
+
+
+# ===========================================================================
 # Project-level plugin agent scanning
 # ===========================================================================
 
