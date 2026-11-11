@@ -578,6 +578,11 @@ class Session:
                     kwargs["owner_user_id"] = parent.owner_user_id
                 if child_owner_username is None:
                     kwargs["owner_username"] = parent.owner_username
+                if parent.memory_enabled is False:
+                    # A child works on its parent's conversation (a delegated
+                    # subagent, a fork): when the parent keeps nothing in
+                    # Memory, neither does the child, whatever its agent's default.
+                    kwargs["memory_enabled"] = False
 
             created = SessionInfo(
                 project_id=project_id,
