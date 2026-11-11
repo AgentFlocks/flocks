@@ -181,7 +181,7 @@ const MARKDOWN_STEP_ORDER = [
 ];
 
 const EMPTY_DATA: Required<Pick<AlertOperationsData, 'summary' | 'source' | 'tableColumns' | 'incidents' | 'filterOptions'>> = {
-  source: { label: 'SOC Contract SQLite', pageId: 'soc-alerts', sampleMode: false, dataSource: 'sqlite' },
+  source: { label: 'SOC Contract', pageId: 'soc-alerts', sampleMode: false, dataSource: '' },
   summary: {
     sourcePageId: 'soc-alerts',
     sourceAssetDate: '-',

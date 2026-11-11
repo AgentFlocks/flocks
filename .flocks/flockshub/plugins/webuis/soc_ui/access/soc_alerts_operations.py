@@ -1,4 +1,10 @@
-"""SOC alert investigation WebUI access contract."""
+"""SOC alert investigation WebUI access contract.
+
+flocks-soc-store-client: this file holds no database code.  The contract names
+the platform's SOC alert store as its source (the ``builtin-soc-alerts``
+adapter kind), which ``flocks.contracts.access.driver`` reads from whatever the
+database backend in use keeps it in, so the same file serves every backend.
+"""
 
 from __future__ import annotations
 
@@ -26,12 +32,9 @@ PAGE_ID = "soc-alerts"
 CONTRACT_ID = "soc.alerts.operations"
 CONTRACT_VERSION = "1.0"
 SOURCE_PAGE_ID = "soc-alerts"
-DEFAULT_SQLITE_DB = Path.home() / ".flocks" / "data" / "soc.db"
-DEFAULT_SQLITE_TABLE = "alert_records"
-DEFAULT_SQLITE_RECORD_COLUMN = "record_json"
-DEFAULT_SQLITE_DATE_COLUMN = "asset_date"
-DEFAULT_SQLITE_EVENT_TIME_COLUMN = "event_time"
-SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# The SOC suite's alert store, wherever the platform's database backend keeps it.
+SOC_ALERTS_ADAPTER_KIND = "builtin-soc-alerts"
+SOC_ALERTS_SOURCE = Path("soc-alerts")
 
 DISPLAY_FIELDS = (
     "id",
@@ -78,7 +81,7 @@ DISPLAY_FIELDS = (
     "is_duplicate",
     "_syslog_meta",
 )
-DRIVER_FIELDS = frozenset((*DISPLAY_FIELDS, "triage_attack_verdict", "triage_attack_success"))
+DRIVER_FIELDS = frozenset((*DISPLAY_FIELDS, "triage_attack_verdict", "triage_attack_success", "__flocks_source_row_id"))
 FILTER_FIELDS = frozenset(
     {
         "_source_type",
@@ -140,25 +143,23 @@ def _contract() -> Contract:
 
 class _BindingResolver:
     def resolve(self, *, page_id: str, slot_id: str, contract_id: str, contract_version: str) -> Binding:
-        settings = _sqlite_settings()
-        db_path = settings["db_path"]
         return Binding(
-            binding_id="soc-alerts-sqlite",
+            binding_id="soc-alerts-store",
             binding_version=1,
             page_id=page_id,
             slot_id=slot_id,
             contract_id=contract_id,
             contract_version=contract_version,
-            adapter_kind="builtin-sqlite-json",
+            adapter_kind=SOC_ALERTS_ADAPTER_KIND,
             source_page_id=SOURCE_PAGE_ID,
-            source_root=db_path,
+            source_root=SOC_ALERTS_SOURCE,
             driver_available_fields=DRIVER_FIELDS,
-            driver_allowlist_roots=(db_path.parent,),
+            driver_allowlist_roots=(),
             driver_options={
-                "table": settings["table"],
-                "recordColumn": settings["record_column"],
-                "dateColumn": settings["date_column"],
-                "eventTimeColumn": settings["event_time_column"],
+                # The suite's settings file as it is: the driver reads the part
+                # meant for its store, and where a relative path in it starts.
+                "settings": _load_config(),
+                "settingsDir": str(_config_path().parent),
                 "facetFields": sorted(FILTER_FIELDS),
             },
             predicate_value_resolver=_filter_value,
@@ -204,10 +205,10 @@ class _ResponsePipeline:
             "schemaVersion": "soc.alerts.v1",
             "generatedAt": datetime.now().isoformat(timespec="seconds"),
             "source": {
-                "label": "SOC Contract SQLite",
+                "label": f"SOC Contract {_store_label()}".strip(),
                 "pageId": binding_source_page_id,
                 "sampleMode": False,
-                "dataSource": "sqlite",
+                "dataSource": _store_name(),
             },
             "summary": {
                 "sourcePageId": binding_source_page_id,
@@ -247,6 +248,7 @@ def _incident_from_row(row: InternalDataRow) -> dict[str, Any]:
     return {
         "id": record_id,
         "sourceRecordId": record_id,
+        "sourceRowId": _text(record.get("__flocks_source_row_id")),
         "observedAt": observed_at,
         "rawAlerts": 1,
         "priority": "P1" if verdict == "success" else "P2",
@@ -319,20 +321,20 @@ def _display_value(value: Any, key: str) -> str:
         return str(value)
 
 
-def _sqlite_settings() -> dict[str, Any]:
-    config = _load_config().get("sqlite", {})
-    if not isinstance(config, dict):
-        config = {}
-    return {
-        "db_path": _resolve_config_path(
-            _read_config_string(os.environ.get("FLOCKS_SOC_ALERTS_SQLITE_DB"), config.get("dbPath")),
-            DEFAULT_SQLITE_DB,
-        ),
-        "table": _sql_identifier(config.get("table"), DEFAULT_SQLITE_TABLE),
-        "record_column": _sql_identifier(config.get("recordColumn"), DEFAULT_SQLITE_RECORD_COLUMN),
-        "date_column": _sql_identifier(config.get("dateColumn"), DEFAULT_SQLITE_DATE_COLUMN),
-        "event_time_column": _sql_identifier(config.get("eventTimeColumn"), DEFAULT_SQLITE_EVENT_TIME_COLUMN),
-    }
+def _alert_store() -> Any:
+    try:
+        from flocks.workflow.soc_store import alerts
+    except ImportError:
+        return None
+    return alerts
+
+
+def _store_name() -> str:
+    return str(getattr(_alert_store(), "DATA_SOURCE", "") or "")
+
+
+def _store_label() -> str:
+    return str(getattr(_alert_store(), "DATA_SOURCE_LABEL", "") or "")
 
 
 def _load_config() -> dict[str, Any]:
@@ -362,19 +364,6 @@ def _read_config_string(*values: Any) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
-
-
-def _resolve_config_path(value: str, fallback: Path) -> Path:
-    text = _read_config_string(value, str(fallback))
-    path = Path(text).expanduser()
-    if path.is_absolute():
-        return path
-    return (_config_path().parent / path).resolve()
-
-
-def _sql_identifier(value: Any, fallback: str) -> str:
-    text = _read_config_string(value, fallback)
-    return text if SQL_IDENTIFIER_RE.fullmatch(text) else fallback
 
 
 def _record_id(record: dict[str, Any]) -> str:

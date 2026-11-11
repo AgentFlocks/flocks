@@ -1,101 +1,64 @@
+"""SOC overview page API.
+
+flocks-soc-store-client: this file holds no database code.  The alert records
+come from the platform's SOC data service (``ctx.services.soc.overview``, the
+``flocks.workflow.soc_store`` of the database backend in use), so the same
+file serves every backend.
+"""
+
 import json
-import os
 import re
-import sqlite3
+import threading
 import time
 from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 CONTRACTS_ROOT = Path(__file__).resolve().parents[4]
 ACCESS_CONFIG_PATH = CONTRACTS_ROOT / "access" / "soc_alerts.json"
-DEFAULT_DATA_SOURCE = "sqlite"
-DEFAULT_SQLITE_DB = Path.home() / ".flocks" / "data" / "soc.db"
-DEFAULT_SQLITE_TABLE = "alert_records"
-DEFAULT_SQLITE_RECORD_COLUMN = "record_json"
-DEFAULT_SQLITE_DATE_COLUMN = "asset_date"
-DEFAULT_SQLITE_EVENT_TIME_COLUMN = "event_time"
 
-WORKFLOW_DB = Path.home() / ".flocks" / "data" / "workflow.db"
-
-_workflow_stats_cache: dict = {}
-_cache_updated_at: float = 0
-_CACHE_TTL: float = 30.0
+# The platform's SOC overview data service, bound by each request.
+_store = None
+# What one request settled on, so its aggregates read the settings file once.
+_request = threading.local()
 
 
-@dataclass(frozen=True)
-class _RecordSource:
-    path: Path
-    role: str
-    date: str
-    data_source: str
-    record_count: int = 0
-    start_time: int | None = None
-    end_time: int | None = None
+def _bind(ctx):
+    """Take the SOC data service the platform hands this page."""
+    global _store
+    soc = getattr(getattr(ctx, "services", None), "soc", None)
+    if soc is None:
+        # Not called by the page runtime: the SOC query tool loads this file itself.
+        try:
+            from flocks.workflow import soc_store
+        except ImportError as exc:
+            raise RuntimeError(
+                "The SOC overview needs the SOC data service of the platform; update Flocks to a version that has it"
+            ) from exc
+        soc = soc_store.page_service()
+    _store = soc.overview
+    return _store
 
 
-def _get_workflow_call_count(workflow_name: str, date: str = None) -> int:
-    global _workflow_stats_cache, _cache_updated_at
-    now = time.time()
-    cache_key = f"{workflow_name}:{date or 'total'}"
+def _data():
+    if _store is None:
+        return _bind(None)
+    return _store
 
-    if now - _cache_updated_at < _CACHE_TTL and cache_key in _workflow_stats_cache:
-        return _workflow_stats_cache[cache_key]
 
-    empty = {"callCount": 0, "dupCount": 0, "uniqueCount": 0}
-    if not WORKFLOW_DB.is_file():
-        return empty
+def _source_settings():
+    """Where the alert records are, as the data service reads the suite's settings file."""
+    settings = getattr(_request, "settings", None)
+    if settings is None:
+        settings = _data().settings(_load_alerts_config(), ACCESS_CONFIG_PATH.parent)
+    return settings
 
-    try:
-        if date:
-            start = int(datetime.strptime(date, "%Y-%m-%d").timestamp() * 1000)
-            end = start + 86400 * 1000
-            with sqlite3.connect(WORKFLOW_DB) as conn:
-                rows = conn.execute(
-                    """
-                    SELECT output_results
-                    FROM workflow_executions
-                    WHERE workflow_id = ? AND started_at >= ? AND started_at < ?
-                    """,
-                    (workflow_name, start, end),
-                ).fetchall()
-            dup_count = 0
-            unique_count = 0
-            for (output_text,) in rows:
-                try:
-                    output = json.loads(output_text or "{}")
-                except Exception:
-                    output = {}
-                stats = output.get("stats") if isinstance(output.get("stats"), dict) else {}
-                raw = _safe_int(stats.get("raw_count"))
-                if "after_dedup_count" in stats and stats.get("after_dedup_count") is not None:
-                    unique_count += _safe_int(stats.get("after_dedup_count"))
-                else:
-                    unique_count += raw
-                if output.get("is_duplicate") is True:
-                    dup_count += 1
-            result_dict = {
-                "callCount": len(rows),
-                "dupCount": dup_count,
-                "uniqueCount": unique_count,
-            }
-        else:
-            with sqlite3.connect(WORKFLOW_DB) as conn:
-                row = conn.execute(
-                    "SELECT call_count FROM workflow_stats WHERE workflow_id = ?",
-                    (workflow_name,),
-                ).fetchone()
-            result_dict = {"callCount": _safe_int(row[0] if row else 0), "dupCount": 0, "uniqueCount": 0}
 
-        _workflow_stats_cache[cache_key] = result_dict
-        _cache_updated_at = now
-        return result_dict
-    except Exception:
-        return _workflow_stats_cache.get(cache_key, empty)
+def _is_store_source(path):
+    """Whether *path* is a set of records in the alert store (what find_sources lists), not a file."""
+    return hasattr(path, "data_source")
 
 
 SOURCE_DEFS = [
@@ -191,6 +154,16 @@ def _has_triage_result(record):
 
 
 def get_stats(ctx, request):
+    _bind(ctx)
+    _request.settings = None
+    _request.settings = _source_settings()
+    try:
+        return _get_stats(request)
+    finally:
+        _request.settings = None
+
+
+def _get_stats(request):
     start_time, end_time = _normalize_time_range(
         request.query_params.get("startTime"),
         request.query_params.get("endTime"),
@@ -222,12 +195,12 @@ def get_stats(ctx, request):
     sample_mode = bool(asset_denoise_files or asset_triage_files)
     if asset_denoise_files:
         denoise_files = asset_denoise_files
-    # alert_records holds the triaged first-seen alerts, so the same rows carry
+    # The alert store holds the triaged first-seen alerts, so the same rows carry
     # the model verdicts the triage statistics are built from (as on the
     # posture dashboard). Nothing is estimated when a field is missing.
     triage_files = asset_triage_files or asset_denoise_files
 
-    workflow_stats = _get_workflow_call_count("stream_alert_denoise", date=start_date)
+    workflow_stats = _data().workflow_call_count("stream_alert_denoise", date=start_date)
     denoise = _read_denoise(denoise_files)
     triage = _read_triage(triage_files)
     sources = _build_sources(denoise["sourceCounter"] or triage["sourceCounter"])
@@ -236,6 +209,7 @@ def get_stats(ctx, request):
     date_range = _build_date_range(start_date, end_date, asset_files)
     event_range = _build_event_range(date_range, denoise, triage)
 
+    source_status = _data().source_status(_source_settings())
     return {
         "date": start_date,
         "dateRange": date_range,
@@ -243,14 +217,14 @@ def get_stats(ctx, request):
         "generatedAt": datetime.now().isoformat(timespec="seconds"),
         "latencyMs": round((time.time() - started) * 1000),
         "sourceStatus": {
-            "workflowStatsDb": _display_path(WORKFLOW_DB),
+            "workflowStatsDb": _display_path(source_status["workflowStatsDb"]),
             "workflowStats": workflow_stats,
             "sampleMode": sample_mode,
             "sampleFile": ", ".join(_source_label(path) for path in asset_files) if sample_mode else "",
             "assets": {
-                "path": _display_path(_active_source_path()),
-                "exists": _active_source_exists(),
-                "dataSource": _active_data_source(),
+                "path": _display_path(source_status["path"]),
+                "exists": source_status["exists"],
+                "dataSource": source_status["dataSource"],
                 "config": _display_path(ACCESS_CONFIG_PATH),
                 "fileCount": len(asset_files),
                 "availableDates": _available_asset_dates(),
@@ -337,11 +311,11 @@ def _date_span(start_date, end_date):
 
 
 def _find_asset_files(start_date, end_date, start_time=None, end_time=None):
-    return _find_sqlite_sources(start_date, end_date, start_time, end_time)
+    return _data().find_sources(_source_settings(), start_date, end_date, start_time, end_time)
 
 
 def _asset_file_date(path):
-    if isinstance(path, _RecordSource):
+    if _is_store_source(path):
         return path.date
     return ""
 
@@ -352,41 +326,19 @@ def _latest_asset_date():
 
 
 def _available_asset_dates():
-    return _available_sqlite_dates()
+    return _data().available_dates(_source_settings())
 
 
 def _load_alerts_config():
-    raw = {}
+    """The suite's alert settings file as it is; the data service reads the part meant for its store."""
     if ACCESS_CONFIG_PATH.is_file():
         try:
             value = json.loads(ACCESS_CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception:
             value = {}
         if isinstance(value, dict):
-            raw = value
-
-    sqlite_config = raw.get("sqlite") if isinstance(raw.get("sqlite"), dict) else {}
-    return {
-        "dataSource": DEFAULT_DATA_SOURCE,
-        "sqlite": {
-            "dbPath": _read_config_string(
-                os.environ.get("FLOCKS_SOC_ALERTS_SQLITE_DB"),
-                sqlite_config.get("dbPath"),
-                str(DEFAULT_SQLITE_DB),
-            ),
-            "table": _read_config_string(sqlite_config.get("table"), DEFAULT_SQLITE_TABLE),
-            "recordColumn": _read_config_string(sqlite_config.get("recordColumn"), DEFAULT_SQLITE_RECORD_COLUMN),
-            "dateColumn": _read_config_string(sqlite_config.get("dateColumn"), DEFAULT_SQLITE_DATE_COLUMN),
-            "eventTimeColumn": _read_config_string(
-                sqlite_config.get("eventTimeColumn"),
-                DEFAULT_SQLITE_EVENT_TIME_COLUMN,
-            ),
-        },
-    }
-
-
-def _active_data_source():
-    return "sqlite"
+            return value
+    return {}
 
 
 def _read_config_string(*values):
@@ -394,107 +346,6 @@ def _read_config_string(*values):
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
-
-
-def _resolve_config_path(value, fallback):
-    text = _read_config_string(value, str(fallback))
-    path = Path(text).expanduser()
-    if path.is_absolute():
-        return path
-    return (ACCESS_CONFIG_PATH.parent / path).resolve()
-
-
-def _sqlite_settings():
-    config = _load_alerts_config()["sqlite"]
-    return {
-        "db_path": _resolve_config_path(config.get("dbPath"), DEFAULT_SQLITE_DB),
-        "table": _sql_identifier(config.get("table"), DEFAULT_SQLITE_TABLE),
-        "record_column": _sql_identifier(config.get("recordColumn"), DEFAULT_SQLITE_RECORD_COLUMN),
-        "date_column": _sql_identifier(config.get("dateColumn"), DEFAULT_SQLITE_DATE_COLUMN),
-        "event_time_column": _sql_identifier(
-            config.get("eventTimeColumn"),
-            DEFAULT_SQLITE_EVENT_TIME_COLUMN,
-        ),
-    }
-
-
-def _sql_identifier(value, fallback):
-    text = _read_config_string(value, fallback)
-    if not SQL_IDENTIFIER_RE.match(text):
-        text = fallback
-    return f'"{text}"'
-
-
-def _active_source_path():
-    return _sqlite_settings()["db_path"]
-
-
-def _active_source_exists():
-    path = _active_source_path()
-    return path.is_file()
-
-
-def _find_sqlite_sources(start_date, end_date, start_time=None, end_time=None):
-    settings = _sqlite_settings()
-    db_path = settings["db_path"]
-    if not db_path.is_file():
-        return []
-
-    where = [f"{settings['date_column']} BETWEEN ? AND ?"]
-    params = [start_date, end_date]
-    if start_time is not None and end_time is not None:
-        where.append(f"{settings['event_time_column']} BETWEEN ? AND ?")
-        params.extend([start_time, end_time])
-
-    query = (
-        f"SELECT {settings['date_column']} AS asset_date, COUNT(*) AS record_count "
-        f"FROM {settings['table']} "
-        f"WHERE {' AND '.join(where)} "
-        f"GROUP BY {settings['date_column']} "
-        f"ORDER BY {settings['date_column']}"
-    )
-    try:
-        with sqlite3.connect(db_path) as conn:
-            rows = conn.execute(query, params).fetchall()
-    except Exception:
-        return []
-
-    sources = []
-    for asset_date, record_count in rows:
-        asset_date = str(asset_date or "")
-        if not DATE_RE.match(asset_date):
-            continue
-        sources.append(
-            _RecordSource(
-                path=db_path,
-                role="denoise",
-                date=asset_date,
-                data_source="sqlite",
-                record_count=int(record_count or 0),
-                start_time=start_time,
-                end_time=end_time,
-            )
-        )
-    return sources
-
-
-def _available_sqlite_dates():
-    settings = _sqlite_settings()
-    db_path = settings["db_path"]
-    if not db_path.is_file():
-        return []
-    query = (
-        f"SELECT DISTINCT {settings['date_column']} AS asset_date "
-        f"FROM {settings['table']} "
-        f"WHERE {settings['date_column']} IS NOT NULL "
-        f"ORDER BY {settings['date_column']}"
-    )
-    try:
-        with sqlite3.connect(db_path) as conn:
-            rows = conn.execute(query).fetchall()
-    except Exception:
-        return []
-    return [str(row[0]) for row in rows if DATE_RE.match(str(row[0]))]
 
 
 def _build_date_range(start_date, end_date, asset_files):
@@ -542,7 +393,7 @@ def _timeline_window(start_date, end_date):
 
 
 def _asset_file_role(path):
-    if isinstance(path, _RecordSource):
+    if _is_store_source(path):
         return path.role
     name = path.name.lower()
     if "triage" in name or "研判" in name:
@@ -1011,74 +862,9 @@ def _port_label(value):
 
 
 def _iter_source_records(path):
-    if isinstance(path, _RecordSource) and path.data_source == "sqlite":
-        yield from _iter_sqlite_records(path)
+    if _is_store_source(path):
+        yield from _data().iter_records(_source_settings(), path)
     return
-
-
-def _iter_sqlite_records(source):
-    settings = _sqlite_settings()
-    where = [f"{settings['date_column']} = ?"]
-    params = [source.date]
-    if source.start_time is not None and source.end_time is not None:
-        where.append(f"{settings['event_time_column']} BETWEEN ? AND ?")
-        params.extend([source.start_time, source.end_time])
-    query = (
-        f"SELECT {settings['record_column']} AS record_json "
-        f"FROM {settings['table']} "
-        f"WHERE {' AND '.join(where)} "
-        f"ORDER BY {settings['event_time_column']}, rowid"
-    )
-    try:
-        with sqlite3.connect(settings["db_path"]) as conn:
-            rows = conn.execute(query, params).fetchall()
-    except Exception:
-        return
-
-    for row in rows:
-        try:
-            payload = json.loads(row[0])
-        except Exception:
-            yield None
-            continue
-        if isinstance(payload, dict):
-            yield payload
-        elif isinstance(payload, list):
-            yield from _iter_json_payload(payload)
-        else:
-            yield None
-
-
-def _iter_json_payload(payload):
-    if isinstance(payload, list):
-        for item in payload:
-            yield item if isinstance(item, dict) else None
-        return
-
-    if not isinstance(payload, dict):
-        yield None
-        return
-
-    records = None
-    for key in ("records", "data", "items", "rows"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            records = value
-            break
-
-    if records is None:
-        yield payload
-        return
-
-    header = {
-        key: value
-        for key, value in payload.items()
-        if key not in {"records", "data", "items", "rows"}
-    }
-    if header:
-        yield {"_type": "file_header", **header}
-    for item in records:
-        yield item if isinstance(item, dict) else None
 
 
 def _without_counters(payload):
@@ -1099,7 +885,7 @@ def _counter_items(counter, limit):
 
 
 def _file_brief(path):
-    if isinstance(path, _RecordSource):
+    if _is_store_source(path):
         stat = path.path.stat() if path.path.exists() else None
         return {
             "name": f"{path.path.name}:{path.date}",
@@ -1121,6 +907,9 @@ def _file_brief(path):
 
 
 def _display_path(path):
+    if not Path(path).is_absolute():
+        # A store that is not a file (a table of the platform's database) is named, not located.
+        return str(path)
     try:
         return "~/" + str(Path(path).resolve().relative_to(Path.home())).replace("\\", "/")
     except Exception:
@@ -1128,7 +917,7 @@ def _display_path(path):
 
 
 def _source_label(path):
-    if isinstance(path, _RecordSource):
+    if _is_store_source(path):
         return f"{_display_path(path.path)}:{path.date}"
     return _display_path(path)
 
