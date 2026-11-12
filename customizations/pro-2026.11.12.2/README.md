@@ -14,13 +14,13 @@
 
 ## 安装
 
-推荐把 `update-flocks.py` 放到服务器使用账号的家目录。首次安装和后续更新始终运行同一条命令：
+把单文件 Bash 脚本 `update-flocks.sh` 放到服务器使用账号的家目录。首次安装和后续更新始终运行同一条命令：
 
 ```bash
-python3 "$HOME/update-flocks.py"
+bash "$HOME/update-flocks.sh"
 ```
 
-脚本使用 Python 3 和标准 `curl` 客户端下载，不需要 Git、npm、uv 或额外的 Python 包。
+脚本由 Bash 执行，使用 `curl` 下载并清理临时文件，内嵌校验和部署逻辑自动调用已有 Python 3；无需另存 `.py` 文件。运行不需要 Git、npm、uv 或额外的 Python 包。
 
 脚本从固定的 Gitee 分支压缩包地址下载仓库 ZIP：
 
@@ -83,6 +83,8 @@ flocks stop && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root
 数据库回归使用隔离 PostgreSQL、真实测试版 Go 数据库入口和实际 Pro 2026.11.12.2 Python 原生模块，不连接用户业务数据库。安装器回归验证重复安装、文件冲突、失败回滚、权限恢复和还原。前端使用锁定依赖执行测试与生产构建。验证记录随交付保存，远程 Linux 机器仍需按上面的安装命令完成实际验收。
 
 `prepare_sources.py --core <新源码目录> --pro <新Pro目录>` 按清单检出固定的 `zw_dev` 提交与 Pro 源码；不会在旧目录叠加修改。`build_package.py` 默认从 `.work/zw_dev` 构建，拒绝未提交改动或过期前端输入。`run_tests.py` 也默认测试该分支，可用 `FLOCKS_TEST_CORE_SOURCE` 指定另一个已准备的源码目录。
+
+`build_shell_updater.py` 从已验证的 `update-flocks.py` 生成独立 `update-flocks.sh`，Bash 负责下载、参数传递及临时文件清理；生成后的脚本可单独分发。修改更新引擎后重新生成，`tests/test_shell_updater.py` 检查两者一致，并验证实际 Bash 入口。
 
 ## 本次交付验收范围
 

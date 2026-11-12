@@ -19,5 +19,6 @@
     "Linux-amd64 server deployment remains unverified."
   ],
   "installerProtocol": 2,
-  "updater": "../update-flocks.py"
+  "updater": "../update-flocks.sh",
+  "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae"
 }

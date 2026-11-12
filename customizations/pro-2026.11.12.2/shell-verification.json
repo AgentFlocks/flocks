@@ -1,0 +1,21 @@
+{
+  "entry": "bash update-flocks.sh",
+  "shellTestsPassed": 9,
+  "engineSha256": "bcf060297590a0be382aa3c52dc3e104817c356fe362cc2e47d92af210e097e6",
+  "shellSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
+  "localProAcceptance": {
+    "localRelease": "2026.11.12.2-darwin-arm64",
+    "sourceOfRepositoryZIP": "offline snapshots of actual 1.14.0 and 1.14.1 packages; target architecture adapted for local Pro; A contains a comment-only source probe",
+    "livePort": 5173,
+    "scriptSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
+    "legacy1140FirstInstall": true,
+    "automaticAtoB": true,
+    "sourceChangedFromAtoB": true,
+    "repeatNoRestart": true,
+    "payloadFilesMatched": 479,
+    "baselineRestored": true,
+    "proWrapperUnchanged": true,
+    "listenUnchanged": true
+  },
+  "runtimePackageUnchanged": "1.14.1"
+}
