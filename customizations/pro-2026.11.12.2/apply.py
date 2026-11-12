@@ -182,14 +182,27 @@ def inspect_files(runtime, package_manifest):
     return result
 
 
-def plan(runtime, manifest, package_manifest):
+def allowed_path(name):
+    relative(name)
+    if not name.startswith(('flocks/flocks/','flocks/.flocks/flockshub/','flocks/.flocks/plugins/','webui-dist/')):
+        raise Refusal(f'Payload outside supported text trees: {name}')
+
+
+def plan(runtime, manifest, package_manifest, state=None):
     signed = {entry['path']:entry for entry in manifest['files']}
     desired = {entry['path']:entry for entry in package_manifest['files']}
+    if len(desired)!=len(package_manifest['files']):
+        raise Refusal('Duplicate payload paths')
+    old = {entry['path']:entry for entry in state['files']} if state and state['status']=='applied' else {}
     originals = {p:e for p,e in signed.items() if p.startswith('webui-dist/')}
+    for name,entry in old.items():
+        allowed_path(name)
+        if entry['before']!=signed.get(name,{}).get('sha256'):
+            raise Refusal(f'Installed enhancement baseline differs from signed release: {name}')
+        if name in signed:
+            originals[name]=signed[name]
     for name, entry in desired.items():
-        relative(name)
-        if not name.startswith(('flocks/flocks/','flocks/.flocks/flockshub/','flocks/.flocks/plugins/','webui-dist/')):
-            raise Refusal(f'Payload outside supported text trees: {name}')
+        allowed_path(name)
         payload = ordinary(PACKAGE/'payload',name)
         if not payload.is_file() or digest(payload) != entry['sha256'] or native(payload):
             raise Refusal(f'Invalid or native payload: {name}')
@@ -200,17 +213,21 @@ def plan(runtime, manifest, package_manifest):
         elif entry.get('before') is not None:
             raise Refusal(f'Missing signed baseline file: {name}')
     records = []
-    for name in sorted(set(originals)|set(desired)):
+    for name in sorted(set(originals)|set(desired)|set(old)):
         path = ordinary(runtime,name)
         before = originals.get(name,{}).get('sha256')
-        if digest(path) != before:
+        expected=old[name]['after'] if name in old else before
+        if digest(path) != expected:
             raise Refusal(f'Local file differs from original Pro release: {name}; preserved')
         if path.exists() and native(path):
             raise Refusal(f'Protected native file in plan: {name}')
-        mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o444
-        records.append({'path':name,'before':before,'after':desired.get(name,{}).get('sha256'),'mode':mode})
+        mode = old[name]['mode'] if name in old else stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o444
+        after=desired[name]['sha256'] if name in desired else None if name.startswith('webui-dist/') else before
+        records.append({'path':name,'before':before,'after':after,'mode':mode})
     actual_frontend = {p.relative_to(runtime).as_posix() for p in (runtime/'webui-dist').rglob('*') if p.is_file()}
-    if actual_frontend != set(p for p in originals if p.startswith('webui-dist/')):
+    expected_frontend=({p for p,e in old.items() if p.startswith('webui-dist/') and e['after'] is not None}
+                       if old else {p for p in originals if p.startswith('webui-dist/')})
+    if actual_frontend != expected_frontend:
         raise Refusal('Unrecognized files in original Pro WebUI; preserved')
     return records
 
@@ -223,31 +240,153 @@ def matches(runtime, records, *, mixed=False, restored=False):
             raise Refusal(f"File changed since enhancement: {entry['path']}; preserved")
 
 
-def rollback(runtime, journal):
+def verified_backup(journal, state_root=None):
+    storage=Path(state_root) if state_root is not None else PACKAGE
     backup = Path(journal['backup'])
-    if backup.resolve().parent != (PACKAGE/'backups').resolve():
+    if backup.resolve().parent != (storage/'backups').resolve():
         raise Refusal('Backup is outside this enhancement installation')
     for entry in journal['files']:
         if entry['before'] is not None and digest(ordinary(backup,entry['path'])) != entry['before']:
             raise Refusal(f"Backup failed verification: {entry['path']}")
+    return backup
+
+
+def rollback(runtime, journal, state_root=None):
+    backup=verified_backup(journal,state_root)
     for entry in reversed(journal['files']):
         path = ordinary(runtime,entry['path'])
         content = None if entry['before'] is None else (backup/entry['path']).read_bytes()
         replace(path,content,entry['mode'])
 
 
-def execute(root, command, *, run=subprocess.run):
+def read_state(path,release):
+    state=load(path) if path.exists() else None
+    if state and (state.get('schemaVersion') not in (1,2) or state.get('status') not in {'prepared','applied','restored'}):
+        raise Refusal('Unsupported enhancement state')
+    if state and state['release']!=str(release):
+        raise Refusal('Existing enhancement state belongs to another installation')
+    return state
+
+
+def prepared_records(state):
+    if state['status']=='prepared' and state.get('rollback') and not state.get('restoreInProgress'):
+        return state['rollback']['files']
+    return state['files']
+
+
+def check_installation(runtime,manifest,package_manifest,profile,state,state_root):
+    if state and state['status']=='prepared':
+        raise Refusal('Previous installation was interrupted; run rollback-update or restore first')
+    active=bool(state and state['status']=='applied')
+    if active:
+        def version(value):
+            parts=str(value).split('.')
+            if len(parts)!=3 or not all(part.isdigit() for part in parts):
+                raise Refusal('Enhancement versions must use major.minor.patch for automatic updates')
+            return tuple(map(int,parts))
+        if version(profile['packageVersion'])<version(state['packageVersion']):
+            raise Refusal(f"Available enhancement {profile['packageVersion']} is older than installed {state['packageVersion']}; current enhancement preserved")
+        matches(runtime,state['files'])
+        backup=verified_backup(state,state_root)
+        check_pair(backup,profile)
+    else:
+        check_pair(runtime,profile)
+    records=plan(runtime,manifest,package_manifest,state)
+    same=bool(active and state.get('packageVersion')==profile['packageVersion'] and (
+        state.get('payloadManifestSha256')==digest(PACKAGE/'payload-manifest.json') or
+        not state.get('payloadManifestSha256') and {e['path']:e['after'] for e in state['files']}=={e['path']:e['after'] for e in records}))
+    return records,'already-applied' if same else 'upgrade' if active else 'apply'
+
+
+def snapshot(runtime,records,backup,sources=None):
+    backup.mkdir(parents=True,mode=0o700)
+    for entry in records:
+        if entry['before'] is not None:
+            name=entry['path']
+            source=sources[name] if sources and name in sources else ordinary(runtime,name)
+            destination=backup/name
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(source,destination)
+            if digest(destination)!=entry['before']:
+                raise Refusal(f'File changed while taking enhancement backup: {name}')
+
+
+def previous_state(journal,state_root):
+    operation=verified_backup(journal['rollback'],state_root)
+    path=operation/'previous-state.json'
+    if digest(path)!=journal.get('previousStateSha256'):
+        raise Refusal('Previous enhancement state backup failed verification')
+    return load(path)
+
+
+def install(root,release,runtime,manifest,package_manifest,profile,state,state_path,state_root,run):
+    records,action=check_installation(runtime,manifest,package_manifest,profile,state,state_root)
+    if action=='already-applied':
+        print('Enhancement already applied and verified')
+        print_layout(release)
+        return
+    stamp='pro-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    backup=state_root/'backups'/(stamp+'-baseline')
+    old={e['path']:e for e in state['files']} if state and state['status']=='applied' else {}
+    sources={name:Path(state['backup'])/name for name,e in old.items() if e['before'] is not None}
+    snapshot(runtime,records,backup,sources)
+    immediate=[{'path':e['path'],'before':digest(ordinary(runtime,e['path'])),'after':e['after'],
+                'mode':stat.S_IMODE((runtime/e['path']).stat().st_mode) if (runtime/e['path']).is_file() else e['mode']} for e in records]
+    operation=state_root/'backups'/(stamp+'-previous') if old else backup
+    if old:
+        snapshot(runtime,immediate,operation)
+    previous=operation/'previous-state.json'
+    save(previous,state)
+    journal={'schemaVersion':2,'packageVersion':profile['packageVersion'],'release':str(release),
+             'payloadManifestSha256':digest(PACKAGE/'payload-manifest.json'),'status':'prepared',
+             'backup':str(backup),'files':records,'rollback':{'backup':str(operation),'files':immediate},
+             'previousStateSha256':digest(previous)}
+    save(state_path,journal)
+    desired={e['path']:e for e in package_manifest['files']}
+    try:
+        for entry in records:
+            if (root/'current').resolve()!=release:
+                raise Refusal('Active Pro release changed during installation')
+            name=entry['path']
+            path=ordinary(runtime,name)
+            content=(PACKAGE/'payload'/name).read_bytes() if name in desired else (backup/name).read_bytes() if entry['after'] is not None else None
+            replace(path,content,entry['mode'])
+        matches(runtime,records)
+        verify_native(root,release,run)
+        journal['status']='applied'
+        save(state_path,journal)
+    except BaseException:
+        matches(runtime,immediate,mixed=True)
+        rollback(runtime,journal['rollback'],state_root)
+        verify_native(root,release,run)
+        if state is None:
+            state_path.unlink(missing_ok=True)
+        else:
+            save(state_path,state)
+        raise
+    print(f"{'Upgraded to' if action=='upgrade' else 'Applied'} enhancement {profile['packageVersion']} on Pro {profile['version']}")
+    print_layout(release)
+    print(f'Backup: {backup}')
+
+
+def execute(root, command, *, run=subprocess.run, state_root=None):
     profile, package_manifest = load(PACKAGE/'target-profile.json'), load(PACKAGE/'payload-manifest.json')
     root, release, manifest = target(root,profile,run)
     runtime = release/'runtime'
-    state_dir = PACKAGE/'state'
-    state_dir.mkdir(exist_ok=True)
+    storage=Path(state_root).expanduser().resolve() if state_root is not None else PACKAGE
+    state_dir=storage/'state'
+    state_path=state_dir/(profile['releaseId']+'.json')
+    if command in {'check','preflight'}:
+        state=read_state(state_path,release)
+        records,action=check_installation(runtime,manifest,package_manifest,profile,state,storage)
+        print(json.dumps({**installation_layout(release),'action':action,'package_version':profile['packageVersion'],
+                          'installed_version':state['packageVersion'] if state and state['status']=='applied' else None,
+                          'managed_files':len(records)},ensure_ascii=False))
+        return
+    state_dir.mkdir(parents=True,exist_ok=True)
     with (state_dir/'pro-enhancement.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        state_path = state_dir/(profile['releaseId']+'.json')
-        state = load(state_path) if state_path.exists() else None
-        if state and state['release'] != str(release):
-            raise Refusal('Existing enhancement state belongs to another installation')
+        state=read_state(state_path,release)
         if command == 'inspect':
             print(json.dumps({**installation_layout(release),'release':str(release),
                 'package_version':profile['packageVersion'],'state':state['status'] if state else 'original',
@@ -255,73 +394,61 @@ def execute(root, command, *, run=subprocess.run):
             return
         if command == 'status':
             if state:
-                matches(runtime,state['files'],mixed=state['status']=='prepared',restored=state['status']=='restored')
+                matches(runtime,prepared_records(state),mixed=state['status']=='prepared',restored=state['status']=='restored')
             print(f"Pro {profile['version']}: {state['status'] if state else 'original'}")
             print_layout(release)
             return
         stopped(release)
-        if state and state['status'] in {'prepared','applied'}:
-            matches(runtime,state['files'],mixed=state['status']=='prepared')
-            if command == 'apply' and state['status']=='applied':
-                if state.get('packageVersion') != profile['packageVersion'] or state.get('payloadManifestSha256') != digest(PACKAGE/'payload-manifest.json'):
-                    raise Refusal('A different enhancement package is installed; run restore before applying this package')
-                print('Enhancement already applied and verified')
-                print_layout(release)
-                return
-            if command == 'apply':
-                raise Refusal('Previous installation was interrupted; run restore first')
-            rollback(runtime,state)
-            verify_native(root,release,run)
-            state['status']='restored'
+        if command=='rollback-update':
+            if not state or state['status']=='restored' or not state.get('rollback'):
+                raise Refusal('No automatic update rollback is available for this installation')
+            if state.get('restoreInProgress'):
+                raise Refusal('An original-release restore was interrupted; continue restore first')
+            matches(runtime,prepared_records(state) if state['status']=='prepared' else state['files'],mixed=state['status']=='prepared')
+            previous=previous_state(state,storage)
+            if previous and previous['release']!=str(release):
+                raise Refusal('Previous enhancement belongs to a different release')
+            state['status']='prepared'
             save(state_path,state)
-            print('Restored the original Pro release; enhancement data retained')
+            rollback(runtime,state['rollback'],storage)
+            verify_native(root,release,run)
+            if previous is None:
+                state_path.unlink(missing_ok=True)
+            else:
+                save(state_path,previous)
+            print('Rolled back the last update to the previous enhancement')
             print_layout(release)
             return
+        if state and state['status'] in {'prepared','applied'}:
+            if command=='apply' and state['status']=='prepared':
+                raise Refusal('Previous installation was interrupted; run restore first')
+            if command=='restore':
+                matches(runtime,prepared_records(state) if state['status']=='prepared' else state['files'],mixed=state['status']=='prepared')
+                verified_backup(state,storage)
+                state.update(status='prepared',restoreInProgress=True)
+                save(state_path,state)
+                rollback(runtime,state,storage)
+                verify_native(root,release,run)
+                state.update(status='restored',restoreInProgress=False)
+                save(state_path,state)
+                print('Restored the original Pro release; enhancement data retained')
+                print_layout(release)
+                return
         if command == 'restore':
             print('No applied enhancement to restore')
             return
-        check_pair(runtime,profile)
-        records = plan(runtime,manifest,package_manifest)
-        backup = PACKAGE/'backups'/('pro-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
-        backup.mkdir(parents=True,mode=0o700)
-        for entry in records:
-            if entry['before'] is not None:
-                destination = backup/entry['path']
-                destination.parent.mkdir(parents=True,exist_ok=True)
-                shutil.copyfile(runtime/entry['path'],destination)
-        journal = {'schemaVersion':1,'packageVersion':profile['packageVersion'], 'release':str(release),
-                   'payloadManifestSha256':digest(PACKAGE/'payload-manifest.json'),
-                   'status':'prepared','backup':str(backup),'files':records}
-        save(state_path,journal)
-        try:
-            for entry in records:
-                if (root/'current').resolve() != release:
-                    raise Refusal('Active Pro release changed during installation')
-                path = ordinary(runtime,entry['path'])
-                content = (PACKAGE/'payload'/entry['path']).read_bytes() if entry['after'] is not None else None
-                replace(path,content,entry['mode'])
-            matches(runtime,records)
-            verify_native(root,release,run)
-            journal['status']='applied'
-            save(state_path,journal)
-        except BaseException:
-            rollback(runtime,journal)
-            journal['status']='restored'
-            save(state_path,journal)
-            raise
-        print(f"Applied enhancement {profile['packageVersion']} to Pro {profile['version']}")
-        print_layout(release)
-        print(f'Backup: {backup}')
+        install(root,release,runtime,manifest,package_manifest,profile,state,state_path,storage,run)
 
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pro-root',type=Path,default=Path.home()/'flockspro')
-    parser.add_argument('command',choices=['apply','restore','status','inspect'])
+    parser.add_argument('--state-root',type=Path,default=None,help='Stable enhancement directory holding state/ and backups/')
+    parser.add_argument('command',choices=['apply','restore','status','inspect','check','preflight','rollback-update'])
     parser.add_argument('--install-deps',action='store_true',help='Compatibility flag; this package ships all pure Python/UI dependencies')
     args=parser.parse_args()
     try:
-        execute(args.pro_root,args.command)
+        execute(args.pro_root,args.command,state_root=args.state_root)
     except (Refusal,OSError,ValueError,KeyError,subprocess.SubprocessError) as exc:
         print(f'ERROR: {exc}',file=sys.stderr)
         return 1

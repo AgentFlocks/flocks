@@ -72,12 +72,13 @@ def build(core,pro,frontend):
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
-    for name in ('apply.py','apply.sh','target-profile.json','README.md'):
+    for name in ('apply.py','apply.sh','update-flocks.py','target-profile.json','README.md'):
         shutil.copyfile(ROOT/name,staging/name)
     for name in ('verification.json','pg-verification-summary.json'):
         if (ROOT/name).is_file():
             shutil.copyfile(ROOT/name,staging/name)
     (staging/'apply.sh').chmod(0o755)
+    (staging/'update-flocks.py').chmod(0o755)
     changed=set(git(core,'diff','--name-only',base,head,'--','.flocks','flocks').decode().splitlines())
     # The native provider still owns these modules. Its task/ownership hooks
     # live in the added pure-Python enhancement, not these SQLite counterparts.

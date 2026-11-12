@@ -1,14 +1,15 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.0",
-  "recordedAt": "2026-11-12T06:31:33.892734+00:00",
+  "packageVersion": "1.14.1",
+  "recordedAt": "2026-11-12T07:32:16.506049+00:00",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.14.0",
+    "packageVersion": "1.14.1",
     "developmentBranch": "zw_dev",
     "sourceRepository": "AgentFlocks/flocksdev",
     "sourceCommit": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
     "deploymentMode": "source-overlay",
+    "installerProtocol": 2,
     "edition": "flockspro",
     "releaseId": "2026.11.12.2-linux-amd64",
     "version": "2026.11.12.2",
@@ -36,7 +37,7 @@
       "note": "Original Core enhancement regression; no production SQLite fallback is used in Pro."
     },
     "installer": {
-      "passed": 11,
+      "passed": 23,
       "checks": [
         "apply/repeat/restore",
         "preserve local edits",
@@ -46,7 +47,13 @@
         "collect new source files",
         "reject stale frontend inputs",
         "inspect actual source hashes and installed paths",
-        "build from committed zw_dev release-baseline diff"
+        "build from committed zw_dev release-baseline diff",
+        "schema1 migration and direct A to B to C upgrades",
+        "remove old-only source and frontend files",
+        "failed upgrade restores previous code and journal",
+        "rollback-update after failed startup",
+        "stable state-root with staged installer",
+        "reject damaged backups and downgrade"
       ]
     },
     "postgres": {
@@ -83,6 +90,25 @@
       "runtimeMismatches": 0,
       "addonMismatches": 0,
       "excluded": "Four Git source updater guard files, excluded from the managed Pro payload"
+    },
+    "updater": {
+      "passed": 17,
+      "downloadSource": "https://gitee.com/flocks/flocks/repository/archive/fix/process_11.12_en",
+      "checks": [
+        "nested ZIP to delivery metadata to tar SHA-256",
+        "managed Pro entry and user service arguments",
+        "retain configuration and historical backups",
+        "skip identical patch without restart",
+        "prevent stale mirror downgrade",
+        "reject HTML and corrupt archives before stopping",
+        "apply and startup failure recovery",
+        "never start mixed source if recovery incomplete",
+        "legacy 1.14.0 first install and repeat compatibility",
+        "restore original listen configuration after failed start",
+        "confirm service mode rather than guessing",
+        "standard curl download path"
+      ],
+      "totalWithInstaller": 40
     }
   },
   "acceptance5173": {
@@ -149,5 +175,27 @@
       "730da6897fbcd85d0b67e22cf13ecd4531161b9d"
     ],
     "deploymentMode": "source-overlay"
+  },
+  "automaticUpdate5173": {
+    "localRelease": "2026.11.12.2-darwin-arm64",
+    "sourceOfRepositoryZIP": "offline snapshots of actual 1.14.0 and 1.14.1 packages; target architecture adapted for local Pro; A contains a comment-only source probe",
+    "livePort": 5173,
+    "scriptSha256": "bcf060297590a0be382aa3c52dc3e104817c356fe362cc2e47d92af210e097e6",
+    "legacy1140FirstInstall": true,
+    "automaticAtoB": true,
+    "sourceChangedFromAtoB": true,
+    "repeatNoRestart": true,
+    "payloadFilesMatched": 479,
+    "baselineRestored": true,
+    "proWrapperUnchanged": true,
+    "listenUnchanged": true
+  },
+  "giteeDownload": {
+    "validated": true,
+    "zipBytes": 35790752,
+    "repositoryCommit": "3c3af53c1d3d90999e3426ae93a5c13bb3b3eaba",
+    "packageVersion": "1.14.0",
+    "sha256": "caf756b2a318652e578f29899f00135c6f83d4ac99dbfc06873f0c65291fda46",
+    "url": "https://gitee.com/flocks/flocks/repository/archive/fix/process_11.12_en"
   }
 }

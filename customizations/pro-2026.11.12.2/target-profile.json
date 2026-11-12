@@ -1,10 +1,11 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.0",
+  "packageVersion": "1.14.1",
   "developmentBranch": "zw_dev",
   "sourceRepository": "AgentFlocks/flocksdev",
   "sourceCommit": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
   "deploymentMode": "source-overlay",
+  "installerProtocol": 2,
   "edition": "flockspro",
   "releaseId": "2026.11.12.2-linux-amd64",
   "version": "2026.11.12.2",

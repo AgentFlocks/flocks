@@ -1,6 +1,6 @@
 # Flocks Pro 2026.11.12.2 定制增强包
 
-增强包版本：1.14.0。仅适用于 `2026.11.12.2-linux-amd64`、Pro 构建 `2ee622b`、Core `730da689`，运行树保护策略必须为 `native`。
+增强包版本：1.14.1。仅适用于 `2026.11.12.2-linux-amd64`、Pro 构建 `2ee622b`、Core `730da689`，运行树保护策略必须为 `native`。
 
 ## 开发与部署方式
 
@@ -14,10 +14,30 @@
 
 ## 安装
 
-先把 `flocks-customizations-1.14.0-pro-2026.11.12.2-full.tar.gz` 上传到服务器用户的家目录，再整行执行：
+推荐把 `update-flocks.py` 放到服务器使用账号的家目录。首次安装和后续更新始终运行同一条命令：
 
 ```bash
-flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks-customizations-1.14.0-pro-2026.11.12.2-full.tar.gz" -C "$HOME/.flocks/customizations" && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root "$HOME/flockspro" apply --install-deps && flocks start --no-browser --webui-host 0.0.0.0
+python3 "$HOME/update-flocks.py"
+```
+
+脚本使用 Python 3 和标准 `curl` 客户端下载，不需要 Git、npm、uv 或额外的 Python 包。
+
+脚本从固定的 Gitee 分支压缩包地址下载仓库 ZIP：
+
+```text
+https://gitee.com/flocks/flocks/repository/archive/fix/process_11.12_en
+```
+
+它通过仓库中的 `delivery.json` 自动选择匹配当前 Pro 发行版的最新补丁，校验内嵌压缩包、源码和界面文件，再部署到 `~/.flocks/customizations/`。不需要手动下载新包、修改版本号、解压或先还原旧补丁。下载与预检在停服务之前完成；相同补丁校验通过后直接退出，不重启服务。镜像版本早于已安装版本时保留当前补丁。
+
+请使用安装和运行 Pro 的系统账号执行；账号名为 `pro` 也适用，脚本从受管 `flocks` 入口识别该账号的安装目录并保留用户服务参数。WebUI 中已登录 Pro 账号无需退出。脚本不更换账号、授权或 PostgreSQL，不自动提权。自定义安装位置可使用 `--pro-root /实际目录`。默认启动参数与原命令一致，为 `--no-browser --webui-host 0.0.0.0`；需要保留本地监听时可传 `--webui-host 127.0.0.1`。
+
+已装补丁 A 时，脚本核对 A 的部署记录和当前文件，再直接写入补丁 B。B 删除的旧补丁文件会清理，不再修改的原版文件恢复发行基线；保留配置、状态及历史备份。部署失败自动退回 A；B 启动失败时也会回退本次代码更新，并尝试重新启动此前运行的服务。未知手工源码改动会被保留并报告。自动升级以补丁声明的 Pro 发行基线为准。
+
+若继续使用手工压缩包方式，把 `flocks-customizations-1.14.1-pro-2026.11.12.2-full.tar.gz` 上传到服务器家目录，再整行执行：
+
+```bash
+flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks-customizations-1.14.1-pro-2026.11.12.2-full.tar.gz" -C "$HOME/.flocks/customizations" && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root "$HOME/flockspro" apply --install-deps && flocks start --no-browser --webui-host 0.0.0.0
 ```
 
 解压目录和安装器都在 `~/.flocks/customizations/`，不需要额外的家目录工作文件夹。补丁目标是当前受管 Pro 发布；旧的 `$HOME/flocks` 不参与安装。
@@ -54,7 +74,7 @@ flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks
 flocks stop && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root "$HOME/flockspro" restore && flocks start --no-browser --webui-host 0.0.0.0
 ```
 
-还原恢复代码和原 Pro 界面，保留业务数据与备份。若安装后又手工改过文件，还原会先停止并保留改动；不会强制覆盖。安装被意外中断时，先执行 `restore`，再重新安装。
+还原恢复未增强的代码和原 Pro 界面，保留业务数据与备份。若安装后又手工改过文件，还原会停止并保留改动；不会强制覆盖。安装被意外中断且自动恢复未完成时，服务保持停止，保留备份；使用 `rollback-update` 退回上一次补丁，或使用 `restore` 回到未增强原版，再重新运行更新脚本。正常 A→B 更新无需手动执行这两个命令。
 
 ## 开发与验证
 
@@ -66,6 +86,8 @@ flocks stop && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root
 
 ## 本次交付验收范围
 
-本次按候选包交付。前端 2968 项、原 SQLite 兼容回归 1574 项及安装器 11 项通过；PostgreSQL 已知失败经定点复核清零，完整运行和定点复核的对应关系、10 项测试夹具限制见 `pg-verification-summary.json`，没有累计重复用例冒称完整单轮全绿。12 并发会话预约、6 并发结束卡及中断恢复均已验证。提交到 `zw_dev` 后另通过源码更新保护 14 项及原生 PostgreSQL 冒烟 7 项，并逐文件核对既有运行源码与增强代码一致。
+本次按候选包交付。既有增强的前端 2968 项、原 SQLite 兼容回归 1574 项通过；PostgreSQL 已知失败经定点复核清零，完整运行和定点复核的对应关系、10 项测试夹具限制见 `pg-verification-summary.json`，没有累计重复用例冒称完整单轮全绿。12 并发会话预约、6 并发结束卡及中断恢复均已验证。提交到 `zw_dev` 后另通过源码更新保护 14 项及原生 PostgreSQL 冒烟 7 项，并逐文件核对既有运行源码与增强代码一致。
+
+1.14.1 的安装器与一键更新脚本共 40 项回归通过，包括 A→B→C、旧安装记录迁移、删除旧文件、异常回滚、监听地址恢复、重复运行及镜像版本防倒退。Gitee 地址已通过真实匿名下载验证；5173 现有 Pro 实例已实际执行旧 1.14.0 首装、直接升级 1.14.1、重复运行不重启和全量还原。验收中使用适配本机架构的离线仓库快照，并以仅注释不同的 A 版源码确认 B 确实覆盖了 A 的文件。
 
 5173 现有 Pro 实例已实际加载同源码增强包，验证首页统计、安全监测套件入口、成功和失败任务详情双向滚动，以及安装、重复安装、还原；最终源码部署复核还确认原 Pro Python 入口加载 `current/runtime/flocks/`，所有部署文件哈希匹配，启动包装脚本未改变；验收后已恢复原版。该实例原有安全监测组件不完整，因此没有自动补全或启用新监测任务，完整报告页与真实监测链路仍待验收。Linux 目标服务器也尚未实机部署。详细记录见 `verification.json`。

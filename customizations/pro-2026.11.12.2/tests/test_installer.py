@@ -23,6 +23,7 @@ def installation(tmp_path, monkeypatch):
     package.mkdir()
     monkeypatch.setattr(installer, 'PACKAGE', package)
     profile = json.loads((Path(__file__).resolve().parents[1]/'target-profile.json').read_text())
+    profile['packageVersion']='1.14.0'
     (package/'target-profile.json').write_text(json.dumps(profile))
     root = tmp_path/'flockspro'
     release = root/'releases'/profile['releaseId']
@@ -136,18 +137,244 @@ def test_unknown_edit_after_apply_blocks_restore(installation):
     assert (i.runtime/'webui-dist/index.html').read_bytes()==b'new-ui'
 
 
-def test_new_package_cannot_masquerade_as_already_applied(installation):
+def test_reissued_package_is_recorded_as_an_upgrade(installation):
     i=installation
     installer.execute(i.root,'apply',run=i.run)
     manifest=i.package/'payload-manifest.json'
     payload=json.loads(manifest.read_text())
     payload['package_revision']='another-package'
     manifest.write_text(json.dumps(payload))
-    with pytest.raises(installer.Refusal,match='different enhancement package'):
-        installer.execute(i.root,'apply',run=i.run)
+    installer.execute(i.root,'apply',run=i.run)
+    state=next((i.package/'state').glob('*.json'))
+    assert json.loads(state.read_text())['payloadManifestSha256']==installer.digest(manifest)
     assert (i.runtime/'webui-dist/index.html').read_bytes()==b'new-ui'
     installer.execute(i.root,'restore',run=i.run)
     assert (i.runtime/'webui-dist/index.html').read_bytes()==b'old-ui'
+
+
+def publish_package(i,version,desired):
+    profile_path=i.package/'target-profile.json'
+    profile=json.loads(profile_path.read_text())
+    profile['packageVersion']=version
+    profile_path.write_text(json.dumps(profile))
+    records=[]
+    for name,data in desired.items():
+        destination=i.package/'payload'/name
+        destination.parent.mkdir(parents=True,exist_ok=True)
+        destination.write_bytes(data)
+        records.append({'path':name,'sha256':hashlib.sha256(data).hexdigest(),
+                        'before':hashlib.sha256(i.original[name]).hexdigest() if name in i.original else None})
+    (i.package/'payload-manifest.json').write_text(json.dumps({'files':records}))
+
+
+def state_file(i,state_root=None):
+    return next(((state_root or i.package)/'state').glob('*.json'))
+
+
+def runtime_tree(i):
+    return {p.relative_to(i.runtime).as_posix():p.read_bytes() for p in i.runtime.rglob('*') if p.is_file()}
+
+
+def test_a_to_b_to_c_updates_removed_files_and_restores_original(installation):
+    i=installation
+    installer.execute(i.root,'apply',run=i.run)
+    b={name:data for name,data in i.desired.items() if name not in {
+        'flocks/flocks/demo.py','flocks/flocks/enhancements/new.py','webui-dist/assets/new.js'}}
+    b.update({'flocks/flocks/enhancements/b.py':b'B feature','webui-dist/assets/b.js':b'B asset',
+              'webui-dist/index.html':b'B UI'})
+    publish_package(i,'1.15.0',b)
+    installer.execute(i.root,'apply',run=i.run)
+    assert (i.runtime/'flocks/flocks/demo.py').read_bytes()==i.original['flocks/flocks/demo.py']
+    assert not (i.runtime/'flocks/flocks/enhancements/new.py').exists()
+    assert not (i.runtime/'webui-dist/assets/new.js').exists()
+    assert (i.runtime/'flocks/flocks/enhancements/b.py').read_bytes()==b'B feature'
+    c={name:data for name,data in b.items() if name not in {'flocks/flocks/enhancements/b.py','webui-dist/assets/b.js'}}
+    c.update({'flocks/flocks/demo.py':b'C source','webui-dist/assets/c.js':b'C asset','webui-dist/index.html':b'C UI'})
+    publish_package(i,'1.16.0',c)
+    installer.execute(i.root,'apply',run=i.run)
+    assert not (i.runtime/'flocks/flocks/enhancements/b.py').exists()
+    assert not (i.runtime/'webui-dist/assets/b.js').exists()
+    assert (i.runtime/'flocks/flocks/demo.py').read_bytes()==b'C source'
+    installer.execute(i.root,'restore',run=i.run)
+    assert runtime_tree(i)==i.original
+    installer.execute(i.root,'status',run=i.run)
+
+
+def test_failed_upgrade_restores_a_and_its_exact_state(installation,monkeypatch):
+    i=installation
+    installer.execute(i.root,'apply',run=i.run)
+    before=runtime_tree(i)
+    state=state_file(i)
+    original_state=state.read_bytes()
+    b={**i.desired,'flocks/flocks/demo.py':b'B source','webui-dist/index.html':b'B UI'}
+    publish_package(i,'1.15.0',b)
+    original_replace=installer.replace
+    failed=False
+    def interrupted(path,data,mode):
+        nonlocal failed
+        if not failed and path==i.runtime/'webui-dist/index.html':
+            failed=True
+            raise OSError('upgrade interrupted')
+        return original_replace(path,data,mode)
+    monkeypatch.setattr(installer,'replace',interrupted)
+    with pytest.raises(OSError,match='upgrade interrupted'):
+        installer.execute(i.root,'apply',run=i.run)
+    assert runtime_tree(i)==before
+    assert state.read_bytes()==original_state
+
+
+def test_update_start_failure_can_roll_back_to_previous_enhancement(installation):
+    i=installation
+    installer.execute(i.root,'apply',run=i.run)
+    original=runtime_tree(i)
+    saved_state=state_file(i).read_bytes()
+    publish_package(i,'1.15.0',{**i.desired,'flocks/flocks/demo.py':b'B source','webui-dist/index.html':b'B UI'})
+    installer.execute(i.root,'apply',run=i.run)
+    installer.execute(i.root,'rollback-update',run=i.run)
+    assert runtime_tree(i)==original
+    assert state_file(i).read_bytes()==saved_state
+
+
+def test_legacy_schema_one_updates_without_restore(installation):
+    i=installation
+    installer.execute(i.root,'apply',run=i.run)
+    state=state_file(i)
+    legacy=json.loads(state.read_text())
+    legacy['schemaVersion']=1
+    for key in ('rollback','previousStateSha256','payloadManifestSha256'):
+        legacy.pop(key,None)
+    state.write_text(json.dumps(legacy))
+    publish_package(i,'1.15.0',{**i.desired,'flocks/flocks/demo.py':b'B source'})
+    installer.execute(i.root,'apply',run=i.run)
+    assert json.loads(state.read_text())['schemaVersion']==2
+    assert (i.runtime/'flocks/flocks/demo.py').read_bytes()==b'B source'
+    installer.execute(i.root,'restore',run=i.run)
+    assert runtime_tree(i)==i.original
+
+
+def test_preflight_is_readonly_and_does_not_require_a_stop(installation,monkeypatch,capsys):
+    i=installation
+    storage=i.package.parent/'stable-home-dashboard'
+    monkeypatch.setattr(installer,'stopped',lambda *_:pytest.fail('preflight must not require stopping'))
+    before=runtime_tree(i)
+    installer.execute(i.root,'preflight',run=i.run,state_root=storage)
+    answer=json.loads(capsys.readouterr().out)
+    assert answer['action']=='apply'
+    assert answer['source_root']==str(i.runtime/'flocks')
+    assert not storage.exists()
+    assert runtime_tree(i)==before
+
+
+def test_candidate_uses_stable_state_root_and_detects_idempotence(installation,capsys):
+    i=installation
+    storage=i.package.parent/'stable-home-dashboard'
+    installer.execute(i.root,'apply',run=i.run,state_root=storage)
+    capsys.readouterr()
+    assert not (i.package/'state').exists()
+    assert state_file(i,storage).is_file()
+    installer.execute(i.root,'preflight',run=i.run,state_root=storage)
+    assert json.loads(capsys.readouterr().out)['action']=='already-applied'
+    installer.execute(i.root,'restore',run=i.run,state_root=storage)
+    assert runtime_tree(i)==i.original
+
+
+def test_upgrade_rejects_unknown_local_edits_before_modification(installation):
+    i=installation
+    installer.execute(i.root,'apply',run=i.run)
+    path=i.runtime/'flocks/flocks/demo.py'
+    path.chmod(0o644)
+    path.write_bytes(b'local edit after A')
+    before=runtime_tree(i)
+    saved_state=state_file(i).read_bytes()
+    publish_package(i,'1.15.0',{**i.desired,'flocks/flocks/demo.py':b'B source'})
+    with pytest.raises(installer.Refusal,match='changed since enhancement'):
+        installer.execute(i.root,'preflight',run=i.run)
+    with pytest.raises(installer.Refusal,match='changed since enhancement'):
+        installer.execute(i.root,'apply',run=i.run)
+    assert runtime_tree(i)==before
+    assert state_file(i).read_bytes()==saved_state
+
+
+def test_old_mirror_cannot_downgrade_an_installed_enhancement(installation):
+    i=installation
+    publish_package(i,'1.16.0',i.desired)
+    installer.execute(i.root,'apply',run=i.run)
+    before=runtime_tree(i)
+    publish_package(i,'1.15.0',i.desired)
+    with pytest.raises(installer.Refusal,match='older than installed'):
+        installer.execute(i.root,'preflight',run=i.run)
+    with pytest.raises(installer.Refusal,match='older than installed'):
+        installer.execute(i.root,'apply',run=i.run)
+    assert runtime_tree(i)==before
+
+
+@pytest.mark.parametrize('recovery',['rollback-update','restore'])
+def test_interrupted_upgrade_requires_explicit_verified_recovery(installation,monkeypatch,recovery):
+    i=installation
+    installer.execute(i.root,'apply',run=i.run)
+    a=runtime_tree(i)
+    old_state=state_file(i).read_bytes()
+    publish_package(i,'1.15.0',{**i.desired,'flocks/flocks/demo.py':b'B source','webui-dist/index.html':b'B UI'})
+    original_replace=installer.replace
+    original_rollback=installer.rollback
+    def power_loss(path,data,mode):
+        if path==i.runtime/'webui-dist/index.html':
+            raise OSError('simulated power loss')
+        return original_replace(path,data,mode)
+    monkeypatch.setattr(installer,'replace',power_loss)
+    monkeypatch.setattr(installer,'rollback',lambda *_:(_ for _ in ()).throw(OSError('rollback interrupted')))
+    with pytest.raises(OSError,match='rollback interrupted'):
+        installer.execute(i.root,'apply',run=i.run)
+    prepared=state_file(i).read_bytes()
+    mixed=runtime_tree(i)
+    assert json.loads(prepared)['status']=='prepared'
+    monkeypatch.setattr(installer,'replace',original_replace)
+    monkeypatch.setattr(installer,'rollback',original_rollback)
+    with pytest.raises(installer.Refusal,match='interrupted'):
+        installer.execute(i.root,'preflight',run=i.run)
+    with pytest.raises(installer.Refusal,match='interrupted'):
+        installer.execute(i.root,'apply',run=i.run)
+    assert runtime_tree(i)==mixed and state_file(i).read_bytes()==prepared
+    installer.execute(i.root,recovery,run=i.run)
+    assert runtime_tree(i)==(a if recovery=='rollback-update' else i.original)
+    if recovery=='rollback-update':
+        assert state_file(i).read_bytes()==old_state
+
+
+def test_upgrade_preflight_rejects_damaged_original_backup(installation):
+    i=installation
+    installer.execute(i.root,'apply',run=i.run)
+    journal=json.loads(state_file(i).read_text())
+    (Path(journal['backup'])/'flocks/flocks/demo.py').write_bytes(b'damaged backup')
+    before=runtime_tree(i)
+    publish_package(i,'1.15.0',{**i.desired,'flocks/flocks/demo.py':b'B source'})
+    with pytest.raises(installer.Refusal,match='Backup failed verification'):
+        installer.execute(i.root,'preflight',run=i.run)
+    assert runtime_tree(i)==before
+
+
+def test_interrupted_original_restore_can_continue_without_losing_the_baseline(installation,monkeypatch):
+    i=installation
+    installer.execute(i.root,'apply',run=i.run)
+    publish_package(i,'1.15.0',{**i.desired,'flocks/flocks/demo.py':b'B source'})
+    installer.execute(i.root,'apply',run=i.run)
+    original_replace=installer.replace
+    failed=False
+    def interrupted(path,data,mode):
+        nonlocal failed
+        if not failed and path==i.runtime/'flocks/flocks/demo.py':
+            failed=True
+            raise OSError('restore interrupted')
+        return original_replace(path,data,mode)
+    monkeypatch.setattr(installer,'replace',interrupted)
+    with pytest.raises(OSError,match='restore interrupted'):
+        installer.execute(i.root,'restore',run=i.run)
+    pending=json.loads(state_file(i).read_text())
+    assert pending['status']=='prepared' and pending['restoreInProgress'] is True
+    with pytest.raises(installer.Refusal,match='restore was interrupted'):
+        installer.execute(i.root,'rollback-update',run=i.run)
+    installer.execute(i.root,'restore',run=i.run)
+    assert runtime_tree(i)==i.original
 
 
 def test_source_overlay_reports_the_real_source_and_entry_hashes(installation,capsys):
@@ -190,7 +417,7 @@ def build_sources(tmp_path,monkeypatch):
              'developmentBranch':'zw_dev','deploymentMode':'source-overlay',
              'frontendSources':{'flockspro':builder.source_hash(pro,'webui-overlay')}}
     (root/'target-profile.json').write_text(json.dumps(profile))
-    for name in ('README.md','apply.py','apply.sh'):
+    for name in ('README.md','apply.py','apply.sh','update-flocks.py'):
         (root/name).write_text('fixture\n')
     frontend=tmp_path/'webui-dist'
     frontend.mkdir()
