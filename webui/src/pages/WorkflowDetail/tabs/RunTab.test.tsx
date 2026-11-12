@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import RunTab from './RunTab';
 import type { WorkflowExecution } from '@/api/workflow';
+import { backendError } from '@/test/helpers';
 
 const { workflowAPI } = vi.hoisted(() => ({
   workflowAPI: {
@@ -246,6 +247,24 @@ describe('RunTab', () => {
       expect(workflowAPI.saveSampleInputs).toHaveBeenCalledWith('wf-1', { topic: 'saved' });
       expect(workflowAPI.run).toHaveBeenCalledWith('wf-1', { inputs: { topic: 'saved' } });
     });
+  });
+
+  it('says why a test run was refused instead of the bare status code', async () => {
+    const user = userEvent.setup();
+    const onLatestExecutionChange = vi.fn();
+    workflowAPI.run.mockRejectedValue(backendError(409, 'Only one syslog trigger is supported per workflow'));
+
+    render(<RunTab workflow={baseWorkflow} latestExecution={null} onLatestExecutionChange={onLatestExecutionChange} />);
+
+    fireEvent.change(screen.getAllByRole('textbox')[0], { target: { value: '{"topic":"saved"}' } });
+    await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+    // Asserted on what the tab reports rather than on the page: the history list reloads right
+    // after and replaces an execution that has no id, so the line does not stay on screen.
+    await waitFor(() => expect(onLatestExecutionChange).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'error',
+      errorMessage: 'Only one syslog trigger is supported per workflow',
+    })));
   });
 
   it('shows a copy button when output results are available', async () => {
