@@ -114,6 +114,8 @@
     "createTitle": "Create {{entityType}}",
     "editTitle": "Edit {{entityType}}",
     "editTitleWithName": "Edit {{entityType}}: {{entityName}}",
+    "viewTitle": "{{entityType}} details",
+    "viewTitleWithName": "{{entityType}} details: {{entityName}}",
     "defaultCreate": "Create",
     "defaultSave": "Save",
     "tabDetails": "Details",

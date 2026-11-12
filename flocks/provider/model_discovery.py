@@ -328,6 +328,10 @@ async def _validate_resolved_addresses(url: str) -> None:
         # The HTTP transport owns connection error reporting; a test or custom
         # transport may also resolve names independently of the system resolver.
         return
+    except UnicodeError:
+        # The resolver encodes names with IDNA: an empty label ("a..b") or one
+        # longer than 63 characters is not a host name, not a server failure.
+        raise DiscoveryError("invalid_base_url", "The provider base URL does not name a valid host.") from None
     for address in addresses:
         target = ipaddress.ip_address(address[4][0].split("%", 1)[0])
         if getattr(target, "ipv4_mapped", None):

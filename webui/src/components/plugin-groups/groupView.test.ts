@@ -3,11 +3,12 @@ import { createInstance } from 'i18next';
 import enGroups from '@/locales/en-US/pluginGroups.json';
 const i18n = createInstance();
 const t = i18n.t.bind(i18n);
-import { deriveGroupNav, GroupActionCancelled, groupLabel, matchesGroup, orderGroupNames, saveGroupItems } from './groupView';
+import { assertGroupItemsEditable, deriveGroupNav, GroupActionCancelled, groupLabel, GroupSaveError, matchesGroup, orderGroupNames, saveGroupItems } from './groupView';
 
 beforeEach(async () => {
   vi.restoreAllMocks();
-  await i18n.init({ lng: 'en-US', resources: { 'en-US': { pluginGroups: enGroups } } });
+  // Same as the application (src/i18n.ts): React escapes, i18next must not.
+  await i18n.init({ lng: 'en-US', resources: { 'en-US': { pluginGroups: enGroups } }, interpolation: { escapeValue: false } });
 });
 
 describe('native group view helpers', () => {
@@ -71,9 +72,9 @@ describe('native group view helpers', () => {
     const result = saveGroupItems([
       { key: 'a', name: 'Alpha' }, { key: 'b', name: 'Beta' }, { key: 'c', name: 'Gamma' },
     ], null, save, reload, t, true);
-    await expect(result).rejects.toThrow('Failed plugins:\nBeta (b): disk full');
-    await expect(result).rejects.toThrow('Saved plugins: Alpha (a), Gamma (c)');
-    await expect(result).rejects.toThrow('Saved 2; failed 1');
+    // Counts first, then one line per failure; the succeeded ones are only counted.
+    await expect(result).rejects.toThrow('Saved 2; failed 1.\n\nBeta (b): disk full');
+    await expect(result).rejects.not.toThrow('Alpha (a)');
     expect(confirm.mock.lastCall?.[0]).toContain('3 plugins');
     expect(confirm.mock.lastCall?.[0]).not.toContain('atomic');
     expect(confirm.mock.lastCall?.[0]).toContain('Alpha (a), Beta (b), Gamma (c)');
@@ -87,6 +88,25 @@ describe('native group view helpers', () => {
     const reload = vi.fn().mockRejectedValue(new Error('offline'));
     await expect(saveGroupItems([{ key: 'a', name: 'Alpha' }], 'Ops', save, reload, t)).rejects.toThrow('Saved 1; failed 0');
     expect(save).toHaveBeenCalledExactlyOnceWith('a', 'Ops');
+  });
+
+  it('rewords a file that changed after it was checked and keeps the server text as details', async () => {
+    const raw = 'Failed to update workflow: /home/u/.flocks/plugins/workflows/hq changed after it was checked; check it again and retry.';
+    const save = vi.fn().mockRejectedValue(new Error(raw));
+    const error = await saveGroupItems([{ key: 'hq', name: 'SOC' }], 'Ops', save, vi.fn(), t, false, 'workflow').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GroupSaveError);
+    expect((error as GroupSaveError).message).toBe('Saved 0; failed 1.\n\nSOC (hq): It changed after it was checked. Refresh and try again.');
+    expect((error as GroupSaveError).message).not.toContain('/home/u');
+    expect((error as GroupSaveError).details).toBe(`SOC (hq): ${raw}`);
+  });
+
+  it('names what the page groups instead of plugins', async () => {
+    expect(() => assertGroupItemsEditable([{ key: 'rex', name: 'Rex', readOnlyReason: 'built-in' }], t, 'agent'))
+      .toThrow('Groups cannot be changed for these agents: Rex (rex)');
+    await expect(saveGroupItems([], 'Ops', vi.fn(), vi.fn(), t, false, 'device')).rejects.toThrow('This device or group is unavailable.');
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await expect(saveGroupItems([{ key: 'a', name: 'A' }], null, vi.fn(), vi.fn(), t, true, 'skill')).rejects.toBeInstanceOf(GroupActionCancelled);
+    expect(confirm.mock.lastCall?.[0]).toContain('Move these 1 skills');
   });
 
   it('does not write or report saved when the actual-scope confirmation is cancelled', async () => {

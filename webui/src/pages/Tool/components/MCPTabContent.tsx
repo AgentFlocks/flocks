@@ -16,7 +16,7 @@ import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalo
 import { MCPServerDetailPanel } from './ServiceDetailPanel';
 import { SERVICE_TAB_GRID_COLS } from './gridLayout';
 import GroupNav, { useGroupDrag } from '@/components/plugin-groups/GroupNav';
-import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection, groupNoun } from '@/components/plugin-groups/groupView';
 import { useAuth } from '@/contexts/AuthContext';
 import { extractErrorMessage } from '@/utils/error';
 
@@ -449,12 +449,12 @@ export default function MCPTabContent({
   // A configured service wins over its catalog default, including an explicit clear.
   const asServerGroupItem = (server: MCPServer) => ({
     key: server.name, name: catalogEntryById.get(server.name)?.name || server.name, group: server.group,
-    readOnlyReason: server.group_readonly ? t('pluginGroups:readOnly.system')
+    readOnlyReason: server.group_readonly ? t('pluginGroups:readOnly.system', groupNoun(t, 'mcp'))
       : user?.role === 'admin' ? undefined : t('pluginGroups:readOnly.admin'),
   });
   const asCatalogGroupItem = (entry: MCPCatalogEntry) => ({
     key: entry.id, name: entry.name, group: entry.group,
-    readOnlyReason: t(entry.group_readonly ? 'pluginGroups:readOnly.system' : 'pluginGroups:readOnly.catalog'),
+    readOnlyReason: t(entry.group_readonly ? 'pluginGroups:readOnly.system' : 'pluginGroups:readOnly.catalog', groupNoun(t, 'mcp')),
   });
   const groupInventory = (nativeServers: MCPServer[]) => [
     ...nativeServers.map(asServerGroupItem),
@@ -468,18 +468,18 @@ export default function MCPTabContent({
   const loadGroupItems = async () => groupInventory(serverRows((await mcpAPI.list()).data));
   const moveGroup = async (key: string, group: string | null) => {
     const inventory = await loadGroupItems();
-    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroupData, t);
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroupData, t, false, 'mcp');
   };
   const createGroup = async (key: string, group: string) => {
     const inventory = await loadGroupItems();
     if (inventory.some((item) => matchesGroup(item.group, group))) throw new Error(t('pluginGroups:validation.duplicate'));
-    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroupData, t);
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroupData, t, false, 'mcp');
   };
   const changeGroup = async (from: string, to: string | null) => {
     const inventory = await loadGroupItems();
     if (to !== null && inventory.some((item) => matchesGroup(item.group, to))) throw new Error(t('pluginGroups:validation.duplicate'));
     const members = inventory.filter((item) => matchesGroup(item.group, from));
-    await saveGroupItems(members, to, saveGroup, reloadGroupData, t, true);
+    await saveGroupItems(members, to, saveGroup, reloadGroupData, t, true, 'mcp');
   };
   const visibleCards = unifiedCards.filter(({ runtimeServer, entry }) => (
     matchesGroup(runtimeServer ? runtimeServer.group : entry?.group, groupSelection)
@@ -487,7 +487,7 @@ export default function MCPTabContent({
 
   return (
     <div className="flex flex-col gap-4 md:flex-row">
-      <GroupNav inventoryComplete={!serversLoading && serversError === null && !catalogLoading} preferenceKey="tools.mcp" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
+      <GroupNav itemKind="mcp" inventoryComplete={!serversLoading && serversError === null && !catalogLoading} preferenceKey="tools.mcp" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
       <div className="min-w-0 flex-1 space-y-4">
       {serversError !== null && <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
         <span>{extractErrorMessage(serversError, t('alert.refreshFailedTitle'))}</span>

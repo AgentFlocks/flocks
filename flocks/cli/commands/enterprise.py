@@ -135,7 +135,7 @@ def _upgrade(enterprise, situation, yes: bool) -> int:
     path = asyncio.run(enterprise.download(offer, progress))
     console.print(f"[green]✓ 已下载并校验：{path}[/green]")
     if not enterprise.can_run_installer_here():
-        console.print("[yellow]这台机器由 systemd 管（开源离线包），要以 root 运行安装包：[/yellow]")
+        console.print("[yellow]当前开源版由 systemd 管理（开源离线包），请使用 root 权限运行安装包：[/yellow]")
         console.print(f"  [bold]{enterprise.installer_command(str(path))}[/bold]")
         return 1
     console.print(f"运行 {path.name}（开源版会停下，企业版起来后照旧用 flocks start|stop|status|update）")

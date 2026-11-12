@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2 } from 'lucide-react';
 import { providerAPI } from '@/api/provider';
-import { extractErrorMessage } from '@/utils/error';
+import { extractErrorMessage, isServiceRefusal } from '@/utils/error';
 
 export default function ProviderKeyCheck({
   providerId,
@@ -40,7 +40,8 @@ export default function ProviderKeyCheck({
       });
     } catch (error) {
       if (current === version.current)
-        setResult({ status: 'invalid', message: extractErrorMessage(error) });
+        // A refusal says what to fix; a server failure ("Internal server error") or a lost request does not.
+        setResult({ status: 'invalid', message: isServiceRefusal(error) ? extractErrorMessage(error) : t('compact.checkFailed') });
     } finally {
       if (current === version.current) setChecking(false);
     }

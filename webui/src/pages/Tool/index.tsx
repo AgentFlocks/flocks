@@ -49,7 +49,7 @@ import { useToast } from '@/components/common/Toast';
 import { useToolPage } from '@/hooks/useTools';
 import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-groups/GroupNav';
 import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
-import { assertGroupItemsEditable, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import { assertGroupItemsEditable, saveGroupItems, type GroupSelection, groupNoun } from '@/components/plugin-groups/groupView';
 import { useAuth } from '@/contexts/AuthContext';
 import { usePluginViewMode } from '@/hooks/usePluginViewMode';
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
@@ -60,7 +60,7 @@ import { mcpAPI, MCPServer } from '@/api/mcp';
 import { providerAPI } from '@/api/provider';
 import client from '@/api/client';
 import type { MCPServerDetail, MCPCredentials, MCPCredentialInput, MCPCatalogEntry, MCPCatalogCategory } from '@/types';
-import { MCPSheet, APISheet, GenerateToolSheet, MCPFormFields, buildMCPFormDataFromConfig } from './ToolSheets';
+import { MCPSheet, APISheet, GenerateToolSheet, MCPFormFields, buildMCPFormDataFromConfig, mcpTestFailure, mcpTestOutcome, type MCPTestResult } from './ToolSheets';
 import type { MCPFormData, ConnStatus as MCPConnStatus } from './ToolSheets';
 import MCPTabContent from './components/MCPTabContent';
 import APITabContent from './components/APITabContent';
@@ -350,7 +350,7 @@ export default function ToolPage() {
   const readOnlyReason = user?.role === 'admin' ? undefined : t('pluginGroups:readOnly.admin');
   const asGroupItem = (tool: Tool) => ({
     key: tool.name, name: tool.name, group: tool.group,
-    readOnlyReason: tool.group_readonly ? t('pluginGroups:readOnly.system') : readOnlyReason,
+    readOnlyReason: tool.group_readonly ? t('pluginGroups:readOnly.system', groupNoun(t, 'tool')) : readOnlyReason,
   });
   const toolGroupItems = tools.map(asGroupItem);
   const toolGroupDrag = useGroupDrag(toolGroupItems, toast.warning);
@@ -378,7 +378,7 @@ export default function ToolPage() {
   };
   const moveToolGroup = async (key: string, group: string | null) => {
     const { data } = await toolAPI.get(key);
-    await saveGroupItems([asGroupItem(data)], group, saveToolGroup, reloadToolGroups, t);
+    await saveGroupItems([asGroupItem(data)], group, saveToolGroup, reloadToolGroups, t, false, 'tool');
   };
   const ensureNewToolGroup = async (name: string) => {
     // Query-independent native facets include names hidden by search, columns or tabs.
@@ -396,12 +396,12 @@ export default function ToolPage() {
     // Audit the entire native group, including members hidden by query, columns,
     // tabs or pagination. Counts and the loaded 25 rows cannot prove writability.
     const wholeGroup = await listAllToolPages({ group: from, sortBy: toolPageParams.sortBy, sortDir: toolPageParams.sortDir }, { requireComplete: true });
-    assertGroupItemsEditable(wholeGroup.map(asGroupItem), t);
+    assertGroupItemsEditable(wholeGroup.map(asGroupItem), t, 'tool');
     // Keep the existing write scope explicit in the single native confirmation.
     const members = hasToolInventoryFilters
       ? await listAllToolPages({ ...toolPageParams, group: from }, { requireComplete: true })
       : wholeGroup;
-    await saveGroupItems(members.map(asGroupItem), to, saveToolGroup, reloadToolGroups, t, true);
+    await saveGroupItems(members.map(asGroupItem), to, saveToolGroup, reloadToolGroups, t, true, 'tool');
   };
   const selectToolGroup = useCallback((name: GroupSelection) => {
     setToolGroup(name);
@@ -409,7 +409,7 @@ export default function ToolPage() {
   }, []);
   // A failed first request has no facets, not an authoritative empty inventory.
   // Do not let it clear the selected group and silently fall back to All.
-  const toolGroupNav = toolFacets.group ? <GroupNav preferenceKey={`tools.${activeTab}`} {...nativeGroupNav} items={toolGroupItems}
+  const toolGroupNav = toolFacets.group ? <GroupNav itemKind="tool" preferenceKey={`tools.${activeTab}`} {...nativeGroupNav} items={toolGroupItems}
     selection={toolGroup} onSelect={selectToolGroup} onMove={moveToolGroup} onCreate={createToolGroup} onRename={changeToolGroup}
     onDelete={(name) => changeToolGroup(name, null)} {...toolGroupDrag} /> : null;
 
@@ -1601,7 +1601,7 @@ function MCPServerDetailPanel({
   const [serverDetail, setServerDetail] = useState<MCPServerDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
   const [testingConnection, setTestingConnection] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string; latency?: number; tools_count?: number } | null>(null);
+  const [testResult, setTestResult] = useState<MCPTestResult | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
@@ -1626,22 +1626,14 @@ function MCPServerDetailPanel({
     try {
       const res = await mcpAPI.testCredentials(server.name);
       const data = res.data;
-      setTestResult({
-        success: data.success ?? false,
-        message: data.message ?? (data.success ? t('alert.connectionOk') : t('detail.testFailed')),
-        latency: data.latency_ms,
-        tools_count: data.tools_count,
-      });
+      setTestResult(mcpTestOutcome({ ...data, message: data.message ?? (data.success ? t('alert.connectionOk') : undefined) }, t));
       if (data.success) {
         const detailRes = await mcpAPI.get(server.name);
         setServerDetail(detailRes.data);
         await onRefresh();
       }
-    } catch (err: any) {
-      setTestResult({
-        success: false,
-        message: err.response?.data?.detail ?? err.message ?? t('detail.testFailed'),
-      });
+    } catch (err: unknown) {
+      setTestResult(mcpTestFailure(err, t));
     } finally {
       setTestingConnection(false);
     }
@@ -1694,7 +1686,8 @@ function MCPServerDetailPanel({
                 ? 'testing'
                 : testResult?.success === true
                   ? 'connected'
-                  : testResult?.success === false
+                  // A request the service refused never tried the connection.
+                  : testResult?.success === false && !testResult.refused
                     ? 'failed'
                     : server.status === 'connected'
                       ? 'connected'
@@ -1703,7 +1696,7 @@ function MCPServerDetailPanel({
                 <MCPFormFields
                   formData={detailFormData}
                   connStatus={mcpConnStatus}
-                  testResult={testResult ? { success: testResult.success, message: testResult.message, tools_count: testResult.tools_count } : null}
+                  testResult={testResult}
                   onTestConnection={handleTestConnection}
                   isTesting={testingConnection}
                 />

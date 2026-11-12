@@ -2075,20 +2075,20 @@ export default function DeviceIntegrationPage() {
   const loadBusinessItems = async () => (await deviceAPI.list()).data.map(asBusinessItem);
   const moveBusinessGroup = async (key: string, group: string | null) => {
     const inventory = await loadBusinessItems();
-    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveBusinessGroup, reloadBusinessDevices, t);
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveBusinessGroup, reloadBusinessDevices, t, false, 'device');
   };
   const createBusinessGroup = async (key: string, group: string) => {
     const inventory = await loadBusinessItems();
     if (inventory.some((item) => matchesGroup(item.group, group))) throw new Error(t('pluginGroups:validation.duplicate'));
-    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveBusinessGroup, reloadBusinessDevices, t);
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveBusinessGroup, reloadBusinessDevices, t, false, 'device');
   };
   const changeBusinessGroup = async (from: string, to: string | null) => {
     const inventory = await loadBusinessItems();
     if (to !== null && inventory.some((item) => matchesGroup(item.group, to))) throw new Error(t('pluginGroups:validation.duplicate'));
-    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveBusinessGroup, reloadBusinessDevices, t, true);
+    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveBusinessGroup, reloadBusinessDevices, t, true, 'device');
   };
   const businessNav: GroupNavProps = {
-    preferenceKey: 'device', inventoryComplete: !loading && !refreshing, ...deriveGroupNav(businessItems), items: businessItems,
+    preferenceKey: 'device', itemKind: 'device', inventoryComplete: !loading && !refreshing, ...deriveGroupNav(businessItems), items: businessItems,
     selection: businessGroup, onSelect: setBusinessGroup, onMove: moveBusinessGroup, onCreate: createBusinessGroup,
     onRename: changeBusinessGroup, onDelete: (name) => changeBusinessGroup(name, null), ...businessDrag,
   };

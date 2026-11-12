@@ -22,6 +22,7 @@ import { providerAPI, defaultModelAPI, modelV2API } from '@/api/provider';
 import { toolAPI, Tool } from '@/api/tool';
 import { skillAPI, Skill } from '@/api/skill';
 import type { ModelDefinitionV2 } from '@/types';
+import { getAgentDisplayName } from '@/utils/agentDisplay';
 
 interface AvailableModel {
   providerID: string;
@@ -57,7 +58,7 @@ interface AgentSheetProps {
 }
 
 export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps) {
-  const { t } = useTranslation(['agent', 'common']);
+  const { t, i18n } = useTranslation(['agent', 'common']);
   const isEdit = !!agent;
   const isNative = !!agent?.native;
 
@@ -335,7 +336,10 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       rexGuideGroups={guideGroups}
       rexGuidePanelTitle={isEdit ? t('edit.guidePanelTitle') : t('create.guidePanelTitle')}
       rexGuidePanelDesc={isEdit
-        ? t(isNative ? 'edit.nativeGuidePanelDesc' : 'edit.guidePanelDesc', { name: agent?.name ?? formData.name })
+        ? t(
+          isNative ? (agent?.mode === 'primary' ? 'edit.nativeGuidePanelDesc' : 'edit.nativeSubagentGuidePanelDesc') : 'edit.guidePanelDesc',
+          { name: isNative ? getAgentDisplayName(agent, i18n?.language) : agent?.name ?? formData.name },
+        )
         : t('create.guidePanelDesc')}
       rexGuideEmptyTitle={isEdit ? t('edit.emptyStateTitle') : t('create.emptyStateTitle')}
       rexGuideIcon={<Bot className="h-5 w-5" />}
@@ -397,7 +401,7 @@ function AgentFormContent({
   skillsLoading = false,
   isPrimary,
 }: AgentFormContentProps) {
-  const { t } = useTranslation('agent');
+  const { t, i18n } = useTranslation('agent');
   const { openRex } = useEntitySheet();
   const update = (fields: Partial<AgentFormData>) => onChange({ ...formData, ...fields });
 
@@ -442,7 +446,10 @@ function AgentFormContent({
       {nativeReadOnly && (
         <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
           <Lock className="w-3.5 h-3.5 shrink-0" />
-          {t('form.nativeReadOnlyMessage')}
+          {/* One sentence for the sheet and the Rex panel: only model and temperature are saved. */}
+          {t(formData.mode === 'primary' ? 'form.nativeReadOnlyMessage' : 'form.nativeSubagentReadOnlyMessage', {
+            name: getAgentDisplayName(formData, i18n?.language),
+          })}
         </div>
       )}
 

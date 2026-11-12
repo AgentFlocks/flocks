@@ -56,6 +56,12 @@ vi.mock('../ToolSheets', () => ({
         }
   ),
   getMCPFormError: () => null,
+  getMCPFieldErrors: () => ({}),
+  clearMCPFieldErrors: (errors: Record<string, string>) => errors,
+  mcpTestOutcome: (data: { success?: boolean; message?: string; tools_count?: number }) => ({
+    success: data.success ?? false, message: data.message ?? '', tools_count: data.tools_count,
+  }),
+  mcpTestFailure: (err: { message?: string }) => ({ success: false, message: err?.message ?? '' }),
   buildMCPFormDataFromConfig: (
     name: string,
     config?: { type?: 'stdio' | 'sse' | 'local' | 'remote'; url?: string } | null,

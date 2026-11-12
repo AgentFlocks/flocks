@@ -96,7 +96,7 @@
     "visibleAgentsSelectedCount": "{{first}}, {{second}}, and {{count}} selected",
     "visibleAgentsNoOptions": "No agents available",
     "permissionMode": "Permission Mode",
-    "permissionModeHint": "Default permission mode for this channel session; it can also be changed from the Session page.",
+    "permissionModeHint": "Default permission mode for this channel’s sessions; each session can also be adjusted on its own.",
     "permissionModeReadonly": "readonly",
     "permissionModeRequireConfirm": "require-confirm",
     "permissionModeAutoConfirmAll": "auto-allow-all"

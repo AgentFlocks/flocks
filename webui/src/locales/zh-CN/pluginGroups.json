@@ -1,7 +1,27 @@
 {
   "title": "分组",
   "navigation": "按分组筛选",
-  "countsDescription": "拖动插件到分组即可归组。",
+  "countsDescription": "拖动{{nouns}}到分组。",
+  "noun": {
+    "plugin": "插件",
+    "agent": "智能体",
+    "skill": "技能",
+    "workflow": "工作流",
+    "tool": "工具",
+    "mcp": " MCP 服务",
+    "api": " API 服务",
+    "device": "设备"
+  },
+  "nouns": {
+    "plugin": "插件",
+    "agent": "智能体",
+    "skill": "技能",
+    "workflow": "工作流",
+    "tool": "工具",
+    "mcp": " MCP 服务",
+    "api": " API 服务",
+    "device": "设备"
+  },
   "defaultNames": {
     "平台集成": "平台集成",
     "安全研判": "安全研判",
@@ -37,7 +57,7 @@
   "saved": "分组更改已保存。",
   "cancel": "取消",
   "close": "关闭",
-  "confirmScope": "将以下 {{count}} 个插件移到“{{group}}”？\n{{items}}\n不会删除插件。",
+  "confirmScope": "将以下 {{count}} 个{{noun}}移到“{{group}}”？\n{{items}}\n不会删除{{noun}}。",
   "confirmScopeTitle": "移动到“{{group}}”",
   "confirmScopeAction": "确认移动",
   "dialog": {
@@ -45,30 +65,34 @@
     "renameTitle": "重命名分组",
     "moveTitle": "设置 {{name}} 的分组",
     "name": "分组名称",
-    "firstPlugin": "首个可编辑插件",
-    "choosePlugin": "选择一个插件",
+    "nameHint": "名称需为 1–32 个字符，不计首尾空格，不能包含控制字符。",
+    "firstPlugin": "选择第一个可编辑的{{noun}}",
+    "choosePlugin": "请选择{{noun}}",
     "destination": "目标分组"
   },
   "validation": {
-    "length": "名称需为 1–32 个字符，不计首尾空格，不能包含控制字符。",
     "duplicate": "已有同名分组，请使用其他名称。",
-    "firstPlugin": "请选择一个可编辑插件。"
+    "required": "请输入分组名称。",
+    "tooLong": "分组名称不能超过 32 个字符。",
+    "controlChars": "分组名称不能包含控制字符。",
+    "firstPlugin": "请选择可编辑的{{noun}}。"
   },
   "readOnly": {
-    "system": "内置插件的分组不能修改。",
+    "system": "内置{{noun}}的分组不能修改。",
     "builtinSkill": "内置技能的分组不能修改。",
     "externalSkill": "外部目录（如 ~/.claude/skills）里的技能不能在这里改分组。",
     "admin": "你没有修改分组的权限。",
     "catalog": "请先安装或配置此服务。",
-    "noEditable": "暂无可修改分组的插件。"
+    "noEditable": "暂无可分组{{nouns}}。"
   },
   "errors": {
-    "missing": "插件或分组不可用，请刷新后重试。",
-    "readOnlyMembers": "以下插件的分组不能修改：{{items}}",
-    "write": "无法保存此插件的分组。",
+    "missing": "所选{{noun}}或分组不可用，请刷新后重试。",
+    "readOnlyMembers": "以下{{noun}}的分组不能修改：{{items}}",
+    "write": "无法保存此{{noun}}的分组。",
     "partial": "已保存 {{succeeded}} 个，失败 {{failed}} 个。",
-    "succeededItems": "已保存插件：",
-    "failedItems": "失败插件：",
+    "failedItem": "{{item}}：{{reason}}",
+    "changedAfterCheck": "检查后发生变化，请刷新后重试。",
+    "details": "技术详情",
     "refresh": "列表刷新失败，请刷新后重试。"
   },
   "drag": {

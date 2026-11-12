@@ -12,7 +12,7 @@ import { toolAPI } from '@/api/tool';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
 import { EnabledBadge } from './badges';
-import { buildMCPConfigFromForm, buildMCPFormDataFromConfig, getMCPFormError, MCPFormFields } from '../ToolSheets';
+import { buildMCPConfigFromForm, buildMCPFormDataFromConfig, clearMCPFieldErrors, getMCPFieldErrors, MCPFormFields, mcpTestFailure, mcpTestOutcome, type MCPFieldErrors, type MCPTestResult } from '../ToolSheets';
 import type { MCPFormData, ConnStatus as MCPConnStatus } from '../ToolSheets';
 import type { APIServiceCredentialField, APIServiceMetadata, ProviderCredentials } from '@/types';
 import ThreatBookMCPConfigPanel from './ThreatBookMCPConfigPanel';
@@ -89,7 +89,8 @@ export function MCPServerDetailPanel({
   const [initialFormData, setInitialFormData] = useState<MCPFormData | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
   const [testingConnection, setTestingConnection] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string; latency?: number; tools_count?: number } | null>(null);
+  const [testResult, setTestResult] = useState<MCPTestResult | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<MCPFieldErrors>({});
   const [refreshing, setRefreshing] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const isThreatBookServer = isThreatBookMCPServer(server.name);
@@ -132,32 +133,30 @@ export function MCPServerDetailPanel({
 
   const handleFormChange = (fields: Partial<MCPFormData>) => {
     setFormData((prev) => (prev ? { ...prev, ...fields } : prev));
+    setFieldErrors((prev) => clearMCPFieldErrors(prev, fields));
     setTestResult(null);
+  };
+
+  const validate = (data: MCPFormData) => {
+    const errors = getMCPFieldErrors(data);
+    setFieldErrors(errors);
+    return Object.keys(errors).length === 0;
   };
 
   const handleTestConnection = async () => {
     if (!formData) return;
-    if (getMCPFormError(formData) === 'invalidHeaders') {
-      alert(t('alert.invalidHeaders'));
-      return;
-    }
+    if (!validate(formData)) return;
     setTestingConnection(true);
     setTestResult(null);
     const currentConfig = buildMCPConfigFromForm(formData);
     try {
       const res = await mcpAPI.testExisting(server.name, currentConfig);
-      const data = res.data;
-      setTestResult({
-        success: data.success ?? false,
-        message: data.message ?? (data.success ? t('alert.connectionOk') : t('detail.testFailed')),
-        latency: data.latency_ms,
-        tools_count: data.tools_count,
-      });
-    } catch (err: any) {
-      setTestResult({
-        success: false,
-        message: err.response?.data?.detail ?? err.message ?? t('detail.testFailed'),
-      });
+      setTestResult(mcpTestOutcome({
+        ...res.data,
+        message: res.data.message ?? (res.data.success ? t('alert.connectionOk') : undefined),
+      }, t));
+    } catch (err: unknown) {
+      setTestResult(mcpTestFailure(err, t));
     } finally {
       setSavingConfig(false);
       setTestingConnection(false);
@@ -166,10 +165,7 @@ export function MCPServerDetailPanel({
 
   const handleSaveConfig = async () => {
     if (!formData || !isDirty) return;
-    if (getMCPFormError(formData) === 'invalidHeaders') {
-      alert(t('alert.invalidHeaders'));
-      return;
-    }
+    if (!validate(formData)) return;
     try {
       setSavingConfig(true);
       setTestResult(null);
@@ -186,6 +182,7 @@ export function MCPServerDetailPanel({
   const handleResetConfig = () => {
     if (!initialFormData) return;
     setFormData(initialFormData);
+    setFieldErrors({});
     setTestResult(null);
   };
 
@@ -255,16 +252,18 @@ export function MCPServerDetailPanel({
                   ? 'saving'
                   : testingConnection
                   ? 'testing'
-                  : testResult?.success === false
+                  // A request the service refused never tried the connection.
+                  : testResult?.success === false && !testResult.refused
                       ? 'failed'
                       : server.status === 'connected'
                         ? 'connected'
                         : testResult?.success === true
                           ? 'tested'
                           : 'idle'}
-                testResult={testResult ? { success: testResult.success, message: testResult.message, tools_count: testResult.tools_count } : null}
+                testResult={testResult}
                 onTestConnection={handleTestConnection}
                 isTesting={testingConnection}
+                fieldErrors={fieldErrors}
               />
             )}
 

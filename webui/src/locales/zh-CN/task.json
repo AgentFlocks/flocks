@@ -187,6 +187,7 @@
     "recurring": "循环执行",
     "selectFrequency": "请选择频率",
     "customOption": "自定义…",
+    "cronInvalid": "Cron 表达式格式错误，请使用五字段格式（分、时、日、月、星期）。示例：0 6 * * *（按所选时区每天 06:00 执行）。不支持六字段格式和 @daily。",
     "customCronLabel": "自定义 Cron 表达式",
     "timezoneLabel": "时区",
     "cronDescLabel": "周期描述",

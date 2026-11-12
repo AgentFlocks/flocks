@@ -15,7 +15,7 @@ import { agentAPI, Agent } from '@/api/agent';
 import { getAgentDisplayDescription, getAgentDisplayName } from '@/utils/agentDisplay';
 import AgentSheet from './AgentSheet';
 import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-groups/GroupNav';
-import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection, groupNoun } from '@/components/plugin-groups/groupView';
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
 import { usePluginViewMode, type PluginViewMode } from '@/hooks/usePluginViewMode';
 
@@ -36,7 +36,7 @@ export default function AgentPage() {
   const [groupSelection, setGroupSelection] = useState<GroupSelection>(null);
   const asGroupItem = (agent: Agent) => ({
     key: agent.name, name: getAgentDisplayName(agent, i18n.language), group: agent.group,
-    readOnlyReason: agent.group_readonly ? t('pluginGroups:readOnly.system') : undefined,
+    readOnlyReason: agent.group_readonly ? t('pluginGroups:readOnly.system', groupNoun(t, 'agent')) : undefined,
   });
   const visibleAgents = (inventory: Agent[]) => inventory.filter((agent) => agent.mode === 'primary' || !(agent.tags ?? []).includes('system'));
   const groupItems = visibleAgents(agents).map(asGroupItem);
@@ -47,17 +47,17 @@ export default function AgentPage() {
   const loadGroupItems = async () => visibleAgents((await agentAPI.list()).data).map(asGroupItem);
   const moveGroup = async (key: string, group: string | null) => {
     const inventory = await loadGroupItems();
-    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t);
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t, false, 'agent');
   };
   const createGroup = async (key: string, group: string) => {
     const inventory = await loadGroupItems();
     if (inventory.some((item) => matchesGroup(item.group, group))) throw new Error(t('pluginGroups:validation.duplicate'));
-    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t);
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t, false, 'agent');
   };
   const changeGroup = async (from: string, to: string | null) => {
     const inventory = await loadGroupItems();
     if (to !== null && inventory.some((item) => matchesGroup(item.group, to))) throw new Error(t('pluginGroups:validation.duplicate'));
-    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveGroup, reloadGroups, t, true);
+    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveGroup, reloadGroups, t, true, 'agent');
   };
   const selectAgent = (agent: Agent) => setEditingAgent(agent);
 
@@ -176,7 +176,7 @@ export default function AgentPage() {
           scrollbar is absent, preventing the layout shift that occurs when filters
           toggle between many results (scrollbar visible) and few results (no bar). */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-4 md:flex-row max-md:px-0" style={{ scrollbarGutter: 'stable' }}>
-        <GroupNav inventoryComplete={!loading && !error} preferenceKey="agent" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
+        <GroupNav itemKind="agent" inventoryComplete={!loading && !error} preferenceKey="agent" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
         <div className="min-w-0 flex-1 space-y-6">
         {agents.length === 0 ? (
           <EmptyState
