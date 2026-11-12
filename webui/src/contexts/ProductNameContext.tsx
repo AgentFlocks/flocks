@@ -13,7 +13,10 @@ interface ProductNameContextValue {
   configuredDisplayName: string | null;
   faviconUrl: string;
   hasCustomFavicon: boolean;
-  /** Flocks logo beside the product name; null once a custom name is set. */
+  /**
+   * Mark beside the product name: the uploaded favicon, otherwise the Flocks logo.
+   * A custom product name alone does not replace it; uploading a favicon does.
+   */
   logoUrl: string | null;
   loading: boolean;
   refreshProductName: () => Promise<void>;
@@ -123,7 +126,7 @@ export function ProductNameProvider({ children }: { children: ReactNode }) {
     configuredDisplayName: displayConfig.configuredDisplayName ?? null,
     faviconUrl: displayConfig.faviconUrl || DEFAULT_FAVICON_URL,
     hasCustomFavicon: Boolean(displayConfig.faviconUrl),
-    logoUrl: displayConfig.configuredDisplayName ? null : DEFAULT_FAVICON_URL,
+    logoUrl: displayConfig.faviconUrl || DEFAULT_FAVICON_URL,
     loading,
     refreshProductName,
     updateProductName,

@@ -50,7 +50,7 @@
   "displayNameSaved": "Workspace name saved",
   "displayNameSaveFailed": "Failed to save workspace name",
   "favicon": "Favicon",
-  "faviconDescription": "Upload the browser tab icon. The default Flocks favicon is used when no custom file is uploaded.",
+  "faviconDescription": "Upload the browser tab icon; the icon at the top left of the header uses it too. The default Flocks favicon is used when no custom file is uploaded.",
   "uploadFavicon": "Upload",
   "resetFavicon": "Restore default",
   "faviconSaved": "Favicon saved",

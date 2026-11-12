@@ -204,7 +204,15 @@ describe('Layout chrome', () => {
     expect(header.querySelector('img[data-brand-logo]')).toHaveAttribute('src', '/favicon.svg');
   });
 
-  it('keeps the initial mark for a custom product name', () => {
+  it('keeps the Flocks logo beside a custom product name', () => {
+    Object.assign(productNameContextValue, { productName: 'Acme SOC', configuredDisplayName: 'Acme SOC', logoUrl: '/favicon.svg' });
+    renderAt('/');
+    const header = document.querySelector('[data-workspace-header]') as HTMLElement;
+    expect(header.querySelector('img[data-brand-logo]')).toHaveAttribute('src', '/favicon.svg');
+    expect(within(header).getByText('Acme SOC')).toBeInTheDocument();
+  });
+
+  it('falls back to the initial mark when there is no logo', () => {
     Object.assign(productNameContextValue, { productName: 'Acme SOC', configuredDisplayName: 'Acme SOC', logoUrl: null });
     renderAt('/');
     const header = document.querySelector('[data-workspace-header]') as HTMLElement;

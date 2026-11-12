@@ -50,7 +50,7 @@
   "displayNameSaved": "工作台名称已保存",
   "displayNameSaveFailed": "保存工作台名称失败",
   "favicon": "Favicon",
-  "faviconDescription": "上传浏览器标签页图标；未上传时使用默认 Flocks favicon。",
+  "faviconDescription": "上传浏览器标签页图标，顶栏左上角的图标也跟着换；未上传时使用默认 Flocks favicon。",
   "uploadFavicon": "上传",
   "resetFavicon": "恢复默认",
   "faviconSaved": "Favicon 已保存",

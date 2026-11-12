@@ -94,7 +94,7 @@ export default function WorkspaceHeader({
 
       <Link to="/" className="flex min-w-0 shrink-0 items-center gap-2 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus lg:w-[calc(var(--sidebar-expanded-width)-1px)] lg:px-5" title={productName}>
         {logoUrl ? (
-          <img src={logoUrl} alt="" aria-hidden="true" data-brand-logo className="h-8 w-8 shrink-0" />
+          <img src={logoUrl} alt="" aria-hidden="true" data-brand-logo className="h-8 w-8 shrink-0 object-contain" />
         ) : (
           <span aria-hidden="true" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-600 text-base font-semibold text-white sm:flex">
             {brandInitial}
