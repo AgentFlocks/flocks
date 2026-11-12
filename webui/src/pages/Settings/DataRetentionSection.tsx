@@ -11,6 +11,7 @@ import {
   type DataRetentionState,
 } from '@/api/dataRetention';
 import { formatBytes } from '@/api/workspace';
+import { extractErrorMessage } from '@/utils/error';
 
 /** Choices offered for every kind of data; 0 keeps it forever. */
 const RETENTION_PRESETS = [7, 14, 30, 90, 180, 365, 0];
@@ -85,7 +86,7 @@ export default function DataRetentionSection() {
       }
       return next;
     } catch (err: any) {
-      if (mountedRef.current) showToastError(loadFailedMessage, err?.response?.data?.detail || err?.message);
+      if (mountedRef.current) showToastError(loadFailedMessage, extractErrorMessage(err, ''));
       return null;
     }
   }, [loadFailedMessage, showToastError]);
@@ -113,7 +114,7 @@ export default function DataRetentionSection() {
         setDraft(policyOf(next));
       })
       .catch((err: any) => {
-        if (!cancelled) showToastError(loadFailedMessage, err?.response?.data?.detail || err?.message);
+        if (!cancelled) showToastError(loadFailedMessage, extractErrorMessage(err, ''));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -204,7 +205,7 @@ export default function DataRetentionSection() {
       setSavedAt(requestedAt);
       showToastSuccess(t(willDelete ? 'dataRetentionSavedCleaning' : 'dataRetentionSaved'));
     } catch (err: any) {
-      showToastError(t('dataRetentionSaveFailed'), err?.response?.data?.detail || err?.message);
+      showToastError(t('dataRetentionSaveFailed'), extractErrorMessage(err, ''));
     } finally {
       if (mountedRef.current) setSaving(false);
     }

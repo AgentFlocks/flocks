@@ -5,6 +5,7 @@ import CopyButton from '@/components/common/CopyButton';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/components/common/Toast';
 import { useConfirm } from '@/components/common/ConfirmDialog';
+import { extractErrorMessage } from '@/utils/error';
 
 function formatDateTime(value: string | null | undefined, locale: string) {
   if (!value) return '-';
@@ -66,7 +67,7 @@ export default function AdminUsersPage() {
     } catch (err: any) {
       toast.error(
         t('admin.resetFailedToast'),
-        err?.response?.data?.detail || err?.message || t('admin.resetFailedToast'),
+        extractErrorMessage(err, t('admin.resetFailedToast')),
       );
     }
   };

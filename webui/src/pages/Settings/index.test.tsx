@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import SettingsPage from './index';
 import { ThemeContext, type Theme, type ThemeMode } from '@/contexts/ThemeContext';
 import { ToastProvider } from '@/components/common/Toast';
+import { backendError } from '@/test/helpers';
 
 const { changeLanguage, dataRetentionApi, setTheme, toolFailureConfigApi, useAuth } = vi.hoisted(() => ({
   changeLanguage: vi.fn(),
@@ -181,6 +182,28 @@ describe('SettingsPage', () => {
       expect(toolFailureConfigApi.update).toHaveBeenCalledWith(true);
       expect(autoDisableSwitch).toHaveAttribute('aria-checked', 'true');
     });
+  });
+
+  it('says why the tool failure setting could not be loaded or saved instead of the bare status code', async () => {
+    const user = userEvent.setup();
+    toolFailureConfigApi.get.mockRejectedValue(backendError(503, '配置服务暂时不可用'));
+    toolFailureConfigApi.update.mockRejectedValue(backendError(403, '只有管理员可以修改这个设置'));
+
+    renderSettings('/settings/preferences');
+
+    expect(await screen.findByText('配置服务暂时不可用')).toBeInTheDocument();
+    await user.click(await screen.findByRole('switch', { name: 'toolFailureAutoDisable' }));
+    expect(await screen.findByText('只有管理员可以修改这个设置')).toBeInTheDocument();
+    expect(screen.queryByText(/status code/)).not.toBeInTheDocument();
+  });
+
+  it('says why the data retention policy could not be loaded instead of the bare status code', async () => {
+    dataRetentionApi.get.mockRejectedValue(backendError(503, '数据库当前只读，读不到保留策略'));
+
+    renderSettings('/settings/preferences');
+
+    expect(await screen.findByText('数据库当前只读，读不到保留策略')).toBeInTheDocument();
+    expect(screen.queryByText(/status code 503/)).not.toBeInTheDocument();
   });
 
   it('previews the cleanup and saves the data retention policy only after the admin confirms', async () => {
