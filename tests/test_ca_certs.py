@@ -119,6 +119,43 @@ def test_hashed_default_directory_changes_nothing(machine):
     assert environ == {}
 
 
+def test_empty_default_cafile_holds_no_certificates(machine):
+    _rhel8(machine.root)
+    (machine.root / "etc/ssl/cert.pem").write_text("")  # there, but OpenSSL loads nothing from it
+    environ: dict[str, str] = {}
+
+    # The empty default is skipped as a candidate too.
+    assert ca_certs.ensure(environ) == str(machine.root / "etc/pki/tls/cert.pem")
+
+
+def test_unreadable_default_cafile_holds_no_certificates(machine, monkeypatch):
+    _rhel8(machine.root)
+    default = machine.root / "etc/ssl/cert.pem"
+    default.write_text(PEM)
+    real_access = os.access
+    # As for a service account the file's mode leaves out (chmod does not stop root, who runs CI).
+    monkeypatch.setattr(ca_certs.os, "access", lambda path, mode: path != str(default) and real_access(path, mode))
+    environ: dict[str, str] = {}
+
+    assert ca_certs.ensure(environ) == str(machine.root / "etc/pki/tls/cert.pem")
+
+
+@pytest.mark.parametrize("broken", ["dangling link", "empty file", "directory"])
+def test_hashed_names_that_hold_nothing_do_not_count(machine, broken):
+    _rhel8(machine.root)
+    certs = machine.root / "etc/pki/tls/certs"  # what /etc/ssl/certs links to
+    hashed = certs / "5ad8a5d6.0"
+    if broken == "dangling link":
+        hashed.symlink_to(certs / "removed.pem")
+    elif broken == "empty file":
+        hashed.write_text("")
+    else:
+        hashed.mkdir()
+    environ: dict[str, str] = {}
+
+    assert ca_certs.ensure(environ) == str(machine.root / "etc/pki/tls/cert.pem")
+
+
 @pytest.mark.parametrize("name", ["SSL_CERT_FILE", "SSL_CERT_DIR"])
 def test_certificates_the_environment_names_win(machine, name):
     _rhel8(machine.root)

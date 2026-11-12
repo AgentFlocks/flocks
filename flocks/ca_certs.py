@@ -57,17 +57,24 @@ def _readable_file(path: str) -> bool:
 
 
 def _holds_hashed_certs(directory: str) -> bool:
+    """Whether *directory* has a certificate under a hashed name (a link that resolves to one counts)."""
     try:
         with os.scandir(directory) as entries:
-            return any(_HASHED_NAME.match(entry.name) for entry in entries)
+            return any(
+                _HASHED_NAME.match(entry.name) and _readable_file(entry.path) for entry in entries
+            )
     except OSError:
         return False
 
 
 def defaults_hold_certs() -> bool:
-    """Whether OpenSSL's default locations hold root certificates at all."""
+    """Whether OpenSSL's default locations hold root certificates it can read.
+
+    A file that is there but empty or unreadable, or a hashed name that is a
+    dangling link, holds none: OpenSSL would load nothing from it.
+    """
     paths = ssl.get_default_verify_paths()
-    if paths.cafile:  # None unless the file exists
+    if paths.cafile and _readable_file(paths.cafile):  # cafile is None unless the file exists
         return True
     return bool(paths.capath) and _holds_hashed_certs(paths.capath)
 
