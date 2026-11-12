@@ -204,7 +204,7 @@ async def test_alert_capability_revoked_since_discovery_cannot_execute(query_cas
     assert case.seen == []
 
 
-@pytest.mark.parametrize('data', [[], {}, None, [{'alertTimeLine': [{'alertId': 'unbound'}]}],
+@pytest.mark.parametrize('data', [[], {}, None, {'uuId': 'incident-other'}, {'alertTimeLine': []}, [{'alertTimeLine': [{'alertId': 'unbound'}]}],
                                  [{'uuId': 'incident-other', 'alertTimeLine': [{'alertId': 'unbound'}]}],
                                  [{'uuId': 'incident-original'}, {'uuId': 'incident-other'}]])
 async def test_incident_proof_cannot_promote_unbound_timeline_alerts(query_case, monkeypatch, data):
@@ -221,15 +221,16 @@ async def test_incident_proof_cannot_promote_unbound_timeline_alerts(query_case,
         await c.query(case.policy, 'session', 'message', capability, case.event, 'proof')
 
 
-async def test_incident_proof_accepts_documented_original_event_id(query_case, monkeypatch):
+@pytest.mark.parametrize('shape', ['array', 'object'])
+async def test_incident_proof_accepts_documented_original_event_id(query_case, monkeypatch, shape):
     case = query_case
     capability = c.Capability('incident-cap', 'xdr', case.policy.tool, 'xdr', 'Fixture XDR', 'unknown')
     monkeypatch.setattr(c, 'discover', AsyncMock(return_value=([capability], [])))
     async def execute(name, ctx, **params):
         await require_monitor_read(name, params, ctx.session_id)
         assert params == {'action': 'get_proof', 'uuid': 'incident-original', 'device_id': 'xdr'}
-        result = ToolResult(success=True, output={'code': 'Success', 'data': [
-            {'uuId': 'incident-original', 'alertTimeLine': [{'alertId': 'a-1', 'lastTime': 90}]}]})
+        proof = {'uuId': 'incident-original', 'alertTimeLine': [{'alertId': 'a-1', 'lastTime': 90}]}
+        result = ToolResult(success=True, output={'code': 'Success', 'data': [proof] if shape == 'array' else proof})
         capture_output(ctx, name, result)
         return result
     monkeypatch.setattr(ToolRegistry, 'execute', execute)

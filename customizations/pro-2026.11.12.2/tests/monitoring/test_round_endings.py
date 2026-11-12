@@ -80,9 +80,45 @@ async def ending(attempt_id=None):
     assert message.info.finish in ('stop', 'error') and message.info.time.get('completed')
     assert card.text == attempt['summary']
     assert card.metadata == {'monitoringRoundEnd': True, 'roundStatus': attempt['status'],
-                             'roundId': attempt['id'], 'nextStep': attempt['next_step']}
+                             'roundId': attempt['id'], 'nextStep': attempt['next_step'],
+                             'monitoringConversation': card.metadata['monitoringConversation']}
     assert attempt['next_step'] and attempt['end_published'] == 1
     return attempt, message, card
+
+
+async def test_empty_query_ends_without_analysis_or_model_calls(context, monkeypatch):
+    context.events.clear()
+    choose = AsyncMock(side_effect=AssertionError('An empty round must not request a model'))
+    monkeypatch.setattr(investigation, 'choose', choose)
+    await runtime.run(context.execution, context.policy, context.adapter)
+    attempt, _, card = await ending()
+    steps = await rows('SELECT tool FROM monitor_steps WHERE attempt_id=?', (attempt['id'],))
+    assert [step['tool'] for step in steps] == ['查询 XDR 事件']
+    assert card.text == '本次查询到 0 条符合条件的事件，本轮结束。'
+    choose.assert_not_awaited()
+
+
+async def test_live_progress_is_replaced_by_validated_summary_and_survives_reload(context):
+    attempt = await seed_attempt(context)
+    recorder = runtime.Recorder(attempt.session, attempt.id)
+
+    async def operation(message_id):
+        await recorder.progress(message_id, '核对主机')
+        await recorder.progress(message_id, '核对主机与进程')
+        return None, {}, Summary('已核对，证据不足，保留待观察。')
+
+    await recorder.call('监测运营智能体：选择下一步', {}, operation)
+    updates = [payload['part'] for kind, payload in context.published if kind == 'message.part.updated'
+               and (payload['part'].get('metadata') or {}).get('monitoringSummary')]
+    assert [item['text'] for item in updates] == [
+        '初步进展（待核验）：核对主机', '初步进展（待核验）：核对主机与进程', '已核对，证据不足，保留待观察。']
+    assert len({part['id'] for part in updates}) == 1
+    Message._messages_cache.pop(attempt.session, None)
+    Message._parts_cache.pop(attempt.session, None)
+    parts = await Message.parts(updates[-1]['messageID'], attempt.session)
+    narratives = [part for part in parts if (part.metadata or {}).get('monitoringSummary')]
+    assert len(narratives) == 1 and narratives[0].text == updates[-1]['text']
+    assert not narratives[0].metadata.get('monitoringProvisional')
 
 
 @pytest.mark.parametrize('scenario', ['empty', 'no_action', 'await_reply', 'deduplicated'])
@@ -515,8 +551,8 @@ async def test_zero_events_with_mail_warning_complete_without_claiming_no_reply(
     assert facts['errors'] == [] and facts['mail']['warnings'] == ['邮件连接未就绪']
     assert attempt['status'] == 'completed' and not attempt['error']
     assert card.metadata['roundStatus'] == 'completed'
-    assert '邮件跟进提示（不影响本轮任务结果）' in card.text
-    assert '当前不能把处理回信 0 封解释为没有新回信' in card.text
+    assert '跟进待核验' in card.text
+    assert '不能据此判断没有新回信' in card.text
     assert '查询未完整成功' not in card.text
 
 

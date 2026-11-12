@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.3",
+  "packageVersion": "1.14.4",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.14.3",
+    "packageVersion": "1.14.4",
     "developmentBranch": "zw_dev",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "e400aa3187f6d8d428951d7a24f464575c7700eb",
+    "sourceCommit": "9dd28ef9a2a2e12f817319c8212649f11182f06a",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -19,69 +19,188 @@
       "flocks": "6bdc2b83de483d4f8366f3368a3b91f95c1523f6fcaff42c2ee92e92709d83e7",
       "flockspro": "bd1ac6bbdad2b3388755de296388d1e1b2d6155769dbc8083997dc894f8c594d"
     },
-    "previousCustomization": "1.14.2"
+    "previousCustomization": "1.14.3"
   },
-  "scope": "SOC landing dashboard, expanded execution records, simultaneous live batches and browser-memory return snapshots",
+  "scope": "monitoring streaming and natural summaries; empty query termination; removed mail banner; recent ten-day project history; managed SQLite monitoring dispatch, read-lock avoidance and bound proof compatibility; legacy PostgreSQL attempt sequence",
   "automatedValidation": {
-    "socFrontend": {
-      "passed": 202,
-      "files": 5,
-      "log": ".work/soc-enhancement-tests-final.log"
+    "frontend": {
+      "passed": 464,
+      "log": ".work/monitor-web-final.log"
+    },
+    "proPostgres": {
+      "passed": 12,
+      "log": ".work/monitor-pro-pg-verified.log"
     },
     "productionFrontendBuild": {
       "status": "passed",
-      "sourceCommit": "e400aa3187f6d8d428951d7a24f464575c7700eb",
+      "sourceCommit": "9dd28ef9a2a2e12f817319c8212649f11182f06a",
       "edition": "flockspro"
     },
-    "installerUpdaterBashAndOverlay": {
-      "passed": 54,
-      "log": ".work/soc-installer-tests-final-2.log",
-      "includes": "paired Pro SOC resources apply/repeat/rollback/restore and preservation of cases files"
+    "coreMonitoring": {
+      "passed": 169,
+      "log": ".work/monitor-core-verified.log"
+    },
+    "installerUpdaterBash": {
+      "passed": 53,
+      "log": ".work/monitor-installers.log"
+    },
+    "projectHistory": {
+      "passed": 32,
+      "log": ".work/monitor-history-tests.log"
+    },
+    "postgresSequenceAndNative": {
+      "passed": 6,
+      "log": ".work/monitor-sequence-verified.log",
+      "legacyRowsUnchanged": true,
+      "repeatSafe": true
+    },
+    "managedSQLiteAndInstallers": {
+      "passed": 55,
+      "log": ".work/monitor-overlay-installer-final.log",
+      "scope": "original seven release stores, real monitoring round and ordinary dispatch, manager startup/stop, installer/update/Bash"
+    },
+    "readLocksAndProof": {
+      "passed": 37,
+      "log": ".work/monitor-read-proof-final.log"
+    },
+    "coreMonitoringSuite": {
+      "passed": 1399,
+      "failedOldEmptyTextAssertions": 2,
+      "log": ".work/monitor-full-core-final.log",
+      "resolvedBy": {
+        "passed": 52,
+        "log": ".work/monitor-migration-selection-final.log",
+        "scope": "legacy schema migration and all selection/structured-output tests passed after preserving source counts"
+      }
+    },
+    "proFinal": {
+      "passed": 76,
+      "log": ".work/monitor-pro-delivery-tests.log"
     }
   },
   "local5173Acceptance": {
-    "startedAt": "2026-11-12T08:55:38.615297+00:00",
+    "startedAt": "2026-11-12T09:43:52.042042+00:00",
     "release": "2026.11.12.2-darwin-arm64",
     "port": 5173,
-    "sourceCommit": "e400aa3187f6d8d428951d7a24f464575c7700eb",
+    "sourceCommit": "9dd28ef9a2a2e12f817319c8212649f11182f06a",
     "originalBinaryHash": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
     "originalListen": null,
     "installedAndReady": true,
-    "payloadFilesMatched": 487,
+    "payloadFilesMatched": 489,
     "nativeBinaryUnchanged": true,
     "listenUnchanged": true,
+    "fixtureRemoved": true,
     "repeatNoRestart": true,
-    "ui": {
-      "baseURL": "http://127.0.0.1:5173",
-      "authenticatedAs": "existing admin",
-      "entryPoints": [
-        "workbench header",
-        "SOC overview header",
-        "workspace root redirect"
-      ],
-      "defaultExpandedRecords": true,
-      "manualCollapse": true,
-      "returnSnapshotVisible": true,
-      "concurrencyDemo": {
-        "denoise": 2,
-        "triage": 1,
-        "query": "mockDashboard=1",
-        "startsRealWorkflows": false
-      },
-      "consoleErrors": [],
-      "statsErrorBanner": false
-    },
-    "installedPageMatchesDeliveredSource": true,
-    "installedSOCRestoredByteForByte": true,
     "baselineRestoredAndReady": true,
-    "finishedAt": "2026-11-12T09:01:35.518365+00:00",
-    "status": "passed"
+    "finishedAt": "2026-11-12T09:50:13.387513+00:00",
+    "listenerPid": "92293",
+    "status": "passed",
+    "uiCases": {
+      "zeroEvents": "passed",
+      "streaming": "passed",
+      "streamUpdates": 5,
+      "refreshPersistence": true,
+      "recentTenDays": "passed on prior candidate with identical frontend; see monitor-live-release history screenshots",
+      "testProjectsArchived": 2
+    },
+    "syntheticBoundaries": [
+      "isolated test projects",
+      "synthetic XDR and model responses",
+      "actual leased execution, PostgreSQL storage, session routes and SSE",
+      "no external mail or business device calls"
+    ],
+    "historyEvidence": "Prior candidate used identical frontend source and production build; default hidden twelve-day session, Load more revealed it, collapse and refresh restored recent-only view."
   },
+  "previousVersionEvidence": "1.14.3 SOC acceptance retained in delivery branch history",
   "limits": [
-    "Linux-amd64 package has not been run on a Linux server.",
-    "Live concurrency was exercised through the explicit browser-only mockDashboard demo; eight parallel denoise batches plus triage were also tested with isolated API fixtures.",
-    "Unrelated security-monitoring and report business chains are outside this SOC UI change."
+    "Linux-amd64 remote installation and new monitoring rounds still require user execution.",
+    "Model gateway HTTP 504 and provider-side timeouts require remote provider verification.",
+    "Original local monitoring suite is incomplete, so local business acceptance uses isolated projects with synthetic XDR/provider boundaries and actual 5173 storage/SSE/session routes."
   ],
-  "previousVersionEvidence": "1.14.2 startup/install/rollback evidence retained in delivery branch history.",
-  "recordedAt": "2026-11-12T09:01:35.518365+00:00"
+  "incidentDiagnosis": {
+    "sourceSha256": "46d968b3305156d702cdff95c759b6492eb06c71933477945c82011392ae597a",
+    "exportedAt": "2026-11-12T09:22:39.713092+00:00",
+    "timezone": "Asia/Shanghai",
+    "recordCoverage": {
+      "first": "2026-11-11T18:10:33.817885+00:00",
+      "last": "2026-11-12T04:40:13.142686+00:00",
+      "capped": true,
+      "runtimePid": 1409028
+    },
+    "xdrList": {
+      "count": 126,
+      "allSuccessful": true,
+      "medianMs": 578.095,
+      "maxMs": 2458.15
+    },
+    "modelCalls": {
+      "count": 77,
+      "gateway504": 5,
+      "local90sTimeout": 1
+    },
+    "proofBindingFailures": 13,
+    "sqliteErrors": [
+      {
+        "time": "2026-11-12T06:08:37.121532+08:00",
+        "durationMs": 5279.61,
+        "kind": "task",
+        "error": "busy",
+        "location": "flocks/task/store.py:_run_write_transaction:352"
+      },
+      {
+        "time": "2026-11-12T06:08:37.233680+08:00",
+        "durationMs": 30146.64,
+        "kind": "monitoring",
+        "error": "busy",
+        "location": "flocks/monitoring/store.py:connection:141"
+      },
+      {
+        "time": "2026-11-12T12:11:25.619312+08:00",
+        "durationMs": 5114.52,
+        "kind": "task",
+        "error": "busy",
+        "location": "flocks/task/store.py:_run_write_transaction:352"
+      },
+      {
+        "time": "2026-11-12T12:11:28.586755+08:00",
+        "durationMs": 30032.99,
+        "kind": "monitoring",
+        "error": "busy",
+        "location": "flocks/monitoring/store.py:connection:141"
+      },
+      {
+        "time": "2026-11-12T12:11:31.066362+08:00",
+        "durationMs": 5013.69,
+        "kind": "task",
+        "error": "busy",
+        "location": "flocks/task/store.py:_run_write_transaction:352"
+      }
+    ],
+    "currentProcessMonitoringTraces": 0,
+    "remoteStatusConfirmed": {
+      "release": "2026.11.12.2-linux-amd64",
+      "healthy": true
+    },
+    "limits": [
+      "Only the retained diagnostic window is covered, not every event today.",
+      "No original proof payload is included; single-object response compatibility retains exact incident ID validation.",
+      "Upstream HTTP 504/90-second model outages require provider-side confirmation after the patch."
+    ],
+    "remoteRuntimeConfirmed": {
+      "backend": "sqlite",
+      "originalReleaseExecutor": true,
+      "monitor_dispatch": false,
+      "daily_session": false,
+      "scheduler_enabled_parameter": false,
+      "evidence": "User-executed read-only introspection on the exporting machine"
+    }
+  },
+  "sourceReproduction": {
+    "sourceCommit": "9dd28ef9a2a2e12f817319c8212649f11182f06a",
+    "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
+    "changedPaths": 459,
+    "reconstructedTree": "de28646c4dc9c7be439182e78abd14c1df0b127d",
+    "expectedTree": "de28646c4dc9c7be439182e78abd14c1df0b127d",
+    "matches": true
+  }
 }

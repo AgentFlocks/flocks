@@ -1,28 +1,28 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.3",
+  "packageVersion": "1.14.4",
   "target": "2026.11.12.2-linux-amd64",
-  "status": "SOC UI accepted on local 5173; Linux target pending",
+  "status": "Monitoring and history accepted on local 5173 with isolated synthetic boundaries; Linux target pending",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
     "branch": "zw_dev",
-    "commit": "e400aa3187f6d8d428951d7a24f464575c7700eb",
+    "commit": "9dd28ef9a2a2e12f817319c8212649f11182f06a",
     "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.14.3-pro-2026.11.12.2-full.tar.gz",
-  "sha256": "98d903f511901fc2e6719ae163aa346f5362d310a1f430673285e95f65204682",
-  "payloadFiles": 487,
+  "archive": "releases/flocks-customizations-1.14.4-pro-2026.11.12.2-full.tar.gz",
+  "sha256": "cc5acc18be2ea33e7d936f3080f9c62639c2438480ecac86d51c33810b8f497e",
+  "payloadFiles": 489,
   "validation": "verification.json",
   "limits": [
-    "Linux-amd64 target has not been run on a Linux server.",
-    "Concurrency GUI acceptance used explicit browser-only demo data, without launching real workflows.",
-    "Unrelated monitoring and report business chains are outside this UI change."
+    "Linux-amd64 remote installation and real XDR/model/mail chain still require user execution.",
+    "Local 5173 acceptance uses isolated projects and synthetic XDR/provider responses with actual task execution, storage, sessions and SSE.",
+    "External model gateway HTTP 504 and 90-second timeout are not resolved by application code."
   ],
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "Authenticated SOC UI entry/records/cache, browser-only concurrency demo, 202 frontend tests, 54 installer/updater tests, 487 file hashes, repeat without restart, baseline restore.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.14.3.zip",
-  "offlineRepositoryArchiveSha256": "fb66d6062915b497898c7f333bdeb2c0ef4817b1ad247034f484c8958fc6bf06"
+  "validationScope": "Streaming updates, zero-event termination, ten-day history, refresh persistence, 489 payload hashes, repeat without restart, baseline restore; original Pro SQLite runtime and PostgreSQL regressions.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.14.4.zip",
+  "offlineRepositoryArchiveSha256": "4590c3759ee646cf8d8a8864504d3102a9619424bd7057171b9fdd45225d5b7d"
 }

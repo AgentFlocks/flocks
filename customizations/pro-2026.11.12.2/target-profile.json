@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.3",
+  "packageVersion": "1.14.4",
   "developmentBranch": "zw_dev",
   "sourceRepository": "AgentFlocks/flocksdev",
-  "sourceCommit": "e400aa3187f6d8d428951d7a24f464575c7700eb",
+  "sourceCommit": "9dd28ef9a2a2e12f817319c8212649f11182f06a",
   "deploymentMode": "source-overlay",
   "installerProtocol": 2,
   "edition": "flockspro",
@@ -16,5 +16,5 @@
     "flocks": "6bdc2b83de483d4f8366f3368a3b91f95c1523f6fcaff42c2ee92e92709d83e7",
     "flockspro": "bd1ac6bbdad2b3388755de296388d1e1b2d6155769dbc8083997dc894f8c594d"
   },
-  "previousCustomization": "1.14.2"
+  "previousCustomization": "1.14.3"
 }

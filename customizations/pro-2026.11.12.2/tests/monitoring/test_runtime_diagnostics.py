@@ -280,7 +280,9 @@ async def test_mail_snapshot_failure_exports_only_exception_type(monkeypatch, ca
     monkeypatch.setattr(mailflow, 'diagnostic_state', AsyncMock(side_effect=TypeError('SECRET_MAIL_CONTENT')))
     response = await api.diagnostics(user=SimpleNamespace(id='owner'))
     data = json.loads(response.body)
-    assert data['mail'] == {'snapshot_available': False, 'error_type': 'TypeError'}
+    assert data['mail']['snapshot_available'] is False
+    assert data['mail']['error_type'] == 'TypeError'
+    assert set(data['mail']) <= {'snapshot_available', 'error_type', 'error_frames'}
     assert 'SECRET' not in json.dumps(data)
 
 

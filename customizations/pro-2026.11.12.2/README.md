@@ -1,12 +1,12 @@
 # Flocks Pro 2026.11.12.2 定制增强包
 
-增强包版本：1.14.3。仅适用于 `2026.11.12.2-linux-amd64`、Pro 构建 `2ee622b`、Core `730da689`，运行树保护策略必须为 `native`。
+增强包版本：1.14.4。仅适用于 `2026.11.12.2-linux-amd64`、Pro 构建 `2ee622b`、Core `730da689`，运行树保护策略必须为 `native`。
 
 ## 开发与部署方式
 
 增强直接合入 `zw_dev` 的 Core 源码，以本发行版配对的 Core `730da689` 为上游基线。打包时根据该基线与增强提交之间的差异，收集 Python 源码、内置组件和配对的 Pro 前端产物。
 
-本包源码提交：[`e400aa31`](https://github.com/AgentFlocks/flocksdev/commit/e400aa3187f6d8d428951d7a24f464575c7700eb)，保留原 `zw_dev` 与发行版基线的开发历史。
+本包源码提交：[`9dd28ef9`](https://github.com/AgentFlocks/flocksdev/commit/9dd28ef9a2a2e12f817319c8212649f11182f06a)，保留原 `zw_dev` 与发行版基线的开发历史。
 
 交付形式仍是独立增强包。解压到 `~/.flocks/customizations/` 后，安装器校验并备份原文件，然后直接修改 `~/flockspro/current/runtime/flocks/` 中实际运行的 Core 源码，以及 `runtime/webui-dist/` 中的界面文件。`customizations` 用于保存安装器、部署文件和备份；服务启动时加载的是受管发布中的增强源码。
 
@@ -34,10 +34,10 @@ https://gitee.com/flocks/flocks/repository/archive/fix/process_11.12_en
 
 已装补丁 A 时，脚本核对 A 的部署记录和当前文件，再直接写入补丁 B。B 删除的旧补丁文件会清理，不再修改的原版文件恢复发行基线；保留配置、状态及历史备份。部署失败自动退回 A；B 启动失败时也会回退本次代码更新，并尝试重新启动此前运行的服务。未知手工源码改动会被保留并报告。自动升级以补丁声明的 Pro 发行基线为准。
 
-若继续使用手工压缩包方式，把 `flocks-customizations-1.14.3-pro-2026.11.12.2-full.tar.gz` 上传到服务器家目录，再整行执行：
+若继续使用手工压缩包方式，把 `flocks-customizations-1.14.4-pro-2026.11.12.2-full.tar.gz` 上传到服务器家目录，再整行执行：
 
 ```bash
-flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks-customizations-1.14.3-pro-2026.11.12.2-full.tar.gz" -C "$HOME/.flocks/customizations" && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root "$HOME/flockspro" apply --install-deps && flocks start --no-browser --webui-host 0.0.0.0
+flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks-customizations-1.14.4-pro-2026.11.12.2-full.tar.gz" -C "$HOME/.flocks/customizations" && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root "$HOME/flockspro" apply --install-deps && flocks start --no-browser --webui-host 0.0.0.0
 ```
 
 解压目录和安装器都在 `~/.flocks/customizations/`，不需要额外的家目录工作文件夹。补丁目标是当前受管 Pro 发布；旧的 `$HOME/flocks` 不参与安装。
@@ -105,3 +105,23 @@ flocks stop && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root
 安装补丁后，在“Agent车间 → 待加载插件库”中更新“SOC Workspace WebUI”（SOC 页面版本 1.18.1），或在场景管理中更新“告警运营套件”，再刷新浏览器，使已安装的 SOC 页面同步到增强版。套件更新仍保留原有修改检测及备份。
 
 增强包同时更新配对 Pro 的 SOC 页面模板，只替换告警态势源码及入口元数据；保留 Pro 的事件管理页面、工具依赖与权限声明。该文本资源仍经原发行签名清单哈希核验、备份、失败回滚和还原，不修改解释器或原生模块。
+
+## 1.14.4 监测对话
+
+移除邮件跟进页及配置页中的黄色认证说明。监测运营模型改用与普通会话相同的流式接口，将公开进展通过消息 SSE 实时更新；生成中的说明标为待核验，完整决策仍先校验再执行。取消前端按固定间隔延迟展示步骤，查询、调查和实际通知结果随执行更新。
+
+新轮次使用简短对话展示设备、事件数、风险、证据缺口及实际处置进度，工具参数、报文和详细依据保留在可展开记录中。原有审计汇总保留。完整查询为 0 条且没有历史待办时，只报告本轮结束，跳过空关联分析及模型调用；查询失败、部分分页或已有回信、状态待办仍按原链路保存和核对，不能把查询异常视为无风险。
+
+本地 5173 功能验收及交付记录见 verification.json；远程 Linux 实例需安装新版后验收，GitHub 上传不代表远程实例已生效。
+
+工作台项目历史对话默认仅展示最近 10 天内有更新的记录，更早对话从“加载更多”查看；“收起”恢复最近列表，搜索继续覆盖历史。原有每页数量及分页保持有效。
+
+兼容历史 PostgreSQL 导入表缺少监测轮次自增编号的情况：仅在未配置默认值或标识列时补齐编号生成器，从现有最大编号之后继续；保留已有记录和已配置生成器。
+
+## 1.14.4 监测慢响应与读取兼容修复
+
+Pro 未启用 PostgreSQL、继续使用发行版原始 SQLite 存储时，补齐监测任务分发、每日会话、暂停取消及启动恢复入口。原版任务存储、执行器、调度器和会话文件保持不覆盖；普通任务继续调用原实现，PostgreSQL 原生执行租约不变。
+
+SQLite 监测读取不再每次执行建表、迁移和 BEGIN IMMEDIATE。按数据库文件及 schema_version 复用迁移结果；普通查询和报告读取可与 WAL 写事务并行，模式变化时仍重新检查迁移。单对象或数组形式的事件举证均须明确匹配原事件 uuId；无编号或不同事件继续拒收，并在诊断中记录结构或编号原因。邮件诊断快照失败会保留脱敏 SQLite 错误码和代码位置。
+
+11 月 12 日所提供日志中的 XDR 事件列表查询均成功，主要等待来自 SQLite 写锁及模型网关超时。应用修复不能代替模型服务的故障处置；安装后需重新导出远程诊断，确认新轮次和模型服务状态。

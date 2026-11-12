@@ -5,6 +5,29 @@ import pytest
 
 
 @pytest.mark.asyncio
+async def test_imported_monitor_sequence_gets_generator_without_rewriting_history():
+    from flocks.enhancements import monitor_db
+    from flocks.task.store import TaskStore
+    from flocks.monitoring.store import rows, write
+    await monitor_db.initialize()
+    handle = await TaskStore.raw_db()
+    async with handle.transaction() as db:
+        await db.execute('ALTER TABLE monitor_attempts ALTER COLUMN sequence DROP DEFAULT')
+    await write('INSERT INTO monitor_attempts(sequence,id,execution_id,owner,project,scope,business_date,session_id,message_id,started_at,status) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+        (41,'legacy','fixture','owner','project','fixture','2026-11-12','session','message','2026-11-12T00:00:00Z','completed'))
+    before = (await rows('SELECT * FROM monitor_attempts WHERE id=?', ('legacy',)))[0]
+    monitor_db._initialized.clear()
+    await monitor_db.initialize()
+    await write('INSERT INTO monitor_attempts(id,execution_id,owner,project,scope,business_date,session_id,message_id,started_at,status) VALUES(?,?,?,?,?,?,?,?,?,?)',
+        ('next','fixture','owner','project','fixture','2026-11-12','session','message','2026-11-12T00:00:00Z','completed'))
+    assert (await rows('SELECT * FROM monitor_attempts WHERE id=?', ('legacy',)))[0] == before
+    assert (await rows('SELECT sequence FROM monitor_attempts WHERE id=?', ('next',)))[0]['sequence'] == 42
+    monitor_db._initialized.clear()
+    await monitor_db.initialize()
+    assert len(await rows('SELECT * FROM monitor_attempts')) == 2
+
+
+@pytest.mark.asyncio
 async def test_monitor_uses_go_postgres_and_atomic_rollback(tmp_path, monkeypatch):
     from flocks.task.store import TaskStore
     from flocks.monitoring.store import connection, rows, write
