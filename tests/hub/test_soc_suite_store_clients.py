@@ -161,3 +161,37 @@ def test_contract_names_the_platform_alert_store_and_no_file() -> None:
     assert binding.driver_allowlist_roots == ()
     assert not binding.source_root.is_absolute()
     assert set(binding.driver_options) == {"settings", "settingsDir", "facetFields"}
+
+
+def test_dashboard_names_workflows_from_the_release_when_the_installation_has_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dashboard's queries moved out of the page's directory: what they read beside it must not have moved with them.
+
+    A workflow that ran here but is not installed (any more) is still named,
+    and its steps counted, from the manifest the release bundles.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    monkeypatch.delenv("FLOCKS_HUB_ROOT", raising=False)
+    from flocks.workflow.soc_store import _paths, dashboard
+
+    bundled = PLUGINS / "workflows"
+    roots = _paths.workflow_roots()
+    assert roots[-1].resolve() == bundled.resolve()
+    assert all(tmp_path in root.parents for root in roots[:-1]), roots
+    nodes = json.loads((bundled / "stream_alert_triage" / "workflow.json").read_text(encoding="utf-8"))["nodes"]
+    assert dashboard._workflow_node_count("stream_alert_triage") == len(nodes) > 0
+    manifest = json.loads((bundled / "stream_alert_triage" / "manifest.json").read_text(encoding="utf-8"))
+    assert dashboard._workflow_manifest_name_map()["stream_alert_triage"] in {
+        manifest.get("nameCn"), manifest.get("name"), (manifest.get("nameI18n") or {}).get("zh-CN"),
+    }
+
+    # The installation's own copy is the one that counts once it is there.
+    installed = roots[0] / "stream_alert_triage"
+    installed.mkdir(parents=True)
+    (installed / "manifest.json").write_text(json.dumps({"name": "本机改名的研判"}), encoding="utf-8")
+    (installed / "workflow.json").write_text(json.dumps({"nodes": [{"id": "only"}]}), encoding="utf-8")
+    assert dashboard._workflow_manifest_name_map()["stream_alert_triage"] == "本机改名的研判"
+    assert dashboard._workflow_node_count("stream_alert_triage") == 1

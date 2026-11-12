@@ -1489,11 +1489,7 @@ def task_center_tasks(limit=12):
 
 
 def _workflow_manifest_name_map():
-    roots = [
-        Path.home() / ".flocks" / "plugins" / "workflows",
-        Path.home() / ".flocks" / "workspace" / "workflows",
-        Path(__file__).resolve().parents[4] / "workflows",
-    ]
+    roots = _paths.workflow_roots()
     names = {}
     for root in roots:
         if not root.is_dir():
@@ -1608,11 +1604,7 @@ def _workflow_execution_column_expr(columns, column_name, fallback):
 
 
 def _workflow_node_count(workflow_id):
-    roots = [
-        Path.home() / ".flocks" / "plugins" / "workflows",
-        Path.home() / ".flocks" / "workspace" / "workflows",
-        Path(__file__).resolve().parents[4] / "workflows",
-    ]
+    roots = _paths.workflow_roots()
     for root in roots:
         workflow_path = root / str(workflow_id) / "workflow.json"
         if not workflow_path.is_file():

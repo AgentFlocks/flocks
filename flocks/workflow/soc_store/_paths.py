@@ -1,4 +1,4 @@
-"""Where the SQLite files behind the SOC suite are.
+"""Where the SQLite files behind the SOC suite are, and the workflow packages its pages name.
 
 ``soc.db`` is the suite's own: the triage workflow writes alerts to it and the
 SOC pages read them back.  The other three are the runtime's own databases,
@@ -17,6 +17,7 @@ SOC_DB: Optional[Path] = None
 WORKFLOW_DB: Optional[Path] = None
 TASK_DB: Optional[Path] = None
 USAGE_DB: Optional[Path] = None
+WORKFLOW_ROOTS: Optional[list[Path]] = None
 
 
 def historical_soc_db() -> Path:
@@ -46,3 +47,23 @@ def task_db() -> Path:
 
 def usage_db() -> Path:
     return Path(USAGE_DB) if USAGE_DB is not None else data_dir() / "flocks.db"
+
+
+def workflow_roots() -> list[Path]:
+    """Where workflow packages are read for their names and step counts, the installation's own first.
+
+    The installation's plugins and workspace, then the workflows the release
+    bundles: a workflow that has run here but is not installed (any more) is
+    still named by the release's manifest.
+    """
+    if WORKFLOW_ROOTS is not None:
+        return [Path(root) for root in WORKFLOW_ROOTS]
+    from flocks.config.config import get_user_plugins_root
+    from flocks.hub.paths import get_bundled_hub_root
+    from flocks.workspace.manager import _get_workspace_dir
+
+    return [
+        get_user_plugins_root() / "workflows",
+        _get_workspace_dir() / "workflows",
+        get_bundled_hub_root() / "plugins" / "workflows",
+    ]
