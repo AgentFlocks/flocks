@@ -133,6 +133,17 @@ async def check():
     result=await TaskExecutor.dispatch(ordinary,normal)
     assert result.status==TaskStatus.COMPLETED and result.result_summary=='ordinary result'
     assert TaskExecutor._run_agent_session.await_count==1
+    from flocks.task.presentation import list_task_center_executions, task_center_dashboard
+    execution.status=TaskStatus.FAILED;execution.error='original monitor failure'
+    ordinary.status=TaskStatus.FAILED;ordinary.error='ordinary failure'
+    await TaskStore.update_execution(execution);await TaskStore.update_execution(ordinary)
+    visible,total=await list_task_center_executions(status=TaskStatus.FAILED)
+    assert total==1 and visible[0].id==ordinary.id
+    assert (await TaskStore.get_execution(execution.id)).error=='original monitor failure'
+    counts=await task_center_dashboard(await TaskStore.dashboard_counts())
+    assert counts['failed_week']==1
+    execution.status=ordinary.status=TaskStatus.COMPLETED
+    await TaskStore.update_execution(execution);await TaskStore.update_execution(ordinary)
     local.get_record=lambda *args:None
     manager=await TaskManager.start(max_concurrent=1)
     assert manager._running

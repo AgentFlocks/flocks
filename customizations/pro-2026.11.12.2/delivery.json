@@ -1,28 +1,28 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.6",
+  "packageVersion": "1.14.7",
   "target": "2026.11.12.2-linux-amd64",
-  "status": "Syslog ISO envelope decoding accepted on local 5173; remote Linux application pending",
+  "status": "Monitor-failure task-center exclusion accepted on local 5173; Linux target pending",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
     "branch": "zw_dev",
-    "commit": "2a822d744c546f1037bc2ddbe0f64db95d9325b3",
+    "commit": "71272416e32f9a07e48a947ce98c111007640c30",
     "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.14.6-pro-2026.11.12.2-full.tar.gz",
-  "sha256": "48daed6b774ea5cc2ea26494a2127cbb6ede0ae000b4ba59e4daab1296aab720",
-  "payloadFiles": 490,
+  "archive": "releases/flocks-customizations-1.14.7-pro-2026.11.12.2-full.tar.gz",
+  "sha256": "9652aef1cac52a9d3856ccc97a2ef991aec7ef1e1c2d644f6c2c6fb8f6db694d",
+  "payloadFiles": 492,
   "validation": "verification.json",
   "limits": [
-    "Remote Linux fix has not yet been installed; the user must synchronize Gitee and run update-flocks.sh.",
-    "Local UDP acceptance used ~1.5KB synthetic messages matching the observed envelope. Parser/receive tests also covered 11KB bodies.",
-    "This release changes only the runtime Syslog parser relative to 1.14.5; installed workflow/tool definitions are not updated by this fix."
+    "Linux-amd64 remote installation and real XDR/model/mail chain still require user execution.",
+    "Local 5173 acceptance uses isolated projects and synthetic XDR/provider responses with actual task execution, storage, sessions and SSE.",
+    "This change only affects task-center presentation, retaining monitoring failures and recovery state."
   ],
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "86 parser/listener/receive tests, 55 installer/updater tests, paired Pro frontend build; authenticated 5173 real loopback UDP in RFC3164, auto/PRI-space and fractional timestamp modes; each raw_count=1, source preservation, 490 file hashes, repeat without restart and baseline restore.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.14.6.zip",
-  "offlineRepositoryArchiveSha256": "7805da10a2d0b5af1e4aff5401aacea66e9d1a21df4e816cb96bb411a60d5a5d"
+  "validationScope": "Task-center all/failed lists and weekly count exclude monitor failures; original errors retained, completed monitors visible, refresh stable; 492 payload hashes, repeat without restart and release baseline restored; 73 frontend, 12 SQLite/routes, 5 Pro PostgreSQL, 2 original SQLite tests.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.14.7.zip",
+  "offlineRepositoryArchiveSha256": "79a986dae9e7fbed59a42b9eea788f9d0159b76706027febb83d89845b9f6d15"
 }

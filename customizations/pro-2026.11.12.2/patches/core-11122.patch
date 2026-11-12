@@ -101021,6 +101021,49 @@ index 885018f2..be6a796f 100644
      finally:
          reset_current_auth_user(auth_token)
      if not deleted_ok:
+diff --git a/flocks/server/routes/task_entities.py b/flocks/server/routes/task_entities.py
+index 74fad431..679d2ae0 100644
+--- a/flocks/server/routes/task_entities.py
++++ b/flocks/server/routes/task_entities.py
+@@ -175,11 +175,16 @@ async def get_task_system_notice():
+ 
+ 
+ @router.get("/task-system/dashboard")
+-async def task_dashboard():
++async def task_dashboard(
++    exclude_monitoring_failures: bool = Query(False, alias="excludeMonitoringFailures"),
++):
+     from flocks.task.manager import TaskManager
+ 
+     started_at = time.perf_counter()
+     payload = await TaskManager.dashboard()
++    if exclude_monitoring_failures:
++        from flocks.task.presentation import task_center_dashboard
++        payload = await task_center_dashboard(payload)
+     log_route_timing(log, "task.dashboard.complete", started_at=started_at, extra={
+         "running": payload.get("running"),
+         "queued": payload.get("queued"),
+@@ -420,6 +425,7 @@ async def run_scheduler(scheduler_id: str):
+ 
+ @router.get("/task-executions")
+ async def list_executions(
++    exclude_monitoring_failures: bool = Query(False, alias="excludeMonitoringFailures"),
+     scheduler_id: Optional[str] = Query(None, alias="schedulerID"),
+     status_filter: Optional[str] = Query(None, alias="status"),
+     priority: Optional[str] = Query(None),
+@@ -444,7 +450,11 @@ async def list_executions(
+             detail="startedAfter must be before or equal to startedBefore",
+         )
+ 
+-    items, total = await TaskManager.list_executions(
++    list_page = TaskManager.list_executions
++    if exclude_monitoring_failures:
++        from flocks.task.presentation import list_task_center_executions
++        list_page = list_task_center_executions
++    items, total = await list_page(
+         scheduler_id=scheduler_id,
+         status=_parse_execution_status_filter(status_filter),
+         priority=_parse_priority(priority),
 diff --git a/flocks/server/routes/workflow.py b/flocks/server/routes/workflow.py
 index 1426e51f..fd296a72 100644
 --- a/flocks/server/routes/workflow.py
@@ -102039,6 +102082,103 @@ index 1c27a582..f33e4e4d 100644
          )
          created += 1
  
+diff --git a/flocks/task/presentation.py b/flocks/task/presentation.py
+new file mode 100644
+index 00000000..ac2b5d05
+--- /dev/null
++++ b/flocks/task/presentation.py
+@@ -0,0 +1,91 @@
++"""Read-only task-center projections; execution and recovery state stay intact."""
++from __future__ import annotations
++
++from contextlib import asynccontextmanager
++from datetime import datetime, timedelta, timezone
++
++from flocks.task.store import TaskStore
++
++
++def _postgres():
++    from flocks.db_backend import backend_choice
++    return backend_choice().backend == 'postgres'
++
++
++def _monitor_failure(postgres):
++    marker = ("execution_input_snapshot::jsonb #> '{context,monitoring}'" if postgres
++              else "json_extract(execution_input_snapshot, '$.context.monitoring')")
++    # The daily-session prefix also identifies older rows without a snapshot.
++    return ("(status = 'failed' AND (COALESCE(CAST(" + marker + " AS TEXT), 'null') "
++            "NOT IN ('null', 'false', '0', '') OR substr(COALESCE(session_id, ''), 1, 12) = 'ses_monitor_'))")
++
++
++@asynccontextmanager
++async def _reader():
++    # Borrow the installed store's own connection. No schema migration, write
++    # transaction, monitoring advisory lock or replacement task engine.
++    db = await TaskStore._db()
++    yield db
++
++
++async def _rows(db, sql, params, postgres):
++    if postgres:
++        from flocks.db.markers import rewrite_markers
++        sql = rewrite_markers(sql, lambda index: f'${index}')
++    async with db.execute(sql, tuple(params)) as cursor:
++        return [dict(row) for row in await cursor.fetchall()]
++
++
++async def list_task_center_executions(*, scheduler_id=None, status=None, priority=None,
++        delivery_status=None, title=None, started_after=None, started_before=None,
++        sort_by='queued_at', sort_order='desc', offset=0, limit=20):
++    postgres = _postgres()
++    clauses, params = ['NOT ' + _monitor_failure(postgres)], []
++    for name, value in [('scheduler_id', scheduler_id), ('status', status),
++                        ('priority', priority), ('delivery_status', delivery_status)]:
++        if value:
++            clauses.append(f'{name} = ?')
++            params.append(getattr(value, 'value', value))
++    if title and title.strip():
++        search = title.strip().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
++        clauses.append("title " + ('ILIKE' if postgres else 'LIKE') + " ? ESCAPE '\\'")
++        params.append('%' + search + '%')
++    for boundary, operator in [(started_after, '>='), (started_before, '<=')]:
++        if boundary is not None:
++            if postgres:
++                instant = "(CASE WHEN started_at ~ '(Z|[+-][0-9]{2}(:?[0-9]{2})?)$' THEN started_at::timestamptz ELSE started_at::timestamp AT TIME ZONE 'UTC' END)"
++                clauses.append(instant + ' ' + operator + ' CAST(? AS timestamptz)')
++                params.append(boundary.isoformat())
++            else:
++                from flocks.task.store import _timestamp_microseconds
++                clauses.append('task_timestamp_us(started_at) ' + operator + ' ?')
++                params.append(_timestamp_microseconds(boundary.isoformat()))
++    where = ' WHERE ' + ' AND '.join(clauses)
++    allowed = {'created_at', 'updated_at', 'priority', 'queued_at', 'started_at', 'completed_at'}
++    column = sort_by if sort_by in allowed else 'queued_at'
++    direction = 'ASC' if sort_order.lower() == 'asc' else 'DESC'
++    async with _reader() as db:
++        count = await _rows(db, 'SELECT COUNT(*) AS total FROM task_executions' + where, params, postgres)
++        rows = await _rows(db, 'SELECT * FROM task_executions' + where +
++            f' ORDER BY {column} {direction}, id {direction} LIMIT ? OFFSET ?', [*params, limit, offset], postgres)
++    return [TaskStore._row_to_execution(row) for row in rows], count[0]['total']
++
++
++async def task_center_dashboard(counts):
++    postgres = _postgres()
++    week_start = datetime.now(timezone.utc) - timedelta(days=7)
++    instant = 'COALESCE(completed_at, started_at, queued_at, created_at)'
++    if postgres:
++        instant = '(' + instant + ')::timestamptz'
++        boundary = 'CAST(? AS timestamptz)'
++        value = week_start.isoformat()
++    else:
++        from flocks.task.store import _timestamp_microseconds
++        instant = 'task_timestamp_us(' + instant + ')'
++        boundary = '?'
++        value = _timestamp_microseconds(week_start.isoformat())
++    async with _reader() as db:
++        rows = await _rows(db, 'SELECT COUNT(*) AS total FROM task_executions WHERE '
++            "status = 'failed' AND NOT " + _monitor_failure(postgres) +
++            ' AND ' + instant + ' >= ' + boundary, [value], postgres)
++    return {**counts, 'failed_week': rows[0]['total']}
 diff --git a/flocks/task/scheduler.py b/flocks/task/scheduler.py
 index dfbd789e..94c02ef8 100644
 --- a/flocks/task/scheduler.py
@@ -122915,6 +123055,128 @@ index 00000000..5c4af1a4
 +            assert list((storage / 'workspace/outputs' / attempts[0]['business_date']).glob('host-security-monitor-*.md'))
 +    finally:
 +        reset_current_auth_user(token)
+diff --git a/tests/task/test_task_center.py b/tests/task/test_task_center.py
+new file mode 100644
+index 00000000..a85d4789
+--- /dev/null
++++ b/tests/task/test_task_center.py
+@@ -0,0 +1,116 @@
++"""The task-center projection hides monitor failures without changing records."""
++from datetime import datetime, timedelta, timezone
++
++import pytest
++
++from flocks.db_backend import backend_choice
++from flocks.task.models import TaskExecution, TaskScheduler, TaskStatus, TaskPriority
++from flocks.task.store import TaskStore
++from flocks.task.presentation import list_task_center_executions, task_center_dashboard
++
++
++@pytest.fixture(autouse=True)
++async def isolated_sqlite(tmp_path, monkeypatch):
++    if backend_choice().backend != 'sqlite':
++        yield
++        return
++    from flocks.storage.storage import Storage
++    from flocks.config.config import Config
++    await TaskStore.close()
++    monkeypatch.setenv('FLOCKS_DATA_DIR', str(tmp_path/'data'))
++    Config._global_config = Config._cached_config = None
++    Storage._db_path = None
++    Storage._initialized = False
++    await Storage.init()
++    yield
++    await TaskStore.close()
++    Storage._db_path = None
++    Storage._initialized = False
++
++
++async def execution(*, monitor=False, legacy=False, status=TaskStatus.FAILED,
++                    title='安全运营监测同名普通任务', age=0, priority=TaskPriority.NORMAL):
++    scheduler = TaskScheduler(title=title)
++    await TaskStore.create_scheduler(scheduler)
++    when = datetime.now(timezone.utc) - timedelta(days=age)
++    row = TaskExecution(scheduler_id=scheduler.id, title=title, status=status,
++        priority=priority, started_at=when, completed_at=when, queued_at=when,
++        error='synthetic original failure',
++        execution_input_snapshot={'context': {'monitoring': {'scope': 'fixture'}}} if monitor else {},
++        session_id='ses_monitor_legacy_fixture' if legacy else None)
++    await TaskStore.create_execution(row)
++    return row
++
++
++@pytest.mark.asyncio
++async def test_existing_monitor_failures_are_hidden_but_stored_details_and_history_remain():
++    normal = await execution()
++    monitor = await execution(monitor=True)
++    legacy = await execution(legacy=True)
++    completed = await execution(monitor=True, status=TaskStatus.COMPLETED)
++    running = await execution(monitor=True, status=TaskStatus.RUNNING)
++    items, total = await list_task_center_executions(status=TaskStatus.FAILED)
++    assert total == 1 and [x.id for x in items] == [normal.id]
++    items, total = await list_task_center_executions()
++    assert total == 3 and {x.id for x in items} == {normal.id, completed.id, running.id}
++    assert (await TaskStore.list_executions(status=TaskStatus.FAILED))[1] == 3
++    for row in [monitor, legacy]:
++        stored = await TaskStore.get_execution(row.id)
++        assert stored.status == TaskStatus.FAILED and stored.error == row.error
++        assert (await TaskStore.list_scheduler_executions(row.scheduler_id))[1] == 1
++
++
++@pytest.mark.asyncio
++async def test_filtering_precedes_pagination_with_many_monitor_failures():
++    for _ in range(25):
++        await execution(monitor=True)
++    normal = [await execution() for _ in range(3)]
++    first, total = await list_task_center_executions(status=TaskStatus.FAILED, limit=2)
++    second, total2 = await list_task_center_executions(status=TaskStatus.FAILED, offset=2, limit=2)
++    assert total == total2 == 3 and len(first) == 2 and len(second) == 1
++    assert {x.id for x in first + second} == {x.id for x in normal}
++
++
++@pytest.mark.asyncio
++async def test_filters_keep_literal_title_priority_scheduler_and_time_boundaries():
++    target = await execution(title='literal %_ task', priority=TaskPriority.HIGH)
++    await execution(title='literal %_ task', monitor=True, priority=TaskPriority.HIGH)
++    await execution(title='literal AB task', priority=TaskPriority.HIGH)
++    await execution(title='literal %_ task', age=2)
++    items, total = await list_task_center_executions(title='%_', priority=TaskPriority.HIGH,
++        started_after=target.started_at, started_before=target.started_at, sort_by='started_at', sort_order='asc')
++    assert total == 1 and items[0].id == target.id
++    assert (await list_task_center_executions(scheduler_id=target.scheduler_id))[1] == 1
++
++
++@pytest.mark.asyncio
++async def test_weekly_count_only_excludes_failed_monitors_and_keeps_other_counts():
++    await execution()
++    await execution(monitor=True)
++    await execution(legacy=True)
++    await execution(age=9)
++    await execution(monitor=True, status=TaskStatus.COMPLETED)
++    before = await TaskStore.dashboard_counts()
++    after = await task_center_dashboard(before)
++    assert after['failed_week'] == 1 and before['failed_week'] == 3
++    assert {k:v for k,v in after.items() if k != 'failed_week'} == {k:v for k,v in before.items() if k != 'failed_week'}
++
++
++@pytest.mark.asyncio
++async def test_api_projection_is_explicit_and_original_detail_remains_available():
++    from fastapi import FastAPI
++    from httpx import ASGITransport, AsyncClient
++    from flocks.server.routes.task_entities import router
++    app = FastAPI()
++    app.include_router(router, prefix='/api')
++    normal = await execution()
++    monitor = await execution(monitor=True)
++    async with AsyncClient(transport=ASGITransport(app), base_url='http://test') as client:
++        original = (await client.get('/api/task-executions?status=failed')).json()
++        visible = (await client.get('/api/task-executions?status=failed&excludeMonitoringFailures=true')).json()
++        assert original['total'] == 2 and visible['total'] == 1
++        assert visible['items'][0]['id'] == normal.id
++        detail = (await client.get('/api/task-executions/' + monitor.id)).json()
++        assert detail['status'] == 'failed' and detail['error'] == monitor.error
++        counts = (await client.get('/api/task-system/dashboard?excludeMonitoringFailures=true')).json()
++        assert counts['failed_week'] == 1
 diff --git a/tests/task/test_task_database_reliability.py b/tests/task/test_task_database_reliability.py
 index 7eab1653..5426bb8b 100644
 --- a/tests/task/test_task_database_reliability.py
@@ -124957,6 +125219,27 @@ index 00000000..d7e58961
 +      signal,
 +    }),
 +};
+diff --git a/webui/src/api/task.ts b/webui/src/api/task.ts
+index aae7384d..bc4e8e7d 100644
+--- a/webui/src/api/task.ts
++++ b/webui/src/api/task.ts
+@@ -98,6 +98,7 @@ export interface PaginatedResponse<T> {
+ }
+ 
+ export interface TaskListParams {
++  excludeMonitoringFailures?: boolean;
+   status?: TaskStatus;
+   priority?: TaskPriority;
+   title?: string;
+@@ -242,7 +243,7 @@ export const taskAPI = {
+     client.delete(`/api/task-executions/${executionId}`),
+ 
+   dashboard: () =>
+-    client.get<DashboardCounts>('/api/task-system/dashboard'),
++    client.get<DashboardCounts>('/api/task-system/dashboard', { params: { excludeMonitoringFailures: true } }),
+ 
+   queueStatus: () =>
+     client.get<QueueStatus>('/api/task-system/queue/status'),
 diff --git a/webui/src/components/common/MonitoringViewport.test.tsx b/webui/src/components/common/MonitoringViewport.test.tsx
 new file mode 100644
 index 00000000..94cac2d0
@@ -127652,6 +127935,46 @@ index 5ff7de66..9605d85d 100644
      hasOlder,
      hasNewer,
      loadingOlder,
+diff --git a/webui/src/hooks/useTasks.test.tsx b/webui/src/hooks/useTasks.test.tsx
+index 7f3c8414..e795b101 100644
+--- a/webui/src/hooks/useTasks.test.tsx
++++ b/webui/src/hooks/useTasks.test.tsx
+@@ -104,6 +104,15 @@ describe('useTasks shared resources', () => {
+     vi.useRealTimers();
+   });
+ 
++  it('keeps projected and unprojected lists in separate caches and forwards the flag', async () => {
++    const raw = renderHook(() => useTaskExecutions({ status: 'failed' }));
++    const projected = renderHook(() => useTaskExecutions({ status: 'failed', excludeMonitoringFailures: true }));
++    await waitFor(() => expect(projected.result.current.loading).toBe(false));
++    expect(listExecutionsMock).toHaveBeenCalledTimes(2);
++    expect(listExecutionsMock).toHaveBeenCalledWith(expect.objectContaining({ excludeMonitoringFailures: true }));
++    raw.unmount(); projected.unmount();
++  });
++
+   it('shares task execution list requests across concurrent hook instances with the same filters', async () => {
+     let resolveList: (value: ReturnType<typeof makeExecutionPage>) => void = () => {};
+     listExecutionsMock.mockReturnValue(new Promise((resolve) => {
+diff --git a/webui/src/hooks/useTasks.ts b/webui/src/hooks/useTasks.ts
+index 738c9e70..0b1fcee9 100644
+--- a/webui/src/hooks/useTasks.ts
++++ b/webui/src/hooks/useTasks.ts
+@@ -83,6 +83,7 @@ function normalizeSchedulerFilters(filters?: SchedulerListParams): SchedulerList
+ 
+ function normalizeExecutionFilters(filters?: TaskListParams & { schedulerID?: string }): TaskListParams & { schedulerID?: string } {
+   return {
++    excludeMonitoringFailures: filters?.excludeMonitoringFailures,
+     status: filters?.status,
+     priority: filters?.priority,
+     title: filters?.title?.trim() || undefined,
+@@ -309,6 +310,7 @@ export function useTaskExecutions(
+   const resource = useMemo(
+     () => getExecutionListResource(filters),
+     [
++      filters?.excludeMonitoringFailures,
+       filters?.status,
+       filters?.priority,
+       filters?.deliveryStatus,
 diff --git a/webui/src/hooks/useTodayTokenUsage.test.ts b/webui/src/hooks/useTodayTokenUsage.test.ts
 new file mode 100644
 index 00000000..1cecb73c
@@ -143699,10 +144022,24 @@ index 00000000..76061922
 +  });
 +});
 diff --git a/webui/src/pages/Task/QueuedSection.test.tsx b/webui/src/pages/Task/QueuedSection.test.tsx
-index 8e35cf41..d188b853 100644
+index 8e35cf41..fa763f42 100644
 --- a/webui/src/pages/Task/QueuedSection.test.tsx
 +++ b/webui/src/pages/Task/QueuedSection.test.tsx
-@@ -380,6 +380,9 @@ describe('QueuedSection', () => {
+@@ -198,6 +198,13 @@ describe('QueuedSection', () => {
+     });
+   });
+ 
++  it('requests the monitor-failure projection for all and failed task-center lists', () => {
++    render(<QueuedSection onRefreshGlobal={vi.fn()} />);
++    expect(mocks.useTaskExecutions).toHaveBeenLastCalledWith(expect.objectContaining({ excludeMonitoringFailures: true }));
++    fireEvent.click(screen.getByRole('button', { name: '失败', exact: true }));
++    expect(mocks.useTaskExecutions).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'failed', excludeMonitoringFailures: true, offset: 0 }));
++  });
++
+   it('切换筛选后会清除不可见列表的选中项', async () => {
+     const user = userEvent.setup();
+ 
+@@ -380,6 +387,9 @@ describe('QueuedSection', () => {
  
      expect(await screen.findByText('queued.heldForVerification')).toBeInTheDocument();
      expect(screen.getByText('bash:call_deploy')).toBeInTheDocument();
@@ -143713,7 +144050,7 @@ index 8e35cf41..d188b853 100644
      expect(mocks.continueExecution).toHaveBeenCalledWith('exec-held-1');
      // Retrying from scratch stays available: that is the person's call.
 diff --git a/webui/src/pages/Task/QueuedSection.tsx b/webui/src/pages/Task/QueuedSection.tsx
-index 0f2d768d..9431b178 100644
+index 0f2d768d..33fc824c 100644
 --- a/webui/src/pages/Task/QueuedSection.tsx
 +++ b/webui/src/pages/Task/QueuedSection.tsx
 @@ -13,6 +13,9 @@ import { taskAPI, TaskExecution, TaskListParams } from '@/api/task';
@@ -143726,6 +144063,15 @@ index 0f2d768d..9431b178 100644
  import { extractErrorMessage } from '@/utils/error';
  import ExecutionFilters, { type ExecutionSearchParams } from './ExecutionFilters';
  
+@@ -45,7 +48,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
+   ];
+ 
+   const currentFilter = QUEUED_FILTERS.find(f => f.key === filterKey)?.filter ?? {};
+-  const listParams = { ...searchFilters, ...currentFilter, offset: page * PAGE_SIZE, limit: PAGE_SIZE };
++  const listParams = { excludeMonitoringFailures: true, ...searchFilters, ...currentFilter, offset: page * PAGE_SIZE, limit: PAGE_SIZE };
+   const hasFilters = filterKey !== 'all' || Object.values(searchFilters).some(Boolean);
+ 
+   const { tasks, total, loading, error, refetch } = useTaskExecutions(listParams, { pollInterval: 5000 });
 @@ -384,7 +387,9 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
    const shouldStreamSession = Boolean(sessionId);
    const emptyText = ['pending', 'queued'].includes(task.status)

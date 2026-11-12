@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.6",
+  "packageVersion": "1.14.7",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.14.6",
+    "packageVersion": "1.14.7",
     "developmentBranch": "zw_dev",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "2a822d744c546f1037bc2ddbe0f64db95d9325b3",
+    "sourceCommit": "71272416e32f9a07e48a947ce98c111007640c30",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -19,132 +19,90 @@
       "flocks": "6bdc2b83de483d4f8366f3368a3b91f95c1523f6fcaff42c2ee92e92709d83e7",
       "flockspro": "bd1ac6bbdad2b3388755de296388d1e1b2d6155769dbc8083997dc894f8c594d"
     },
-    "previousCustomization": "1.14.5"
+    "previousCustomization": "1.14.6"
   },
-  "scope": "Decode forwarded ISO syslog headers in RFC3164 mode while preserving installed workflows and tools",
-  "remoteEvidence": {
-    "release": "2026.11.12.2-linux-amd64",
-    "backend": "sqlite",
-    "receiveSha256": "31e2d9a2f98c3f4788c154cf5fb1178e83d2deb0d0a1e987240f9fd3ac3e5d46",
-    "mapping": {
-      "syslog_message": "$.body"
-    },
-    "firstObjectOffset": 78,
-    "embeddedJSONType": "dict",
-    "trailingLength": 0,
-    "nulCount": 0,
-    "bomCount": 0,
-    "jsonError": {
-      "message": "Extra data",
-      "position": 4
-    },
-    "status": "problem evidenced; fix not installed remotely"
-  },
+  "scope": "Task-center read projection excludes monitoring failures before pagination/counting; original records, retry and history retained",
   "automatedValidation": {
-    "parserListenerAndReceive": {
-      "passed": 86,
-      "log": ".work/soc-iso-tests-2.log"
+    "frontend": {
+      "passed": 73,
+      "log": ".work/monitor-queue-web-all.log"
     },
-    "installerUpdaterBashAndOverlay": {
-      "passed": 55,
-      "log": ".work/soc-iso-installer-tests.log"
+    "coreSQLiteAndRoutes": {
+      "passed": 12,
+      "log": ".work/monitor-queue-core-tests.log"
     },
-    "pairedProFrontendBuild": {
+    "proPostgres": {
+      "passed": 5,
+      "log": ".work/monitor-queue-pro-tests.log"
+    },
+    "originalManagedSQLite": {
+      "passed": 2,
+      "log": ".work/monitor-queue-original-sqlite.log"
+    },
+    "typeCheck": {
       "status": "passed",
-      "manifest": ".work/pro-webui-soc-1.14.6/flocks-webui-manifest.json",
-      "sourceCommit": "2a822d744c546f1037bc2ddbe0f64db95d9325b3"
+      "log": ".work/monitor-queue-tsc.log"
+    },
+    "productionProBuild": {
+      "status": "passed",
+      "log": ".work/monitor-queue-build.log"
     }
   },
+  "sourceReproduction": {
+    "sourceCommit": "71272416e32f9a07e48a947ce98c111007640c30",
+    "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
+    "reconstructedTree": "7e3af9a04ea49b205ea414048cef0f5e96fd73ff",
+    "expectedTree": "7e3af9a04ea49b205ea414048cef0f5e96fd73ff",
+    "matches": true
+  },
   "local5173Acceptance": {
-    "startedAt": "2026-11-12T12:14:06.905501+00:00",
+    "startedAt": "2026-11-12T13:12:52.698731+00:00",
     "release": "2026.11.12.2-darwin-arm64",
     "port": 5173,
-    "sourceCommit": "2a822d744c546f1037bc2ddbe0f64db95d9325b3",
+    "packageVersion": "1.14.7",
+    "sourceCommit": "71272416e32f9a07e48a947ce98c111007640c30",
     "originalBinaryHash": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
     "originalListen": null,
-    "installedExistingWorkflowToolAndPageSourcesUnchanged": true,
-    "sourceChecksExcludeGeneratedDistCache": true,
-    "autoCreationScope": "Existing enhancement seeds its seven missing bundled custom SOC workflows; tracked for local cleanup, no change to this behavior in 1.14.6.",
     "installedAndReady": true,
-    "payloadFilesMatched": 490,
+    "payloadFilesMatched": 492,
     "nativeBinaryUnchanged": true,
+    "listenUnchanged": true,
     "scenarios": [
       {
-        "case": "rfc3164",
-        "status": "passed",
-        "transport": "real loopback UDP",
-        "formatHint": "rfc3164",
-        "decodedFormat": "iso3164",
-        "bodyOffsetWithoutPRI": 78,
-        "raw_count": 1,
-        "input_mode": "syslog",
-        "rawPreserved": true,
-        "receiveNodeUnchanged": true,
-        "parserSha256": "affd22f758e56d81fb187425d125c67aca89d809e9bb6b1b8952ef768c560e7c"
-      },
-      {
-        "case": "auto-space",
-        "status": "passed",
-        "transport": "real loopback UDP",
-        "formatHint": "auto",
-        "decodedFormat": "iso3164",
-        "bodyOffsetWithoutPRI": 78,
-        "raw_count": 1,
-        "input_mode": "syslog",
-        "rawPreserved": true,
-        "receiveNodeUnchanged": true,
-        "parserSha256": "affd22f758e56d81fb187425d125c67aca89d809e9bb6b1b8952ef768c560e7c"
-      },
-      {
-        "case": "fractional",
-        "status": "passed",
-        "transport": "real loopback UDP",
-        "formatHint": "rfc3164",
-        "decodedFormat": "iso3164",
-        "bodyOffsetWithoutPRI": 78,
-        "raw_count": 1,
-        "input_mode": "syslog",
-        "rawPreserved": true,
-        "receiveNodeUnchanged": true,
-        "parserSha256": "affd22f758e56d81fb187425d125c67aca89d809e9bb6b1b8952ef768c560e7c"
+        "state": "passed",
+        "key": "b9fa01df",
+        "rawTotal": 4,
+        "taskCenterTotal": 2,
+        "failedTotal": 1,
+        "visibleTitles": [
+          "队列隔离验收-ordinary-b9fa01df",
+          "队列隔离验收-completed-b9fa01df"
+        ],
+        "failureTitles": [
+          "队列隔离验收-ordinary-b9fa01df"
+        ],
+        "originalMonitorErrorsRetained": true,
+        "weeklyFailed": 1
       }
     ],
-    "fixtureAnonymousHTTPStatus": 401,
-    "fixtureWritesBusinessDatabase": false,
-    "screenshot": ".work/soc-iso-live/udp-acceptance.png",
-    "localUDPSizeNote": "Real loopback UDP uses ~1.5KB envelopes matching the latest remote sample; 11KB JSON bodies were exercised by parser and real receive-node regression tests. The initial 11KB loopback send exceeded the macOS UDP datagram limit, so it was not counted as a successful test.",
+    "fixtureRecordsCleaned": true,
     "temporaryFixtureRemoved": true,
-    "filesMatchedAfterFixtureRemoval": 490,
+    "filesMatchedAfterFixtureRemoval": 492,
     "repeatWithoutRestart": true,
-    "localAutoCreatedWorkflowCleanup": [
-      "custom-soc-alert-fusion",
-      "custom-soc-closure-report",
-      "custom-soc-device-health",
-      "custom-soc-ndr-dns",
-      "custom-soc-ndr-egress",
-      "custom-soc-ndr-exfil",
-      "custom-soc-ndr-lateral"
-    ],
-    "installedExistingSourcesUnchangedAfterRestore": true,
     "baselineRestoredAndReady": true,
-    "finalListenerPid": "51724",
-    "listenUnchanged": true,
-    "finishedAt": "2026-11-12T12:23:44.826602+00:00",
-    "status": "passed"
+    "restoredAppAndSevenModulesMatchRelease": true,
+    "refreshPersistence": true,
+    "screenshot": ".work/monitor-queue-live/failed-queue.jpg",
+    "finalListenerPid": "74309",
+    "finishedAt": "2026-11-12T13:16:18.278543+00:00",
+    "status": "passed",
+    "existingPluginSourceHashesUnchanged": true,
+    "runtimeGeneratedAPIMetadataExcluded": 2,
+    "localAutoCreatedWorkflows": 0
   },
+  "previousVersionEvidence": "1.14.6 delivery commit 8efd1118cff26af35e790176a1dfa00b010eec31 retains previous acceptance records",
   "limits": [
-    "Remote Linux installation and live security-device acceptance require the user to run update-flocks.sh.",
-    "Local acceptance uses isolated synthetic messages matching the reported envelope; no private alert payload was exported."
-  ],
-  "previousVersionEvidence": "1.14.5 evidence remains in delivery commit 6c61503a99fa9162a98c8da4a80abd065f27659f.",
-  "recordedAt": "2026-11-12T12:23:44.826602+00:00",
-  "payloadDifferenceFromPrevious": {
-    "previousVersion": "1.14.5",
-    "version": "1.14.6",
-    "changedRuntimeSources": [
-      "flocks/flocks/ingest/syslog/parser.py"
-    ],
-    "installedWorkflowChanges": [],
-    "installedToolChanges": []
-  }
+    "Linux-amd64 remote installation pending user sync to Gitee and bash update-flocks.sh.",
+    "Local acceptance uses isolated synthetic failed executions without external model, XDR or mail calls."
+  ]
 }
