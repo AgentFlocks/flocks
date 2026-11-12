@@ -52,6 +52,7 @@ from flocks.updater.deploy import declared_managed, detect_deploy_mode
 from flocks.updater.handoff_progress import summarize_error
 from flocks.updater.installation_status import (
     installation_result_id,
+    installation_result_mark,
     installation_result_path,
     read_installation_result,
     scrub_credentials,
@@ -616,6 +617,20 @@ def _installation_outcome(state: dict[str, Any]) -> dict[str, Any] | None:
     return read_installation_result() or {"recovery": "unknown"}
 
 
+def _installer_recorded_done(state: dict[str, Any]) -> bool:
+    """The installer's own record of this run says done: it writes that once the release it put in
+    place serves, whatever becomes of its exit status after. Not said of a run that did not note
+    which record was there before it, nor from a record that cannot be read."""
+    prior = state.get("prior_result", "unreadable")
+    if prior == "unreadable":
+        return False
+    try:
+        mark = installation_result_mark()
+    except (OSError, ValueError):
+        return False
+    return mark is not None and mark[0] != prior and mark[1] == "done"
+
+
 def _explain_failure(state: dict[str, Any]) -> None:
     """Where a failed upgrade stopped and why, for whoever reads it: the step, the reason in the
     installer's words, how the machine was left and the end of the log."""
@@ -793,6 +808,11 @@ def read_state() -> dict[str, Any] | None:
         if code is not None:
             state["phase"] = "finished" if code == 0 else "failed"
             state["exit_code"] = code
+        elif _installer_recorded_done(state):
+            # No exit status, and the machine is switched over: it did not come back. The Windows
+            # installer writes it last, from a console window that can hold it there for as long as
+            # its user selects text in it, or be closed on it.
+            state["phase"] = "finished"
         elif not _pid_alive(int(state.get("pid") or 0)):
             # Gone without saying how it ended (the machine restarted under it).
             state["phase"] = "failed"
