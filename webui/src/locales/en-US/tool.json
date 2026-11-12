@@ -543,6 +543,11 @@
     "enabled": "Enabled",
     "disabled": "Disabled",
     "updating": "Updating…",
+    "serviceDisabledApi": "The API service \"{{service}}\" that owns this tool is disabled, so the tool cannot be enabled on its own. Enable the service under API Integrations first.",
+    "serviceDisabledDevice": "The device plugin \"{{service}}\" that owns this tool has no enabled device, so the tool cannot be enabled on its own. Add or enable a device in Device Integration first.",
+    "goToApiService": "Enable the service",
+    "goToDevices": "Go to Device Integration",
+    "enableNotApplied": "The tool was not enabled. Check whether the service that owns it is enabled.",
     "noDescription": "No description"
   },
 

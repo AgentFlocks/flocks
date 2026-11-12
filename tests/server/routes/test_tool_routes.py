@@ -775,10 +775,10 @@ class TestToolListPageRoute:
         original_build_tool_index_item = tool_routes._build_tool_index_item
         index_builds = 0
 
-        def counted_build_tool_index_item(tool_info):
+        def counted_build_tool_index_item(tool_info, **kwargs):
             nonlocal index_builds
             index_builds += 1
-            return original_build_tool_index_item(tool_info)
+            return original_build_tool_index_item(tool_info, **kwargs)
 
         monkeypatch.setattr(tool_routes, "_build_tool_index_item", counted_build_tool_index_item)
 

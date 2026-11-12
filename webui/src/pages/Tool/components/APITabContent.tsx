@@ -41,6 +41,8 @@ interface APITabContentProps {
   onRefreshTools: () => Promise<void>;
   onServiceCountChange?: (count: number) => void;
   refreshKey?: number;
+  /** Open this service's detail panel; a new nonce repeats the request. */
+  focusService?: { id: string; nonce: number } | null;
   viewMode?: 'list' | 'cards';
   catalogEntries: MCPCatalogEntry[];
   catalogCategories: Record<string, MCPCatalogCategory>;
@@ -58,6 +60,7 @@ export default function APITabContent({
   onRefreshTools,
   onServiceCountChange,
   refreshKey,
+  focusService,
   viewMode = 'list',
   catalogEntries,
   catalogCategories,
@@ -106,6 +109,14 @@ export default function APITabContent({
   useEffect(() => {
     fetchServices();
   }, [fetchServices, refreshKey]);
+
+  // The panel renders once the service is in the loaded list, so the request
+  // may arrive before the first fetch has finished.
+  const focusServiceId = focusService?.id;
+  const focusServiceNonce = focusService?.nonce;
+  useEffect(() => {
+    if (focusServiceId) setSelectedServiceId(focusServiceId);
+  }, [focusServiceId, focusServiceNonce]);
 
   const selectedService = useMemo(
     () => (selectedServiceId ? services.find((service) => service.id === selectedServiceId) ?? null : null),
