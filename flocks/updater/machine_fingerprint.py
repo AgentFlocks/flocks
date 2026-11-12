@@ -1,16 +1,24 @@
 """
 This machine, as the enterprise core names it.
 
-The enterprise core (flockspro ``go/internal/activation/machine.go``) identifies the host by a digest
-of the identifier the operating system keeps for it, and holds a licence Console bound to that digest
-to this host. An application for a licence sends the same digest, so Console can bind the licence it
-issues to the machine the application came from: a copy of the licence on another machine is then no
-licence there. The raw identifier never leaves this module; Console sees only the digest.
+The enterprise core (flockspro ``go/internal/activation``) names the host by its device id where it can read
+it: the fingerprint the company's other products license hosts by, computed as the company's libdevid computes
+it on its default path -- the MD5 of the device type ``flocks`` and the host's SMBIOS system UUID as dmidecode
+prints it, in lower case (on an AWS Xen host, its board asset tag or hypervisor UUID), in hex
+(``flockspro go/internal/devid``).
+Where it cannot read that, it names the host by a digest of the identifier the operating system keeps for it, the
+way every request did before the device id. An application for a licence sends the same fingerprint, so Console
+can bind the licence it issues to the machine the application came from; the core holds a licence bound to
+either of a host's fingerprints to that host, so licences issued before the device id keep working there.
 
-A host that keeps no identifier (a container without /etc/machine-id) has no digest, and Console shows
-the operator that the licence cannot be bound. One whose identifier cannot be read now (a file it may
-not read, ioreg failing) raises ``MachineIdUnreadable`` instead: an application then waits until it
-can be read, rather than go out as one that cannot be bound by accident.
+Both are 32 lower-case hex digits, the shape Console takes. The raw identifiers never leave this module.
+
+On Linux only root may read the SMBIOS table: a process without root has no device id and names the host by
+the digest, as the core run by its service account does unless root recorded the device id for it. A host
+that keeps no identifier (a container without /etc/machine-id) has no fingerprint, and Console shows the
+operator that the licence cannot be bound. One whose identifier cannot be read now (a file it may not read,
+ioreg failing) raises ``MachineIdUnreadable`` instead: an application then waits until it can be read, rather
+than go out as one that cannot be bound by accident.
 """
 
 from __future__ import annotations
@@ -26,40 +34,23 @@ _DOMAIN = b"flocks-machine/1\x00"
 _PLATFORM_UUID = re.compile(r'"IOPlatformUUID"\s*=\s*"([^"]+)"')
 #: Where Linux keeps the machine id; older distributions keep only the D-Bus copy.
 LINUX_MACHINE_ID_FILES = (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id"))
+#: The device type Flocks hashes into its device id: each product has its own.
+DEV_TYPE = "flocks"
+#: What dmidecode prints for a UUID the firmware leaves all zeros or all ones: neither names a host.
+_PLACEHOLDER_UUIDS = frozenset({"", "Not Settable", "Not Present"})
+#: Where Linux exposes the SMBIOS tables (root only) and an AWS Xen host its identifiers (anyone).
+LINUX_SMBIOS_ENTRY_POINT = Path("/sys/firmware/dmi/tables/smbios_entry_point")
+LINUX_SMBIOS_TABLE = Path("/sys/firmware/dmi/tables/DMI")
+LINUX_HYPERVISOR_UUID = Path("/sys/hypervisor/uuid")
+LINUX_BOARD_ASSET_TAG = Path("/sys/devices/virtual/dmi/id/board_asset_tag")
+
+#: What a fingerprint is (the core's activation.MachineKind*): the device id, or the machine-id digest.
+KIND_DEVID = "devid"
+KIND_MACHINE_ID = "machine-id"
 
 
 class MachineIdUnreadable(RuntimeError):
     """The host keeps an identifier, and it cannot be read now; ``str()`` says why."""
-
-
-def _machine_id() -> str:
-    if sys.platform.startswith("linux"):
-        for path in LINUX_MACHINE_ID_FILES:
-            try:
-                text = path.read_text(encoding="utf-8").strip()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise MachineIdUnreadable(f"读不了 {path}：{exc}") from exc
-            if text:
-                return text
-        return ""
-    if sys.platform == "darwin":
-        try:
-            # The absolute path keeps a PATH entry from standing in for it, as in the core.
-            result = subprocess.run(
-                ["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
-                capture_output=True, text=True, timeout=10, check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise MachineIdUnreadable(f"ioreg 没有运行成功：{exc}") from exc
-        match = _PLATFORM_UUID.search(result.stdout or "")
-        if result.returncode != 0 or match is None:
-            # Every Mac has a platform UUID: not finding it is a failure, not a host without one.
-            raise MachineIdUnreadable(f"ioreg 没有给出 IOPlatformUUID（退出码 {result.returncode}）")
-        return match.group(1)
-    # The enterprise edition runs on Linux and macOS only.
-    return ""
 
 
 def fingerprint_of(raw: str) -> str:
@@ -70,8 +61,134 @@ def fingerprint_of(raw: str) -> str:
     return hashlib.sha256(_DOMAIN + text.encode("utf-8")).hexdigest()[:32]
 
 
+def device_id_of(source: str) -> str:
+    """The device id of what it hashes (the SMBIOS UUID, or an AWS host's identifier), as the core computes
+    it, in lower case: libdevid prints the same digits in upper case."""
+    return hashlib.md5((DEV_TYPE + source).encode("utf-8"), usedforsecurity=False).hexdigest()
+
+
+def format_smbios_uuid(raw: bytes, major: int, minor: int) -> str:
+    """A 16-byte SMBIOS UUID as dmidecode prints it and libdevid hashes it: all ones "Not Present", all zeros
+    "Not Settable"; from SMBIOS 2.6 the first three fields little-endian; lower-case hex in 8-4-4-4-12 groups.
+    "" for too few."""
+    if len(raw) < 16:
+        return ""
+    data = bytearray(raw[:16])
+    if data == b"\xff" * 16:
+        return "Not Present"
+    if data == b"\x00" * 16:
+        return "Not Settable"
+    if major > 2 or (major == 2 and minor >= 6):
+        data[0:4] = data[0:4][::-1]
+        data[4:6] = data[4:6][::-1]
+        data[6:8] = data[6:8][::-1]
+    text = data.hex()
+    return f"{text[0:8]}-{text[8:12]}-{text[12:16]}-{text[16:20]}-{text[20:32]}"
+
+
+def smbios_system_uuid(table: bytes, major: int, minor: int) -> str:
+    """The UUID of the System Information structure (type 1) in a raw SMBIOS structure table, as dmidecode
+    prints it; "" when there is none. Firmware's table is read defensively: a structure claiming more than
+    is there ends the walk."""
+    uuid, p = "", 0
+    while p + 4 <= len(table):
+        kind, length = table[p], table[p + 1]
+        if length < 4 or p + length > len(table):
+            break
+        # The UUID came with SMBIOS 2.1, which made the structure 0x19 long.
+        if kind == 1 and length >= 0x19:
+            uuid = format_smbios_uuid(table[p + 8 : p + 24], major, minor)
+        if kind == 127:  # end of table
+            break
+        # The formatted area is followed by the structure's strings, which end with two NULs.
+        nxt = p + length
+        while nxt + 1 < len(table) and (table[nxt] != 0 or table[nxt + 1] != 0):
+            nxt += 1
+        p = nxt + 2
+    return uuid
+
+
+def _first_line(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0].strip()
+    except OSError:
+        return ""
+
+
+def _linux_device_id() -> str:
+    """This Linux host's device id, "" where it cannot be read as the host's own: without root the SMBIOS
+    table is closed, and a UUID the firmware leaves unset names no host."""
+    hypervisor = _first_line(LINUX_HYPERVISOR_UUID)
+    if hypervisor[:3].lower() == "ec2":
+        return device_id_of(_first_line(LINUX_BOARD_ASSET_TAG) or hypervisor)
+    major, minor = 2, 6
+    try:
+        entry = LINUX_SMBIOS_ENTRY_POINT.read_bytes()
+    except OSError:
+        entry = b""
+    if len(entry) >= 9 and entry[:5] == b"_SM3_":
+        major, minor = entry[7], entry[8]
+    elif len(entry) >= 8 and entry[:4] == b"_SM_":
+        major, minor = entry[6], entry[7]
+    try:
+        table = LINUX_SMBIOS_TABLE.read_bytes()
+    except OSError:
+        return ""
+    uuid = smbios_system_uuid(table, major, minor)
+    return "" if uuid in _PLACEHOLDER_UUIDS else device_id_of(uuid)
+
+
+def _linux_machine_id() -> str:
+    for path in LINUX_MACHINE_ID_FILES:
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise MachineIdUnreadable(f"读不了 {path}：{exc}") from exc
+        if text:
+            return text
+    return ""
+
+
+def _platform_uuid() -> str:
+    try:
+        # The absolute path keeps a PATH entry from standing in for it, as in the core.
+        result = subprocess.run(
+            ["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise MachineIdUnreadable(f"ioreg 没有运行成功：{exc}") from exc
+    match = _PLATFORM_UUID.search(result.stdout or "")
+    if result.returncode != 0 or match is None:
+        # Every Mac has a platform UUID: not finding it is a failure, not a host without one.
+        raise MachineIdUnreadable(f"ioreg 没有给出 IOPlatformUUID（退出码 {result.returncode}）")
+    return match.group(1)
+
+
+def machine_identity() -> tuple[str, str]:
+    """This host's fingerprint and what it is (``KIND_DEVID`` or ``KIND_MACHINE_ID``): the device id where it
+    can be read, else the machine-id digest; ("", "") where the host keeps no identifier. Raises
+    ``MachineIdUnreadable`` when the device id cannot be read and the machine id there cannot be either.
+    Blocking (ioreg runs up to 10 seconds): call it off the event loop."""
+    if sys.platform.startswith("linux"):
+        device = _linux_device_id()
+        if device:
+            return device, KIND_DEVID
+        digest = fingerprint_of(_linux_machine_id())
+        return (digest, KIND_MACHINE_ID) if digest else ("", "")
+    if sys.platform == "darwin":
+        # A Mac keeps no SMBIOS table a process can read: its platform UUID stands in, as in the core, in
+        # the lower case libdevid hashes a UUID in (ioreg prints it in upper).
+        uuid = _platform_uuid()
+        if uuid.strip() not in _PLACEHOLDER_UUIDS:
+            return device_id_of(uuid.lower()), KIND_DEVID
+        return fingerprint_of(uuid), KIND_MACHINE_ID
+    # Windows and the rest: applications from here go out unbound, as they always have.
+    return "", ""
+
+
 def machine_fingerprint() -> str:
-    """This host's digest; "" where it keeps no identifier (a container without /etc/machine-id).
-    Raises ``MachineIdUnreadable`` when it keeps one that cannot be read now. Blocking (ioreg runs up
-    to 10 seconds): call it off the event loop."""
-    return fingerprint_of(_machine_id())
+    """This host's fingerprint (``machine_identity``); "" where it keeps no identifier."""
+    return machine_identity()[0]
