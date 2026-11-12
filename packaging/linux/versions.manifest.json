@@ -9,8 +9,8 @@
     "CXXABI": "1.3.11"
   },
   "python": {
-    "version": "3.12.12",
-    "python_build_standalone_release": "20251202",
+    "version": "3.12.16",
+    "python_build_standalone_release": "20261026",
     "archive_template": "cpython-{version}+{release}-{triple}-unknown-linux-gnu-install_only_stripped.tar.gz",
     "base_url": "https://github.com/astral-sh/python-build-standalone/releases/download"
   },

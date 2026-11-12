@@ -9,9 +9,13 @@ AI-Native SecOps Platform
 # runtime modules, which has to be in place before the first of them is
 # imported (flocks/db_backend.py).
 from flocks import startup_env as _startup_env
+from flocks import ca_certs as _ca_certs
 from flocks import db_backend as _db_backend
 
 _startup_env.load()
+# Root certificates where OpenSSL's defaults find none (RHEL 8 and its kin,
+# flocks/ca_certs.py); after the .env, which may name its own.
+_ca_certs.ensure()
 _db_backend.install()
 
 from importlib.metadata import version, PackageNotFoundError
