@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "commit": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
+  "parents": [
+    "818bb2365217df74b29b99c9afbb99049f7eeba0",
+    "730da6897fbcd85d0b67e22cf13ecd4531161b9d"
+  ],
+  "checkedRuntimePaths": 7114,
+  "excludedSourceOnlyGuard": [
+    "flocks/cli/commands/update.py",
+    "flocks/updater/deploy.py",
+    "flocks/updater/source_branch.py",
+    "flocks/updater/updater.py"
+  ],
+  "runtimeMismatches": [],
+  "addonChecked": 97,
+  "addonMismatches": [],
+  "minimumBranchSmoke": {
+    "coreSource": "/Users/yinzhongchao/Documents/ChatGPT/flocks 增强程序/.work/zw_dev",
+    "log": ".work/zw-dev-native-smoke.log",
+    "passed": 7,
+    "failed": 0,
+    "durationSeconds": 5.82,
+    "cases": [
+      "tests/test_pro_monitor.py (5 tests: native PG transaction/rollback, JSON/date, disabled scheduler, sync read path, leased dispatch exact-once)",
+      "tests/monitoring/test_monitoring.py::test_daily_reservation_concurrent_recovery_midnight (12 simultaneous reservations, 10s bound)",
+      "tests/monitoring/test_round_endings.py::test_concurrent_finish_calls_do_not_duplicate_end_marker (6 concurrent terminal publications)"
+    ],
+    "sourceLoadedEvidence": ".work/zw_dev/flocks/hooks/types.py:15 appears in the actual test output; runner explicitly used FLOCKS_TEST_CORE_SOURCE=.work/zw_dev",
+    "branchRemainedClean": true
+  },
+  "reusableEvidence": [
+    {
+      "path": ".work/webui-tests.log",
+      "result": "2968 frontend tests passed",
+      "reason": "All tracked/untracked runtime WebUI inputs in scope are byte-identical; the Pro registry and dependency lock are unchanged."
+    },
+    {
+      "path": ".work/sqlite-feature-tests.log",
+      "result": "1574 source feature/monitoring tests passed",
+      "reason": "All tested feature runtime paths are byte-identical; these suites exclude the separate source-only updater guard."
+    },
+    {
+      "path": ".work/pg-verification-summary.json",
+      "result": "Every observed PG failure resolved by focused passing evidence; 10 explicitly scoped skips; no one-shot all-green complete rerun claimed",
+      "reason": "Verified runtime and all 97 addon files match branch bytes. The fresh seven-test branch smoke verifies the native import/lease/concurrency boundaries."
+    }
+  ],
+  "limits": [
+    "The source-only updater guard in four excluded files is separate from the Pro payload and inherited feature evidence. Its branch-specific tests belong to the merge/integration owner.",
+    "A production frontend bundle must be rebuilt from the committed branch to record that branch identity; identical source permits reusing behavioral tests, not relabeling an old build manifest.",
+    "Installer/package derivation and actual 5173 acceptance are outside this read-only runtime equivalence check.",
+    "No later dev 8655 root-certificate changes were merged; parents are 818bb236 and the verified 730da689 release base."
+  ]
+}

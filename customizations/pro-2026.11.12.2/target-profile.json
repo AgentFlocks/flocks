@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "packageVersion": "1.14.0",
+  "developmentBranch": "zw_dev",
+  "sourceRepository": "AgentFlocks/flocksdev",
+  "sourceCommit": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
+  "deploymentMode": "source-overlay",
+  "edition": "flockspro",
+  "releaseId": "2026.11.12.2-linux-amd64",
+  "version": "2026.11.12.2",
+  "proCommit": "2ee622ba0a05e0dda157ea80739da583de2733c6",
+  "coreCommit": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
+  "protection": "native",
+  "frontendSources": {
+    "flocks": "6bdc2b83de483d4f8366f3368a3b91f95c1523f6fcaff42c2ee92e92709d83e7",
+    "flockspro": "bd1ac6bbdad2b3388755de296388d1e1b2d6155769dbc8083997dc894f8c594d"
+  },
+  "previousCustomization": "1.13.0"
+}

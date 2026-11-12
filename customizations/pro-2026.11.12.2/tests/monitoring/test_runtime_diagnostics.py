@@ -1,0 +1,431 @@
+import asyncio
+import json
+import logging
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+from fastapi import FastAPI
+import httpx
+
+from flocks.monitoring import diagnostics as diag
+from flocks.monitoring.adapter import XdrAdapter, ContractError
+from flocks.monitoring.models import COMPONENT_ID, MonitoringPolicy
+from flocks.server.routes import security_monitoring as api
+from flocks.tool.registry import Tool, ToolContext, ToolInfo, ToolRegistry, ToolResult, ToolParameter, ParameterType
+
+
+class Capture:
+    def __init__(self):
+        self.records = []
+
+    def submit(self, fields):
+        self.records.append(diag.safe_record(fields))
+
+    def snapshot(self):
+        return self.records[:], {'queued': 0, 'write_errors': 0, 'queue_dropped': 0}
+
+
+@pytest.fixture
+def captured(monkeypatch):
+    sink = Capture()
+    monkeypatch.setattr(diag, '_sink', sink)
+    return sink.records
+
+
+def adapter(monkeypatch, result):
+    policy = MonitoringPolicy(owner='owner', project='project', directory='.',
+                              devices=['private-device'], tool='sangfor_xdr_incidents')
+    monkeypatch.setattr(ToolRegistry, 'get', lambda *a: SimpleNamespace(info=SimpleNamespace(enabled=True, requires_confirmation=False)))
+    async def execute(name, ctx, **params):
+        ctx._output_capture.accept(name, result)
+        return result
+    monkeypatch.setattr(ToolRegistry, 'execute', execute)
+    return XdrAdapter(policy, 'private-session')
+
+
+@pytest.mark.parametrize('output,reason,kind', [
+    ('<html>secret-cookie-token</html>', 'non_json', 'html'),
+    ('```json\n{"secret":"token"}\n```', 'non_json', 'fenced'),
+    ('', 'non_json', 'empty'),
+    ('[]', 'not_object', None),
+    ('{"code":401,"message":"secret-cookie-token"}', 'business_error', None),
+])
+async def test_response_failures_are_distinct_without_body_leak(monkeypatch, captured, output, reason, kind):
+    client = adapter(monkeypatch, ToolResult(success=True, output=output))
+    async with diag.trace_scope('owner', COMPONENT_ID, 'private-execution'):
+        with pytest.raises(ContractError):
+            await client.call('private-device', {'action': 'list'}, 'private-message')
+    failure = next(row for row in captured if row['event'] == 'adapter.failure')
+    assert failure['reason'] == reason
+    if kind:
+        assert failure['text_kind'] == kind
+        assert 'json_position' in failure
+    text = json.dumps(captured)
+    assert 'secret' not in text and 'private-' not in text
+    assert len({r['trace'] for r in captured}) == 1
+    assert failure['call'] == 1
+
+
+async def test_real_tool_display_truncation_preserves_machine_result(monkeypatch, tmp_path, captured):
+    from flocks.tool import truncation
+    output_dir = tmp_path / 'truncated'
+    output_dir.mkdir()
+    monkeypatch.setattr(truncation, '_OUTPUT_DIR', output_dir)
+    monkeypatch.setattr(truncation, '_last_cleanup_ts', 0)
+    payload = {'code': 'Success', 'data': {'list': [{'uuId': str(i), 'name': 'CUSTOMER_SECRET' * 200} for i in range(100)]}}
+    async def handler(ctx, action):
+        assert action == 'list'
+        return ToolResult(success=True, output=payload)
+    tool = Tool(ToolInfo(name='sangfor_xdr_incidents', description='Fixture',
+                         parameters=[ToolParameter(name='action', type=ParameterType.STRING)]), handler)
+    client = adapter(monkeypatch, None)
+    async def execute(name, ctx, **params):
+        ctx.extra['monitor_resolved_device'] = params['device_id']
+        return await tool.execute(ctx, action=params['action'])
+    monkeypatch.setattr(ToolRegistry, 'execute', execute)
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
+        value = await client.call('private-device', {'action': 'list'}, 'message')
+    assert value == payload
+    raw = next(r for r in captured if r['event'] == 'tool.raw')
+    normalized = next(r for r in captured if r['event'] == 'tool.normalized')
+    structured = next(r for r in captured if r['event'] == 'adapter.structured')
+    assert raw['value_type'] == 'dict' and raw['items'] == 100 and not raw['truncated']
+    assert normalized['value_type'] == 'str' and not normalized['truncated'] and not normalized['has_saved_output']
+    assert not list(output_dir.glob('*'))
+    assert structured['value_type'] == 'dict' and structured['items'] == 100
+    assert not any(r['event'] == 'adapter.failure' for r in captured)
+    assert raw['call'] == normalized['call'] == structured['call']
+    assert 'CUSTOMER_SECRET' not in json.dumps(captured)
+    assert str(output_dir) not in json.dumps(captured)
+
+
+async def test_tool_error_and_success_contract_are_unchanged(monkeypatch, captured):
+    client = adapter(monkeypatch, ToolResult(success=False, error='Authorization: secret'))
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
+        with pytest.raises(ContractError, match='设备查询失败'):
+            await client.call('private-device', {'action': 'list'}, 'message')
+    assert any(r.get('reason') == 'tool_failed' for r in captured)
+    client = adapter(monkeypatch, ToolResult(success=True, output='{"data":{"list":[],"total":0}}'))
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution2'):
+        value = await client.call('private-device', {'action': 'list'}, 'message')
+    assert value == {'data': {'list': [], 'total': 0}}
+    assert 'secret' not in json.dumps(captured)
+
+
+async def test_cancellation_terminal_and_monotonic_timing(captured):
+    entered = asyncio.Event()
+    async def work():
+        async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
+            with diag.span('tool.handler'):
+                entered.set()
+                await asyncio.sleep(60)
+    task = asyncio.create_task(work())
+    await entered.wait()
+    await asyncio.sleep(.015)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert captured[-1]['event'] == 'trace.end' and captured[-1]['outcome'] == 'cancelled'
+    assert captured[-1]['duration_ms'] >= 10
+    assert any(r.get('stage') == 'tool.handler' and r.get('outcome') == 'cancelled' for r in captured)
+    assert diag._current.get() is None
+
+
+async def test_event_budget_reserves_failure_and_terminal(captured):
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
+        for _ in range(1000):
+            diag.event('adapter.result', **diag.shape('safe'))
+        for _ in range(100):
+            diag.event('adapter.failure', failure=True, reason='non_json')
+        diag.result('failed')
+    assert len(captured) <= diag.MAX_EVENTS + diag.MAX_ERRORS + 2
+    assert any(r.get('reason') == 'non_json' for r in captured)
+    assert captured[-1]['outcome'] == 'failed' and captured[-1]['suppressed'] > 0
+
+
+async def test_broken_sink_does_not_change_business(monkeypatch):
+    def fail(*args, **kwargs):
+        raise OSError('secret disk path')
+    monkeypatch.setattr(diag._sink, 'submit', fail)
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
+        with diag.span('run'):
+            diag.result('completed')
+    assert diag._current.get() is None
+
+
+async def test_symlink_logs_survive_restart_and_export_only_owner(tmp_path, monkeypatch):
+    target = tmp_path / 'data' / 'flocks'
+    target.mkdir(parents=True)
+    link = tmp_path / 'linked-flocks'
+    link.symlink_to(target, target_is_directory=True)
+    monkeypatch.setenv('FLOCKS_LOG_DIR', str(link / 'logs'))
+    sink = diag.Sink()
+    monkeypatch.setattr(diag, '_sink', sink)
+    for owner in ('owner', 'other'):
+        async with diag.trace_scope(owner, COMPONENT_ID, 'execution'):
+            diag.result('completed')
+    await asyncio.wait_for(asyncio.to_thread(sink.pending.join), 2)
+    path = target / 'logs/security-monitor/diagnostics.jsonl'
+    assert path.is_file() and path.stat().st_mode & 0o777 == 0o600
+    monkeypatch.setattr(diag, '_sink', Capture())  # emulate empty memory after restart
+    bundle = await asyncio.to_thread(diag.export_bundle, 'owner', COMPONENT_ID)
+    assert bundle['record_count'] == 3
+    assert all(r['owner'] == diag.opaque('owner') for r in bundle['records'])
+    assert diag.opaque('other') not in json.dumps(bundle)
+    assert str(tmp_path) not in json.dumps(bundle)
+
+
+def test_private_rotation_is_bounded(tmp_path):
+    path = tmp_path / 'diagnostics.jsonl'
+    handler = diag._PrivateFileHandler(path, maxBytes=500, backupCount=3, encoding='utf-8')
+    try:
+        for _ in range(100):
+            handler.emit(logging.LogRecord('fixture', 20, '', 0, json.dumps({'data': 'x' * 90}), (), None))
+    finally:
+        handler.close()
+    files = list(tmp_path.glob('diagnostics.jsonl*'))
+    assert len(files) == 4 and all(f.stat().st_size < 500 for f in files)
+
+
+def test_queue_full_is_nonblocking_and_export_has_health(monkeypatch, tmp_path):
+    sink = diag.Sink()
+    sink.started = True  # a stuck disk worker must not block the producer
+    monkeypatch.setattr(diag, '_sink', sink)
+    monkeypatch.setenv('FLOCKS_LOG_DIR', str(tmp_path / 'missing'))
+    trace = diag.Trace('owner', COMPONENT_ID, 'execution')
+    for _ in range(600):
+        trace.emit('progress', terminal=True)
+    assert sink.pending.qsize() == 512 and sink.dropped == 88
+    bundle = diag.export_bundle('owner', COMPONENT_ID)
+    assert bundle['health']['queue_dropped'] == 88 and bundle['record_count'] == 600
+
+
+async def test_disk_write_failure_preserves_business_and_memory_export(monkeypatch, tmp_path):
+    sink = diag.Sink()
+    monkeypatch.setattr(diag, '_sink', sink)
+    blocked = tmp_path / 'not-a-directory'
+    blocked.write_text('fixture')
+    monkeypatch.setenv('FLOCKS_LOG_DIR', str(blocked))
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
+        diag.result('completed')
+    await asyncio.wait_for(asyncio.to_thread(sink.pending.join), 2)
+    bundle = await asyncio.to_thread(diag.export_bundle, 'owner', COMPONENT_ID)
+    assert bundle['record_count'] == 3
+    assert bundle['health']['write_errors'] == 3 and bundle['health']['read_errors'] == 4
+    assert bundle['records'][-1]['outcome'] == 'completed'
+
+
+async def test_download_endpoint_auth_and_owner_scope(monkeypatch, captured):
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
+        diag.result('failed')
+    app = FastAPI()
+    app.include_router(api.router)
+    # Keep the actual route dependency: a request without an authenticated user
+    # must not download diagnostics from the shared data directory.
+    from flocks.auth.context import set_current_auth_user, reset_current_auth_user
+    token = set_current_auth_user(None)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+            response = await client.get('/monitoring/host-security-monitor/diagnostics')
+            assert response.status_code == 401
+    finally:
+        reset_current_auth_user(token)
+    for owner, expected in (('owner', 3), ('other', 0)):
+        response = await api.diagnostics(user=SimpleNamespace(id=owner))
+        assert json.loads(response.body)['record_count'] == expected
+        assert response.headers['cache-control'] == 'no-store'
+        assert 'attachment;' in response.headers['content-disposition']
+
+
+def test_export_schema_discards_body_and_unknown_fields(tmp_path, monkeypatch, captured):
+    monkeypatch.setenv('FLOCKS_LOG_DIR', str(tmp_path))
+    root = tmp_path / 'security-monitor'
+    root.mkdir()
+    row = dict(trace='a' * 32, seq=1, event='adapter.failure', owner=diag.opaque('owner'), scope=diag.opaque(COMPONENT_ID),
+               reason='non_json', body='SECRET', token='SECRET', stage='SECRET', error_type='SECRET=/private/host')
+    (root / 'diagnostics.jsonl').write_text(json.dumps(row) + '\n' + '{invalid\n')
+    bundle = diag.export_bundle('owner', COMPONENT_ID)
+    assert bundle['record_count'] == 1 and 'SECRET' not in json.dumps(bundle)
+
+
+@pytest.mark.parametrize('failure', [False, True])
+async def test_mail_configuration_diagnostics_capture_result_without_form_data(monkeypatch, captured, failure):
+    from fastapi import HTTPException
+    from flocks.monitoring import mailflow
+    configure = AsyncMock(side_effect=TypeError('SECRET_MAIL_CONTENT') if failure else None)
+    monkeypatch.setattr(mailflow, 'configure', configure)
+    monkeypatch.setattr(api, 'snapshot', AsyncMock(return_value={}))
+    monkeypatch.setattr(api, 'resolve_day', AsyncMock(return_value='2026-09-25'))
+    request = mailflow.MailSettingsRequest(enabled=True, recipient_email='secret@example.com', responsible_name='SECRET_NAME')
+    if failure:
+        with pytest.raises(HTTPException) as exc:
+            await api.mail_settings(request, user=SimpleNamespace(id='owner'))
+        assert exc.value.status_code == 500
+    else:
+        await api.mail_settings(request, user=SimpleNamespace(id='owner'))
+    bundle = diag.export_bundle('owner', COMPONENT_ID)
+    stage = next(r for r in bundle['records'] if r.get('stage') == 'mail.configure' and r['event'] == 'stage.end')
+    assert stage['outcome'] == ('error' if failure else 'ok')
+    if failure:
+        assert stage['error_type'] == 'TypeError'
+    assert not diag.export_bundle('other', COMPONENT_ID)['records']
+    raw = json.dumps(bundle)
+    assert 'SECRET' not in raw and 'secret@example.com' not in raw
+
+
+async def test_mail_snapshot_failure_exports_only_exception_type(monkeypatch, captured):
+    from flocks.monitoring import mailflow
+    monkeypatch.setattr(mailflow, 'diagnostic_state', AsyncMock(side_effect=TypeError('SECRET_MAIL_CONTENT')))
+    response = await api.diagnostics(user=SimpleNamespace(id='owner'))
+    data = json.loads(response.body)
+    assert data['mail'] == {'snapshot_available': False, 'error_type': 'TypeError'}
+    assert 'SECRET' not in json.dumps(data)
+
+
+def test_export_reports_installed_versions_not_bundled_fallback(monkeypatch, captured):
+    from flocks.hub import local
+    from flocks.monitoring import agent_component
+    monkeypatch.setattr(local, 'get_record', lambda kind, key: SimpleNamespace(version='2.4.1') if kind == 'component' else None)
+    monkeypatch.setattr(agent_component, 'diagnostic_state', lambda: {'installed': True, 'version': '1.2.3'})
+    bundle = diag.export_bundle('owner', COMPONENT_ID)
+    assert bundle['component_version'] == '2.4.1'
+    assert bundle['build']['agent']['version'] == '1.2.3'
+    assert len(bundle['build']['monitor_source_sha256']) == 64
+    monkeypatch.setattr(local, 'get_record', lambda *args: None)
+    assert diag.export_bundle('owner', COMPONENT_ID)['component_version'] is None
+
+
+def test_model_and_mail_diagnostics_keep_only_bounded_metadata():
+    record = diag.safe_record({'event': 'investigation.validation', 'model_id': 'provider/model-1',
+        'model_provider': 'compatible', 'request_max_tokens': 3000, 'input_tokens': 42,
+        'output_tokens': 19, 'error_kind': 'model_format', 'validation_field': 'capability',
+        'validation_code': 'wrong_device', 'mail_stage': 'authenticate',
+        'mail_direction': 'receive', 'consecutive_failures': 4,
+        'raw_reply': 'PRIVATE', 'token': 'PRIVATE', 'validation_input': 'PRIVATE'})
+    assert record['model_id'] == 'provider/model-1'
+    assert record['validation_code'] == 'wrong_device'
+    assert record['mail_stage'] == 'authenticate'
+    assert 'PRIVATE' not in json.dumps(record)
+    for value in ['https://provider.invalid?api_key=PRIVATE', 'Authorization: Bearer PRIVATE', 'x' * 129]:
+        assert not diag.safe_record({'model_id': value, 'model_provider': value})
+
+
+@pytest.fixture
+async def real_sink(monkeypatch):
+    sink = diag.Sink()
+    monkeypatch.setattr(diag, '_sink', sink)
+    yield sink
+    await asyncio.wait_for(asyncio.to_thread(sink.pending.join), 2)
+
+
+async def test_trace_reserved_fields_cannot_drop_or_reassign_record(real_sink):
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution') as trace:
+        diag.event('investigation.model', duration_ms=7, elapsed_ms=999999,
+                   owner=diag.opaque('other'), scope=diag.opaque('other'),
+                   trace='a' * 32, seq=999, call=888, event='trace.start')
+    await asyncio.wait_for(asyncio.to_thread(real_sink.pending.join), 2)
+    bundle = diag.export_bundle('owner', COMPONENT_ID)
+    model = next(row for row in bundle['records'] if row['event'] == 'investigation.model')
+    assert model['trace'] == trace.id and model['seq'] == 2
+    assert model['duration_ms'] == 7 and model['elapsed_ms'] < 999999
+    assert 'call' not in model and model['owner'] == diag.opaque('owner')
+    assert bundle['record_count'] == 3 and bundle['health']['field_conflicts'] == 7
+    assert bundle['health']['record_errors'] == bundle['health']['write_errors'] == 0
+    assert not diag.export_bundle('other', COMPONENT_ID)['records']
+
+
+async def test_model_choice_reaches_real_sink_and_disk(monkeypatch, real_sink, tmp_path):
+    from flocks.monitoring import investigation as i
+    agent = SimpleNamespace(model=None, prompt='SECRET_AGENT_PROMPT')
+    monkeypatch.setattr(i.Agent, 'get', AsyncMock(return_value=agent))
+    monkeypatch.setattr(i.Config, 'resolve_default_llm', AsyncMock(return_value={
+        'provider_id': 'fixture', 'model_id': 'fixture-model'}))
+    monkeypatch.setattr(i.Provider, 'apply_config', AsyncMock())
+    response = SimpleNamespace(tool_calls=[], finish_reason='stop',
+        content=i.Choice(action='query', capability='cap-1', reason='SECRET_REASON').model_dump_json(),
+        usage={'prompt_tokens': 42, 'completion_tokens': 11, 'total_tokens': 53})
+    chat = AsyncMock(return_value=response)
+    monkeypatch.setattr(i.Provider, 'get', lambda _: SimpleNamespace(chat=chat))
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
+        assert (await i.choose('fixture-monitor', {'private': 'SECRET_INPUT'})).action == 'query'
+        chat.side_effect = httpx.ReadTimeout('SECRET_ENDPOINT_TOKEN')
+        with pytest.raises(i.InvestigationError, match='超时'):
+            await i.choose('fixture-monitor', {})
+    await asyncio.wait_for(asyncio.to_thread(real_sink.pending.join), 2)
+    path = tmp_path / 'logs/security-monitor/diagnostics.jsonl'
+    disk = [json.loads(line) for line in path.read_text().splitlines()]
+    records = [row for row in disk if row['event'] == 'investigation.model']
+    assert len(records) == 2 and [row['seq'] for row in records] == [2, 3]
+    assert all('duration_ms' in row and 'elapsed_ms' in row for row in records)
+    assert records[0]['model_stop'] == 'stop' and records[0]['total_tokens'] == 53
+    assert records[1]['model_failure'] == 'timeout' and records[1]['error_type'] == 'ReadTimeout'
+    assert records[1]['success'] is False and chat.await_count == 2
+    assert 'SECRET' not in json.dumps(disk)
+    bundle = diag.export_bundle('owner', COMPONENT_ID)
+    assert bundle['record_count'] == 4 and bundle['health']['record_errors'] == 0
+
+
+@pytest.mark.parametrize('status,category', [(400, 'request'), (401, 'authentication'),
+    (403, 'permission'), (408, 'timeout'), (429, 'rate_limit'), (503, 'unavailable'), (504, 'timeout')])
+async def test_provider_failure_metadata_is_safe_and_persisted(real_sink, status, category):
+    class ProviderError(Exception):
+        status_code = status
+        request_id = 'SECRET_REQUEST_ID'
+    wrapped = RuntimeError('SECRET_WRAPPER_BODY')
+    wrapped.__cause__ = ProviderError('SECRET_CREDENTIAL')
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
+        diag.event('investigation.model', failure=True, **diag.model_error(wrapped))
+    await asyncio.wait_for(asyncio.to_thread(real_sink.pending.join), 2)
+    record = next(row for row in diag.export_bundle('owner', COMPONENT_ID)['records']
+                  if row['event'] == 'investigation.model')
+    assert record['model_failure'] == category and record['http_status'] == status
+    assert record['error_type'] == 'RuntimeError' and record['cause_error_type'] == 'ProviderError'
+    assert record['request_id_hash'] == diag.opaque('SECRET_REQUEST_ID')
+    assert 'SECRET' not in json.dumps(record)
+
+
+@pytest.mark.parametrize('location', ['record', 'trace'])
+async def test_diagnostic_construction_failure_is_observable_and_nonblocking(real_sink, monkeypatch, location):
+    def fail(*args, **kwargs):
+        raise RuntimeError('SECRET_CREDENTIAL')
+    with monkeypatch.context() as patch:
+        if location == 'record':
+            patch.setattr(diag, 'safe_record', fail)
+        else:
+            patch.setattr(diag, 'datetime', SimpleNamespace(now=fail))
+        diag.Trace('owner', COMPONENT_ID, 'execution').emit('progress')
+    diag.Trace('owner', COMPONENT_ID, 'execution').emit('progress')
+    await asyncio.wait_for(asyncio.to_thread(real_sink.pending.join), 2)
+    bundle = diag.export_bundle('owner', COMPONENT_ID)
+    assert bundle['health']['record_errors'] == 1 and bundle['record_count'] == 1
+    assert 'SECRET' not in json.dumps(bundle)
+
+
+def test_provider_failure_properties_and_unknown_status_are_not_trusted():
+    class BrokenMetadata(Exception):
+        @property
+        def status_code(self):
+            raise ValueError('SECRET_ERROR')
+    assert diag.model_error(BrokenMetadata('SECRET_BODY')) == {
+        'error_type': 'BrokenMetadata', 'model_failure': 'other'}
+    assert diag.safe_record({'http_status': 9999, 'request_id_hash': 'SECRET',
+                             'model_failure': 'SECRET', 'cause_error_type': 'SECRET TOKEN'}) == {}
+
+
+async def test_action_conflict_diagnostics_survive_history_queries_filling_trace_budget(captured):
+    async with diag.trace_scope('owner', COMPONENT_ID, 'execution'):
+        for _ in range(diag.MAX_EVENTS + 20):
+            diag.event('adapter.result', **diag.shape('safe'))
+        diag.event('investigation.validation', error_kind='model_format',
+                   validation_field='capability', validation_code='duplicate_query',
+                   validation_count=1, correction_attempt=1, entity_type='alert_proof')
+        diag.event('investigation.replan', validation_code='duplicate_query', validation_count=1,
+                   entity_type='alert_proof')
+        diag.result('completed')
+    validation = next(r for r in captured if r.get('event') == 'investigation.validation')
+    recovery = next(r for r in captured if r.get('event') == 'investigation.replan')
+    assert validation['entity_type'] == recovery['entity_type'] == 'alert_proof'
+    assert captured[-1]['outcome'] == 'completed'
+    assert captured[-1]['suppressed'] > 0

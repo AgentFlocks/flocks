@@ -1,0 +1,275 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-11-12T14:09:30.493157+08:00",
+  "scope": "Isolated PostgreSQL feature regression using exact Pro native Python and real Go database test core",
+  "remainingObservedFailures": [],
+  "originalCompleteAttempt": {
+    "log": ".work/pg-final-tests.log",
+    "passed": 1089,
+    "failed": 20,
+    "skipped": 6,
+    "stoppedAfterMaxFailures": true,
+    "resolutionByNode": [
+      {
+        "node": "tests/monitoring/test_lifecycle.py::test_native_scene_install_pause_restart_and_reenable",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_monitoring.py::test_native_rounds_dashboard_report_idempotence",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_monitoring.py::test_recovery_closes_running_steps_preserves_attempt",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_restart_closes_inflight_steps_and_emits_one_failed_card",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-final-failures.log",
+        "basis": "Explicitly selected in the final 13-pass targeted command."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_concurrent_finish_calls_do_not_duplicate_end_marker",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-final-failures.log",
+        "basis": "Explicitly selected in the final 13-pass targeted command."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_zero_event_round_ends_missing_system_failure_without_retry_plan",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_system_failure_only_fails_round_when_retry_actually_runs[False]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_system_failure_only_fails_round_when_retry_actually_runs[True]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_exhausted_history_remains_visible_without_failing_new_round[False]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_exhausted_history_remains_visible_without_failing_new_round[True]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_resumed_work_counts_are_separate_from_current_query[False]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_resumed_work_counts_are_separate_from_current_query[True]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_manual_review_is_not_promised_automatic_resumption",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_next_step_excludes_old_devices_and_development_cases",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_real_background_timeout_marks_reason_before_runner_cleanup[query]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-final-failures.log",
+        "basis": "Explicitly selected in the final 13-pass targeted command."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_real_background_timeout_marks_reason_before_runner_cleanup[model]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-final-failures.log",
+        "basis": "Explicitly selected in the final 13-pass targeted command."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_manual_readback_is_automatic_and_does_not_fail_investigation_round[True]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_manual_readback_is_automatic_and_does_not_fail_investigation_round[False]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_start_gate_rejects_a_previously_cancelled_or_deleted_execution[False]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      },
+      {
+        "node": "tests/monitoring/test_round_endings.py::test_start_gate_rejects_a_previously_cancelled_or_deleted_execution[True]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-tail-recheck.log",
+        "basis": "The whole lifecycle/monitoring/round_endings files ran; this node is absent from the eight failed nodes in that 109-pass run."
+      }
+    ]
+  },
+  "remainingFilesAttempt": {
+    "log": ".work/pg-tail-recheck.log",
+    "passed": 109,
+    "failed": 8,
+    "note": "Full lifecycle, monitoring and round_endings files, including previously unexecuted end cases. All eight failures subsequently passed in the final targeted run."
+  },
+  "unexecutedTailAttempt": {
+    "log": ".work/pg-unexecuted-tail.log",
+    "passed": 273,
+    "failed": 6,
+    "errors": 2,
+    "resolutionByNode": [
+      {
+        "node": "tests/monitoring/test_runtime_diagnostics.py::test_model_choice_reaches_real_sink_and_disk",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-final-failures.log"
+      },
+      {
+        "node": "tests/monitoring/test_source_membership.py::test_new_suite_requires_source_membership_core_contract",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-final-failures.log"
+      },
+      {
+        "node": "tests/monitoring/test_vertical.py::test_full_installed_path_no_direct_ready_or_result_seeding[False-False]",
+        "finalStatus": "skipped",
+        "evidence": ".work/pg-account-fixture-skips.log",
+        "reason": "This fixture bootstraps accounts through SQLite AuthService; the isolated database-only Pro test core has no Accounts RPC. Its original SQLite vertical regression passed in the 1574-test SQLite run. Real Pro account integration is outside this database fixture."
+      },
+      {
+        "node": "tests/monitoring/test_vertical.py::test_full_installed_path_no_direct_ready_or_result_seeding[False-True]",
+        "finalStatus": "skipped",
+        "evidence": ".work/pg-account-fixture-skips.log",
+        "reason": "This fixture bootstraps accounts through SQLite AuthService; the isolated database-only Pro test core has no Accounts RPC. Its original SQLite vertical regression passed in the 1574-test SQLite run. Real Pro account integration is outside this database fixture."
+      },
+      {
+        "node": "tests/monitoring/test_vertical.py::test_full_installed_path_no_direct_ready_or_result_seeding[True-False]",
+        "finalStatus": "skipped",
+        "evidence": ".work/pg-account-fixture-skips.log",
+        "reason": "This fixture bootstraps accounts through SQLite AuthService; the isolated database-only Pro test core has no Accounts RPC. Its original SQLite vertical regression passed in the 1574-test SQLite run. Real Pro account integration is outside this database fixture."
+      },
+      {
+        "node": "tests/monitoring/test_vertical.py::test_full_installed_path_no_direct_ready_or_result_seeding[True-True]",
+        "finalStatus": "skipped",
+        "evidence": ".work/pg-account-fixture-skips.log",
+        "reason": "This fixture bootstraps accounts through SQLite AuthService; the isolated database-only Pro test core has no Accounts RPC. Its original SQLite vertical regression passed in the 1574-test SQLite run. Real Pro account integration is outside this database fixture."
+      },
+      {
+        "node": "tests/monitoring/test_tdp_time.py::test_tdp_clock_timeout_reaps_subprocess_and_names_actual_stage[False]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-final-failures.log"
+      },
+      {
+        "node": "tests/monitoring/test_tdp_time.py::test_tdp_clock_timeout_reaps_subprocess_and_names_actual_stage[True]",
+        "finalStatus": "passed",
+        "evidence": ".work/pg-final-failures.log"
+      }
+    ]
+  },
+  "finalTargetedFailures": {
+    "log": ".work/pg-final-failures.log",
+    "passed": 13,
+    "failed": 0,
+    "errors": 0,
+    "selectedTestFunctions": [
+      "test_cancel_during_daily_session_preparation_cannot_revive_execution",
+      "test_cancel_while_registered_start_gate_waits_drains_the_held_runner",
+      "test_concurrent_finish_calls_do_not_duplicate_end_marker",
+      "test_model_choice_reaches_real_sink_and_disk",
+      "test_new_suite_requires_source_membership_core_contract",
+      "test_real_background_timeout_marks_reason_before_runner_cleanup",
+      "test_real_hub_install_disable_reinstall_uninstall_restart",
+      "test_restart_closes_inflight_steps_and_emits_one_failed_card",
+      "test_tdp_clock_timeout_reaps_subprocess_and_names_actual_stage",
+      "test_terminal_monitor_result_cannot_overwrite_a_persisted_cancellation"
+    ]
+  },
+  "explicitSQLiteOnlySkips": {
+    "nodes": [
+      "tests/monitoring/test_infrastructure_diagnostics.py::test_real_taskstore_contention_reports_admission_and_application_health",
+      "tests/monitoring/test_infrastructure_diagnostics.py::test_export_reads_owner_state_while_writer_is_locked_and_never_reuses_taskstore",
+      "tests/monitoring/test_infrastructure_diagnostics.py::test_snapshot_busy_or_missing_does_not_prevent_trace_export",
+      "tests/monitoring/test_infrastructure_diagnostics.py::test_diagnostic_download_mail_reads_cannot_request_a_write_lock",
+      "tests/monitoring/test_infrastructure_diagnostics.py::test_read_only_diagnostic_scope_resets_after_failure",
+      "tests/monitoring/test_investigation.py::test_legacy_system_error_migration_keeps_business_review_and_evidence"
+    ],
+    "evidence": ".work/pg-final-tests.log",
+    "reason": "SQLite file locking, old SQLite TaskStore health, local SQLite support-file snapshots and SQLite schema migration do not describe the live PostgreSQL backend. The separate original SQLite suite passed 1574 tests."
+  },
+  "accountsFixtureSkips": {
+    "log": ".work/pg-account-fixture-skips.log",
+    "count": 4,
+    "reason": "Database test core intentionally does not implement Accounts RPC."
+  },
+  "realProductFixes": [
+    {
+      "change": "Serialize finish_round read/reserve/create/publish and recheck publication under an attempt-scoped native advisory transaction; avoid duplicate terminal cards from concurrent native Message.create calls.",
+      "files": [
+        ".work/flocks/flocks/monitoring/rounds.py"
+      ],
+      "evidence": [
+        ".work/pg-round-publication-check.log",
+        ".work/pg-final-failures.log"
+      ]
+    },
+    {
+      "change": "Acquire per-event-loop monitoring transaction gate before borrowing a native PG connection, retaining cross-node advisory locking; prevent pool starvation during 12 simultaneous daily reservations.",
+      "files": [
+        "runtime/flocks/enhancements/monitor_db.py"
+      ],
+      "evidence": [
+        ".work/pg-pool-before.log",
+        ".work/pg-pool-after.log"
+      ]
+    }
+  ],
+  "additionalChecks": [
+    {
+      "log": ".work/pg-multi-device-check.log",
+      "result": "28 passed; device targets executemany and related scenarios"
+    },
+    {
+      "log": ".work/pg-recovery-check.log",
+      "result": "3 passed; uncertain/readback recovery"
+    },
+    {
+      "log": ".work/pg-pool-after.log",
+      "result": "3 passed; 12 daily reservations, concurrent terminal publication and interrupted publication recovery"
+    }
+  ],
+  "lastFailedCache": {
+    "path": ".pytest_cache/v/cache/lastfailed",
+    "value": {},
+    "note": "Supporting record of resolved observed failures, not a replacement for test logs."
+  },
+  "coverageLimits": [
+    "No single all-green complete PG rerun after final corrections; earlier passed cases and focused failure/tail rechecks are recorded individually. Counts must not be summed as unique tests.",
+    "The six SQLite-specific tests and four account-bootstrap parameter cases are explicitly skipped in the Pro database fixture.",
+    "Mock model/device/mail boundaries are used; no real outbound mail or device actions are performed.",
+    "5173 acceptance and Linux publication are the parent integrator responsibility; this record does not assert remote Linux installation or full Pro Accounts E2E acceptance."
+  ]
+}

@@ -1,0 +1,2219 @@
+{
+  "schemaVersion": 1,
+  "deploymentMode": "source-overlay",
+  "source": {
+    "branch": "zw_dev",
+    "head": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
+    "base": "730da6897fbcd85d0b67e22cf13ecd4531161b9d"
+  },
+  "sourceRoot": "runtime/flocks",
+  "webuiRoot": "runtime/webui-dist",
+  "proEntry": "core/flockspro-go",
+  "excludedSourcePaths": [
+    {
+      "path": "flocks/session/session.py",
+      "reason": "The Pro native provider owns this module; its SQLite counterpart is not overlaid"
+    },
+    {
+      "path": "flocks/task/executor.py",
+      "reason": "The Pro native provider owns this module; its SQLite counterpart is not overlaid"
+    },
+    {
+      "path": "flocks/task/manager.py",
+      "reason": "The Pro native provider owns this module; its SQLite counterpart is not overlaid"
+    },
+    {
+      "path": "flocks/task/scheduler.py",
+      "reason": "The Pro native provider owns this module; its SQLite counterpart is not overlaid"
+    },
+    {
+      "path": "flocks/task/store.py",
+      "reason": "The Pro native provider owns this module; its SQLite counterpart is not overlaid"
+    },
+    {
+      "path": "flocks/workflow/poller_manager.py",
+      "reason": "The Pro native provider owns this module; its SQLite counterpart is not overlaid"
+    },
+    {
+      "path": "flocks/workflow/store.py",
+      "reason": "The Pro native provider owns this module; its SQLite counterpart is not overlaid"
+    },
+    {
+      "path": "flocks/cli/commands/update.py",
+      "reason": "Source-only Git updater guard; the managed Pro updater entry is retained"
+    },
+    {
+      "path": "flocks/updater/deploy.py",
+      "reason": "Source-only Git updater guard; the managed Pro updater entry is retained"
+    },
+    {
+      "path": "flocks/updater/source_branch.py",
+      "reason": "Source-only Git updater guard; the managed Pro updater entry is retained"
+    },
+    {
+      "path": "flocks/updater/updater.py",
+      "reason": "Source-only Git updater guard; the managed Pro updater entry is retained"
+    }
+  ],
+  "files": [
+    {
+      "path": "flocks/.flocks/flockshub/index.json",
+      "sha256": "b7956cf7e88de4f24cbf6cd8f7e3747f3ccfa28bed84a1f75ee518052639700a",
+      "before": "b897e1b02c394185abd7f329bb8bf3565eb408010799de449e1c9edba7861d86"
+    },
+    {
+      "path": "flocks/.flocks/flockshub/plugins/agents/security-monitor/agent.yaml",
+      "sha256": "dca844ef76f340b35f2c77256340fea69f6dc095a9ac8ae7df8b0f3a931801a1",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/flockshub/plugins/agents/security-monitor/manifest.json",
+      "sha256": "aee231958f79a4daa0fbd615e18f3e670caecc19af6ca266323d2dadf94b2eab",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/flockshub/plugins/agents/security-monitor/prompt.md",
+      "sha256": "90997fde17e93ba07ba71ac0d67dd79d2b385a191c92873d8d4ec5b8db2ac0a8",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/flockshub/plugins/components/host-security-monitor/component.json",
+      "sha256": "2a86563ddcae29fb0e55e43640d3506344f1671a90c23899f44441eca1c6e1ee",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/flockshub/plugins/components/host-security-monitor/manifest.json",
+      "sha256": "11b264d349d6a7949cb21c9cf62c060d3f9db33c9d48d5f78f5fea3c1f0d23b3",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/flockshub/plugins/components/host-security-monitor/monitoring.json",
+      "sha256": "6bba40b33161dbfd8bfa34d741ea334c39568a62d0dfc38770a4649aea54c0b8",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/flockshub/plugins/components/soc-workspace/manifest.json",
+      "sha256": "6b90c3f9bb3e17f202f4a740fea7641bd7af567b623d33413d3d1ecfb776b2cc",
+      "before": "6b463dae122895c4ddf873d09ca8ecdfb3675ce4f50bcd2a75ec9a3644b0ee25"
+    },
+    {
+      "path": "flocks/.flocks/flockshub/plugins/webuis/soc_ui/manifest.json",
+      "sha256": "30975c744ff27f5bf75e3354135541afd89eaa1407ac7eb3c97d468bbd6a042a",
+      "before": "97e8423b2ec4ea02f5f304c59b9aea1093e10cd7cdc4c80bef832c6948b5de7a"
+    },
+    {
+      "path": "flocks/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/api/handlers.py",
+      "sha256": "45538bb0fbcf132b3b861a7c43012c4242542de447a7a1e6d0da1794ab8ba8e2",
+      "before": "a1d8ed4efce778f71948f9667ffb4ffcf805a4ece91a084373032a0355d50cf2"
+    },
+    {
+      "path": "flocks/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/Page.tsx",
+      "sha256": "098d455dc3480e6606fee3bf322ad09605fb60b6203777e8a12ad31b2a4d6242",
+      "before": "91d2e284bc10940f4a138e0b8880f177a2e111b9693e0dc8dd95e207ac21e2f0"
+    },
+    {
+      "path": "flocks/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/stepCards.ts",
+      "sha256": "4b3851c9832b58ebbdec2ae6e4e982bde8b9b50b08b659c79f130cd7199ec1e5",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/flockshub/plugins/webuis/soc_ui/soc_overview/src/index.tsx",
+      "sha256": "6deb000dcc1cbbc6c02b5df46fca96bd093f14e52ee1f3c077011a9b4d42a32d",
+      "before": "c8fa78c37d9cbceb9d2db14fd3890dd9c77e7a6c86bdb29b1504e523d7790fed"
+    },
+    {
+      "path": "flocks/.flocks/flockshub/plugins/webuis/soc_ui/workspace.json",
+      "sha256": "a2872b0be9f883e79c91ddb5869a1435fe243fcf977b48d91f9d38b06c8b8ff5",
+      "before": "5b146178d8fd1b0e8fb8e9b09f8fc4e3428599902fab9184461ee1dfaa45fe0c"
+    },
+    {
+      "path": "flocks/.flocks/plugins/agents/asset-survey/agent.yaml",
+      "sha256": "0d3f773a3b929df074e2dc558627404ccf056195041e7d622d2ecbc04f2f9111",
+      "before": "da65e9c11d5bcde21ec022403173ca1746649100cbfca2152373ded9127c39dd"
+    },
+    {
+      "path": "flocks/.flocks/plugins/agents/device-inspector/agent.yaml",
+      "sha256": "3efd127e19763e12c78cd322af078bfc0df07eedd46715559a779189e3588717",
+      "before": "e7ddd1389bc735062dde71565a3c0e796312222aee395cd10b654beed97b6588"
+    },
+    {
+      "path": "flocks/.flocks/plugins/agents/host-forensics-fast/agent.yaml",
+      "sha256": "b863864f166225e8a5a95246a2789d52dd6eb0e1c0d904598e4c109a4e3b1bb5",
+      "before": "ccb7a767d9e97ed9da23dd3733f97f8f7f00adac9eb06a3eeb9e986cb035da3f"
+    },
+    {
+      "path": "flocks/.flocks/plugins/agents/host-forensics/agent.yaml",
+      "sha256": "6e30b0ee71a4b99628b69e698be03cfd19d63c6e0d4855ac55d0cbf8a5880c83",
+      "before": "061a24389833e66d6046d1ef58cd06262b3c014015fddcc7d83dac5fa52c90a5"
+    },
+    {
+      "path": "flocks/.flocks/plugins/agents/hrti_threat_intelligence/agent.yaml",
+      "sha256": "8d601086d963c4d88599d1cf67f18b74ecbdd8366cadd30be8fd478ac3ff9945",
+      "before": "463d0a066c844ecab6dd5fb3f542d613a45ef7e8c2c42e5f256a93daf175b9e4"
+    },
+    {
+      "path": "flocks/.flocks/plugins/agents/ndr-analyst/agent.yaml",
+      "sha256": "00005d9e0e7eae67b0e021cadf177be3c27e4ed56118e4fa2702a1e9aa4811d5",
+      "before": "9ee796f072e215853d04117ff54b12cf946420449ee2b57899fa59b2d379f42c"
+    },
+    {
+      "path": "flocks/.flocks/plugins/agents/phishing-detector/agent.yaml",
+      "sha256": "781e03184fb5ad0d92d77b4d879ee65109f42e4a60536fd3447aef4bfd10dda1",
+      "before": "6fd79f384d390f874c6ee2b9dd82f88281c1e466d74b6da86238458ab68fe1f4"
+    },
+    {
+      "path": "flocks/.flocks/plugins/agents/ti-analyst/agent.yaml",
+      "sha256": "a53027fd73324f5858297eff886b66e0859f85e90afba36e8cd522cfeb8c6d74",
+      "before": "0fbdd2760f9d0271522c12b907fcc8cd840d828d3e94ef2b0efbaedd4ee49868"
+    },
+    {
+      "path": "flocks/.flocks/plugins/agents/vul_threat_intelligence/agent.yaml",
+      "sha256": "42977e00291fa6989cc014dab0ef46bdddb4a65ae1d8307bf9d0377da41e8eba",
+      "before": "6ac8a1f0221cbac01a6c6018774f1b472275ebe4083fddb7d8244235447d60be"
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr.handler.py",
+      "sha256": "2ef8c750c0c2a2698fe7cd2d30e040ab22de20fd36406b57d3e714fcde8c777a",
+      "before": "d63d4bdc6182c6c7b75642884c6d49fb4d24f5cce44c2008ac7a1be0c4e5adde"
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_alerts.yaml",
+      "sha256": "7086de29c98b3a1e877de2217a659e76f52c1bb8c838a8060580edda25f7e8ef",
+      "before": "88b8e66cfeac7ce6fd5a3023f481a8f8cea6b1ba09b81145c6f40a3a69a9833f"
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_analysislog.yaml",
+      "sha256": "628c0f4ed5ec9643f875c7178b6de6a3d90b8f3ff039c6d0509e2317928704a9",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_assets.yaml",
+      "sha256": "c8cafd6e909a139efa9c3cc418638299a92c4cf5697eebc7442b1a9a1da4f20d",
+      "before": "897dc5a439288963327ddc095dea5bda32298290849095a133c329da90328d25"
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_assets_manage.yaml",
+      "sha256": "a0c6bba61a64a5d2d439f74a319da74da88e8fac68798f10cdfc3e98cd603884",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_bigscreen.yaml",
+      "sha256": "3eda9683db9c57600ee1ecd3a741de77f4c7bfa2bff15ffbe6ef48fb66b0839a",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_bigscreen_manage.yaml",
+      "sha256": "810cae6597a7fcd088083cc76afbe67fe92308bd4367f64e77ccee52355ed60d",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_device.yaml",
+      "sha256": "13c154c61588880c387d9296e2c5b9d1efff63b5d76d8a2d8f1613b0ea1f9fdd",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_incidents.yaml",
+      "sha256": "c7991095919dd49aa600c3c2ee2c4728259589f54c0cd29f518725822937a591",
+      "before": "3489e91b764dd99f9262673e9dfc010e1b93a0af3b8c2c93ace1ee7d1b85ae2d"
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_orders.yaml",
+      "sha256": "18427b7281b4c0571521b4e0f1214b61f860c399579ce7bbec6e82ce654b86ed",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_orders_manage.yaml",
+      "sha256": "f630f94c2e09d3538d31d94d77d27c3eaeef107b04e7a9db2be1b99d1d8bc363",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_responses.yaml",
+      "sha256": "6f900e0889bcee33ccc4d646a4c2b4a3652b94bfbb065b4db706d94fdc5b0799",
+      "before": "1b7f725a01067e8e9fdae640479931fa5d41ab415bc1cc724de7856f61c08e5b"
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_riskassets.yaml",
+      "sha256": "97125bd2946f1dbfffc3ca559d8b50b6971c413a522c20fe6dcf2a09669a77c7",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_siem.yaml",
+      "sha256": "b6b670cbcca78ea8faec45cf16c9ca5103054e7621dba651b7c31607bd100adc",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_soar.yaml",
+      "sha256": "d6790e373490bbd82bd2824490ae2fe4b6e04d2fc92100238db995c2087da900",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_vulns.yaml",
+      "sha256": "2ebdd604bc054c17841ce5963571c0825de930ba4eb7505a669e66035d2de548",
+      "before": "87bba183babad36d703a8f303b13f229525b3b365fbc860837623332802771e3"
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_vulns_manage.yaml",
+      "sha256": "438446349e2a80e5c78959a64fae42bae5681499054075e9fcc9d920afd3037d",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/tools/device/sangfor_xdr_v2_2/sangfor_xdr_whitelists.yaml",
+      "sha256": "d69a506e1d7aa203c97b679577b2fab9f638e231f6788e46038995178584cd5b",
+      "before": "93e8649cc9245bbf333c2d294e2dffe78828364927a0f0138cdf98bd56ef24a8"
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-alert-fusion/meta.json",
+      "sha256": "25bf757a5de2a6ed15320e3afe62950ae725ebed314c2fbc702521edb7bff0b6",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-alert-fusion/workflow.json",
+      "sha256": "b714c7ab057a901b047358adb37ea94510004c050edebbcef251dd66ff99e4d0",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-alert-fusion/workflow.md",
+      "sha256": "f98b00cc96a5b2d16b4a5fc6463d701a49871e26902e375d83016faace2f3516",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-closure-report/meta.json",
+      "sha256": "25bf757a5de2a6ed15320e3afe62950ae725ebed314c2fbc702521edb7bff0b6",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-closure-report/workflow.json",
+      "sha256": "2f41f027ac953a210e0a706bb29739eb642ece948eab5c1d126613b789d2d8d4",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-closure-report/workflow.md",
+      "sha256": "11c832f1157423a23fc17acbeffd1bd2c1a6109247e71d4b5b257c8c87bf2b6a",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-device-health/meta.json",
+      "sha256": "25bf757a5de2a6ed15320e3afe62950ae725ebed314c2fbc702521edb7bff0b6",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-device-health/workflow.json",
+      "sha256": "ddf686e778d34bf1baf7cb2aba95ba72150d451e7b64b257e370e1ebd8d39636",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-device-health/workflow.md",
+      "sha256": "13a055ae32ed9eb009a2bd4f494f2a1d8dd22c74c574e8259e4ee87594233187",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-ndr-dns/meta.json",
+      "sha256": "25bf757a5de2a6ed15320e3afe62950ae725ebed314c2fbc702521edb7bff0b6",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-ndr-dns/workflow.json",
+      "sha256": "3f6d7c284d50faeacbf45c8dfc34080c52d3b376c81357b0f9bd604a07b972af",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-ndr-dns/workflow.md",
+      "sha256": "1c920a99f03835d6a43604b4850cb93da56167618c7bf68a8d627c1131995157",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-ndr-egress/meta.json",
+      "sha256": "25bf757a5de2a6ed15320e3afe62950ae725ebed314c2fbc702521edb7bff0b6",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-ndr-egress/workflow.json",
+      "sha256": "e0c0ed7084e69938d67d1a994221110ef8863dd0eed61fa4fb169cebe8c9516f",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-ndr-egress/workflow.md",
+      "sha256": "dcf32d06f945b4cdc5b037dd21b2f5e392a153123cc5b7f9e6bb3d19a3a6b7ca",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-ndr-exfil/meta.json",
+      "sha256": "25bf757a5de2a6ed15320e3afe62950ae725ebed314c2fbc702521edb7bff0b6",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-ndr-exfil/workflow.json",
+      "sha256": "906c5d1deffb05b8e449e69d9c7500ec85f63d8de1b21a44ab3944ca1e398816",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-ndr-exfil/workflow.md",
+      "sha256": "345e65ff91359a9a02a8048886542cb004557d12d738a396571ff559930b0c2d",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-ndr-lateral/meta.json",
+      "sha256": "25bf757a5de2a6ed15320e3afe62950ae725ebed314c2fbc702521edb7bff0b6",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-ndr-lateral/workflow.json",
+      "sha256": "5947d15191ed354293eefbc2a80338c211458b9ba6258f380e70b6eb20924da6",
+      "before": null
+    },
+    {
+      "path": "flocks/.flocks/plugins/workflows/custom-soc-ndr-lateral/workflow.md",
+      "sha256": "4de0e6c66e5933ccdd982602b655d7741e677e453cf855e3b4a31315451aa692",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/agent/agents/rex/agent.yaml",
+      "sha256": "eeaafd6da93f7edacbf28801ad9b9684457a71ec83bb64c8e839ada506d24894",
+      "before": "736c8bb45cad32d34eba38e63c66b65f8ffef3952994149e664896ba78f7fb20"
+    },
+    {
+      "path": "flocks/flocks/channel/base.py",
+      "sha256": "eec2ccedd7f4026edf3deca97f939ab07ed15702fa5688dfbd78e640550eda22",
+      "before": "9cc81412f1061ee14f8dbbbac7cc68330798eef0c5fa4a872a9647afa3d5e81b"
+    },
+    {
+      "path": "flocks/flocks/channel/builtin/email/channel.py",
+      "sha256": "19c294f653cb27f6029cb7af34882aa5daab3081df9904ac15d00f70639448aa",
+      "before": "270014331c69a6b7650d010b5cff6adb8497996d56fb20a38861c74439ea8ae6"
+    },
+    {
+      "path": "flocks/flocks/channel/inbound/dispatcher.py",
+      "sha256": "a08261259f96bd3ed339718795bf0367818c5255e4d125d7a42fd834091901b1",
+      "before": "4343a077ede43380b9fc3fd3f26e9a870cfc2ce2e8dd84b6c75b62032d975c80"
+    },
+    {
+      "path": "flocks/flocks/channel/outbound/deliver.py",
+      "sha256": "4dd03d8641beb65ba0044df14cac5c2bbca553a38c49322f8352efdd63109a43",
+      "before": "a7531c039b5f2743f549b9e957d65ce8e55df7aba2cfe83ff9fe326152ab8178"
+    },
+    {
+      "path": "flocks/flocks/db_backend.py",
+      "sha256": "cec2842828733cb36f3ac6e70ac3f0da1734c01c5fe09d4e5eca46d5c3cd60c5",
+      "before": "707c8f1b427be1f05122834d67cf768baf695124bbd7297524270e65ea5c3a2f"
+    },
+    {
+      "path": "flocks/flocks/enhancements/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/SQLGLOT-LICENSE",
+      "sha256": "a75624d01e286b497c461fbf758cb2ef977cb298cf77fbd39685dfcf8156c72b",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/__init__.py",
+      "sha256": "5ed1db6f3f77ba086d0a828d6136c1f147ed42f379073b7c7c965c0f4f5970cf",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/__main__.py",
+      "sha256": "b9889236d3818018d791422fd436ff100ab7f36d9d78a29f62349cfae57a8be8",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/_typing.py",
+      "sha256": "fb51cfcabdf0e423a54895aa960b7c8e1164d9dc8cbc1baf541a885f5c325423",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/_version.py",
+      "sha256": "6edccbeeaee45d07741c0628277b480bcd15196ee927b09fdeff955aa38341b4",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/__init__.py",
+      "sha256": "8371d1b726f7dabdcba28887293cee50d074feb04efd16aeb8e7a0a78da0078f",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/athena.py",
+      "sha256": "a1f02b99ac982debf8a99435e4633c99ebc6d38aaa47958615bd9972e626eb1e",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/bigquery.py",
+      "sha256": "1d5f65c948e550206991bce8acac7e619084ab0244513e26ca7d28fbca736455",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/clickhouse.py",
+      "sha256": "d7fc0e0ccf968476c293bbaaaa67bbef1d9f8594a81c72eb1ead1f124f385286",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/databricks.py",
+      "sha256": "09ffdfe88633c1bd087e4c2edd1797e839b7b425513334a8a16870148f018f76",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/dialect.py",
+      "sha256": "aba896f5283d806fd48ec94a54b3792570780d6922781646b0c5756afd63a1ce",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/doris.py",
+      "sha256": "4b9778357e785043de03c7e38ab8ddb89a533e1834266211a5e4ec3e6b20eda8",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/dremio.py",
+      "sha256": "5ce4a1ffcf6ee4d59207d6b9768656d8281449c268a5bba343a3b954d9a334e1",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/drill.py",
+      "sha256": "14e87bfca8cfc7fefba6fd03887299a20d02726cea785f7f3c49869c9d444923",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/druid.py",
+      "sha256": "06f0faf131d3b135f8c3b220f57a7185be5b6d2928709f0a1627291bc46eb5d1",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/duckdb.py",
+      "sha256": "ec2ad19314a3ff35ad54bf5de6a19ae487d64e6c47ccb0461f6b39d76689ba81",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/dune.py",
+      "sha256": "8002eeb7e7c57cddaa32cafc2ef6753502b71775bdcf67f83f032f4cc5d55558",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/exasol.py",
+      "sha256": "9dbec67c5b01ee69f455a32b9cab749360974709b0dde6229e81881d5f823f08",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/fabric.py",
+      "sha256": "05d92fcccf2cfa6e4321d070763118b24a77dae6fb6870807b1ff1961427f762",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/hive.py",
+      "sha256": "14b4f6ed2e577f6766d74baabffd1e62b186fd2bba4ac37953274f5de17234e3",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/materialize.py",
+      "sha256": "2c3daad644d1ac2c2422ed417e806f9e34c66eea43b6843c2503030886005c78",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/mysql.py",
+      "sha256": "ddcccd7b33aa1e8115c730592356d7fa6afa1c5540e35ef990098d6464d0acdd",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/oracle.py",
+      "sha256": "f860912b455e80b5ad3df86ee4c284eb6469f1cbc41165d8645b60289d794666",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/postgres.py",
+      "sha256": "42f9c0eef2efddd98afc3a01828c0ee828aebb7e782fc61e1a4e75cd07a3eae6",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/presto.py",
+      "sha256": "37587504f5cb35821991d5cacfeb04226d946b878f023f219abb8941980c4782",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/prql.py",
+      "sha256": "7f037e48f106c7e76bc1fd4ad14d8c07237e3e45b70bface810df17897b27218",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/redshift.py",
+      "sha256": "cbdd58d4126f8aa0682fe1bcbff83d9ef1d6cf6e10f9aba747f13824737569d3",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/risingwave.py",
+      "sha256": "66171a762673248bc99c49d34edcf329918e7c7898317b4189468dfd7e2d3c5f",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/singlestore.py",
+      "sha256": "a96548f7c813d8958cad66dd4448f236a88f81202ab3aad596232ff93a3f2c1b",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/snowflake.py",
+      "sha256": "f9000b4a5543749e267d7ad4dc4cf0a9f2910cce98695310e52f6aaed81e877e",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/solr.py",
+      "sha256": "a727679789a5fb733515ce002e6e9c3153bd87ee44b6a6713d91fff75373d52b",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/spark.py",
+      "sha256": "a418f07ce45d8b1c3333c4a0f2e761d55a1d878704aa5bb9cbe7ad62bdc97ce1",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/spark2.py",
+      "sha256": "4aa51eff1926c9e7f67150072f7ded1962581f920a92ab2b48104afa3a3afd5f",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/sqlite.py",
+      "sha256": "b93a4caefea90a1fdb8997ed0314ab2dee69fb868388cb0f161aac5b3e2844c8",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/starrocks.py",
+      "sha256": "f45cd3c81f5683aa82a8a00b2cbc3d0497ef43a9a8c0a5d0398fa880b05ec623",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/tableau.py",
+      "sha256": "a086b00f35084f118259a10c07c39a34c3d685b0b753edb2d3da583e6e1e6b37",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/teradata.py",
+      "sha256": "c53ac75bf11ee8bcb8c40b53598c6ac83e1ee373b68982910d2cd402eb75883c",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/trino.py",
+      "sha256": "9092487f12e46e4ace9c2320f566670a9705a0c7ca9305dbe499836f62a85ce8",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/dialects/tsql.py",
+      "sha256": "cfc23bf38f70fe87b37af14000e70c1ae02c0d82eae7c3b71853b66377a128c5",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/diff.py",
+      "sha256": "2e004d4582af416fddc4e2eff09370b0795e29cc1b908caa32cd319cc6c6dc4a",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/errors.py",
+      "sha256": "bc4edd54697c7b6d48cb2557ab68f54bb1d5c22e98f662c441f25ed06711d79b",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/executor/__init__.py",
+      "sha256": "39f8db5e67c86c3edaccbef65f8eecb8c8d8688a75a997e6005cc2c9cd634a26",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/executor/context.py",
+      "sha256": "5891c975840239e557c0bc34b924ab592736e5e04c9f9231d74f110af76c2914",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/executor/env.py",
+      "sha256": "b50854e4fa5304c73181920575d16ac5630d3ed1cdd2f38ecfbdafa27718dca6",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/executor/python.py",
+      "sha256": "d00f6b347d63244ca44e2778b80d3422ad55340e8ac95e0bf14df72aaf31f54e",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/executor/table.py",
+      "sha256": "c64b899602d5358517b1251a5f4cd372715e9257572cb53c2ea0f28d1e4af706",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/expressions.py",
+      "sha256": "88c8ade563722e35a2a213f7502b940d57fd554755a655015d63648215025a79",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/generator.py",
+      "sha256": "1c318e902c7fd7f7d5f073142812e075cf96e5add251f695fea9da9effd1534d",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/helper.py",
+      "sha256": "942379312f921c6be2a5f44bf0e23e4ebe7f129615b62a6074dcff32d9df1cc8",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/jsonpath.py",
+      "sha256": "49081ac7368460137b02df5d9132b83754a993ac47c6f1cbe90b4220fea2337d",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/lineage.py",
+      "sha256": "3ac2571b8b6c5c2906fb446153e1104da4d450180b8a6cdb289f980b8c9272a4",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/__init__.py",
+      "sha256": "15d02f573eab40b2e48a21f6d7e483e11c41e734b7583794facd373d9909f85e",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/annotate_types.py",
+      "sha256": "fa355b8c40bee9f3b8d247d21c2818345ef1ec0d01ca99891726f7dffbb84b7e",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/canonicalize.py",
+      "sha256": "820797b3ddab8bfd5967101976d9aaef8f9471b8e628f517729ac6ba65bf33a8",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/eliminate_ctes.py",
+      "sha256": "7d404cd115273eb9b6b18a6d11606ec7df01edf731ed6f81335cd5a9f803cfd7",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/eliminate_joins.py",
+      "sha256": "18af689b6092eb9deebee442f13f3419948736e83c527c750eab326945897551",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/eliminate_subqueries.py",
+      "sha256": "c2c87d11d5979b86b90e1c10569b172fd879d601c808052fbc4d43d2e5f4ca8a",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/isolate_table_selects.py",
+      "sha256": "ffcac82953282fb798debac9b2680875346f7e60522d4c5e1e0e36ab5256f7dd",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/merge_subqueries.py",
+      "sha256": "103914fac132c8c65902b15bbb3497615349b2120e2eae95ccd6fc47094489db",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/normalize.py",
+      "sha256": "154c16a93680b7fea1e58b9eaf7b94a9fca4c232cd1448aa2a613954e369dd4c",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/normalize_identifiers.py",
+      "sha256": "f6e62dbf2b35b4de883496c2e520fa324877913fc25a0d7d305eea87cd6519ee",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/optimize_joins.py",
+      "sha256": "9e77d1a4bd379690d0175a013b512068006a9ebeadd863fab8c5a848b3d6dc84",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/optimizer.py",
+      "sha256": "dd5e8761f8c3575f6432df6e5dd6f87672803dc7ed909ac26bdd10be99bd345d",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/pushdown_predicates.py",
+      "sha256": "ff101ddf9cb63d5de1931f477b4bece7eafdcd967fdb7ec431ae973bb026ad3b",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/pushdown_projections.py",
+      "sha256": "ecda0ae4d014558561b34627632a3a5ae5df68ef814a14b04ba940f18f804d0e",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/qualify.py",
+      "sha256": "74103a832255c834541c8a61525813001ebb0583c8c0be4ffcd86ff73aac67bc",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/qualify_columns.py",
+      "sha256": "9bfe3976551033fa2b5fc5e427b2c7b60d5a224ced1347781e46d2fe30f006b0",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/qualify_tables.py",
+      "sha256": "5a2d5348c33199c9a5ec53e0e37d275aa22a94d5303c3c50c864c621186f425c",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/resolver.py",
+      "sha256": "c93b8eca92acbd6c25ceed134f9899c8632ae3d39caf27cc9ae47f353cf4027d",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/scope.py",
+      "sha256": "1ea67c8d936b7bfa94dc16372dd7815427682c189f29683bff72cb5fed4fe2f3",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/simplify.py",
+      "sha256": "4e354f83276835ea5a554e2f8371b3c83689249995cb581324ce1182ba01cb2b",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/optimizer/unnest_subqueries.py",
+      "sha256": "c614992453ead3a7f55233ecba99bab801ec453ff95857b761d9d0dea44132ad",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/parser.py",
+      "sha256": "08aeb36614b6364b2a4340d95e5509e01b69f8daf91204434e319865798cc542",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/planner.py",
+      "sha256": "f421d6a3d58ed30af5360aabc16d5473ae83e7609c15b2b7afc1a88223e953a8",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/py.typed",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/schema.py",
+      "sha256": "7ca8c1dac12d9f5f17dd408b145bd2746270ab84ed68ad801051116bcaabe4b5",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/serde.py",
+      "sha256": "9d6a411548f0661d3a2e2e2a06e35bd18454fd0c9f973495c96905c6e8ccd163",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/time.py",
+      "sha256": "43ada0bfa90be343a244117a04c112c4a25c3159fb64b370eecbfc1f7e33e452",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/tokens.py",
+      "sha256": "f2acc8be0ed53bec4de3213c9ac2fd4ba566469b7aebe131bc6a8831605e34b2",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/transforms.py",
+      "sha256": "8478933bf44af8712088b7622c630650790a1c7209a8af8969d448438025c024",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/trie.py",
+      "sha256": "bf6eee5ccac77eaad7949e8699e4d2328bec07fde8d1cb6794a85d36ded6e9f2",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/typing/__init__.py",
+      "sha256": "d87c1b5e1ef12a3a8b0f792875ac6975e12e2f030c7fc72151d1f12ede6f7f3c",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/typing/bigquery.py",
+      "sha256": "69bc7491db4b35ee706c7e13b26988ce7e5f21e27295b1376d18f3b149559236",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/typing/duckdb.py",
+      "sha256": "79be33c395c775b2362d9c5f753b08d9f0e515a66ef1b6b9693674203ed7c381",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/typing/hive.py",
+      "sha256": "ca4b3ea585be1962f1e715ff65da19bd89ce2a0dcef18cc503a42f1e8eb0f9f4",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/typing/mysql.py",
+      "sha256": "ceec4c8c34c28a3d690906b2fda4794c7ebcb476ec59f2ef4de56ab2f10ff100",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/typing/presto.py",
+      "sha256": "cb0baa0858f1eeecc5f44733394b31c41a8e16d24cbb6c57b527782eac2aa184",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/typing/snowflake.py",
+      "sha256": "d9e6d9fee60e66e7a3e20a64a7818661f2090d48eb034fca0854e085ce0bdfee",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/typing/spark.py",
+      "sha256": "1716a588d4be74912967faccc9c68544ae9b6a68bf3e77e3d04a4df54d5a2498",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/typing/spark2.py",
+      "sha256": "8c738d6b51e1382ac3cd2787032fefdf18af9fd841c651d0850df103cb021b96",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/_vendor/sqlglot/typing/tsql.py",
+      "sha256": "c33126e5170a97fbb4060ebb7f458b9ba20504ff4a6b17a296583984e62235a4",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/monitor_db.py",
+      "sha256": "0a679c0b0609c01277d5f104c3c15ad255802f3c6903c44d558401f3fa48914e",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/monitor_schema.sql",
+      "sha256": "6f2d9e015706feff804c235898f6d2e2413459c7a4773fa53a129a54b1dd5b2f",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/monitor_sql.py",
+      "sha256": "514b0455cc4f50097498cbdb4b36955e8828975867ee61ee5f25921c25cae6c3",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/pro_runtime.py",
+      "sha256": "f725a433bb65f7914bf9b1ff6f0a928cf38fe04313a20d47d1f4e053ba85ddd6",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/enhancements/soc_dashboard.py",
+      "sha256": "62312275a22e856f771ba26f9237b757274de7df7b468f89f31782ffaacdee86",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/hub/installer.py",
+      "sha256": "02691599ae36802e1bd17b40af5a99cc5a64ad4dff200ac0c0180fcf53166966",
+      "before": "3b47c324e008a13be72651fd4054250f625ed4c534ce2aa5a1eeb645d1914d75"
+    },
+    {
+      "path": "flocks/flocks/hub/paths.py",
+      "sha256": "0cf1b12c44576b509f98b5c0750cfa042eb58e7a836a59df1566822e4d8497db",
+      "before": "f4a7baacd89d0cca0762d1aaf42bad28901a48ae2585d423932ca98e0d1d6454"
+    },
+    {
+      "path": "flocks/flocks/ingest/syslog/listener.py",
+      "sha256": "4462e0b18be1efe1fdbe6246ad1fda13f4d5f952bd028c34ba83a98b7101c016",
+      "before": "3a59dbd97cc940bd77741305ee9409db87166c48522fbe0135fe813023a64f43"
+    },
+    {
+      "path": "flocks/flocks/ingest/syslog/manager.py",
+      "sha256": "3275ca5c8cb88f8e9a305d5e69268f2c30c4d9cbadf20fefd62cf423fe67e6af",
+      "before": "f8a030952d101c82cc0e49ad53224c73334feeb8b30ea681e9618dd48fd3e47d"
+    },
+    {
+      "path": "flocks/flocks/monitoring/__init__.py",
+      "sha256": "bb624d6f066dffb95b2851fc690f5e2adc0e158d20028ee3f8f4ca25e61e7934",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/adapter.py",
+      "sha256": "6a300a3d969ba590f0e52f373148ddff55a7f245f5d1eb760c4bc81998ecaeaf",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/agent_component.py",
+      "sha256": "29e759903ecf3930e1c668c211bdc1211d574bc8b06f68ba2f68af34303134b8",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/assessment.py",
+      "sha256": "627eb50948dca80bb3d818d45399d59591eca716969aa81540589b7e02949d61",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/automatic.py",
+      "sha256": "e58897fd6620e50f6f4bc402db9b00f988388b867349cd3c28092a7e64e5cb37",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/capabilities.py",
+      "sha256": "eb7f81ddf6b4d1e6c7e0e4c6f0ddf1763ca9fff2c85f97e376e173db60505903",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/case_overview.py",
+      "sha256": "8e2e61760d42928761c9019a431a0e7958720bc633e52ef1f498d75e2da09606",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/conclusions.py",
+      "sha256": "94b544dd6791e2195ada05100658d2c545647fd702643fd218a3f9015ebb6413",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/configuration.py",
+      "sha256": "2e64decf2be033a944a26bbf61fa403c3e974bb004e81b466f320052d925089c",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/correlation.py",
+      "sha256": "0cc4e69cfa97ae8bafe9a4c00d4d0703330268622ed2b963bfb2e00b3d74c7b7",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/diagnostic_state.py",
+      "sha256": "53f2d0b42ef4b07db02d35d5ba1c9d8b5f843fcd48d0bd7d72c31ca3c0ccd9f7",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/diagnostics.py",
+      "sha256": "04af1b91f11c0062fd7c9255eeee8378fc6d770d23833e3ac4b3dc43b15c8428",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/disposition.py",
+      "sha256": "20d0f06ca1b3ebaf6f92c8ed33a02765f6f6a0d71a55b3036d68186338f069d1",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/event_details.py",
+      "sha256": "2e82944fffa1a1ac4df09ea351cbb4501831c925d86a64fdd84ca0508511a0dc",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/event_list.py",
+      "sha256": "3c9e8c8c08917780c099907f3c4147d12d9540d2abedc753910827feeb5a90ce",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/evidence_presenter.py",
+      "sha256": "f2b3878adbda84ff27328a562fca26ac9277f58ca48d6ad14e1da2ce9438779b",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/followup.py",
+      "sha256": "bfd1d06921cb9499bc9a4d302d943240bff2b298781a7c68417f3997d0337457",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/investigation.py",
+      "sha256": "693c1c5c91b3c867f807e50cb7ef64ae0bca3ad58662a1598dd45cd970f0ee4e",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/lifecycle.py",
+      "sha256": "514e795b040542b8df92dbd235b63140c4c8e00fde80bfa7adb90237eb1dcffa",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/mail_interpreter.py",
+      "sha256": "3c17a9180bb5bb487a792039f443bfa6b510f50471e68a47ecc9a819c52c33b7",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/mail_manual.py",
+      "sha256": "687e4472f6d76f7a2f5b3be8372233bbaa03e0d1889a5fc8e77557445fffe60e",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/mail_retry.py",
+      "sha256": "3223b3140d6b4cd7346a2a4e0fb78e0ee3418b499b0e347a6423fbb95d4054e0",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/mail_template.py",
+      "sha256": "765e2d45ad82cdbeb813a1fcd3c2c0d237291c462af55b9a43b3790079506c5c",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/mail_transport.py",
+      "sha256": "f8b1da26685686d4f21d1ae3025f4d3ec10119346c71bc5a0fc0970229e03115",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/mailflow.py",
+      "sha256": "d7ee9d06d479837d6c75ceb8cc9e27e3cff100b22cba7b0e5999dca69be05480",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/model_recovery.py",
+      "sha256": "ff6966ed10003cdd5d4bdc302f33e84be7a49dd10c403f9c197382687d510122",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/models.py",
+      "sha256": "5a61da60c6772503a6eb219901f09e7c923cf98e8e71eab4df38b45169c604ba",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/pagination.py",
+      "sha256": "2e39ad4a0423dfbfa359c4f498bb23faab9bb968db6708140c08eb5181b57779",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/query_time.py",
+      "sha256": "28e723b6d128e9016953bc634f0fc9c4939fa198d1db7682c4d5c0879e8f0638",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/reconciliation.py",
+      "sha256": "24b27cca366e78a09b43333cf95cfed3c6422d9749cba578fd5018f5b74ab849",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/recovery.py",
+      "sha256": "af8f8cc522e8757e807a8829715ebd4bafdf26ba900e2acee8cc6edbd9643ac9",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/reports.py",
+      "sha256": "c96811c3bedb011503e69f1953602887023955e92d58b1fc0a29f6bea06c37e4",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/rounds.py",
+      "sha256": "f86f1eb01892068c2d96c40164875139da149274cb9d3481529fb95c92abbe4c",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/runtime.py",
+      "sha256": "002348fcffc4cc53a8acf983f7e4a2929e1298c3b5db5f5bc9d316edb071fe82",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/sampling.py",
+      "sha256": "3d8d01c49d1887a02974061c85b34577cd57585f11cd530c50ff708e27aeb7bc",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/scheduling.py",
+      "sha256": "e8b46d2af0f8f6ce3541b3771aa5e441c26a19ad7aa1f71b35aedea0ff96533d",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/selection.py",
+      "sha256": "bcef65921ceb91a2884b0479e08fa90aa569e7cf57b0ed6f2233f53a74d1f06f",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/sessions.py",
+      "sha256": "98a0e4c574397b3c0ffa03ae6afe58dc1432a187c6b6d1a58b081885d0b12f3e",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/source_event.py",
+      "sha256": "cc8024cd6bb39fbe0b963654b7e7e28eaa6de44d29af4b79badc9b2cdfbf3145",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/status_rules.py",
+      "sha256": "9fa0fd1ea8d9ac8b37d54bc79b4d40960106cd4d38621ee5aeda4928138779a2",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/store.py",
+      "sha256": "52b0ed74fa4181cbe42a572974ad7e56f653a2ee66f5a4fa5b347b46eb7aa6d9",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/monitoring/summaries.py",
+      "sha256": "99b81c6b8e20972c27c30dd4f234ac8e2774ab47bb4040606050e4bf1b6c6545",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/permission/next.py",
+      "sha256": "9134c449d2478da2136ecccd3a968377828c211c6e33ded36d1fd35145a01c86",
+      "before": "73ad06da306ff457cb84afc00db68d6b94b66a0026cdc4cfb2f5f42fd7080f48"
+    },
+    {
+      "path": "flocks/flocks/project/instance.py",
+      "sha256": "57ed2e8733e05c424666fa9ccfe24276c1c734e15cc77e5a898d6259bddc5ee6",
+      "before": "747e6f64691b1f37571d784fd2b5e7eadfb9e510b0a8dc68b3841f3c30fd8587"
+    },
+    {
+      "path": "flocks/flocks/project/project.py",
+      "sha256": "65c33c70988ad15ca7af4c03279a5e304c5d1fa1cca80e94fbcd7cc65b9645ac",
+      "before": "c7f72b79e282b1bf23b3661b5527a899ce9af3cc78324843f9c20275cd3c0f16"
+    },
+    {
+      "path": "flocks/flocks/server/app.py",
+      "sha256": "2e6466125d529bb507bbf259e1f163d96a8d0bd0ddcc5ce423cd0aee5d58d934",
+      "before": "ad137cbac77756e6776cddf4f45eae6e0f95afb0d0b7ba5b1c6a8a0850c85568"
+    },
+    {
+      "path": "flocks/flocks/server/routes/home_usage.py",
+      "sha256": "bbb1df4ce7fcac676b1f8734653a1e37b682eeb0f5c6a761cf74019a69f52a49",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/server/routes/hub.py",
+      "sha256": "f2b107cf6c81ca282f387c1bd5ba37575f6812253a99850c409cbcdbcb31f796",
+      "before": "472813c67559f1a5174a40abb6e346aa28c408ae354aecbc6d2839fee07db4f4"
+    },
+    {
+      "path": "flocks/flocks/server/routes/knowledge.py",
+      "sha256": "32054e9876e04d16489954a00638fe08ebab48a87c6c511a3b623f033890a66e",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/server/routes/knowledge_catalog.py",
+      "sha256": "67e1e6966bca23387584bec37356fac119f8ec6808d57a67e4b249e16b61bf7b",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/server/routes/knowledge_categories.json",
+      "sha256": "16890cec4616ca8162fc2484e1f2d764b1d0c149e28ac211b447ca2d3678d2b7",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/server/routes/knowledge_experience.py",
+      "sha256": "17e0d3d600e369e6778f4c138af2468613ed1e1aa12f6821b022308bfed452c7",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/server/routes/knowledge_experience_api.py",
+      "sha256": "fab1e953448b245ebee29554b0c464cfed25bd0796d043edbabb97147858f581",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/server/routes/knowledge_experience_daily.py",
+      "sha256": "ba4f574d24e7999c9a9a76b2dfc9bc1ff9b34a8488bb591b6e86c5685a23ddc7",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/server/routes/knowledge_experience_runtime.py",
+      "sha256": "0317a4523dfa6e153dd0ad7ed0e427c1265268d42be623425d14d8c1b197117f",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/server/routes/knowledge_experience_settings.json",
+      "sha256": "de7b68fa1fcad23a29ae11a8c1492b23a1e640d46d2723096a721c579d64f386",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/server/routes/security_monitoring.py",
+      "sha256": "14ce7fd034f89708bee304476725193106c3cca311a4f6c44d8bcfb544a539f8",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/server/routes/session.py",
+      "sha256": "516be0b60af89211e94bbf3b3744dcec43000e98d5c649f8a665189fd6c060ca",
+      "before": "e9d2144382694bd609e94cfd4615dedecae0055a83fccc10ac204a81add81044"
+    },
+    {
+      "path": "flocks/flocks/server/routes/workflow.py",
+      "sha256": "9a67a105f27ac0a753c4e1646a9b234eee982dae1ed550eceb05c9a112628106",
+      "before": "e4d14e291e5c422e58162c0dd712ccc5e573df8d7e2f7031ac74a34b9ae5bae5"
+    },
+    {
+      "path": "flocks/flocks/session/interaction_policy.py",
+      "sha256": "1717fbf74990f46f8d1c566a048f1be15fc424916f40b3c5142f143b03048365",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/session/runner.py",
+      "sha256": "99424794e210f393f6fb27a3e1a4de18d957fca195d2c89d6c428f3446eea6e1",
+      "before": "ebcb61118248a3e1c5c0e6f15efaabc1af056972579843d409b9e0c0e6b67db9"
+    },
+    {
+      "path": "flocks/flocks/task/background.py",
+      "sha256": "cc19cedca54aeea78a6ddcd183404e71ac353009ba876675779489eb32f645b7",
+      "before": "7602ca697649043248e7c55220e1a1be37b967c6f448d27230b769783d6eb0c3"
+    },
+    {
+      "path": "flocks/flocks/task/diagnostics.py",
+      "sha256": "ac88d1961d0ccc49de4de1f82cbb3e41ff13e9ef4408ee0129603cc9758ae564",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/task/plugin_sync.py",
+      "sha256": "e6ab8b98c9f66077c5e60ce6b1571b200bdd683fbd34fa0323be3f4b785b2e16",
+      "before": "36188cf27a03ef71b4101c2c58d763c463b724a4859087ab50a896b058375fab"
+    },
+    {
+      "path": "flocks/flocks/tool/question_handler.py",
+      "sha256": "4cec76363f974f11cb8c4899a6d187daf43d396078459040b708c9271fe27bae",
+      "before": "37e62f0848a012aa3100af398cff219bef596fb9d4c7d0afcf8e7dbd45532477"
+    },
+    {
+      "path": "flocks/flocks/tool/registry.py",
+      "sha256": "f520d8c396057f4101febef1d3f141d82b2da2b64f82c6f6a33b1ca60ff6fd84",
+      "before": "e43c0c2f73350a8f9d7184b32992e00d2f99b93c6b189f40f2849fc5955a8ea5"
+    },
+    {
+      "path": "flocks/flocks/tool/structured_output.py",
+      "sha256": "c0a9509dd868da1b8e1dc0a6fb976dd7ff814af6e53bc514397f6425516d0195",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/tool/system/question.py",
+      "sha256": "282968edd7d4a0ca2adcc30e3ac9ab4d8c08cdbc7f9940a59b056ac2b4e67c8d",
+      "before": "c764375b0617470424d3a4fb800994af88b026a9fc0431565501b1ed8e13cca7"
+    },
+    {
+      "path": "flocks/flocks/workflow/center.py",
+      "sha256": "e7c323985046b309b4cbf4c7e693bedf2165c09d890adc742746d8157d22cd31",
+      "before": "87497b6a7355bdf1775e83a382ea4b24fb7a6ad7b32311ba0d46216293b9e315"
+    },
+    {
+      "path": "flocks/flocks/workflow/custom_soc_suite.py",
+      "sha256": "c72602f3c34efc437ad360120c266bf94e4d704a775667aa55fa19afebde88a6",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/workflow/custom_soc_suite_settings.json",
+      "sha256": "bb702a0f415b661fa0a5f8930beed8bf98e4aa3cd4acd082e0cc80bdba8f0b90",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/workflow/runner.py",
+      "sha256": "cd5f91bf695d7ea2743df2f34106421c06d5450aa2dbbf36ae0f7400b57bec30",
+      "before": "068fb2df29356f66d3d8404b709da6b2cd83417571c2f0e1ba056ec00d951cf8"
+    },
+    {
+      "path": "flocks/flocks/workflow/soc_diagnostics.py",
+      "sha256": "77fd859e7cdd698b33c6f33be8829c634613d5adcea6cd9abe8c7a18a2fd96e7",
+      "before": null
+    },
+    {
+      "path": "flocks/flocks/workflow/triggers/dispatcher.py",
+      "sha256": "15b298535af65caf07ba40a2d7c57234901c7832a9a93c519285ac12b13c8f92",
+      "before": "3bdf6e974d91e7ed30693c889527b121886df1d66be02c5775294e61f4ba4065"
+    },
+    {
+      "path": "webui-dist/assets/ArchivedDataPanel-DsrouExh.js",
+      "sha256": "e4493c311b7bd1e343a3db7726302820167a4cde12a4cf543ceac7befc5e4668"
+    },
+    {
+      "path": "webui-dist/assets/Callback-2C2_AoBb.js",
+      "sha256": "fa29dd266d641ab13f58c8ad92ea76daa43d28e3389cd0d7c82063893d7bdf42"
+    },
+    {
+      "path": "webui-dist/assets/ChatGuideDock-Bvq8xbOt.js",
+      "sha256": "ea464f24f89747c049f0eb784102ef28662fb2afba2e7ddc40802975f62d8b7e"
+    },
+    {
+      "path": "webui-dist/assets/ChatPromptSelectors-BlmDY7ml.js",
+      "sha256": "a282bb8e7dedd1a40f87789ac1150a5c4996ac81ee33a110e5ede2ab7ce6f75e"
+    },
+    {
+      "path": "webui-dist/assets/CopyButton-BqMtdTwW.js",
+      "sha256": "65932daee45d1d62f8dd0c4cfafe85fece73dea8a8e92d340399be8914e3dd17"
+    },
+    {
+      "path": "webui-dist/assets/EmptyState-O6X3yFiQ.js",
+      "sha256": "987c5de40c21201c3ad25fe39f4b288848c514af10cb4279542d9f31e9e68b11"
+    },
+    {
+      "path": "webui-dist/assets/EnabledSwitch-Bl5xbwsx.js",
+      "sha256": "32db67746b2d014c031cba9c506aae9c330ecca163aa6c87d6b63419797cdf30"
+    },
+    {
+      "path": "webui-dist/assets/EntitySheet-C2wRj65l.js",
+      "sha256": "27b7d80c13e58497cf75e28beb1c0ae5fa806f0681bb895ee366be165daa8296"
+    },
+    {
+      "path": "webui-dist/assets/ExtensionSlot-Bw4mDyHX.js",
+      "sha256": "a5ab284d78e3d0c345b63d5cef9711fefaac8448e0fb7a579137b0ec1cf59668"
+    },
+    {
+      "path": "webui-dist/assets/FlowCanvas-k-3F57if.js",
+      "sha256": "a9d691b1f8143197ab800fd1cf282589f21cc6860cb41f7d57af31903b52519d"
+    },
+    {
+      "path": "webui-dist/assets/GuideInfoIcon-CjpZKB3-.js",
+      "sha256": "b3f5a0476b934895d76f0cd2a096196416ded93dba1cb11bff429acfddd68c5c"
+    },
+    {
+      "path": "webui-dist/assets/GuidedCreatePanel-CnbBPetl.js",
+      "sha256": "e79fc591a623b95088e1df6f5bcde29739ef2583473110ec5d87854e5d01ceab"
+    },
+    {
+      "path": "webui-dist/assets/IntegrationTab-eBnEL9jW.js",
+      "sha256": "641b43817b92e343b6ef043f362659b3c89d16a64d2d8341465daf96269a6915"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_AMS-Regular-BQhdFMY1.woff2",
+      "sha256": "0cdd387c9590a1a9f9794560022dbb59654a7d86f187aa0c81495ad42d3a7308"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_AMS-Regular-DMm9YOAa.woff",
+      "sha256": "30da91e84c893f875e252689faebdc590b2871145e8adc7f9a9d4dbd8ce0b251"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_AMS-Regular-DRggAlZN.ttf",
+      "sha256": "68534840bcfdd2bffb6f0e8deb48684dd01e7f04ea2813267577afb906de1d13"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Caligraphic-Bold-ATXxdsX0.ttf",
+      "sha256": "07d8e303ce4fc12b4bb54f1004170dd190a1f3db45d400fe68060df3e0897268"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Caligraphic-Bold-BEiXGLvX.woff",
+      "sha256": "1ae6bd7475590e97e7f145a89e09ccde322f7a6bc0b91607b1c8b8ee28290fed"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Caligraphic-Bold-Dq_IR9rO.woff2",
+      "sha256": "de7701e42cf1f4cf0b766c03fb27977207eee2f4fd5d76fa82188406da43ea4c"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Caligraphic-Regular-CTRA-rTL.woff",
+      "sha256": "3398dd02302557a793f2863f88e02d96ce10df2abffa07c8e9fa90775116e65c"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Caligraphic-Regular-Di6jR-x-.woff2",
+      "sha256": "5d53e70ad607c2352162dec9e0923fb54ecdafaccbf604cd8dcf7d00facb989b"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Caligraphic-Regular-wX97UBjC.ttf",
+      "sha256": "ed0b74372feefcbb9c0666b2e210da37b7e49fa7fbbf3eeb11db5f693dacfbb7"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Fraktur-Bold-BdnERNNW.ttf",
+      "sha256": "9163df9c7122432e6495b4229fa9071cf9ae86a758ae5efc4924ec2e1a6dbce1"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Fraktur-Bold-BsDP51OF.woff",
+      "sha256": "9be7ceb88004ab8ad124082246fbfcca4091e36385d4ec6ed1df67375dad50fb"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Fraktur-Bold-CL6g_b3V.woff2",
+      "sha256": "74444efd593c005e3f4573b44524704c0af0a937fe911cca9e94068d0d140d3f"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Fraktur-Regular-CB_wures.ttf",
+      "sha256": "1e6f9579e90e2cac37f8f60a597c436e075c114385652b7cbeb0dec0421291b3"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Fraktur-Regular-CTYiF6lA.woff2",
+      "sha256": "51814d270d06ff0255dba0799994fa4d8c84d11f09951d47595f4abb1f3602dc"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Fraktur-Regular-Dxdc4cR9.woff",
+      "sha256": "5e28753be717dac97f559f49bc10be9cf3c124ddcabda6659d11cb68febc6463"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Main-Bold-Cx986IdX.woff2",
+      "sha256": "0f60d1b897938ec918c8ce073092411baf9438f6739465693ff18b0f9d20b021"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Main-Bold-Jm3AIy58.woff",
+      "sha256": "c76c5d696297d51b9cb1639c7da4334f0e7dec81b42b11213b5e25ef671bb822"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Main-Bold-waoOVXN0.ttf",
+      "sha256": "138ac28d1663b3037e9c5f52371fa5c63d8324f4a38d22cd573e6ea3a3fd0cf8"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Main-BoldItalic-DxDJ3AOS.woff2",
+      "sha256": "99cd42a3c072d918f2f44984a807cf7aa16e13545fd0875fc07c6c65f99e715b"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Main-BoldItalic-DzxPMmG6.ttf",
+      "sha256": "70ee1f64a20f2048c21940ef46d0144fd215baa953ca69afd1e31e98544f708f"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Main-BoldItalic-SpSLRI95.woff",
+      "sha256": "a6f7ec0d846ac7ad975adb8959c37ed49b94acbc4ae436db9ce9e20287e4a64c"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Main-Italic-3WenGoN9.ttf",
+      "sha256": "0d85ae7cc30f23790a7f1a58c4a112fdca8aae769b6ba11429af1d98b1b6cb3a"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Main-Italic-BMLOBm91.woff",
+      "sha256": "f1d6ef86f3b11a528bd5185199bd2443ecb2b0dead96d88674b5a2c12be24bdf"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Main-Italic-NWA7e6Wa.woff2",
+      "sha256": "97479ca6cce906abc961ecac96faa5f9ca2e61b8e7670d475826bcdee9a7c267"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Main-Regular-B22Nviop.woff2",
+      "sha256": "c2342cd8b869e01752a9321dc17213fc40d4d04c79688c1d43f2cf316abd7866"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Main-Regular-Dr94JaBh.woff",
+      "sha256": "c6368d87e8a1a3a5d337623d83d8dc4b868f242a9ad476237d6f8d1e0f168cdc"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Main-Regular-ypZvNtVU.ttf",
+      "sha256": "d0332f52868370fd83ae7fa46470f90c8f2eab2fcf12bc4f88080b340c95a830"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Math-BoldItalic-B3XSjfu4.ttf",
+      "sha256": "f9377ab0271cda59af24bcffbd46a4d0c8a3572ffafdbb38de2ad5ea7b0d5ee5"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Math-BoldItalic-CZnvNsCZ.woff2",
+      "sha256": "dc47344dbb6cb5b655c8460d561f4df5f501b90c804ad3c6cec65fe322351ab1"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Math-BoldItalic-iY-2wyZ7.woff",
+      "sha256": "850c0af5c2238497febaf5e461d880bf458c341f42f4f330f1b1ab5698b1998e"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Math-Italic-DA0__PXp.woff",
+      "sha256": "8a8d244581371912b8f3f5a23e2437cb2a59cd9bcaebb0346e722c05737a2571"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Math-Italic-flOr_0UB.ttf",
+      "sha256": "08ce98e51b04d58945a301e639e02b6998af29fdfd61a7b8afdd07bbfc479d4a"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Math-Italic-t53AETM-.woff2",
+      "sha256": "7af58c5ec8f132a2ddde9027c6d7814decce4d3b822a11192a42a20e2e973264"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_SansSerif-Bold-CFMepnvq.ttf",
+      "sha256": "1ece03f79f95277d57dc7f6b435a74e1379b0d46104a8530286b60ff49369ea0"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_SansSerif-Bold-D1sUS0GD.woff2",
+      "sha256": "e99ae51144bf1232efcc1bfe5add36262c6866b0faab24fa75740e1b98577a62"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_SansSerif-Bold-DbIhKOiC.woff",
+      "sha256": "ece03cfd83e22c212cdef66feb8442d25a083beb988db3f1883f3f9738d750ba"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_SansSerif-Italic-C3H0VqGB.woff2",
+      "sha256": "00b26ac825e2095056396e0553b8ac26d3f8ad158c3826e28b4c45b385c4714a"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_SansSerif-Italic-DN2j7dab.woff",
+      "sha256": "91ee67500cc0129aa0ace3ac5c61ff1692102f0f31d02b69347fba35dcb75bf2"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_SansSerif-Italic-YYjJ1zSn.ttf",
+      "sha256": "3931dd81faed86ba021bb2bbdc36f5bed9a38d6b4f4077aca59b265aa1b02083"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_SansSerif-Regular-BNo7hRIc.ttf",
+      "sha256": "f36ea897e19f4a2e571d1e900e4e3710e438deb05a842486045ba0a3e616a4ad"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_SansSerif-Regular-CS6fqUqJ.woff",
+      "sha256": "11e4dc8a6471ff6d6ee561d53d10fde8f7489e798257ff449c5d37c197435605"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_SansSerif-Regular-DDBCnlJ7.woff2",
+      "sha256": "68e8c73ef42afd3ccec58bf0fba302cce448938e7fc020a5e31f8a952eee1342"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Script-Regular-C5JkGWo-.ttf",
+      "sha256": "1c67f068fea8bb09bf099c088b1cf64bd27516a6e07f4684344873564bb66a67"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Script-Regular-D3wIWfF6.woff2",
+      "sha256": "036d4e95149b69ff9bcc0cd55771efeb25ffa3947293e69acd78d5ac328c684b"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Script-Regular-D5yQViql.woff",
+      "sha256": "d96cdf2b3bdd4d64a8fd5f74a4c467f123a8a73931cd435889f08ffaf9bf947a"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Size1-Regular-C195tn64.woff",
+      "sha256": "c943cc986384f59e86bea5fd7dc50a9c4dfe567a7c05eb40d6790720dead97c9"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Size1-Regular-Dbsnue_I.ttf",
+      "sha256": "95b6d2f1a50173bfedb8c63e1d1c99b10427d0a4df4201cb44513b226951a22b"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Size1-Regular-mCD8mA8B.woff2",
+      "sha256": "6b47c40166b6dbe21a5dfca7718413f2147fd2399be1ba605d8ad39cedf25dfe"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Size2-Regular-B7gKUWhC.ttf",
+      "sha256": "a6b2099fb555c60e3a0db3a08842ebf1d732c6eb4e4bf44913613bed4fc4e39b"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Size2-Regular-Dy4dx90m.woff2",
+      "sha256": "d04c54219f9eaec6d4d4fd42dfb28785975a4794d6b2fc71e566b9cd6db842dd"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Size2-Regular-oD1tc_U0.woff",
+      "sha256": "2014c523c3210bcc166648c4d4cc57f05b747df07a24277bf71c51e67dc79e3d"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Size3-Regular-CTq5MqoE.woff",
+      "sha256": "6ab6b62e9b62dae2c00dd90f791bd10950be0ecc3490d7d6045f51c2e8fe0949"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Size3-Regular-DgpXs0kz.ttf",
+      "sha256": "500e04d54f0d51666332c9d2089aa803be22aa878eca539e59fa53c6e522b082"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Size4-Regular-BF-4gkZK.woff",
+      "sha256": "99f9c6750b489c9462bf04900bd3f939df9b829339daaaaa99ef5495cdddea58"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Size4-Regular-DWFBv043.ttf",
+      "sha256": "c647367d1dd4e162468717d020e1fc0f1dc5c26ebfdffbe55261713bf88c5877"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Size4-Regular-Dl5lxZxV.woff2",
+      "sha256": "a4af7d414440a1c1790825cfb700cf9cf43b0f2c4b04f0ebc523011ad9853ec0"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Typewriter-Regular-C0xS9mPB.woff",
+      "sha256": "e14fed02b1aba7ce9f5afd5844b5d0321b22351febc720e0de8b8723527609f7"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Typewriter-Regular-CO6r4hn1.woff2",
+      "sha256": "71d517d67827787cfabdf186914cc3358eda539e37931941f2b2fd4a21f68c0b"
+    },
+    {
+      "path": "webui-dist/assets/KaTeX_Typewriter-Regular-D3Ib7_Hf.ttf",
+      "sha256": "f01f3e87d9c6a61c0c081ceb577abd864eb00a612f7ac1620dd6915fad2ef5aa"
+    },
+    {
+      "path": "webui-dist/assets/LegacyRedirect-DPyQax3T.js",
+      "sha256": "e4bc26ea0f707d4271990b9b2fb166d3daa7026e8d7800d3f956c48ea9aa23ee"
+    },
+    {
+      "path": "webui-dist/assets/NoticeCard-CyeqPzjB.js",
+      "sha256": "0dbea37f14ef7b8263672df6795151463a139e51fcb8d49c4cac6e58b5fa046c"
+    },
+    {
+      "path": "webui-dist/assets/NotificationModal-BvYpXTUx.js",
+      "sha256": "e76031087b8aa578ffc6ebb738e661a7c465c5df2a725a4cad97fa2752b1e6bc"
+    },
+    {
+      "path": "webui-dist/assets/OnboardingModal-D601y00v.js",
+      "sha256": "b3c81fc27f2d914ec432cde5fb2fbf81dad80e285054e8f88592db9e5162b1db"
+    },
+    {
+      "path": "webui-dist/assets/PageHeader-BteSL-O3.js",
+      "sha256": "f28238ff361db5417816394e9eaeaf87e617f90ebc7871b7b70f7b45097f09d6"
+    },
+    {
+      "path": "webui-dist/assets/PageRuntimeHost-a_HTN5R8.js",
+      "sha256": "cdd6129dc659e12d79630640c8922556b97f4b5f31de4fef20e98a42de06025f"
+    },
+    {
+      "path": "webui-dist/assets/PasswordInput-Cfcm02CU.js",
+      "sha256": "443f81d9d56869da7c243fe0b5f2cbd2f6ab71363a743db4d32f92e5b5384457"
+    },
+    {
+      "path": "webui-dist/assets/PillGroup-DU4xwRNn.js",
+      "sha256": "c9c469e0a78f2c9481713f914c45d61bcba7b7d0a351b11433f4d1056a7a73ef"
+    },
+    {
+      "path": "webui-dist/assets/ProDialogShell-D7Z049Nu.js",
+      "sha256": "6aa9479bf763b93972b06c5bf9f4b5d675b5acdfbc083002da936fc3b1af48f3"
+    },
+    {
+      "path": "webui-dist/assets/SessionChat-kcjBHfU1.js",
+      "sha256": "06512d1aabaf49679cab8f9dd95c1d1c30d1339ba2166eddc7abf4c00528e42b"
+    },
+    {
+      "path": "webui-dist/assets/SessionTranscript-RDajz939.js",
+      "sha256": "56fa61b769835d2b14ac143207d234f1ebddca310ea5a078293a56f2814765ec"
+    },
+    {
+      "path": "webui-dist/assets/StreamingMarkdown-CaeMWxnx.js",
+      "sha256": "7d0ac4a16d21be44856caa01d95ab53a8f416716f24ade143ba4faab596a6bb3"
+    },
+    {
+      "path": "webui-dist/assets/StreamingMarkdown-Cjuf3p-m.css",
+      "sha256": "f8dcb19a2443ae5bbc50d0e299d54508081bfa2c4f2eaae8d09c773a86a5b3ce"
+    },
+    {
+      "path": "webui-dist/assets/SuiteInstallProgressPanel-L7DTBu-V.js",
+      "sha256": "bd8a59281814cad9814cc238f9c882c4e36c040a39bc9c9064879c3269eb9f74"
+    },
+    {
+      "path": "webui-dist/assets/TokenPolicyNotice-BX8abjPb.js",
+      "sha256": "dff0ef95654d5c71d6c4c3be45acefaf29e141878710ae3197ac1b37069ba007"
+    },
+    {
+      "path": "webui-dist/assets/UpdateModal-Df_rFemm.js",
+      "sha256": "71b13c20b0f51c85674743b983b0006887c7d8f0507fa62e31b1639b002e1387"
+    },
+    {
+      "path": "webui-dist/assets/UpgradeHandoffSteps-DHCGnrc0.js",
+      "sha256": "7f4946cda44aeddaf94520c5e4fdb17f84335169a972cf995c3ff118b78e0c83"
+    },
+    {
+      "path": "webui-dist/assets/WorkbenchSidePanel-CZ-QErcV.js",
+      "sha256": "eb463e4a3a753521cf8f82440fc2dd4efc98409c0c0e21b3dc1d59deb5bfc247"
+    },
+    {
+      "path": "webui-dist/assets/WorkflowStatusBadge-Cn4DnCoJ.js",
+      "sha256": "828d18d57238a915b466677299b2b1365a274cbdf0b34726afe0d8c4a0e3de81"
+    },
+    {
+      "path": "webui-dist/assets/agent-Bhk806ZJ.js",
+      "sha256": "2ed75b66317318533f850f593150b9f62db09bcacd3578b71128cb5eb16766ab"
+    },
+    {
+      "path": "webui-dist/assets/agent-DuiK30aI.js",
+      "sha256": "74ce5482c70d539402a0b5be215d3e1538a77cb10a0017512cfaa42e3be95206"
+    },
+    {
+      "path": "webui-dist/assets/agentDisplay-BBFnqEzT.js",
+      "sha256": "a72596801b311de2b15f49e429e3be6ccd07570cfe6be404a654419917d5b744"
+    },
+    {
+      "path": "webui-dist/assets/badges-1igJ9kL_.js",
+      "sha256": "2232edc8c03de49c9a797b722db45626b3a78fd6b0448f9b5646a89a385b2922"
+    },
+    {
+      "path": "webui-dist/assets/channel-D-RGQ_FR.js",
+      "sha256": "33f10a948307fa2d07bb76a71a0c725f61267946c9bf15e3cb88fbcd920f4b1e"
+    },
+    {
+      "path": "webui-dist/assets/channel-D4NUvxpz.js",
+      "sha256": "2fb7f2eea8d366e205c5826f2f37ca32aef006c36ea973420c8c14495b331d32"
+    },
+    {
+      "path": "webui-dist/assets/charts-vendor-V8XNH4OC.js",
+      "sha256": "a5c2d424532a48c1d80ab16f9e6f3a0bda5f73ff4a67b276403f49e20098d948"
+    },
+    {
+      "path": "webui-dist/assets/clipboard-l5oTE5tW.js",
+      "sha256": "f6c6053fcc2c53753a6ba5e1a077d33d9c61c8f2ea6546d636fbdec76066d087"
+    },
+    {
+      "path": "webui-dist/assets/commands-BFc3cIFg.js",
+      "sha256": "7676c9017c445f71accf9a51c6824fef3ba26c9018f3e4f8f842b9f91700d2bf"
+    },
+    {
+      "path": "webui-dist/assets/config-CY1KYPRt.js",
+      "sha256": "1668380ae12acc95757fb854b00cf0326ae9475bc83505ba66769f79edfca007"
+    },
+    {
+      "path": "webui-dist/assets/config-DeXv3L_j.js",
+      "sha256": "4932142f7ba3ee5b3910fff0aef3238a9c7da756a69ccd598933267e7fb8036e"
+    },
+    {
+      "path": "webui-dist/assets/consoleUpgrade-DN6Gy0R6.js",
+      "sha256": "e1a96fbf39929d6eefc4eb26edea04b58065715d00104da064c4649b197f8aec"
+    },
+    {
+      "path": "webui-dist/assets/constants-BZT6lQkX.js",
+      "sha256": "9eed9522583e225bff82d065560e6fa5f5e8855bd60b75f2a8dd62f42417ab5f"
+    },
+    {
+      "path": "webui-dist/assets/customSocWorkflow-C-SL88JW.js",
+      "sha256": "d172b6c725359a930bb2d6807a1b88f1315b08968500b2788249a6ed20b5d8af"
+    },
+    {
+      "path": "webui-dist/assets/device-5ii4E6P1.js",
+      "sha256": "a1d3001f31a54e9abbf37779c7d307678fdc33de7143279d5b32786547a76d10"
+    },
+    {
+      "path": "webui-dist/assets/device-IzqC_Ne9.js",
+      "sha256": "450e954fc2060d959d0dfb63d978a65c3bec78d2f7701e83c3b69b0305e48a80"
+    },
+    {
+      "path": "webui-dist/assets/ha-7SNHut31.js",
+      "sha256": "82b8cbf1577f6b3b568681616d6a49c31338c1b126906ca131b8680886981b65"
+    },
+    {
+      "path": "webui-dist/assets/ha-BoMWUG5T.js",
+      "sha256": "113e45cc023faac026cac0cf6bbb1be7dd944aa116d964c327cf9cfe5c52dfcf"
+    },
+    {
+      "path": "webui-dist/assets/highlight-vendor-CYQ-kLdy.js",
+      "sha256": "7cf35f212048ee96fef1b22f4bd4ae928190fabd7bdbf18d2b697f9703b6b0c5"
+    },
+    {
+      "path": "webui-dist/assets/i18n-vendor-ZDeNXa0T.js",
+      "sha256": "11c4b8833ac105c984509ea02774f255f91f3700496085f246653c7dcc0b6547"
+    },
+    {
+      "path": "webui-dist/assets/icons-vendor-CE_wVRv4.js",
+      "sha256": "3e0f92a405a55dfd61a301f85cf2fc77e0b73aa69dbd62fe567bb38b9119ddcc"
+    },
+    {
+      "path": "webui-dist/assets/imageUpload-dnFwvxYJ.js",
+      "sha256": "2647fac99d96746b44639fa67a93cdca5faeaf39f2881fae082a51af91e8dbc5"
+    },
+    {
+      "path": "webui-dist/assets/index-2gQr_OCI.js",
+      "sha256": "0ab49bf59ef33a228e3e1a420b7cd67079ebfdf7f5ec816d4a9d6e9dd6bd34b5"
+    },
+    {
+      "path": "webui-dist/assets/index-4m2pbvmw.js",
+      "sha256": "8a1a8ef1fe0d4c63d40aa37b9475e904a1b342369146d4ca9b9e263374f27209"
+    },
+    {
+      "path": "webui-dist/assets/index-B9eebvnI.js",
+      "sha256": "29738673cac8ec833e711f64c6e5845d97662d78e37f81176f69ed66442915b7"
+    },
+    {
+      "path": "webui-dist/assets/index-BAb4Ffqh.js",
+      "sha256": "805c311ce7e57be7d5b1d1182c8c666181c334085f4d89d0378cbf5ba423fdc2"
+    },
+    {
+      "path": "webui-dist/assets/index-BAe_7WeI.js",
+      "sha256": "8e09346c20d75865829255e311e85dd08e87b24580b4e19afd61551b2a289605"
+    },
+    {
+      "path": "webui-dist/assets/index-BIPNLdN3.js",
+      "sha256": "6341921170705650256af80e3d599307927f68046716986ee6c1bc541c3be951"
+    },
+    {
+      "path": "webui-dist/assets/index-BJKIUibf.js",
+      "sha256": "c83512b5bd7702d30c4824698a4f68d2444e479d637b18ec3bfe8646302003ec"
+    },
+    {
+      "path": "webui-dist/assets/index-BJqYXInE.js",
+      "sha256": "7fbf75fed2d84fbe4420d7d8d1824f8f8a613578e00d0645891da918a02a000b"
+    },
+    {
+      "path": "webui-dist/assets/index-BL7ROW4o.js",
+      "sha256": "8a15c669fd83e63a2200b89bd75002fb8be68aeac52835921d76450fdcc7aa73"
+    },
+    {
+      "path": "webui-dist/assets/index-BOgj7qSt.js",
+      "sha256": "4cd3893dffcb49946c856a16c6dde583b2ef2841980020f139be0707f5ff0ff1"
+    },
+    {
+      "path": "webui-dist/assets/index-BigdVJTa.js",
+      "sha256": "818192d08866d9537940382dc34e780ec9b2ad48869971e8369e81eb8dce4883"
+    },
+    {
+      "path": "webui-dist/assets/index-Bj5PYAAN.js",
+      "sha256": "a554a1f6bd8a99fe26a74c6af4c5e242cd58a136b57f211d1550ce57e074a062"
+    },
+    {
+      "path": "webui-dist/assets/index-Bp3Ztf8V.js",
+      "sha256": "6585610fa4e207b3b049cfbcefd7fb9e180197776b8ed652cbc2e6104a49a1ac"
+    },
+    {
+      "path": "webui-dist/assets/index-Bp9PY6V2.js",
+      "sha256": "da1c3b7db72f5bf70a32f208094e6a196ea4815a9cb346c8c0ade24f7acaa74c"
+    },
+    {
+      "path": "webui-dist/assets/index-BrhrV824.js",
+      "sha256": "5e1375e1c29bc3e8be07fc6cb96d3b7453249fad0cbbdd8b4538af8a577a2773"
+    },
+    {
+      "path": "webui-dist/assets/index-CJg3xraE.js",
+      "sha256": "20cb12c42b33c0c1403f8037d8a2c80f4156b6e5d9a41785516db11d7299a228"
+    },
+    {
+      "path": "webui-dist/assets/index-CKjtHQND.js",
+      "sha256": "2ee1cfc7bfdeb4c4679c0b4adb75a61647faacb286bc0b6702db6f8bef553440"
+    },
+    {
+      "path": "webui-dist/assets/index-CPRWOTtY.css",
+      "sha256": "c7b155dc18bae46a382f8e34cbede3069a35ab87eaaec02322a1df265fe773fd"
+    },
+    {
+      "path": "webui-dist/assets/index-CR6NJ8ix.js",
+      "sha256": "fbde82170e89c6741d0b0bc2786c6d2fcc9ffac3f38558e01f2ea7c2ac9b5c29"
+    },
+    {
+      "path": "webui-dist/assets/index-CnRZfu6W.js",
+      "sha256": "fe7f9442f9da056959b488276562d8076c31ff2ac0db19602917d60033fb4e6e"
+    },
+    {
+      "path": "webui-dist/assets/index-Cu_p9BgF.js",
+      "sha256": "230e02635496e01b1839f339107c26c9e0a8529a11524428a6f35d90280eb6ae"
+    },
+    {
+      "path": "webui-dist/assets/index-CyFBZZ6T.js",
+      "sha256": "05f08f511f1c3d220f9985e82a9fa645868ed6d906e00025080543e154fff6fa"
+    },
+    {
+      "path": "webui-dist/assets/index-D1Gk4IK7.js",
+      "sha256": "3db7d980c6b77bf27013ff2f3ce04baf787ff0c6e321538457bbe0ef750457ff"
+    },
+    {
+      "path": "webui-dist/assets/index-DAd--BDf.js",
+      "sha256": "7f097292c2d9936b978cd0a6a897dd2e2e2a8af830129cf0409a57baa10e42f1"
+    },
+    {
+      "path": "webui-dist/assets/index-DZSvt8hm.css",
+      "sha256": "34f71915dd2cca56d82bd091773102e8c421fff603e1dcf82e195f8cad0dce39"
+    },
+    {
+      "path": "webui-dist/assets/index-De16_r0M.js",
+      "sha256": "47e90c3f62d89c84335cba4aa12d870337a15b3a2184e1886674436b9eeed3cb"
+    },
+    {
+      "path": "webui-dist/assets/index-DfifMq7g.js",
+      "sha256": "f0aea035265cb5c29187a075bf435b27b6fa0a3dc62ea354a7df15b8b613a2f0"
+    },
+    {
+      "path": "webui-dist/assets/index-DkiHfVyM.js",
+      "sha256": "24623792ea724ffa3d2fad420b8b749163b37e51300535ec80bc56cf42e43609"
+    },
+    {
+      "path": "webui-dist/assets/index-Dn6BfknP.js",
+      "sha256": "bb4b7ef1ad3c536e52e40f57dacec63895523a5e6ed6c14f6d82f0144e8e08c3"
+    },
+    {
+      "path": "webui-dist/assets/index-DvNG2mLV.css",
+      "sha256": "bd3831d8e043df0cc0d7d1afb373c03d0825e300db3bc775945288e228f033cb"
+    },
+    {
+      "path": "webui-dist/assets/index-Dw4q1AIG.js",
+      "sha256": "efa2d88df4514a77dfc5b4e9b11c1c6581d8e9c6e223bd58b809ea73b7b0ad31"
+    },
+    {
+      "path": "webui-dist/assets/index-DxbXYRqX.js",
+      "sha256": "84c3e516b542fc28dbc81b9f1fc0fc631ad435b8e219fe0ca6ee1efdab127b0f"
+    },
+    {
+      "path": "webui-dist/assets/index-GWP3cDwz.js",
+      "sha256": "0121f543be97130f834bfaac5ccafe9df8cfab9dbf869b60ee475e7e5a43d1c4"
+    },
+    {
+      "path": "webui-dist/assets/index-MBVBh74b.js",
+      "sha256": "eff22c962b4e3fde5e6d88b4c8c2981c423cce56a2f4534cda54a0e803843d58"
+    },
+    {
+      "path": "webui-dist/assets/index-SMdoS2gf.js",
+      "sha256": "010a95491c755bbd6a0b40a76c8096cd8d6c3560c47795230887cd1274ef944e"
+    },
+    {
+      "path": "webui-dist/assets/index-gO2WE1ff.js",
+      "sha256": "7a726fbe14b5e14110ff9c79ba68462d469ac3e4e82ff675d89d43ed636c840f"
+    },
+    {
+      "path": "webui-dist/assets/index-hLhqJL3o.js",
+      "sha256": "ebe3aae844810fe9df90bdc2c198fa10bc5f40d8dd89b7c187eedf59f104f45d"
+    },
+    {
+      "path": "webui-dist/assets/index-lcyMADZn.js",
+      "sha256": "301fcc294ddf7732c45b4e455b915860aa9b8ec6b1b823203ebb4349ad07b463"
+    },
+    {
+      "path": "webui-dist/assets/index-yGrRTOJ8.js",
+      "sha256": "182ba3a5b206db3f018dc829e2313c8327c99be12f4b455f34469798cc961532"
+    },
+    {
+      "path": "webui-dist/assets/markdown-vendor-CZNUDgeK.js",
+      "sha256": "f1eed4306d7ed6d63332a34004e46e8e3dd99eb5c2ff9d07b7a3f776715a939b"
+    },
+    {
+      "path": "webui-dist/assets/mcp-CQoi0UWG.js",
+      "sha256": "f6267a428585cc6c3b829bb61ef71c04382918da77f6211bf086d2bce44789ec"
+    },
+    {
+      "path": "webui-dist/assets/mcp-CZIrM04k.js",
+      "sha256": "05828040ce1bc514a48b884428028ac8d549055a5f4423f6804b727144b56507"
+    },
+    {
+      "path": "webui-dist/assets/mcpCatalog-BKXPXkVM.js",
+      "sha256": "98dcc3a2e17d191fb599174c72a4f1f34c36d261b8d291a7e0f29e3a66078572"
+    },
+    {
+      "path": "webui-dist/assets/mobile-pages-DEkiuhx7.css",
+      "sha256": "e2a265301983f278f2b666c27ac825112346852c7c385837a0a7b3a283d0df56"
+    },
+    {
+      "path": "webui-dist/assets/model-Ca4dENZH.js",
+      "sha256": "263752178e0963832b62c5580a90e47c470f3f5f6f4804f203018fbc391c5589"
+    },
+    {
+      "path": "webui-dist/assets/model-D9NiaO89.js",
+      "sha256": "cf5026ac3a32ea9b92b8070ea78ed99c7826b9674bb6b0ba19eba4f572960795"
+    },
+    {
+      "path": "webui-dist/assets/modelPricing-aalmhCL8.js",
+      "sha256": "81970a146b753f7d43b9fd261d8e390f1a06d51bf231136150e21bb80751af2b"
+    },
+    {
+      "path": "webui-dist/assets/monitoring-Bg23Ulzc.js",
+      "sha256": "d0bee85909e78e37e1e9c564e57c9cec50236298cd6722b65a43ffbc812a7907"
+    },
+    {
+      "path": "webui-dist/assets/monitoring-DEhdDmTy.js",
+      "sha256": "dd586f9fefc37ed9ca378416dc4a83302b726c3334c9be50368f03367bf92e8d"
+    },
+    {
+      "path": "webui-dist/assets/navigation-D3fs-KGF.js",
+      "sha256": "8cabc6ef8b94bf1639ded2e480b65bf20eda66464501a0cfccafcec55d1eaeba"
+    },
+    {
+      "path": "webui-dist/assets/notification-B1A8Q6-v.js",
+      "sha256": "efdeb6837d8e2ddd162633a60505667662bb61e7f0c876058e176fb014894bed"
+    },
+    {
+      "path": "webui-dist/assets/notification-x36PEtkG.js",
+      "sha256": "f7caf9b29047c56d5e29da70d3e57fbd77d5463f1eab6943ff4f3f1c8c296e5a"
+    },
+    {
+      "path": "webui-dist/assets/pdf-BjAALUVx.js",
+      "sha256": "80d067a56f2f58127ac0a333a5dea57841aa25fe8f1bfac092fd7a785ef4ed13"
+    },
+    {
+      "path": "webui-dist/assets/pdf.worker.min-BUZPQQf9.js",
+      "sha256": "dd8d9b8e858d280e15c2a90cd8c033deb0a108bb7e9b20f4aae797b367dd81be"
+    },
+    {
+      "path": "webui-dist/assets/pdf.worker.min-DEtVeC4l.mjs",
+      "sha256": "2ab9e09667296dab1a618868b3ce6e6c23d5b8f48120ae7c5b34e7e335ed01fa"
+    },
+    {
+      "path": "webui-dist/assets/permission-BflkTX5p.js",
+      "sha256": "8c45fc502a43011dbcf8b445270fde78c5d36ec4f0cd0bf5d84d32d095e68c60"
+    },
+    {
+      "path": "webui-dist/assets/permission-Dl0GSRCB.js",
+      "sha256": "1ac4eeef582ca81c08bd69d2052a29ba978aef42aef7aea2d562fd3942bf34b6"
+    },
+    {
+      "path": "webui-dist/assets/pluginGroups-Bo1tn9Il.js",
+      "sha256": "bb519fc1d6fd6b50f67eb70d5b4b01aab13c8cafe425f68106a3bb0f5d390dfd"
+    },
+    {
+      "path": "webui-dist/assets/pluginGroups-Di2Fx1AG.js",
+      "sha256": "729b5d4396821e2ab795f4d007dfc4fe3fa17473683c0fd452d25d9b050e6909"
+    },
+    {
+      "path": "webui-dist/assets/provider-CHOFuVpN.js",
+      "sha256": "351120eb3345feafbf5fa7de40170e97d20ec7a60ff12e50797320e3988a80cb"
+    },
+    {
+      "path": "webui-dist/assets/react-vendor-BZV40eAE.css",
+      "sha256": "77eb229e70c7949e1d9e4f542afdf7b38d85eccc656a7c3ee9b8429a339872be"
+    },
+    {
+      "path": "webui-dist/assets/react-vendor-CU8YRgkx.js",
+      "sha256": "1a09500585dff28e825bbd151b1a68ea6177ec3fcda6331e6cd1fcf569681efe"
+    },
+    {
+      "path": "webui-dist/assets/session-BUvPeOGA.js",
+      "sha256": "2367bdaefc663b93047be7ed0c7752bba6b5ee768e5ca281dc4fe6554c084c0a"
+    },
+    {
+      "path": "webui-dist/assets/session-DmYmfgK1.js",
+      "sha256": "0b6369c3be200765aee329f1f28e8670a7081a7cfc2c40fc8905cf2bb54fce65"
+    },
+    {
+      "path": "webui-dist/assets/sidePanelSizing-C_Nd3w_w.js",
+      "sha256": "78badb0cabd818717a18bb40d69fe2182fb2df313a37a4048e238255dcb0189a"
+    },
+    {
+      "path": "webui-dist/assets/skill-8kr35wq6.js",
+      "sha256": "44deb9412fdb9243be5ee4654a0ee59923f4659316c7f84092a2461ad900b75c"
+    },
+    {
+      "path": "webui-dist/assets/skill-D9YHB5mY.js",
+      "sha256": "20e8028313e122b5d3685294c880469f7999498debdf22fd205c58b0c3fac079"
+    },
+    {
+      "path": "webui-dist/assets/task-CvbCMjou.js",
+      "sha256": "fc15fb1b223c64a5a14b8a8382122565d54b07d1d38cc287c1be466e371501c6"
+    },
+    {
+      "path": "webui-dist/assets/task-DvdgVkwH.js",
+      "sha256": "4fb81f3c557be61a5a4f3a193ed2c99a01eadd35189550b43afc7a89bdf0dea0"
+    },
+    {
+      "path": "webui-dist/assets/threatbook-DsY-6Kzg.js",
+      "sha256": "8bbf3fe5916f1c9933bbf695c43ece096a7951c231717d7fde03a297fc26a0e2"
+    },
+    {
+      "path": "webui-dist/assets/tool-Bbk_9ERX.js",
+      "sha256": "686b992b075cb754ddec99dc1995e0b37d23c722e1bc1abbf54b327d14ca2c2d"
+    },
+    {
+      "path": "webui-dist/assets/tool-BjudjCaw.js",
+      "sha256": "d16411f2965ea049b1736b699262647bef2aa72c1d7ec4c441c597468f82ffa5"
+    },
+    {
+      "path": "webui-dist/assets/tool-DK83dtOh.js",
+      "sha256": "61025873e82695a86bca93cbfac6a037fbd1a3cabec1cd04aa3051415421eed5"
+    },
+    {
+      "path": "webui-dist/assets/ui-g_t3zyo-.js",
+      "sha256": "e2f487734fdd409f554ee1aae6d58bdc683167131208204cdb53dbd8dd7813f0"
+    },
+    {
+      "path": "webui-dist/assets/update-C0ruiXtA.js",
+      "sha256": "ddc9236c1b60d9ecb1254773d4d442b438273cc3e26e7c775b489404fcb738ec"
+    },
+    {
+      "path": "webui-dist/assets/update-WtoaVqKt.js",
+      "sha256": "14ee7b6d1144fd2d66afa8434237e382c4962cd0439a63e3e812e0645fda70c4"
+    },
+    {
+      "path": "webui-dist/assets/useAgents-DTm_GhhA.js",
+      "sha256": "6e3a9c0079263cda7387c99755fa2eba579b3e8e294fc6465ea7a5bc07c51631"
+    },
+    {
+      "path": "webui-dist/assets/useChatModelResources-DjmESkjX.js",
+      "sha256": "8820c41faac352f5b2307a4de531fd48adce2c5e9eaac4a98b69101edd640386"
+    },
+    {
+      "path": "webui-dist/assets/useDefaultModelVision-BttUDkSW.js",
+      "sha256": "084c99f5ae03217b7b707e01dff50e79ee4624fb05e8b88c0df3d669466ebeec"
+    },
+    {
+      "path": "webui-dist/assets/useDialogFocus-BasAevBG.js",
+      "sha256": "8d3550a1d9dc1754fc2d1fa42353776f30369da3d86ece1ed0a67fc5d08bbecc"
+    },
+    {
+      "path": "webui-dist/assets/usePluginViewMode-5tGXqE69.js",
+      "sha256": "7c1c674334fe36a078175ec9693867310cd2c2815367b81fd09b4c290b784edf"
+    },
+    {
+      "path": "webui-dist/assets/useProtectedHubUpdate-83A9aWMt.js",
+      "sha256": "463afa27152a0010bfb787dd09f7621581ada89b2a43d616eeab72b14cef1022"
+    },
+    {
+      "path": "webui-dist/assets/useRea-CGw25uYK.js",
+      "sha256": "cf9e25cd57152f33feb249c4aa8927734210f0f75ff818386a7efc525439b556"
+    },
+    {
+      "path": "webui-dist/assets/useRexComposerControls-C_6ntQls.js",
+      "sha256": "2d8f11cd5f468cffff44461d2368b01f51a962069d9a3de3c54866e3a68aa3ce"
+    },
+    {
+      "path": "webui-dist/assets/useSessionChat-_1s-5m9I.js",
+      "sha256": "882dc4ada64fc6894582cbcda0c7190955457f36a3100bf94eb334f60b14c9d5"
+    },
+    {
+      "path": "webui-dist/assets/voice-CwJZleBK.js",
+      "sha256": "4d3d30dcac64436e405ab99f0cde28628d7afc35dd6f6b904408078748df7e1d"
+    },
+    {
+      "path": "webui-dist/assets/voice-d3rCnrC3.js",
+      "sha256": "98c56c6fc37d29043a955b4a3a4e050e9a8df0b11cd7925eb77a74ab61dcc917"
+    },
+    {
+      "path": "webui-dist/assets/workflow-BcVKK3G-.js",
+      "sha256": "deef0d1af9e264f71b757fcd748dd7ef1bf91d5237b5d3f7670eaabf19290435"
+    },
+    {
+      "path": "webui-dist/assets/workflow-Dv2epAiN.js",
+      "sha256": "0c49be0f068f467c5c3ec4237cfd0c050da73aab14623dad4efe8cafb5175108"
+    },
+    {
+      "path": "webui-dist/assets/workflowCallCount-BbY4Xhba.js",
+      "sha256": "cb35ecbdfc715e5b96aacb7fe758f5bf24ad374d197bcce6ae05444020805b26"
+    },
+    {
+      "path": "webui-dist/assets/workflowDisplay-ETInGsmJ.js",
+      "sha256": "3926b6e0cb939874631a7be5d4c02cad650d7ea2b4945658b3e5286210039a7f"
+    },
+    {
+      "path": "webui-dist/assets/workflowGraphLayout-b5NyNMdH.js",
+      "sha256": "89f8926694c4fa6886e9c3fbc6a0321eba0f94545cf64d8c18869e5020a5293d"
+    },
+    {
+      "path": "webui-dist/assets/workspace-CpVtRobM.js",
+      "sha256": "7a2fe9d8de3e05f49fcec819dacdbdcc3755835e5317b3853b9fc71a6b27c2ee"
+    },
+    {
+      "path": "webui-dist/assets/workspace-D60oAbeC.js",
+      "sha256": "e0e92f21708216008b2625b8874838b6e88791d92dfc6bbd3a065893000d403e"
+    },
+    {
+      "path": "webui-dist/assets/workspace-DCETVYQW.js",
+      "sha256": "65bb53007ebdb45d24beef81d5ac6c6103e3dfbf8439aeec43ab56beb488ee84"
+    },
+    {
+      "path": "webui-dist/channel-dingtalk-transparent.png",
+      "sha256": "f31d6af67a57761c2cf3332c705e3fe9f19849935ebaa1a7f8ad4fd5aef49af4"
+    },
+    {
+      "path": "webui-dist/channel-dingtalk.png",
+      "sha256": "77a1729f82a0f0d913983aa75c8ac2e237cedc0b84b2c66daee42d89bdbebe4d"
+    },
+    {
+      "path": "webui-dist/channel-email.png",
+      "sha256": "d25720e8c37a74e17aba9ea9e3fd17ae75e556efbcc45fa8aafd9587ef60e423"
+    },
+    {
+      "path": "webui-dist/channel-feishu.png",
+      "sha256": "8f82452b15a881f626cddf8835396b8fae1072cf8effbd35b6a6d16091d8997f"
+    },
+    {
+      "path": "webui-dist/channel-slack.png",
+      "sha256": "9b1da107a6c3ddd5b1845430c96f560a02330be71889cea59214296bcaab324f"
+    },
+    {
+      "path": "webui-dist/channel-telegram.png",
+      "sha256": "61c4bf5c4fbb66f06a55de86cc3ab4d54884608a3dd72807886d77778607fa91"
+    },
+    {
+      "path": "webui-dist/channel-wecom.png",
+      "sha256": "8491925905f6279e013df539a1ba70d3f29fdba8fbba512f0b9f379c4e5593a2"
+    },
+    {
+      "path": "webui-dist/channel-weixin-transparent.png",
+      "sha256": "3810cc2b27aacc9872ee55228076b59151e090867b137f2a4f94d49201a49372"
+    },
+    {
+      "path": "webui-dist/channel-weixin.png",
+      "sha256": "35f0e5dea8e1aed54594df1d5adfcf2993c75b9c098f9948781244743a604dea"
+    },
+    {
+      "path": "webui-dist/channel-whatsapp.png",
+      "sha256": "ee18a9562a8132d64803cd6de12f350366e57e86dba49652265f7828e5d2f0ee"
+    },
+    {
+      "path": "webui-dist/dingtalk-channel-guide.pdf",
+      "sha256": "8deceb44a417425854686e11b7865535722e587b9ca2eeec29bc8873d34529e8"
+    },
+    {
+      "path": "webui-dist/favicon.svg",
+      "sha256": "435ffdc8a0aaf37dd06a0248f136429345f57e8d4f413e832a1734cc638316e6"
+    },
+    {
+      "path": "webui-dist/feishu-bot-guide.pdf",
+      "sha256": "6b17aa971956851fd4ceca62bc740398a14d06aee30f06a53f93bbe91670ec68"
+    },
+    {
+      "path": "webui-dist/flocks-webui-manifest.json",
+      "sha256": "75cdd9a415b4272a3435dcfb4f7c886e9afc04d562fddb6efeaea840c2fd0fbf"
+    },
+    {
+      "path": "webui-dist/gitee-logo.png",
+      "sha256": "963ee0feca6d6ecaf36d05ee1c4f674b582e1082c1db900d7ebe8222a22bdec8"
+    },
+    {
+      "path": "webui-dist/index.html",
+      "sha256": "fb37b5e0a78f284e459d42de90fa660e9edcdcd661ebed814688eb382425f5d4"
+    },
+    {
+      "path": "webui-dist/notifications/holiday-transition-20260923.jpg",
+      "sha256": "7f31b7027bcca4a3c361cf3ce5491b86f6f1e07b5db7be87c1d8de2bea79ee02"
+    },
+    {
+      "path": "webui-dist/vendor-logos/360.png",
+      "sha256": "a042b75840358fc5d818e72cd8c484bb04d96e602b587f5fa91ea73e01726063"
+    },
+    {
+      "path": "webui-dist/vendor-logos/chaitin.png",
+      "sha256": "12faed58c658d56f1712e426f2dc6fb47f9ba4823a88b7addadcf831e24c94aa"
+    },
+    {
+      "path": "webui-dist/vendor-logos/huaweicloud.png",
+      "sha256": "4b62ea0ac6dc227cbad9bcc3229eeb850c71dadfb4e5046ce48c67ac9e4f317b"
+    },
+    {
+      "path": "webui-dist/vendor-logos/huorong.png",
+      "sha256": "5b5397c1c73049e8309c075341721c8c2076c9a65e8d13af718ef0add769a563"
+    },
+    {
+      "path": "webui-dist/vendor-logos/nsfocus.png",
+      "sha256": "68a82ae15c4e550590d47189b876d5e80299b0c447d87d41fafeace79a0f4e51"
+    },
+    {
+      "path": "webui-dist/vendor-logos/qianxin.png",
+      "sha256": "b4717306a367ce0ef6728b4aa9c5124ccc8f275439fb4d54ad708802bdec08ca"
+    },
+    {
+      "path": "webui-dist/vendor-logos/qingteng.png",
+      "sha256": "f4570f186b39ffa59191000f772687c248e91a38555290d66b44e25e486bbf03"
+    },
+    {
+      "path": "webui-dist/vendor-logos/sangfor.png",
+      "sha256": "a4efe06fc445983d6f2383def82d4a6929d78c030100e65266430930a0d7086f"
+    },
+    {
+      "path": "webui-dist/vendor-logos/threatbook.png",
+      "sha256": "256c8c2408b2489efdd871e7ffe69dc87f771f1bab995f17a945c68e3db2f5fe"
+    },
+    {
+      "path": "webui-dist/vite.svg",
+      "sha256": "4a748afd443918bb16591c834c401dae33e87861ab5dbad0811c3a3b4a9214fb"
+    },
+    {
+      "path": "webui-dist/wecom-bot-guide.pdf",
+      "sha256": "4ff7069c9b612d80a6b84043317a04620a686ad8d679f579b317759a828893f4"
+    }
+  ]
+}

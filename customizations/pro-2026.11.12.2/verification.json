@@ -1,0 +1,153 @@
+{
+  "schemaVersion": 1,
+  "packageVersion": "1.14.0",
+  "recordedAt": "2026-11-12T06:31:33.892734+00:00",
+  "target": {
+    "schemaVersion": 1,
+    "packageVersion": "1.14.0",
+    "developmentBranch": "zw_dev",
+    "sourceRepository": "AgentFlocks/flocksdev",
+    "sourceCommit": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
+    "deploymentMode": "source-overlay",
+    "edition": "flockspro",
+    "releaseId": "2026.11.12.2-linux-amd64",
+    "version": "2026.11.12.2",
+    "proCommit": "2ee622ba0a05e0dda157ea80739da583de2733c6",
+    "coreCommit": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
+    "protection": "native",
+    "frontendSources": {
+      "flocks": "6bdc2b83de483d4f8366f3368a3b91f95c1523f6fcaff42c2ee92e92709d83e7",
+      "flockspro": "bd1ac6bbdad2b3388755de296388d1e1b2d6155769dbc8083997dc894f8c594d"
+    },
+    "previousCustomization": "1.13.0"
+  },
+  "automatedValidation": {
+    "frontend": {
+      "passed": 2968,
+      "productionBuild": "passed",
+      "preservedProRegistry": true,
+      "cleanSourceBuild": {
+        "sourceCommit": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
+        "assetDifferencesFrom5173TestedBuild": 0
+      }
+    },
+    "sqliteCompatibility": {
+      "passed": 1574,
+      "note": "Original Core enhancement regression; no production SQLite fallback is used in Pro."
+    },
+    "installer": {
+      "passed": 11,
+      "checks": [
+        "apply/repeat/restore",
+        "preserve local edits",
+        "rollback interrupted writes",
+        "restore status",
+        "reject different package without restore",
+        "collect new source files",
+        "reject stale frontend inputs",
+        "inspect actual source hashes and installed paths",
+        "build from committed zw_dev release-baseline diff"
+      ]
+    },
+    "postgres": {
+      "remainingKnownFailures": 0,
+      "singleFullGreenRun": false,
+      "details": "pg-verification-summary.json",
+      "notCumulativePassedCount": true
+    },
+    "concurrency": {
+      "dailyReservations": 12,
+      "endingPublishers": 6,
+      "testsPassed": 3,
+      "beforeFix": "12 concurrent reservations timed out",
+      "afterFixSeconds": 3.21
+    },
+    "patchReproduction": "Full patch applies to exact Core baseline and reproduces the zw_dev Git tree 067068ba8923976d79dc41c09b64b360f0a1b65e",
+    "sourceBranchGuards": {
+      "passed": 14
+    },
+    "sourceBranchSmoke": {
+      "passed": 7,
+      "sourceCommit": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
+      "nativeProModules": true,
+      "isolatedPostgres": true,
+      "checks": [
+        "native execution lease and exact-once dispatch",
+        "12 concurrent daily-session reservations",
+        "6 concurrent round-ending publications"
+      ]
+    },
+    "sourceEquivalence": {
+      "runtimeFilesChecked": 7114,
+      "addonFilesChecked": 97,
+      "runtimeMismatches": 0,
+      "addonMismatches": 0,
+      "excluded": "Four Git source updater guard files, excluded from the managed Pro payload"
+    }
+  },
+  "acceptance5173": {
+    "edition": "Pro 2026.11.12.2-darwin-arm64",
+    "releaseProtection": "native",
+    "finalCriticalFilesMatchedPayload": true,
+    "ready": true,
+    "taskManagerStarted": true,
+    "checks": {
+      "homeCountsAndTokenCard": "passed",
+      "monitorSuiteListed": "passed",
+      "failedTaskScrolling": {
+        "passed": true,
+        "scrollTop": [
+          0,
+          214,
+          0
+        ],
+        "clientHeight": 698,
+        "scrollHeight": 912
+      },
+      "completedTaskScrolling": {
+        "passed": true,
+        "scrollTop": [
+          948,
+          0,
+          948
+        ],
+        "scrollHeight": 1473
+      },
+      "installRepeatAndRestore": "passed"
+    },
+    "limitations": [
+      "Existing local monitor scene is incomplete (v1.0.0); full report UI and live monitoring were not triggered to avoid activating a new task.",
+      "Linux-amd64 server deployment was not performed in this session."
+    ],
+    "baselineRestored": true,
+    "sourceOverlayInstaller": {
+      "port": 5173,
+      "localRelease": "2026.11.12.2-darwin-arm64",
+      "remotePayloadArchitecture": "linux-amd64",
+      "payloadSource": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
+      "payloadFilesMatched": 479,
+      "enhancedReady": {
+        "ready": true
+      },
+      "restoredReady": {
+        "ready": true
+      },
+      "entryWrapperUnchanged": true,
+      "baselineRestored": true,
+      "loadedCorePackage": "Pro current/runtime/flocks/flocks/__init__.py"
+    }
+  },
+  "releaseStatus": "candidate - report UI acceptance remains pending",
+  "sourcePatchSha256": "733c366193d7bb9fb49f0bc62afa8a32600a454bf2c473ba318a65d155d463d4",
+  "developmentSource": {
+    "repository": "AgentFlocks/flocksdev",
+    "branch": "zw_dev",
+    "commit": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
+    "upstreamBaseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
+    "mergeParents": [
+      "818bb2365217df74b29b99c9afbb99049f7eeba0",
+      "730da6897fbcd85d0b67e22cf13ecd4531161b9d"
+    ],
+    "deploymentMode": "source-overlay"
+  }
+}
