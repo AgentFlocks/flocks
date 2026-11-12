@@ -12,7 +12,7 @@ import {
   type InstallerOffer,
   type PreviousEdition,
 } from '@/api/enterpriseUpgrade';
-import { extractErrorMessage } from '@/utils/error';
+import { extractErrorMessage, isServiceRefusal } from '@/utils/error';
 import LicenceApplicationCard from './Application';
 import MachineHeading from './MachineHeading';
 import {
@@ -98,7 +98,8 @@ export default function FlocksproUpgradePage() {
       setUpgrade(data.upgrade);
       setLoadError(null);
     } catch (err) {
-      const wentBack = (err as { response?: { status?: number } })?.response?.status === 404;
+      // The older backend's own 404: on some proxies a service that is restarting is a 404 too.
+      const wentBack = (err as { response?: { status?: number } })?.response?.status === 404 && isServiceRefusal(err);
       if (mounted.current) setLoadError(wentBack ? t('errors.wentBack') : extractErrorMessage(err, t('errors.load')));
     }
     void refreshConsoleLogin();

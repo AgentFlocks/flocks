@@ -53,6 +53,7 @@ const NotificationModal = lazyLayoutComponent(() => import('@/components/common/
 const TokenPolicyNotice = lazyLayoutComponent(() => import('@/components/common/TokenPolicyNotice'), ['notification']);
 import { DEFAULT_UPDATE_CHANNEL, checkUpdate, getCurrentRelease, noteOlderBackend, type VersionInfo } from '@/api/update';
 import { enterpriseUpgradeApi, enterpriseVersionInfo } from '@/api/enterpriseUpgrade';
+import { isServiceRefusal } from '@/utils/error';
 import { withReleaseUpdate } from '@/utils/releaseUpdate';
 import type { EnterpriseUpdate } from '@/components/common/UpdateModal';
 import {
@@ -389,7 +390,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const findEnterpriseUpdate = useCallback(async () => {
     if (registry.updateChannel) return null;
     const situation = await enterpriseUpgradeApi.situation().catch((err) => {
-      if (err?.response?.status === 404) noteOlderBackend();
+      // Its own 404 for the question: on some proxies a service that is restarting is a 404 too.
+      if (err?.response?.status === 404 && isServiceRefusal(err)) noteOlderBackend();
       return undefined;
     });
     setEnterpriseRead(true);

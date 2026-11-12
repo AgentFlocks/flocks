@@ -30,7 +30,7 @@ import UpgradeHandoffSteps, { useHandoffFailureMessage } from './UpgradeHandoffS
 import UpgradeFailureDetails, { failureOfEnterpriseUpgrade, failureOfReleaseUpdate, type UpgradeFailure } from './UpgradeFailureDetails';
 import { ENTERPRISE_UPDATE_CHANNEL, UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
 import { withReleaseUpdate, type ReleaseUpdateSource } from '@/utils/releaseUpdate';
-import { extractErrorMessage } from '@/utils/error';
+import { extractErrorMessage, isServiceRefusal } from '@/utils/error';
 import { ENTERPRISE_UPGRADE_PAGE, EnterpriseUpgradeRefused, enterpriseUpgradeApi, enterpriseVersionInfo, type EnterpriseUpgradeState } from '@/api/enterpriseUpgrade';
 
 // ------------------------------------------------------------------ //
@@ -262,10 +262,10 @@ export default function UpdateModal({
           return;
         }
       } catch (e: any) {
-        // Out of reach, or the proxy's answer while the service restarts: keep asking.
-        // The service's own refusal (signed out, say) will not change.
-        const code = e?.response?.status;
-        if (typeof code === 'number' && code >= 400 && code < 500) {
+        // Out of reach, or a proxy answering for the service while it restarts (a 502 or 503 page
+        // on most, a 404 on some): keep asking. The service's own refusal (signed out, say)
+        // comes in its own JSON and will not change.
+        if (isServiceRefusal(e)) {
           unlock({ reason: extractErrorMessage(e, t('upgradeFailed')) });
           return;
         }
