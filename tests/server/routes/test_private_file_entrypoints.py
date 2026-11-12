@@ -237,3 +237,10 @@ def test_project_folder_browser_hides_and_refuses_private_directories(private_fi
         assert response.status_code == 200
         assert 'private-directory' not in response.text
         assert client.get('/project/folders', params={'path': str(private_files.context / 'private-directory')}).status_code == 403
+        # The nearest existing ancestor of a missing directory is refused the same way.
+        missing_below_private = str(private_files.context / 'private-directory' / 'not-created')
+        assert client.get('/project/folders', params={'path': missing_below_private, 'nearest': 'true'}).status_code == 403
+        missing_below_public = client.get('/project/folders', params={'path': str(private_files.context / 'not-created'), 'nearest': 'true'})
+        assert missing_below_public.status_code == 200
+        assert missing_below_public.json()['missing'] is True
+        assert 'private-directory' not in missing_below_public.text
