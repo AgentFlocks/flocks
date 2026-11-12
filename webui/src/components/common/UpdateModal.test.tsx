@@ -1052,6 +1052,27 @@ describe('UpdateModal on a release its own core installs', () => {
     expect(outcome).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps asking when a proxy answers 404 for the service while it restarts', async () => {
+    // nginx's own page, as a gateway set up that way sends it for a service it cannot reach: not this service's JSON.
+    const proxyPage = '<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n';
+    const proxyAnswer = { response: { status: 404, data: proxyPage }, message: 'Request failed with status code 404' };
+    const outcome = vi.fn()
+      .mockResolvedValueOnce({ state: 'running' })
+      .mockRejectedValueOnce(proxyAnswer)
+      .mockRejectedValueOnce(proxyAnswer)
+      .mockResolvedValue({ state: 'done' });
+    await started(outcome);
+    await vi.advanceTimersByTimeAsync(1_500);
+    for (let asked = 0; asked < 2; asked += 1) {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(location.reload).not.toHaveBeenCalled();
+    }
+    expect(screen.queryByText('Request failed with status code 404')).not.toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(outcome).toHaveBeenCalledTimes(4);
+    expect(location.reload).toHaveBeenCalledTimes(1);
+  });
+
   it('says what stopped it before it was handed over', async () => {
     const start = vi.fn().mockRejectedValue(new Error('Console 没有这个平台的发布包'));
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });

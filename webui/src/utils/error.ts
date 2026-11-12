@@ -41,3 +41,23 @@ export function extractErrorMessage(err: unknown, fallback = '操作失败'): st
     || asMessage(err)
     || fallback;
 }
+
+/**
+ * Whether a failed request was refused by this service itself, rather than answered for it by a
+ * proxy in front of it.
+ *
+ * The service refuses in JSON: `{ error, message }` from its exception handlers, `{ detail }`
+ * from the framework. A proxy standing in for a service that is down or restarting sends its own
+ * page under whatever status it is set up to give: 502 or 503 on most, 404 or 403 on some. The
+ * status alone does not tell the two apart, so what waits through a restart asks this before it
+ * takes a 4xx for an answer that will not change.
+ */
+export function isServiceRefusal(err: unknown): boolean {
+  const response = (err as { response?: { status?: unknown; data?: unknown } } | null | undefined)?.response;
+  const status = response?.status;
+  if (typeof status !== 'number' || status < 400 || status >= 500) return false;
+  const data = response?.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const body = data as Record<string, unknown>;
+  return 'detail' in body || (typeof body.error === 'string' && 'message' in body);
+}

@@ -140,6 +140,15 @@ describe('Flocks Pro page of the open edition', () => {
     expect(screen.queryByText('Not Found')).not.toBeInTheDocument();
   });
 
+  it('does not say the machine went back when a proxy answers 404 for a service that is restarting', async () => {
+    // nginx's own page, as a gateway set up that way sends it for a service it cannot reach: not this service's JSON.
+    const proxyPage = '<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n';
+    situation.mockRejectedValue({ response: { status: 404, data: proxyPage }, message: 'Request failed with status code 404' });
+    render(<FlocksproUpgradePage />);
+    expect(await screen.findByText('Request failed with status code 404')).toBeInTheDocument();
+    expect(screen.queryByText('errors.wentBack')).not.toBeInTheDocument();
+  });
+
   it('FP2 on a systemd machine gives root the command for the downloaded installer', async () => {
     situation.mockResolvedValue({ ...base, systemd: true, can_start: false });
     check.mockResolvedValue(offer);

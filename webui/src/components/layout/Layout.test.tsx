@@ -6,7 +6,7 @@ import Layout from './Layout';
 import { ThemeProvider } from '@/contexts/ThemeContext';
 
 const {
-  checkUpdate, getCurrentRelease, enterpriseSituation, enterpriseVersionInfo, onboardingAPI, sessionApi,
+  checkUpdate, getCurrentRelease, noteOlderBackend, enterpriseSituation, enterpriseVersionInfo, onboardingAPI, sessionApi,
   getActiveNotifications, ackNotification, getNotificationAckStatus,
   productNameContextValue,
   useAuth, useWebUIContractPages, useSceneSuiteUpdates, useTaskDashboard,
@@ -15,6 +15,7 @@ const {
   changeLanguage: vi.fn(),
   checkUpdate: vi.fn(),
   getCurrentRelease: vi.fn(),
+  noteOlderBackend: vi.fn(),
   enterpriseSituation: vi.fn(),
   enterpriseVersionInfo: vi.fn(),
   onboardingAPI: { getStatus: vi.fn() },
@@ -33,7 +34,7 @@ const {
   notificationModal: vi.fn(),
 }));
 
-vi.mock('@/api/update', () => ({ checkUpdate, getCurrentRelease, DEFAULT_UPDATE_CHANNEL: 'default' }));
+vi.mock('@/api/update', () => ({ checkUpdate, getCurrentRelease, noteOlderBackend, DEFAULT_UPDATE_CHANNEL: 'default' }));
 vi.mock('@/api/enterpriseUpgrade', () => ({
   enterpriseUpgradeApi: { situation: enterpriseSituation },
   enterpriseVersionInfo,
@@ -853,6 +854,22 @@ describe('Layout chrome', () => {
       await waitFor(() => expect(enterpriseSituation).toHaveBeenCalledTimes(2));
       await waitFor(() => expect(updateModalProps.at(-1)).toEqual(expect.objectContaining({ forceInitialCheck: true })));
       expect(updateModalProps.at(-1)).toEqual(expect.objectContaining({ enterprise: { installRoot: '/home/me/flockspro', canStart: true } }));
+    });
+
+    it('knows the older backend by its own 404 for the question', async () => {
+      enterpriseSituation.mockRejectedValue({ response: { status: 404, data: { error: 'HTTPException', message: 'Not Found' } } });
+      renderAt('/');
+      await waitFor(() => expect(noteOlderBackend).toHaveBeenCalledTimes(1));
+    });
+
+    it('does not take a proxy answering 404 for a service that is restarting for the older backend', async () => {
+      // nginx's own page, as a gateway set up that way sends it for a service it cannot reach: not this service's JSON.
+      const proxyPage = '<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n';
+      enterpriseSituation.mockRejectedValue({ response: { status: 404, data: proxyPage } });
+      renderAt('/');
+      await waitFor(() => expect(enterpriseSituation).toHaveBeenCalled());
+      await waitFor(() => expect(checkUpdate).toHaveBeenCalled());
+      expect(noteOlderBackend).not.toHaveBeenCalled();
     });
 
     it('finds out again on a check by hand: a licence taken since counts', async () => {
