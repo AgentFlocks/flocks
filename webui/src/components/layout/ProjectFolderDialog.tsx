@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { ArrowUp, FolderOpen, HardDrive, Loader2, X } from 'lucide-react';
 import apiClient from '@/api/client';
 import { useToast } from '@/components/common/Toast';
+import { extractErrorMessage } from '@/utils/error';
 
 export interface ProjectFolderSummary {
   id: string;
@@ -22,11 +23,19 @@ interface FolderBrowserResponse {
   parent: string | null;
   roots: FolderEntry[];
   entries: FolderEntry[];
+  /** The requested directory does not exist yet; `path` is its nearest existing ancestor. */
+  missing?: boolean;
 }
 
 export function pathBasename(path: string): string {
   const parts = path.replace(/[\\/]+$/, '').split(/[\\/]/);
   return parts[parts.length - 1] || path;
+}
+
+/** Append `name` to a server path with the separator that path uses, so a Windows root does not read `C:\Users\me/name`. */
+export function joinFolderPath(root: string, name: string): string {
+  const separator = /^(?:[A-Za-z]:|\\\\)/.test(root) ? '\\' : '/';
+  return `${root.replace(/[\\/]+$/, '')}${separator}${name}`;
 }
 
 interface ProjectFolderDialogProps {
@@ -60,15 +69,18 @@ export default function ProjectFolderDialog({ mode, project, onClose, onSaved }:
     const requestId = ++requestIdRef.current;
     setBrowserLoading(true);
     try {
-      const response = await apiClient.get('/api/project/folders', { params: { path: path?.trim() || undefined } });
+      // `nearest`: the directory may only be created on save, so the picker opens on what exists above it.
+      const response = await apiClient.get('/api/project/folders', { params: { path: path?.trim() || undefined, nearest: true } });
       if (requestId !== requestIdRef.current) return;
       const next = response.data as FolderBrowserResponse;
       setBrowser(next);
+      // The listing stands in for a directory that is not there yet: nothing was picked, keep what is typed.
+      if (next.missing) return;
       setWorktree(next.path);
       setWorktreeEdited(true);
       if (!nameEdited) setName(pathBasename(next.path));
-    } catch (err: any) {
-      if (requestId === requestIdRef.current) toast.error(t('history.folderBrowseFailed'), err?.message);
+    } catch (err: unknown) {
+      if (requestId === requestIdRef.current) toast.error(t('history.folderBrowseFailed'), extractErrorMessage(err, ''));
     } finally {
       if (requestId === requestIdRef.current) setBrowserLoading(false);
     }
@@ -92,7 +104,7 @@ export default function ProjectFolderDialog({ mode, project, onClose, onSaved }:
   useEffect(() => {
     if (mode !== 'create' || worktreeEdited || !defaultRoot) return;
     const folderName = name.trim().replace(/[\\/]+/g, '-');
-    setWorktree(folderName ? `${defaultRoot.replace(/[\\/]+$/, '')}/${folderName}` : '');
+    setWorktree(folderName ? joinFolderPath(defaultRoot, folderName) : '');
   }, [defaultRoot, mode, name, worktreeEdited]);
 
   useEffect(() => {
@@ -121,9 +133,8 @@ export default function ProjectFolderDialog({ mode, project, onClose, onSaved }:
         ? await apiClient.post('/api/project', { name: nextName, worktree: nextWorktree })
         : await apiClient.patch(`/api/project/${project?.id}`, { name: nextName });
       onSaved(response.data as ProjectFolderSummary);
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      toast.error(t('history.folderSaveFailed'), typeof detail === 'string' ? detail : err?.message);
+    } catch (err: unknown) {
+      toast.error(t('history.folderSaveFailed'), extractErrorMessage(err, ''));
     } finally {
       setSubmitting(false);
     }
