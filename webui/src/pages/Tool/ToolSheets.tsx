@@ -620,7 +620,7 @@ export function MCPSheet({ onClose, onSaved, onRefresh }: MCPSheetProps) {
       setConnStatus('failed');
       setTestResult({
         success: false,
-        message: err.response?.data?.detail ?? err.message ?? t('detail.testFailed'),
+        message: extractErrorMessage(err, t('detail.testFailed')),
       });
     }
   };

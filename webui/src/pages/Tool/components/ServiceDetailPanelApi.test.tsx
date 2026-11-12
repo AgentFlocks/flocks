@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { APIServiceDetailPanel } from './ServiceDetailPanel';
+import { backendError } from '@/test/helpers';
 
 const { providerAPI } = vi.hoisted(() => ({
   providerAPI: {
@@ -664,5 +665,26 @@ describe('APIServiceDetailPanel', () => {
       });
       expect(providerAPI.testCredentials).not.toHaveBeenCalled();
     });
+  });
+
+  it('says why the ThreatBook API key could not be saved instead of the bare status code', async () => {
+    const user = userEvent.setup();
+    providerAPI.getServiceCredentials.mockResolvedValueOnce({ data: { has_credential: false } });
+    providerAPI.configureServiceCredentials.mockRejectedValueOnce(backendError(400, 'API Key 格式不正确'));
+
+    render(
+      <APIServiceDetailPanel
+        serviceName="threatbook-io"
+        serviceTools={[]}
+        onSelectTool={vi.fn()}
+        enabled
+      />,
+    );
+
+    await user.type(await screen.findByPlaceholderText('粘贴国际区 ThreatBook API Key'), 'bad-key');
+    await user.click(screen.getByRole('button', { name: '保存并验证' }));
+
+    expect(await screen.findByText('API Key 格式不正确')).toBeInTheDocument();
+    expect(screen.queryByText(/status code 400/)).not.toBeInTheDocument();
   });
 });

@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event';
 
 import MCPTabContent from './MCPTabContent';
+import { backendError } from '@/test/helpers';
 
 vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ user: { role: 'admin' } }) }));
 
@@ -58,6 +59,8 @@ vi.mock('react-i18next', () => ({
       if (key === 'credentials.enterField') {
         return `请输入 ${String(options?.field || '')}`;
       }
+      // A failure alert carries its reason as the `error` value; show it so a test can read it.
+      if (typeof options?.error === 'string') return `${key}: ${options.error}`;
       const translations: Record<string, string> = {
         'catalog.all': '全部',
         'mcp.refreshStatus': '刷新状态',
@@ -257,6 +260,39 @@ describe('MCPTabContent', () => {
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
     expect(mcpAPI.connect).not.toHaveBeenCalled();
     expect(mcpAPI.update).not.toHaveBeenCalled();
+  });
+
+  it('says why a server could not be enabled instead of the bare status code', async () => {
+    mcpAPI.list.mockResolvedValue({ data: { native: { status: 'disabled', group: 'Ops', tools: [], resources: [] } } });
+    mcpAPI.update.mockRejectedValue(backendError(403, '只有管理员可以启用 MCP 服务'));
+    render(<MCPTabContent tools={[]} searchQuery="" onSelectTool={vi.fn()} onRefreshTools={vi.fn()} catalogEntries={[]}
+      catalogCategories={{}} catalogLoading={false} configuredIds={new Set()} onConfiguredChange={vi.fn()} />);
+    await screen.findByText('native');
+
+    fireEvent.click(screen.getByRole('button', { name: 'detail.enableServer' }));
+
+    await waitFor(() => expect(window.alert).toHaveBeenCalledWith('alert.saveFailed: 只有管理员可以启用 MCP 服务'));
+    expect(mcpAPI.update).toHaveBeenCalledWith('native', { enabled: true });
+  });
+
+  it('says why a catalog entry could not be installed instead of the bare status code', async () => {
+    mcpAPI.catalogInstall.mockRejectedValue(backendError(400, 'MCP 服务地址不在允许的范围内'));
+    const onConfiguredChange = vi.fn();
+    render(<MCPTabContent tools={[]} searchQuery="" onSelectTool={vi.fn()} onRefreshTools={vi.fn()}
+      catalogEntries={[{
+        id: 'open-intel', name: 'Open Intel', description: 'No key needed', category: 'siem', tool_type: 'mcp',
+        github: 'example/open-intel', language: 'python', license: 'MIT', stars: 1, transport: 'local',
+        install: { local_command: ['python', '-m', 'open_intel'] }, env_vars: {}, system_deps: [], tags: [],
+        official: false, requires_auth: false,
+      }]}
+      catalogCategories={{ siem: { label: 'SIEM', description: 'siem' } }} catalogLoading={false}
+      configuredIds={new Set()} onConfiguredChange={onConfiguredChange} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '安装' }));
+
+    await waitFor(() => expect(window.alert).toHaveBeenCalledWith('alert.configFailed: MCP 服务地址不在允许的范围内'));
+    expect(onConfiguredChange).not.toHaveBeenCalled();
+    expect(mcpAPI.connect).not.toHaveBeenCalled();
   });
 
   it.each(['create', 'rename'])('rejects fresh native MCP name collisions before %s writes', async (operation) => {
