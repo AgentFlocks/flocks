@@ -1,28 +1,28 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.4",
+  "packageVersion": "1.14.5",
   "target": "2026.11.12.2-linux-amd64",
-  "status": "Monitoring and history accepted on local 5173 with isolated synthetic boundaries; Linux target pending",
+  "status": "Task Center blocker presentation accepted on local 5173; Linux target pending",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
     "branch": "zw_dev",
-    "commit": "9dd28ef9a2a2e12f817319c8212649f11182f06a",
+    "commit": "dddae2aff4bab9d468a61755bd0d331288d0b284",
     "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.14.4-pro-2026.11.12.2-full.tar.gz",
-  "sha256": "cc5acc18be2ea33e7d936f3080f9c62639c2438480ecac86d51c33810b8f497e",
+  "archive": "releases/flocks-customizations-1.14.5-pro-2026.11.12.2-full.tar.gz",
+  "sha256": "60f1ca094d117cadbe8361d0704783c65b3236a7de6c1a1ffd50df7c3d92fb03",
   "payloadFiles": 489,
   "validation": "verification.json",
   "limits": [
-    "Linux-amd64 remote installation and real XDR/model/mail chain still require user execution.",
-    "Local 5173 acceptance uses isolated projects and synthetic XDR/provider responses with actual task execution, storage, sessions and SSE.",
-    "External model gateway HTTP 504 and 90-second timeout are not resolved by application code."
+    "Linux-amd64 remote installation has not been performed for this package.",
+    "Task UI acceptance used isolated synthetic failed executions through actual 5173 Task APIs.",
+    "Exact clipboard content is covered by component tests; live UI copy reported success but the automation virtual clipboard could not inspect the native clipboard."
   ],
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "Streaming updates, zero-event termination, ten-day history, refresh persistence, 489 payload hashes, repeat without restart, baseline restore; original Pro SQLite runtime and PostgreSQL regressions.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.14.4.zip",
-  "offlineRepositoryArchiveSha256": "4590c3759ee646cf8d8a8864504d3102a9619424bd7057171b9fdd45225d5b7d"
+  "validationScope": "64 Task frontend tests, typecheck, production paired Pro build; authenticated 5173 timeout and HTTP 401 failures, 160 collapsed calls, reload, original error persistence, 489 file hashes, repeat without restart, cleanup and baseline restore.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.14.5.zip",
+  "offlineRepositoryArchiveSha256": "89c404118b82ed49bc7c40e6ea8142a1d4d81411e8560210fbd6b176c4a7a6c5"
 }

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.4",
+  "packageVersion": "1.14.5",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.14.4",
+    "packageVersion": "1.14.5",
     "developmentBranch": "zw_dev",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "9dd28ef9a2a2e12f817319c8212649f11182f06a",
+    "sourceCommit": "dddae2aff4bab9d468a61755bd0d331288d0b284",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -19,66 +19,81 @@
       "flocks": "6bdc2b83de483d4f8366f3368a3b91f95c1523f6fcaff42c2ee92e92709d83e7",
       "flockspro": "bd1ac6bbdad2b3388755de296388d1e1b2d6155769dbc8083997dc894f8c594d"
     },
-    "previousCustomization": "1.14.3"
+    "previousCustomization": "1.14.4"
   },
-  "scope": "monitoring streaming and natural summaries; empty query termination; removed mail banner; recent ten-day project history; managed SQLite monitoring dispatch, read-lock avoidance and bound proof compatibility; legacy PostgreSQL attempt sequence",
+  "scope": "Task Center monitoring failures: only current blockers, collapsed unverified calls; stored errors and retry policy retained",
   "automatedValidation": {
-    "frontend": {
-      "passed": 464,
-      "log": ".work/monitor-web-final.log"
+    "taskFrontend": {
+      "sourceCommit": "b1df8e9ce0d5079b82b6ea00ee6982039e2fedb9",
+      "webuiSourceSha256": "33e750f7757473da0599c750ff0975b49d85dcd52434a7b48619fd7938c35f03",
+      "tests": {
+        "filesPassed": 10,
+        "passed": 64,
+        "scope": "src/pages/Task"
+      },
+      "typecheck": "tsc --noEmit passed",
+      "recordedAt": "2026-11-12T09:41:26.274904+00:00",
+      "integratedSourceCommit": "dddae2aff4bab9d468a61755bd0d331288d0b284",
+      "frontendIdenticalAfterIntegration": true
     },
-    "proPostgres": {
-      "passed": 12,
-      "log": ".work/monitor-pro-pg-verified.log"
-    },
-    "productionFrontendBuild": {
-      "status": "passed",
-      "sourceCommit": "9dd28ef9a2a2e12f817319c8212649f11182f06a",
-      "edition": "flockspro"
-    },
-    "coreMonitoring": {
-      "passed": 169,
-      "log": ".work/monitor-core-verified.log"
-    },
-    "installerUpdaterBash": {
-      "passed": 53,
-      "log": ".work/monitor-installers.log"
-    },
-    "projectHistory": {
-      "passed": 32,
-      "log": ".work/monitor-history-tests.log"
-    },
-    "postgresSequenceAndNative": {
-      "passed": 6,
-      "log": ".work/monitor-sequence-verified.log",
-      "legacyRowsUnchanged": true,
-      "repeatSafe": true
-    },
-    "managedSQLiteAndInstallers": {
-      "passed": 55,
-      "log": ".work/monitor-overlay-installer-final.log",
-      "scope": "original seven release stores, real monitoring round and ordinary dispatch, manager startup/stop, installer/update/Bash"
-    },
-    "readLocksAndProof": {
-      "passed": 37,
-      "log": ".work/monitor-read-proof-final.log"
-    },
-    "coreMonitoringSuite": {
-      "passed": 1399,
-      "failedOldEmptyTextAssertions": 2,
-      "log": ".work/monitor-full-core-final.log",
-      "resolvedBy": {
-        "passed": 52,
-        "log": ".work/monitor-migration-selection-final.log",
-        "scope": "legacy schema migration and all selection/structured-output tests passed after preserving source counts"
+    "inheritedFrom1.14.4": {
+      "frontend": {
+        "passed": 464,
+        "log": ".work/monitor-web-final.log"
+      },
+      "proPostgres": {
+        "passed": 12,
+        "log": ".work/monitor-pro-pg-verified.log"
+      },
+      "productionFrontendBuild": {
+        "status": "passed",
+        "sourceCommit": "9dd28ef9a2a2e12f817319c8212649f11182f06a",
+        "edition": "flockspro"
+      },
+      "coreMonitoring": {
+        "passed": 169,
+        "log": ".work/monitor-core-verified.log"
+      },
+      "installerUpdaterBash": {
+        "passed": 53,
+        "log": ".work/monitor-installers.log"
+      },
+      "projectHistory": {
+        "passed": 32,
+        "log": ".work/monitor-history-tests.log"
+      },
+      "postgresSequenceAndNative": {
+        "passed": 6,
+        "log": ".work/monitor-sequence-verified.log",
+        "legacyRowsUnchanged": true,
+        "repeatSafe": true
+      },
+      "managedSQLiteAndInstallers": {
+        "passed": 55,
+        "log": ".work/monitor-overlay-installer-final.log",
+        "scope": "original seven release stores, real monitoring round and ordinary dispatch, manager startup/stop, installer/update/Bash"
+      },
+      "readLocksAndProof": {
+        "passed": 37,
+        "log": ".work/monitor-read-proof-final.log"
+      },
+      "coreMonitoringSuite": {
+        "passed": 1399,
+        "failedOldEmptyTextAssertions": 2,
+        "log": ".work/monitor-full-core-final.log",
+        "resolvedBy": {
+          "passed": 52,
+          "log": ".work/monitor-migration-selection-final.log",
+          "scope": "legacy schema migration and all selection/structured-output tests passed after preserving source counts"
+        }
+      },
+      "proFinal": {
+        "passed": 76,
+        "log": ".work/monitor-pro-delivery-tests.log"
       }
-    },
-    "proFinal": {
-      "passed": 76,
-      "log": ".work/monitor-pro-delivery-tests.log"
     }
   },
-  "local5173Acceptance": {
+  "inheritedAcceptanceFrom1.14.4": {
     "startedAt": "2026-11-12T09:43:52.042042+00:00",
     "release": "2026.11.12.2-darwin-arm64",
     "port": 5173,
@@ -111,96 +126,56 @@
     ],
     "historyEvidence": "Prior candidate used identical frontend source and production build; default hidden twelve-day session, Load more revealed it, collapse and refresh restored recent-only view."
   },
-  "previousVersionEvidence": "1.14.3 SOC acceptance retained in delivery branch history",
-  "limits": [
-    "Linux-amd64 remote installation and new monitoring rounds still require user execution.",
-    "Model gateway HTTP 504 and provider-side timeouts require remote provider verification.",
-    "Original local monitoring suite is incomplete, so local business acceptance uses isolated projects with synthetic XDR/provider boundaries and actual 5173 storage/SSE/session routes."
-  ],
-  "incidentDiagnosis": {
-    "sourceSha256": "46d968b3305156d702cdff95c759b6492eb06c71933477945c82011392ae597a",
-    "exportedAt": "2026-11-12T09:22:39.713092+00:00",
-    "timezone": "Asia/Shanghai",
-    "recordCoverage": {
-      "first": "2026-11-11T18:10:33.817885+00:00",
-      "last": "2026-11-12T04:40:13.142686+00:00",
-      "capped": true,
-      "runtimePid": 1409028
-    },
-    "xdrList": {
-      "count": 126,
-      "allSuccessful": true,
-      "medianMs": 578.095,
-      "maxMs": 2458.15
-    },
-    "modelCalls": {
-      "count": 77,
-      "gateway504": 5,
-      "local90sTimeout": 1
-    },
-    "proofBindingFailures": 13,
-    "sqliteErrors": [
+  "local5173Acceptance": {
+    "startedAt": "2026-11-12T09:54:13.324156+00:00",
+    "release": "2026.11.12.2-darwin-arm64",
+    "port": 5173,
+    "packageVersion": "1.14.5",
+    "sourceCommit": "dddae2aff4bab9d468a61755bd0d331288d0b284",
+    "originalBinaryHash": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
+    "originalListen": null,
+    "installedAndReady": true,
+    "payloadFilesMatched": 489,
+    "nativeBinaryUnchanged": true,
+    "listenUnchanged": true,
+    "scenarios": [
       {
-        "time": "2026-11-12T06:08:37.121532+08:00",
-        "durationMs": 5279.61,
-        "kind": "task",
-        "error": "busy",
-        "location": "flocks/task/store.py:_run_write_transaction:352"
+        "name": "model timeout blocker",
+        "expected": "device and incident plus 90-second model timeout only",
+        "actual": "passed; round counts, recovery schedule, mail notes, duplicate reasons and metadata absent"
       },
       {
-        "time": "2026-11-12T06:08:37.233680+08:00",
-        "durationMs": 30146.64,
-        "kind": "monitoring",
-        "error": "busy",
-        "location": "flocks/monitoring/store.py:connection:141"
+        "name": "query failure with historical model timeout",
+        "expected": "HTTP 401 only",
+        "actual": "passed; historical timeout excluded"
       },
       {
-        "time": "2026-11-12T12:11:25.619312+08:00",
-        "durationMs": 5114.52,
-        "kind": "task",
-        "error": "busy",
-        "location": "flocks/task/store.py:_run_write_transaction:352"
+        "name": "160 unverified calls",
+        "expected": "collapsed by default and manually expandable",
+        "actual": "passed; expanded then collapsed"
       },
       {
-        "time": "2026-11-12T12:11:28.586755+08:00",
-        "durationMs": 30032.99,
-        "kind": "monitoring",
-        "error": "busy",
-        "location": "flocks/monitoring/store.py:connection:141"
+        "name": "reload and original API data",
+        "actual": "passed; same compact UI after reload, original summary/recovery plan/all calls preserved in real Task API"
       },
       {
-        "time": "2026-11-12T12:11:31.066362+08:00",
-        "durationMs": 5013.69,
-        "kind": "task",
-        "error": "busy",
-        "location": "flocks/task/store.py:_run_write_transaction:352"
+        "name": "copy",
+        "actual": "success toast; exact compact copy value verified by component regression; browser automation virtual clipboard did not expose native clipboard contents"
       }
     ],
-    "currentProcessMonitoringTraces": 0,
-    "remoteStatusConfirmed": {
-      "release": "2026.11.12.2-linux-amd64",
-      "healthy": true
-    },
-    "limits": [
-      "Only the retained diagnostic window is covered, not every event today.",
-      "No original proof payload is included; single-object response compatibility retains exact incident ID validation.",
-      "Upstream HTTP 504/90-second model outages require provider-side confirmation after the patch."
-    ],
-    "remoteRuntimeConfirmed": {
-      "backend": "sqlite",
-      "originalReleaseExecutor": true,
-      "monitor_dispatch": false,
-      "daily_session": false,
-      "scheduler_enabled_parameter": false,
-      "evidence": "User-executed read-only introspection on the exporting machine"
-    }
+    "fixtureRecordsCleaned": true,
+    "browserErrorsAfterReady": [],
+    "screenshot": ".work/task-blockers-live/timeout.jpg",
+    "filesMatchedAfterFixtureRemoval": 489,
+    "repeatWithoutRestart": true,
+    "restoredBaselineAndReady": true,
+    "finalListenerPid": "96879",
+    "finishedAt": "2026-11-12T09:57:55.135928+00:00",
+    "status": "passed"
   },
-  "sourceReproduction": {
-    "sourceCommit": "9dd28ef9a2a2e12f817319c8212649f11182f06a",
-    "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
-    "changedPaths": 459,
-    "reconstructedTree": "de28646c4dc9c7be439182e78abd14c1df0b127d",
-    "expectedTree": "de28646c4dc9c7be439182e78abd14c1df0b127d",
-    "matches": true
-  }
+  "limits": [
+    "Linux-amd64 target installation has not been performed for this package.",
+    "Task UI acceptance uses isolated synthetic failed executions through the actual 5173 Task API."
+  ],
+  "recordedAt": "2026-11-12T09:57:55.135928+00:00"
 }

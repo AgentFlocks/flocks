@@ -127829,10 +127829,10 @@ index db2b4efc..04567a98 100644
 +  "knowledge": "Knowledge Center"
  }
 diff --git a/webui/src/locales/en-US/task.json b/webui/src/locales/en-US/task.json
-index 33cc78a8..86657f9f 100644
+index 33cc78a8..6af81f61 100644
 --- a/webui/src/locales/en-US/task.json
 +++ b/webui/src/locales/en-US/task.json
-@@ -124,7 +124,30 @@
+@@ -124,7 +124,33 @@
      "confirmBatchCancel": "Are you sure you want to cancel {{count}} tasks?",
      "confirmBatchCancelBtn": "Cancel Tasks",
      "confirmBatchDelete": "Are you sure you want to delete {{count}} tasks?",
@@ -127859,8 +127859,11 @@ index 33cc78a8..86657f9f 100644
 +      "noProcessRecord": "",
 +      "expand": "Expand details",
 +      "collapse": "Collapse details",
-+      "truncated": "The error was too long and has been truncated for display."
-+    }
++      "truncated": "The error was too long and has been truncated for display.",
++      "blocker": "Blocker"
++    },
++    "heldForVerificationCompact": "Action results are unverified. Automatic retry is paused.",
++    "unverifiedCalls": "Calls to verify ({{count}})"
    },
    "scheduled": {
      "emptyTitle": "No Scheduled Tasks",
@@ -128191,10 +128194,10 @@ index 09e4b4cc..8c72bdf6 100644
 +  "knowledge": "知识沉淀"
  }
 diff --git a/webui/src/locales/zh-CN/task.json b/webui/src/locales/zh-CN/task.json
-index b49dd2f2..691d980d 100644
+index b49dd2f2..bbd95722 100644
 --- a/webui/src/locales/zh-CN/task.json
 +++ b/webui/src/locales/zh-CN/task.json
-@@ -124,7 +124,30 @@
+@@ -124,7 +124,33 @@
      "confirmBatchCancel": "确定要取消 {{count}} 个任务吗？",
      "confirmBatchCancelBtn": "取消任务",
      "confirmBatchDelete": "确定要删除 {{count}} 个任务吗？",
@@ -128221,8 +128224,11 @@ index b49dd2f2..691d980d 100644
 +      "noProcessRecord": "",
 +      "expand": "展开详情",
 +      "collapse": "收起详情",
-+      "truncated": "错误内容过长，已截断显示。"
-+    }
++      "truncated": "错误内容过长，已截断显示。",
++      "blocker": "阻断原因"
++    },
++    "heldForVerificationCompact": "动作结果尚未核实，自动重试已暂停。",
++    "unverifiedCalls": "待核对调用（{{count}} 条）"
    },
    "scheduled": {
      "emptyTitle": "暂无定时任务",
@@ -143571,20 +143577,35 @@ index 00000000..76061922
 +    expect(records.querySelector('.h-\\[420px\\]')).toBeNull();
 +  });
 +});
+diff --git a/webui/src/pages/Task/QueuedSection.test.tsx b/webui/src/pages/Task/QueuedSection.test.tsx
+index 8e35cf41..d188b853 100644
+--- a/webui/src/pages/Task/QueuedSection.test.tsx
++++ b/webui/src/pages/Task/QueuedSection.test.tsx
+@@ -380,6 +380,9 @@ describe('QueuedSection', () => {
+ 
+     expect(await screen.findByText('queued.heldForVerification')).toBeInTheDocument();
+     expect(screen.getByText('bash:call_deploy')).toBeInTheDocument();
++    expect(screen.getByText('bash:call_deploy').closest('details')).not.toHaveAttribute('open');
++    fireEvent.click(screen.getByText('bash:call_deploy').closest('details')!.querySelector('summary')!);
++    expect(screen.getByText('bash:call_deploy').closest('details')).toHaveAttribute('open');
+     await user.click(screen.getByRole('button', { name: 'queued.actionResume' }));
+     expect(mocks.continueExecution).toHaveBeenCalledWith('exec-held-1');
+     // Retrying from scratch stays available: that is the person's call.
 diff --git a/webui/src/pages/Task/QueuedSection.tsx b/webui/src/pages/Task/QueuedSection.tsx
-index 0f2d768d..dbcce82b 100644
+index 0f2d768d..9431b178 100644
 --- a/webui/src/pages/Task/QueuedSection.tsx
 +++ b/webui/src/pages/Task/QueuedSection.tsx
-@@ -13,6 +13,8 @@ import { taskAPI, TaskExecution, TaskListParams } from '@/api/task';
+@@ -13,6 +13,9 @@ import { taskAPI, TaskExecution, TaskListParams } from '@/api/task';
  import { copyText } from '@/utils/clipboard';
  import { StatusBadge, PriorityBadge, SourceBadge, ModeBadge, ActionButton } from './components';
  import { formatTime, formatDuration, PAGE_SIZE } from './helpers';
 +import TaskExecutionRecord from './TaskExecutionRecord';
 +import TaskFailureDetail from './TaskFailureDetail';
++import { isMonitoringTask } from './monitorTaskFailure';
  import { extractErrorMessage } from '@/utils/error';
  import ExecutionFilters, { type ExecutionSearchParams } from './ExecutionFilters';
  
-@@ -384,7 +386,9 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
+@@ -384,7 +387,9 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
    const shouldStreamSession = Boolean(sessionId);
    const emptyText = ['pending', 'queued'].includes(task.status)
      ? t('queued.detailWaiting')
@@ -143595,7 +143616,7 @@ index 0f2d768d..dbcce82b 100644
    const [drawerWidth, setDrawerWidth] = useState(DRAWER_DEFAULT_WIDTH);
    const [isDragging, setIsDragging] = useState(false);
    const dragStartX = useRef(0);
-@@ -442,6 +446,7 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
+@@ -442,6 +447,7 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
            </button>
          </div>
  
@@ -143603,7 +143624,22 @@ index 0f2d768d..dbcce82b 100644
          <div className="px-6 py-4 border-b border-gray-100 flex-shrink-0 space-y-2.5">
            <div className="flex items-center gap-2 flex-wrap">
              <StatusBadge status={task.status} />
-@@ -488,6 +493,9 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
+@@ -464,9 +470,12 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
+ 
+           {task.status === 'failed' && task.retry?.blockedReason === 'unverified_effects' && (
+             <div className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+-              <p>{t('queued.heldForVerification')}</p>
++              <p>{t(isMonitoringTask(task) ? 'queued.heldForVerificationCompact' : 'queued.heldForVerification')}</p>
+               {(task.retry.unverifiedEffects?.length ?? 0) > 0 && (
+-                <p className="mt-1 break-all font-mono">{task.retry.unverifiedEffects!.join(', ')}</p>
++                <details className="mt-1">
++                  <summary className="cursor-pointer">{t('queued.unverifiedCalls', { count: task.retry.unverifiedEffects!.length })}</summary>
++                  <p className="mt-1 max-h-32 overflow-y-auto break-all font-mono">{task.retry.unverifiedEffects!.join(', ')}</p>
++                </details>
+               )}
+             </div>
+           )}
+@@ -488,6 +497,9 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
            </div>
          </div>
  
@@ -143613,7 +143649,7 @@ index 0f2d768d..dbcce82b 100644
          {isWorkflowExecution ? (
            <QueuedWorkflowDetail task={task} emptyText={emptyText} />
          ) : (
-@@ -515,6 +523,9 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
+@@ -515,6 +527,9 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
              />
            </Suspense>
          )}
@@ -143623,7 +143659,7 @@ index 0f2d768d..dbcce82b 100644
        </div>
      </>
    );
-@@ -614,7 +625,7 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
+@@ -614,7 +629,7 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
              </div>
            )}
  
@@ -143632,7 +143668,7 @@ index 0f2d768d..dbcce82b 100644
              <div>
                <h4 className="mb-2 text-sm font-semibold text-red-700">
                  {t('queued.workflowError')}
-@@ -625,7 +636,7 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
+@@ -625,7 +640,7 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
              </div>
            )}
  
@@ -143667,10 +143703,10 @@ index 00000000..9d0b12df
 +}
 diff --git a/webui/src/pages/Task/TaskFailureDetail.test.tsx b/webui/src/pages/Task/TaskFailureDetail.test.tsx
 new file mode 100644
-index 00000000..512f142e
+index 00000000..f9263bb3
 --- /dev/null
 +++ b/webui/src/pages/Task/TaskFailureDetail.test.tsx
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,200 @@
 +import { fireEvent, render, screen, within } from '@testing-library/react';
 +import { describe, expect, it, vi } from 'vitest';
 +import type { TaskExecution } from '@/api/task';
@@ -143691,6 +143727,7 @@ index 00000000..512f142e
 +        'queued.failureDetail.inferred': '系统推断',
 +        'queued.failureDetail.recorded': '系统记录',
 +        'queued.failureDetail.reason': '失败原因',
++        'queued.failureDetail.blocker': '阻断原因',
 +        'queued.failureDetail.executionId': '执行 ID',
 +        'queued.failureDetail.failedAt': '失败时间',
 +        'queued.failureDetail.duration': '执行耗时',
@@ -143843,6 +143880,22 @@ index 00000000..512f142e
 +  });
 +});
 +
++it('监测失败只展示并复制本轮阻断点，不展示汇总和任务诊断元数据', () => {
++  mocks.copyText.mockClear();
++  const error = '本轮失败：查询返回 1 条，待判定 1 条。\n待跟进事项：设备「四季青XDR」· Apache漏洞攻击：智能体调查未完成：调查模型请求超时（单次最多等待 90 秒），已有证据保留；本轮不再请求同一模型，后续轮次按退避计划重试。已有证据和待办保留，不据此判定无风险。\n邮件跟进未启用。';
++  const task = buildFailedTask({ error, sessionID: 'ses_monitor_test' });
++  render(<TaskFailureDetail task={task} />);
++  expect(screen.getByText('阻断原因')).toBeInTheDocument();
++  const blocker = '设备「四季青XDR」· Apache漏洞攻击：调查模型请求超时（单次最多等待 90 秒）';
++  expect(screen.getByText(blocker)).toBeInTheDocument();
++  expect(screen.queryByText(/邮件跟进未启用|本轮失败|已有证据保留/)).not.toBeInTheDocument();
++  expect(screen.queryByText('执行 ID')).not.toBeInTheDocument();
++  expect(screen.queryByText('系统记录')).not.toBeInTheDocument();
++  fireEvent.click(screen.getByRole('button', { name: '复制' }));
++  expect(mocks.copyText).toHaveBeenCalledWith(blocker);
++  expect(task.error).toBe(error);
++});
++
 +
 +it.each([
 +  { executionInputSnapshot: { context: { monitoring: { scope: 'host-security-monitor' } } } },
@@ -143856,10 +143909,10 @@ index 00000000..512f142e
 +});
 diff --git a/webui/src/pages/Task/TaskFailureDetail.tsx b/webui/src/pages/Task/TaskFailureDetail.tsx
 new file mode 100644
-index 00000000..dcfdb549
+index 00000000..0db0add3
 --- /dev/null
 +++ b/webui/src/pages/Task/TaskFailureDetail.tsx
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,203 @@
 +import { useMemo, useState } from 'react';
 +import { AlertTriangle, ChevronDown, ChevronUp, Copy } from 'lucide-react';
 +import { useTranslation } from 'react-i18next';
@@ -143867,6 +143920,7 @@ index 00000000..dcfdb549
 +import { useToast } from '@/components/common/Toast';
 +import { copyText } from '@/utils/clipboard';
 +import TaskIncidentTimeline from './TaskIncidentTimeline';
++import { isMonitoringTask, monitorFailureMessage } from './monitorTaskFailure';
 +
 +const MAX_DISPLAY_ERROR_LENGTH = 20_000;
 +const COLLAPSE_THRESHOLD = 240;
@@ -143888,7 +143942,7 @@ index 00000000..dcfdb549
 +
 +  if (recordedError) {
 +    return {
-+      message: recordedError,
++      message: monitorFailureMessage(task, recordedError),
 +      inferred: false,
 +      stage: 'unknown',
 +      retriesExhausted,
@@ -143948,6 +144002,7 @@ index 00000000..dcfdb549
 +  const { t: tCommon } = useTranslation('common');
 +  const toast = useToast();
 +  const [expanded, setExpanded] = useState(false);
++  const monitoring = isMonitoringTask(task);
 +  const presentation = useMemo(
 +    () => getTaskFailurePresentation(task, (key, options) => t(key, options)),
 +    [task, t],
@@ -143964,7 +144019,7 @@ index 00000000..dcfdb549
 +    max: task.retry.maxRetries,
 +  });
 +
-+  const copiedDetail = [
++  const copiedDetail = monitoring ? displayMessage : [
 +    `${t('queued.failureDetail.source')}: ${t(presentation.inferred
 +      ? 'queued.failureDetail.inferred'
 +      : 'queued.failureDetail.recorded')}`,
@@ -143999,7 +144054,7 @@ index 00000000..dcfdb549
 +          <h4 className="text-sm font-semibold text-red-800">
 +            {t('queued.failureDetail.title')}
 +          </h4>
-+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
++          {!monitoring && <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
 +            presentation.inferred
 +              ? 'bg-amber-100 text-amber-700'
 +              : 'bg-red-100 text-red-700'
@@ -144007,7 +144062,7 @@ index 00000000..dcfdb549
 +            {t(presentation.inferred
 +              ? 'queued.failureDetail.inferred'
 +              : 'queued.failureDetail.recorded')}
-+          </span>
++          </span>}
 +        </div>
 +        <button
 +          type="button"
@@ -144021,7 +144076,7 @@ index 00000000..dcfdb549
 +
 +      <div className="mt-3">
 +        <div className="mb-1 text-xs font-medium text-red-700">
-+          {t('queued.failureDetail.reason')}
++          {t(monitoring ? 'queued.failureDetail.blocker' : 'queued.failureDetail.reason')}
 +        </div>
 +        <p className={`break-words whitespace-pre-wrap text-sm leading-6 text-red-900 ${
 +          canCollapse && !expanded ? 'line-clamp-4' : ''
@@ -144040,12 +144095,12 @@ index 00000000..dcfdb549
 +        )}
 +      </div>
 +
-+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-red-100 pt-3 text-xs sm:grid-cols-3">
++      {!monitoring && <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-red-100 pt-3 text-xs sm:grid-cols-3">
 +        <Metadata label={t('queued.failureDetail.executionId')} value={task.id} mono />
 +        <Metadata label={t('queued.failureDetail.failedAt')} value={formatTimestamp(failedAt, i18n.language)} />
 +        <Metadata label={t('queued.failureDetail.duration')} value={formatDurationMs(task.durationMs)} />
 +        <Metadata label={t('queued.failureDetail.retryProgress')} value={retryProgress} />
-+      </dl>
++      </dl>}
 +    </section>
 +    <TaskIncidentTimeline task={task} />
 +  </>);
@@ -144570,6 +144625,86 @@ index df202616..0ae89087 100644
        <PageHeader
          title={t('pageTitle')}
          description={t('pageDescription')}
+diff --git a/webui/src/pages/Task/monitorTaskFailure.test.ts b/webui/src/pages/Task/monitorTaskFailure.test.ts
+new file mode 100644
+index 00000000..e28a6ae5
+--- /dev/null
++++ b/webui/src/pages/Task/monitorTaskFailure.test.ts
+@@ -0,0 +1,42 @@
++import { describe, expect, it } from 'vitest';
++import type { TaskExecution } from '@/api/task';
++import { monitorFailureMessage } from './monitorTaskFailure';
++
++const task = { executionInputSnapshot: { context: { monitoring: {} } } } as TaskExecution;
++const event = '设备「10.26.21.101【四季青XDR】」· 主机存在Apache HTTP Server安全漏洞攻击';
++const timeout = '调查模型请求超时（单次最多等待 90 秒）';
++const reason = `${timeout}，已有证据保留；本轮不再请求同一模型，后续轮次按退避计划重试`;
++export const roundError = `本轮失败：本轮查询返回 1 条，确认风险 0 条，无风险 0 条，待判定 1 条。
++待跟进事项：${event}：智能体调查未完成：${reason}。已有证据和待办保留，不据此判定无风险。
++智能体调查：${event}（ID：incident-example） · 系统故障，调查尚未恢复。调查模型请求：${reason}已保存恢复计划；不早于 2026-11-12T03:13:14.242558+00:00 再次尝试。
++历史与当前未完成调查：待续查 0 条，系统故障 1 条。
++状态跟进：本轮核验前轮意图 0 条。
++邮件跟进未启用，本轮不发送责任人邮件。`;
++
++describe('monitorFailureMessage', () => {
++  it('从真实格式中提取设备、事件和模型超时，排除重复原因、统计和恢复长文', () => {
++    expect(monitorFailureMessage(task, roundError)).toBe(`${event}：${timeout}`);
++  });
++
++  it('不把历史 system_wait 或待人工核对当作本轮阻断', () => {
++    const error = `本轮失败：查询失败\n待跟进事项：XDR 查询认证失败（HTTP 401）。已有证据和待办保留，不据此判定无风险。\n智能体调查：旧事件 · 系统故障，调查尚未恢复。旧模型超时\n历史与当前未完成调查：业务待人工核对 1 条。`;
++    expect(monitorFailureMessage(task, error)).toBe('XDR 查询认证失败（HTTP 401）');
++  });
++
++  it('保留超过五个事件的所有阻断及其他接口错误', () => {
++    const errors = Array.from({ length: 7 }, (_, i) => `设备「XDR-${i}」· 事件-${i}：智能体调查未完成：模型访问被拒绝（HTTP 403），已有证据保留`);
++    const error = `本轮失败：7 条\n待跟进事项：${errors.join('；')}；查询 TDP 失败：连接拒绝；异常类型：ConnectionError。已有证据和待办保留，不据此判定无风险。`;
++    const message = monitorFailureMessage(task, error);
++    for (let i = 0; i < 7; i++) expect(message).toContain(`设备「XDR-${i}」· 事件-${i}`);
++    expect(message).toContain('HTTP 403');
++    expect(message).toContain('查询 TDP 失败：连接拒绝');
++    expect(message).toContain('异常类型：ConnectionError');
++    expect(message).not.toContain('已有证据保留');
++  });
++
++  it('保留未知错误格式和普通任务原文，不凭任务标题猜测监测任务', () => {
++    expect(monitorFailureMessage(task, '数据库锁等待超时\nSQLITE_BUSY')).toBe('数据库锁等待超时\nSQLITE_BUSY');
++    expect(monitorFailureMessage({ executionInputSnapshot: {}, title: '安全运营监测' } as TaskExecution, roundError)).toBe(roundError);
++    expect(monitorFailureMessage({ sessionID: 'ses_monitor_old' } as TaskExecution, roundError)).toBe(`${event}：${timeout}`);
++  });
++});
+diff --git a/webui/src/pages/Task/monitorTaskFailure.ts b/webui/src/pages/Task/monitorTaskFailure.ts
+new file mode 100644
+index 00000000..9629e108
+--- /dev/null
++++ b/webui/src/pages/Task/monitorTaskFailure.ts
+@@ -0,0 +1,26 @@
++import type { TaskExecution } from '@/api/task';
++
++export function isMonitoringTask(task: TaskExecution): boolean {
++  return Boolean(task.executionInputSnapshot?.context?.monitoring)
++    || Boolean(task.sessionID?.startsWith('ses_monitor_'));
++}
++
++/** Project the round's recorded errors, never its historical investigation backlog.
++ * Keep the stored error and session unchanged; unknown formats remain readable.
++ */
++export function monitorFailureMessage(task: TaskExecution, error: string): string {
++  if (!isMonitoringTask(task)) return error;
++  const errors = error.match(/(?:^|\n)待跟进事项[：:]\s*([^\n]+)/)?.[1];
++  if (!errors) return error;
++
++  const message = errors
++    .replace(/智能体调查未完成[：:]\s*/g, '')
++    .replace(/。已有证据和待办保留，不据此判定无风险。?\s*$/, '')
++    .split('；')
++    .map((part) => part.trim()
++      .replace(/[，,]?已有证据(?:和待办)?保留[。]?/g, '')
++      .trim())
++    .filter((part) => part && !/^(?:本轮不再请求同一模型|后续轮次按退避计划重试|已保存(?:恢复|退避)计划|不早于\s*\d{4}-)/.test(part));
++  // Each event remains represented, even when more than five failed in a round.
++  return [...new Set(message)].join('；\n') || error;
++}
 diff --git a/webui/src/pages/Task/taskIncidentConfig.json b/webui/src/pages/Task/taskIncidentConfig.json
 new file mode 100644
 index 00000000..ef1d93f2
