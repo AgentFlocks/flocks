@@ -83882,10 +83882,10 @@ index 00000000..df0c50d8
 +'''
 diff --git a/flocks/enhancements/pro_runtime.py b/flocks/enhancements/pro_runtime.py
 new file mode 100644
-index 00000000..e7bff306
+index 00000000..f2cb0574
 --- /dev/null
 +++ b/flocks/enhancements/pro_runtime.py
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,158 @@
 +"""Add feature hooks to Pro's original classes without replacing its provider."""
 +from __future__ import annotations
 +
@@ -83905,13 +83905,8 @@ index 00000000..e7bff306
 +        return
 +    module._zw_bound = True
 +    if name == 'flockspro.runtime.workflow.store':
-+        def error_fields(exc):
-+            fields = {'error_type':type(exc).__name__}
-+            code = getattr(exc, 'sqlstate', None)
-+            if isinstance(code, str) and len(code) == 5:
-+                fields['sqlstate'] = code
-+            return fields
-+        module.sqlite_error_fields = error_fields
++        from flocks.workflow.error_fields import sqlite_error_fields
++        module.sqlite_error_fields = sqlite_error_fields
 +    if name == 'flockspro.runtime.task.store':
 +        cls = module.TaskStore
 +        create = cls.create_scheduler.__func__
@@ -84338,7 +84333,7 @@ index 350f27c5..1cfc0006 100644
          try:
              writer.close()
 diff --git a/flocks/ingest/syslog/manager.py b/flocks/ingest/syslog/manager.py
-index 7aa17ff1..67267410 100644
+index 7aa17ff1..a85453c8 100644
 --- a/flocks/ingest/syslog/manager.py
 +++ b/flocks/ingest/syslog/manager.py
 @@ -4,6 +4,7 @@ from __future__ import annotations
@@ -84349,16 +84344,15 @@ index 7aa17ff1..67267410 100644
  import time
  import uuid
  from typing import Any, Dict, List, Optional
-@@ -22,7 +23,7 @@ from flocks.workflow.execution_plan import build_workflow_execution_plan
- from flocks.workflow.fs_store import read_workflow_from_fs
+@@ -23,6 +24,7 @@ from flocks.workflow.fs_store import read_workflow_from_fs
  from flocks.workflow.models import Workflow
  from flocks.workflow.runner import run_workflow
--from flocks.workflow.store import WorkflowStore
-+from flocks.workflow.store import WorkflowStore, sqlite_error_fields
+ from flocks.workflow.store import WorkflowStore
++from flocks.workflow.error_fields import sqlite_error_fields
  from flocks.workflow.ownership import abandon_execution, execution_cancelled
  from flocks.workflow.tool_context import (
      build_workflow_tool_context,
-@@ -39,6 +40,8 @@ from flocks.workflow.triggers.models import (
+@@ -39,6 +41,8 @@ from flocks.workflow.triggers.models import (
      workflow_trigger_definitions_from_json,
  )
  
@@ -84367,7 +84361,7 @@ index 7aa17ff1..67267410 100644
  log = Log.create(service="syslog.manager")
  
  
-@@ -124,6 +127,14 @@ class _DropWarningThrottle:
+@@ -124,6 +128,14 @@ class _DropWarningThrottle:
          self._last_log = time.monotonic()
  
  
@@ -84382,7 +84376,7 @@ index 7aa17ff1..67267410 100644
  class SyslogManager:
      """One async listener task per workflow id (when enabled).
  
-@@ -163,6 +174,7 @@ class SyslogManager:
+@@ -163,6 +175,7 @@ class SyslogManager:
          # Restart and stop of one workflow happen one at a time: two of them
          # interleaving (two saves of its config, say) would leave a listener
          # that nothing tracks any more.
@@ -84390,7 +84384,7 @@ index 7aa17ff1..67267410 100644
          self._workflow_locks: dict[str, asyncio.Lock] = {}
          self._stopped = False
  
-@@ -261,6 +273,7 @@ class SyslogManager:
+@@ -261,6 +274,7 @@ class SyslogManager:
          pool = self._worker_pools.get(workflow_id)
          if pool is not None:
              status["workerCount"] = sum(1 for t in pool if not t.done())
@@ -84398,7 +84392,7 @@ index 7aa17ff1..67267410 100644
          return status
  
      def _track_draining_workers(
-@@ -483,10 +496,15 @@ class SyslogManager:
+@@ -483,10 +497,15 @@ class SyslogManager:
          # invoke it inline from datagram_received() without creating an
          # asyncio task per packet. That preserves the queue-based backpressure.
          def on_msg(parsed: dict) -> None:
@@ -84414,7 +84408,7 @@ index 7aa17ff1..67267410 100644
  
          async def _periodic_drop_flush() -> None:
              """Flush leftover drop count when the flood stops."""
-@@ -497,6 +515,8 @@ class SyslogManager:
+@@ -497,6 +516,8 @@ class SyslogManager:
                  except asyncio.TimeoutError:
                      pass
                  throttle.maybe_flush()
@@ -84423,7 +84417,7 @@ index 7aa17ff1..67267410 100644
  
          async def _bind_and_serve() -> None:
              """Serve the socket and flip ``ready`` once the bind really happened.
-@@ -543,6 +563,7 @@ class SyslogManager:
+@@ -543,6 +564,7 @@ class SyslogManager:
          except asyncio.CancelledError:
              raise
          except OSError as exc:
@@ -84431,7 +84425,7 @@ index 7aa17ff1..67267410 100644
              self._listener_status[workflow_id] = {
                  "state": "failed",
                  "error": str(exc),
-@@ -564,6 +585,7 @@ class SyslogManager:
+@@ -564,6 +586,7 @@ class SyslogManager:
                  "protocol": protocol,
              }
              ready.set()
@@ -84439,7 +84433,7 @@ index 7aa17ff1..67267410 100644
              log.error("syslog.listener_error", {"workflow_id": workflow_id, "error": str(exc)})
  
      async def _worker_loop(
-@@ -591,24 +613,41 @@ class SyslogManager:
+@@ -591,24 +614,41 @@ class SyslogManager:
                  continue
              except asyncio.CancelledError:
                  return
@@ -84499,7 +84493,7 @@ index 7aa17ff1..67267410 100644
      async def _trigger_workflow(
          self,
          workflow_id: str,
-@@ -642,10 +681,11 @@ class SyslogManager:
+@@ -642,10 +682,11 @@ class SyslogManager:
              summarized_inputs = {"_trigger": trigger.type}
              summarized_inputs.update(mapped_inputs)
  
@@ -84515,7 +84509,7 @@ index 7aa17ff1..67267410 100644
              exec_id = exec_data["id"]
              # Every way out of here ends the run: one whose end was not recorded (a
              # cancel while its context is cleaned up, say) is let go, not left live.
-@@ -655,10 +695,12 @@ class SyslogManager:
+@@ -655,10 +696,12 @@ class SyslogManager:
                  trigger_meta = mapped_inputs.get("_flocks", {}).get("trigger", {})
                  tool_context = None
                  try:
@@ -84528,7 +84522,7 @@ index 7aa17ff1..67267410 100644
                      result = await asyncio.to_thread(
                          run_workflow,
                          workflow=workflow_plan,
-@@ -717,8 +759,10 @@ class SyslogManager:
+@@ -717,8 +760,10 @@ class SyslogManager:
                      )
                  finally:
                      steps = step_recorder.take_steps()
@@ -84539,7 +84533,7 @@ index 7aa17ff1..67267410 100644
                          await record_execution_result(
                              workflow_id,
                              exec_id,
-@@ -726,12 +770,15 @@ class SyslogManager:
+@@ -726,12 +771,15 @@ class SyslogManager:
                              steps=steps,
                          )
                      except Exception as exc:
@@ -84555,7 +84549,7 @@ index 7aa17ff1..67267410 100644
              action_payload = {
                  "operation": "workflow.trigger.syslog",
                  "transport": "headless",
-@@ -763,6 +810,7 @@ class SyslogManager:
+@@ -763,6 +811,7 @@ class SyslogManager:
                  after=HookPipeline.run_ingress_after,
              )
          except TriggerDispatchError as exc:
@@ -102418,8 +102412,36 @@ index 00000000..ef1d93f2
 +  "recoveryMinMinutes": 40,
 +  "recoveryMaxMinutes": 120
 +}
+diff --git a/flocks/workflow/error_fields.py b/flocks/workflow/error_fields.py
+new file mode 100644
+index 00000000..24e36c22
+--- /dev/null
++++ b/flocks/workflow/error_fields.py
+@@ -0,0 +1,22 @@
++"""Payload-free error fields shared by SQLite and Pro workflow diagnostics.
++
++Keep this independent of the selected store: managed Pro installs retain
++their original store modules, including when PostgreSQL is unavailable.
++"""
++from __future__ import annotations
++
++from typing import Any
++
++
++def sqlite_error_fields(exc: BaseException) -> dict[str, Any]:
++    fields = {"error_type": type(exc).__name__}
++    code = getattr(exc, "sqlite_errorcode", None)
++    name = getattr(exc, "sqlite_errorname", None)
++    if isinstance(code, int):
++        fields["sqlite_errorcode"] = code
++    if isinstance(name, str) and name.startswith("SQLITE_"):
++        fields["sqlite_errorname"] = name
++    sqlstate = getattr(exc, "sqlstate", None)
++    if isinstance(sqlstate, str) and len(sqlstate) == 5:
++        fields["sqlstate"] = sqlstate
++    return fields
 diff --git a/flocks/workflow/poller_manager.py b/flocks/workflow/poller_manager.py
-index 780cd19a..94e77cd4 100644
+index 780cd19a..7a2b6ece 100644
 --- a/flocks/workflow/poller_manager.py
 +++ b/flocks/workflow/poller_manager.py
 @@ -6,6 +6,8 @@ id that periodically triggers ``run_workflow`` with configured inputs.
@@ -102431,16 +102453,15 @@ index 780cd19a..94e77cd4 100644
  import asyncio
  import threading
  import time
-@@ -30,7 +32,7 @@ from flocks.workflow.health_notifications import WorkflowHealthNotifier
- from flocks.workflow._async_runtime import register_primary_loop
+@@ -31,6 +33,7 @@ from flocks.workflow._async_runtime import register_primary_loop
  from flocks.workflow.ownership import abandon_execution, execution_cancelled
  from flocks.workflow.runner import RunWorkflowResult, _validate_lint_results, run_workflow
--from flocks.workflow.store import WorkflowStore
-+from flocks.workflow.store import WorkflowStore, sqlite_error_fields
+ from flocks.workflow.store import WorkflowStore
++from flocks.workflow.error_fields import sqlite_error_fields
  from flocks.workflow.tool_context import (
      build_workflow_tool_context,
      cleanup_workflow_tool_context,
-@@ -119,6 +121,13 @@ class WorkflowPollerManager:
+@@ -119,6 +122,13 @@ class WorkflowPollerManager:
          task_set.add(task)
  
          def _discard(done_task: asyncio.Task[Any]) -> None:
@@ -102454,7 +102475,7 @@ index 780cd19a..94e77cd4 100644
              tasks = self._run_tasks.get(workflow_id)
              if tasks is not None:
                  tasks.discard(done_task)
-@@ -452,6 +461,7 @@ class WorkflowPollerManager:
+@@ -452,6 +462,7 @@ class WorkflowPollerManager:
              current["error"] = str(exc)
              current["nextRunAt"] = None
              self._status[workflow_id] = current
@@ -102462,7 +102483,7 @@ index 780cd19a..94e77cd4 100644
              log.warning("poller.loop_failed", {"workflow_id": workflow_id, "error": str(exc)})
          finally:
              if workflow_id in self._tasks and self._tasks.get(workflow_id) is asyncio.current_task():
-@@ -470,9 +480,11 @@ class WorkflowPollerManager:
+@@ -470,9 +481,11 @@ class WorkflowPollerManager:
          config: Dict[str, Any],
      ) -> None:
          active_runs = self._cleanup_done_runs(workflow_id)
@@ -102474,7 +102495,7 @@ index 780cd19a..94e77cd4 100644
              current["lastError"] = "previous_run_still_active"
              current["activeRuns"] = active_runs
              self._status[workflow_id] = current
-@@ -484,6 +496,7 @@ class WorkflowPollerManager:
+@@ -484,6 +497,7 @@ class WorkflowPollerManager:
          )
          self._register_run_task(workflow_id, run_task)
  
@@ -102482,7 +102503,7 @@ index 780cd19a..94e77cd4 100644
      async def _execute_run(
          self,
          workflow_id: str,
-@@ -503,7 +516,7 @@ class WorkflowPollerManager:
+@@ -503,7 +517,7 @@ class WorkflowPollerManager:
          exec_id = ""
          step_recorder = ExecutionStepRecorder()
          current = self._status.get(workflow_id) or self._base_status(workflow_id)
@@ -102491,7 +102512,7 @@ index 780cd19a..94e77cd4 100644
          current["activeRuns"] = self._cleanup_done_runs(workflow_id)
          self._status[workflow_id] = current
  
-@@ -515,12 +528,14 @@ class WorkflowPollerManager:
+@@ -515,12 +529,14 @@ class WorkflowPollerManager:
              exec_data = await create_execution_record(workflow_id, input_params=inputs)
              exec_id = str(exec_data["id"])
              failure_stage = "tool_context"
@@ -102506,7 +102527,7 @@ index 780cd19a..94e77cd4 100644
              result = await asyncio.to_thread(
                  run_workflow,
                  workflow=workflow_json,
-@@ -616,6 +631,7 @@ class WorkflowPollerManager:
+@@ -616,6 +632,7 @@ class WorkflowPollerManager:
                  current["state"] = "running"
                  current["error"] = None
              self._status[workflow_id] = current
@@ -102514,7 +102535,7 @@ index 780cd19a..94e77cd4 100644
              log.warning("poller.run_failed", {"workflow_id": workflow_id, "error": str(exc)})
          finally:
              # Keep caller cancellation distinct from stopping leftover worker
-@@ -627,11 +643,15 @@ class WorkflowPollerManager:
+@@ -627,11 +644,15 @@ class WorkflowPollerManager:
              try:
                  if exec_id:
                      try:
@@ -102530,7 +102551,7 @@ index 780cd19a..94e77cd4 100644
                          self._status[workflow_id] = current
                          log.warning("poller.exec_record_failed", {
                              "workflow_id": workflow_id, "exec_id": exec_id, "error": persistence_error,
-@@ -655,6 +675,7 @@ class WorkflowPollerManager:
+@@ -655,6 +676,7 @@ class WorkflowPollerManager:
                          log.warning("poller.health_notification_failed", {"workflow_id": workflow_id, "error": str(exc)})
              finally:
                  try:
@@ -102561,7 +102582,7 @@ index 257fb21d..ef045e5b 100644
      *,
 diff --git a/flocks/workflow/soc_diagnostics.py b/flocks/workflow/soc_diagnostics.py
 new file mode 100644
-index 00000000..bba110ff
+index 00000000..f5796e74
 --- /dev/null
 +++ b/flocks/workflow/soc_diagnostics.py
 @@ -0,0 +1,432 @@
@@ -102868,7 +102889,7 @@ index 00000000..bba110ff
 +                return result
 +            except BaseException as exc:
 +                from flocks.hooks.execution import execution_stop_diagnostics
-+                from flocks.workflow.store import sqlite_error_fields
++                from flocks.workflow.error_fields import sqlite_error_fields
 +                stop = execution_stop_diagnostics(exc)
 +                # Keep the support bundle payload-free. Extension detail can
 +                # contain arbitrary input; source/stage/code identify the
@@ -102998,7 +103019,7 @@ index 00000000..bba110ff
 +            "notes": ["Recent events may overlap persisted events.",
 +                      "Long elapsed time is evidence of waiting, not proof of deadlock."]}
 diff --git a/flocks/workflow/store.py b/flocks/workflow/store.py
-index c76b3451..83b6cbe8 100644
+index c76b3451..29a62360 100644
 --- a/flocks/workflow/store.py
 +++ b/flocks/workflow/store.py
 @@ -4,6 +4,7 @@ from __future__ import annotations
@@ -103009,26 +103030,15 @@ index c76b3451..83b6cbe8 100644
  import os
  import sqlite3
  from contextlib import asynccontextmanager
-@@ -82,6 +83,18 @@ def _write_operation(operation: Callable[..., Awaitable[Any]]) -> Callable[...,
-     return wrapped
+@@ -16,6 +17,7 @@ import aiosqlite
  
+ from flocks.storage.storage import Storage
+ from flocks.utils.log import Log
++from flocks.workflow.error_fields import sqlite_error_fields
  
-+def sqlite_error_fields(exc: BaseException) -> Dict[str, Any]:
-+    fields = {"error_type": type(exc).__name__}
-+    code = getattr(exc, "sqlite_errorcode", None)
-+    name = getattr(exc, "sqlite_errorname", None)
-+    if isinstance(code, int):
-+        fields["sqlite_errorcode"] = code
-+    if isinstance(name, str) and name.startswith("SQLITE_"):
-+        fields["sqlite_errorname"] = name
-+    return fields
-+
-+
-+
- class WorkflowStore:
-     """Workflow-domain store backed by ``workflow.db`` tables."""
+ log = Log.create(service="workflow.store")
  
-@@ -156,6 +169,7 @@ class WorkflowStore:
+@@ -156,6 +158,7 @@ class WorkflowStore:
              cls._conn.row_factory = aiosqlite.Row
              await Storage.configure_connection(cls._conn)
              await cls._conn.executescript(_WORKFLOW_DDL)
@@ -103036,7 +103046,7 @@ index c76b3451..83b6cbe8 100644
              for stmt in _INDEX_STMTS:
                  await cls._conn.execute(stmt)
              await cls._conn.commit()
-@@ -203,6 +217,22 @@ class WorkflowStore:
+@@ -203,6 +206,22 @@ class WorkflowStore:
                  return
              raise
  
@@ -103059,7 +103069,7 @@ index c76b3451..83b6cbe8 100644
      @classmethod
      async def close(cls) -> None:
          async with cls._lock():
-@@ -338,6 +368,8 @@ class WorkflowStore:
+@@ -338,6 +357,8 @@ class WorkflowStore:
                      await db.commit()
                      return result
                  except BaseException as exc:
@@ -103068,7 +103078,7 @@ index c76b3451..83b6cbe8 100644
                      fields = {
                          "action": action, "phase": phase, "attempt": attempt,
                          "max_attempts": attempts, "error": str(exc),
-@@ -727,10 +759,18 @@ class WorkflowStore:
+@@ -727,10 +748,18 @@ class WorkflowStore:
                  cls._json_dumps(step_payload.get("outputs") or {}),
                  step_payload.get("error"),
                  cls._json_dumps(step_payload),
@@ -103087,7 +103097,7 @@ index c76b3451..83b6cbe8 100644
      @classmethod
      async def record_step(
          cls,
-@@ -755,8 +795,8 @@ class WorkflowStore:
+@@ -755,8 +784,8 @@ class WorkflowStore:
              await db.executemany(
                  """
                  INSERT OR REPLACE INTO workflow_execution_steps
@@ -103098,7 +103108,7 @@ index c76b3451..83b6cbe8 100644
                  """,
                  rows,
              )
-@@ -779,8 +819,8 @@ class WorkflowStore:
+@@ -779,8 +808,8 @@ class WorkflowStore:
                  await db.executemany(
                      """
                      INSERT OR REPLACE INTO workflow_execution_steps
@@ -103109,7 +103119,7 @@ index c76b3451..83b6cbe8 100644
                      """,
                      step_rows,
                  )
-@@ -1114,6 +1154,7 @@ CREATE TABLE IF NOT EXISTS workflow_execution_steps (
+@@ -1114,6 +1143,7 @@ CREATE TABLE IF NOT EXISTS workflow_execution_steps (
      outputs    TEXT NOT NULL DEFAULT '{}',
      error      TEXT,
      payload    TEXT NOT NULL,
@@ -122682,6 +122692,47 @@ index 00000000..e9dd36ed
 +            assert captured[2]['body']['dealStatus']==[0,10]
 +        finally:await runner.cleanup()
 +    asyncio.run(run())
+diff --git a/tests/workflow/test_error_fields.py b/tests/workflow/test_error_fields.py
+new file mode 100644
+index 00000000..612b7fc2
+--- /dev/null
++++ b/tests/workflow/test_error_fields.py
+@@ -0,0 +1,35 @@
++"""Error diagnostics must work without depending on the selected store."""
++import sqlite3
++from types import SimpleNamespace
++
++from flocks.workflow.error_fields import sqlite_error_fields
++
++
++def test_sqlite_error_codes_are_kept_without_query_or_payload():
++    with sqlite3.connect(":memory:") as connection:
++        try:
++            connection.execute("SELECT private_payload FROM missing_table")
++        except sqlite3.OperationalError as exc:
++            assert sqlite_error_fields(exc) == {
++                "error_type": "OperationalError",
++                "sqlite_errorcode": sqlite3.SQLITE_ERROR,
++                "sqlite_errorname": "SQLITE_ERROR",
++            }
++
++
++def test_postgres_sqlstate_is_kept_without_exception_message():
++    class DatabaseError(Exception):
++        sqlstate = "40001"
++
++    assert sqlite_error_fields(DatabaseError("private query and credentials")) == {
++        "error_type": "DatabaseError", "sqlstate": "40001",
++    }
++
++
++def test_unstructured_exception_records_only_its_type():
++    assert sqlite_error_fields(RuntimeError("private payload")) == {"error_type": "RuntimeError"}
++
++
++def test_invalid_database_fields_are_not_exported():
++    error = SimpleNamespace(sqlite_errorcode="private", sqlite_errorname="private", sqlstate="private")
++    assert sqlite_error_fields(error) == {"error_type": "SimpleNamespace"}
 diff --git a/tests/workflow/test_poller_manager.py b/tests/workflow/test_poller_manager.py
 index b5f9f704..08f8d87a 100644
 --- a/tests/workflow/test_poller_manager.py

@@ -1,12 +1,12 @@
 # Flocks Pro 2026.11.12.2 定制增强包
 
-增强包版本：1.14.1。仅适用于 `2026.11.12.2-linux-amd64`、Pro 构建 `2ee622b`、Core `730da689`，运行树保护策略必须为 `native`。
+增强包版本：1.14.2。仅适用于 `2026.11.12.2-linux-amd64`、Pro 构建 `2ee622b`、Core `730da689`，运行树保护策略必须为 `native`。
 
 ## 开发与部署方式
 
 增强直接合入 `zw_dev` 的 Core 源码，以本发行版配对的 Core `730da689` 为上游基线。打包时根据该基线与增强提交之间的差异，收集 Python 源码、内置组件和配对的 Pro 前端产物。
 
-本包源码提交：[`538ee022`](https://github.com/AgentFlocks/flocksdev/commit/538ee022defd7ef5b5969aaed7d6ac02037a5b58)，为原 `zw_dev` 与发行版基线的普通合并，保留开发历史。
+本包源码提交：[`f7009d80`](https://github.com/AgentFlocks/flocksdev/commit/f7009d80af910f802d773ca76df0526e75aab1de)，保留原 `zw_dev` 与发行版基线的开发历史。
 
 交付形式仍是独立增强包。解压到 `~/.flocks/customizations/` 后，安装器校验并备份原文件，然后直接修改 `~/flockspro/current/runtime/flocks/` 中实际运行的 Core 源码，以及 `runtime/webui-dist/` 中的界面文件。`customizations` 用于保存安装器、部署文件和备份；服务启动时加载的是受管发布中的增强源码。
 
@@ -34,10 +34,10 @@ https://gitee.com/flocks/flocks/repository/archive/fix/process_11.12_en
 
 已装补丁 A 时，脚本核对 A 的部署记录和当前文件，再直接写入补丁 B。B 删除的旧补丁文件会清理，不再修改的原版文件恢复发行基线；保留配置、状态及历史备份。部署失败自动退回 A；B 启动失败时也会回退本次代码更新，并尝试重新启动此前运行的服务。未知手工源码改动会被保留并报告。自动升级以补丁声明的 Pro 发行基线为准。
 
-若继续使用手工压缩包方式，把 `flocks-customizations-1.14.1-pro-2026.11.12.2-full.tar.gz` 上传到服务器家目录，再整行执行：
+若继续使用手工压缩包方式，把 `flocks-customizations-1.14.2-pro-2026.11.12.2-full.tar.gz` 上传到服务器家目录，再整行执行：
 
 ```bash
-flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks-customizations-1.14.1-pro-2026.11.12.2-full.tar.gz" -C "$HOME/.flocks/customizations" && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root "$HOME/flockspro" apply --install-deps && flocks start --no-browser --webui-host 0.0.0.0
+flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks-customizations-1.14.2-pro-2026.11.12.2-full.tar.gz" -C "$HOME/.flocks/customizations" && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root "$HOME/flockspro" apply --install-deps && flocks start --no-browser --webui-host 0.0.0.0
 ```
 
 解压目录和安装器都在 `~/.flocks/customizations/`，不需要额外的家目录工作文件夹。补丁目标是当前受管 Pro 发布；旧的 `$HOME/flocks` 不参与安装。
@@ -50,7 +50,7 @@ flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks
 
 保留原有首页、中文品牌文案、知识分类和经验总结、工作流统计、七个定制 SOC 工作流、安全运营监测及邮件闭环，并包含定时任务详情滚动和每日报告路由修复。
 
-监测数据通过 Pro 原有 Go 数据库入口写入 PostgreSQL；普通任务和监测任务继续使用 Pro 的执行租约、代次校验和权限检查。旧的 SQLite 连接锁修复不覆盖 Pro 任务引擎。Go 程序、原生扩展、授权文件、签名清单和 Python 解释器保持原样。界面来自精确配对的 Core 和 Pro 源码，不覆盖成普通开源版界面。
+监测数据通过 Pro 原有 Go 数据库入口写入 PostgreSQL；普通任务和监测任务继续使用 Pro 的执行租约、代次校验和权限检查。旧的 SQLite 连接锁修复不覆盖 Pro 任务引擎。诊断错误字段使用独立模块，不再要求原版存储额外导出函数；Pro 未启用 PostgreSQL 时沿用其原有 SQLite 回退方式，不切换业务数据库。Go 程序、原生扩展、授权文件、签名清单和 Python 解释器保持原样。界面来自精确配对的 Core 和 Pro 源码，不覆盖成普通开源版界面。
 
 安装器只替换代码和界面文件，不修改现有数据库、设备配置、账号和授权。已有增强包的配置、状态和备份目录保留。历史 SQLite 监测数据不会被当作当前 PostgreSQL 数据使用。
 
@@ -88,8 +88,8 @@ flocks stop && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root
 
 ## 本次交付验收范围
 
-本次按候选包交付。既有增强的前端 2968 项、原 SQLite 兼容回归 1574 项通过；PostgreSQL 已知失败经定点复核清零，完整运行和定点复核的对应关系、10 项测试夹具限制见 `pg-verification-summary.json`，没有累计重复用例冒称完整单轮全绿。12 并发会话预约、6 并发结束卡及中断恢复均已验证。提交到 `zw_dev` 后另通过源码更新保护 14 项及原生 PostgreSQL 冒烟 7 项，并逐文件核对既有运行源码与增强代码一致。
+1.14.2 修复 Pro 未启用 PostgreSQL、沿用发行版原始 SQLite 存储时，增强 syslog 模块导入 `sqlite_error_fields` 失败而无法启动的问题。诊断函数移至独立模块，syslog、轮询及 SOC 异常诊断共用；原存储模块继续保留，不触发数据库迁移。
 
-1.14.1 的安装器与一键更新脚本共 40 项回归通过，包括 A→B→C、旧安装记录迁移、删除旧文件、异常回滚、监听地址恢复、重复运行及镜像版本防倒退。Gitee 地址已通过真实匿名下载验证；5173 现有 Pro 实例已实际执行旧 1.14.0 首装、直接升级 1.14.1、重复运行不重启和全量还原。验收中使用适配本机架构的离线仓库快照，并以仅注释不同的 A 版源码确认 B 确实覆盖了 A 的文件。
+已在隔离目录准确复现 1.14.1 的启动导入异常，换用 1.14.2 代码后完整服务模块加载成功。安装器、更新脚本、Bash 入口及原始 SQLite 存储组合回归共 50 项通过；Core 定点回归 91 项通过，另有 6 项 SOC 仪表盘私有函数测试在原提交也同样失败，已单独记录。Pro 扩展注册表及锁定依赖生产构建通过。
 
-5173 现有 Pro 实例已实际加载同源码增强包，验证首页统计、安全监测套件入口、成功和失败任务详情双向滚动，以及安装、重复安装、还原；最终源码部署复核还确认原 Pro Python 入口加载 `current/runtime/flocks/`，所有部署文件哈希匹配，启动包装脚本未改变；验收后已恢复原版。该实例原有安全监测组件不完整，因此没有自动补全或启用新监测任务，完整报告页与真实监测链路仍待验收。Linux 目标服务器也尚未实机部署。详细记录见 `verification.json`。
+5173 现有 Pro 实例已完成 1.14.1 首装、模拟部署后校验失败并恢复旧补丁、直接升级 1.14.2、重复运行不重启、480 文件哈希核对及还原原版。原存储文件与发行清单一致，Pro 入口和监听配置未变，最终原版已恢复健康。匿名访问报告页和业务 API 返回原 Pro 登录保护的 401；没有将其计为已登录业务验收。详细交付记录见 `verification.json`。本机为 darwin-arm64；Linux 目标服务器仍需运行更新脚本确认。原实例完整报告页与真实监测链路尚未验收，不能将本轮启动修复解释为完整监测业务验收。

@@ -1,24 +1,28 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.1",
+  "packageVersion": "1.14.2",
   "target": "2026.11.12.2-linux-amd64",
   "status": "candidate - partial live acceptance",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
     "branch": "zw_dev",
-    "commit": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
+    "commit": "f7009d80af910f802d773ca76df0526e75aab1de",
     "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.14.1-pro-2026.11.12.2-full.tar.gz",
-  "sha256": "85dae045ee7d22874d86d5af3693aadf636629c631dcfcfd6c04e67103ca1c7e",
-  "payloadFiles": 479,
+  "archive": "releases/flocks-customizations-1.14.2-pro-2026.11.12.2-full.tar.gz",
+  "sha256": "ad465043ebd2b38a0bd452f1c06227da9e851a4de3b55b999f245e5be66fac8a",
+  "payloadFiles": 480,
   "validation": "verification.json",
   "limits": [
-    "Existing local monitor scene is incomplete; full report GUI and live monitoring remain unverified.",
-    "Linux-amd64 server deployment remains unverified."
+    "Linux-amd64 fix not yet run on user server.",
+    "Full authenticated report GUI and live monitoring remain unverified.",
+    "Six existing SOC dashboard test contract failures reproduce at the previous source commit."
   ],
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
-  "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae"
+  "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
+  "validationScope": "Startup compatibility, 5173 install/upgrade/repeat/failure rollback/restore and original store preservation.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.14.2.zip",
+  "offlineRepositoryArchiveSha256": "674df253542dee11162bfbf129df4d782cd0b0b8ab231c0cf50a500b00223c1f"
 }

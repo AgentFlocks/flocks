@@ -17,13 +17,8 @@ def bind(module):
         return
     module._zw_bound = True
     if name == 'flockspro.runtime.workflow.store':
-        def error_fields(exc):
-            fields = {'error_type':type(exc).__name__}
-            code = getattr(exc, 'sqlstate', None)
-            if isinstance(code, str) and len(code) == 5:
-                fields['sqlstate'] = code
-            return fields
-        module.sqlite_error_fields = error_fields
+        from flocks.workflow.error_fields import sqlite_error_fields
+        module.sqlite_error_fields = sqlite_error_fields
     if name == 'flockspro.runtime.task.store':
         cls = module.TaskStore
         create = cls.create_scheduler.__func__

@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.1",
-  "recordedAt": "2026-11-12T07:32:16.506049+00:00",
+  "packageVersion": "1.14.2",
+  "recordedAt": "2026-11-12T08:16:31.210729+00:00",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.14.1",
+    "packageVersion": "1.14.2",
     "developmentBranch": "zw_dev",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
+    "sourceCommit": "f7009d80af910f802d773ca76df0526e75aab1de",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -22,180 +22,61 @@
     },
     "previousCustomization": "1.13.0"
   },
+  "scope": "Fix startup ImportError when managed Pro retains its original SQLite store",
   "automatedValidation": {
-    "frontend": {
-      "passed": 2968,
-      "productionBuild": "passed",
-      "preservedProRegistry": true,
-      "cleanSourceBuild": {
-        "sourceCommit": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
-        "assetDifferencesFrom5173TestedBuild": 0
-      }
+    "installerUpdaterBashAndOriginalStoreOverlay": {
+      "passed": 50,
+      "log": ".work/startup-fix-tests.log"
     },
-    "sqliteCompatibility": {
-      "passed": 1574,
-      "note": "Original Core enhancement regression; no production SQLite fallback is used in Pro."
+    "focusedCore": {
+      "passed": 91,
+      "failed": 6,
+      "baselineFailuresReproduced": 6,
+      "details": "Six pre-existing SOC dashboard private-function contract tests fail identically at 538ee022; error fields, trace errors/cancellation, syslog backpressure and workflow store checks pass.",
+      "log": ".work/startup-core-tests.log"
     },
-    "installer": {
-      "passed": 23,
-      "checks": [
-        "apply/repeat/restore",
-        "preserve local edits",
-        "rollback interrupted writes",
-        "restore status",
-        "reject different package without restore",
-        "collect new source files",
-        "reject stale frontend inputs",
-        "inspect actual source hashes and installed paths",
-        "build from committed zw_dev release-baseline diff",
-        "schema1 migration and direct A to B to C upgrades",
-        "remove old-only source and frontend files",
-        "failed upgrade restores previous code and journal",
-        "rollback-update after failed startup",
-        "stable state-root with staged installer",
-        "reject damaged backups and downgrade"
-      ]
+    "sqliteFailureReproduction": {
+      "old1141ImportErrorReproduced": true,
+      "new1142AppImportPassed": true,
+      "backend": "sqlite",
+      "originalReleaseStoresUnchanged": true
     },
-    "postgres": {
-      "remainingKnownFailures": 0,
-      "singleFullGreenRun": false,
-      "details": "pg-verification-summary.json",
-      "notCumulativePassedCount": true
-    },
-    "concurrency": {
-      "dailyReservations": 12,
-      "endingPublishers": 6,
-      "testsPassed": 3,
-      "beforeFix": "12 concurrent reservations timed out",
-      "afterFixSeconds": 3.21
-    },
-    "patchReproduction": "Full patch applies to exact Core baseline and reproduces the zw_dev Git tree 067068ba8923976d79dc41c09b64b360f0a1b65e",
-    "sourceBranchGuards": {
-      "passed": 14
-    },
-    "sourceBranchSmoke": {
-      "passed": 7,
-      "sourceCommit": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
-      "nativeProModules": true,
-      "isolatedPostgres": true,
-      "checks": [
-        "native execution lease and exact-once dispatch",
-        "12 concurrent daily-session reservations",
-        "6 concurrent round-ending publications"
-      ]
-    },
-    "sourceEquivalence": {
-      "runtimeFilesChecked": 7114,
-      "addonFilesChecked": 97,
-      "runtimeMismatches": 0,
-      "addonMismatches": 0,
-      "excluded": "Four Git source updater guard files, excluded from the managed Pro payload"
-    },
-    "updater": {
-      "passed": 17,
-      "downloadSource": "https://gitee.com/flocks/flocks/repository/archive/fix/process_11.12_en",
-      "checks": [
-        "nested ZIP to delivery metadata to tar SHA-256",
-        "managed Pro entry and user service arguments",
-        "retain configuration and historical backups",
-        "skip identical patch without restart",
-        "prevent stale mirror downgrade",
-        "reject HTML and corrupt archives before stopping",
-        "apply and startup failure recovery",
-        "never start mixed source if recovery incomplete",
-        "legacy 1.14.0 first install and repeat compatibility",
-        "restore original listen configuration after failed start",
-        "confirm service mode rather than guessing",
-        "standard curl download path"
-      ],
-      "totalWithInstaller": 40
-    }
+    "productionFrontendBuild": "passed with exact Pro registry and unchanged locked frontend sources"
   },
-  "acceptance5173": {
-    "edition": "Pro 2026.11.12.2-darwin-arm64",
-    "releaseProtection": "native",
-    "finalCriticalFilesMatchedPayload": true,
-    "ready": true,
-    "taskManagerStarted": true,
-    "checks": {
-      "homeCountsAndTokenCard": "passed",
-      "monitorSuiteListed": "passed",
-      "failedTaskScrolling": {
-        "passed": true,
-        "scrollTop": [
-          0,
-          214,
-          0
-        ],
-        "clientHeight": 698,
-        "scrollHeight": 912
-      },
-      "completedTaskScrolling": {
-        "passed": true,
-        "scrollTop": [
-          948,
-          0,
-          948
-        ],
-        "scrollHeight": 1473
-      },
-      "installRepeatAndRestore": "passed"
-    },
-    "limitations": [
-      "Existing local monitor scene is incomplete (v1.0.0); full report UI and live monitoring were not triggered to avoid activating a new task.",
-      "Linux-amd64 server deployment was not performed in this session."
-    ],
-    "baselineRestored": true,
-    "sourceOverlayInstaller": {
-      "port": 5173,
-      "localRelease": "2026.11.12.2-darwin-arm64",
-      "remotePayloadArchitecture": "linux-amd64",
-      "payloadSource": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
-      "payloadFilesMatched": 479,
-      "enhancedReady": {
-        "ready": true
-      },
-      "restoredReady": {
-        "ready": true
-      },
-      "entryWrapperUnchanged": true,
-      "baselineRestored": true,
-      "loadedCorePackage": "Pro current/runtime/flocks/flocks/__init__.py"
-    }
-  },
-  "releaseStatus": "candidate - report UI acceptance remains pending",
-  "sourcePatchSha256": "733c366193d7bb9fb49f0bc62afa8a32600a454bf2c473ba318a65d155d463d4",
-  "developmentSource": {
-    "repository": "AgentFlocks/flocksdev",
-    "branch": "zw_dev",
-    "commit": "538ee022defd7ef5b5969aaed7d6ac02037a5b58",
-    "upstreamBaseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
-    "mergeParents": [
-      "818bb2365217df74b29b99c9afbb99049f7eeba0",
-      "730da6897fbcd85d0b67e22cf13ecd4531161b9d"
-    ],
-    "deploymentMode": "source-overlay"
-  },
-  "automaticUpdate5173": {
+  "local5173Acceptance": {
+    "startedAt": "2026-11-12T08:14:27.923654+00:00",
     "localRelease": "2026.11.12.2-darwin-arm64",
-    "sourceOfRepositoryZIP": "offline snapshots of actual 1.14.0 and 1.14.1 packages; target architecture adapted for local Pro; A contains a comment-only source probe",
     "livePort": 5173,
-    "scriptSha256": "bcf060297590a0be382aa3c52dc3e104817c356fe362cc2e47d92af210e097e6",
-    "legacy1140FirstInstall": true,
-    "automaticAtoB": true,
-    "sourceChangedFromAtoB": true,
+    "oldVersion": "1.14.1",
+    "newVersion": "1.14.2",
+    "sourceOfRepositoryZIP": "Actual release packages adapted only for local darwin-arm64 release id",
+    "old1141InstalledAndReady": true,
+    "failedUpgradeRolledBackToA": true,
+    "automatic1141to1142": true,
+    "payloadFilesMatched": 480,
+    "sourceCommit": "f7009d80af910f802d773ca76df0526e75aab1de",
     "repeatNoRestart": true,
-    "payloadFilesMatched": 479,
-    "baselineRestored": true,
+    "httpChecks": {
+      "/": 200,
+      "/report": 401,
+      "/reports": 401,
+      "/api/workflow/stats": 401,
+      "/api/home-usage/today-token": 401
+    },
+    "baselineRestoredAndReady": true,
     "proWrapperUnchanged": true,
-    "listenUnchanged": true
+    "proBinaryUnchanged": true,
+    "listenUnchanged": true,
+    "finishedAt": "2026-11-12T08:15:55.584615+00:00",
+    "originalStoresMatchSignedReleaseManifest": true,
+    "status": "passed for startup, install/update/repeat, failed-update rollback, original-store preservation and restore",
+    "authenticationScope": "Unauthenticated protected page/API routes return 401; authenticated report contents and business stats were not exercised.",
+    "harnessNote": "The driver initially expected 200 on protected report routes. A supplementary probe during the same 1.14.2 run confirmed their 401 login guards and all original store hashes against the release manifest."
   },
-  "giteeDownload": {
-    "validated": true,
-    "zipBytes": 35790752,
-    "repositoryCommit": "3c3af53c1d3d90999e3426ae93a5c13bb3b3eaba",
-    "packageVersion": "1.14.0",
-    "sha256": "caf756b2a318652e578f29899f00135c6f83d4ac99dbfc06873f0c65291fda46",
-    "url": "https://gitee.com/flocks/flocks/repository/archive/fix/process_11.12_en"
-  }
+  "limits": [
+    "Linux-amd64 fix has not yet been run on the user server.",
+    "Full report GUI and live security monitoring remain outside this startup fix acceptance.",
+    "Six pre-existing SOC dashboard test contract failures remain."
+  ],
+  "previousVersionEvidence": "Historical 1.14.1 verification retained in delivery branch history."
 }
