@@ -1,7 +1,6 @@
 {
-  "_comment": "stream_alert_triage runtime defaults. Workflow inputs override these values.",
+  "_comment": "stream_alert_triage runtime defaults. Workflow inputs override these values. SOC persistence goes through the platform's alert store, in the database Flocks is configured for; no database location is set here.",
   "triage_output_mode": "soc_db",
-  "soc_db_path": "~/.flocks/data/soc.db",
   "persist_triage_output": false,
   "jsonl_output_dir": ""
 }

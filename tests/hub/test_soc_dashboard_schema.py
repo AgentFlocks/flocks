@@ -1,5 +1,6 @@
 import importlib.util
 import asyncio
+import uuid
 import gc
 import json
 import sqlite3
@@ -49,7 +50,7 @@ def test_activity_preview_handles_bounded_execution_shapes(wrapper):
         inputs = {"syslog_message": {"message": "Sep 11 device vendor: " + json.dumps(record)}}
     else:
         inputs = {"syslog_message": {"message": json.dumps({"data": {"message": json.dumps(record)}})}}
-    alert, count = handlers._dashboard_execution_detail(json.dumps(output), json.dumps(inputs))
+    alert, count = handlers._store._dashboard_execution_detail(json.dumps(output), json.dumps(inputs))
     assert alert == {"id": "a", "threatName": "scan", "sourceType": "ndr",
                      "srcIp": "192.0.2.1", "dstIp": "198.51.100.2"}
     assert count == (1 if wrapper == "direct" else None)
@@ -61,85 +62,85 @@ def test_activity_does_not_combine_unrelated_alerts_or_guess_source():
         {"id": "a", "threat_name": "first", "sip": "192.0.2.1"},
         {"id": "b", "dip": "198.51.100.2", "_source_type": "ndr"},
     ]}
-    alert, _ = handlers._dashboard_execution_detail(json.dumps(output), "{}")
+    alert, _ = handlers._store._dashboard_execution_detail(json.dumps(output), "{}")
     assert alert["id"] == "a"
     assert alert["dstIp"] == alert["sourceType"] == ""
 
 
 def test_activity_distinguishes_empty_unknown_and_real_batches(tmp_path):
     handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
-    _activity_execution(handlers.WORKFLOW_DB, "empty", output={"stats": {"raw_count": 0}})
-    _activity_execution(handlers.WORKFLOW_DB, "unknown", inputs={"source_log_type": "ndr"})
-    _activity_execution(handlers.WORKFLOW_DB, "nonempty", inputs={"_soc_alert_count": 5})
-    _activity_execution(handlers.WORKFLOW_DB, "queued", status="queued", inputs={"_soc_alert_count": 2})
-    events = {e["eventId"]: e for e in handlers._get_workflow_recent_events("stream_alert_denoise")}
+    handlers._store._paths.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers._store._paths.WORKFLOW_DB, "empty", output={"stats": {"raw_count": 0}})
+    _activity_execution(handlers._store._paths.WORKFLOW_DB, "unknown", inputs={"source_log_type": "ndr"})
+    _activity_execution(handlers._store._paths.WORKFLOW_DB, "nonempty", inputs={"_soc_alert_count": 5})
+    _activity_execution(handlers._store._paths.WORKFLOW_DB, "queued", status="queued", inputs={"_soc_alert_count": 2})
+    events = {e["eventId"]: e for e in handlers._store.workflow_recent_events("stream_alert_denoise")}
     assert "workflow-execution:empty" not in events
     assert events["workflow-execution:unknown"]["result"]["rawCount"] is None
     assert events["workflow-execution:unknown"]["alert"]["threatName"] == "降噪批次 · 数量未提供"
     assert events["workflow-execution:nonempty"]["result"]["rawCount"] == 5
     assert events["workflow-execution:queued"]["status"] == "queued"
-    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+    with sqlite3.connect(handlers._store._paths.WORKFLOW_DB) as conn:
         assert conn.execute("SELECT count(*) FROM workflow_executions").fetchone()[0] == 4
 
 
 def test_activity_keeps_long_running_execution_and_bounds_history(tmp_path):
     handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
-    _activity_execution(handlers.WORKFLOW_DB, "long-running", started=1000)
+    handlers._store._paths.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers._store._paths.WORKFLOW_DB, "long-running", started=1000)
     for index in range(30):
-        _activity_execution(handlers.WORKFLOW_DB, f"done-{index}", status="success", started=2000 + index)
+        _activity_execution(handlers._store._paths.WORKFLOW_DB, f"done-{index}", status="success", started=2000 + index)
     snapshot = {"complete": True}
-    events = handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot)
+    events = handlers._store.workflow_recent_events("stream_alert_denoise", snapshot=snapshot)
     assert len(events) == 11
     assert events[0]["eventId"] == "workflow-execution:long-running"
     assert events[0]["updatedAt"] != events[0]["occurredAt"]
     assert snapshot["complete"] is True
     assert all(e["eventId"] != "workflow-execution:long-running" for e in
-               handlers._get_workflow_recent_events("stream_alert_denoise", 2, 3))
+               handlers._store.workflow_recent_events("stream_alert_denoise", 2, 3))
 
 
 def test_activity_large_payload_and_database_lock_degrade_without_writes(tmp_path):
     handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
-    _activity_execution(handlers.WORKFLOW_DB, "large", payload={"large": "x" * 1_000_000},
+    handlers._store._paths.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers._store._paths.WORKFLOW_DB, "large", payload={"large": "x" * 1_000_000},
                         inputs={"large": "x" * 1_000_000})
-    events = handlers._get_workflow_recent_events("stream_alert_denoise")
+    events = handlers._store.workflow_recent_events("stream_alert_denoise")
     assert len(json.dumps(events)) < 4096
-    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+    with sqlite3.connect(handlers._store._paths.WORKFLOW_DB) as conn:
         conn.execute("BEGIN EXCLUSIVE")
         snapshot = {"complete": True}
         started = time.monotonic()
-        assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+        assert handlers._store.workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
         assert time.monotonic() - started < 1.0
         assert snapshot["complete"] is False
 
 
 def test_activity_truncated_active_snapshot_is_not_authoritative(tmp_path):
     handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    handlers._store._paths.WORKFLOW_DB = _activity_workflow_db(tmp_path)
     for index in range(12):
-        _activity_execution(handlers.WORKFLOW_DB, str(index))
+        _activity_execution(handlers._store._paths.WORKFLOW_DB, str(index))
     snapshot = {"complete": True}
-    assert len(handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot)) <= 20
+    assert len(handlers._store.workflow_recent_events("stream_alert_denoise", snapshot=snapshot)) <= 20
     assert snapshot["complete"] is False
 
 
 def test_activity_does_not_substitute_execution_id_for_missing_alert_id(tmp_path):
     handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
-    _activity_execution(handlers.WORKFLOW_DB, "batch", inputs={
+    handlers._store._paths.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers._store._paths.WORKFLOW_DB, "batch", inputs={
         "alerts": [{"threat_name": "scan", "sip": "192.0.2.1"}],
     })
-    event = handlers._get_workflow_recent_events("stream_alert_denoise")[0]
+    event = handlers._store.workflow_recent_events("stream_alert_denoise")[0]
     assert event["eventId"] == "workflow-execution:batch"
     assert event["alert"]["id"] == ""
 
 
 def test_activity_old_sqlite_omits_payloads_instead_of_using_unsafe_length(tmp_path, monkeypatch):
     handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
-    _activity_execution(handlers.WORKFLOW_DB, "old-sqlite", inputs={
+    handlers._store._paths.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers._store._paths.WORKFLOW_DB, "old-sqlite", inputs={
         "alerts": [{"threat_name": "must not read this"}],
     })
     original_connect = sqlite3.connect
@@ -152,8 +153,8 @@ def test_activity_old_sqlite_omits_payloads_instead_of_using_unsafe_length(tmp_p
                 raise sqlite3.OperationalError("no such function: octet_length")
             return super().execute(sql, *args)
 
-    monkeypatch.setattr(handlers.sqlite3, "connect", lambda *a, **kw: original_connect(*a, **kw, factory=OldSQLiteConnection))
-    events = handlers._get_workflow_recent_events("stream_alert_denoise")
+    monkeypatch.setattr(handlers._store.sqlite3, "connect", lambda *a, **kw: original_connect(*a, **kw, factory=OldSQLiteConnection))
+    events = handlers._store.workflow_recent_events("stream_alert_denoise")
     assert events[0]["status"] == "running"
     assert "must not read this" not in json.dumps(events)
     assert not any("CASE WHEN" in query or "length(payload)" in query for query in queries)
@@ -161,17 +162,17 @@ def test_activity_old_sqlite_omits_payloads_instead_of_using_unsafe_length(tmp_p
 
 def test_activity_reader_does_not_wait_or_open_another_db_when_busy(tmp_path, monkeypatch):
     handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
-    _activity_execution(handlers.WORKFLOW_DB, "active")
-    with handlers._workflow_activity_read_lock:
+    handlers._store._paths.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers._store._paths.WORKFLOW_DB, "active")
+    with handlers._store._workflow_activity_read_lock:
         with monkeypatch.context() as patch:
             def unexpected_connect(*args, **kwargs):
                 raise AssertionError("contending reader must not open SQLite")
-            patch.setattr(handlers.sqlite3, "connect", unexpected_connect)
+            patch.setattr(handlers._store.sqlite3, "connect", unexpected_connect)
             snapshot = {"complete": True, "available": True}
-            assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+            assert handlers._store.workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
             assert snapshot == {"complete": False, "available": False}
-    assert handlers._get_workflow_recent_events("stream_alert_denoise")
+    assert handlers._store.workflow_recent_events("stream_alert_denoise")
 
 
 @pytest.mark.asyncio
@@ -184,48 +185,48 @@ async def test_cancelled_request_keeps_activity_read_slot_until_worker_exits(mon
         assert release.wait(3), "test must release its worker"
         return []
 
-    monkeypatch.setattr(handlers, "_read_workflow_recent_events", blocked_read)
-    request = asyncio.create_task(asyncio.to_thread(handlers._get_workflow_recent_events, "stream_alert_denoise"))
+    monkeypatch.setattr(handlers._store, "_read_workflow_recent_events", blocked_read)
+    request = asyncio.create_task(asyncio.to_thread(handlers._store.workflow_recent_events, "stream_alert_denoise"))
     try:
         assert await asyncio.to_thread(entered.wait, 3)
         request.cancel()
         with pytest.raises(asyncio.CancelledError):
             await request
-        assert handlers._workflow_activity_read_lock.locked()
+        assert handlers._store._workflow_activity_read_lock.locked()
         snapshot = {"complete": True, "available": True}
-        assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+        assert handlers._store.workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
         assert snapshot == {"complete": False, "available": False}
     finally:
         release.set()
-        assert await asyncio.to_thread(handlers._workflow_activity_read_lock.acquire, True, 3)
-        handlers._workflow_activity_read_lock.release()
+        assert await asyncio.to_thread(handlers._store._workflow_activity_read_lock.acquire, True, 3)
+        handlers._store._workflow_activity_read_lock.release()
 
 
 def test_activity_preview_limit_counts_utf8_bytes_not_characters(tmp_path):
     handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
-    _activity_execution(handlers.WORKFLOW_DB, "unicode")
+    handlers._store._paths.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers._store._paths.WORKFLOW_DB, "unicode")
     inputs = json.dumps({"padding": "中" * 100_000, "alerts": [{"threat_name": "oversized-preview"}]}, ensure_ascii=False)
     assert len(inputs) < 262144 < len(inputs.encode("utf-8"))
-    with sqlite3.connect(handlers.WORKFLOW_DB) as conn:
+    with sqlite3.connect(handlers._store._paths.WORKFLOW_DB) as conn:
         conn.execute("UPDATE workflow_executions SET input_params = ?", (inputs,))
-    events = handlers._get_workflow_recent_events("stream_alert_denoise")
+    events = handlers._store.workflow_recent_events("stream_alert_denoise")
     assert events[0]["status"] == "running"
     assert "oversized-preview" not in json.dumps(events)
 
 
 def test_activity_deadline_is_checked_even_without_sqlite_progress_callback(tmp_path, monkeypatch):
     handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
-    _activity_execution(handlers.WORKFLOW_DB, "active")
+    handlers._store._paths.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    _activity_execution(handlers._store._paths.WORKFLOW_DB, "active")
     ticks = iter([100.0, 101.0])
-    monkeypatch.setattr(handlers, "time", SimpleNamespace(monotonic=lambda: next(ticks, 101.0)))
+    monkeypatch.setattr(handlers._store, "time", SimpleNamespace(monotonic=lambda: next(ticks, 101.0)))
     snapshot = {"complete": True, "available": True}
-    assert handlers._get_workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
+    assert handlers._store.workflow_recent_events("stream_alert_denoise", snapshot=snapshot) == []
     assert snapshot == {"complete": False, "available": False}
     # Errors must release the worker-owned lock as well.
-    assert handlers._workflow_activity_read_lock.acquire(blocking=False)
-    handlers._workflow_activity_read_lock.release()
+    assert handlers._store._workflow_activity_read_lock.acquire(blocking=False)
+    handlers._store._workflow_activity_read_lock.release()
 
 
 @pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="native RSS via resource is Unix-only")
@@ -238,21 +239,19 @@ def test_activity_large_text_is_not_materialized_in_native_sqlite_memory(tmp_pat
     # A fresh process excludes fixture allocations; tracemalloc alone cannot
     # see SQLite's native buffers. Do not start the application or touch user DBs.
     script = '''
-import importlib.util, json, resource, sys
+import json, resource, sys
 from pathlib import Path
-spec = importlib.util.spec_from_file_location("soc_native_rss_test", sys.argv[1])
-module = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = module
-spec.loader.exec_module(module)
-module.WORKFLOW_DB = Path(sys.argv[2])
+from flocks.workflow.soc_store import _paths, dashboard
+_paths.WORKFLOW_DB = Path(sys.argv[1])
 before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-events = module._get_workflow_recent_events("stream_alert_denoise")
+events = dashboard.workflow_recent_events("stream_alert_denoise")
 after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 scale = 1024**2 if sys.platform == "darwin" else 1024
 print(json.dumps({"growth_mib": (after - before) / scale, "events": len(events)}))
 '''
-    result = subprocess.run([sys.executable, "-B", "-c", script, handlers.__file__, str(db)],
-                            check=True, text=True, capture_output=True, timeout=20)
+    result = subprocess.run([sys.executable, "-B", "-c", script, str(db)],
+                            check=True, text=True, capture_output=True, timeout=60,
+                            cwd=Path(__file__).resolve().parents[2])
     measurement = json.loads(result.stdout)
     assert measurement["events"] == 11
     assert measurement["growth_mib"] < 16, measurement
@@ -260,20 +259,20 @@ print(json.dumps({"growth_mib": (after - before) / scale, "events": len(events)}
 
 def test_activity_repeated_projection_does_not_retain_payloads(tmp_path):
     handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = _activity_workflow_db(tmp_path)
+    handlers._store._paths.WORKFLOW_DB = _activity_workflow_db(tmp_path)
     for index in range(12):
-        _activity_execution(handlers.WORKFLOW_DB, str(index), inputs={
+        _activity_execution(handlers._store._paths.WORKFLOW_DB, str(index), inputs={
             "_soc_alert_preview": {"threat_name": "scan", "sip": "192.0.2.1"},
             "padding": "x" * 20000,
         })
     tracemalloc.start(1)
     try:
         for _ in range(10):
-            handlers._get_workflow_recent_events("stream_alert_denoise")
+            handlers._store.workflow_recent_events("stream_alert_denoise")
         gc.collect()
         before, _ = tracemalloc.get_traced_memory()
         for _ in range(200):
-            events = handlers._get_workflow_recent_events("stream_alert_denoise")
+            events = handlers._store.workflow_recent_events("stream_alert_denoise")
             assert len(events) <= 20
             assert len(json.dumps(events)) < 20000
         gc.collect()
@@ -282,6 +281,31 @@ def test_activity_repeated_projection_does_not_retain_payloads(tmp_path):
         assert peak < 8_000_000
     finally:
         tracemalloc.stop()
+
+
+def _fresh_soc_store():
+    """The platform's SOC data service (flocks.workflow.soc_store), as a copy of its own.
+
+    The pages' handlers hold no database code; they read through this package.
+    Each test gets a fresh copy so that its caches, locks and file locations
+    start clean, as a newly loaded handlers module's did.
+    """
+    package_dir = Path(__file__).resolve().parents[2] / "flocks" / "workflow" / "soc_store"
+    name = f"_soc_store_test_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(
+        name, package_dir / "__init__.py", submodule_search_locations=[str(package_dir)],
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _soc_context(store=None):
+    """What the page runtime hands a SOC page's handlers: the data service as ``ctx.services.soc``."""
+    store = store or _fresh_soc_store()
+    return SimpleNamespace(services=SimpleNamespace(soc=store.page_service()))
 
 
 def _load_dashboard_handlers():
@@ -305,6 +329,8 @@ def _load_dashboard_handlers():
         spec.loader.exec_module(module)
     finally:
         sys.dont_write_bytecode = previous
+    module._soc_context = _soc_context()
+    module._bind(module._soc_context)
     return module
 
 
@@ -329,6 +355,8 @@ def _load_overview_handlers():
         spec.loader.exec_module(module)
     finally:
         sys.dont_write_bytecode = previous
+    module._soc_context = _soc_context()
+    module._bind(module._soc_context)
     return module
 
 
@@ -395,10 +423,10 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
         conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.DEFAULT_SQLITE_DB = db_path
-    handlers._schema_ready.clear()
+    handlers._store._paths.SOC_DB = db_path
+    handlers._store._schema_ready.clear()
 
-    assert handlers._ensure_sqlite_schema() is True
+    assert handlers._store.ensure_schema() is True
 
     second_record = {
         "_source_type": "hids",
@@ -414,8 +442,8 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
         )
         conn.commit()
 
-    handlers._schema_ready.clear()
-    assert handlers._ensure_sqlite_schema() is True
+    handlers._store._schema_ready.clear()
+    assert handlers._store.ensure_schema() is True
 
     updated_first_record = {
         **first_record,
@@ -582,11 +610,11 @@ def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
         conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.DEFAULT_SQLITE_DB = db_path
-    handlers._schema_ready.clear()
+    handlers._store._paths.SOC_DB = db_path
+    handlers._store._schema_ready.clear()
 
-    assert handlers._ensure_sqlite_schema() is True
-    sources = handlers._find_sqlite_sources(
+    assert handlers._store.ensure_schema() is True
+    sources = handlers._store.find_sources(
         asset_date,
         asset_date,
         1784014800,
@@ -595,9 +623,9 @@ def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
     triage = handlers._read_triage(sources)
     closed_loop = handlers._build_closed_loop(triage)
     with sqlite3.connect(db_path) as conn:
-        timeline = handlers._sqlite_timeline(
+        timeline = handlers._store._sqlite_timeline(
             conn,
-            handlers._sqlite_settings(),
+            handlers._store._settings(),
             "asset_date = ? AND event_time BETWEEN ? AND ?",
             [asset_date, 1784014800, 1784014800 + len(records)],
             [asset_date],
@@ -640,10 +668,10 @@ def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
     assert sum(timeline["attack"]) == triage["attackTotal"]
 
     overview_handlers = _load_overview_handlers()
-    overview_handlers.DEFAULT_SQLITE_DB = db_path
+    overview_handlers._store._paths.SOC_DB = db_path
     overview_triage = overview_handlers._read_triage(
         [
-            overview_handlers._RecordSource(
+            overview_handlers._store.RecordSource(
                 path=db_path,
                 role="triage",
                 date=asset_date,
@@ -735,8 +763,8 @@ def test_soc_overview_keeps_threat_names_and_types_separate(tmp_path: Path):
         conn.commit()
 
     handlers = _load_overview_handlers()
-    handlers.DEFAULT_SQLITE_DB = db_path
-    source = handlers._RecordSource(
+    handlers._store._paths.SOC_DB = db_path
+    source = handlers._store.RecordSource(
         path=db_path,
         role="denoise",
         date=asset_date,
@@ -770,8 +798,8 @@ def _overview_alert_store(db_path: Path, asset_date: str, records: list[dict], s
 def _overview_stats(db_path: Path, monkeypatch: pytest.MonkeyPatch, date: str) -> dict:
     handlers = _load_overview_handlers()
     monkeypatch.setenv("FLOCKS_SOC_ALERTS_SQLITE_DB", str(db_path))
-    monkeypatch.setattr(handlers, "WORKFLOW_DB", db_path.parent / "no-workflow.db")
-    return handlers.get_stats(SimpleNamespace(), SimpleNamespace(query_params={"date": date}))
+    monkeypatch.setattr(handlers._store._paths, "WORKFLOW_DB", db_path.parent / "no-workflow.db")
+    return handlers.get_stats(handlers._soc_context, SimpleNamespace(query_params={"date": date}))
 
 
 def test_soc_overview_reports_the_model_verdicts_instead_of_estimating_them(
@@ -855,13 +883,13 @@ def test_soc_dashboard_holds_the_write_lock_while_its_triggers_are_down(tmp_path
         )
         conn.commit()
     handlers = _load_dashboard_handlers()
-    handlers.DEFAULT_SQLITE_DB = db_path
-    handlers._schema_ready.clear()
-    assert handlers._ensure_sqlite_schema() is True
-    handlers._schema_ready.clear()  # a restart: same schema version, the triggers are replaced again
+    handlers._store._paths.SOC_DB = db_path
+    handlers._store._schema_ready.clear()
+    assert handlers._store.ensure_schema() is True
+    handlers._store._schema_ready.clear()  # a restart: same schema version, the triggers are replaced again
 
     seen = {}
-    real_drop = handlers._drop_dashboard_triggers
+    real_drop = handlers._store._drop_dashboard_triggers
 
     def drop_then_another_writer(conn):
         real_drop(conn)
@@ -878,8 +906,8 @@ def test_soc_dashboard_holds_the_write_lock_while_its_triggers_are_down(tmp_path
         finally:
             other.close()
 
-    monkeypatch.setattr(handlers, "_drop_dashboard_triggers", drop_then_another_writer)
-    assert handlers._ensure_sqlite_schema() is True
+    monkeypatch.setattr(handlers._store, "_drop_dashboard_triggers", drop_then_another_writer)
+    assert handlers._store.ensure_schema() is True
 
     with sqlite3.connect(db_path) as conn:
         alerts = conn.execute("SELECT COUNT(*) FROM alert_records").fetchone()[0]
@@ -938,11 +966,11 @@ def test_soc_dashboard_upgrades_an_older_facts_table_in_place(tmp_path: Path, mo
         return connection
 
     handlers = _load_dashboard_handlers()
-    handlers.DEFAULT_SQLITE_DB = db_path
-    handlers._schema_ready.clear()
+    handlers._store._paths.SOC_DB = db_path
+    handlers._store._schema_ready.clear()
     with monkeypatch.context() as patch:
         patch.setattr(sqlite3, "connect", connect)
-        assert handlers._ensure_sqlite_schema() is True
+        assert handlers._store.ensure_schema() is True
 
     with sqlite3.connect(db_path) as conn:
         facts = conn.execute(
@@ -975,7 +1003,7 @@ def test_soc_dashboard_activity_does_not_mix_name_type_or_risk_fields():
         ),
     }
 
-    event = handlers._activity_event(row)
+    event = handlers._store._activity_event(row)
 
     assert event["alert"]["threatName"] == "未知告警"
     assert event["alert"]["threatType"] == "web_attack"
@@ -1077,13 +1105,16 @@ def test_every_soc_entry_reads_an_attack_outcome_the_same_way(record, expected):
     """Alerts page, posture dashboard (Python and SQL), overview and the query tool (Python and SQL)."""
     dashboard = _load_dashboard_handlers()
     query_tool = _load_workspace_query_tool()
+    # The SQL readings are the platform's now: the dashboard's facts and the query tool's search.
+    from flocks.workflow.soc_store import alerts as alert_store
+
     with sqlite3.connect(":memory:") as conn:
         conn.execute("CREATE TABLE alert_records (record_json TEXT NOT NULL)")
         conn.execute("INSERT INTO alert_records VALUES (?)", (json.dumps(record),))
         dashboard_sql = conn.execute(
-            f"SELECT {dashboard._fact_expressions('source')[-1]} FROM alert_records AS source"
+            f"SELECT {dashboard._store._fact_expressions('source')[-1]} FROM alert_records AS source"
         ).fetchone()[0]
-        query_sql = conn.execute(f"SELECT {query_tool.ATTACK_RESULT_SQL} FROM alert_records").fetchone()[0]
+        query_sql = conn.execute(f"SELECT {alert_store.ATTACK_RESULT_SQL} FROM alert_records").fetchone()[0]
 
     readings = {
         "alerts": _load_alert_operations()._triage_attack_success(record),
@@ -1114,11 +1145,11 @@ def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path:
         conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = workflow_db
-    handlers.DEFAULT_SQLITE_DB = tmp_path / "missing-soc.db"
-    handlers._activity_pruned_at = float("inf")
+    handlers._store._paths.WORKFLOW_DB = workflow_db
+    handlers._store._paths.SOC_DB = tmp_path / "missing-soc.db"
+    handlers._store._activity_pruned_at = float("inf")
 
-    payload = handlers._get_activity({"bootstrap": "latest"})
+    payload = handlers._store.activity({"bootstrap": "latest"})
 
     assert payload["workflowStats"] == {"callCount": 42, "latestStartedAt": 0}
     assert payload["workflowEvents"] == []
@@ -1131,7 +1162,7 @@ def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path:
         )
         conn.commit()
 
-    assert handlers._get_activity({"bootstrap": "latest"})["workflowStats"] == {
+    assert handlers._store.activity({"bootstrap": "latest"})["workflowStats"] == {
         "callCount": 43,
         "latestStartedAt": 0,
     }
@@ -1180,11 +1211,11 @@ def test_soc_dashboard_activity_exposes_triage_workflow_link_context(tmp_path: P
         conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = workflow_db
-    handlers.DEFAULT_SQLITE_DB = tmp_path / "missing-soc.db"
-    handlers._activity_pruned_at = float("inf")
+    handlers._store._paths.WORKFLOW_DB = workflow_db
+    handlers._store._paths.SOC_DB = tmp_path / "missing-soc.db"
+    handlers._store._activity_pruned_at = float("inf")
 
-    payload = handlers._get_activity({"bootstrap": "latest"})
+    payload = handlers._store.activity({"bootstrap": "latest"})
     triage_events = [
         event for event in payload["workflowEvents"]
         if event["workflowId"] == "stream_alert_triage"
@@ -1233,11 +1264,11 @@ def test_soc_dashboard_activity_tolerates_empty_soc_db_with_workflow_events(tmp_
         conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.DEFAULT_SQLITE_DB = soc_db
-    handlers.WORKFLOW_DB = workflow_db
-    handlers._activity_pruned_at = float("inf")
+    handlers._store._paths.SOC_DB = soc_db
+    handlers._store._paths.WORKFLOW_DB = workflow_db
+    handlers._store._activity_pruned_at = float("inf")
 
-    payload = handlers._get_activity({"bootstrap": "latest"})
+    payload = handlers._store.activity({"bootstrap": "latest"})
 
     assert "error" not in payload
     assert payload["workflowEvents"][0]["alert"]["threatName"] == "Mock 研判"
@@ -1515,10 +1546,10 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
         conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.TASK_DB = tasks_db
-    handlers.WORKFLOW_DB = workflow_db
+    handlers._store._paths.TASK_DB = tasks_db
+    handlers._store._paths.WORKFLOW_DB = workflow_db
     monkeypatch.setattr(
-        handlers,
+        handlers._store,
         "_workflow_node_count",
         lambda workflow_id: 4 if workflow_id == "stream_alert_triage" else 1,
     )
@@ -1607,8 +1638,8 @@ def test_soc_dashboard_task_center_hides_mock_pinned_workflows_by_default(tmp_pa
         conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.TASK_DB = tmp_path / "missing-tasks.db"
-    handlers.WORKFLOW_DB = workflow_db
+    handlers._store._paths.TASK_DB = tmp_path / "missing-tasks.db"
+    handlers._store._paths.WORKFLOW_DB = workflow_db
 
     payload = handlers._get_task_center()
     assert payload["workflows"] == []
@@ -1623,8 +1654,8 @@ def test_soc_dashboard_task_center_hides_mock_pinned_workflows_by_default(tmp_pa
 def test_soc_dashboard_token_usage_uses_grouped_cached_reads(tmp_path: Path, monkeypatch):
     handlers = _load_dashboard_handlers()
     usage_db = tmp_path / "flocks.db"
-    handlers.USAGE_DB = usage_db
-    handlers._token_usage_cache.update({"updatedAt": 0.0, "mtimeNs": 0, "value": None})
+    handlers._store._paths.USAGE_DB = usage_db
+    handlers._store._token_usage_cache.update({"updatedAt": 0.0, "mtimeNs": 0, "value": None})
 
     now = datetime.now().astimezone().replace(hour=10, minute=0, second=0, microsecond=0)
     yesterday = now - timedelta(days=1)
@@ -1633,14 +1664,14 @@ def test_soc_dashboard_token_usage_uses_grouped_cached_reads(tmp_path: Path, mon
         conn.executemany(
             "INSERT INTO usage_records VALUES (?, ?)",
             [
-                (handlers._usage_iso(now), 10),
-                (handlers._usage_iso(now + timedelta(minutes=5)), 15),
-                (handlers._usage_iso(yesterday), 7),
+                (handlers._store._usage_iso(now), 10),
+                (handlers._store._usage_iso(now + timedelta(minutes=5)), 15),
+                (handlers._store._usage_iso(yesterday), 7),
             ],
         )
         conn.commit()
 
-    first = handlers._read_token_usage()
+    first = handlers._store.token_usage()
 
     assert first["totalTokens"] == 32
     assert first["todayTokens"] == 25
@@ -1651,8 +1682,8 @@ def test_soc_dashboard_token_usage_uses_grouped_cached_reads(tmp_path: Path, mon
     def fail_connect(*args, **kwargs):
         raise AssertionError("token usage should be served from cache")
 
-    monkeypatch.setattr(handlers.sqlite3, "connect", fail_connect)
-    assert handlers._read_token_usage() == first
+    monkeypatch.setattr(handlers._store.sqlite3, "connect", fail_connect)
+    assert handlers._store.token_usage() == first
 
 
 def test_soc_dashboard_task_center_supports_legacy_workflow_execution_schema(tmp_path: Path):
@@ -1696,8 +1727,8 @@ def test_soc_dashboard_task_center_supports_legacy_workflow_execution_schema(tmp
         conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.TASK_DB = tmp_path / "missing-tasks.db"
-    handlers.WORKFLOW_DB = workflow_db
+    handlers._store._paths.TASK_DB = tmp_path / "missing-tasks.db"
+    handlers._store._paths.WORKFLOW_DB = workflow_db
 
     payload = handlers._get_task_center()
 
@@ -1782,8 +1813,8 @@ def test_soc_dashboard_task_center_ignores_disabled_trigger_workflow_runs(tmp_pa
         conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.TASK_DB = tmp_path / "missing-tasks.db"
-    handlers.WORKFLOW_DB = workflow_db
+    handlers._store._paths.TASK_DB = tmp_path / "missing-tasks.db"
+    handlers._store._paths.WORKFLOW_DB = workflow_db
 
     payload = handlers._get_task_center()
 
@@ -1890,8 +1921,8 @@ def test_soc_dashboard_task_center_uses_trigger_runtime_window_for_active_workfl
         conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.TASK_DB = tmp_path / "missing-tasks.db"
-    handlers.WORKFLOW_DB = workflow_db
+    handlers._store._paths.TASK_DB = tmp_path / "missing-tasks.db"
+    handlers._store._paths.WORKFLOW_DB = workflow_db
 
     payload = handlers._get_task_center()
 
@@ -1949,8 +1980,8 @@ def test_soc_dashboard_task_center_marks_stale_running_without_trigger_config(tm
         conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.TASK_DB = tmp_path / "missing-tasks.db"
-    handlers.WORKFLOW_DB = workflow_db
+    handlers._store._paths.TASK_DB = tmp_path / "missing-tasks.db"
+    handlers._store._paths.WORKFLOW_DB = workflow_db
 
     payload = handlers._get_task_center()
 
@@ -2124,8 +2155,8 @@ def test_soc_dashboard_task_center_orders_dynamic_rows(tmp_path: Path):
         conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.TASK_DB = tasks_db
-    handlers.WORKFLOW_DB = workflow_db
+    handlers._store._paths.TASK_DB = tasks_db
+    handlers._store._paths.WORKFLOW_DB = workflow_db
 
     payload = handlers._get_task_center()
 
@@ -2144,9 +2175,9 @@ def test_soc_dashboard_task_center_orders_dynamic_rows(tmp_path: Path):
 
 def test_soc_dashboard_workflow_progress_marks_unavailable_database(tmp_path: Path):
     handlers = _load_dashboard_handlers()
-    handlers.WORKFLOW_DB = tmp_path / "missing-workflow.db"
+    handlers._store._paths.WORKFLOW_DB = tmp_path / "missing-workflow.db"
 
-    assert handlers._get_workflow_progress("stream_alert_denoise") == {
+    assert handlers._store.workflow_progress("stream_alert_denoise") == {
         "callCount": None,
         "latestStartedAt": None,
     }
@@ -2165,7 +2196,7 @@ def test_soc_dashboard_corrects_legacy_single_alert_duplicate_metrics():
         "is_duplicate": True,
     }
 
-    metrics = handlers._workflow_execution_metrics(json.dumps(output))
+    metrics = handlers._store._workflow_execution_metrics(json.dumps(output))
 
     assert metrics["uniqueCount"] == 0
     assert metrics["duplicateCount"] == 1
@@ -2173,7 +2204,7 @@ def test_soc_dashboard_corrects_legacy_single_alert_duplicate_metrics():
     assert metrics["reductionRate"] == 1
     assert metrics["dedupRate"] == 1
 
-    flag_only_metrics = handlers._workflow_execution_metrics(
+    flag_only_metrics = handlers._store._workflow_execution_metrics(
         json.dumps({"is_duplicate": True})
     )
 
@@ -2184,7 +2215,7 @@ def test_soc_dashboard_corrects_legacy_single_alert_duplicate_metrics():
     assert flag_only_metrics["reductionRate"] == 1
 
     output["is_duplicate"] = False
-    first_seen_metrics = handlers._workflow_execution_metrics(json.dumps(output))
+    first_seen_metrics = handlers._store._workflow_execution_metrics(json.dumps(output))
 
     assert first_seen_metrics["uniqueCount"] == 1
     assert first_seen_metrics["duplicateCount"] == 0
@@ -2197,7 +2228,7 @@ def test_soc_dashboard_corrects_legacy_single_alert_duplicate_metrics():
         after_filter_count=2,
         after_dedup_count=2,
     )
-    batch_metrics = handlers._workflow_execution_metrics(json.dumps(output))
+    batch_metrics = handlers._store._workflow_execution_metrics(json.dumps(output))
 
     assert batch_metrics["uniqueCount"] == 2
     assert batch_metrics["duplicateCount"] == 0
@@ -2373,9 +2404,9 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
         conn.commit()
 
     handlers = _load_dashboard_handlers()
-    handlers.DEFAULT_SQLITE_DB = soc_db
-    handlers.WORKFLOW_DB = workflow_db
-    handlers._schema_ready.clear()
+    handlers._store._paths.SOC_DB = soc_db
+    handlers._store._paths.WORKFLOW_DB = workflow_db
+    handlers._store._schema_ready.clear()
 
     stats = handlers._get_stats(
         {"startTime": str(start_time), "endTime": str(end_time), "force": "1"}
@@ -2411,7 +2442,7 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
         "other": 0,
     }
 
-    activity = handlers._get_activity(
+    activity = handlers._store.activity(
         {
             "bootstrap": "latest",
             "startTime": str(start_time),
@@ -2427,7 +2458,7 @@ def test_soc_dashboard_uses_workflow_stats_and_soc_unique_for_reduction(tmp_path
         "降噪批次 · 数量未提供",
     ]
 
-    events = handlers._get_workflow_recent_events(
+    events = handlers._store.workflow_recent_events(
         "stream_alert_denoise",
         start_time,
         end_time,
