@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, type Dispatch, type SetStateAction } from 'react';
 import {
   Loader2, ChevronDown, ChevronRight, StopCircle,
   Clock, CheckCircle, XCircle, AlertCircle, FlaskConical,
@@ -14,10 +14,16 @@ import CopyButton from '@/components/common/CopyButton';
 import WorkflowStatusBadge from '@/components/common/WorkflowStatusBadge';
 import { extractErrorMessage } from '@/utils/error';
 
+/**
+ * How the tab hands the latest execution to whoever holds it. Like a state setter it also takes
+ * an updater, which is given the execution held at the moment the update is applied.
+ */
+export type LatestExecutionChange = Dispatch<SetStateAction<WorkflowExecution | null>>;
+
 interface RunTabProps {
   workflow: Workflow;
   latestExecution: WorkflowExecution | null;
-  onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
+  onLatestExecutionChange?: LatestExecutionChange;
   onExecutionSettled?: () => void;
   sections?: RunTabSection[];
   embedded?: boolean;
@@ -34,6 +40,11 @@ function getExecutionDisplayStatus(execution?: WorkflowExecution | null): string
     return execution.currentPhase;
   }
   return execution.status;
+}
+
+/** An execution the test section made up to say why a run never started: it has no id. */
+function isLocalRunFailure(execution: WorkflowExecution | null): boolean {
+  return !!execution && !execution.id;
 }
 
 function getExecutionDisplayMessage(
@@ -951,7 +962,7 @@ function HistorySection({
   workflowId: string;
   latestExecutionId?: string;
   focusExecutionId?: string;
-  onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
+  onLatestExecutionChange?: LatestExecutionChange;
   embedded?: boolean;
   hideSectionHeader?: boolean;
 }) {
@@ -962,6 +973,15 @@ function HistorySection({
   const [selectedExec, setSelectedExec] = useState<WorkflowExecution | null>(null);
   const [focusedExecutionError, setFocusedExecutionError] = useState('');
   const executionNotFoundText = t('detail.run.executionNotFound');
+
+  // A test run that could not be started leaves an execution with no id in the test section, to
+  // say why (TestSection.handleRun). It is not in the history, so a history refresh must not swap
+  // it for an older run or clear it; the next run replaces it. Whether to keep it is decided
+  // against the execution held when the update is applied: the history answers later, and what
+  // this section last rendered with may be out of date by then.
+  const syncLatestExecution = useCallback((execution: WorkflowExecution | null) => {
+    onLatestExecutionChange?.((current) => (isLocalRunFailure(current) ? current : execution));
+  }, [onLatestExecutionChange]);
 
   const loadFocusedExecution = useCallback(async (executionId: string): Promise<WorkflowExecution | null> => {
     try {
@@ -993,7 +1013,7 @@ function HistorySection({
       if (focusExecutionId) {
         const focusedExecution = nextHistory.find((item: WorkflowExecution) => item.id === focusExecutionId) ?? null;
         if (focusedExecution) {
-          onLatestExecutionChange?.(focusedExecution);
+          syncLatestExecution(focusedExecution);
           setSelectedExec(focusedExecution);
           setExpanded(true);
         }
@@ -1002,12 +1022,12 @@ function HistorySection({
           ? nextHistory.find((item: WorkflowExecution) => item.id === latestExecutionId)
           : nextHistory[0];
         if (matchingExecution) {
-          onLatestExecutionChange?.(matchingExecution);
+          syncLatestExecution(matchingExecution);
         } else if (!latestExecutionId) {
-          onLatestExecutionChange?.(nextHistory[0]);
+          syncLatestExecution(nextHistory[0]);
         }
       } else if (!latestExecutionId) {
-        onLatestExecutionChange?.(null);
+        syncLatestExecution(null);
       }
       setSelectedExec(prev => {
         if (!prev) return null;
@@ -1038,16 +1058,16 @@ function HistorySection({
       if (focusExecutionId) {
         const focusedExecution = nextHistory.find((item) => item.id === focusExecutionId) ?? null;
         setSelectedExec(focusedExecution);
-        if (focusedExecution) onLatestExecutionChange?.(focusedExecution);
+        if (focusedExecution) syncLatestExecution(focusedExecution);
       } else if (nextHistory.length > 0) {
-        onLatestExecutionChange?.(nextHistory[0]);
+        syncLatestExecution(nextHistory[0]);
       } else {
-        onLatestExecutionChange?.(null);
+        syncLatestExecution(null);
       }
     } finally {
       setLoading(false);
     }
-  }, [executionNotFoundText, focusExecutionId, latestExecutionId, loadFocusedExecution, onLatestExecutionChange, workflowId]);
+  }, [executionNotFoundText, focusExecutionId, latestExecutionId, loadFocusedExecution, syncLatestExecution, workflowId]);
 
   const hasRunning = history.some(e => e.status === 'running');
 
