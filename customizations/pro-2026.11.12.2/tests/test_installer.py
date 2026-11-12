@@ -34,6 +34,8 @@ def installation(tmp_path, monkeypatch):
         'runtime_root':'runtime','runtime_manifest':'runtime-manifest.json','python':'runtime/python/bin/python3','webui_dist':'runtime/webui-dist'})
     original = {'flocks/flocks/demo.py':b'original\n','webui-dist/index.html':b'old-ui',
                 'webui-dist/assets/old.js':b'old-js','flocks/native.so':b'\x7fELFfixture'}
+    original['python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/workspace.json'] = b'original-pro-soc'
+    original['python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/soc_cases/src/index.tsx'] = b'preserved-pro-cases'
     original['webui-dist/flocks-webui-manifest.json'] = json.dumps({'repositories':{
         repo:{'sha':profile['coreCommit'] if repo=='flocks' else profile['proCommit'], 'dirty':False,'webui_source_sha256':sha}
         for repo,sha in profile['frontendSources'].items()}}).encode()
@@ -48,6 +50,8 @@ def installation(tmp_path, monkeypatch):
     desired = {'flocks/flocks/demo.py':b'enhanced\n','flocks/flocks/enhancements/new.py':b'feature',
                'webui-dist/index.html':b'new-ui','webui-dist/assets/new.js':b'new-js',
                'webui-dist/flocks-webui-manifest.json':b'{"enhanced":true}'}
+    desired['python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/workspace.json'] = b'enhanced-pro-soc'
+    desired['python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/soc_dashboard/src/dashboardCache.ts'] = b'cache-source'
     payload=[]
     for name,data in desired.items():
         path=package/'payload'/name
@@ -406,8 +410,20 @@ def build_sources(tmp_path,monkeypatch):
         source=tmp_path/label
         (source/scope).mkdir(parents=True)
         (source/scope/'entry.ts').write_text('export const fixture = true;\n')
+        if label == 'pro':
+            soc=source/'hub/soc-workspace'
+            for relative, value in {
+                'index.json': {'plugins':[{'type':'webui','id':'soc_ui','version':'1.2.9'}]},
+                'plugins/webuis/soc_ui/manifest.json': {'version':'1.2.9','permissions':{'tools':['soc_case_manage']}},
+                'plugins/webuis/soc_ui/workspace.json': {'version':'1.2.9','defaultPageId':'soc-overview'},
+            }.items():
+                path=soc/relative;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(value))
+        else:
+            page=source/'.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src'
+            page.mkdir(parents=True)
+            for file in ('Page.tsx','stepCards.ts','dashboardCache.ts'):(page/file).write_text('fixture source')
         subprocess.run(['git','init','-q',str(source)],check=True)
-        subprocess.run(['git','-C',str(source),'add',scope],check=True)
+        subprocess.run(['git','-C',str(source),'add',scope,'hub' if label=='pro' else '.flocks'],check=True)
         subprocess.run(['git','-C',str(source),'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture baseline'],check=True)
         sources.append(source)
     core,pro=sources
@@ -447,6 +463,10 @@ def test_build_includes_committed_customization_branch_runtime_source(build_sour
     archive=next((root/'releases').glob('*.tar.gz'))
     with tarfile.open(archive) as package:
         assert package.extractfile('home-dashboard/payload/flocks/flocks/new_feature.py').read()==b'NEW_FEATURE = True\n'
+        pro_ui=json.loads(package.extractfile('home-dashboard/payload/python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/manifest.json').read())
+        assert pro_ui['version']=='1.18.1'
+        assert pro_ui['permissions']['tools']==['soc_case_manage']
+        assert not any('/soc_cases/' in name for name in package.getnames())
         manifest=json.load(package.extractfile('home-dashboard/payload-manifest.json'))
         assert manifest['source']['branch']=='zw_dev'
         assert manifest['source']['head']==builder.git(core,'rev-parse','HEAD').decode().strip()
@@ -470,3 +490,14 @@ def test_build_requires_the_pinned_customization_commit(build_sources):
     path.write_text(json.dumps(profile))
     with pytest.raises(ValueError,match='source commit does not match'):
         builder.build(core,pro,frontend)
+
+
+@pytest.mark.parametrize('name', [
+    'python/bin/python3',
+    'python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/soc_cases/src/index.tsx',
+    'python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/soc_dashboard/api/handlers.py',
+    'python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/soc_dashboard/src/native.so',
+])
+def test_pro_soc_resources_do_not_expand_permissions_to_other_pro_files(name):
+    with pytest.raises(installer.Refusal, match='outside supported text trees'):
+        installer.allowed_path(name)

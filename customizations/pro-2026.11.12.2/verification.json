@@ -1,13 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.2",
-  "recordedAt": "2026-11-12T08:16:31.210729+00:00",
+  "packageVersion": "1.14.3",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.14.2",
+    "packageVersion": "1.14.3",
     "developmentBranch": "zw_dev",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "f7009d80af910f802d773ca76df0526e75aab1de",
+    "sourceCommit": "e400aa3187f6d8d428951d7a24f464575c7700eb",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -20,63 +19,69 @@
       "flocks": "6bdc2b83de483d4f8366f3368a3b91f95c1523f6fcaff42c2ee92e92709d83e7",
       "flockspro": "bd1ac6bbdad2b3388755de296388d1e1b2d6155769dbc8083997dc894f8c594d"
     },
-    "previousCustomization": "1.13.0"
+    "previousCustomization": "1.14.2"
   },
-  "scope": "Fix startup ImportError when managed Pro retains its original SQLite store",
+  "scope": "SOC landing dashboard, expanded execution records, simultaneous live batches and browser-memory return snapshots",
   "automatedValidation": {
-    "installerUpdaterBashAndOriginalStoreOverlay": {
-      "passed": 50,
-      "log": ".work/startup-fix-tests.log"
+    "socFrontend": {
+      "passed": 202,
+      "files": 5,
+      "log": ".work/soc-enhancement-tests-final.log"
     },
-    "focusedCore": {
-      "passed": 91,
-      "failed": 6,
-      "baselineFailuresReproduced": 6,
-      "details": "Six pre-existing SOC dashboard private-function contract tests fail identically at 538ee022; error fields, trace errors/cancellation, syslog backpressure and workflow store checks pass.",
-      "log": ".work/startup-core-tests.log"
+    "productionFrontendBuild": {
+      "status": "passed",
+      "sourceCommit": "e400aa3187f6d8d428951d7a24f464575c7700eb",
+      "edition": "flockspro"
     },
-    "sqliteFailureReproduction": {
-      "old1141ImportErrorReproduced": true,
-      "new1142AppImportPassed": true,
-      "backend": "sqlite",
-      "originalReleaseStoresUnchanged": true
-    },
-    "productionFrontendBuild": "passed with exact Pro registry and unchanged locked frontend sources"
+    "installerUpdaterBashAndOverlay": {
+      "passed": 54,
+      "log": ".work/soc-installer-tests-final-2.log",
+      "includes": "paired Pro SOC resources apply/repeat/rollback/restore and preservation of cases files"
+    }
   },
   "local5173Acceptance": {
-    "startedAt": "2026-11-12T08:14:27.923654+00:00",
-    "localRelease": "2026.11.12.2-darwin-arm64",
-    "livePort": 5173,
-    "oldVersion": "1.14.1",
-    "newVersion": "1.14.2",
-    "sourceOfRepositoryZIP": "Actual release packages adapted only for local darwin-arm64 release id",
-    "old1141InstalledAndReady": true,
-    "failedUpgradeRolledBackToA": true,
-    "automatic1141to1142": true,
-    "payloadFilesMatched": 480,
-    "sourceCommit": "f7009d80af910f802d773ca76df0526e75aab1de",
-    "repeatNoRestart": true,
-    "httpChecks": {
-      "/": 200,
-      "/report": 401,
-      "/reports": 401,
-      "/api/workflow/stats": 401,
-      "/api/home-usage/today-token": 401
-    },
-    "baselineRestoredAndReady": true,
-    "proWrapperUnchanged": true,
-    "proBinaryUnchanged": true,
+    "startedAt": "2026-11-12T08:55:38.615297+00:00",
+    "release": "2026.11.12.2-darwin-arm64",
+    "port": 5173,
+    "sourceCommit": "e400aa3187f6d8d428951d7a24f464575c7700eb",
+    "originalBinaryHash": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
+    "originalListen": null,
+    "installedAndReady": true,
+    "payloadFilesMatched": 487,
+    "nativeBinaryUnchanged": true,
     "listenUnchanged": true,
-    "finishedAt": "2026-11-12T08:15:55.584615+00:00",
-    "originalStoresMatchSignedReleaseManifest": true,
-    "status": "passed for startup, install/update/repeat, failed-update rollback, original-store preservation and restore",
-    "authenticationScope": "Unauthenticated protected page/API routes return 401; authenticated report contents and business stats were not exercised.",
-    "harnessNote": "The driver initially expected 200 on protected report routes. A supplementary probe during the same 1.14.2 run confirmed their 401 login guards and all original store hashes against the release manifest."
+    "repeatNoRestart": true,
+    "ui": {
+      "baseURL": "http://127.0.0.1:5173",
+      "authenticatedAs": "existing admin",
+      "entryPoints": [
+        "workbench header",
+        "SOC overview header",
+        "workspace root redirect"
+      ],
+      "defaultExpandedRecords": true,
+      "manualCollapse": true,
+      "returnSnapshotVisible": true,
+      "concurrencyDemo": {
+        "denoise": 2,
+        "triage": 1,
+        "query": "mockDashboard=1",
+        "startsRealWorkflows": false
+      },
+      "consoleErrors": [],
+      "statsErrorBanner": false
+    },
+    "installedPageMatchesDeliveredSource": true,
+    "installedSOCRestoredByteForByte": true,
+    "baselineRestoredAndReady": true,
+    "finishedAt": "2026-11-12T09:01:35.518365+00:00",
+    "status": "passed"
   },
   "limits": [
-    "Linux-amd64 fix has not yet been run on the user server.",
-    "Full report GUI and live security monitoring remain outside this startup fix acceptance.",
-    "Six pre-existing SOC dashboard test contract failures remain."
+    "Linux-amd64 package has not been run on a Linux server.",
+    "Live concurrency was exercised through the explicit browser-only mockDashboard demo; eight parallel denoise batches plus triage were also tested with isolated API fixtures.",
+    "Unrelated security-monitoring and report business chains are outside this SOC UI change."
   ],
-  "previousVersionEvidence": "Historical 1.14.1 verification retained in delivery branch history."
+  "previousVersionEvidence": "1.14.2 startup/install/rollback evidence retained in delivery branch history.",
+  "recordedAt": "2026-11-12T09:01:35.518365+00:00"
 }

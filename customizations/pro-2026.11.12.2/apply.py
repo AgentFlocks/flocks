@@ -184,6 +184,15 @@ def inspect_files(runtime, package_manifest):
 
 def allowed_path(name):
     relative(name)
+    # Only these paired Pro SOC client resources are added outside the Core
+    # and browser trees. No interpreter, native module or other Pro file is allowed.
+    soc_root = 'python/share/flockspro/hub/soc-workspace/'
+    soc_files = {'index.json', 'plugins/webuis/soc_ui/manifest.json',
+                 'plugins/webuis/soc_ui/workspace.json',
+                 *('plugins/webuis/soc_ui/soc_dashboard/src/' + file for file in
+                   ('Page.tsx', 'stepCards.ts', 'dashboardCache.ts'))}
+    if name.startswith(soc_root) and name[len(soc_root):] in soc_files:
+        return
     if not name.startswith(('flocks/flocks/','flocks/.flocks/flockshub/','flocks/.flocks/plugins/','webui-dist/')):
         raise Refusal(f'Payload outside supported text trees: {name}')
 

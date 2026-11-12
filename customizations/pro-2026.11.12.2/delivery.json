@@ -1,28 +1,28 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.2",
+  "packageVersion": "1.14.3",
   "target": "2026.11.12.2-linux-amd64",
-  "status": "candidate - partial live acceptance",
+  "status": "SOC UI accepted on local 5173; Linux target pending",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
     "branch": "zw_dev",
-    "commit": "f7009d80af910f802d773ca76df0526e75aab1de",
+    "commit": "e400aa3187f6d8d428951d7a24f464575c7700eb",
     "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.14.2-pro-2026.11.12.2-full.tar.gz",
-  "sha256": "ad465043ebd2b38a0bd452f1c06227da9e851a4de3b55b999f245e5be66fac8a",
-  "payloadFiles": 480,
+  "archive": "releases/flocks-customizations-1.14.3-pro-2026.11.12.2-full.tar.gz",
+  "sha256": "98d903f511901fc2e6719ae163aa346f5362d310a1f430673285e95f65204682",
+  "payloadFiles": 487,
   "validation": "verification.json",
   "limits": [
-    "Linux-amd64 fix not yet run on user server.",
-    "Full authenticated report GUI and live monitoring remain unverified.",
-    "Six existing SOC dashboard test contract failures reproduce at the previous source commit."
+    "Linux-amd64 target has not been run on a Linux server.",
+    "Concurrency GUI acceptance used explicit browser-only demo data, without launching real workflows.",
+    "Unrelated monitoring and report business chains are outside this UI change."
   ],
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "Startup compatibility, 5173 install/upgrade/repeat/failure rollback/restore and original store preservation.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.14.2.zip",
-  "offlineRepositoryArchiveSha256": "674df253542dee11162bfbf129df4d782cd0b0b8ab231c0cf50a500b00223c1f"
+  "validationScope": "Authenticated SOC UI entry/records/cache, browser-only concurrency demo, 202 frontend tests, 54 installer/updater tests, 487 file hashes, repeat without restart, baseline restore.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.14.3.zip",
+  "offlineRepositoryArchiveSha256": "fb66d6062915b497898c7f333bdeb2c0ef4817b1ad247034f484c8958fc6bf06"
 }

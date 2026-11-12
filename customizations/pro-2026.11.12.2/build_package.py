@@ -99,6 +99,30 @@ def build(core,pro,frontend):
         shutil.copyfile(source,destination)
         result=subprocess.run(['git','-C',str(core),'show',profile['coreCommit']+':'+name],capture_output=True)
         files.append({'path':'flocks/'+name,'sha256':sha(source.read_bytes()),'before':sha(result.stdout) if result.returncode==0 else None})
+    # Pro lists a separate SOC package on PostgreSQL. Patch its exact paired
+    # page clients too, preserving Pro's cases pages, dependencies and policies.
+    pro_soc = pro/'hub/soc-workspace'
+    pro_changes = {}
+    for relative in ('index.json', 'plugins/webuis/soc_ui/manifest.json', 'plugins/webuis/soc_ui/workspace.json'):
+        value = json.loads((pro_soc/relative).read_text())
+        if relative == 'index.json':
+            for item in value['plugins']:
+                if item['type'] == 'webui' and item['id'] == 'soc_ui': item['version'] = '1.18.1'
+        else:
+            value['version'] = '1.18.1'
+            if relative.endswith('workspace.json'): value['defaultPageId'] = 'soc-dashboard'
+        pro_changes[relative] = (json.dumps(value, ensure_ascii=False, indent=2)+'\n').encode()
+    for file in ('Page.tsx','stepCards.ts','dashboardCache.ts'):
+        relative = 'plugins/webuis/soc_ui/soc_dashboard/src/'+file
+        pro_changes[relative] = (core/'.flocks/flockshub'/relative).read_bytes()
+    for relative, data in pro_changes.items():
+        name = 'python/share/flockspro/hub/soc-workspace/'+relative
+        destination = staging/'payload'/name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+        baseline = pro_soc/relative
+        files.append({'path':name, 'sha256':sha(data),
+                      'before':sha(baseline.read_bytes()) if baseline.is_file() else None})
     for path in sorted(frontend.rglob('*')):
         if not path.is_file():continue
         if path.is_symlink() or path.suffix=='.map':raise ValueError('Unexpected frontend symlink/source map')

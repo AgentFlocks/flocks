@@ -1,5 +1,5 @@
 diff --git a/.flocks/flockshub/index.json b/.flocks/flockshub/index.json
-index ef33f5ca..680d54d6 100644
+index ef33f5ca..8aa6244b 100644
 --- a/.flocks/flockshub/index.json
 +++ b/.flocks/flockshub/index.json
 @@ -14689,7 +14689,7 @@
@@ -7,7 +7,7 @@ index ef33f5ca..680d54d6 100644
        "description": "SOC workspace pages for posture, overview, and alert investigation.",
        "descriptionCn": "SOC 工作区页面，包含态势、SOC 总览和告警调查。",
 -      "version": "1.1.13",
-+      "version": "1.18.0",
++      "version": "1.18.1",
        "category": "workflow-automation",
        "tags": [
          "siem",
@@ -16,7 +16,7 @@ index ef33f5ca..680d54d6 100644
        "description": "Installer for Flocks alert operations: pages, tools, denoise workflow, and triage workflow.",
        "descriptionCn": "Flocks 告警运营套件安装器：包含页面、工具、降噪工作流和研判工作流。",
 -      "version": "1.0.3",
-+      "version": "1.18.0",
++      "version": "1.18.1",
        "category": "workflow-automation",
        "tags": [
          "siem",
@@ -333,7 +333,7 @@ index 00000000..7eb4b32f
 +  "mailFollowupPolicy": "mail-feedback-v1"
 +}
 diff --git a/.flocks/flockshub/plugins/components/soc-workspace/manifest.json b/.flocks/flockshub/plugins/components/soc-workspace/manifest.json
-index 7190d97a..332feed5 100644
+index 7190d97a..ba6edbd8 100644
 --- a/.flocks/flockshub/plugins/components/soc-workspace/manifest.json
 +++ b/.flocks/flockshub/plugins/components/soc-workspace/manifest.json
 @@ -6,7 +6,7 @@
@@ -341,12 +341,12 @@ index 7190d97a..332feed5 100644
    "description": "Installer for Flocks alert operations: pages, tools, denoise workflow, and triage workflow.",
    "descriptionCn": "Flocks 告警运营套件安装器：包含页面、工具、降噪工作流和研判工作流。",
 -  "version": "1.0.3",
-+  "version": "1.18.0",
++  "version": "1.18.1",
    "author": "Flocks Team",
    "license": "MIT",
    "homepage": "",
 diff --git a/.flocks/flockshub/plugins/webuis/soc_ui/manifest.json b/.flocks/flockshub/plugins/webuis/soc_ui/manifest.json
-index 1b7394d4..0bac8c9d 100644
+index 1b7394d4..4cbcfebb 100644
 --- a/.flocks/flockshub/plugins/webuis/soc_ui/manifest.json
 +++ b/.flocks/flockshub/plugins/webuis/soc_ui/manifest.json
 @@ -5,7 +5,7 @@
@@ -354,7 +354,7 @@ index 1b7394d4..0bac8c9d 100644
    "description": "SOC workspace pages for posture, overview, and alert investigation.",
    "descriptionCn": "SOC 工作区页面，包含态势、SOC 总览和告警调查。",
 -  "version": "1.1.13",
-+  "version": "1.18.0",
++  "version": "1.18.1",
    "author": "Flocks Team",
    "license": "MIT",
    "homepage": "",
@@ -373,16 +373,17 @@ index bb070ee7..76b95de5 100644
  
  def get_task_center(ctx, request):
 diff --git a/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/Page.tsx b/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/Page.tsx
-index 4a14f256..7745a302 100644
+index 4a14f256..4f392307 100644
 --- a/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/Page.tsx
 +++ b/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/Page.tsx
-@@ -1,4 +1,5 @@
+@@ -1,4 +1,6 @@
++import { readDashboardSnapshot, saveDashboardSnapshot } from './dashboardCache';
  import { severityKey, severityRows } from './severityValues';
 +import { advanceStepStream, createStepStream, taskIsLive } from './stepCards';
  
  // The host installs the runtime for this page right before the bundle
  // evaluates. Bind it here once: this page keeps polling while another SOC
-@@ -90,15 +91,16 @@ const EMPTY_STATS = {
+@@ -90,15 +92,16 @@ const EMPTY_STATS = {
  };
  
  const ACTIVITY_QUEUE_LIMIT = 8;
@@ -401,7 +402,7 @@ index 4a14f256..7745a302 100644
  const DEFAULT_TIME_RANGE = '7d';
  const DEFAULT_COMMAND_TITLE = 'Flocks AI 智能告警态势中心';
  const CUSTOM_COMMAND_TITLE_KEY = 'soc-dashboard-custom-title-v1';
-@@ -188,7 +190,7 @@ function readMockDashboardEnabled() {
+@@ -188,7 +191,7 @@ function readMockDashboardEnabled() {
  function defaultEventRailWidth() {
    if (typeof window === 'undefined') return EVENT_RAIL_DEFAULT_WIDTH;
    if (window.innerWidth <= 1120) return EVENT_RAIL_MIN_WIDTH;
@@ -410,7 +411,7 @@ index 4a14f256..7745a302 100644
    return EVENT_RAIL_DEFAULT_WIDTH;
  }
  
-@@ -213,6 +215,7 @@ function createActivityState() {
+@@ -213,6 +216,7 @@ function createActivityState() {
      denoise: { current: null, queue: [], last: null },
      triage: { current: null, queue: [], last: null },
      recent: [],
@@ -418,7 +419,31 @@ index 4a14f256..7745a302 100644
      lastIdentified: null,
      batch: emptyActivityBatch(),
      batchUpdatedAt: 0,
-@@ -394,125 +397,7 @@ function activityHasVisibleEvents(activity) {
+@@ -335,9 +339,9 @@ function createMockActivityState() {
+       durationMs: 0,
+     },
+   });
+-  const denoiseWaiting = createMockActivityEvent({
++  const denoiseParallel = createMockActivityEvent({
+     stage: 'denoise',
+-    status: 'queued',
++    status: 'running',
+     workflowId: 'stream_alert_denoise',
+     executionId: 'mock-denoise-run-004',
+     occurredAt: new Date(now - 26000).toISOString(),
+@@ -364,9 +368,9 @@ function createMockActivityState() {
+     ...createActivityState(),
+     connection: 'online',
+     mode: 'burst',
+-    denoise: { current: denoiseCurrent, queue: [denoiseWaiting], last: null },
++    denoise: { current: denoiseCurrent, queue: [denoiseParallel], last: null },
+     triage: { current: triageCurrent, queue: [triageWaiting], last: null },
+-    recent: [denoiseCurrent, triageCurrent, triageWaiting, denoiseWaiting],
++    recent: [denoiseCurrent, triageCurrent, triageWaiting, denoiseParallel],
+     batch: {
+       mode: 'burst',
+       windowMs: ACTIVITY_POLL_MS,
+@@ -394,125 +398,7 @@ function activityHasVisibleEvents(activity) {
      || activity?.triage?.last
      || activity?.triage?.queue?.length
      || activity?.recent?.length
@@ -545,7 +570,7 @@ index 4a14f256..7745a302 100644
    );
  }
  
-@@ -598,7 +483,8 @@ function expireWorkflowActivity(previous, now = Date.now()) {
+@@ -598,7 +484,8 @@ function expireWorkflowActivity(previous, now = Date.now()) {
      // A missing/truncated response is not evidence of completion or failure.
      return { ...event, status: 'unconfirmed' };
    };
@@ -555,7 +580,7 @@ index 4a14f256..7745a302 100644
    for (const kind of ['denoise', 'triage']) {
      const lane = previous[kind];
      const current = expire(lane.current);
-@@ -655,6 +541,7 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch,
+@@ -655,6 +542,7 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch,
      denoise: { ...previous.denoise, queue: [...previous.denoise.queue] },
      triage: { ...previous.triage, queue: [...previous.triage.queue] },
      recent: [...previous.recent],
@@ -563,7 +588,7 @@ index 4a14f256..7745a302 100644
      batch: hasBatch ? batch : previous.batch,
      batchUpdatedAt: hasBatch ? Date.now() : previous.batchUpdatedAt,
      mode: modeState.mode,
-@@ -670,6 +557,7 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch,
+@@ -670,6 +558,7 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch,
        lane.queue = lane.queue.filter(retained);
      }
      next.recent = next.recent.filter(retained);
@@ -571,7 +596,7 @@ index 4a14f256..7745a302 100644
    }
    if (batch.mode !== 'normal' && batch.receivedCount > 0) next.denoise.queue = [];
    for (const event of incomingEvents) {
-@@ -712,6 +600,20 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch,
+@@ -712,6 +601,20 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch,
      }
    }
    const incomingRecent = [...incomingRecentEvents, ...incomingEvents];
@@ -592,7 +617,18 @@ index 4a14f256..7745a302 100644
    for (const event of [...incomingRecent].reverse()) {
      if (!event?.eventId) continue;
      const merged = [mergeActivityEvent(next.recent.find((item) => item.eventId === event.eventId), event),
-@@ -2161,21 +2063,27 @@ function activityTaskKey(event) {
+@@ -900,8 +803,8 @@ function formatTokenVolume(value) {
+ function AnimatedNumber({ value, format, tag = 'span', className, duration = 900 }) {
+   const { useEffect, useRef, useState } = getReact();
+   const target = Number(value || 0);
+-  const current = useRef(0);
+-  const [display, setDisplay] = useState(0);
++  const current = useRef(target);
++  const [display, setDisplay] = useState(target);
+   const formatter = format || ((number) => compactNumber(Math.round(number)));
+ 
+   useEffect(() => {
+@@ -2161,21 +2064,27 @@ function activityTaskKey(event) {
    return String(event?.eventId || '').trim();
  }
  
@@ -622,7 +658,7 @@ index 4a14f256..7745a302 100644
      taskByKey.set(key, { key, event, state, stage: event.stage,
        [event.stage]: event, latestAt: activityTimestamp(event) });
    }
-@@ -2212,6 +2120,7 @@ function useAnimatedTaskWindow(tasks, transitionKey) {
+@@ -2212,6 +2121,7 @@ function useAnimatedTaskWindow(tasks, transitionKey) {
      task.latestAt || '',
      JSON.stringify(task.event?.alert || {}),
      JSON.stringify(task.event?.result || {}),
@@ -630,7 +666,7 @@ index 4a14f256..7745a302 100644
    ].join(':')).join('|');
  
    useEffect(() => {
-@@ -2273,76 +2182,138 @@ function useAnimatedTaskWindow(tasks, transitionKey) {
+@@ -2273,76 +2183,138 @@ function useAnimatedTaskWindow(tasks, transitionKey) {
    return displayedTasks;
  }
  
@@ -816,12 +852,12 @@ index 4a14f256..7745a302 100644
 +          : busy ? '等待新的步骤记录'
 +            : latest ? `${latest.stage === 'triage' ? '研判' : '降噪'}最近一批${latest.event.status === 'completed' ? '已完成' : '执行异常'}${workflowElapsed(latest.event, Date.now()) ? ` · ${workflowElapsed(latest.event, Date.now())}` : ''}`
 +              : '等待新告警，处理步骤将在这里逐张出现') : null,
-+    busy > 6 ? h('small', { className: 'ai-data-note', key: 'more' }, `当前展示部分处理动态 · ${busy} 批执行中`) : null,
++    busy ? h('small', { className: 'ai-data-note', key: 'more' }, `${busy} 批正在执行 · 每批独立展示`) : null,
 +  ]);
  }
  
  function executionIdFromWorkflowEvent(event) {
-@@ -2376,292 +2347,86 @@ function openWorkflowExecution(workflowId, executionId) {
+@@ -2376,292 +2348,86 @@ function openWorkflowExecution(workflowId, executionId) {
    return true;
  }
  
@@ -996,7 +1032,7 @@ index 4a14f256..7745a302 100644
 +    ]),
 +    h('div', { className: 'ai-task-board-scroll', key: 'body' }, [
 +      h(AiStepStream, { tasks, online, key: filterKey }),
-+      h('details', { className: 'ai-execution-details', key: 'details' }, [
++      h('details', { className: 'ai-execution-details', open: true, key: 'details' }, [
 +        h('summary', { key: 'title' }, `执行记录${active.length ? ` · ${active.length} 批` : ''}`),
 +        activity.snapshotComplete === false ? h('p', { className: 'ai-data-note', key: 'coverage' }, '当前为部分任务快照。') : null,
 +        h('div', { className: 'event-rail-list', key: 'active' }, visibleTasks.map((task) =>
@@ -1174,22 +1210,71 @@ index 4a14f256..7745a302 100644
    ];
    return h('aside', { className: cx('command-event-rail', collapsed && 'collapsed') }, [
      collapsed ? null : h('div', {
-@@ -2697,14 +2462,12 @@ export default function Page() {
+@@ -2690,21 +2456,27 @@ function CommandEventRail({ activity, timeFilter, taskCenter, view, onViewChange
+ }
+ 
+ export default function Page() {
++  const user = getSdk().useCurrentUser?.();
++  const scope = JSON.stringify([user?.id ?? null, user?.username ?? null]);
++  return h(Dashboard, { key: scope, cacheScope: scope });
++}
++
++function Dashboard({ cacheScope }) {
+   const { useCallback, useEffect, useMemo, useRef, useState } = getReact();
+-  const [timeFilter, setTimeFilter] = useState(() => createRelativeTimeFilter());
++  const [initialSnapshot] = useState(() => readDashboardSnapshot(cacheScope));
++  const [timeFilter, setTimeFilter] = useState(() => initialSnapshot?.filter || createRelativeTimeFilter());
+   const [refreshKey, setRefreshKey] = useState('off');
+   const [timeMenuOpen, setTimeMenuOpen] = useState(false);
    const [pageSettingsOpen, setPageSettingsOpen] = useState(false);
    const [eventRailCollapsed, setEventRailCollapsed] = useState(false);
    const [eventRailWidth, setEventRailWidth] = useState(defaultEventRailWidth);
 -  const [rightRailView, setRightRailView] = useState('aiTasks');
    const [customCommandTitle, setCustomCommandTitle] = useState(readCustomCommandTitle);
    const [mockDashboardEnabled, setMockDashboardEnabled] = useState(readMockDashboardEnabled);
-   const [stats, setStats] = useState(EMPTY_STATS);
-   const [loading, setLoading] = useState(true);
+-  const [stats, setStats] = useState(EMPTY_STATS);
+-  const [loading, setLoading] = useState(true);
++  const [stats, setStats] = useState(() => initialSnapshot?.stats || EMPTY_STATS);
++  const [loading, setLoading] = useState(() => !initialSnapshot?.stats);
    const [error, setError] = useState('');
-   const [activity, setActivity] = useState(createActivityState);
+-  const [activity, setActivity] = useState(createActivityState);
 -  const [taskCenter, setTaskCenter] = useState(createTaskCenterState);
++  const [activity, setActivity] = useState(() => initialSnapshot?.activity
++    ? { ...expireWorkflowActivity(initialSnapshot.activity), connection: 'initializing' } : createActivityState());
    const activityCursor = useRef('');
    const workflowProgressByFilter = useRef(new Map());
    const statsRequestId = useRef(0);
-@@ -2863,58 +2626,6 @@ export default function Page() {
+@@ -2793,7 +2565,9 @@ export default function Page() {
+       if (options.force) params.force = '1';
+       const response = await getApi().page.get('/stats', { params });
+       if (requestId !== statsRequestId.current) return;
+-      setStats(mergeStats(response.data));
++      const next = mergeStats(response.data);
++      saveDashboardSnapshot(cacheScope, filter, { stats: next });
++      setStats(next);
+       setError('');
+     } catch (err) {
+       if (requestId !== statsRequestId.current) return;
+@@ -2802,13 +2576,15 @@ export default function Page() {
+       statsPending.current = Math.max(statsPending.current - 1, 0);
+       if (requestId === statsRequestId.current) setLoading(false);
+     }
+-  }, []);
++  }, [cacheScope]);
+ 
+   const refresh = useCallback(() => loadStats(timeFilter, { force: true }), [loadStats, timeFilter]);
+ 
+   useEffect(() => {
+-    void loadStats(timeFilter);
+-  }, [loadStats, timeFilter]);
++    const cached = readDashboardSnapshot(cacheScope, timeFilter);
++    setStats(cached?.stats || EMPTY_STATS);
++    void loadStats(timeFilter, { silent: Boolean(cached?.stats) });
++  }, [cacheScope, loadStats, timeFilter]);
+ 
+   useEffect(() => {
+     // Also expires stale state while requests are failing or remain in flight.
+@@ -2863,58 +2639,6 @@ export default function Page() {
    }, []);
    const resetCommandTitle = useCallback(() => saveCommandTitle(''), [saveCommandTitle]);
  
@@ -1248,17 +1333,39 @@ index 4a14f256..7745a302 100644
    useEffect(() => {
      let stopped = false;
      let timer = 0;
-@@ -2992,7 +2703,8 @@ export default function Page() {
+@@ -2923,7 +2647,9 @@ export default function Page() {
+     let retryDelay = ACTIVITY_POLL_MS;
+     const workflowFilterKey = [timeFilter.mode, timeFilter.range, timeFilter.start, timeFilter.end].join('|');
+     activityCursor.current = '';
+-    setActivity(createActivityState());
++    const cached = readDashboardSnapshot(cacheScope, timeFilter);
++    setActivity(cached?.activity
++      ? { ...expireWorkflowActivity(cached.activity), connection: 'initializing' } : createActivityState());
+ 
+     const schedule = (delay) => {
+       if (!stopped) timer = window.setTimeout(() => void poll(false), delay);
+@@ -2992,7 +2718,10 @@ export default function Page() {
            setActivity((previous) => {
              const next = enqueueActivity(previous, incomingEvents, payload.generatedAt,
                incomingRecentEvents, payload.batch, payload.workflowSnapshotComplete === true);
 -            return payload.workflowSnapshotAvailable === false ? { ...next, connection: 'error' } : next;
-+            return { ...next, snapshotComplete: payload.workflowSnapshotComplete === true,
++            const snapshot = { ...next, snapshotComplete: payload.workflowSnapshotComplete === true,
 +              ...(payload.workflowSnapshotAvailable === false ? { connection: 'error' } : {}) };
++            saveDashboardSnapshot(cacheScope, timeFilter, { activity: snapshot });
++            return snapshot;
            });
            const batch = normalizeActivityBatch(payload.batch);
            const hasStatsChange = workflowChanged
-@@ -3080,14 +2792,6 @@ export default function Page() {
+@@ -3016,7 +2745,7 @@ export default function Page() {
+       window.clearTimeout(timer);
+       window.clearTimeout(statsTimer);
+     };
+-  }, [loadStats, timeFilter]);
++  }, [cacheScope, loadStats, timeFilter]);
+ 
+   useEffect(() => {
+     setActivity((previous) => {
+@@ -3080,14 +2809,6 @@ export default function Page() {
      ),
      [activity, mockDashboardEnabled],
    );
@@ -1273,7 +1380,7 @@ index 4a14f256..7745a302 100644
    const displayActivityBusy = Boolean(
      displayActivity.denoise.current
      || displayActivity.triage.current
-@@ -3136,9 +2840,6 @@ export default function Page() {
+@@ -3136,9 +2857,6 @@ export default function Page() {
          key: 'events',
          activity: displayActivity,
          timeFilter,
@@ -1283,7 +1390,7 @@ index 4a14f256..7745a302 100644
          collapsed: eventRailCollapsed,
          onToggle: () => setEventRailCollapsed((current) => !current),
          railWidth: eventRailWidth,
-@@ -6129,7 +5830,7 @@ const CSS = `
+@@ -6129,7 +5847,7 @@ const CSS = `
    color: #b9d8ff;
    background: rgba(31,76,132,.3);
  }
@@ -1292,7 +1399,7 @@ index 4a14f256..7745a302 100644
    content: "";
    position: absolute;
    top: 0;
-@@ -6807,4 +6508,77 @@ const CSS = `
+@@ -6807,4 +6525,77 @@ const CSS = `
  [data-animations="on"] *::after {
    animation-play-state: running !important;
  }
@@ -1370,12 +1477,42 @@ index 4a14f256..7745a302 100644
 +}
 +
  `;
+diff --git a/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/dashboardCache.ts b/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/dashboardCache.ts
+new file mode 100644
+index 00000000..f2376776
+--- /dev/null
++++ b/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/dashboardCache.ts
+@@ -0,0 +1,24 @@
++// Browser-memory snapshots only: survive page remounts, never persist alert data
++// to disk. Each authenticated user and time filter has an independent snapshot.
++export const DASHBOARD_CACHE_TTL_MS = 5 * 60 * 1000;
++const snapshots = new Map<string, any>();
++const filterKey = (filter: any) => JSON.stringify([filter.mode, filter.range, filter.start, filter.end]);
++
++export function readDashboardSnapshot(scope: string, filter?: any, now = Date.now()): any {
++  for (const [key, value] of snapshots) {
++    if (now - value.savedAt >= DASHBOARD_CACHE_TTL_MS) snapshots.delete(key);
++  }
++  const candidates = [...snapshots.values()].filter(value => value.scope === scope
++    && (!filter || filterKey(value.filter) === filterKey(filter)));
++  return candidates[candidates.length - 1];
++}
++
++export function saveDashboardSnapshot(scope: string, filter: any, patch: any, now = Date.now()) {
++  const key = JSON.stringify([scope, filterKey(filter)]);
++  const previous = readDashboardSnapshot(scope, filter, now);
++  snapshots.delete(key);
++  snapshots.set(key, { ...previous, ...patch, scope, filter, savedAt: now });
++  while (snapshots.size > 8) snapshots.delete(snapshots.keys().next().value!);
++}
++
++export function clearDashboardSnapshots() { snapshots.clear(); }
 diff --git a/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/stepCards.ts b/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/stepCards.ts
 new file mode 100644
-index 00000000..a01c4903
+index 00000000..5ba40a28
 --- /dev/null
 +++ b/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/stepCards.ts
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,156 @@
 +// A bounded presentation state machine. It never starts or cancels a workflow.
 +export const STEP_CARD_LIMIT = 6;
 +export const STEP_DISPLAY_MS = 2000;
@@ -1510,32 +1647,20 @@ index 00000000..a01c4903
 +    }
 +    state.cards.push(card);
 +  }
-+  const candidates = [...continuations, ...tasks];
-+  const availableStages = new Set([
-+    ...state.cards.map((card) => card.task.stage),
-+    ...candidates.filter((task) => nextNode(task, batches[task.key], now)).map((task) => task.stage),
-+  ]);
-+  const stageLimit = availableStages.size > 1 ? STEP_CARD_LIMIT / 2 : STEP_CARD_LIMIT;
-+  const keptByStage: Record<string, number> = {};
-+  state.cards = state.cards.map((card) => {
-+    const stage = card.task.stage;
-+    keptByStage[stage] = (keptByStage[stage] || 0) + 1;
-+    if (keptByStage[stage] > stageLimit && card.phase !== 'exit') {
-+      return { ...card, phase: 'exit', outcome: 'yielded', endAt: now + STEP_EXIT_MS };
-+    }
-+    return card;
-+  });
++  // Every observed live execution gets its own slot. Completed replays are
++  // bounded independently so a burst (or another stage) cannot hide live work.
++  let replayCount = 0;
++  state.cards = state.cards.filter((card) => taskIsLive(card.task) || replayCount++ < STEP_CARD_LIMIT);
 +  const occupied = new Set(state.cards.map((card) => card.task.key));
-+  const counts = state.cards.reduce((all, card) => {
-+    all[card.task.stage] = (all[card.task.stage] || 0) + 1; return all;
-+  }, {} as Record<string, number>);
++  const candidates = [...continuations, ...tasks].sort((a, b) => Number(taskIsLive(b)) - Number(taskIsLive(a)));
++  replayCount = state.cards.filter((card) => !taskIsLive(card.task)).length;
 +  for (const task of candidates) {
-+    if (state.cards.length >= STEP_CARD_LIMIT) break;
-+    if (occupied.has(task.key) || (counts[task.stage] || 0) >= stageLimit) continue;
++    if (occupied.has(task.key) || !taskIsLive(task) && replayCount >= STEP_CARD_LIMIT) continue;
 +    const card = nextCard(task);
 +    if (card) {
-+      state.cards.push(card); occupied.add(task.key);
-+      counts[task.stage] = (counts[task.stage] || 0) + 1;
++      state.cards.push(card);
++      occupied.add(task.key);
++      if (!taskIsLive(task)) replayCount += 1;
 +    }
 +  }
 +  // At most 128 small dedup memories; in-flight slots are never evicted.
@@ -1592,17 +1717,25 @@ index f2617473..23718907 100644
          </div>
        </header>
 diff --git a/.flocks/flockshub/plugins/webuis/soc_ui/workspace.json b/.flocks/flockshub/plugins/webuis/soc_ui/workspace.json
-index e3240b32..dad557c2 100644
+index e3240b32..0934ccb4 100644
 --- a/.flocks/flockshub/plugins/webuis/soc_ui/workspace.json
 +++ b/.flocks/flockshub/plugins/webuis/soc_ui/workspace.json
-@@ -1,6 +1,6 @@
+@@ -1,13 +1,13 @@
  {
    "id": "soc_ui",
 -  "version": "1.1.13",
-+  "version": "1.18.0",
++  "version": "1.18.1",
    "title": "SOC 工作区",
    "titleEn": "SOC Workspace",
    "icon": "ShieldCheck",
+   "order": 10,
+   "enabled": true,
+   "placement": "sceneWorkspace",
+-  "defaultPageId": "soc-overview",
++  "defaultPageId": "soc-dashboard",
+   "sections": [
+     {
+       "id": "posture",
 diff --git a/.flocks/plugins/agents/asset-survey/agent.yaml b/.flocks/plugins/agents/asset-survey/agent.yaml
 index e927eb04..65280b60 100644
 --- a/.flocks/plugins/agents/asset-survey/agent.yaml
@@ -125831,8 +125964,49 @@ index 8b3f5f62..5cec1fe6 100644
      if (!areLegacyToolPayloadsRenderEqual(prevPart.toolCall, nextPart.toolCall)) return false;
      if (!areLegacyToolPayloadsRenderEqual(prevPart.toolResult, nextPart.toolResult)) return false;
    }
+diff --git a/webui/src/components/layout/Layout.test.tsx b/webui/src/components/layout/Layout.test.tsx
+index 922a7c86..78851144 100644
+--- a/webui/src/components/layout/Layout.test.tsx
++++ b/webui/src/components/layout/Layout.test.tsx
+@@ -278,6 +278,18 @@ describe('Layout chrome', () => {
+     expect(screen.getByRole('link', { name: 'sceneManagement' })).toHaveAttribute('aria-current', 'page');
+   });
+ 
++  it('opens the SOC landing route instead of a remembered subpage, also from within SOC', async () => {
++    useWebUIContractPages.mockReturnValue({
++      pages: [], workspaces: [sceneWorkspace('soc_ui', 'SOC 工作区')], loading: false, error: null, refetch: vi.fn(),
++    });
++    renderAt('/contracts/webui/workspaces/soc_ui/soc-alerts');
++    fireEvent.click(screen.getByRole('button', { name: 'SOC 工作区' }));
++    await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/soc_ui'));
++    fireEvent.click(screen.getByRole('button', { name: 'workbench' }));
++    fireEvent.click(screen.getByRole('button', { name: 'SOC 工作区' }));
++    await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/soc_ui'));
++  });
++
+   it('switches to a scene directly from the module bar', async () => {
+     useWebUIContractPages.mockReturnValue({
+       pages: [], workspaces: [sceneWorkspace('soc_ui', 'SOC 工作区')], loading: false, error: null, refetch: vi.fn(),
+@@ -548,7 +560,7 @@ describe('Layout chrome', () => {
+     await waitFor(() => expect(activeProbe().textContent).toBe('/workflows'));
+   });
+ 
+-  it.each(['disabled', 'locked', 'uninstalled'])('keeps the SOC page memory when an old link opens a %s audit suite', async (state) => {
++  it.each(['disabled', 'locked', 'uninstalled'])('opens the SOC landing page when an old link opens a %s audit suite', async (state) => {
+     const socPage = '/contracts/webui/workspaces/soc_ui/soc_ui-overview?severity=high';
+     localStorage.setItem('flocks_layout_workspace_paths', JSON.stringify({ 'scene:soc_ui': socPage }));
+     const audit = sceneWorkspace('code_audit_ui', '代码漏洞审计工作区', {
+@@ -561,7 +573,7 @@ describe('Layout chrome', () => {
+     renderAt('/contracts/webui/workspaces/code_audit_ui/code_audit_ui-overview?view=audits');
+     await waitFor(() => expect(activeProbe().textContent).toBe('/scenes/suites'));
+     fireEvent.click(screen.getByRole('button', { name: 'SOC 工作区' }));
+-    await waitFor(() => expect(activeProbe().textContent).toBe(socPage));
++    await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/soc_ui'));
+   });
+ 
+   it('keeps scene management on the audit module after SOC is disabled', async () => {
 diff --git a/webui/src/components/layout/Layout.tsx b/webui/src/components/layout/Layout.tsx
-index 415ef229..ae6d8170 100644
+index 415ef229..66cedc45 100644
 --- a/webui/src/components/layout/Layout.tsx
 +++ b/webui/src/components/layout/Layout.tsx
 @@ -1,3 +1,4 @@
@@ -125872,6 +126046,19 @@ index 415ef229..ae6d8170 100644
        { name: t('memory'), href: '/workspace?tab=memory', icon: Brain },
      ] },
      { id: 'tools-models', name: t('toolsAndModels'), items: [
+@@ -897,6 +901,12 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
+       navigate(AGENT_WORKSPACE_DEFAULT_PATH);
+       return;
+     }
++    // SOC always opens its posture screen, including when it is already active.
++    if (sceneWorkspaceIdOf(workspaceId) === SOC_WORKSPACE_ID) {
++      const workspace = openSceneWorkspaces.find((item) => item.id === SOC_WORKSPACE_ID);
++      if (workspace) navigate(workspace.route);
++      return;
++    }
+     if (workspaceId === currentWorkspace && routeNav.kind === 'workspace') return;
+     const paths = workspacePathsRef.current;
+     const stored = paths[workspaceId];
 diff --git a/webui/src/hooks/useMonitorNavigation.test.tsx b/webui/src/hooks/useMonitorNavigation.test.tsx
 new file mode 100644
 index 00000000..b5395005
@@ -143687,6 +143874,53 @@ index 00000000..ef1d93f2
 +  "recoveryMinMinutes": 40,
 +  "recoveryMaxMinutes": 120
 +}
+diff --git a/webui/src/pages/WebUIContractWorkspaceHost/index.test.tsx b/webui/src/pages/WebUIContractWorkspaceHost/index.test.tsx
+index 783503cb..35fc9bca 100644
+--- a/webui/src/pages/WebUIContractWorkspaceHost/index.test.tsx
++++ b/webui/src/pages/WebUIContractWorkspaceHost/index.test.tsx
+@@ -233,6 +233,20 @@ describe('WebUIContractWorkspaceHost', () => {
+     expect(screen.queryByText('workspace.selectPage')).not.toBeInTheDocument();
+   });
+ 
++  it('opens the SOC dashboard even when an installed older manifest still defaults to overview', async () => {
++    const data = useWebUIContractPagesMock.getMockImplementation()!();
++    const workspace = data.workspaces[0];
++    workspace.id = 'soc_ui';
++    workspace.route = '/contracts/webui/workspaces/soc_ui';
++    workspace.pages[0].id = 'soc-dashboard';
++    workspace.sections[0].pageIds = ['soc-dashboard'];
++    workspace.sections[0].defaultPageId = 'soc-dashboard';
++    useWebUIContractPagesMock.mockReturnValue(data);
++    renderHostAt(workspace.route);
++    await waitFor(() => expect(screen.getByText('page:soc-dashboard')).toBeInTheDocument());
++    expect(screen.queryByText('page:ops-overview')).not.toBeInTheDocument();
++  });
++
+   it('falls back to the first ready page when the default page id is unknown', async () => {
+     useWebUIContractPagesMock.mockReturnValue({
+       pages: [], loading: false, error: null, refetch: vi.fn(),
+diff --git a/webui/src/pages/WebUIContractWorkspaceHost/index.tsx b/webui/src/pages/WebUIContractWorkspaceHost/index.tsx
+index ecab52eb..b8638fdc 100644
+--- a/webui/src/pages/WebUIContractWorkspaceHost/index.tsx
++++ b/webui/src/pages/WebUIContractWorkspaceHost/index.tsx
+@@ -7,6 +7,7 @@ import { hubAPI, type HubSceneSuite } from '@/api/hub';
+ import ExtensionSlot from '@/components/extensions/ExtensionSlot';
+ import { useDelayedVisible } from '@/hooks/useDelayedVisible';
+ import { ThemeContext } from '@/contexts/ThemeContext';
++import { SOC_WORKSPACE_ID } from '@/utils/navPartitions';
+ import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
+ import PageRuntimeHost from '@/pages/WebUIContractPageHost/PageRuntimeHost';
+ import { buildWebUIContractWorkspacePageList, buildWebUIContractWorkspaceSections, findWorkspaceSection, workspaceSectionHref } from '@/utils/webuiContractWorkspaceSections';
+@@ -171,7 +172,8 @@ export default function WebUIContractWorkspaceHost() {
+ 
+   if (!pageId) {
+     // Opening the workspace itself lands on its default page instead of an empty frame.
+-    const defaultPage = pages.find((page) => page.id === workspace.defaultPageId)
++    const defaultPage = pages.find((page) => workspace.id === SOC_WORKSPACE_ID && page.id === 'soc-dashboard')
++      ?? pages.find((page) => page.id === workspace.defaultPageId)
+       ?? pages.find((page) => page.buildStatus === 'ready')
+       ?? pages[0];
+     const defaultSection = sections.find(section => section.pages.some(page => page.id === defaultPage.id));
 diff --git a/webui/src/pages/Workflow/index.tsx b/webui/src/pages/Workflow/index.tsx
 index 6feb32a3..2f8e71cb 100644
 --- a/webui/src/pages/Workflow/index.tsx
@@ -144557,15 +144791,79 @@ index dfeeade6..d65c3741 100644
    return pathname.match(WORKSPACE_ROUTE_RE)?.[1] ?? null;
  }
  
+diff --git a/webui/src/utils/socDashboardCache.test.ts b/webui/src/utils/socDashboardCache.test.ts
+new file mode 100644
+index 00000000..40b87a62
+--- /dev/null
++++ b/webui/src/utils/socDashboardCache.test.ts
+@@ -0,0 +1,22 @@
++import { beforeEach, describe, expect, it } from 'vitest';
++import { clearDashboardSnapshots, DASHBOARD_CACHE_TTL_MS, readDashboardSnapshot, saveDashboardSnapshot }
++  from '../../../.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/dashboardCache';
++
++const filter = { mode: 'relative', range: '7d', start: '', end: '' };
++describe('SOC dashboard return snapshots', () => {
++  beforeEach(clearDashboardSnapshots);
++  it('separates users and time ranges while retaining the last selected range', () => {
++    saveDashboardSnapshot('alice', filter, { stats: { total: 12 } }, 1000);
++    const today = { ...filter, range: 'today' };
++    saveDashboardSnapshot('alice', today, { stats: { total: 2 } }, 1001);
++    saveDashboardSnapshot('bob', filter, { stats: { total: 7 } }, 1002);
++    expect(readDashboardSnapshot('alice', filter, 1003).stats.total).toBe(12);
++    expect(readDashboardSnapshot('alice', undefined, 1003).filter.range).toBe('today');
++    expect(readDashboardSnapshot('bob', filter, 1003).stats.total).toBe(7);
++    expect(readDashboardSnapshot('carol', filter, 1003)).toBeUndefined();
++  });
++  it('discards snapshots after five minutes away', () => {
++    saveDashboardSnapshot('alice', filter, { stats: { total: 12 } }, 1000);
++    expect(readDashboardSnapshot('alice', filter, 1000 + DASHBOARD_CACHE_TTL_MS)).toBeUndefined();
++  });
++});
 diff --git a/webui/src/utils/socDashboardPageRuntime.test.tsx b/webui/src/utils/socDashboardPageRuntime.test.tsx
-index 39cc42d6..eaf7e394 100644
+index 39cc42d6..b36beb00 100644
 --- a/webui/src/utils/socDashboardPageRuntime.test.tsx
 +++ b/webui/src/utils/socDashboardPageRuntime.test.tsx
-@@ -91,19 +91,19 @@ describe('SOC dashboard contract page runtime', () => {
+@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
+ import userEvent from '@testing-library/user-event';
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+ 
++import { clearDashboardSnapshots } from '../../../.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/dashboardCache';
+ import Page from '../../../.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src/Page';
+ 
+ const pageGetMock = vi.fn();
+@@ -51,6 +52,7 @@ async function pollActivity() {
+ 
+ describe('SOC dashboard contract page runtime', () => {
+   beforeEach(() => {
++    clearDashboardSnapshots();
+     installContractSdk();
+     setDocumentHidden(false);
+     window.localStorage.clear();
+@@ -91,19 +93,39 @@ describe('SOC dashboard contract page runtime', () => {
      pageGetMock.mockReset();
    });
  
 -  it('loads stats, activity, and task center data through the page SDK', async () => {
++  it('opens execution records by default', async () => {
++    const view = render(<Page />);
++    expect(view.container.querySelector('.ai-execution-details')).toHaveAttribute('open');
++    await waitFor(() => expect(pageGetMock).toHaveBeenCalled());
++  });
++
++  it('restores cached dashboard contents immediately while the return request is pending', async () => {
++    pageGetMock.mockImplementation((path: string) => path === '/stats'
++      ? Promise.resolve({ data: { denoise: { totalRaw: 9876 }, pipeline: { raw: 9876 } } })
++      : Promise.resolve({ data: { workflowEvents: [workflowEvent('cached-batch')], workflowSnapshotComplete: true } }));
++    const first = render(<Page />);
++    await waitFor(() => expect(first.container.querySelector('[title="9,876"]')).not.toBeNull());
++    first.unmount();
++    pageGetMock.mockImplementation(() => new Promise(() => {}));
++    const second = render(<Page />);
++    expect(second.container.querySelector('.command-root')?.textContent).toContain('9,876');
++    expect(second.container.querySelector('.ai-execution-details')).toHaveAttribute('open');
++    expect(pageGetMock.mock.calls.filter(([path]) => path === '/stats')).toHaveLength(2);
++  });
++
 +  it('loads SOC stats and activity without polling the general task center', async () => {
      render(<Page />);
  
@@ -144584,7 +144882,7 @@ index 39cc42d6..eaf7e394 100644
      setDocumentHidden(true);
  
      render(<Page />);
-@@ -200,123 +200,17 @@ describe('SOC dashboard contract page runtime', () => {
+@@ -200,123 +222,17 @@ describe('SOC dashboard contract page runtime', () => {
      expect(await screen.findByText('已流转至研判')).toBeInTheDocument();
    });
  
@@ -144718,7 +145016,7 @@ index 39cc42d6..eaf7e394 100644
    });
  
    it('shows only actual running/queued tasks, not completed playback or empty batches', async () => {
-@@ -329,7 +223,7 @@ describe('SOC dashboard contract page runtime', () => {
+@@ -329,7 +245,7 @@ describe('SOC dashboard contract page runtime', () => {
      await waitFor(() => expect(container.querySelectorAll('.event-rail-item')).toHaveLength(2));
      const rail = container.querySelector('.event-rail-list') as HTMLElement;
      expect(within(rail).getByText('处理中')).toBeInTheDocument();
@@ -144727,7 +145025,7 @@ index 39cc42d6..eaf7e394 100644
      expect(within(rail).queryByText(/原始 0 条/)).not.toBeInTheDocument();
      expect(within(rail).queryByText(/降噪处理完成/)).not.toBeInTheDocument();
      expect(within(rail).queryByText(/s \/ .*s/)).not.toBeInTheDocument();
-@@ -363,10 +257,31 @@ describe('SOC dashboard contract page runtime', () => {
+@@ -363,10 +279,31 @@ describe('SOC dashboard contract page runtime', () => {
      await pollActivity();
      const rail = container.querySelector('.event-rail-list') as HTMLElement;
      expect(within(rail).getByText('边界扫描')).toBeInTheDocument();
@@ -144761,7 +145059,7 @@ index 39cc42d6..eaf7e394 100644
      vi.useFakeTimers();
      const running = workflowEvent('active');
      let event = running;
-@@ -398,7 +313,7 @@ describe('SOC dashboard contract page runtime', () => {
+@@ -398,7 +335,7 @@ describe('SOC dashboard contract page runtime', () => {
      data = { error: 'offline' };
      await pollActivity();
      expect(container.querySelectorAll('.event-rail-item')).toHaveLength(1);
@@ -144770,7 +145068,7 @@ index 39cc42d6..eaf7e394 100644
      data = { workflowEvents: [], workflowSnapshotComplete: true };
      await act(async () => { await vi.advanceTimersByTimeAsync(6500); });
      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
-@@ -496,7 +411,7 @@ describe('SOC dashboard contract page runtime', () => {
+@@ -496,7 +433,7 @@ describe('SOC dashboard contract page runtime', () => {
      const cards = container.querySelector('.ai-evidence-field') as HTMLElement;
      expect(within(cards).queryByText('旧任务')).not.toBeInTheDocument();
      expect(within(cards).getByText(/新任务-/)).toBeInTheDocument();
@@ -144779,7 +145077,7 @@ index 39cc42d6..eaf7e394 100644
    });
  
    it('does not expire a long-running task whose unchanged status is still confirmed by polls', async () => {
-@@ -545,6 +460,244 @@ describe('SOC dashboard contract page runtime', () => {
+@@ -545,6 +482,258 @@ describe('SOC dashboard contract page runtime', () => {
      expect(container.querySelectorAll('.event-rail-item')).toHaveLength(0);
    });
  
@@ -144839,7 +145137,21 @@ index 39cc42d6..eaf7e394 100644
 +    expect(container.querySelector('.ai-step-card.kind-triage')).toHaveTextContent('100');
 +    expect(container.querySelector('.ai-step-card.kind-triage')).not.toHaveTextContent('5%');
 +    expect(container.querySelectorAll('.ai-pipeline-track')).toHaveLength(0);
-+    expect(container.querySelector('details.ai-execution-details')).not.toHaveAttribute('open');
++    expect(container.querySelector('details.ai-execution-details')).toHaveAttribute('open');
++  });
++
++  it('shows eight simultaneous denoise executions together with triage', async () => {
++    mockActivity(() => ({ workflowEvents: [
++      ...Array.from({ length: 8 }, (_, i) => workflowEvent(`parallel-${i}`, 'running', {
++        live: { nodeId: 'normalize' },
++      })),
++      workflowEvent('triage-parallel', 'running', { stage: 'triage', workflowId: 'stream_alert_triage',
++        live: { nodeId: 'concurrent_triage' } }),
++    ] }));
++    const { container } = render(<Page />);
++    await waitFor(() => expect(container.querySelectorAll('.ai-step-card.kind-denoise')).toHaveLength(8));
++    expect(container.querySelectorAll('.ai-step-card.kind-triage')).toHaveLength(1);
++    expect(screen.getByText('9 批正在执行 · 每批独立展示')).toBeInTheDocument();
 +  });
 +
 +  it('updates the current card without duplicating the batch and transitions to the next step', async () => {
@@ -145066,10 +145378,10 @@ index 00000000..13b21006
 +});
 diff --git a/webui/src/utils/socStepCards.test.ts b/webui/src/utils/socStepCards.test.ts
 new file mode 100644
-index 00000000..e47e80d5
+index 00000000..bf6176b1
 --- /dev/null
 +++ b/webui/src/utils/socStepCards.test.ts
-@@ -0,0 +1,450 @@
+@@ -0,0 +1,449 @@
 +import { describe, expect, it } from 'vitest';
 +
 +import {
@@ -145184,14 +145496,13 @@ index 00000000..e47e80d5
 +    expect(state.batches.a.nodes).not.toContain('batch');
 +  });
 +
-+  it('bounds real batch fallbacks at six without creating unknown-step placeholders', () => {
++  it('shows every live batch fallback without creating unknown-step placeholders', () => {
 +    const unknown = Array.from({ length: 20 }, (_, i) => batch(`unknown-${i}`));
 +    const known = Array.from({ length: STEP_CARD_LIMIT }, (_, i) => batch(`known-${i}`, { node: 'normalize' }));
 +    const state = advanceStepStream(createStepStream(), [...unknown, ...known], true, NOW);
-+    expect(state.cards).toHaveLength(STEP_CARD_LIMIT);
-+    expect(state.cards.every(card => card.nodeId === 'batch')).toBe(true);
-+    expect(Object.keys(state.batches)).toHaveLength(STEP_CARD_LIMIT);
-+    expect(state.serial).toBe(STEP_CARD_LIMIT);
++    expect(state.cards).toHaveLength(unknown.length + known.length);
++    expect(state.cards.filter(card => card.nodeId === 'batch')).toHaveLength(unknown.length);
++    expect(Object.keys(state.batches)).toHaveLength(unknown.length + known.length);
 +  });
 +
 +  it.each(['processing', 'completed'])('preserves measured successful steps despite missing current node (%s)', stateName => {
@@ -145375,35 +145686,35 @@ index 00000000..e47e80d5
 +    expect(state.cards[0]).toMatchObject({ nodeId: 'normalize', phase: 'processing', serial: 1 });
 +  });
 +
-+  it('retains existing slots under burst traffic and caps concurrent cards at six', () => {
++  it('retains all existing live slots and adds every concurrent execution under burst traffic', () => {
 +    const tasks = Array.from({ length: 20 }, (_, i) => batch(`a${i}`, { node: 'normalize' }));
 +    let state = advanceStepStream(createStepStream(), tasks, true, NOW);
-+    expect(state.cards).toHaveLength(STEP_CARD_LIMIT);
++    expect(state.cards).toHaveLength(tasks.length);
 +    const keys = state.cards.map(card => card.task.key);
 +    const burst = Array.from({ length: 30 }, (_, i) => batch(`b${i}`, { node: 'filter_logs' }));
 +    state = advanceStepStream(state, [...burst, ...tasks], true, NOW + 50);
-+    expect(state.cards.map(card => card.task.key)).toEqual(keys);
-+    expect(Object.keys(state.batches)).toHaveLength(STEP_CARD_LIMIT);
++    expect(state.cards.map(card => card.task.key)).toEqual([...keys, ...burst.map(task => task.key)]);
++    expect(Object.keys(state.batches)).toHaveLength(tasks.length + burst.length);
 +  });
 +
-+  it('reserves three slots per category when long-running triage and completed denoise both need display', () => {
++  it('shows all live triage alongside a bounded number of completed denoise replays', () => {
 +    const triage = Array.from({ length: 6 }, (_, i) => batch(`t${i}`, { stage: 'triage', node: 'concurrent_triage' }));
 +    const denoise = Array.from({ length: 10 }, (_, i) => batch(`d${i}`, { state: 'completed' }));
 +    const state = advanceStepStream(createStepStream(), [...triage, ...denoise], true, NOW);
-+    expect(state.cards).toHaveLength(6);
-+    expect(state.cards.filter(card => card.task.stage === 'triage')).toHaveLength(3);
-+    expect(state.cards.filter(card => card.task.stage === 'denoise')).toHaveLength(3);
++    expect(state.cards).toHaveLength(6 + STEP_CARD_LIMIT);
++    expect(state.cards.filter(card => card.task.stage === 'triage')).toHaveLength(6);
++    expect(state.cards.filter(card => card.task.stage === 'denoise')).toHaveLength(STEP_CARD_LIMIT);
 +  });
 +
-+  it('rotates surplus cards when the other category arrives without marking the running nodes complete', () => {
++  it('keeps every running card when another category arrives', () => {
 +    const triage = Array.from({ length: 6 }, (_, i) => batch(`t${i}`, { stage: 'triage', node: 'concurrent_triage' }));
 +    const denoise = Array.from({ length: 3 }, (_, i) => batch(`d${i}`, { state: 'completed' }));
 +    let state = advanceStepStream(createStepStream(), triage, true, NOW);
 +    expect(state.cards).toHaveLength(6);
 +    state = advanceStepStream(state, [...triage, ...denoise], true, NOW + 100);
-+    expect(state.cards.filter(card => card.outcome === 'yielded')).toHaveLength(3);
++    expect(state.cards.filter(card => card.outcome === 'yielded')).toHaveLength(0);
 +    state = advanceStepStream(state, [...triage, ...denoise], true, NOW + 100 + STEP_EXIT_MS);
-+    expect(state.cards.filter(card => card.task.stage === 'triage')).toHaveLength(3);
++    expect(state.cards.filter(card => card.task.stage === 'triage')).toHaveLength(6);
 +    expect(state.cards.filter(card => card.task.stage === 'denoise')).toHaveLength(3);
 +    expect(state.batches.t3.nodes).toEqual([]);
 +    expect(state.batches.t4.nodes).toEqual([]);
@@ -145477,12 +145788,12 @@ index 00000000..e47e80d5
 +        }));
 +      }
 +      state = advanceStepStream(state, [...triage, ...denoise], true, NOW + elapsed);
-+      expect(state.cards.length).toBeLessThanOrEqual(STEP_CARD_LIMIT);
++      expect(state.cards.length).toBeLessThanOrEqual(STEP_CARD_LIMIT + 6);
 +      expect(Object.keys(state.batches).length).toBeLessThanOrEqual(128);
 +      expect(new Set(state.cards.map(card => card.task.key)).size).toBe(state.cards.length);
 +      if (elapsed >= STEP_EXIT_MS) {
-+        expect(state.cards.filter(card => card.task.stage === 'triage')).toHaveLength(3);
-+        expect(state.cards.filter(card => card.task.stage === 'denoise')).toHaveLength(3);
++        expect(state.cards.filter(card => card.task.stage === 'triage')).toHaveLength(6);
++        expect(state.cards.filter(card => card.task.stage === 'denoise').length).toBeLessThanOrEqual(STEP_CARD_LIMIT);
 +      }
 +      state.cards.filter(card => card.task.stage === 'denoise').forEach(card => seenDenoise.add(card.task.key));
 +    }
