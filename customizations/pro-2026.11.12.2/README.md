@@ -1,12 +1,12 @@
 # Flocks Pro 2026.11.12.2 定制增强包
 
-增强包版本：1.14.5。仅适用于 `2026.11.12.2-linux-amd64`、Pro 构建 `2ee622b`、Core `730da689`，运行树保护策略必须为 `native`。
+增强包版本：1.14.6。仅适用于 `2026.11.12.2-linux-amd64`、Pro 构建 `2ee622b`、Core `730da689`，运行树保护策略必须为 `native`。
 
 ## 开发与部署方式
 
 增强直接合入 `zw_dev` 的 Core 源码，以本发行版配对的 Core `730da689` 为上游基线。打包时根据该基线与增强提交之间的差异，收集 Python 源码、内置组件和配对的 Pro 前端产物。
 
-本包源码提交：[`dddae2af`](https://github.com/AgentFlocks/flocksdev/commit/dddae2aff4bab9d468a61755bd0d331288d0b284)，保留原 `zw_dev` 与发行版基线的开发历史。
+本包源码提交：[`2a822d74`](https://github.com/AgentFlocks/flocksdev/commit/2a822d744c546f1037bc2ddbe0f64db95d9325b3)，保留原 `zw_dev` 与发行版基线的开发历史。
 
 交付形式仍是独立增强包。解压到 `~/.flocks/customizations/` 后，安装器校验并备份原文件，然后直接修改 `~/flockspro/current/runtime/flocks/` 中实际运行的 Core 源码，以及 `runtime/webui-dist/` 中的界面文件。`customizations` 用于保存安装器、部署文件和备份；服务启动时加载的是受管发布中的增强源码。
 
@@ -34,17 +34,17 @@ https://gitee.com/flocks/flocks/repository/archive/fix/process_11.12_en
 
 已装补丁 A 时，脚本核对 A 的部署记录和当前文件，再直接写入补丁 B。B 删除的旧补丁文件会清理，不再修改的原版文件恢复发行基线；保留配置、状态及历史备份。部署失败自动退回 A；B 启动失败时也会回退本次代码更新，并尝试重新启动此前运行的服务。未知手工源码改动会被保留并报告。自动升级以补丁声明的 Pro 发行基线为准。
 
-若继续使用手工压缩包方式，把 `flocks-customizations-1.14.5-pro-2026.11.12.2-full.tar.gz` 上传到服务器家目录，再整行执行：
+若继续使用手工压缩包方式，把 `flocks-customizations-1.14.6-pro-2026.11.12.2-full.tar.gz` 上传到服务器家目录，再整行执行：
 
 ```bash
-flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks-customizations-1.14.5-pro-2026.11.12.2-full.tar.gz" -C "$HOME/.flocks/customizations" && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root "$HOME/flockspro" apply --install-deps && flocks start --no-browser --webui-host 0.0.0.0
+flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks-customizations-1.14.6-pro-2026.11.12.2-full.tar.gz" -C "$HOME/.flocks/customizations" && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root "$HOME/flockspro" apply --install-deps && flocks start --no-browser --webui-host 0.0.0.0
 ```
 
 解压目录和安装器都在 `~/.flocks/customizations/`，不需要额外的家目录工作文件夹。补丁目标是当前受管 Pro 发布；旧的 `$HOME/flocks` 不参与安装。
 
 前端已经使用原版 Pro 扩展注册表编译。`--install-deps` 保留原命令习惯，本包不需要在服务器上运行 npm、uv 或修改 Pro 的 Python 依赖环境。
 
-若已安装的告警运营套件在“添加场景”中显示“有更新”，点击更新，以将该套件的已安装页面同步到新版统一存储接口。安全运营监测使用原生监测页面，`/report`、`/reports` 都进入报告页。
+仅需同步 SOC 页面时，在“Agent车间 → 待加载插件库”更新“SOC Workspace WebUI”。整套“告警运营套件”更新还会替换需更新的工作流、查询工具及其他组件，应先检查覆盖清单与备份。安全运营监测使用原生监测页面，`/report`、`/reports` 都进入报告页。
 
 ## 内容与存储
 
@@ -102,7 +102,7 @@ flocks stop && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root
 
 大屏在同一浏览器页面会话内缓存最近访问的时间范围、统计及执行记录。返回时立即恢复已有数值，再后台请求最新数据；离开超过 5 分钟不再复用缓存。缓存按账号和时间范围隔离，仅保存在内存中，浏览器整页刷新后重新加载。
 
-安装补丁后，在“Agent车间 → 待加载插件库”中更新“SOC Workspace WebUI”（SOC 页面版本 1.18.1），或在场景管理中更新“告警运营套件”，再刷新浏览器，使已安装的 SOC 页面同步到增强版。套件更新仍保留原有修改检测及备份。
+首次同步 1.14.3 的界面优化时，在“Agent车间 → 待加载插件库”中单独更新“SOC Workspace WebUI”（SOC 页面版本 1.18.1），再刷新浏览器。整套更新会同时更新工作流和工具；仅需界面更新时不要用整套更新替代。本次 1.14.6 解析修复只需运行增强包更新脚本，不需要再次更新页面或套件。
 
 增强包同时更新配对 Pro 的 SOC 页面模板，只替换告警态势源码及入口元数据；保留 Pro 的事件管理页面、工具依赖与权限声明。该文本资源仍经原发行签名清单哈希核验、备份、失败回滚和还原，不修改解释器或原生模块。
 
@@ -129,3 +129,13 @@ SQLite 监测读取不再每次执行建表、迁移和 BEGIN IMMEDIATE。按数
 任务中心的安全运营监测失败详情仅展示本轮阻断原因，保留设备与事件定位；不再重复展示轮次统计、历史待办、邮件说明或恢复长文。历史错误仍完整保存，未知格式保留原文；未确认动作的调用清单默认折叠，原重试安全规则保持有效。模型超时属于调查执行阻断，等待回信、历史退避和业务待人工核对不作为新的阻断原因。
 
 1.14.5 已在现有 5173 Pro 实例以两条隔离失败记录验收：模型超时仅显示设备/事件/90秒超时，认证失败仅显示HTTP 401并排除历史模型故障；160条调用默认收起且可展开，刷新显示一致，真实任务接口保留完整原始错误。489个部署文件校验匹配，重复安装不重启，验收数据和临时入口已清理，原版基线已还原并健康运行。任务中心64项回归及类型检查通过；Linux目标机仍需安装后验证。
+
+## 1.14.6 SOC Syslog 数据接收修复
+
+远程取证显示输入映射正确，接收节点与发行版一致；正文前有 ISO 时间、主机名和程序路径，后面的 JSON 对象完整，但整段作为 JSON 解码时在第 4 个字符报 Extra data，导致原接收节点以 0 条告警继续执行。
+
+通用 Syslog 解析器现在也在显式 rfc3164 模式下识别 ISO 时间头，并兼容 PRI 后空白、时间小数秒及无 PRI 的 ISO 头。只剥离完整匹配的日志头，保留原始报文和 JSON 正文，不从未知字符串中任意截取 JSON。原 RFC3164、RFC5424 和 Sangfor SE 行为继续回归。
+
+本次补丁不更新已安装的工作流、工具或场景；不改阈值、字段映射、监听端口或业务数据库。更新增强包后即使用新解析器，不需要再点击“告警运营套件”的整套更新。既有套件更新备份位于用户数据目录的 hub/backups 下；未经核对备份内容不要用整树还原覆盖当前配置。
+
+本机 5173 中，显式 RFC3164、自动模式含 PRI 空白、小数秒时间头三种合成报文均通过真实 UDP 进入原版接收节点，raw_count=1；490 个运行文件哈希匹配，重复更新不重启，验收入口及临时内容清理后恢复原版并健康运行。已安装的降噪/研判工作流及查询工具源文件哈希保持不变。86 项解析/监听/接收回归及 55 项安装更新回归通过。详细记录见 verification.json。远程应用仍由用户同步 Gitee 同名分支后执行 bash update-flocks.sh，远程效果待用户回传确认。

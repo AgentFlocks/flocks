@@ -84924,6 +84924,56 @@ index 7aa17ff1..a85453c8 100644
              log.warning(
                  "syslog.trigger_dispatch_failed",
                  {"workflow_id": workflow_id, "trigger_id": trigger.id, "error": str(exc)},
+diff --git a/flocks/ingest/syslog/parser.py b/flocks/ingest/syslog/parser.py
+index 2e16d39c..f3391b11 100644
+--- a/flocks/ingest/syslog/parser.py
++++ b/flocks/ingest/syslog/parser.py
+@@ -16,7 +16,7 @@ _RFC3164_REST_RE = re.compile(
+ )
+ # Non-standard but common: <PRI>ISO_TS HOSTNAME APP[PID]: msg  (no RFC5424 version)
+ _ISO3164_REST_RE = re.compile(
+-    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?)"  # ISO timestamp
++    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?)"
+     r"\s+(\S+)"                                                           # hostname
+     r"\s+(\S+?)\s*:\s*"                                                   # app_name/tag:
+     r"([\s\S]*)$",                                                        # message
+@@ -91,6 +91,10 @@ def parse_syslog(raw: str, format_hint: str = "auto") -> Dict[str, Any]:
+     if not m_pri:
+         if format_hint == "se" or (format_hint == "auto" and _looks_like_se(text)):
+             return _parse_se(text, raw=original_text, facility=1, severity=6)
++        if format_hint in ("auto", "rfc3164"):
++            iso = _ISO3164_REST_RE.match(text)
++            if iso:
++                return _parse_iso3164(iso, raw=original_text, facility=0, severity=0)
+         return {
+             "raw": text,
+             "facility": 0,
+@@ -118,11 +122,6 @@ def parse_syslog(raw: str, format_hint: str = "auto") -> Dict[str, Any]:
+         first_space = rest.find(" ")
+         if first_space > 0 and rest[:first_space].isdigit():
+             return _parse_rfc5424(rest, raw=text, facility=facility, severity=severity)
+-        # Non-standard: <PRI>ISO_TS HOSTNAME APP[PID]: msg (no version number)
+-        if first_space > 0 and "T" in rest[:first_space]:
+-            m_iso = _ISO3164_REST_RE.match(rest)
+-            if m_iso:
+-                return _parse_iso3164(m_iso, raw=text, facility=facility, severity=severity)
+ 
+     return _parse_rfc3164(rest, raw=text, facility=facility, severity=severity)
+ 
+@@ -292,6 +291,13 @@ def _parse_rfc3164(
+     facility: int,
+     severity: int,
+ ) -> Dict[str, Any]:
++    # Forwarders commonly use an ISO timestamp with a BSD TAG rather than a
++    # versioned RFC5424 header. Recognize it even when the listener explicitly
++    # selects rfc3164, or whitespace follows PRI. Never search for arbitrary
++    # JSON: only remove a complete, recognized syslog envelope.
++    iso = _ISO3164_REST_RE.match(rest.strip())
++    if iso:
++        return _parse_iso3164(iso, raw=raw, facility=facility, severity=severity)
+     m = _RFC3164_REST_RE.match(rest.strip())
+     if m:
+         ts = m.group(1)
 diff --git a/flocks/monitoring/__init__.py b/flocks/monitoring/__init__.py
 new file mode 100644
 index 00000000..9ffea4dc
@@ -108031,6 +108081,44 @@ index 29750f05..c26e0abb 100644
 +    with pytest.raises(RuntimeError, match="execution_persist_failed"):
 +        await manager._trigger_workflow("wf", {}, {"message": "one"}, "message")
 +    run.assert_called_once()
+diff --git a/tests/ingest/test_syslog_parser.py b/tests/ingest/test_syslog_parser.py
+index 23adce2d..3276831b 100644
+--- a/tests/ingest/test_syslog_parser.py
++++ b/tests/ingest/test_syslog_parser.py
+@@ -150,3 +150,33 @@ def test_existing_rfc5424_json_remains_unchanged() -> None:
+     assert parsed["format"] == "rfc5424"
+     assert parsed["message"] == '{"id":1}'
+     assert parsed["app_name"] == "sensor"
++
++
++@pytest.mark.parametrize("hint", ["auto", "rfc3164"])
++@pytest.mark.parametrize("pri", ["<14>", "<14> ", ""])
++@pytest.mark.parametrize("timestamp", [
++    "2026-11-12T19:52:58+08:00",
++    "2026-11-12T19:52:58.067123+08:00",
++    "2026-11-12T11:52:58.067Z",
++])
++def test_iso_timestamp_and_path_tag_are_separated_from_json(hint, pri, timestamp) -> None:
++    body = json.dumps({"id": "fixture", "evidence": "literal : {value} " + "x" * 11600})
++    raw = f"{pri}{timestamp} appliance-host /opt/vendor/bin/logsender[1]: {body}"
++
++    parsed = parse_syslog(raw, hint)
++
++    assert parsed["raw"] == raw
++    assert parsed["format"] == "iso3164"
++    assert parsed["hostname"] == "appliance-host"
++    assert parsed["app_name"] == "/opt/vendor/bin/logsender"
++    assert parsed["pid"] == "1"
++    assert parsed["timestamp"].startswith("2026-11-12T")
++    assert parsed["message"] == body
++    assert json.loads(parsed["message"])["id"] == "fixture"
++
++
++def test_unknown_text_with_embedded_json_is_not_silently_reinterpreted() -> None:
++    raw = '<14>unknown prefix: {"id":"fixture"} trailing text'
++    parsed = parse_syslog(raw)
++    assert parsed["format"] == "rfc3164"
++    assert parsed["message"] == raw[4:]
 diff --git a/tests/monitoring/conftest.py b/tests/monitoring/conftest.py
 new file mode 100644
 index 00000000..dde000c6
@@ -124113,6 +124201,39 @@ index 00000000..1ab005dc
 +    assert live['phase'] == ('cancelled' if isinstance(error, asyncio.CancelledError) else 'failed')
 +    assert live['metrics']['rawCount'] is None and live['stepCount'] == 0
 +    assert 'secret' not in json.dumps(live)
+diff --git a/tests/workflow/test_stream_alert_denoise_syslog.py b/tests/workflow/test_stream_alert_denoise_syslog.py
+new file mode 100644
+index 00000000..70bbde7d
+--- /dev/null
++++ b/tests/workflow/test_stream_alert_denoise_syslog.py
+@@ -0,0 +1,27 @@
++"""Receive the real suite's JSON input after decoding forwarded ISO syslog."""
++import json
++from pathlib import Path
++
++import pytest
++
++from flocks.ingest.syslog.parser import parse_syslog
++
++
++@pytest.mark.parametrize("hint", ["auto", "rfc3164"])
++@pytest.mark.parametrize("pri", ["<14>", "<14> ", ""])
++def test_installed_receive_definition_gets_one_alert_from_iso_envelope(hint, pri):
++    workflow = Path(__file__).resolve().parents[2] / ".flocks/flockshub/plugins/workflows/stream_alert_denoise/workflow.json"
++    definition = json.loads(workflow.read_text())
++    receive = next(node for node in definition["nodes"] if node["id"] == "receive_alert")
++    alert = {"id": "syslog-iso-fixture", "evidence": "x" * 11600}
++    raw = f"{pri}2026-11-12T19:52:58+08:00 appliance-host /opt/vendor/bin/logsender[1]: " + json.dumps(alert)
++    outputs = {}
++
++    exec(compile(receive["code"], "receive_alert", "exec"),
++         {"inputs": {"syslog_message": parse_syslog(raw, hint)}, "outputs": outputs})
++
++    assert outputs["stats"]["raw_count"] == 1
++    assert outputs["input_mode"] == "syslog"
++    assert outputs["raw_alerts"][0]["id"] == alert["id"]
++    assert outputs["raw_alerts"][0]["evidence"] == alert["evidence"]
++    assert outputs["raw_alerts"][0]["_syslog_meta"]["hostname"] == "appliance-host"
 diff --git a/tests/workflow/test_workflow_store.py b/tests/workflow/test_workflow_store.py
 index da61b337..9f692d76 100644
 --- a/tests/workflow/test_workflow_store.py
