@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 
 import ModelPage from './index';
-import { renderWithRouter } from '@/test/helpers';
+import { backendError, renderWithRouter } from '@/test/helpers';
 
 const mocks = vi.hoisted(() => ({
   toast: {
@@ -739,6 +739,37 @@ describe('ModelPage configure provider dialog', () => {
     await user.click(sheet.getByRole('tab', { name: 'discovery.manual' }));
     expect(sheet.getByText('form.modelId')).toBeVisible();
     expect(mocks.setCredentials).not.toHaveBeenCalled();
+  });
+
+  async function submitHandTypedModel(user: ReturnType<typeof userEvent.setup>) {
+    renderWithRouter(<ModelPage />);
+    const sheet = await openAddModelDialog(user);
+    await user.click(sheet.getByRole('tab', { name: 'discovery.manual' }));
+    await user.type(sheet.getByPlaceholderText('model-id'), 'dup-model');
+    await user.type(sheet.getByPlaceholderText('model-name'), 'Dup Model');
+    await user.click(sheet.getByRole('button', { name: 'form.addModelBtn' }));
+    return sheet;
+  }
+
+  it('says why a hand-typed model was refused instead of the bare status code', async () => {
+    mocks.createDefinition.mockRejectedValue(backendError(409, '模型 dup-model 已存在'));
+    const user = userEvent.setup(); await submitHandTypedModel(user);
+    await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledWith('operationFailed', '模型 dup-model 已存在'));
+  });
+
+  it('says why the check of a hand-typed model failed, and keeps its own wording when the service gives no reason', async () => {
+    mocks.createDefinition.mockResolvedValue({ data: { id: 'dup-model' } });
+    mocks.testCredentials.mockRejectedValue(backendError(502, '上游模型服务拒绝了这个模型'));
+    const user = userEvent.setup(); const sheet = await submitHandTypedModel(user);
+    expect(await sheet.findByText('上游模型服务拒绝了这个模型')).toBeInTheDocument();
+  });
+
+  it('does not show the transport error for a failed check the service gave no reason for', async () => {
+    mocks.createDefinition.mockResolvedValue({ data: { id: 'dup-model' } });
+    mocks.testCredentials.mockRejectedValue(new Error('Network Error'));
+    const user = userEvent.setup(); const sheet = await submitHandTypedModel(user);
+    expect(await sheet.findByText('Request failed')).toBeInTheDocument();
+    expect(sheet.queryByText('Network Error')).not.toBeInTheDocument();
   });
 });
 

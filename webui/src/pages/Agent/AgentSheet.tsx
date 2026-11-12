@@ -22,6 +22,7 @@ import { providerAPI, defaultModelAPI, modelV2API } from '@/api/provider';
 import { toolAPI, Tool } from '@/api/tool';
 import { skillAPI, Skill } from '@/api/skill';
 import type { ModelDefinitionV2 } from '@/types';
+import { extractErrorMessage } from '@/utils/error';
 
 interface AvailableModel {
   providerID: string;
@@ -208,7 +209,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       onSaved();
       onClose();
     } catch (err: any) {
-      alert(t('error.updateFailed', { detail: err.response?.data?.detail ?? err.message }));
+      alert(t('error.updateFailed', { detail: extractErrorMessage(err, '') }));
     } finally {
       setLoading(false);
     }

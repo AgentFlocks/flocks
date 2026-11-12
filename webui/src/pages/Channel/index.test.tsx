@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import ChannelPage from './index';
+import { backendError } from '@/test/helpers';
 
 const { client, toast, useAgents } = vi.hoisted(() => ({
   client: {
@@ -421,6 +422,54 @@ describe('ChannelPage error surfacing', () => {
       expect(toast.success).toHaveBeenCalledWith('restartSuccess');
     });
     expect(client.post).toHaveBeenCalledWith('/api/channel/feishu/restart', {}, { timeout: 5000 });
+  });
+});
+
+describe('ChannelPage pairing failures', () => {
+  const capabilities = { chat_types: ['direct'], media: true, threads: false, reactions: false, edit: false, rich_text: false };
+
+  function serveChannel(id: string, saved: Record<string, unknown>) {
+    client.get.mockImplementation((url: string) => {
+      if (url === '/api/channel/list') {
+        return Promise.resolve({ data: [{ id, label: id, aliases: [], capabilities, running: false }] });
+      }
+      if (url === '/api/config') return Promise.resolve({ data: { channels: { [id]: saved } } });
+      if (url === '/api/channel/status') return Promise.resolve({ data: {} });
+      return Promise.reject(new Error(`Unexpected GET ${url}`));
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useAgents.mockReturnValue({ agents: [] });
+    client.patch.mockResolvedValue({ data: {} });
+  });
+
+  it('says why a Telegram pairing code was refused', async () => {
+    serveChannel('telegram', { enabled: true, botToken: 'token', allowFrom: ['1001'] });
+    client.post.mockRejectedValue(backendError(400, '配对码无效或已过期'));
+    const user = userEvent.setup();
+    render(<ChannelPage />);
+
+    await user.type(await screen.findByPlaceholderText('telegram.pairingCodePlaceholder'), 'abc123');
+    await user.click(screen.getByRole('button', { name: 'telegram.pairingButton' }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('telegram.pairingError', '配对码无效或已过期');
+    });
+    expect(client.post).toHaveBeenCalledWith('/api/channel/telegram/pair', { code: 'ABC123' });
+  });
+
+  it('says why the Weixin QR login could not start', async () => {
+    serveChannel('weixin', { enabled: true });
+    client.post.mockRejectedValue(backendError(502, '无法连接微信 iLink 服务'));
+    const user = userEvent.setup();
+    render(<ChannelPage />);
+
+    await user.click(await screen.findByRole('button', { name: /weixin.qrLoginButton/ }));
+
+    expect(await screen.findByText('无法连接微信 iLink 服务')).toBeInTheDocument();
+    expect(screen.queryByText(/status code 502/)).not.toBeInTheDocument();
   });
 });
 

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { agentAPI, Agent } from '@/api/agent';
+import { extractErrorMessage } from '@/utils/error';
 
 // ============================================================================
 // Create Agent Dialog
@@ -107,7 +108,7 @@ export function EditAgentDialog({
       // onClose is called by the parent via onUpdated → setEditingAgent(null);
       // calling it here again would set state on an already-unmounted component.
     } catch (err: any) {
-      alert(t('agent:error.updateFailed', { detail: err.response?.data?.detail ?? err.message }));
+      alert(t('agent:error.updateFailed', { detail: extractErrorMessage(err, '') }));
     } finally {
       setLoading(false);
     }
