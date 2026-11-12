@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import ssl
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlsplit
@@ -98,6 +99,18 @@ def _error_facts(error: BaseException) -> str:
     return "，".join(facts)
 
 
+def _cert_verification_error(error: BaseException) -> Optional[ssl.SSLCertVerificationError]:
+    """The failed certificate check behind *error* (itself, or what it was raised from), if any."""
+    seen: set[int] = set()
+    current: Optional[BaseException] = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def _describe_sdk_error(error: BaseException, ws_url: str) -> str:
     """What the channel status shows for an SDK ``error`` event: the cause, then type and codes only."""
     if _is_auth_failure(error):
@@ -106,6 +119,19 @@ def _describe_sdk_error(error: BaseException, ws_url: str) -> str:
         return (
             "企业微信机器人鉴权失败：请在企业微信管理后台核对智能机器人的 Bot ID 和 Secret，"
             "Secret 重置过的要在这里重新填写并保存。"
+            f"{facts}，{_SEE_SERVER_LOG}"
+        )
+    cert_error = _cert_verification_error(error)
+    if cert_error is not None:
+        # The address answered: the network and the proxy are not what to check.
+        facts = _error_facts(cert_error)
+        verify_code = getattr(cert_error, "verify_code", None)
+        if isinstance(verify_code, int):
+            facts += f"，证书校验错误码 {verify_code}"
+        return (
+            f"连接企业微信长连接服务（{_shown_ws_url(ws_url)}）时证书校验没通过："
+            "这台服务器信任的根证书验证不了对方的证书。请确认系统装了根证书包（ca-certificates）；"
+            "网络里有会替换 HTTPS 证书的代理或安全设备的，要把它的根证书加进系统信任。"
             f"{facts}，{_SEE_SERVER_LOG}"
         )
     return (

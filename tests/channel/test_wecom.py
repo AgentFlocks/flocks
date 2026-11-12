@@ -720,6 +720,75 @@ class TestWeComConnectionStatus:
         assert "ECHOED" not in refused
         assert "wecom.ws.error" in refused  # where the full error is
 
+    @staticmethod
+    def _cert_failure():
+        import ssl
+
+        # As the ssl module raises it when no root certificate vouches for the server's.
+        error = ssl.SSLCertVerificationError(
+            1,
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+            "unable to get local issuer certificate (_ssl.c:1010)",
+        )
+        error.verify_code = 20
+        error.verify_message = "unable to get local issuer certificate"
+        return error
+
+    def test_certificate_failure_points_at_root_certificates_not_the_network(self):
+        from flocks.channel.builtin.wecom.channel import _describe_sdk_error
+
+        shown = _describe_sdk_error(self._cert_failure(), "wss://openws.work.weixin.qq.com")
+
+        assert "（wss://openws.work.weixin.qq.com）时证书校验没通过" in shown
+        assert "ca-certificates" in shown
+        assert "根证书加进系统信任" in shown
+        assert "错误类型 SSLCertVerificationError，errno 1，证书校验错误码 20" in shown
+        assert "wecom.ws.error" in shown
+        # Not the hint for an address the server cannot reach.
+        assert "请确认服务器能访问这个地址" not in shown
+        assert "检查代理设置" not in shown
+        assert "_ssl.c" not in shown
+
+    def test_certificate_failure_is_found_behind_a_wrapping_error(self):
+        from flocks.channel.builtin.wecom.channel import _describe_sdk_error
+
+        try:
+            try:
+                raise self._cert_failure()
+            except Exception as cause:
+                raise RuntimeError("websocket connect failed") from cause
+        except RuntimeError as wrapped:
+            shown = _describe_sdk_error(wrapped, "wss://gw.example/ws")
+
+        assert "时证书校验没通过" in shown
+        assert "错误类型 SSLCertVerificationError" in shown
+        assert "websocket connect failed" not in shown
+
+    def test_other_ssl_errors_keep_the_reachability_hint(self):
+        import ssl
+
+        from flocks.channel.builtin.wecom.channel import _describe_sdk_error
+
+        shown = _describe_sdk_error(ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number"), "wss://gw.example/ws")
+
+        assert "证书校验没通过" not in shown
+        assert "请确认服务器能访问这个地址" in shown
+        assert "错误类型 SSLError" in shown
+
+    async def test_reconnect_timeout_names_the_certificate_failure(self):
+        ch = WeComChannel()
+        client = object()
+        ch._ws_client = client
+
+        ch._handle_error(self._cert_failure(), client=client)
+        assert "证书校验没通过" in (ch.status.last_error or "")
+        assert not ch._failure_event.is_set()  # the SDK keeps retrying; a fixed trust store recovers
+
+        message = ch._reconnect_timeout_message()
+        assert message.startswith("WeCom reconnect timed out after")
+        assert "证书校验没通过" in message
+        assert "检查代理设置" not in message
+
     @pytest.mark.parametrize(
         ("url", "shown"),
         [
