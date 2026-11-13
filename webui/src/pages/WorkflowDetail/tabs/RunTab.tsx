@@ -601,7 +601,7 @@ function TestSection({
       onExecutionChange?.(res.data);
     } catch (err: any) {
       setRunning(false);
-      const msg = err?.response?.data?.detail || err?.message || t('detail.run.runFailed');
+      const msg = extractErrorMessage(err, t('detail.run.runFailed'));
       onExecutionChange?.({
         id: '',
         workflowId: workflow.id,

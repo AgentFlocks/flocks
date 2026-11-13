@@ -5,6 +5,7 @@ import { Link, MemoryRouter } from 'react-router-dom';
 import SessionHistoryPanel, { sessionIdFromLocation } from './SessionHistoryPanel';
 import { useSSE } from '@/hooks/useSSE';
 import { noteSessionListChange } from '@/hooks/useSessions';
+import { backendError } from '@/test/helpers';
 
 const {
   apiGet, apiDelete, apiPost, sessionApi, useSessionsMock, navigateMock,
@@ -189,6 +190,66 @@ describe('SessionHistoryPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'history.newSessionIn:产品设计' }));
     await waitFor(() => expect(sessionApi.create).toHaveBeenCalledWith({ title: 'New Session', projectID: 'prj_a' }));
     await waitFor(() => expect(navigateMock).toHaveBeenCalledWith('/sessions/s_new'));
+  });
+
+  it('says why a session could not be created in a folder', async () => {
+    sessionApi.create.mockRejectedValue(backendError(403, '该项目目录已不可用，不能新建会话'));
+    renderPanel();
+    await waitFor(() => expect(screen.getByText('产品设计')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: 'history.newSessionIn:产品设计' }));
+
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith(
+      'history.createSessionFailed',
+      '该项目目录已不可用，不能新建会话',
+    ));
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+
+  it('shows the message of a structured refusal when a session could not be created', async () => {
+    // What POST /api/session answers once the licence has lapsed (flocks/server/routes/session.py).
+    sessionApi.create.mockRejectedValue(backendError(403, {
+      code: 'license_inactive', message: '授权已过期，请联系管理员续期', feature: 'session_create',
+    }));
+    renderPanel();
+    await waitFor(() => expect(screen.getByText('产品设计')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: 'history.newSessionIn:产品设计' }));
+
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith(
+      'history.createSessionFailed',
+      '授权已过期，请联系管理员续期',
+    ));
+  });
+
+  it('says why a session could not be moved to another folder', async () => {
+    sessionApi.moveToProject.mockRejectedValue(backendError(409, '会话正在运行，结束后才能移动'));
+    renderPanel();
+    await waitFor(() => expect(screen.getByText('s2')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: 'history.sessionActions:s2' }));
+    const menu = () => within(document.querySelector('[data-history-menu]') as HTMLElement);
+    fireEvent.click(menu().getByRole('button', { name: 'history.move' }));
+    fireEvent.click(menu().getByRole('button', { name: '产品设计' }));
+
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith('history.moveFailed', '会话正在运行，结束后才能移动'));
+    expect(sessionApi.moveToProject).toHaveBeenCalledWith('s2', 'prj_a');
+  });
+
+  it('says why a folder could not be removed or deleted', async () => {
+    apiDelete.mockRejectedValueOnce(backendError(403, '只有文件夹的所有者可以移除它'));
+    renderPanel();
+    await waitFor(() => expect(screen.getByText('产品设计')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: 'history.folderActions:产品设计' }));
+    fireEvent.click(screen.getByRole('button', { name: /history.removeFolder$/ }));
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith('history.removeFolderFailed', '只有文件夹的所有者可以移除它'));
+
+    apiDelete.mockRejectedValueOnce(backendError(409, '文件夹里还有正在运行的会话'));
+    fireEvent.click(screen.getByRole('button', { name: 'history.folderActions:产品设计' }));
+    fireEvent.click(screen.getByRole('button', { name: 'history.deleteFolder' }));
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith('history.deleteFolderFailed', '文件夹里还有正在运行的会话'));
+    expect(toastMock.success).not.toHaveBeenCalled();
   });
 
   it('removes a folder while keeping its sessions', async () => {

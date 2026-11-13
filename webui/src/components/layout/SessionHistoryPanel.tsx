@@ -38,6 +38,7 @@ import { exportSessionJson } from '@/utils/sessionExport';
 import ProjectFolderDialog, { pathBasename, type ProjectFolderSummary } from './ProjectFolderDialog';
 import { announceProjectsChanged, onProjectsChanged } from '@/utils/projectEvents';
 import { requestClock } from '@/utils/sharedRequest';
+import { extractErrorMessage } from '@/utils/error';
 
 // Sessions outside any registered folder are grouped as "未分类".
 const UNGROUPED_ID = 'tasks';
@@ -451,7 +452,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
       void refreshAll();
       openSession(created.id);
     } catch (err: any) {
-      toast.error(t('history.createSessionFailed'), err?.response?.data?.detail ?? err?.message);
+      toast.error(t('history.createSessionFailed'), extractErrorMessage(err, ''));
     } finally {
       setCreatingIn(null);
     }
@@ -499,8 +500,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
       toast.success(t('history.moved', { folder: folderLabel(folder) }));
       void refreshAll();
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      toast.error(t('history.moveFailed'), typeof detail === 'string' ? detail : err?.message);
+      toast.error(t('history.moveFailed'), extractErrorMessage(err, ''));
     }
   };
 
@@ -582,8 +582,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
       announceProjectsChanged('sidebar');
       void refreshAll();
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      toast.error(t('history.removeFolderFailed'), typeof detail === 'string' ? detail : err?.message);
+      toast.error(t('history.removeFolderFailed'), extractErrorMessage(err, ''));
     }
   };
 
@@ -648,8 +647,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
       announceProjectsChanged('sidebar');
       void refreshAll();
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      toast.error(t('history.deleteFolderFailed'), typeof detail === 'string' ? detail : err?.message);
+      toast.error(t('history.deleteFolderFailed'), extractErrorMessage(err, ''));
     }
   };
 

@@ -1159,7 +1159,7 @@ function LegacyMCPTabContent({
       await fetchServers();
       onRefreshTools();
     } catch (err: any) {
-      alert(t('alert.removeFailed', { error: err.response?.data?.detail ?? err.message }));
+      alert(t('alert.removeFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     }
   };
 
@@ -1267,7 +1267,7 @@ function LegacyMCPTabContent({
       onConfiguredChange(entryId);
       setCredModalEntry(null);
     } catch (err: any) {
-      alert(t('alert.configFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.configFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
       setInstalling(null);
       return;
     }
@@ -1281,7 +1281,7 @@ function LegacyMCPTabContent({
         alert(t('alert.mcpConfiguredDisabled', { name: entryName }));
       }
     } catch (err: any) {
-      alert(t('alert.connectFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.connectFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setInstalling(null);
     }
@@ -1297,7 +1297,7 @@ function LegacyMCPTabContent({
       shouldConnect = installRes.data?.config?.enabled !== false;
       onConfiguredChange(entry.id);
     } catch (err: any) {
-      alert(t('alert.configFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.configFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
       setInstalling(null);
       return;
     }
@@ -1311,7 +1311,7 @@ function LegacyMCPTabContent({
         alert(t('alert.mcpConfiguredDisabled', { name: entry.name }));
       }
     } catch (err: any) {
-      alert(t('alert.connectFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.connectFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setInstalling(null);
     }
@@ -1661,7 +1661,7 @@ function MCPServerDetailPanel({
     } catch (err: any) {
       setTestResult({
         success: false,
-        message: err.response?.data?.detail ?? err.message ?? t('detail.testFailed'),
+        message: extractErrorMessage(err, t('detail.testFailed')),
       });
     } finally {
       setTestingConnection(false);
@@ -1867,7 +1867,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
       const res = await toolAPI.test(tool.name, params);
       setTestResult({ success: res.data.success, data: res.data.output, error: res.data.error });
     } catch (err: any) {
-      setTestResult({ success: false, error: err.response?.data?.detail ?? err.message });
+      setTestResult({ success: false, error: extractErrorMessage(err, t('alert.unknownError')) });
     } finally {
       setTesting(false);
     }
@@ -2391,7 +2391,7 @@ function LegacyAPITabContent({
       onConfiguredChange(entryId);
       setCredModalEntry(null);
     } catch (err: any) {
-      alert(t('alert.configFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.configFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
       setInstalling(null);
       return;
     }
@@ -2405,7 +2405,7 @@ function LegacyAPITabContent({
         alert(t('alert.mcpConfiguredDisabled', { name: entryName }));
       }
     } catch (err: any) {
-      alert(t('alert.connectFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.connectFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setInstalling(null);
     }
@@ -2421,7 +2421,7 @@ function LegacyAPITabContent({
       shouldConnect = installRes.data?.config?.enabled !== false;
       onConfiguredChange(entry.id);
     } catch (err: any) {
-      alert(t('alert.configFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.configFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
       setInstalling(null);
       return;
     }
@@ -2435,7 +2435,7 @@ function LegacyAPITabContent({
         alert(t('alert.mcpConfiguredDisabled', { name: entry.name }));
       }
     } catch (err: any) {
-      alert(t('alert.connectFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.connectFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setInstalling(null);
     }

@@ -17,6 +17,7 @@ import type { MCPFormData, ConnStatus as MCPConnStatus } from '../ToolSheets';
 import type { APIServiceCredentialField, APIServiceMetadata, ProviderCredentials } from '@/types';
 import ThreatBookMCPConfigPanel from './ThreatBookMCPConfigPanel';
 import ThreatBookAPIConfigPanel from './ThreatBookAPIConfigPanel';
+import { extractErrorMessage } from '@/utils/error';
 
 function isThreatBookMCPServer(serverName: string): boolean {
   return serverName.trim().toLowerCase() === 'threatbook_mcp';
@@ -156,7 +157,7 @@ export function MCPServerDetailPanel({
     } catch (err: any) {
       setTestResult({
         success: false,
-        message: err.response?.data?.detail ?? err.message ?? t('detail.testFailed'),
+        message: extractErrorMessage(err, t('detail.testFailed')),
       });
     } finally {
       setSavingConfig(false);
@@ -177,7 +178,7 @@ export function MCPServerDetailPanel({
       await loadServerDetail();
       await onStatusChange?.();
     } catch (err: any) {
-      alert(t('alert.saveFailed', { error: err.response?.data?.detail ?? err.message ?? t('alert.unknownError') }));
+      alert(t('alert.saveFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setSavingConfig(false);
     }
@@ -206,7 +207,7 @@ export function MCPServerDetailPanel({
       await loadServerDetail();
       await onStatusChange?.();
     } catch (err: any) {
-      alert(t('alert.saveFailed', { error: err.response?.data?.detail ?? err.message ?? t('alert.unknownError') }));
+      alert(t('alert.saveFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setSavingConfig(false);
     }

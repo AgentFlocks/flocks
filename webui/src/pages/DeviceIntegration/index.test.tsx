@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 
 import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
 import DeviceIntegrationPage from './index';
+import { backendError } from '@/test/helpers';
 
 const mocks = vi.hoisted(() => ({
   toastSuccess: vi.fn(),
@@ -1017,6 +1018,39 @@ describe('DeviceIntegrationPage', () => {
       model: { providerID: 'openai', modelID: 'gpt-4.1' },
     })));
     expect(mocks.createAndSend.mock.calls[0][0].text).toContain('storage_key=onesig_v2_5_3_D20250710_api_v2_5_3_D20250710');
+  });
+
+  it.each([
+    ['the reason the service gave', backendError(403, '「onesig」需要单独授权后才能安装'), '「onesig」需要单独授权后才能安装'],
+    // No reason in the answer: its own wording, never the transport's "Network Error".
+    ['its own wording when the service gave none', new Error('Network Error'), '设备模板「onesig」安装失败'],
+    // The catch-all fault only says that it failed; the page's own wording says what did.
+    ['its own wording when the service only says it failed', Object.assign(new Error('Request failed with status code 500'), {
+      response: { status: 500, data: { error: 'InternalServerError', message: 'Internal server error' } },
+    }), '设备模板「onesig」安装失败'],
+  ])('reports a failed template install with %s', async (_name, error, expected) => {
+    const user = userEvent.setup();
+    mocks.listTemplates.mockResolvedValue({
+      data: [buildTemplate({
+        plugin_id: 'onesig_v2_5_3_D20250710',
+        storage_key: 'onesig_v2_5_3_D20250710_api_v2_5_3_D20250710',
+        service_id: 'onesig_v2_5_3_D20250710_api',
+        name: 'onesig',
+        version: '2.5.3 D20250710',
+        installed: false,
+        state: 'available',
+      })],
+    });
+    mocks.hubInstall.mockRejectedValue(error);
+
+    render(<DeviceIntegrationPage />);
+
+    await openSupportedDeviceList(user);
+    await user.click(screen.getByText('微步'));
+    await user.click(screen.getByText('onesig'));
+
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(expected));
+    expect(mocks.createAndSend).not.toHaveBeenCalled();
   });
 
   it('sends api guidance directly to Rex without opening a custom form', async () => {

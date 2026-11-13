@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import OnboardingModal from './OnboardingModal';
 import zhCNCommon from '@/locales/zh-CN/common.json';
+import { backendError } from '@/test/helpers';
 
 const {
   catalogAPI,
@@ -328,6 +329,50 @@ describe('OnboardingModal', () => {
         third_party_llm: expect.objectContaining({ provider_id: 'openai-compatible', api_key: 'retry-this-key' }),
       }),
     }));
+  });
+
+  it('says why the draft could not be saved when the service gives a reason', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    onboardingAPI.saveDraft.mockRejectedValueOnce(backendError(403, '只有管理员可以修改引导配置'));
+    renderOnboarding(onClose);
+
+    await screen.findByRole('button', { name: 'onboarding.bootstrap.savePrimary' });
+    await user.selectOptions(screen.getByRole('combobox'), 'openai-compatible');
+    await user.type(screen.getByPlaceholderText('onboarding.bootstrap.thirdPartyKeyPlaceholder'), 'some-key');
+    await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.dontShowAgain' }));
+
+    expect(await screen.findByText('只有管理员可以修改引导配置')).toBeInTheDocument();
+    expect(screen.queryByText('onboarding.bootstrap.saveError')).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('keeps its own wording when the service only says that saving the draft failed', async () => {
+    const user = userEvent.setup();
+    onboardingAPI.saveDraft.mockRejectedValueOnce(Object.assign(new Error('Request failed with status code 500'), {
+      response: { status: 500, data: { error: 'InternalServerError', message: 'Internal server error' } },
+    }));
+    renderOnboarding();
+
+    const key = await screen.findByPlaceholderText('onboarding.bootstrap.modelKeyPlaceholder');
+    await user.type(key, 'pending-model-key');
+    await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.nextStep' }));
+
+    expect(await screen.findByText('onboarding.bootstrap.saveError')).toBeInTheDocument();
+    expect(screen.queryByText('Internal server error')).not.toBeInTheDocument();
+  });
+
+  it('says why advancing to the next step could not save the draft', async () => {
+    const user = userEvent.setup();
+    onboardingAPI.saveDraft.mockRejectedValueOnce(backendError(503, '数据库当前只读，暂时不能保存'));
+    renderOnboarding();
+
+    const key = await screen.findByPlaceholderText('onboarding.bootstrap.modelKeyPlaceholder');
+    await user.type(key, 'pending-model-key');
+    await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.nextStep' }));
+
+    expect(await screen.findByText('数据库当前只读，暂时不能保存')).toBeInTheDocument();
+    expect(screen.queryByText('onboarding.bootstrap.intelPageTitle')).not.toBeInTheDocument();
   });
 
   it('prevents input changes and duplicate actions while the next-step draft save is pending', async () => {

@@ -5,6 +5,7 @@ import { sessionApi } from '@/api/session';
 import { useToast } from '@/components/common/Toast';
 import PageHeader from '@/components/common/PageHeader';
 import type { Session } from '@/types';
+import { extractErrorMessage } from '@/utils/error';
 
 const PAGE_SIZE = 50;
 const SYSTEM_SESSION_OWNER_USER_ID = 'api-token-service';
@@ -82,7 +83,7 @@ export default function ArchivedDataPanel() {
       if (!append) setSelectedIds(new Set());
     } catch (err: any) {
       if (requestSeq !== requestSeqRef.current) return;
-      setError(err?.response?.data?.detail || err?.message || t('archivedData.loadFailed'));
+      setError(extractErrorMessage(err, t('archivedData.loadFailed')));
     } finally {
       if (requestSeq === requestSeqRef.current) {
         setLoading(false);

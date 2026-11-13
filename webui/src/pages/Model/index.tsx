@@ -29,7 +29,7 @@ import ProviderCatalogPicker from './ProviderCatalogPicker';
 import ModelDiscovery, { ModelImportSummary, toModelImport } from './ModelDiscovery';
 import TokenUsageCard from './TokenUsageCard';
 import { formatPricePerMillion, formatPricingPerMillion, formatPricingTierRange, isPricingFree } from '@/utils/modelPricing';
-import { extractErrorMessage } from '@/utils/error';
+import { extractErrorMessage, extractServerMessage } from '@/utils/error';
 import {
   convertCurrencyAmount,
   getConvertedTotalCost,
@@ -1543,12 +1543,12 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
           latency: res.data.latency_ms,
         });
       } catch (err: any) {
-        setModelTestResult({ success: false, message: err.response?.data?.detail || 'Request failed' });
+        setModelTestResult({ success: false, message: extractServerMessage(err) || 'Request failed' });
       } finally {
         setModelTesting(false);
       }
     } catch (err: any) {
-      toast.error(t('operationFailed'), err.response?.data?.detail || err.message);
+      toast.error(t('operationFailed'), extractErrorMessage(err, ''));
     } finally {
       setAddingModel(false);
     }
@@ -2149,13 +2149,12 @@ function AddModelDialog({ provider, models, loadingModels, onClose, onCreated, i
           latency: res.data.latency_ms,
         });
       } catch (err: any) {
-        setTestResult({ success: false, message: err.response?.data?.detail || 'Request failed' });
+        setTestResult({ success: false, message: extractServerMessage(err) || 'Request failed' });
       } finally {
         setTesting(false);
       }
     } catch (err: any) {
-      const detail = err.response?.data?.detail || err.message;
-      toast.error(t('operationFailed'), detail);
+      toast.error(t('operationFailed'), extractErrorMessage(err, ''));
     } finally {
       setLoading(false);
     }

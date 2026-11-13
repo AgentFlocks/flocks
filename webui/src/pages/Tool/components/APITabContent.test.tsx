@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import APITabContent from './APITabContent';
+import { backendError } from '@/test/helpers';
 
 vi.mock('@/contexts/AuthContext', () => ({ useAuth: () => ({ user: { role: 'admin' } }) }));
 
@@ -50,7 +51,10 @@ vi.mock('./ServiceDetailPanel', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) => key,
+    // A failure alert carries its reason as the `error` value; show it so a test can read it.
+    t: (key: string, options?: Record<string, unknown>) => (
+      typeof options?.error === 'string' ? `${key}: ${options.error}` : key
+    ),
     i18n: { language: 'zh-CN' },
   }),
 }));
@@ -328,6 +332,29 @@ describe('APITabContent', () => {
     fireEvent.click(screen.getByRole('button', { name: 'button.retry' }));
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
     expect(providerAPI.updateApiService).toHaveBeenCalledExactlyOnceWith('service', { enabled: false });
+  });
+
+  it('says why a service could not be switched off or removed instead of the bare status code', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      providerAPI.listApiServices.mockResolvedValue({ data: [{ id: 'service', name: 'Native API', group: 'Ops', enabled: true, tool_count: 0 }] });
+      providerAPI.updateApiService.mockRejectedValue(backendError(403, '只有管理员可以停用服务'));
+      providerAPI.deleteApiService.mockRejectedValue(backendError(409, '服务仍被工作流引用，不能删除'));
+      render(<APITabContent tools={[]} onSelectTool={vi.fn()} onRefreshTools={vi.fn()}
+        catalogEntries={[]} catalogCategories={{}} catalogLoading={false} configuredIds={new Set()} onConfiguredChange={vi.fn()} />);
+      await screen.findByText('Native API');
+
+      fireEvent.click(screen.getByTitle('detail.disableServer'));
+      await waitFor(() => expect(alertSpy).toHaveBeenCalledWith('只有管理员可以停用服务'));
+
+      fireEvent.click(screen.getByTitle('button.delete'));
+      await waitFor(() => expect(alertSpy).toHaveBeenLastCalledWith('alert.deleteFailed: 服务仍被工作流引用，不能删除'));
+      expect(providerAPI.deleteApiService).toHaveBeenCalledWith('service');
+    } finally {
+      alertSpy.mockRestore();
+      confirmSpy.mockRestore();
+    }
   });
 
   it.each(['create', 'rename'])('rejects fresh native API name collisions before %s writes', async (operation) => {

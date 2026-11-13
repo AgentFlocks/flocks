@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import SystemLogPage from './index';
+import { backendError } from '@/test/helpers';
 
 const { logsAPI } = vi.hoisted(() => ({
   logsAPI: {
@@ -32,5 +33,12 @@ describe('SystemLogPage toolbar', () => {
     expect(await screen.findByText('INFO line')).toBeInTheDocument();
     expect(screen.getByRole('combobox')).toHaveValue('2026-09-15/flocks.log');
     expect(logsAPI.readLatest).toHaveBeenCalled();
+  });
+
+  it('says why the log could not be read instead of the bare status code', async () => {
+    logsAPI.readLatest.mockRejectedValue(backendError(403, '只有管理员可以查看系统日志'));
+    render(<SystemLogPage />);
+    expect(await screen.findByText('只有管理员可以查看系统日志')).toBeInTheDocument();
+    expect(screen.queryByText(/status code 403/)).not.toBeInTheDocument();
   });
 });

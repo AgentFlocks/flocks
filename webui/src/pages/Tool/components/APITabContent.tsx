@@ -239,7 +239,7 @@ export default function APITabContent({
       onConfiguredChange(entryId);
       setCredModalEntry(null);
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+      alert(extractErrorMessage(err, t('alert.unknownError')));
       setInstalling(null);
       return;
     }
@@ -253,7 +253,7 @@ export default function APITabContent({
         alert(t('alert.mcpConfiguredDisabled', { name: entryName }));
       }
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+      alert(extractErrorMessage(err, t('alert.unknownError')));
     } finally {
       setInstalling(null);
     }
@@ -268,7 +268,7 @@ export default function APITabContent({
       shouldConnect = installRes.data?.config?.enabled !== false;
       onConfiguredChange(entry.id);
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+      alert(extractErrorMessage(err, t('alert.unknownError')));
       setInstalling(null);
       return;
     }
@@ -282,7 +282,7 @@ export default function APITabContent({
         alert(t('alert.mcpConfiguredDisabled', { name: entry.name }));
       }
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+      alert(extractErrorMessage(err, t('alert.unknownError')));
     } finally {
       setInstalling(null);
     }
@@ -296,7 +296,7 @@ export default function APITabContent({
       await onRefreshTools();
       await fetchServices();
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+      alert(extractErrorMessage(err, t('alert.unknownError')));
     } finally {
       setInstalling(null);
     }
@@ -312,7 +312,7 @@ export default function APITabContent({
       });
       setServices((prev) => prev.map((s) => (s.id === serviceId ? res.data : s)));
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+      alert(extractErrorMessage(err, t('alert.unknownError')));
     }
   };
 
@@ -327,7 +327,7 @@ export default function APITabContent({
       await onRefreshTools();
       await fetchServices();
     } catch (err: any) {
-      alert(t('alert.deleteFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.deleteFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setInstalling(null);
     }
