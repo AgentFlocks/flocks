@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.7",
+  "packageVersion": "1.14.8",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.14.7",
+    "packageVersion": "1.14.8",
     "developmentBranch": "zw_dev",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "71272416e32f9a07e48a947ce98c111007640c30",
+    "sourceCommit": "f6a4481c698d2a527e69328bc25a91e0267bda0a",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -19,90 +19,59 @@
       "flocks": "6bdc2b83de483d4f8366f3368a3b91f95c1523f6fcaff42c2ee92e92709d83e7",
       "flockspro": "bd1ac6bbdad2b3388755de296388d1e1b2d6155769dbc8083997dc894f8c594d"
     },
-    "previousCustomization": "1.14.6"
+    "previousCustomization": "1.14.7"
   },
-  "scope": "Task-center read projection excludes monitoring failures before pagination/counting; original records, retry and history retained",
+  "scope": "Monitoring conversation color accents only: blue progress, green completion, red failure; neutral body, dark variants, no filled round-end panels",
   "automatedValidation": {
-    "frontend": {
-      "passed": 73,
-      "log": ".work/monitor-queue-web-all.log"
-    },
-    "coreSQLiteAndRoutes": {
-      "passed": 12,
-      "log": ".work/monitor-queue-core-tests.log"
-    },
-    "proPostgres": {
-      "passed": 5,
-      "log": ".work/monitor-queue-pro-tests.log"
-    },
-    "originalManagedSQLite": {
-      "passed": 2,
-      "log": ".work/monitor-queue-original-sqlite.log"
+    "sessionChat": {
+      "passed": 358,
+      "log": ".work/monitor-color-tests.log"
     },
     "typeCheck": {
-      "status": "passed",
-      "log": ".work/monitor-queue-tsc.log"
+      "status": "passed"
     },
-    "productionProBuild": {
-      "status": "passed",
-      "log": ".work/monitor-queue-build.log"
+    "pairedProBuild": {
+      "status": "passed"
     }
   },
-  "sourceReproduction": {
-    "sourceCommit": "71272416e32f9a07e48a947ce98c111007640c30",
-    "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
-    "reconstructedTree": "7e3af9a04ea49b205ea414048cef0f5e96fd73ff",
-    "expectedTree": "7e3af9a04ea49b205ea414048cef0f5e96fd73ff",
-    "matches": true
-  },
   "local5173Acceptance": {
-    "startedAt": "2026-11-12T13:12:52.698731+00:00",
+    "startedAt": "2026-11-13T02:45:10.627293+00:00",
     "release": "2026.11.12.2-darwin-arm64",
     "port": 5173,
-    "packageVersion": "1.14.7",
-    "sourceCommit": "71272416e32f9a07e48a947ce98c111007640c30",
+    "packageVersion": "1.14.8",
+    "sourceCommit": "f6a4481c698d2a527e69328bc25a91e0267bda0a",
     "originalBinaryHash": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
     "originalListen": null,
     "installedAndReady": true,
     "payloadFilesMatched": 492,
     "nativeBinaryUnchanged": true,
     "listenUnchanged": true,
-    "scenarios": [
-      {
-        "state": "passed",
-        "key": "b9fa01df",
-        "rawTotal": 4,
-        "taskCenterTotal": 2,
-        "failedTotal": 1,
-        "visibleTitles": [
-          "队列隔离验收-ordinary-b9fa01df",
-          "队列隔离验收-completed-b9fa01df"
-        ],
-        "failureTitles": [
-          "队列隔离验收-ordinary-b9fa01df"
-        ],
-        "originalMonitorErrorsRetained": true,
-        "weeklyFailed": 1
-      }
-    ],
-    "fixtureRecordsCleaned": true,
-    "temporaryFixtureRemoved": true,
-    "filesMatchedAfterFixtureRemoval": 492,
-    "repeatWithoutRestart": true,
+    "fixtureRemoved": true,
+    "repeatNoRestart": true,
     "baselineRestoredAndReady": true,
-    "restoredAppAndSevenModulesMatchRelease": true,
-    "refreshPersistence": true,
-    "screenshot": ".work/monitor-queue-live/failed-queue.jpg",
-    "finalListenerPid": "74309",
-    "finishedAt": "2026-11-12T13:16:18.278543+00:00",
+    "finishedAt": "2026-11-13T02:48:47.085807+00:00",
+    "listenerPid": "7931",
     "status": "passed",
-    "existingPluginSourceHashesUnchanged": true,
-    "runtimeGeneratedAPIMetadataExcluded": 2,
-    "localAutoCreatedWorkflows": 0
+    "uiCases": {
+      "streaming": "passed",
+      "threeAccentColors": "blue progress and evidence; green completion; red failure",
+      "darkMode": "passed"
+    },
+    "evidence": [
+      ".work/monitor-color-live/light.jpg",
+      ".work/monitor-color-live/dark.jpg"
+    ],
+    "scope": "Actual session UI with synthetic model chunks and independent completion/failure presentation examples; no external models or devices."
   },
-  "previousVersionEvidence": "1.14.6 delivery commit 8efd1118cff26af35e790176a1dfa00b010eec31 retains previous acceptance records",
   "limits": [
-    "Linux-amd64 remote installation pending user sync to Gitee and bash update-flocks.sh.",
-    "Local acceptance uses isolated synthetic failed executions without external model, XDR or mail calls."
-  ]
+    "Remote Linux installation requires user Gitee synchronization and bash update-flocks.sh.",
+    "Local UI acceptance uses isolated synthetic monitoring sessions."
+  ],
+  "sourceReproduction": {
+    "sourceCommit": "f6a4481c698d2a527e69328bc25a91e0267bda0a",
+    "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
+    "reconstructedTree": "c9c1526d63766b47775ac083bb4636ffb9869f1f",
+    "expectedTree": "c9c1526d63766b47775ac083bb4636ffb9869f1f",
+    "matches": true
+  }
 }

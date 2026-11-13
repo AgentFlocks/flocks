@@ -1,12 +1,12 @@
 # Flocks Pro 2026.11.12.2 定制增强包
 
-增强包版本：1.14.7。仅适用于 `2026.11.12.2-linux-amd64`、Pro 构建 `2ee622b`、Core `730da689`，运行树保护策略必须为 `native`。
+增强包版本：1.14.8。仅适用于 `2026.11.12.2-linux-amd64`、Pro 构建 `2ee622b`、Core `730da689`，运行树保护策略必须为 `native`。
 
 ## 开发与部署方式
 
 增强直接合入 `zw_dev` 的 Core 源码，以本发行版配对的 Core `730da689` 为上游基线。打包时根据该基线与增强提交之间的差异，收集 Python 源码、内置组件和配对的 Pro 前端产物。
 
-本包源码提交：[`71272416`](https://github.com/AgentFlocks/flocksdev/commit/71272416e32f9a07e48a947ce98c111007640c30)，保留原 `zw_dev` 与发行版基线的开发历史。
+本包源码提交：[`f6a4481c`](https://github.com/AgentFlocks/flocksdev/commit/f6a4481c698d2a527e69328bc25a91e0267bda0a)，保留原 `zw_dev` 与发行版基线的开发历史。
 
 交付形式仍是独立增强包。解压到 `~/.flocks/customizations/` 后，安装器校验并备份原文件，然后直接修改 `~/flockspro/current/runtime/flocks/` 中实际运行的 Core 源码，以及 `runtime/webui-dist/` 中的界面文件。`customizations` 用于保存安装器、部署文件和备份；服务启动时加载的是受管发布中的增强源码。
 
@@ -34,10 +34,10 @@ https://gitee.com/flocks/flocks/repository/archive/fix/process_11.12_en
 
 已装补丁 A 时，脚本核对 A 的部署记录和当前文件，再直接写入补丁 B。B 删除的旧补丁文件会清理，不再修改的原版文件恢复发行基线；保留配置、状态及历史备份。部署失败自动退回 A；B 启动失败时也会回退本次代码更新，并尝试重新启动此前运行的服务。未知手工源码改动会被保留并报告。自动升级以补丁声明的 Pro 发行基线为准。
 
-若继续使用手工压缩包方式，把 `flocks-customizations-1.14.7-pro-2026.11.12.2-full.tar.gz` 上传到服务器家目录，再整行执行：
+若继续使用手工压缩包方式，把 `flocks-customizations-1.14.8-pro-2026.11.12.2-full.tar.gz` 上传到服务器家目录，再整行执行：
 
 ```bash
-flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks-customizations-1.14.7-pro-2026.11.12.2-full.tar.gz" -C "$HOME/.flocks/customizations" && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root "$HOME/flockspro" apply --install-deps && flocks start --no-browser --webui-host 0.0.0.0
+flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks-customizations-1.14.8-pro-2026.11.12.2-full.tar.gz" -C "$HOME/.flocks/customizations" && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root "$HOME/flockspro" apply --install-deps && flocks start --no-browser --webui-host 0.0.0.0
 ```
 
 解压目录和安装器都在 `~/.flocks/customizations/`，不需要额外的家目录工作文件夹。补丁目标是当前受管 Pro 发布；旧的 `$HOME/flocks` 不参与安装。
@@ -146,3 +146,8 @@ SQLite 监测读取不再每次执行建表、迁移和 BEGIN IMMEDIATE。按数
 安全运营监测失败不再进入任务中心执行队列的全部/失败列表，也不计入任务中心近七天失败数。按执行快照中的 monitoring 标记或旧版每日监测会话编号识别，已有失败记录同样生效；普通同名任务不受影响，运行中和已完成的监测记录继续显示。
 
 排除发生在数据库分页与计数之前，筛选、搜索和翻页保持一致。只改变任务中心的读取视图，不删除或改写失败状态、原始错误、调度历史及监测诊断；执行租约、重试和恢复规则保持原实现。更新后刷新任务中心即可，不需要更新整个套件。
+
+
+## 1.14.8 监测对话三色点缀
+
+监测进展与依据入口使用蓝色，完成标题使用绿色，失败提示使用红色。以文字、图标和细竖线标识，正文保持中性色；移除本轮结束的大面积彩色面板，保留流式输出和折叠依据，并适配深色模式。绿色表示执行完成，不代表已经确认无风险。普通工作台消息不变。更新补丁后刷新即可，无需更新整套场景。

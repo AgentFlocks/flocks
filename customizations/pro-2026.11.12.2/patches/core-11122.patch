@@ -125978,7 +125978,7 @@ index f812d2de..e90be297 100644
 +  expect(screen.getByText('主机记录已返回；进程证据尚缺。')).toBeVisible();
 +});
 diff --git a/webui/src/components/common/SessionChat.tsx b/webui/src/components/common/SessionChat.tsx
-index 911581a4..235765b7 100644
+index 911581a4..5b47949a 100644
 --- a/webui/src/components/common/SessionChat.tsx
 +++ b/webui/src/components/common/SessionChat.tsx
 @@ -16,38 +16,9 @@
@@ -126584,7 +126584,7 @@ index 911581a4..235765b7 100644
      </ReaChatContext.Provider>
    );
  }
-@@ -5668,6 +5725,175 @@ function AgentMentionDropdown({
+@@ -5668,6 +5725,147 @@ function AgentMentionDropdown({
  // ChatMessageBubble
  // ============================================================================
  
@@ -126597,7 +126597,7 @@ index 911581a4..235765b7 100644
 +function MonitoringEvidence({ details, active, id }: { details: string; active: boolean; id: string }) {
 +  const [open, setOpen] = useMonitoringDisclosure(`evidence:${id}`, active);
 +  return <details open={open} className="mt-3 border-t border-sky-100 pt-3 dark:border-sky-900">
-+    <summary onClick={event => { event.preventDefault(); setOpen(!open); }} className="cursor-pointer text-xs font-semibold text-sky-700 dark:text-sky-300">查看本步骤的结果与依据</summary>
++    <summary onClick={event => { event.preventDefault(); setOpen(!open); }} className="cursor-pointer text-xs font-semibold text-blue-700 dark:text-blue-300">查看本步骤的结果与依据</summary>
 +    {open && <div className="mt-2 whitespace-pre-wrap break-words rounded-lg bg-[#eaf4ff] p-3 text-sm text-[#17212b] dark:bg-sky-950 dark:text-slate-200">{details}</div>}
 +  </details>;
 +}
@@ -126651,11 +126651,12 @@ index 911581a4..235765b7 100644
 +    const label = section.label.trim();
 +    return label && section.text.trim() ? [{ label, text: section.text }] : [];
 +  }) : [];
++  const narrativeTone = toolPart?.state?.status === 'error' ? 'border-red-300 text-red-700 dark:border-red-700 dark:text-red-300' : 'border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-300';
 +  if (part.metadata?.monitoringNarrative === true) return (
-+    <div data-testid="monitor-step-summary" className="text-sm leading-7">
++    <div data-testid="monitor-step-summary" className={`border-l-2 pl-3 text-sm leading-7 ${narrativeTone}`}>
 +      <p className="whitespace-pre-wrap break-words">{part.text}</p>
 +      {(details || sections.length > 0 || (Array.isArray(part.metadata?.monitoringPackets) && part.metadata.monitoringPackets.length > 0)) && (
-+        <MonitoringDeferredDetails cacheKey={`narrative:${part.id}`} className="mt-2 text-sm"
++        <MonitoringDeferredDetails cacheKey={`narrative:${part.id}`} className="mt-2 text-sm text-blue-700 dark:text-blue-300"
 +          summary="查看依据与执行记录" renderBody={() => <div className="mt-2 space-y-3 text-slate-600 dark:text-slate-300">
 +            {sections.map((section, index) => <p key={index} className="whitespace-pre-wrap break-words"><strong>{section.label}：</strong>{section.text}</p>)}
 +            {details && <p className="whitespace-pre-wrap break-words">{details}</p>}
@@ -126716,51 +126717,22 @@ index 911581a4..235765b7 100644
 +  const Icon = failed ? XCircle : CheckCircle2;
 +  const conversation = typeof part.metadata?.monitoringConversation === 'string' ? part.metadata.monitoringConversation : part.text;
 +
-+  if (monitor) return <section aria-label={title} data-testid="monitor-round-end"
++  return <section aria-label={title} data-testid="monitor-round-end"
 +    data-round-id={typeof part.metadata?.roundId === 'string' ? part.metadata.roundId : undefined}
-+    className="my-3 text-sm leading-7">
-+    <p className="whitespace-pre-wrap break-words">{conversation}</p>
-+    {(nextStep || details) && <MonitoringEvidence id={part.id} active={false} details={[conversation !== part.text ? part.text : '', details, nextStep].filter(Boolean).join('\n')} />}
++    className={`my-3 border-l-2 pl-3 text-sm leading-7 ${failed ? 'border-red-300 dark:border-red-700' : 'border-emerald-300 dark:border-emerald-700'}`}>
++    <h3 className={`mb-1 flex items-center gap-1.5 text-sm font-semibold ${failed ? 'text-red-700 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}`}><Icon aria-hidden="true" className="h-4 w-4 shrink-0" />{title}</h3>
++    <p className="whitespace-pre-wrap break-words text-zinc-700 dark:text-zinc-200">{monitor ? conversation : part.text}</p>
++    {monitor ? (nextStep || details) && <MonitoringEvidence id={part.id} active={false} details={[conversation !== part.text ? part.text : '', details, nextStep].filter(Boolean).join('\n')} /> : <>
++      {nextStep && <p className="mt-2 whitespace-pre-wrap break-words text-zinc-600 dark:text-zinc-300"><span className="mr-2 font-medium text-blue-700 dark:text-blue-300">下一步</span>{nextStep}</p>}
++      {details && <details className="mt-2"><summary className="cursor-pointer text-xs text-blue-700 dark:text-blue-300">查看本轮详细依据</summary><p className="mt-2 whitespace-pre-wrap break-words text-zinc-600 dark:text-zinc-300">{details}</p></details>}
++    </>}
 +  </section>;
-+
-+  return (
-+    <section
-+      aria-label={title}
-+      data-testid="monitor-round-end"
-+      data-round-id={typeof part.metadata?.roundId === 'string' ? part.metadata.roundId : undefined}
-+      className={`my-4 overflow-hidden rounded-xl border shadow-sm ${failed
-+        ? monitor ? 'border-slate-400 border-l-4 bg-white dark:border-slate-500 dark:bg-slate-900' : 'border-rose-200 bg-rose-50/60 dark:border-rose-900 dark:bg-rose-950/20'
-+        : 'border-emerald-200 bg-emerald-50/50 dark:border-emerald-900 dark:bg-emerald-950/20'}`}
-+    >
-+      <div className={`flex items-center gap-2.5 border-b px-4 py-3 ${failed
-+        ? monitor ? 'border-slate-200 bg-slate-100 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100' : 'border-rose-200/70 text-rose-800 dark:border-rose-900 dark:text-rose-200'
-+        : 'border-emerald-200/70 text-emerald-800 dark:border-emerald-900 dark:text-emerald-200'}`}>
-+        <Icon aria-hidden="true" className="h-5 w-5 shrink-0" />
-+        <h3 className="text-base font-semibold">{title}</h3>
-+      </div>
-+      <div className="space-y-3 px-4 py-3 text-sm leading-7 text-zinc-700 dark:text-zinc-200">
-+        <div className="whitespace-pre-wrap break-words">{part.text}</div>
-+        {nextStep && (
-+          <div className="rounded-lg bg-white/80 px-3 py-2 dark:bg-zinc-900/70">
-+            <span className="mr-2 font-semibold">下一步</span>
-+            <span className="whitespace-pre-wrap break-words">{nextStep}</span>
-+          </div>
-+        )}
-+        {details && (
-+          <details>
-+            <summary className="cursor-pointer text-zinc-500 dark:text-zinc-400">查看本轮详细依据</summary>
-+            <div className="mt-2 whitespace-pre-wrap break-words">{details}</div>
-+          </details>
-+        )}
-+      </div>
-+    </section>
-+  );
 +}
 +
  function ContextFileCard({
    sessionId,
    resourceId,
-@@ -5805,7 +6031,10 @@ function ChatMessageTimelineInner({
+@@ -5805,7 +6003,10 @@ function ChatMessageTimelineInner({
  }: ChatMessageTimelineProps) {
    const listRef = useRef<HTMLDivElement>(null);
    const [scrollMargin, setScrollMargin] = useState(0);
@@ -126772,7 +126744,7 @@ index 911581a4..235765b7 100644
    const getItemKey = useCallback((index: number) => items[index].message.id, [items]);
    const virtualizer = useVirtualizer({
      count: items.length,
-@@ -5874,6 +6103,7 @@ function ChatMessageTimelineInner({
+@@ -5874,6 +6075,7 @@ function ChatMessageTimelineInner({
          <div key={message.id} data-index={index} ref={virtual ? virtualizer.measureElement : undefined}
            data-message-id={message.id} className="rounded-md transition-shadow duration-300"
            style={virtual ? { position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${start - scrollMargin}px)` } : undefined}>
@@ -126780,7 +126752,7 @@ index 911581a4..235765b7 100644
            <ChatMessageBubble
              message={message}
              isActive={isActive}
-@@ -5905,6 +6135,7 @@ function ChatMessageTimelineInner({
+@@ -5905,6 +6107,7 @@ function ChatMessageTimelineInner({
              onOpenContext={onOpenContext}
            />
            {renderMessageFooter?.(message)}
@@ -126788,7 +126760,7 @@ index 911581a4..235765b7 100644
          </div>
        ))}
      </div>
-@@ -5993,6 +6224,7 @@ function ChatMessageBubbleInner({
+@@ -5993,6 +6196,7 @@ function ChatMessageBubbleInner({
    onOpenContextFile,
    onOpenContext,
  }: ChatMessageBubbleProps) {
@@ -126796,7 +126768,7 @@ index 911581a4..235765b7 100644
    const { t, i18n } = useTranslation('session');
    const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
    const sender = getAgentSender(parts);
-@@ -6022,7 +6254,7 @@ function ChatMessageBubbleInner({
+@@ -6022,7 +6226,7 @@ function ChatMessageBubbleInner({
      );
    }
    const rawAgentName = sender?.source_agent || message.agent || 'rex';
@@ -126805,7 +126777,7 @@ index 911581a4..235765b7 100644
  
    const getTextContent = () => {
      const text = parts
-@@ -6102,8 +6334,8 @@ function ChatMessageBubbleInner({
+@@ -6102,8 +6306,8 @@ function ChatMessageBubbleInner({
        <User aria-hidden="true" className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
      </span>
    ) : (
@@ -126816,7 +126788,7 @@ index 911581a4..235765b7 100644
      </span>
    );
  
-@@ -6123,7 +6355,12 @@ function ChatMessageBubbleInner({
+@@ -6123,7 +6327,12 @@ function ChatMessageBubbleInner({
              {t('chat.sending')}
            </div>
          ) : (
@@ -126830,7 +126802,7 @@ index 911581a4..235765b7 100644
              <div className="flex items-center gap-1 py-1" aria-label={t('chat.thinking')}>
                <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
                <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
-@@ -6155,7 +6392,9 @@ function ChatMessageBubbleInner({
+@@ -6155,7 +6364,9 @@ function ChatMessageBubbleInner({
            // UX for "look at this image and …" style messages.
            const fileParts = parts.filter((p) => p.type === 'file');
            // The error alert below already says it.
@@ -126841,7 +126813,7 @@ index 911581a4..235765b7 100644
            const isQuestionToolPart = (part: MessagePart): boolean => {
              if (part.type !== 'tool') return false;
              return isQuestionToolName(part.tool || '');
-@@ -6175,7 +6414,7 @@ function ChatMessageBubbleInner({
+@@ -6175,7 +6386,7 @@ function ChatMessageBubbleInner({
              return true;
            };
            const isRenderableTextPart = (part: MessagePart): boolean => (
@@ -126850,7 +126822,7 @@ index 911581a4..235765b7 100644
            );
            const isRenderableDisplayPart = (part: MessagePart): boolean => {
              if (isIntermediateProcessPart(part)) return true;
-@@ -6194,9 +6433,14 @@ function ChatMessageBubbleInner({
+@@ -6194,9 +6405,15 @@ function ChatMessageBubbleInner({
              // wrapper div, `first:` always matched and the gap collapsed
              // to zero between, e.g., a tool card and the next thinking
              // block, making them look glued together.
@@ -126863,10 +126835,11 @@ index 911581a4..235765b7 100644
 +                  const toolPart = parts.find(candidate => candidate.type === 'tool' && candidate.id === part.metadata?.toolPartID);
 +                  return <MonitoringStepSummary part={part} toolPart={toolPart} isActive={isActive} />;
 +                }
++                if (!isUser && (part.metadata?.monitoringOpening === true || part.metadata?.monitoringProgress === true)) return <p className="border-l-2 border-blue-300 pl-3 text-sm leading-7 whitespace-pre-wrap break-words text-blue-700 dark:border-blue-700 dark:text-blue-300">{part.text}</p>;
                  const rawText = part.text || '';
                  const nodeRefMatch = isUser
                    ? rawText.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
-@@ -6253,6 +6497,7 @@ function ChatMessageBubbleInner({
+@@ -6253,6 +6470,7 @@ function ChatMessageBubbleInner({
                      ? () => onQuestionReject(part.callID!, pendingQuestions![part.callID!].requestId)
                      : undefined}
                    processStep={processStep}
@@ -126874,7 +126847,7 @@ index 911581a4..235765b7 100644
                  />
                )}
  
-@@ -6433,7 +6678,7 @@ function ChatMessageBubbleInner({
+@@ -6433,7 +6651,7 @@ function ChatMessageBubbleInner({
                  else pendingTiming.push(part);
                  return;
                }
@@ -126883,7 +126856,7 @@ index 911581a4..235765b7 100644
                  if (!processGroup) {
                    processGroup = { steps: [], timing: pendingTiming, index: processGroupIndex++ };
                    pendingTiming = [];
-@@ -6690,6 +6935,10 @@ function ChatMessageBubbleInner({
+@@ -6690,6 +6908,10 @@ function ChatMessageBubbleInner({
      </div>
    ) : null;
  
@@ -126894,7 +126867,7 @@ index 911581a4..235765b7 100644
    if (bare) {
      return (
        <div className={`group relative flex w-full min-w-0${isUser ? ' justify-end' : ''}`}>
-@@ -6967,7 +7216,7 @@ function ChatQuestionResult({
+@@ -6967,7 +7189,7 @@ function ChatQuestionResult({
  
    if (processStep) {
      return (
@@ -126903,7 +126876,7 @@ index 911581a4..235765b7 100644
          <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden min-h-7">
            <span
              className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${statusIconColor}`}
-@@ -7248,6 +7497,7 @@ export interface ChatToolPartProps {
+@@ -7248,6 +7470,7 @@ export interface ChatToolPartProps {
    onAnswer?: (answers: string[][]) => Promise<void>;
    onReject?: () => Promise<void>;
    processStep?: boolean;
@@ -126911,7 +126884,7 @@ index 911581a4..235765b7 100644
  }
  
  export function ChatToolPart({
-@@ -7256,7 +7506,10 @@ export function ChatToolPart({
+@@ -7256,7 +7479,10 @@ export function ChatToolPart({
    onAnswer,
    onReject,
    processStep = false,
@@ -126922,7 +126895,7 @@ index 911581a4..235765b7 100644
    const { t } = useTranslation('session');
    const toolName = part.tool || 'unknown';
  
-@@ -7397,7 +7650,7 @@ export function ChatToolPart({
+@@ -7397,7 +7623,7 @@ export function ChatToolPart({
      );
    }
  
@@ -126931,7 +126904,7 @@ index 911581a4..235765b7 100644
      <>
        {isTodoTool && todoEntries.length > 0 && (
          <div className="space-y-1.5">
-@@ -7428,14 +7681,10 @@ export function ChatToolPart({
+@@ -7428,14 +7654,10 @@ export function ChatToolPart({
        )}
  
        {showGenericToolPayload && safeToolInput && (
@@ -126949,7 +126922,7 @@ index 911581a4..235765b7 100644
        )}
  
        {showGenericToolPayload && status === 'completed' && state.output !== undefined && (
-@@ -7466,17 +7715,9 @@ export function ChatToolPart({
+@@ -7466,17 +7688,9 @@ export function ChatToolPart({
    if (processStep) {
      return (
        <>
@@ -126970,7 +126943,7 @@ index 911581a4..235765b7 100644
                {processStepIcon}
              </span>
              <span className="min-w-0 flex-shrink-0">{processStepLabel}</span>
-@@ -7488,7 +7729,7 @@ export function ChatToolPart({
+@@ -7488,7 +7702,7 @@ export function ChatToolPart({
              <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500 flex-shrink-0" />
            </summary>
            <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
@@ -126979,7 +126952,7 @@ index 911581a4..235765b7 100644
            </div>
          </details>
        </>
-@@ -7498,12 +7739,12 @@ export function ChatToolPart({
+@@ -7498,12 +7712,12 @@ export function ChatToolPart({
    return (
      <>
        {/* The part wrapper owns vertical spacing between process rows. */}
@@ -126995,7 +126968,7 @@ index 911581a4..235765b7 100644
              {cardHeaderDetail && (
                <span
                  className={`text-[11px] truncate min-w-0 ${
-@@ -7524,7 +7765,7 @@ export function ChatToolPart({
+@@ -7524,7 +7738,7 @@ export function ChatToolPart({
        </summary>
  
          <div className="space-y-1.5 border-t border-zinc-200/60 px-2.5 py-2 text-xs">
