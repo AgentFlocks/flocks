@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.9",
+  "packageVersion": "1.14.10",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.14.9",
+    "packageVersion": "1.14.10",
     "developmentBranch": "zw_dev",
     "sourceRepository": "AgentFlocks/flocksdev",
     "sourceCommit": "ee34cc2af124e3bfc4fcc16adde420ba19ab21bb",
@@ -19,64 +19,70 @@
       "flocks": "6bdc2b83de483d4f8366f3368a3b91f95c1523f6fcaff42c2ee92e92709d83e7",
       "flockspro": "bd1ac6bbdad2b3388755de296388d1e1b2d6155769dbc8083997dc894f8c594d"
     },
-    "previousCustomization": "1.14.8"
+    "previousCustomization": "1.14.9",
+    "sourcePatchFiles": [
+      "patches/hide-device-inspector-ti-analyst.patch"
+    ]
   },
-  "scope": "Hide only knowledge base and memory sidebar entries; retain knowledge accumulation in Agent workshop and all direct routes/data",
+  "scope": "Remove device-inspector (设备巡检专家) and ti-analyst (威胁情报专家) from the Agent list and delegation; definitions remain in source with hidden: true for reversible restoration.",
   "automatedValidation": {
-    "navigationTests": 95,
-    "pairedProBuild": "passed (TypeScript + paired Core/Pro production build)",
-    "installerAndUpdaterTests": 53,
+    "coreAgentTests": {
+      "hidden_agents_excluded": {
+        "passed": 1,
+        "deselected": 81
+      },
+      "is_delegatable_hidden_agent": {
+        "passed": 1,
+        "deselected": 12
+      },
+      "python": "3.12.12 (isolated venv based on local Pro runtime; only pytest and pytest-asyncio installed)"
+    },
+    "installerTests": {
+      "passed": 27,
+      "command": "pytest -q tests/test_installer.py"
+    },
+    "packageBuild": {
+      "status": "passed",
+      "payloadFiles": 492,
+      "target": "2026.11.12.2-linux-amd64"
+    },
     "sourceReproduction": {
       "sourceCommit": "ee34cc2af124e3bfc4fcc16adde420ba19ab21bb",
       "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
-      "reconstructedTree": "52a4054b99419bddda8d93f0ae35c87eacc570df",
-      "expectedTree": "52a4054b99419bddda8d93f0ae35c87eacc570df",
+      "sourcePatch": "patches/hide-device-inspector-ti-analyst.patch",
+      "reconstructedTree": "7457d21e28d0002ba50fde2738c902c01863fdc6",
+      "expectedTree": "7457d21e28d0002ba50fde2738c902c01863fdc6",
       "matches": true
     }
   },
   "local5173": {
-    "startedAt": "2026-11-13T06:49:06.556452+00:00",
     "release": "2026.11.12.2-darwin-arm64",
     "port": 5173,
-    "packageVersion": "1.14.9",
-    "sourceCommit": "ee34cc2af124e3bfc4fcc16adde420ba19ab21bb",
-    "originalBinaryHash": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
-    "originalListen": null,
-    "installedAndReady": true,
-    "payloadFilesMatched": 492,
-    "nativeBinaryUnchanged": true,
-    "listenUnchanged": true,
-    "status": "passed",
-    "cases": [
-      "Agent workshop sidebar contains knowledge accumulation only in knowledge and memory group",
-      "Knowledge accumulation click, reload and module switch remain in workshop",
-      "Direct knowledge and memory routes still work",
-      "No browser console errors"
+    "preexistingCustomization": "1.14.9",
+    "operation": "Deleted device-inspector and ti-analyst in the Agent UI, then refreshed the list.",
+    "counts": {
+      "agentsBefore": 12,
+      "agentsAfter": 10,
+      "subagentsBefore": 10,
+      "subagentsAfter": 8
+    },
+    "idsAbsentAfterRefresh": [
+      "device-inspector",
+      "ti-analyst"
     ],
-    "screenshot": ".work/nav-hide-live/sidebar.png",
-    "platform": "darwin-arm64",
-    "repeatNoRestart": true,
-    "baselineRestoredAndReady": true,
-    "finishedAt": "2026-11-13T06:51:32.637386+00:00",
-    "listenerPid": "88621",
-    "uiCases": {
-      "sidebarHidden": true,
-      "knowledgeRetained": true,
-      "refresh": true,
-      "moduleSwitch": true,
-      "directRoutesRetained": true,
-      "consoleErrors": 0
-    }
+    "behavioralUiCheck": "passed",
+    "packageApplied": false,
+    "packageAcceptance": "pending: this package targets linux-amd64 and the local listener is darwin-arm64; the installer refuses this mismatch."
   },
   "previousValidation": {
     "schemaVersion": 1,
-    "packageVersion": "1.14.8",
+    "packageVersion": "1.14.9",
     "target": {
       "schemaVersion": 1,
-      "packageVersion": "1.14.8",
+      "packageVersion": "1.14.9",
       "developmentBranch": "zw_dev",
       "sourceRepository": "AgentFlocks/flocksdev",
-      "sourceCommit": "f6a4481c698d2a527e69328bc25a91e0267bda0a",
+      "sourceCommit": "ee34cc2af124e3bfc4fcc16adde420ba19ab21bb",
       "deploymentMode": "source-overlay",
       "installerProtocol": 2,
       "edition": "flockspro",
@@ -89,61 +95,133 @@
         "flocks": "6bdc2b83de483d4f8366f3368a3b91f95c1523f6fcaff42c2ee92e92709d83e7",
         "flockspro": "bd1ac6bbdad2b3388755de296388d1e1b2d6155769dbc8083997dc894f8c594d"
       },
-      "previousCustomization": "1.14.7"
+      "previousCustomization": "1.14.8"
     },
-    "scope": "Monitoring conversation color accents only: blue progress, green completion, red failure; neutral body, dark variants, no filled round-end panels",
+    "scope": "Hide only knowledge base and memory sidebar entries; retain knowledge accumulation in Agent workshop and all direct routes/data",
     "automatedValidation": {
-      "sessionChat": {
-        "passed": 358,
-        "log": ".work/monitor-color-tests.log"
-      },
-      "typeCheck": {
-        "status": "passed"
-      },
-      "pairedProBuild": {
-        "status": "passed"
+      "navigationTests": 95,
+      "pairedProBuild": "passed (TypeScript + paired Core/Pro production build)",
+      "installerAndUpdaterTests": 53,
+      "sourceReproduction": {
+        "sourceCommit": "ee34cc2af124e3bfc4fcc16adde420ba19ab21bb",
+        "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
+        "reconstructedTree": "52a4054b99419bddda8d93f0ae35c87eacc570df",
+        "expectedTree": "52a4054b99419bddda8d93f0ae35c87eacc570df",
+        "matches": true
       }
     },
-    "local5173Acceptance": {
-      "startedAt": "2026-11-13T02:45:10.627293+00:00",
+    "local5173": {
+      "startedAt": "2026-11-13T06:49:06.556452+00:00",
       "release": "2026.11.12.2-darwin-arm64",
       "port": 5173,
-      "packageVersion": "1.14.8",
-      "sourceCommit": "f6a4481c698d2a527e69328bc25a91e0267bda0a",
+      "packageVersion": "1.14.9",
+      "sourceCommit": "ee34cc2af124e3bfc4fcc16adde420ba19ab21bb",
       "originalBinaryHash": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
       "originalListen": null,
       "installedAndReady": true,
       "payloadFilesMatched": 492,
       "nativeBinaryUnchanged": true,
       "listenUnchanged": true,
-      "fixtureRemoved": true,
+      "status": "passed",
+      "cases": [
+        "Agent workshop sidebar contains knowledge accumulation only in knowledge and memory group",
+        "Knowledge accumulation click, reload and module switch remain in workshop",
+        "Direct knowledge and memory routes still work",
+        "No browser console errors"
+      ],
+      "screenshot": ".work/nav-hide-live/sidebar.png",
+      "platform": "darwin-arm64",
       "repeatNoRestart": true,
       "baselineRestoredAndReady": true,
-      "finishedAt": "2026-11-13T02:48:47.085807+00:00",
-      "listenerPid": "7931",
-      "status": "passed",
+      "finishedAt": "2026-11-13T06:51:32.637386+00:00",
+      "listenerPid": "88621",
       "uiCases": {
-        "streaming": "passed",
-        "threeAccentColors": "blue progress and evidence; green completion; red failure",
-        "darkMode": "passed"
-      },
-      "evidence": [
-        ".work/monitor-color-live/light.jpg",
-        ".work/monitor-color-live/dark.jpg"
-      ],
-      "scope": "Actual session UI with synthetic model chunks and independent completion/failure presentation examples; no external models or devices."
+        "sidebarHidden": true,
+        "knowledgeRetained": true,
+        "refresh": true,
+        "moduleSwitch": true,
+        "directRoutesRetained": true,
+        "consoleErrors": 0
+      }
     },
-    "limits": [
-      "Remote Linux installation requires user Gitee synchronization and bash update-flocks.sh.",
-      "Local UI acceptance uses isolated synthetic monitoring sessions."
-    ],
-    "sourceReproduction": {
-      "sourceCommit": "f6a4481c698d2a527e69328bc25a91e0267bda0a",
-      "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
-      "reconstructedTree": "c9c1526d63766b47775ac083bb4636ffb9869f1f",
-      "expectedTree": "c9c1526d63766b47775ac083bb4636ffb9869f1f",
-      "matches": true
-    }
+    "previousValidation": {
+      "schemaVersion": 1,
+      "packageVersion": "1.14.8",
+      "target": {
+        "schemaVersion": 1,
+        "packageVersion": "1.14.8",
+        "developmentBranch": "zw_dev",
+        "sourceRepository": "AgentFlocks/flocksdev",
+        "sourceCommit": "f6a4481c698d2a527e69328bc25a91e0267bda0a",
+        "deploymentMode": "source-overlay",
+        "installerProtocol": 2,
+        "edition": "flockspro",
+        "releaseId": "2026.11.12.2-linux-amd64",
+        "version": "2026.11.12.2",
+        "proCommit": "2ee622ba0a05e0dda157ea80739da583de2733c6",
+        "coreCommit": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
+        "protection": "native",
+        "frontendSources": {
+          "flocks": "6bdc2b83de483d4f8366f3368a3b91f95c1523f6fcaff42c2ee92e92709d83e7",
+          "flockspro": "bd1ac6bbdad2b3388755de296388d1e1b2d6155769dbc8083997dc894f8c594d"
+        },
+        "previousCustomization": "1.14.7"
+      },
+      "scope": "Monitoring conversation color accents only: blue progress, green completion, red failure; neutral body, dark variants, no filled round-end panels",
+      "automatedValidation": {
+        "sessionChat": {
+          "passed": 358,
+          "log": ".work/monitor-color-tests.log"
+        },
+        "typeCheck": {
+          "status": "passed"
+        },
+        "pairedProBuild": {
+          "status": "passed"
+        }
+      },
+      "local5173Acceptance": {
+        "startedAt": "2026-11-13T02:45:10.627293+00:00",
+        "release": "2026.11.12.2-darwin-arm64",
+        "port": 5173,
+        "packageVersion": "1.14.8",
+        "sourceCommit": "f6a4481c698d2a527e69328bc25a91e0267bda0a",
+        "originalBinaryHash": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
+        "originalListen": null,
+        "installedAndReady": true,
+        "payloadFilesMatched": 492,
+        "nativeBinaryUnchanged": true,
+        "listenUnchanged": true,
+        "fixtureRemoved": true,
+        "repeatNoRestart": true,
+        "baselineRestoredAndReady": true,
+        "finishedAt": "2026-11-13T02:48:47.085807+00:00",
+        "listenerPid": "7931",
+        "status": "passed",
+        "uiCases": {
+          "streaming": "passed",
+          "threeAccentColors": "blue progress and evidence; green completion; red failure",
+          "darkMode": "passed"
+        },
+        "evidence": [
+          ".work/monitor-color-live/light.jpg",
+          ".work/monitor-color-live/dark.jpg"
+        ],
+        "scope": "Actual session UI with synthetic model chunks and independent completion/failure presentation examples; no external models or devices."
+      },
+      "limits": [
+        "Remote Linux installation requires user Gitee synchronization and bash update-flocks.sh.",
+        "Local UI acceptance uses isolated synthetic monitoring sessions."
+      ],
+      "sourceReproduction": {
+        "sourceCommit": "f6a4481c698d2a527e69328bc25a91e0267bda0a",
+        "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
+        "reconstructedTree": "c9c1526d63766b47775ac083bb4636ffb9869f1f",
+        "expectedTree": "c9c1526d63766b47775ac083bb4636ffb9869f1f",
+        "matches": true
+      }
+    },
+    "remoteLinux": "pending user Gitee sync and bash update-flocks.sh"
   },
   "remoteLinux": "pending user Gitee sync and bash update-flocks.sh"
 }

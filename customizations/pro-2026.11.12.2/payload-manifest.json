@@ -3,8 +3,14 @@
   "deploymentMode": "source-overlay",
   "source": {
     "branch": "zw_dev",
-    "head": "dddae2aff4bab9d468a61755bd0d331288d0b284",
-    "base": "730da6897fbcd85d0b67e22cf13ecd4531161b9d"
+    "head": "ee34cc2af124e3bfc4fcc16adde420ba19ab21bb",
+    "base": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
+    "patches": [
+      {
+        "path": "patches/hide-device-inspector-ti-analyst.patch",
+        "sha256": "23ad64c3e763b16ec8ae23a051d204b758288a9d588513d9cee0da9c1d1d713b"
+      }
+    ]
   },
   "sourceRoot": "runtime/flocks",
   "webuiRoot": "runtime/webui-dist",
@@ -138,7 +144,7 @@
     },
     {
       "path": "flocks/.flocks/plugins/agents/device-inspector/agent.yaml",
-      "sha256": "3efd127e19763e12c78cd322af078bfc0df07eedd46715559a779189e3588717",
+      "sha256": "34b6bb418e7b24b6e86a24f980fa8e5e311cec0855d3b3234e09a24631f3dc2e",
       "before": "e7ddd1389bc735062dde71565a3c0e796312222aee395cd10b654beed97b6588"
     },
     {
@@ -168,7 +174,7 @@
     },
     {
       "path": "flocks/.flocks/plugins/agents/ti-analyst/agent.yaml",
-      "sha256": "a53027fd73324f5858297eff886b66e0859f85e90afba36e8cd522cfeb8c6d74",
+      "sha256": "d5e7d105e85a00265f8b47cf65e6faedcbb65cebdf7aaaa3a14d3876ad10b203",
       "before": "0fbdd2760f9d0271522c12b907fcc8cd840d828d3e94ef2b0efbaedd4ee49868"
     },
     {
@@ -912,6 +918,11 @@
       "before": "f8a030952d101c82cc0e49ad53224c73334feeb8b30ea681e9618dd48fd3e47d"
     },
     {
+      "path": "flocks/flocks/ingest/syslog/parser.py",
+      "sha256": "affd22f758e56d81fb187425d125c67aca89d809e9bb6b1b8952ef768c560e7c",
+      "before": "763b71e8187f2da83c4b1cc0de6bc2f25dfceea689ade7ab27ea24b96decf207"
+    },
+    {
       "path": "flocks/flocks/monitoring/__init__.py",
       "sha256": "bb624d6f066dffb95b2851fc690f5e2adc0e158d20028ee3f8f4ca25e61e7934",
       "before": null
@@ -1207,6 +1218,11 @@
       "before": "e9d2144382694bd609e94cfd4615dedecae0055a83fccc10ac204a81add81044"
     },
     {
+      "path": "flocks/flocks/server/routes/task_entities.py",
+      "sha256": "71e15dde9baac201b7069a3cd5a73ffa1864eeb12dc546deb1eb80c43fae5e5c",
+      "before": "54f1c69559ad7bb3c73cbf5f78bc79d0fbfc4a257195a3cfbe3ccd0058cdb816"
+    },
+    {
       "path": "flocks/flocks/server/routes/workflow.py",
       "sha256": "9a67a105f27ac0a753c4e1646a9b234eee982dae1ed550eceb05c9a112628106",
       "before": "e4d14e291e5c422e58162c0dd712ccc5e573df8d7e2f7031ac74a34b9ae5bae5"
@@ -1235,6 +1251,11 @@
       "path": "flocks/flocks/task/plugin_sync.py",
       "sha256": "e6ab8b98c9f66077c5e60ce6b1571b200bdd683fbd34fa0323be3f4b785b2e16",
       "before": "36188cf27a03ef71b4101c2c58d763c463b724a4859087ab50a896b058375fab"
+    },
+    {
+      "path": "flocks/flocks/task/presentation.py",
+      "sha256": "ff4866e189ff76be7f227df44cd9cf1930071f0db2e05b224056347785161e71",
+      "before": null
     },
     {
       "path": "flocks/flocks/tool/question_handler.py",
@@ -1322,56 +1343,56 @@
       "before": null
     },
     {
-      "path": "webui-dist/assets/ArchivedDataPanel-hiZnBsYX.js",
-      "sha256": "64052ca0b624f700815aa85cd9a331b9f1e12b283fd94f83126bd9b3148e7452"
+      "path": "webui-dist/assets/ArchivedDataPanel-cynnM5pM.js",
+      "sha256": "5d699d864d584cc58320190b0bbd500826e9413ae004664b9a7a00a2f4fc944a"
     },
     {
-      "path": "webui-dist/assets/Callback-_VoVlWqB.js",
-      "sha256": "44e6ce3354fd7f2977884c61251c30b121599ff9098ac49af7df0f58d424c5a9"
+      "path": "webui-dist/assets/Callback-EPOMKbf8.js",
+      "sha256": "0bd2ed8a7601d583b255141748e02aae01efc80e4607855ec0a03e7183200981"
     },
     {
-      "path": "webui-dist/assets/ChatGuideDock-Bvq8xbOt.js",
-      "sha256": "ea464f24f89747c049f0eb784102ef28662fb2afba2e7ddc40802975f62d8b7e"
+      "path": "webui-dist/assets/ChatGuideDock-DxlK-kT3.js",
+      "sha256": "8b5d2219ccc955f960c3d8c2853a52223e1ad7e278e612b5815c46a4691e99c2"
     },
     {
-      "path": "webui-dist/assets/ChatPromptSelectors-DrjaIjMT.js",
-      "sha256": "23a52045cc680c029b63cd1e8229939920c7cfb0835d0cc3e35b9ddb2cb46298"
+      "path": "webui-dist/assets/ChatPromptSelectors-DW8Vx1qB.js",
+      "sha256": "b48a0236b9979fbc2aa61dcba08b8c1936f163a7df7c93750035f69528255a76"
     },
     {
-      "path": "webui-dist/assets/CopyButton-CjmJ1uZV.js",
-      "sha256": "8c717ac1acbc9ce4fb8a485ee37bcde35d75b6303372186376790f4fe26377bf"
+      "path": "webui-dist/assets/CopyButton-C6sHy7Pa.js",
+      "sha256": "7a15ccc97487c0983e28b91eaab0a8fb3bc672e085dff58b1a755c1819a62565"
     },
     {
       "path": "webui-dist/assets/EmptyState-O6X3yFiQ.js",
       "sha256": "987c5de40c21201c3ad25fe39f4b288848c514af10cb4279542d9f31e9e68b11"
     },
     {
-      "path": "webui-dist/assets/EnabledSwitch-Bl5xbwsx.js",
-      "sha256": "32db67746b2d014c031cba9c506aae9c330ecca163aa6c87d6b63419797cdf30"
+      "path": "webui-dist/assets/EnabledSwitch-DOwJkCAn.js",
+      "sha256": "f67cfb84f1ec865eabcf1b848958502f62a29e775f95af35f727efa374953f4a"
     },
     {
-      "path": "webui-dist/assets/EntitySheet-fRHPxbfw.js",
-      "sha256": "d3f45b08861c5f4710052d0dce4ba5cfc5d2e94440955e6691dcbded20dc34dc"
+      "path": "webui-dist/assets/EntitySheet-B2gjvP-Y.js",
+      "sha256": "ac584005aa897f54030daa4af7e46bd459d4f75e9da41aadf91df4596bd3a46a"
     },
     {
-      "path": "webui-dist/assets/ExtensionSlot-BL6jufC4.js",
-      "sha256": "f0f6bfe7b496e40bc9927ed87700bc331b905f80b9e23aa0a6c9929e730a5ca4"
+      "path": "webui-dist/assets/ExtensionSlot-DP7WIEva.js",
+      "sha256": "bcc5116849fa4ec7ac6fabe5fe836a010bf9780ef8a940ce7b41ec318fb1d108"
     },
     {
-      "path": "webui-dist/assets/FlowCanvas-BYwGcAFP.js",
-      "sha256": "9e62c7d81ae6fef808a1275d032fdaaea3b71a9dc3be1793f5adf2a69233ab3a"
+      "path": "webui-dist/assets/FlowCanvas-BwacCyrP.js",
+      "sha256": "b5f32db8909385df7c3ddc03198b8f41f9b53d50e2debdda048d1c423bd53731"
     },
     {
-      "path": "webui-dist/assets/GuideInfoIcon-CjpZKB3-.js",
-      "sha256": "b3f5a0476b934895d76f0cd2a096196416ded93dba1cb11bff429acfddd68c5c"
+      "path": "webui-dist/assets/GuideInfoIcon-GwIeOimM.js",
+      "sha256": "955ad458bdecd3d85c70774f08ca6bab48e4d8e598b638a9bbdf3bcbcf33b19a"
     },
     {
-      "path": "webui-dist/assets/GuidedCreatePanel-CnbBPetl.js",
-      "sha256": "e79fc591a623b95088e1df6f5bcde29739ef2583473110ec5d87854e5d01ceab"
+      "path": "webui-dist/assets/GuidedCreatePanel-CMzlWHAV.js",
+      "sha256": "68954d18c072dc14e8bbb0d1217a7055893debe172324c5e6db2a4ac36505f63"
     },
     {
-      "path": "webui-dist/assets/IntegrationTab-DYri6Oz8.js",
-      "sha256": "1cd0f58ef805c9f40b1e1c9e98ebfe6483ef8536edb28a486e378173955f3dec"
+      "path": "webui-dist/assets/IntegrationTab-BldJ7qA5.js",
+      "sha256": "09df2b5a82b6149b896184f4502d48c63504271584b364d27166f37d3446312a"
     },
     {
       "path": "webui-dist/assets/KaTeX_AMS-Regular-BQhdFMY1.woff2",
@@ -1614,28 +1635,28 @@
       "sha256": "e4bc26ea0f707d4271990b9b2fb166d3daa7026e8d7800d3f956c48ea9aa23ee"
     },
     {
-      "path": "webui-dist/assets/NoticeCard-CyeqPzjB.js",
-      "sha256": "0dbea37f14ef7b8263672df6795151463a139e51fcb8d49c4cac6e58b5fa046c"
+      "path": "webui-dist/assets/NoticeCard-7sWoWPsy.js",
+      "sha256": "c0caa4890eb25c4600818442aa0861f353eee825d18b7725a30ce324efa6e47d"
     },
     {
-      "path": "webui-dist/assets/NotificationModal-Q1k4nMlO.js",
-      "sha256": "44c85a42c470e9ff3a71fb5ede32edb64360542f62ce2dfc0ddffdfc4b6da622"
+      "path": "webui-dist/assets/NotificationModal-Ds5AIQpl.js",
+      "sha256": "389128ae9cf9851ca369f39a1b9c23adc47ce586065345cd409bd6bbc2d6c558"
     },
     {
-      "path": "webui-dist/assets/OnboardingModal-4AhirjPB.js",
-      "sha256": "6222b653951f62c27576d1c6d490f1db3afd8d0fe8d7f8144a4cf3af8daf2668"
+      "path": "webui-dist/assets/OnboardingModal-x9LCs-E4.js",
+      "sha256": "3d2cf36cf0f2d059e0bed1101a3d3488122103d4f899d47676da03c233062fd3"
     },
     {
       "path": "webui-dist/assets/PageHeader-BteSL-O3.js",
       "sha256": "f28238ff361db5417816394e9eaeaf87e617f90ebc7871b7b70f7b45097f09d6"
     },
     {
-      "path": "webui-dist/assets/PageRuntimeHost-e0EhLaeG.js",
-      "sha256": "83bb2f0476889e570ca52f47e6e5b1ace9ebaa5b450edfaff17858b3c56aa426"
+      "path": "webui-dist/assets/PageRuntimeHost-BfZspNyE.js",
+      "sha256": "ab641e7e6edd60525fa4d6b39b8cbc448ddf8abc4cc57e346a193110d866f78c"
     },
     {
-      "path": "webui-dist/assets/PasswordInput-DXCBS1l6.js",
-      "sha256": "d212ef30da215a461ecaafe66308cd0c58fef33986a8e235aab95aa4af39e6ec"
+      "path": "webui-dist/assets/PasswordInput-CRnqjtnI.js",
+      "sha256": "2e81b1ca134d537ecd7a94b75521652b537b027c4ca4d286a8db9a936e35d86d"
     },
     {
       "path": "webui-dist/assets/PillGroup-DU4xwRNn.js",
@@ -1646,12 +1667,12 @@
       "sha256": "6aa9479bf763b93972b06c5bf9f4b5d675b5acdfbc083002da936fc3b1af48f3"
     },
     {
-      "path": "webui-dist/assets/SessionChat-DW6dbwGb.js",
-      "sha256": "bbda652ebd09829d7d4acef27e84db0571edde6f4ec8df67454fccb4cf762e3c"
+      "path": "webui-dist/assets/SessionChat-BuBEjlbz.js",
+      "sha256": "57f93ec1d9684cdefed4d492dd1140df71eb7d49c729e97a0359f49970c173d8"
     },
     {
-      "path": "webui-dist/assets/SessionTranscript-CapKgOyk.js",
-      "sha256": "b8da54831a2a5b426ebdc060f8d50382889e397ba26ce291f143c834847d2db6"
+      "path": "webui-dist/assets/SessionTranscript-BK60JBEC.js",
+      "sha256": "371225086871eb3d695afbacc6ea52c73ec7a31ba59b841fe4869f0ba3c05dde"
     },
     {
       "path": "webui-dist/assets/StreamingMarkdown-CaeMWxnx.js",
@@ -1662,28 +1683,28 @@
       "sha256": "f8dcb19a2443ae5bbc50d0e299d54508081bfa2c4f2eaae8d09c773a86a5b3ce"
     },
     {
-      "path": "webui-dist/assets/SuiteInstallProgressPanel-L7DTBu-V.js",
-      "sha256": "bd8a59281814cad9814cc238f9c882c4e36c040a39bc9c9064879c3269eb9f74"
+      "path": "webui-dist/assets/SuiteInstallProgressPanel-DIexiOd_.js",
+      "sha256": "fd48c1f40d1aa279c7b761997e5d99a4c2ccf768f1900192728728e426476d74"
     },
     {
-      "path": "webui-dist/assets/TokenPolicyNotice-v40I66yP.js",
-      "sha256": "a656461ef2be488aaa02c8dae442f1860540a1984d4de7f7f479d73e887b1c5e"
+      "path": "webui-dist/assets/TokenPolicyNotice-B-jIbDsN.js",
+      "sha256": "ed23e9db23bab8c7ea2f54e9949c8b73f12bbb5b129fe7c71b411d91b0f39055"
     },
     {
-      "path": "webui-dist/assets/UpdateModal-C90WGHHZ.js",
-      "sha256": "d137d7d5d812de2c417ecd57bdf6a7b4bd41d07a2f6657ff5f6b924d9f253765"
+      "path": "webui-dist/assets/UpdateModal-BZvVk3DC.js",
+      "sha256": "9e2f85729d0c14934cfa89be05cd82916f0eab15c4b31643fa8c766469bfdc18"
     },
     {
-      "path": "webui-dist/assets/UpgradeHandoffSteps-EmCLuwkn.js",
-      "sha256": "ac71e8d4732c66a616b530f0c2e989f266b6088dc021ea4001be5a1377113c34"
+      "path": "webui-dist/assets/UpgradeHandoffSteps-BT6VQeeQ.js",
+      "sha256": "e5d93a4bf767b7819ccfa78bed40ae31a8d0378ea28bad428b060b2de599d010"
     },
     {
       "path": "webui-dist/assets/WorkbenchSidePanel-CZ-QErcV.js",
       "sha256": "eb463e4a3a753521cf8f82440fc2dd4efc98409c0c0e21b3dc1d59deb5bfc247"
     },
     {
-      "path": "webui-dist/assets/WorkflowStatusBadge-C81VZDCd.js",
-      "sha256": "47ff7445c4ff994aed515ac38d273abdaaf52c25f68d4f5ef8f17baaeb3d2332"
+      "path": "webui-dist/assets/WorkflowStatusBadge-BWhMLeMt.js",
+      "sha256": "f0f7f07804a5289b8e8bbf06770d929dcd6fd69780b33648efb2ab798039120f"
     },
     {
       "path": "webui-dist/assets/agent-Bhk806ZJ.js",
@@ -1698,8 +1719,8 @@
       "sha256": "a72596801b311de2b15f49e429e3be6ccd07570cfe6be404a654419917d5b744"
     },
     {
-      "path": "webui-dist/assets/badges-DadykCLu.js",
-      "sha256": "5a1168256a4edeb196143448640b9f4b6550cfd8cfa8e12e8b6c25b415ffb1f0"
+      "path": "webui-dist/assets/badges-DCNaD4yz.js",
+      "sha256": "826160c4a879d21af81f0a01a07a24c8a97529de042bdfa7a47963ce285e937a"
     },
     {
       "path": "webui-dist/assets/channel-D-RGQ_FR.js",
@@ -1718,8 +1739,8 @@
       "sha256": "f6c6053fcc2c53753a6ba5e1a077d33d9c61c8f2ea6546d636fbdec76066d087"
     },
     {
-      "path": "webui-dist/assets/commands-Se5J7EaB.js",
-      "sha256": "63ec8c32a4b0a53fb4d3b4b603022df805529d38ddfaab613cd3ca29e925dc0e"
+      "path": "webui-dist/assets/commands-d0R9GsLw.js",
+      "sha256": "4186068a2f5266f8fb2aad1d3cb18cab8732dc72c370d5256820d1f41cae590e"
     },
     {
       "path": "webui-dist/assets/config-CY1KYPRt.js",
@@ -1730,8 +1751,8 @@
       "sha256": "4932142f7ba3ee5b3910fff0aef3238a9c7da756a69ccd598933267e7fb8036e"
     },
     {
-      "path": "webui-dist/assets/consoleUpgrade-BAdqRLmV.js",
-      "sha256": "6085feeaba6e776c4e5937fc0379fb6ba91e0dacf95d3d184ea311b217689d03"
+      "path": "webui-dist/assets/consoleUpgrade-BOX1StXO.js",
+      "sha256": "a7ba68c9bd535ec34a8c070f46b815b5ef14a57a8500313c94f54039288296e5"
     },
     {
       "path": "webui-dist/assets/constants-BZT6lQkX.js",
@@ -1766,168 +1787,168 @@
       "sha256": "11c4b8833ac105c984509ea02774f255f91f3700496085f246653c7dcc0b6547"
     },
     {
-      "path": "webui-dist/assets/icons-vendor-CE_wVRv4.js",
-      "sha256": "3e0f92a405a55dfd61a301f85cf2fc77e0b73aa69dbd62fe567bb38b9119ddcc"
+      "path": "webui-dist/assets/icons-vendor-F3OKSZJe.js",
+      "sha256": "83b92baa9de90a88d06630189d83c67b3f4e8fb8f59e131c209b5f8bbcb27f68"
     },
     {
       "path": "webui-dist/assets/imageUpload-dnFwvxYJ.js",
       "sha256": "2647fac99d96746b44639fa67a93cdca5faeaf39f2881fae082a51af91e8dbc5"
     },
     {
-      "path": "webui-dist/assets/index-B-ykxEgf.js",
-      "sha256": "fa2a6f0383ff41520e44a263a08b7a45f4666b209ac4fc9c239630834c100db1"
+      "path": "webui-dist/assets/index-5MyoxRV9.js",
+      "sha256": "3d3bb75eeb820988e35412768548a14fa9ab42fbd8cad9616afd8526897add8b"
     },
     {
-      "path": "webui-dist/assets/index-B2EfgU7x.js",
-      "sha256": "b24499bc709b60a45d6f960a0e592efdb1f7011cf3d6a2f60cf2111b7eb015bb"
+      "path": "webui-dist/assets/index-AQRKchj_.js",
+      "sha256": "9f8585db90cbbdd0f7dd6549477fc94e591e57a598828c2d8b37dc81453d770e"
     },
     {
-      "path": "webui-dist/assets/index-B4SRLdSO.js",
-      "sha256": "ee6acb2e542ee41a52e5094c5e84b469962bd98784292d6d699ae22da6a66e4a"
+      "path": "webui-dist/assets/index-B1F42-oS.js",
+      "sha256": "019a2ffff9ebeaaa4cf47ba290d142921e835f773a6c0784cdcbe8fc169eb164"
     },
     {
-      "path": "webui-dist/assets/index-BLFcMJI5.js",
-      "sha256": "eadf409565d5dde4d7ccdf7121e32fe7a6724ded4a13f05d94a8ebf1aea20d80"
+      "path": "webui-dist/assets/index-B1Fd-eSH.js",
+      "sha256": "b1fe9d2d6ab2a5328ea196caf099e99422d8f0a0eb83c4b97839955c2d792756"
     },
     {
-      "path": "webui-dist/assets/index-BRdBShu1.js",
-      "sha256": "6138d2b8b5d720adb959e6f07bed2f91a4e6d8f51f854977bc8372078e3b0fda"
+      "path": "webui-dist/assets/index-BAeQjWPL.js",
+      "sha256": "fab391c627d9347d2b38b4845c38e8826d3cb3a1edd1a07c70710e3ada7d24d3"
     },
     {
-      "path": "webui-dist/assets/index-BUKmKVcC.js",
-      "sha256": "634294fc529b48caff59242271c366c683bdfc70fa77995d637321a9eabf6380"
+      "path": "webui-dist/assets/index-BHVcKA2F.js",
+      "sha256": "160effc5e21f642455131157172cdb4686d843bbbe638211421cd64f1782bdb8"
     },
     {
-      "path": "webui-dist/assets/index-BVx42qXg.js",
-      "sha256": "4758d2143676f7bc92a8ee650db721c95f707355619c86a3e46cce607f462460"
+      "path": "webui-dist/assets/index-B_nyudi-.js",
+      "sha256": "2804df6c66d7fbad34502ce4061ff5ecd97f0e4f6fefebf7bd3eb30042a7d578"
     },
     {
-      "path": "webui-dist/assets/index-Bb5Z1vw6.js",
-      "sha256": "c980d24aeb7714eea4551554eb63425091c6f580103999fbef10f1a63ebe1226"
+      "path": "webui-dist/assets/index-BiOTP8BU.js",
+      "sha256": "b81662e0a1abcd88b88e937afd32de506265a9e12dedad5f4b6e7834cfda4bf3"
     },
     {
-      "path": "webui-dist/assets/index-BbbQmlNe.js",
-      "sha256": "7d600b361fc5f8c9688a396a12fed60c60c9d8124b144bd6840b76cbf527fdd8"
+      "path": "webui-dist/assets/index-BjH1EFkj.js",
+      "sha256": "50a9fc8d782c93e79637c86906b974cb30d2e68c12f90c96045f5d697cdc7e6f"
     },
     {
-      "path": "webui-dist/assets/index-Bi6-GaEH.js",
-      "sha256": "aa3db8aaf1ec168983e9b885126f7e08b89a7ecc576f5f34eba72e1d57265ea5"
+      "path": "webui-dist/assets/index-Bq7ouPcO.js",
+      "sha256": "75971b28128e37a55b746f53e71f9c5f8abedd628dbb3ae8aa80077759c34d59"
     },
     {
-      "path": "webui-dist/assets/index-BjBH_2rx.js",
-      "sha256": "78aee6b4368c77c675282fc67131f863f6ed9e8550994e1f51239ef70986498f"
+      "path": "webui-dist/assets/index-BrZWdf1K.js",
+      "sha256": "800eb82fe9875f46abdb91c7fbdbba1d9809acb13dd2a154ca3d8a9033434086"
     },
     {
-      "path": "webui-dist/assets/index-Bni2u-Jx.js",
-      "sha256": "2f40a60cdfa754400459211119704d852cc0519cbdce2b2a4147e577bebac0e8"
+      "path": "webui-dist/assets/index-BtLY1_7m.js",
+      "sha256": "3239b55e4a79cead1597f87f4ce7cda5057b0c49b1b558e73b1071a559f4e7cf"
     },
     {
-      "path": "webui-dist/assets/index-ByXh4RHg.js",
-      "sha256": "efdb593dac68f8c006abf1b18d0722463f450d2286ded914ad1b720d32f46d2a"
+      "path": "webui-dist/assets/index-Btx8MPem.js",
+      "sha256": "ddc7381de8d0cc449ed9b6e5edd1e75066e87d87fee1d6e3f9cbdc532919c055"
     },
     {
-      "path": "webui-dist/assets/index-C87g1HOp.js",
-      "sha256": "d38307cf3c95ee3fb47af7b2f985d66e0269b1a028374ac7b457bd832013dca0"
+      "path": "webui-dist/assets/index-BxSTohwH.js",
+      "sha256": "9f70ea74cd4abbbefe27b4a258a3b6c0d93f098e95ca0603a095e99a6b4115b6"
     },
     {
-      "path": "webui-dist/assets/index-CC0fM4N6.js",
-      "sha256": "d24758386f208b233d5a4fe55fd48af73732359436fc357b5b3bd54a18d162e6"
+      "path": "webui-dist/assets/index-By_p4JUY.js",
+      "sha256": "e47d5d0b81a7c59fddfdda422247de5abccdda01737924f6b1178e5c04afccc2"
     },
     {
-      "path": "webui-dist/assets/index-CCJDdHGH.js",
-      "sha256": "2003b889b143799ce2d8716ed6f87bd3fbc4caf1febf77b12b920a53c674a589"
+      "path": "webui-dist/assets/index-CGWuF2mj.js",
+      "sha256": "956f52ce78f6de8440e4cd392a551a72d743b70075c77bc54ea84afefb881c6e"
     },
     {
-      "path": "webui-dist/assets/index-CLaiirV-.js",
-      "sha256": "d88a2a5a22cd865a4f215949c77daf141267a569debbb80bcecae05d923655f1"
+      "path": "webui-dist/assets/index-CJd_LY0j.js",
+      "sha256": "7cfda364c76309e15f94201ed0aca2c2f14c1a6a89fbc03823ceaaab0e0bb575"
     },
     {
-      "path": "webui-dist/assets/index-CNLDr3nW.js",
-      "sha256": "ed4f4d59644157745fbb8a51512c82392ae9d3c598a081733b52c8bae8177bf5"
+      "path": "webui-dist/assets/index-CMpXw0eM.css",
+      "sha256": "a76ef736c2fdc0eb61305951c177d559096ba0ed72a51f68e6dbfe64b6dc9ef8"
+    },
+    {
+      "path": "webui-dist/assets/index-CPP080XY.js",
+      "sha256": "5af7d473a2a8513a24d1f4b919e937a05189153b85bc318199efa02ba6bdef34"
     },
     {
       "path": "webui-dist/assets/index-CPRWOTtY.css",
       "sha256": "c7b155dc18bae46a382f8e34cbede3069a35ab87eaaec02322a1df265fe773fd"
     },
     {
-      "path": "webui-dist/assets/index-CekDexVV.js",
-      "sha256": "07d7fcfbb96ef728a010428b7fbb5d74691956ee9ee0eb90c66653c30a4f651a"
+      "path": "webui-dist/assets/index-CY2LcACl.js",
+      "sha256": "777916241d87f1ad8396550335a14f554010a9da9a7eeb9f1f83264738d1622b"
     },
     {
-      "path": "webui-dist/assets/index-CfNfXfs5.js",
-      "sha256": "5c0e0421bec9f11896801698e984d63f9c5e360aa583bedf40569e01e61a53ac"
+      "path": "webui-dist/assets/index-Cbn20gHE.js",
+      "sha256": "684a3639d7a3713972cf912f9b0106a12097788422b7aa871233d43d46d3c8a8"
     },
     {
-      "path": "webui-dist/assets/index-CkbM2-nq.js",
-      "sha256": "e7fa0bdea846520554847f452117aaf06590726bd596fb38b6132e2c3a5011fc"
+      "path": "webui-dist/assets/index-Cj37Lv4j.js",
+      "sha256": "8bfec0d2caa4d0497247ea19fe1340e7b9fdd0ff2f8c9c7de59d60863a20ba48"
     },
     {
-      "path": "webui-dist/assets/index-CtBhqRGo.js",
-      "sha256": "326980d95b64c31966785ed1bf67353e2df7fc6b63415cf66b2d849aaf222745"
+      "path": "webui-dist/assets/index-CjOMmleP.js",
+      "sha256": "1b2fe1de99fdf6772f9a9e6c5cd4840daf13926eef556157443a5870e7858ead"
     },
     {
-      "path": "webui-dist/assets/index-D6ocDfdw.js",
-      "sha256": "f80800a5d8fdd393f28e455e18cf16c58580d9784ebd20445d1d91a41d369159"
+      "path": "webui-dist/assets/index-CpNrIW0p.js",
+      "sha256": "1c058dd1c17f96f2f0385b6d319d563ac1a317c87267fc7594c4d8b8c5e45386"
     },
     {
-      "path": "webui-dist/assets/index-D7Welt3v.js",
-      "sha256": "423e7db7ac7d1493eb663893e3f3f5adaafe997fa797a9633d57cfcc92173d97"
+      "path": "webui-dist/assets/index-Cx2MYiXe.js",
+      "sha256": "f05ff46a4595cf7db76f46b28832e24871ce8985ac4d6eb46b33e2271b4774ac"
     },
     {
-      "path": "webui-dist/assets/index-DZPe0ZD6.js",
-      "sha256": "3ed1ee230292bcb58f35f07de6e346ccdbe30c39fdf7006d1a732cd94820ee30"
+      "path": "webui-dist/assets/index-D8WlrudB.js",
+      "sha256": "22cb446a65886ab21b3240c511f539d6f36159da2bc92f4b87b77a209b900388"
     },
     {
-      "path": "webui-dist/assets/index-DZSvt8hm.css",
-      "sha256": "34f71915dd2cca56d82bd091773102e8c421fff603e1dcf82e195f8cad0dce39"
+      "path": "webui-dist/assets/index-DFFfnAbh.js",
+      "sha256": "d36c5ff42d5c07be77c7d5c9720fde548d8b2f05e1660d35398d3fdf93f8cdbf"
     },
     {
-      "path": "webui-dist/assets/index-DbhNGzs5.js",
-      "sha256": "78327704461ab923c4c2750e447d9c55e2128d4c04918e5ab74ea5d12fbfc3ff"
+      "path": "webui-dist/assets/index-DfkmV0EY.js",
+      "sha256": "89f1acec508ce8fea6e3f8f6d4e72127d2d0ded117c557fc1ff7042ad8a9eb74"
     },
     {
-      "path": "webui-dist/assets/index-DhLUhIKk.js",
-      "sha256": "f3af7b5f24a1995c6df88fd3a9abd596ec586f77836c923d6031e390e14261da"
-    },
-    {
-      "path": "webui-dist/assets/index-DinISnKt.js",
-      "sha256": "ea8001d608b3e89c674aa95ff93aac85b581265435bf85bab09b52935bfc640d"
-    },
-    {
-      "path": "webui-dist/assets/index-DoLhwA--.js",
-      "sha256": "31035e29dba2928cdcb71cc1632dd02454f1031806df34bf9bc6756290b25595"
-    },
-    {
-      "path": "webui-dist/assets/index-DuOSDxSL.js",
-      "sha256": "31c67ff1c428e35c1607cb2dcbf64735ea6ce58cefdd3de9385e29f016fafe7f"
+      "path": "webui-dist/assets/index-DieOipBk.js",
+      "sha256": "cd4a0377d8e1316fb93f8f69ad628142fe8a94289300625522d2ad0fad589421"
     },
     {
       "path": "webui-dist/assets/index-DvNG2mLV.css",
       "sha256": "bd3831d8e043df0cc0d7d1afb373c03d0825e300db3bc775945288e228f033cb"
     },
     {
-      "path": "webui-dist/assets/index-DwJaIScN.js",
-      "sha256": "cc8b4b2aced2afb1db595c4a6334462c0092712c4ae11893e81a43d7c7c97016"
+      "path": "webui-dist/assets/index-DxI54jL1.js",
+      "sha256": "a67dc156cca13ac5ad115e5f38f56d287b9875386fb22202b5f468518bf116e6"
     },
     {
-      "path": "webui-dist/assets/index-MfsD23n-.js",
-      "sha256": "4aa8483de7f18fa210313b11e3265de88fa8610e6d435ea52b8118eb73f34865"
+      "path": "webui-dist/assets/index-Im37TMuu.js",
+      "sha256": "5982c67940977d2bc29c091886f3f90bd4ea0bbf63ba8134d5ec87429cee4cae"
     },
     {
-      "path": "webui-dist/assets/index-Rd7TnEfm.js",
-      "sha256": "992829cdb944121bb8dd2c49d00c1c8467c87fcf456691e71c50b6233532e143"
+      "path": "webui-dist/assets/index-JgSHZmJd.js",
+      "sha256": "dc18b65df3874ecd929dff5b92d3d1fc8fc8a669d175a7095e3065cf7bb8506b"
     },
     {
-      "path": "webui-dist/assets/index-aGZ-RSqX.js",
-      "sha256": "14e8afb1db706db7a17c104ed27ad180c2ef745e4a23adc3c1fb7449db5a6d30"
+      "path": "webui-dist/assets/index-NC1sPck-.js",
+      "sha256": "d25a2f64c89f19eb724c3f5aafbf7dabceefefcd7ba48a47201fb41bd7b276b3"
     },
     {
-      "path": "webui-dist/assets/index-fXBQ_43u.js",
-      "sha256": "2c642289ef7e336f0efb09965afd4dcd2f0748d9166414a92ec496b0c02bc716"
+      "path": "webui-dist/assets/index-YLlsFcFO.js",
+      "sha256": "7ef5ef8c97e6b652a4a3ea3a5849ce94a3328b5c5318d3bbd559cd4d4097f0ed"
     },
     {
-      "path": "webui-dist/assets/index-lVm4nL2A.js",
-      "sha256": "c8ef59cfde50b692837d25a4619523bcf08a8bdb08c23c8b28f51553d1717984"
+      "path": "webui-dist/assets/index-d9QVqwue.js",
+      "sha256": "3c63c996b5ba307cf1bc71b4c2d5c024db2b22b295492757da61bceeb9f0487e"
+    },
+    {
+      "path": "webui-dist/assets/index-uF6I2412.js",
+      "sha256": "8b2b8659a24efc52374f007cac75e6de7b65eb1d27dcea18ecd229be343c0ea7"
+    },
+    {
+      "path": "webui-dist/assets/index-vNrcitop.js",
+      "sha256": "4882cafffb2c8e7e6d4d93e6ed07a86e3c379afc9d1d9dac93c3c4a9d3a17f47"
     },
     {
       "path": "webui-dist/assets/markdown-vendor-CZNUDgeK.js",
@@ -1958,8 +1979,8 @@
       "sha256": "cf5026ac3a32ea9b92b8070ea78ed99c7826b9674bb6b0ba19eba4f572960795"
     },
     {
-      "path": "webui-dist/assets/modelPricing-DTm_fvIn.js",
-      "sha256": "6def9ac06ca8846aa143cf5c7597c0db3c84f232e36f0e49191991c649e9bfbd"
+      "path": "webui-dist/assets/modelPricing-C3rkza8f.js",
+      "sha256": "0578092cd0e5ece4f10612a1603074896de9b6153380a26a817794c5a14b8811"
     },
     {
       "path": "webui-dist/assets/monitoring-Bg23Ulzc.js",
@@ -2010,8 +2031,8 @@
       "sha256": "729b5d4396821e2ab795f4d007dfc4fe3fa17473683c0fd452d25d9b050e6909"
     },
     {
-      "path": "webui-dist/assets/provider-D69SceN3.js",
-      "sha256": "65c8bd3192e135e51c40ce49dc78bbe4a7faf53d8e2b12782bb4099b535547ac"
+      "path": "webui-dist/assets/provider-DV58IrCo.js",
+      "sha256": "85cd9e09049e0ce3b86cd2431f797ea27de96ad2f21bdb286f108f368d7bc60a"
     },
     {
       "path": "webui-dist/assets/react-vendor-BZV40eAE.css",
@@ -2050,12 +2071,8 @@
       "sha256": "00477198d4c86f5f9792e7fcb6fd509f20546a01a5c0a47c7ae127d7ed7b26bd"
     },
     {
-      "path": "webui-dist/assets/threatbook-CvDkg__w.js",
-      "sha256": "5c89ca6d71e1697415c63a5c79e9ef879a75198df58d96e92e3660c00507310f"
-    },
-    {
-      "path": "webui-dist/assets/tool-BOW3nGEQ.js",
-      "sha256": "05ad5fbb76822f0b18a8cdf8a3056bb3cdfab483931d128307ce340773b2f506"
+      "path": "webui-dist/assets/threatbook-m_Y0dzCY.js",
+      "sha256": "e63fb9a7307222ffcd8b563a4c7803a6cd396d05279d50998243b8eaa6622af8"
     },
     {
       "path": "webui-dist/assets/tool-BjudjCaw.js",
@@ -2066,8 +2083,12 @@
       "sha256": "61025873e82695a86bca93cbfac6a037fbd1a3cabec1cd04aa3051415421eed5"
     },
     {
-      "path": "webui-dist/assets/ui-Bm7VGELx.js",
-      "sha256": "73dd8c1ca32eb6bdce8763cda72faa4dc4019102c9df44e2c66c549bd7f0048e"
+      "path": "webui-dist/assets/tool-DYwUr59T.js",
+      "sha256": "e44699f39167163493c722a525250b3da83f1cf5cd52191a4c5dc8ee17980a80"
+    },
+    {
+      "path": "webui-dist/assets/ui-BB39N_Li.js",
+      "sha256": "3388f05c799eb30558c3f7aa1bf903b32f0da09455f2f7c04153a64574b678c8"
     },
     {
       "path": "webui-dist/assets/update-C0ruiXtA.js",
@@ -2078,40 +2099,40 @@
       "sha256": "14ee7b6d1144fd2d66afa8434237e382c4962cd0439a63e3e812e0645fda70c4"
     },
     {
-      "path": "webui-dist/assets/useAgents-BAGUAeym.js",
-      "sha256": "d626d4a85547ebffdb169468c1f23580546905e5ca2088007c70e03312c8ec4b"
+      "path": "webui-dist/assets/useAgents-qEY9qv96.js",
+      "sha256": "e3363745b8351688f16919e0c09cc35578f3df2c400b0c5181cddc7479619167"
     },
     {
-      "path": "webui-dist/assets/useChatModelResources-VFhZEnAM.js",
-      "sha256": "6caa5ee98162b22867833dc32f880d375be122cf8033e402cf1d77f365748279"
+      "path": "webui-dist/assets/useChatModelResources-CbeO89ws.js",
+      "sha256": "03a6e93d15f36f35411ff71d0ca8ab7a830f1466722fdd3174b6723fb2e3dcca"
     },
     {
-      "path": "webui-dist/assets/useDefaultModelVision-DjoMWkvV.js",
-      "sha256": "10e761c5b35067508fe500470c5bdabc3416986835f274682e0f6f5dd92e2786"
+      "path": "webui-dist/assets/useDefaultModelVision-Chaf1fMa.js",
+      "sha256": "17d0e7c9279e43093fb526e29009f2c39921b47b552ee91c6d936d62e005b8bf"
     },
     {
       "path": "webui-dist/assets/useDialogFocus-BasAevBG.js",
       "sha256": "8d3550a1d9dc1754fc2d1fa42353776f30369da3d86ece1ed0a67fc5d08bbecc"
     },
     {
-      "path": "webui-dist/assets/usePluginViewMode-CkNPL_cW.js",
-      "sha256": "a73380b2b3893c928ac37306ee570cd0e917791d037b90472157804f7a8387db"
+      "path": "webui-dist/assets/usePluginViewMode-XQ_aSOag.js",
+      "sha256": "0dfa966d55a798a3b3fb1c4c36176861d3637df176863a7d2e84f20dc635998d"
     },
     {
-      "path": "webui-dist/assets/useProtectedHubUpdate-BvNVyAzV.js",
-      "sha256": "493b6ba84061f6c65a5913e519d5b1ad026e2b18c90a59d764e5fe9befa930af"
+      "path": "webui-dist/assets/useProtectedHubUpdate-DNKZtdui.js",
+      "sha256": "c948d75341ee665dfaabcbddd0e3d1ee0ff4f0bb00c2980ce73cb3b1b7ceba25"
     },
     {
-      "path": "webui-dist/assets/useRea-DqZjyDOZ.js",
-      "sha256": "4d95a79cc117f59416e46ee4b3c79e81fdffc7d4ef9620b08ec4da250043d2c3"
+      "path": "webui-dist/assets/useRea-7d7BYOjX.js",
+      "sha256": "044d425efe95a9fbc2e42690676c4348a621b45e212841c05ea810790bd2c4a1"
     },
     {
-      "path": "webui-dist/assets/useRexComposerControls-DkhFAqJO.js",
-      "sha256": "a1fa8f78f69ab132ce13f19e220d49f2c14a183fff8cd019d63a39bb7353bf9b"
+      "path": "webui-dist/assets/useRexComposerControls-BXqybo71.js",
+      "sha256": "2e5a736aee190956259861a0507007bf39e88e8b7c09d73b345672794be72ff2"
     },
     {
-      "path": "webui-dist/assets/useSessionChat-CCz8eFFl.js",
-      "sha256": "f9a6766d6bbbb4e4880958f0bdf1457752da0c92b6ecd6ea196f19035ddd9027"
+      "path": "webui-dist/assets/useSessionChat-ypoh-YMH.js",
+      "sha256": "2d7febbbdb35d8fee105ddae1c0da478da6b1e3152c6ba1025febabd19aacce8"
     },
     {
       "path": "webui-dist/assets/voice-CwJZleBK.js",
@@ -2134,16 +2155,16 @@
       "sha256": "cb35ecbdfc715e5b96aacb7fe758f5bf24ad374d197bcce6ae05444020805b26"
     },
     {
-      "path": "webui-dist/assets/workflowDisplay-BCldhaNM.js",
-      "sha256": "0a8d29719f408d83646958c8fccd9b745e9e6cf3e3c6e7d90ea6c73b527761f0"
+      "path": "webui-dist/assets/workflowDisplay-D6xq6RAo.js",
+      "sha256": "8d5f9bad3e7d561163598fcc618cd0a40e997480affc0ef7da7509df91be9db3"
     },
     {
       "path": "webui-dist/assets/workflowGraphLayout-b5NyNMdH.js",
       "sha256": "89f8926694c4fa6886e9c3fbc6a0321eba0f94545cf64d8c18869e5020a5293d"
     },
     {
-      "path": "webui-dist/assets/workspace-BqPL4yXT.js",
-      "sha256": "991a997d3e4d7fbee87912dd08fcfd1e68d9d668f4efee3aac86ee3841a77794"
+      "path": "webui-dist/assets/workspace-CeKLHLvg.js",
+      "sha256": "82843d6daf576019b7faf0de969a6cda94852207d4f5fee6e3bba1b0f62f78a2"
     },
     {
       "path": "webui-dist/assets/workspace-CpVtRobM.js",
@@ -2207,7 +2228,7 @@
     },
     {
       "path": "webui-dist/flocks-webui-manifest.json",
-      "sha256": "3f8d62bf64e5a075921d76228cd3492c76d2b5a90ad5a1fd59a29565d7a6e277"
+      "sha256": "730fd083ca7d35add7f869f02be13b4ddf10dab7431a30d36710eaae14c05233"
     },
     {
       "path": "webui-dist/gitee-logo.png",
@@ -2215,7 +2236,7 @@
     },
     {
       "path": "webui-dist/index.html",
-      "sha256": "c4acc76ab406e948ac785d73ba98761acedd8e3f7fc38ddbc7fb5cff700d6cf0"
+      "sha256": "e33c1658e34450c149cd136c651f08f8646dc017f7f5fa442d722e2667f91f35"
     },
     {
       "path": "webui-dist/notifications/holiday-transition-20260923.jpg",

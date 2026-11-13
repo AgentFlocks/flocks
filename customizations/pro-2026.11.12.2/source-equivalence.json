@@ -1,7 +1,9 @@
 {
   "sourceCommit": "ee34cc2af124e3bfc4fcc16adde420ba19ab21bb",
   "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d",
-  "reconstructedTree": "52a4054b99419bddda8d93f0ae35c87eacc570df",
-  "expectedTree": "52a4054b99419bddda8d93f0ae35c87eacc570df",
+  "sourcePatch": "patches/hide-device-inspector-ti-analyst.patch",
+  "sourcePatchSha256": "23ad64c3e763b16ec8ae23a051d204b758288a9d588513d9cee0da9c1d1d713b",
+  "reconstructedTree": "7457d21e28d0002ba50fde2738c902c01863fdc6",
+  "expectedTree": "7457d21e28d0002ba50fde2738c902c01863fdc6",
   "matches": true
 }

@@ -1,6 +1,6 @@
 # Flocks Pro 2026.11.12.2 定制增强包
 
-增强包版本：1.14.9。仅适用于 `2026.11.12.2-linux-amd64`、Pro 构建 `2ee622b`、Core `730da689`，运行树保护策略必须为 `native`。
+增强包版本：1.14.10。仅适用于 `2026.11.12.2-linux-amd64`、Pro 构建 `2ee622b`、Core `730da689`，运行树保护策略必须为 `native`。
 
 ## 开发与部署方式
 
@@ -34,10 +34,10 @@ https://gitee.com/flocks/flocks/repository/archive/fix/process_11.12_en
 
 已装补丁 A 时，脚本核对 A 的部署记录和当前文件，再直接写入补丁 B。B 删除的旧补丁文件会清理，不再修改的原版文件恢复发行基线；保留配置、状态及历史备份。部署失败自动退回 A；B 启动失败时也会回退本次代码更新，并尝试重新启动此前运行的服务。未知手工源码改动会被保留并报告。自动升级以补丁声明的 Pro 发行基线为准。
 
-若继续使用手工压缩包方式，把 `flocks-customizations-1.14.9-pro-2026.11.12.2-full.tar.gz` 上传到服务器家目录，再整行执行：
+若继续使用手工压缩包方式，把 `flocks-customizations-1.14.10-pro-2026.11.12.2-full.tar.gz` 上传到服务器家目录，再整行执行：
 
 ```bash
-flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks-customizations-1.14.9-pro-2026.11.12.2-full.tar.gz" -C "$HOME/.flocks/customizations" && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root "$HOME/flockspro" apply --install-deps && flocks start --no-browser --webui-host 0.0.0.0
+flocks stop && mkdir -p "$HOME/.flocks/customizations" && tar -xzf "$HOME/flocks-customizations-1.14.10-pro-2026.11.12.2-full.tar.gz" -C "$HOME/.flocks/customizations" && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root "$HOME/flockspro" apply --install-deps && flocks start --no-browser --webui-host 0.0.0.0
 ```
 
 解压目录和安装器都在 `~/.flocks/customizations/`，不需要额外的家目录工作文件夹。补丁目标是当前受管 Pro 发布；旧的 `$HOME/flocks` 不参与安装。
@@ -85,6 +85,10 @@ flocks stop && "$HOME/.flocks/customizations/home-dashboard/apply.sh" --pro-root
 `prepare_sources.py --core <新源码目录> --pro <新Pro目录>` 按清单检出固定的 `zw_dev` 提交与 Pro 源码；不会在旧目录叠加修改。`build_package.py` 默认从 `.work/zw_dev` 构建，拒绝未提交改动或过期前端输入。`run_tests.py` 也默认测试该分支，可用 `FLOCKS_TEST_CORE_SOURCE` 指定另一个已准备的源码目录。
 
 `build_shell_updater.py` 从已验证的 `update-flocks.py` 生成独立 `update-flocks.sh`，Bash 负责下载、参数传递及临时文件清理；生成后的脚本可单独分发。修改更新引擎后重新生成，`tests/test_shell_updater.py` 检查两者一致，并验证实际 Bash 入口。
+
+## 1.14.10 Agent 列表清理
+
+把随包的 `device-inspector`（设备巡检专家）和 `ti-analyst`（威胁情报专家）定义标记为 `hidden: true`。Agent API 不再列出这两个子 Agent，主 Agent 也不会委派给它们。此项保留定义文件以便补丁还原；它实现的是“从列表移除并停止使用”，不是从发行源码删除文件。开发仓库保留增量源码补丁 `customizations/pro-2026.11.12.2/patches/hide-device-inspector-ti-analyst.patch`，完整 Core 源码差异保存在 `customizations/pro-2026.11.12.2/patches/core-11122.patch`。
 
 ## 本次交付验收范围
 

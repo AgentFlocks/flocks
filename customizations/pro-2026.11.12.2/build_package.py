@@ -59,6 +59,15 @@ def build(core,pro,frontend):
             raise ValueError(f'{name} frontend sources changed after the production build; rebuild before packaging')
         if git(source,'status','--porcelain','--untracked-files=normal').strip():
             raise ValueError(f'{name} source worktree must be clean before packaging; commit the intended changes first')
+    source_patches=[]
+    for relative in profile.get('sourcePatchFiles',[]):
+        patch=ROOT/relative
+        if not patch.is_file():
+            raise ValueError(f'Source patch is missing: {relative}')
+        check=subprocess.run(['git','-C',str(core),'apply','--check',str(patch)],capture_output=True,text=True)
+        if check.returncode:
+            raise ValueError(f'Source patch does not apply to the pinned Core source: {relative}\n{check.stderr}')
+        source_patches.append({'path':relative,'sha256':sha(patch.read_bytes())})
     for path in (ROOT/'runtime').rglob('*'):
         if path.is_file() and path.name!='.DS_Store' and '__pycache__' not in path.parts and path.suffix!='.pyc':
             name=path.relative_to(ROOT/'runtime').as_posix()
@@ -72,6 +81,9 @@ def build(core,pro,frontend):
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
+    git_root=Path(git(ROOT,'rev-parse','--show-toplevel').decode().strip())
+    payload_fl=staging/'payload/flocks'
+    payload_directory=payload_fl.relative_to(git_root).as_posix()
     for name in ('apply.py','apply.sh','update-flocks.py','target-profile.json','README.md'):
         shutil.copyfile(ROOT/name,staging/name)
     for name in ('verification.json','pg-verification-summary.json'):
@@ -99,6 +111,20 @@ def build(core,pro,frontend):
         shutil.copyfile(source,destination)
         result=subprocess.run(['git','-C',str(core),'show',profile['coreCommit']+':'+name],capture_output=True)
         files.append({'path':'flocks/'+name,'sha256':sha(source.read_bytes()),'before':sha(result.stdout) if result.returncode==0 else None})
+    for item in source_patches:
+        patch=ROOT/item['path']
+        result=subprocess.run(['git','apply','--directory='+payload_directory,str(patch)],cwd=git_root,capture_output=True,text=True)
+        if result.returncode:
+            raise ValueError(f'Could not apply source patch to the package payload: {item["path"]}\n{result.stderr}')
+        reverse=subprocess.run(['git','apply','--reverse','--check','--directory='+payload_directory,str(patch)],cwd=git_root,capture_output=True,text=True)
+        if reverse.returncode:
+            raise ValueError(f'Source patch was not applied to the package payload: {item["path"]}\n{reverse.stderr}')
+    if source_patches:
+        for entry in files:
+            if entry['path'].startswith('flocks/'):
+                path=staging/'payload'/entry['path']
+                if path.is_file():
+                    entry['sha256']=sha(path.read_bytes())
     # Pro lists a separate SOC package on PostgreSQL. Patch its exact paired
     # page clients too, preserving Pro's cases pages, dependencies and policies.
     pro_soc = pro/'hub/soc-workspace'
@@ -132,7 +158,7 @@ def build(core,pro,frontend):
         shutil.copyfile(path,destination)
         files.append({'path':name,'sha256':sha(path.read_bytes())})
     (staging/'payload-manifest.json').write_text(json.dumps({'schemaVersion':1,'deploymentMode':'source-overlay',
-        'source':{'branch':branch,'head':head,'base':base}, 'sourceRoot':'runtime/flocks',
+        'source':{'branch':branch,'head':head,'base':base,'patches':source_patches}, 'sourceRoot':'runtime/flocks',
         'webuiRoot':'runtime/webui-dist','proEntry':'core/flockspro-go',
         'excludedSourcePaths':[{'path':name,'reason':'The Pro native provider owns this module; its SQLite counterpart is not overlaid'} for name in sorted(replaced)]+
                               [{'path':name,'reason':'Source-only Git updater guard; the managed Pro updater entry is retained'} for name in sorted(source_only)],

@@ -1,0 +1,26 @@
+diff --git a/.flocks/plugins/agents/device-inspector/agent.yaml b/.flocks/plugins/agents/device-inspector/agent.yaml
+index 873c3532..5353f91d 100644
+--- a/.flocks/plugins/agents/device-inspector/agent.yaml
++++ b/.flocks/plugins/agents/device-inspector/agent.yaml
+@@ -11,7 +11,7 @@ description_cn: >-
+ mode: subagent
+ strategy: react
+ delegatable: true
+-hidden: false
++hidden: true
+ tags:
+   - security
+   - device-inspection
+diff --git a/.flocks/plugins/agents/ti-analyst/agent.yaml b/.flocks/plugins/agents/ti-analyst/agent.yaml
+index a600d8a2..5235f9aa 100644
+--- a/.flocks/plugins/agents/ti-analyst/agent.yaml
++++ b/.flocks/plugins/agents/ti-analyst/agent.yaml
+@@ -12,7 +12,7 @@ description_cn: >-
+   威胁情报分析子 Agent：面向 IOC 研判、归因与威胁体研究；分析 IP、域名与文件哈希，评估威胁等级并关联已知威胁体与行动。
+   支持单点深挖、批量筛选、归因追踪与事件驱动情报收集；可调用 IP/域名/哈希与威胁体查询及联网检索。
+ mode: subagent
+-hidden: false
++hidden: true
+ color: "#E74C3C"
+ delegatable: true
+ tags:
