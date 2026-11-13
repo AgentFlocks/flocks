@@ -43,7 +43,7 @@ from flocks.console.previous_licence import find_licence_file, licence_token
 from flocks.storage.storage import Storage
 from flocks.updater import enterprise
 from flocks.updater.enterprise import EnterpriseUpgradeError
-from flocks.updater.machine_fingerprint import MachineIdUnreadable, machine_fingerprint
+from flocks.updater.machine_fingerprint import MachineIdUnreadable, machine_identity
 from flocks.utils.log import Log
 
 log = Log.create(service="updater.enterprise_application")
@@ -275,7 +275,7 @@ async def _apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
             raise EnterpriseUpgradeError("已经有一份申请在审核或等着启用，处理完再申请")
     base, session = _console_base(), await _console_session()
     try:
-        machine = await asyncio.to_thread(machine_fingerprint)
+        machine, machine_kind = await asyncio.to_thread(machine_identity)
     except MachineIdUnreadable as exc:
         # Sent without it, the licence would not be bound to this machine although it could be.
         raise EnterpriseUpgradeError(f"读不到这台机器的标识，先处理好再申请：{exc}") from exc
@@ -304,8 +304,10 @@ async def _apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
         "applied_by": applied_by,
         # The host as the enterprise core names it: Console binds the licence it issues to it, and the
         # core runs on that licence on this machine only. None for a host that keeps no identifier,
-        # which Console shows the operator.
+        # which Console shows the operator. machine_kind says which fingerprint it is, for whoever
+        # reviews: the device id, or the machine-id digest where the device id cannot be read.
         "machine": machine or None,
+        "machine_kind": machine_kind or None,
     }
     payload = {
         # The machine, as Console knows it from the sign-in: Console holds one open application
