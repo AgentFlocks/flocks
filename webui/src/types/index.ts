@@ -240,6 +240,17 @@ export interface Tool {
   enabled_default?: boolean;
   /** True when a user setting is recorded in flocks.json `tool_settings`. */
   enabled_customized?: boolean;
+  /**
+   * Enabled flag of the API service that gates this tool; null or absent when
+   * no service does. While false the tool cannot be switched on by itself.
+   */
+  service_enabled?: boolean | null;
+  /**
+   * integration_type of that service, as the API service list reports it.
+   * 'device' means it is managed on the Device Integration page and is not
+   * listed on the API tab, whatever `source` says.
+   */
+  service_integration_type?: string | null;
   requires_confirmation: boolean;
 }
 

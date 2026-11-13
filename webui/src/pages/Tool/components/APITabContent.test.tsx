@@ -134,6 +134,32 @@ describe('APITabContent', () => {
     expect(listAllToolPages).not.toHaveBeenCalled();
   });
 
+  it('opens the detail panel of the service it is asked to focus, once per request', async () => {
+    providerAPI.listApiServices.mockResolvedValue({ data: [
+      { id: 'af_api', name: 'AF API', enabled: false, tool_count: 1 },
+      { id: 'other', name: 'Other API', enabled: true, tool_count: 0 },
+    ] });
+    const props = { tools: [], onSelectTool: vi.fn(), onRefreshTools: vi.fn(),
+      catalogEntries: [], catalogCategories: {}, catalogLoading: false, configuredIds: new Set<string>(), onConfiguredChange: vi.fn() };
+    // The request arrives with the tab, before the service list has loaded.
+    const { rerender } = render(<APITabContent {...props} focusService={{ id: 'af_api', nonce: 1 }} />);
+    expect(screen.queryByText('detail-panel')).not.toBeInTheDocument();
+    expect(await screen.findByText('detail-panel')).toBeInTheDocument();
+    expect(apiDetailProps).toHaveBeenLastCalledWith(expect.objectContaining({ serviceName: 'af_api', enabled: false }));
+
+    // Closing it is final: re-rendering with the same request does not reopen it.
+    fireEvent.click(screen.getByText('AF API', { selector: 'h2' }).closest('div.flex')!.querySelector('button')!);
+    expect(screen.queryByText('detail-panel')).not.toBeInTheDocument();
+    rerender(<APITabContent {...props} searchQuery="" focusService={{ id: 'af_api', nonce: 1 }} />);
+    expect(screen.queryByText('detail-panel')).not.toBeInTheDocument();
+    // A new request for the same service opens it again.
+    rerender(<APITabContent {...props} focusService={{ id: 'af_api', nonce: 2 }} />);
+    expect(screen.getByText('detail-panel')).toBeInTheDocument();
+    // A service that is not in the list opens nothing.
+    rerender(<APITabContent {...props} focusService={{ id: 'missing', nonce: 3 }} />);
+    expect(screen.queryByText('detail-panel')).not.toBeInTheDocument();
+  });
+
   it('keeps catalog keyword search independent of service and child-tool matches', async () => {
     providerAPI.listApiServices.mockResolvedValue({ data: [{ id: 'service', name: 'Native service', enabled: false, tool_count: 0 }] });
     const props = { tools: [], onSelectTool: vi.fn(), onRefreshTools: vi.fn(),
