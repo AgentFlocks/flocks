@@ -1,6 +1,6 @@
 import React from 'react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import RunTab from './RunTab';
 import type { WorkflowExecution } from '@/api/workflow';
@@ -412,6 +412,318 @@ describe('RunTab', () => {
     expect(await screen.findByText(/"verdict": "疑似攻击行为"/)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '执行日志 (2)' }));
     expect(screen.getByText('concurrent_triage')).toBeInTheDocument();
+  });
+
+  describe('a test run the server refused', () => {
+    const reason = 'Workflow not found: wf-1';
+    const earlierRun: WorkflowExecution = {
+      id: 'exec-earlier',
+      workflowId: 'wf-1',
+      inputParams: {},
+      outputResults: { marker: 'earlier-run' },
+      status: 'success',
+      startedAt: new Date('2026-01-01T00:00:00Z').getTime(),
+      duration: 1,
+      executionLog: [],
+    };
+
+    /**
+     * Refuse the next test run and, from the moment it is sent, hold back the history responses:
+     * the history reloads right after a refusal, and that reload is what used to wipe the reason.
+     * The returned function answers the held requests and waits for the page to take the answer in.
+     */
+    function refuseNextRun() {
+      let answer!: (history: WorkflowExecution[] | Error) => void;
+      const held = new Promise<{ data: WorkflowExecution[] }>((resolve, reject) => {
+        answer = (history) => (history instanceof Error ? reject(history) : resolve({ data: history }));
+      });
+      held.catch(() => undefined);
+      workflowAPI.run.mockImplementationOnce(() => {
+        workflowAPI.getHistory.mockReturnValue(held);
+        return Promise.reject(new Error(reason));
+      });
+      return async (history: WorkflowExecution[] | Error) => {
+        await waitFor(() => {
+          expect(workflowAPI.getHistory.mock.results.some((result) => result.value === held)).toBe(true);
+        });
+        await act(async () => {
+          answer(history);
+        });
+      };
+    }
+
+    it('keeps the reason on screen after the history reloads empty', async () => {
+      const user = userEvent.setup();
+      const answerHistory = refuseNextRun();
+
+      render(<ControlledRunTab />);
+      await screen.findByText('暂无执行记录');
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+      expect(await screen.findByText(reason)).toBeInTheDocument();
+      await answerHistory([]);
+      expect(screen.getByText(reason)).toBeInTheDocument();
+    });
+
+    it('keeps the reason on screen instead of going back to an earlier run from the history', async () => {
+      const user = userEvent.setup();
+      workflowAPI.getHistory.mockResolvedValue({ data: [earlierRun] });
+      const answerHistory = refuseNextRun();
+
+      render(<ControlledRunTab />);
+      expect(await screen.findByText(/"marker": "earlier-run"/)).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+      expect(await screen.findByText(reason)).toBeInTheDocument();
+      await answerHistory([earlierRun]);
+      expect(screen.getByText(reason)).toBeInTheDocument();
+      expect(screen.queryByText(/"marker": "earlier-run"/)).not.toBeInTheDocument();
+    });
+
+    it('keeps the reason on screen when the history cannot be loaded either', async () => {
+      const user = userEvent.setup();
+      workflowAPI.getHistory.mockResolvedValue({ data: [earlierRun] });
+      const answerHistory = refuseNextRun();
+
+      render(<ControlledRunTab />);
+      expect(await screen.findByText(/"marker": "earlier-run"/)).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+      expect(await screen.findByText(reason)).toBeInTheDocument();
+      await answerHistory(new Error('Network Error'));
+      expect(screen.getByText(reason)).toBeInTheDocument();
+    });
+
+    it('keeps the reason on screen when a history response asked for before the refusal arrives after it', async () => {
+      const user = userEvent.setup();
+      let answerEarlyRequest!: (response: { data: WorkflowExecution[] }) => void;
+      workflowAPI.getHistory.mockReturnValueOnce(new Promise((resolve) => {
+        answerEarlyRequest = resolve;
+      }));
+      workflowAPI.run.mockRejectedValue(new Error(reason));
+
+      render(<ControlledRunTab />);
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+      expect(await screen.findByText(reason)).toBeInTheDocument();
+      await act(async () => {
+        answerEarlyRequest({ data: [earlierRun] });
+      });
+      expect(screen.getByText(reason)).toBeInTheDocument();
+      expect(screen.queryByText(/"marker": "earlier-run"/)).not.toBeInTheDocument();
+    });
+
+    it('keeps the reason when the history answers right behind the refusal, before the page has redrawn', async () => {
+      const user = userEvent.setup();
+      let answerEarlyRequest!: (response: { data: WorkflowExecution[] }) => void;
+      workflowAPI.getHistory.mockReturnValueOnce(new Promise((resolve) => {
+        answerEarlyRequest = resolve;
+      }));
+      workflowAPI.run.mockImplementation(() => {
+        const refusal = Promise.reject(new Error(reason));
+        // Attached ahead of the tab's own handler: the history request from before the refusal is
+        // answered in the same turn, once the tab has reported the refusal and before it redraws.
+        refusal.catch(() => queueMicrotask(() => answerEarlyRequest({ data: [earlierRun] })));
+        return refusal;
+      });
+
+      render(<ControlledRunTab />);
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+      expect(await screen.findByText(reason)).toBeInTheDocument();
+      expect(screen.queryByText(/"marker": "earlier-run"/)).not.toBeInTheDocument();
+    });
+
+    it('keeps the reason on screen when the page was opened on one execution', async () => {
+      const user = userEvent.setup();
+      workflowAPI.getHistory.mockResolvedValue({ data: [earlierRun] });
+      const answerHistory = refuseNextRun();
+
+      render(<ControlledRunTab focusExecutionId="exec-earlier" />);
+      expect((await screen.findAllByText(/"marker": "earlier-run"/)).length).toBeGreaterThan(0);
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+      expect(await screen.findByText(reason)).toBeInTheDocument();
+      await answerHistory([earlierRun]);
+      expect(screen.getByText(reason)).toBeInTheDocument();
+    });
+
+    it('gives way to the next run once the server accepts one', async () => {
+      const user = userEvent.setup();
+      const answerHistory = refuseNextRun();
+
+      render(<ControlledRunTab />);
+      await screen.findByText('暂无执行记录');
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+      expect(await screen.findByText(reason)).toBeInTheDocument();
+      await answerHistory([]);
+      expect(screen.getByText(reason)).toBeInTheDocument();
+
+      const nextRun: WorkflowExecution = {
+        id: 'exec-next',
+        workflowId: 'wf-1',
+        inputParams: {},
+        status: 'running',
+        startedAt: Date.now(),
+        executionLog: [],
+      };
+      workflowAPI.run.mockResolvedValue({ data: nextRun });
+      workflowAPI.getHistory.mockResolvedValue({
+        data: [{ ...nextRun, status: 'success', outputResults: { marker: 'next-run' }, duration: 2 }],
+      });
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+      expect(await screen.findByText(/"marker": "next-run"/)).toBeInTheDocument();
+      expect(screen.queryByText(reason)).not.toBeInTheDocument();
+    });
+  });
+
+  describe('bringing the result of a test run into view', () => {
+    const acceptedRun: WorkflowExecution = {
+      id: 'exec-new',
+      workflowId: 'wf-1',
+      inputParams: {},
+      status: 'running',
+      startedAt: Date.now(),
+      executionLog: [],
+    };
+    const finishedRun: WorkflowExecution = {
+      ...acceptedRun,
+      status: 'success',
+      outputResults: { marker: 'finished' },
+      duration: 1,
+    };
+    let measure: { mockRestore: () => void } | undefined;
+
+    afterEach(() => {
+      measure?.mockRestore();
+      measure = undefined;
+    });
+
+    /**
+     * jsdom lays nothing out, so the test says where things are: the panel shows what lies between
+     * 100 and 500, and the result card is wherever `card` puts it. Nothing else is ever measured.
+     */
+    function layOut(card: () => [top: number, bottom: number]) {
+      measure = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+        const [top, bottom] = this.getAttribute('data-testid') === 'panel' ? [100, 500] : card();
+        return { top, bottom, left: 0, right: 320, width: 320, height: bottom - top, x: 0, y: top, toJSON: () => ({}) };
+      });
+    }
+
+    /** The tab inside a panel the user scrolls, as it sits in the page. */
+    function renderInPanel(ui: React.ReactElement = <ControlledRunTab />) {
+      render(<div data-testid="panel" style={{ overflowY: 'auto' }}>{ui}</div>);
+      return screen.getByTestId('panel');
+    }
+
+    /** Hold back the history responses from now on; the returned function answers them. */
+    function holdHistory() {
+      let answer!: (history: WorkflowExecution[]) => void;
+      const held = new Promise<{ data: WorkflowExecution[] }>((resolve) => {
+        answer = (history) => resolve({ data: history });
+      });
+      workflowAPI.getHistory.mockReturnValue(held);
+      return async (history: WorkflowExecution[]) => {
+        await waitFor(() => {
+          expect(workflowAPI.getHistory.mock.results.some((result) => result.value === held)).toBe(true);
+        });
+        await act(async () => {
+          answer(history);
+        });
+      };
+    }
+
+    it('shows why a run was refused without the user having to scroll down to it', async () => {
+      const user = userEvent.setup();
+      workflowAPI.run.mockRejectedValue(new Error('Workflow not found: wf-1'));
+      layOut(() => [490, 562]);
+      const panel = renderInPanel();
+      await screen.findByText('暂无执行记录');
+
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+      expect(await screen.findByText('Workflow not found: wf-1')).toBeInTheDocument();
+      expect(panel.scrollTop).toBe(562 + 12 - 500);
+    });
+
+    it('shows a result taller than the panel from its top', async () => {
+      const user = userEvent.setup();
+      workflowAPI.run.mockRejectedValue(new Error('Workflow not found: wf-1'));
+      layOut(() => [490, 1200]);
+      const panel = renderInPanel();
+      await screen.findByText('暂无执行记录');
+
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+      expect(await screen.findByText('Workflow not found: wf-1')).toBeInTheDocument();
+      expect(panel.scrollTop).toBe(490 - 100);
+    });
+
+    it('keeps the result in view as the run it started finishes and the card grows', async () => {
+      const user = userEvent.setup();
+      workflowAPI.run.mockResolvedValue({ data: acceptedRun });
+      let card: [number, number] = [490, 530];
+      layOut(() => card);
+      const panel = renderInPanel();
+      await screen.findByText('暂无执行记录');
+      const answerHistory = holdHistory();
+
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+      await waitFor(() => expect(panel.scrollTop).toBe(530 + 12 - 500));
+
+      card = [448, 648];
+      await answerHistory([finishedRun]);
+      expect(screen.getByText(/"marker": "finished"/)).toBeInTheDocument();
+      expect(panel.scrollTop).toBe(42 + 648 + 12 - 500);
+    });
+
+    it('does not pull the panel back once the user has scrolled away from a run in progress', async () => {
+      const user = userEvent.setup();
+      workflowAPI.run.mockResolvedValue({ data: acceptedRun });
+      let card: [number, number] = [490, 530];
+      layOut(() => card);
+      const panel = renderInPanel();
+      await screen.findByText('暂无执行记录');
+      const answerHistory = holdHistory();
+
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+      await waitFor(() => expect(panel.scrollTop).toBe(42));
+
+      panel.scrollTop = 0;
+      card = [560, 760];
+      await answerHistory([finishedRun]);
+      expect(screen.getByText(/"marker": "finished"/)).toBeInTheDocument();
+      expect(panel.scrollTop).toBe(0);
+    });
+
+    it('does not fight the user over the scroll position while the run has nothing new to show', async () => {
+      const user = userEvent.setup();
+      workflowAPI.run.mockResolvedValue({ data: acceptedRun });
+      let card: [number, number] = [490, 530];
+      layOut(() => card);
+      const panel = renderInPanel();
+      await screen.findByText('暂无执行记录');
+      const answerHistory = holdHistory();
+
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+      await waitFor(() => expect(panel.scrollTop).toBe(42));
+
+      panel.scrollTop = 30;
+      card = [470, 510];
+      await answerHistory([{ ...acceptedRun }]);
+      expect(panel.scrollTop).toBe(30);
+    });
+
+    it('leaves the panel where it is when the page opens on a result from the history', async () => {
+      workflowAPI.getHistory.mockResolvedValue({ data: [finishedRun] });
+      layOut(() => [490, 700]);
+      const panel = renderInPanel();
+
+      expect(await screen.findByText(/"marker": "finished"/)).toBeInTheDocument();
+      expect(panel.scrollTop).toBe(0);
+    });
   });
 
 });
