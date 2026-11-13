@@ -237,7 +237,17 @@
     "retry": "Retry",
     "compatCreateFirst": "OpenAI-compatible providers must be created first; test the connection from the configuration dialog afterwards",
     "providerNameHint": "Creates a separate OpenAI-compatible provider instance; existing configurations are not overwritten.",
-    "close": "Close"
+    "close": "Close",
+    "tls": {
+      "title": "SSL certificate",
+      "verify": "Verify SSL certificate",
+      "verifyHint": "If an internal gateway uses a self-signed certificate or one issued by an internal CA, add the CA certificate below or turn verification off.",
+      "caCert": "CA certificate",
+      "optional": "(optional)",
+      "caCertPlaceholder": "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----\nor a path on the server, e.g. /etc/pki/ca-trust/source/anchors/corp-ca.pem",
+      "caCertHint": "Paste one or more CA certificates in PEM format, or enter the absolute path of a certificate file on the server. The system's root certificates stay trusted.",
+      "disabledWarning": "Certificate verification is off: the gateway's certificate is not checked, and older TLS (RSA key exchange, TLS 1.0/1.1, …) is accepted. Only do this for trusted gateways on your internal network."
+    }
   },
   "wizard": {
     "providerSaved": "Provider Saved",
@@ -307,7 +317,10 @@
       "connection_error": "Could not connect. Check the service address and network.",
       "invalid_response": "The model list response could not be recognized.",
       "response_too_large": "The service response is too large. Reduce the returned list or add models manually.",
-      "redirect_not_allowed": "The service returned a redirect. To protect credentials, it was not followed. Enter the final service URL and retry."
+      "redirect_not_allowed": "The service returned a redirect. To protect credentials, it was not followed. Enter the final service URL and retry.",
+      "tls_certificate_failed": "SSL certificate verification failed: the gateway uses a self-signed certificate or one issued by an internal CA. Add the CA certificate under SSL certificate, or turn off Verify SSL certificate.",
+      "tls_handshake_failed": "TLS handshake failed: the gateway uses an old TLS version or cipher suite, or the address has the wrong http/https scheme. Once the address is right, turning off Verify SSL certificate also accepts older TLS.",
+      "invalid_ca_cert": "The CA certificate could not be loaded. Check its content or path."
     },
     "reviewSelection": "Review fetched models",
     "invertVisible": "Invert filtered selection",
@@ -443,7 +456,10 @@
       "redirect_not_allowed": "The service returned a redirect. To protect credentials, it was not followed. Enter the final service URL and retry.",
       "key_valid": "The key is valid.",
       "model_list_verified": "Model list fetched successfully. Key verification passed.",
-      "key_check_unsupported": "This service cannot independently verify the key."
+      "key_check_unsupported": "This service cannot independently verify the key.",
+      "tls_certificate_failed": "SSL certificate verification failed: the gateway uses a self-signed certificate or one issued by an internal CA. Add the CA certificate under SSL certificate, or turn off Verify SSL certificate.",
+      "tls_handshake_failed": "TLS handshake failed: the gateway uses an old TLS version or cipher suite, or the address has the wrong http/https scheme. Once the address is right, turning off Verify SSL certificate also accepts older TLS.",
+      "invalid_ca_cert": "The CA certificate could not be loaded. Check its content or path."
     }
   }
 }

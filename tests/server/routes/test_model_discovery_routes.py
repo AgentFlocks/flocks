@@ -170,11 +170,38 @@ async def test_discovery_forwards_transient_credentials_and_returns_structured_e
         "custom-inventory",
         api_key="transient-secret",
         base_url="https://candidate.test/v1",
+        tls_overrides=None,
     )
     assert saved(inventory) == inventory.initial
     inventory.write.assert_not_called()
     inventory.apply_config.assert_not_awaited()
     assert "transient-secret" not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "overrides"),
+    [
+        ({"verify_ssl": False}, {"verify_ssl": False}),
+        ({"ca_cert": ""}, {"ca_cert": ""}),
+        ({"verify_ssl": True, "ca_cert": "/etc/pki/corp-ca.pem"}, {"verify_ssl": True, "ca_cert": "/etc/pki/corp-ca.pem"}),
+    ],
+)
+async def test_discovery_and_key_check_use_unsaved_tls_settings(body, overrides, inventory, inventory_client, monkeypatch):
+    """The settings form checks a gateway with the SSL settings it has not saved yet."""
+    result = {"source": "api", "status": "success", "code": "models_discovered", "message": "", "truncated": False, "models": []}
+    discover = AsyncMock(return_value=result)
+    monkeypatch.setattr(inventory.routes, "discover_models", discover)
+
+    response = await inventory_client.post("/api/provider/custom-inventory/discover-models", json=body)
+    assert response.status_code == 200
+    assert discover.await_args.kwargs["tls_overrides"] == overrides
+
+    discover.reset_mock()
+    response = await inventory_client.post("/api/provider/custom-inventory/check-key", json={"api_key": "k", **body})
+    assert response.status_code == 200
+    assert [call.kwargs["tls_overrides"] for call in discover.await_args_list] == [overrides, overrides]
+    assert saved(inventory) == inventory.initial
 
 
 @pytest.mark.asyncio
@@ -615,7 +642,9 @@ async def test_threatbook_key_check_uses_one_live_inventory_request_without_savi
     })
     assert response.status_code == 200
     assert response.json() == {'status': status, 'code': expected_code}
-    discover.assert_awaited_once_with(provider_id, api_key='candidate-key', base_url='https://configured.test/v1')
+    discover.assert_awaited_once_with(
+        provider_id, api_key='candidate-key', base_url='https://configured.test/v1', tls_overrides=None  # secret-guard: allow (test value)
+    )
     assert saved(inventory) == inventory.initial
     inventory.write.assert_not_called()
     inventory.apply_config.assert_not_awaited()

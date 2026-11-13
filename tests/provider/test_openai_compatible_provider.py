@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.provider.tls_helpers import assert_no_verify_context
+
 from flocks.provider.provider import ChatMessage, ChatResponse
 from flocks.provider.provider import ProviderConfig
 from flocks.provider.sdk.openai_compatible import OpenAICompatibleProvider
@@ -52,7 +54,7 @@ class TestOpenAICompatibleProviderConfiguration:
         # so minor adjustments to non-critical values don't break the test.
         assert mock_http_client.call_count == 1
         kwargs = mock_http_client.call_args.kwargs
-        assert kwargs["verify"] is False
+        assert_no_verify_context(kwargs["verify"])
         assert kwargs["trust_env"] is True
         timeout_arg = kwargs["timeout"]
         assert getattr(timeout_arg, "connect", None) == 30.0
