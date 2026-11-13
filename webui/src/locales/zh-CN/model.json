@@ -237,7 +237,17 @@
     "retry": "重试",
     "compatCreateFirst": "OpenAI-compatible Provider 需要先创建，创建后可在配置弹窗中测试连接",
     "providerNameHint": "用于创建独立的 OpenAI-compatible Provider 实例，不会覆盖已有配置。",
-    "close": "关闭"
+    "close": "关闭",
+    "tls": {
+      "title": "SSL 证书",
+      "verify": "校验 SSL 证书",
+      "verifyHint": "内网网关用自签名证书或内部 CA 签发的证书时，可以在下面填 CA 证书，或者关闭校验。",
+      "caCert": "CA 证书",
+      "optional": "（可选）",
+      "caCertPlaceholder": "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----\n或服务器上的证书路径，例如 /etc/pki/ca-trust/source/anchors/corp-ca.pem",
+      "caCertHint": "粘贴 PEM 格式的 CA 证书（可以多张），或者填服务器上证书文件的绝对路径。系统自带的根证书照常信任。",
+      "disabledWarning": "已关闭证书校验：不再核对网关证书，同时兼容旧版 TLS（RSA 密钥交换、TLS 1.0/1.1 等）。只建议对内网里可信的网关这样设置。"
+    }
   },
   "wizard": {
     "providerSaved": "Provider 已保存",
@@ -307,7 +317,10 @@
       "connection_error": "无法连接模型服务，请检查地址和网络。",
       "invalid_response": "服务返回的模型列表格式无法识别。",
       "response_too_large": "服务返回内容过大，请缩小返回范围或手动添加。",
-      "redirect_not_allowed": "服务返回了重定向，为保护凭据未自动跳转。请填写最终服务地址后重试。"
+      "redirect_not_allowed": "服务返回了重定向，为保护凭据未自动跳转。请填写最终服务地址后重试。",
+      "tls_certificate_failed": "SSL 证书校验失败：网关用的是自签名或内部 CA 签发的证书。请在「SSL 证书」里填 CA 证书，或者关闭「校验 SSL 证书」。",
+      "tls_handshake_failed": "TLS 握手失败：网关的 TLS 版本或加密套件较旧，或者地址的 http/https 写错了。确认地址无误后，可以关闭「校验 SSL 证书」来兼容旧版 TLS。",
+      "invalid_ca_cert": "CA 证书无法加载，请检查证书内容或路径。"
     },
     "reviewSelection": "查看获取结果",
     "invertVisible": "反选筛选结果",
@@ -443,7 +456,10 @@
       "redirect_not_allowed": "服务返回了重定向，为保护凭据未自动跳转。请填写最终服务地址后重试。",
       "key_valid": "Key 有效。",
       "model_list_verified": "已成功获取模型列表，Key 验证通过。",
-      "key_check_unsupported": "该服务暂无法独立验证 Key。"
+      "key_check_unsupported": "该服务暂无法独立验证 Key。",
+      "tls_certificate_failed": "SSL 证书校验失败：网关用的是自签名或内部 CA 签发的证书。请在「SSL 证书」里填 CA 证书，或者关闭「校验 SSL 证书」。",
+      "tls_handshake_failed": "TLS 握手失败：网关的 TLS 版本或加密套件较旧，或者地址的 http/https 写错了。确认地址无误后，可以关闭「校验 SSL 证书」来兼容旧版 TLS。",
+      "invalid_ca_cert": "CA 证书无法加载，请检查证书内容或路径。"
     }
   }
 }

@@ -1202,6 +1202,11 @@ class BaseProvider:
     # in get_model_definitions(). Leave empty for providers without a catalog entry.
     CATALOG_ID: str = ""
 
+    # True when the provider's HTTP client follows the ``verify_ssl`` and
+    # ``ca_cert`` options (flocks.provider.tls); the model settings page offers
+    # those settings only then.
+    SUPPORTS_TLS_SETTINGS: bool = False
+
     # Per-event-loop SDK client cache; see LoopBoundClientSlot.
     _client = LoopBoundClientSlot()
 

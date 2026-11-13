@@ -8,10 +8,14 @@ Subclasses only need to define class attributes and get_models().
 """
 
 import os
-from typing import Any, AsyncIterator, Dict, List, Optional
+import ssl
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 import httpx
 
+# ``_coerce_bool`` and ``resolve_verify_ssl`` keep being imported from here.
+from flocks.provider.tls import coerce_bool as _coerce_bool
+from flocks.provider.tls import httpx_verify, resolve_verify_ssl
 from flocks.provider.provider import (
     BaseProvider,
     ChatMessage,
@@ -132,11 +136,15 @@ def response_size_limit_hook(max_bytes: int):
 def create_openai_http_client(
     *,
     trust_env: bool,
-    verify: bool,
+    verify: Union[bool, ssl.SSLContext],
     timeout: httpx.Timeout = DEFAULT_HTTP_TIMEOUT,
     custom_settings: Any = None,
 ) -> httpx.AsyncClient:
-    """Build the shared OpenAI-compatible client with an ingress size cap."""
+    """Build the shared OpenAI-compatible client with an ingress size cap.
+
+    *verify* is what :func:`flocks.provider.tls.httpx_verify` gives for the
+    provider's options.
+    """
     max_response_bytes = resolve_max_response_bytes(custom_settings)
     return httpx.AsyncClient(
         trust_env=trust_env,
@@ -404,29 +412,6 @@ def format_openai_messages(
             d["name"] = m.name
         formatted.append(d)
     return formatted
-
-
-def _coerce_bool(value: Any, default: bool) -> bool:
-    """Coerce loosely-typed config values to bool."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return default
-
-
-def resolve_verify_ssl(custom_settings: Any, default: bool = True) -> bool:
-    """Resolve the SSL verification flag from provider custom settings."""
-    if not isinstance(custom_settings, dict):
-        return default
-
-    if "verify_ssl" in custom_settings:
-        return _coerce_bool(custom_settings.get("verify_ssl"), default)
-    if "ssl_verify" in custom_settings:
-        return _coerce_bool(custom_settings.get("ssl_verify"), default)
-    return default
 
 
 def _normalize_stream_usage(raw_usage: Any, *, response_id: Any = None) -> Optional[Dict[str, Any]]:
@@ -1003,6 +988,7 @@ class OpenAIBaseProvider(BaseProvider):
     ALLOW_NO_API_KEY: bool = False
     PREFER_MAX_COMPLETION_TOKENS: bool = False
     NO_API_KEY_PLACEHOLDER: str = "not-needed"
+    SUPPORTS_TLS_SETTINGS = True
 
     def __init__(self, provider_id: str, name: str):
         super().__init__(provider_id=provider_id, name=name)
@@ -1068,7 +1054,7 @@ class OpenAIBaseProvider(BaseProvider):
             timeout = DEFAULT_HTTP_TIMEOUT
             http_client = create_openai_http_client(
                 trust_env=trust_env,
-                verify=verify_ssl,
+                verify=httpx_verify(custom_settings, trust_env=trust_env),
                 timeout=timeout,
                 custom_settings=custom_settings,
             )

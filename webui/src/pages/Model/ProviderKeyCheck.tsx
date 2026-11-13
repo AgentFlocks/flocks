@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Loader2 } from 'lucide-react';
 import { providerAPI } from '@/api/provider';
 import { extractErrorMessage } from '@/utils/error';
+import type { ProviderConnectionInput } from '@/types';
 
 export default function ProviderKeyCheck({
   providerId,
@@ -10,7 +11,7 @@ export default function ProviderKeyCheck({
   disabled,
 }: {
   providerId: string;
-  credentials: { api_key?: string; base_url?: string };
+  credentials: ProviderConnectionInput;
   disabled?: boolean;
 }) {
   const { t } = useTranslation('model');
@@ -25,7 +26,7 @@ export default function ProviderKeyCheck({
     return () => {
       version.current += 1;
     };
-  }, [providerId, credentials.api_key, credentials.base_url]);
+  }, [providerId, credentials.api_key, credentials.base_url, credentials.verify_ssl, credentials.ca_cert]);
   const check = async () => {
     if (checking || disabled) return;
     const current = ++version.current;

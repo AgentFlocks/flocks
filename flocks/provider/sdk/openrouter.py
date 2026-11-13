@@ -5,13 +5,14 @@ Based on @openrouter/ai-sdk-provider from Flocks's bundled providers
 Multi-model routing provider
 """
 
-from typing import List
+from typing import Any, Dict, List
 
 from flocks.provider.provider import (
     ModelInfo,
     ModelCapabilities,
 )
 from flocks.provider.sdk.openai_base import OpenAIBaseProvider
+from flocks.provider.tls import has_custom_tls, httpx_verify
 
 
 class OpenRouterProvider(OpenAIBaseProvider):
@@ -42,6 +43,15 @@ class OpenRouterProvider(OpenAIBaseProvider):
                 else self._base_url
             )
 
+            client_kwargs: Dict[str, Any] = {}
+            # verify_ssl / ca_cert from the provider options (SUPPORTS_TLS_SETTINGS
+            # is inherited); without them the SDK keeps its own default client.
+            settings = getattr(self._config, "custom_settings", None) or {}
+            if has_custom_tls(settings):
+                from openai import DefaultAsyncHttpxClient
+
+                client_kwargs["http_client"] = DefaultAsyncHttpxClient(verify=httpx_verify(settings))
+
             self._client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=base_url,
@@ -49,6 +59,7 @@ class OpenRouterProvider(OpenAIBaseProvider):
                     "HTTP-Referer": "https://opencode.ai/",
                     "X-Title": "opencode",
                 },
+                **client_kwargs,
             )
         return self._client
     

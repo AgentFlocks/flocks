@@ -32,6 +32,7 @@ from flocks.provider.provider import (
     ProviderConfig,
 )
 from flocks.provider.sdk.openai_compatible import OpenAICompatibleProvider
+from flocks.provider.tls import CA_CERT_KEY, MAX_CA_CERT_CHARS, VERIFY_SSL_KEY, CACertError, validate_ca_cert
 from flocks.server.auth import require_admin
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.server.routes.provider import _get_inline_provider_api_key
@@ -121,6 +122,9 @@ class CreateProviderReq(BaseModel):
     api_key: Optional[str] = Field(None)
     description: Optional[str] = Field(None)
     skip_catalog_bootstrap: bool = False
+    # TLS settings of the gateway (flocks.provider.tls).
+    verify_ssl: StrictBool = True
+    ca_cert: Optional[str] = Field(None, max_length=MAX_CA_CERT_CHARS)
 
 
 class ProviderResp(BaseModel):
@@ -209,6 +213,15 @@ async def create_provider(body: CreateProviderReq, _admin: object = Depends(requ
     supplied_key = (body.api_key or "").strip() or None
     if supplied_key and not api_key_is_sendable(supplied_key):
         raise HTTPException(422, UNSENDABLE_API_KEY_MESSAGE)
+    tls_options: dict[str, Any] = {}
+    if not body.verify_ssl:
+        tls_options[VERIFY_SSL_KEY] = False
+    try:
+        ca_cert = validate_ca_cert(body.ca_cert)
+    except CACertError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if ca_cert:
+        tls_options[CA_CERT_KEY] = ca_cert
 
     # Check if already exists
     if ConfigWriter.get_provider_raw(pid) is not None:
@@ -221,6 +234,7 @@ async def create_provider(body: CreateProviderReq, _admin: object = Depends(requ
         pid,
         npm="@ai-sdk/openai-compatible",
         base_url=base_url,
+        extra_options=tls_options or None,
     )
     config_dict["name"] = body.name
     if body.description:
@@ -242,7 +256,7 @@ async def create_provider(body: CreateProviderReq, _admin: object = Depends(requ
         log.warning("custom_provider.secret_save_failed", {"id": pid, "error": str(e)})
 
     # Register in runtime
-    _register_provider(pid, body.name, base_url, supplied_key)
+    _register_provider(pid, body.name, base_url, supplied_key, custom_settings=tls_options)
 
     log.info("custom_provider.created", {"id": pid})
     return ProviderResp(
@@ -675,7 +689,12 @@ async def _resolve_model_limits(
 
 
 def _register_provider(
-    pid: str, name: str, base_url: str, api_key: Optional[str] = None
+    pid: str,
+    name: str,
+    base_url: str,
+    api_key: Optional[str] = None,
+    *,
+    custom_settings: Optional[dict[str, Any]] = None,
 ):
     """Register a custom provider in the runtime Provider registry."""
     if Provider.get(pid):
@@ -687,6 +706,7 @@ def _register_provider(
         provider_id=pid,
         api_key=api_key or "not-needed",
         base_url=base_url,
+        custom_settings=dict(custom_settings or {}),
     ))
     Provider.register(p)
 

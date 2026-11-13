@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, Mock, patch, MagicMock
 
 import httpx
 import pytest
+
+from tests.provider.tls_helpers import assert_no_verify_context
 from openai import AsyncOpenAI
 
 import flocks.provider.sdk.openai_base as openai_base_module
@@ -501,7 +503,7 @@ class TestOpenAIBaseProviderConfiguration:
         # See ``OpenAIBaseProvider._get_client``.
         assert mock_http_client.call_count == 1
         kwargs = mock_http_client.call_args.kwargs
-        assert kwargs["verify"] is False
+        assert_no_verify_context(kwargs["verify"])
         assert kwargs["trust_env"] is True
         timeout_arg = kwargs["timeout"]
         # Either an httpx.Timeout instance or compatible object: assert the
