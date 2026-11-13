@@ -102,7 +102,7 @@
     "mcp": {
       "emptyStateTitle": "暂无接入对话",
       "guidePanelTitle": "Rex 辅助接入",
-      "guidePanelDesc": "选择一个引导或案例，Rex 会先确认服务类型、连接方式、凭证和启动命令，再帮你生成可测试的 MCP 配置。",
+      "guidePanelDesc": "请选择引导或案例，Rex 将确认服务类型、连接方式、凭证和启动命令，并生成可测试的 MCP 配置。",
       "guideSectionTitle": "接入引导",
       "caseSectionTitle": "接入案例",
       "guideActions": [
@@ -143,7 +143,7 @@
     "api": {
       "emptyStateTitle": "暂无接入对话",
       "guidePanelTitle": "Rex 辅助接入",
-      "guidePanelDesc": "选择一个引导或案例，Rex 会加载 tool-builder skill，确认 API 文档、认证和输出格式后生成 YAML 工具。",
+      "guidePanelDesc": "请选择引导或案例，Rex 将确认 API 文档、认证方式和输出格式，并生成工具。",
       "guideSectionTitle": "接入引导",
       "caseSectionTitle": "接入案例",
       "guideActions": [
@@ -184,7 +184,7 @@
     "local": {
       "emptyStateTitle": "暂无创建对话",
       "guidePanelTitle": "Rex 辅助创建",
-      "guidePanelDesc": "选择一个引导或案例，Rex 会加载 tool-builder skill，确认工具输入输出、实现方式和冒烟测试后生成本地 Python 工具。",
+      "guidePanelDesc": "请选择引导或案例，Rex 将确认工具的输入输出、实现方式和冒烟测试，并生成本地 Python 工具。",
       "guideSectionTitle": "创建引导",
       "caseSectionTitle": "创建案例",
       "guideActions": [
@@ -269,7 +269,14 @@
     "startCommandRequired": "请输入启动命令",
     "serviceUrlRequired": "请输入服务地址",
     "chatPrompt": "请帮我接入名为 \"{{name}}\" 的 MCP 服务",
-    "chatSubtitle": "通过对话让 Rex 帮你接入 MCP 服务"
+    "chatSubtitle": "通过对话让 Rex 帮你接入 MCP 服务",
+    "errors": {
+      "nameRequired": "请输入服务名称。",
+      "commandRequired": "请输入启动命令。",
+      "urlRequired": "请输入服务地址。",
+      "urlScheme": "服务地址格式不正确，请以 http:// 或 https:// 开头。",
+      "invalidHeaders": "请输入有效的 JSON 对象。"
+    }
   },
 
   "addAPI": {
@@ -646,7 +653,7 @@
     "addFailed": "添加失败: {{error}}",
     "mcpNameRequired": "请输入 MCP 服务名称",
     "apiKeyRequired": "请输入 API Key",
-    "invalidHeaders": "额外请求头必须是合法的 JSON 对象",
+    "invalidHeaders": "请输入有效的 JSON 对象。",
     "credSaved": "凭证已保存",
     "saveFailed": "保存失败: {{error}}",
     "testFailed": "测试失败: {{error}}",
@@ -706,6 +713,7 @@
     "mcpHintDesc": "不确定怎么填？切换到「工作台」标签页，告诉 Rex 你想接入什么 MCP 服务，它会帮你自动完成配置。",
     "connSuccess": "连接成功",
     "connFailed": "连接失败",
+    "mcpConnectFailed": "MCP 服务连接失败，请检查服务地址、服务状态和网络后重试；仍失败请联系管理员。",
     "addFailedTitle": "添加失败"
   },
 

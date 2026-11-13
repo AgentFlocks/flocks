@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2, Pencil, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
 import { providerAPI } from '@/api/provider';
-import { extractErrorMessage } from '@/utils/error';
+import { extractErrorMessage, extractServerMessage } from '@/utils/error';
 import type {
   DiscoveredModel,
   InventoryModelInput,
@@ -422,7 +422,8 @@ export default function ModelDiscovery({
       setDirty(true);
       if (response.data.source === 'catalog') setNotice(t('compact.catalogNotice'));
     } catch (reason) {
-      if (version === request.current) setError(extractErrorMessage(reason));
+      // A refusal says what to fix; a server failure ("Internal server error") or a lost request does not.
+      if (version === request.current) setError(extractServerMessage(reason) || t('discovery.requestFailed'));
     } finally {
       if (version === request.current) setLoading(false);
     }

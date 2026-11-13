@@ -484,7 +484,7 @@ describe('SceneSuitesPage', () => {
     await user.click(await screen.findByRole('button', { name: '卸载' }));
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
-      '操作失败: 告警运营套件', '场景正在运行，请稍后重试',
+      '告警运营套件卸载失败，请重试；如仍失败，请联系管理员。', '场景正在运行，请稍后重试',
     ));
   });
 

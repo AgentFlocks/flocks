@@ -10,7 +10,7 @@
   "details": "详情",
   "newVersionTitle": "发现新版本",
   "newVersionDesc": "本次更新包含新的产品能力、体验优化和问题修复，建议升级后查看重点变化。",
-  "confirmUpgrade": "确认升级到 {{version}}？",
+  "confirmUpgrade": "确认升级至 {{version}}？",
   "confirmUpgradeDesc": "升级过程中服务会短暂重启，页面将在完成后自动刷新。",
   "confirmAction": "确认升级",
   "laterAction": "稍后再说",
@@ -83,8 +83,8 @@
     "restarting": "正在把服务起回来，好了这里会告诉你。",
     "restarted": "服务已重新启动，数据没有动。这次升级装的组件没有办法还原，可能已经是新的：到服务器上查看 ~/.flocks/run/upgrade-result.json，把原因处理掉之后重新升级。"
   },
-  "enterpriseDesc": "这台机器有企业版授权，这次升级到新企业版：程序装到 {{root}}，数据和授权沿用，网页地址不变。开源版会先停下，第一次启动要迁移数据，可能要几分钟。",
-  "enterpriseInstalling": "开源版会先停下，企业版第一次启动要迁移数据，可能要几分钟。装好后这个页面会自动刷新。",
+  "enterpriseDesc": "程序安装至 {{root}}。原有数据和授权沿用，访问地址不变。升级期间开源版服务将停止；首次启动需迁移数据，可能需要几分钟。",
+  "enterpriseInstalling": "开源版将停止，企业版首次启动需迁移数据，可能需要几分钟，安装完成后页面自动刷新。",
   "enterpriseStageLabels": {
     "fetching": "下载新企业版安装包",
     "restarting": "安装新企业版"

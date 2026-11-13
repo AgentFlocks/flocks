@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getLocalizedReleaseNotes } from './releaseNotes';
+import { getLocalizedReleaseNotes, humanizeReleaseNotes } from './releaseNotes';
 
 describe('getLocalizedReleaseNotes', () => {
   it('falls back to full release notes when no details section is present', () => {
@@ -97,5 +97,51 @@ describe('getLocalizedReleaseNotes', () => {
         '- English fix 1',
       ].join('\n'),
     );
+  });
+});
+
+describe('release notes written as commit subjects (v0.21 #49)', () => {
+  const notes = [
+    "## What's Changed",
+    '',
+    '* feat(models): streamline model discovery and imports',
+    '* fix(enterprise): improve Flocks Pro installation and licensing flows',
+    '',
+    '<details>',
+    '<summary>Chinese Release Notes</summary>',
+    '',
+    '* feat(models)：简化模型发现与导入，支持向导草稿恢复和 Azure 部署配置',
+    '* fix(runtime)：就地升级保留额外 Python 依赖，保护配置凭据和受管环境，修复 Windows 多实例控制问题',
+    '* fix(something-new)：修复一个问题',
+    '* 已经写成读者语言的一行。',
+    '',
+    '</details>',
+  ].join('\n');
+
+  it('names the area instead of the commit type and module', () => {
+    expect(getLocalizedReleaseNotes(notes, 'zh-CN')).toBe([
+      '* 模型管理：简化模型发现与导入，支持向导草稿恢复和 Azure 部署配置。',
+      '* 运行环境：就地升级保留额外 Python 依赖，保护配置凭据和受管环境，修复 Windows 多实例控制问题。',
+      '* 修复一个问题。',
+      '* 已经写成读者语言的一行。',
+    ].join('\n'));
+    expect(getLocalizedReleaseNotes(notes, 'en-US')).toContain('* Models: streamline model discovery and imports');
+    expect(getLocalizedReleaseNotes(notes, 'en-US')).toContain('* Enterprise edition: improve Flocks Pro installation');
+  });
+
+  it('leaves examples in fenced code blocks as written', () => {
+    expect(humanizeReleaseNotes(['```', '* fix: example command', '```', '* fix(models)：真的一条'].join('\n'), 'zh'))
+      .toBe(['```', '* fix: example command', '```', '* 模型管理：真的一条。'].join('\n'));
+  });
+
+  it('keeps a longer fence open across a shorter fence inside it', () => {
+    const notes = ['````', '```', '* fix: example command', '```', '````', '* fix(models)：真的一条'].join('\n');
+    expect(humanizeReleaseNotes(notes, 'zh'))
+      .toBe(['````', '```', '* fix: example command', '```', '````', '* 模型管理：真的一条。'].join('\n'));
+  });
+
+  it('leaves headings and ordinary text alone', () => {
+    expect(humanizeReleaseNotes('## fix: not a bullet\nfeat(models): not a bullet either', 'zh'))
+      .toBe('## fix: not a bullet\nfeat(models): not a bullet either');
   });
 });

@@ -96,7 +96,7 @@
     "visibleAgentsSelectedCount": "{{first}}、{{second}} 等 {{count}} 个",
     "visibleAgentsNoOptions": "暂无可选 Agent",
     "permissionMode": "权限模式",
-    "permissionModeHint": "该 channel session 的默认权限模式；Session 页面也可以单独调整。",
+    "permissionModeHint": "设置通道会话的默认权限模式，也可在会话中单独调整。",
     "permissionModeReadonly": "readonly",
     "permissionModeRequireConfirm": "require-confirm",
     "permissionModeAutoConfirmAll": "auto-allow-all"

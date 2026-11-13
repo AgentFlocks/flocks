@@ -106,6 +106,8 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
   });
 
   const [loading, setLoading] = useState(false);
+  // A rejected cron expression is answered next to the expression, keeping what was typed.
+  const [cronError, setCronError] = useState('');
   const [agents, setAgents] = useState<Agent[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const guideGroups = useMemo(() => {
@@ -147,9 +149,16 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
   const canSubmit =
     formData.title.trim() &&
     (isImmediate || (isOnce ? formData.runAt : effectiveCron.trim()));
+  const cronShown = !isOnce && !isRunOnce && isRecurring;
+
+  useEffect(() => { setCronError(''); }, [formData.cron, formData.scheduleKind]);
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
+    if (cronShown && !isFiveFieldCron(effectiveCron)) {
+      setCronError(t('form.cronInvalid'));
+      return;
+    }
     setLoading(true);
     try {
       let workflowContext: Record<string, any> | undefined;
@@ -214,7 +223,13 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
       onSaved();
       onClose();
     } catch (err: unknown) {
-      toast.error(t(isEdit ? 'taskSheet.saveFailed' : 'taskSheet.createFailed'), extractErrorMessage(err));
+      const message = extractErrorMessage(err);
+      // flocks.task.models.validate_cron_expression: English for API and agent callers.
+      if (cronShown && /invalid cron expression/i.test(message)) {
+        setCronError(t('form.cronInvalid'));
+        return;
+      }
+      toast.error(t(isEdit ? 'taskSheet.saveFailed' : 'taskSheet.createFailed'), message);
     } finally {
       setLoading(false);
     }
@@ -316,6 +331,7 @@ ${fields}
         isEdit={isEdit}
         isRunOnce={isRunOnce}
         effectiveCron={effectiveCron}
+        cronError={cronError}
         agents={agents}
         workflows={workflows}
       />
@@ -332,6 +348,7 @@ interface TaskFormContentProps {
   isEdit: boolean;
   isRunOnce: boolean;
   effectiveCron: string;
+  cronError?: string;
   agents: Agent[];
   workflows: WorkflowSummary[];
 }
@@ -343,6 +360,7 @@ function TaskFormContent({
   isEdit,
   isRunOnce,
   effectiveCron,
+  cronError,
   agents,
   workflows,
 }: TaskFormContentProps) {
@@ -498,12 +516,16 @@ function TaskFormContent({
                   type="text"
                   value={formData.cron}
                   onChange={(e) => update({ cron: e.target.value })}
+                  aria-invalid={cronError ? true : undefined}
+                  aria-describedby={cronError ? 'task-cron-error' : undefined}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none font-mono text-sm"
                   placeholder="0 9 * * 1-5"
                 />
               )}
 
-              {effectiveCron && (
+              {cronError ? (
+                <p id="task-cron-error" role="alert" className="text-xs text-red-600">{cronError}</p>
+              ) : effectiveCron && (
                 <p className="text-xs text-purple-600 font-medium">{describeCron(effectiveCron)}</p>
               )}
 
@@ -746,6 +768,12 @@ function buildRexWelcome(isEdit: boolean, taskTitle?: string): string {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** The scheduler takes plain five-field cron only (flocks.task.models.validate_cron_expression). */
+function isFiveFieldCron(cron: string): boolean {
+  const value = cron.trim();
+  return !value.startsWith('@') && value.split(/\s+/).length === 5;
+}
 
 function parseJsonFromText(text: string): Record<string, any> | null {
   const fenced = text.match(/```(?:json)?\s*\n([\s\S]+?)\n```/);

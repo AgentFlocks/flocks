@@ -765,7 +765,23 @@ async def _rollback_component_ref_installs(
         raise RuntimeError("Dependency rollback incomplete; " + "; ".join(errors))
 
 
+def _project_root_is_user_root(plugin_type: PluginType) -> bool:
+    """The instance directory holds the flocks root (``~`` holding ``~/.flocks``).
+
+    Its ``.flocks/plugins`` is then the user plugin root itself: what is installed
+    there was installed by the user, nothing in it shipped with a project.
+    """
+    try:
+        return local.install_root(plugin_type, "project").resolve() == local.install_root(plugin_type, "global").resolve()
+    except OSError:
+        return False
+
+
 def _is_project_install_path(plugin_type: PluginType, install_path: Path) -> bool:
+    if _project_root_is_user_root(plugin_type):
+        # A server started from the home directory would otherwise refuse to
+        # uninstall anything ("Built-in project Hub plugins cannot be removed").
+        return False
     try:
         project_root = local.install_root(plugin_type, "project").resolve()
         resolved_install_path = install_path.resolve()
@@ -1296,6 +1312,11 @@ async def _uninstall_plugin(
     record = local.get_record(plugin_type, plugin_id)
     install_path = Path(record.installPath) if record and record.installPath else local.infer_local_install(plugin_type, plugin_id)
     scope = record.scope if record else "global"
+    if scope == "project" and _project_root_is_user_root(plugin_type):
+        # The project plugin root is the user plugin root: a "project" record there is
+        # a user install, checked and removed as one -- every target is validated
+        # (the access contracts included) before anything is deleted.
+        scope = "global"
     if install_path is not None:
         await asyncio.to_thread(_validate_uninstall_target, plugin_type, plugin_id, install_path, scope)
     if plugin_type == "webui" and scope != "project":
@@ -1317,7 +1338,7 @@ async def _uninstall_plugin(
         # A missing page payload can still leave its access contracts behind.
         # Keep project-managed contracts protected even when their pages vanished.
         access_removed = False
-        if plugin_type == "webui" and (record is None or record.scope != "project"):
+        if plugin_type == "webui" and scope != "project":
             access_removed = await asyncio.to_thread(
                 _remove_attached_access_contracts, plugin_type, plugin_id, "global", recovery_root=recovery_root,
             )
@@ -1346,7 +1367,7 @@ async def _uninstall_plugin(
     else:
         install_path.unlink()
     _remove_attached_access_contracts(
-        plugin_type, plugin_id, record.scope if record else "global", recovery_root=recovery_root,
+        plugin_type, plugin_id, scope, recovery_root=recovery_root,
     )
     local.remove_installed_record(plugin_type, plugin_id)
     clear_catalog_caches()

@@ -2560,6 +2560,7 @@ function ModelDetailSheet({
       onSubmit={handleSave}
       hideRex
       hideTest
+      readOnly={readOnly}
     >
       {settingsLoadError && (
         <div role="alert" className="mb-4 space-y-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">

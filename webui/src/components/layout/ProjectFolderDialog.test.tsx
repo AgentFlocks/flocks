@@ -129,6 +129,45 @@ describe('ProjectFolderDialog', () => {
     expect(screen.queryByRole('button', { name: 'history.parentFolder' })).not.toBeInTheDocument();
   });
 
+  it('answers a missing name under the name field, without a failed-save toast', async () => {
+    serveFolders({ '': homeListing() });
+    await renderDialog();
+
+    fireEvent.click(screen.getByRole('button', { name: 'history.createFolder' }));
+
+    expect(await screen.findByText('history.folderNameEmpty')).toBeInTheDocument();
+    expect(nameInput()).toHaveAttribute('aria-invalid', 'true');
+    expect(toastMock.error).not.toHaveBeenCalled();
+    expect(apiPost).not.toHaveBeenCalled();
+    fireEvent.change(nameInput(), { target: { value: 'AAA' } });
+    expect(screen.queryByText('history.folderNameEmpty')).not.toBeInTheDocument();
+  });
+
+  it('drops the missing-directory answer once the directory fills in from the name', async () => {
+    serveFolders({ '': homeListing() });
+    await renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: 'history.createFolder' }));
+    expect(await screen.findByText('history.folderPathEmpty')).toBeInTheDocument();
+
+    // Only the name is typed: the directory follows it under the default root.
+    await typeName('AAA', `${HOME}/AAA`);
+    expect(screen.queryByText('history.folderNameEmpty')).not.toBeInTheDocument();
+    expect(screen.queryByText('history.folderPathEmpty')).not.toBeInTheDocument();
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
+  it('drops the missing-name answer once a picked directory names the folder', async () => {
+    serveFolders({ '': homeListing() });
+    await renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: 'history.createFolder' }));
+    expect(await screen.findByText('history.folderNameEmpty')).toBeInTheDocument();
+
+    browse();
+    await waitFor(() => expect(nameInput()).not.toHaveValue(''));
+    expect(screen.queryByText('history.folderNameEmpty')).not.toBeInTheDocument();
+    expect(screen.queryByText('history.folderPathEmpty')).not.toBeInTheDocument();
+  });
+
   it('says why the folder could not be saved', async () => {
     serveFolders({ '': homeListing() });
     apiPost.mockRejectedValue(httpError(400, 'Project directory is outside the allowed roots'));
@@ -138,7 +177,7 @@ describe('ProjectFolderDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: 'history.createFolder' }));
 
     await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith(
-      'history.folderSaveFailed',
+      'history.folderCreateFailed',
       'Project directory is outside the allowed roots',
     ));
     expect(apiPost).toHaveBeenCalledWith('/api/project', { name: 'AAA', worktree: `${HOME}/AAA` });

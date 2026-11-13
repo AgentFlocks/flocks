@@ -1,5 +1,5 @@
 {
-  "description": "Complete console account login, upgrade application, and upgrade execution locally.",
+  "description": "Sign in with a cloud account to apply for an enterprise licence, then upgrade to the enterprise edition.",
   "loading": "Loading...",
   "consoleLogin": {
     "title": "Console Account Login",
@@ -14,13 +14,13 @@
     "previousTitle": "Flocks Pro {{version}}",
     "previousDescription": "This machine has the previous enterprise edition (the Python one), not yet moved to the new enterprise edition.",
     "licensedTitle": "Flocks Pro",
-    "licensedDescription": "This machine has an enterprise licence, not yet moved to the new enterprise edition.",
+    "licensedDescription": "Enterprise licence obtained; not upgraded yet.",
     "openTitle": "Upgrade to Flocks Pro",
     "openDescription": "Review the current license information, submit applications, and track approval status.",
     "previousNote": "The enterprise edition is a separate installer now, and the previous one gets no more releases. The open part keeps upgrading with flocks update; the previous edition's audit logs, security configuration, user management and prompt redaction pages come back with the new enterprise edition.",
-    "licensedNote": "The licence is kept on this machine; the new enterprise edition takes it over when you upgrade.",
+    "licensedNote": "The licence is saved on this machine and will be used after upgrading to the enterprise edition.",
     "lapsedNote": "The licence on this machine is no longer valid. Once it is renewed or a new one is issued, the new enterprise edition goes by that one.",
-    "openNote": "The enterprise edition is a separate installer: it takes this install's data over (moved into its own PostgreSQL on its first start) and is used the same way."
+    "openNote": "The enterprise edition is a separate installer: its first start copies the open edition’s data into its bundled PostgreSQL, and everything is used as before."
   },
   "licenceStatus": {
     "commercial": "Commercial",
@@ -121,11 +121,11 @@
   },
   "upgrade": {
     "title": "Enterprise updates",
-    "currentPrevious": "This is the previous enterprise edition {{version}}. Check what new enterprise edition Console has for this machine's platform; upgrading downloads and checks it and hands it to its installer, and the service restarts by itself.",
-    "currentOpen": "This is the open edition. Check what new enterprise edition Console has for this machine's platform; upgrading downloads and checks it and hands it to its installer, and the service restarts by itself.",
-    "whatChanges": "After the upgrade the program is in {{root}}, the data stays where it is (moved into the bundled PostgreSQL on the first start; the original is kept) and the machine's licence is carried over; flocks start|stop|restart|status|logs|update work as before.",
-    "whatChangesWindows": "After the upgrade the program is in {{root}} and runs as the FlocksPro Core service, started with the machine; the open edition's data is copied for it (the original stays) and the machine's licence is carried over. Windows asks for an administrator while it installs.",
-    "systemd": "systemd runs this machine (the open edition's offline package): the installer runs as root. The page can download it; then run the command it gives.",
+    "currentPrevious": "This is the previous enterprise edition {{version}}. The service restarts automatically during the upgrade.",
+    "currentOpen": "The service restarts automatically during the upgrade.",
+    "whatChanges": "After the upgrade the program is in {{root}} and the data directory stays the same; the first start copies the existing data into the bundled PostgreSQL, and the original data files are kept but no longer updated; the machine’s licence is carried over. flocks start|stop|restart|status|logs|update keep managing the service.",
+    "whatChangesWindows": "After the upgrade the program is in {{root}} and the enterprise edition starts at boot as the \"FlocksPro Core\" service; the open edition’s data is copied for the enterprise edition, and the original directory is kept but no longer updated; the machine’s licence is carried over. Windows asks for administrator confirmation during the installation.",
+    "systemd": "This open edition is managed by systemd. Download the installer and run the command shown here with root privileges.",
     "prepare": "{{account}} cannot write {{root}} yet: run this once as root, then come back.",
     "recheck": "Done, check again",
     "check": "Check for a new version",
@@ -136,7 +136,7 @@
   },
   "progress": {
     "downloading": "Downloading the new enterprise edition {{version}}",
-    "installing": "The installer runs ({{version}}): the open edition stops first, and the enterprise edition's first start moves the data, which can take a few minutes. This page reloads once it is done.",
+    "installing": "Upgrading to {{version}}. The open edition stops, and the enterprise edition’s first start migrates the data, which can take a few minutes; the page refreshes automatically when the installation finishes.",
     "restarting": "The open edition has stopped and the enterprise edition is starting for the first time (moving the data). The page reloads if it listens on this address; otherwise open the address the installer printed.",
     "finished": "The new enterprise edition {{version}} is installed; reload the page.",
     "failed": "The install did not finish and the open edition keeps running; the installer output below says why.",

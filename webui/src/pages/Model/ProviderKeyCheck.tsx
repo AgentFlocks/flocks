@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2 } from 'lucide-react';
 import { providerAPI } from '@/api/provider';
-import { extractErrorMessage } from '@/utils/error';
+import { extractServerMessage } from '@/utils/error';
 import type { ProviderConnectionInput } from '@/types';
 
 export default function ProviderKeyCheck({
@@ -41,7 +41,9 @@ export default function ProviderKeyCheck({
       });
     } catch (error) {
       if (current === version.current)
-        setResult({ status: 'invalid', message: extractErrorMessage(error) });
+        // A refusal says what to fix; a server failure ("Internal server error") or a lost request does not.
+        // The reason the service gave, refusal or failure; the bare catch-all, a proxy page or a lost connection say nothing.
+        setResult({ status: 'invalid', message: extractServerMessage(error) || t('compact.checkFailed') });
     } finally {
       if (current === version.current) setChecking(false);
     }

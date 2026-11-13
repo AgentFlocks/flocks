@@ -1,5 +1,5 @@
 {
-  "description": "在本地完成云账号登录、升级申请与升级执行。",
+  "description": "登录云账号申请企业版授权，并升级至企业版。",
   "loading": "加载中...",
   "consoleLogin": {
     "title": "云账号登录",
@@ -12,15 +12,15 @@
   },
   "machine": {
     "previousTitle": "Flocks Pro {{version}}",
-    "previousDescription": "这台机器装着老企业版（Python 版），还没有升级到新企业版。",
+    "previousDescription": "已安装旧版企业版（Python 版），尚未升级至新企业版。",
     "licensedTitle": "Flocks Pro",
-    "licensedDescription": "这台机器有企业版授权，还没有升级到新企业版。",
+    "licensedDescription": "已获得企业版授权，尚未升级。",
     "openTitle": "升级为 Flocks Pro",
     "openDescription": "查看当前授权信息、提交申请并跟踪审批进度。",
     "previousNote": "企业版换成了单独的安装包，老企业版不再更新。开源部分照常用 flocks update 升级；老企业版的审计日志、安全配置、用户管理、Prompt 脱敏这些页面，升级到新企业版后回来。",
-    "licensedNote": "授权已经保存在这台机器上，升级到新企业版时会沿用它。",
-    "lapsedNote": "这台机器上的授权已失效；续期或重新申请之后，升级到新企业版时沿用新的授权。",
-    "openNote": "企业版是单独的安装包：装好后开源版的数据会迁过去（第一次启动迁进自带的 PostgreSQL），用法照旧。"
+    "licensedNote": "授权已保存在当前机器，升级至企业版时将沿用该授权。",
+    "lapsedNote": "当前机器上的授权已失效；续期或重新申请后，升级至企业版时将沿用新的授权。",
+    "openNote": "企业版是独立的安装包：安装后首次启动会把开源版的数据复制到企业版自带的 PostgreSQL，使用方式不变。"
   },
   "licenceStatus": {
     "commercial": "商用授权",
@@ -121,11 +121,11 @@
   },
   "upgrade": {
     "title": "企业版更新",
-    "currentPrevious": "当前是老企业版 {{version}}。检查 Console 给这台机器所在平台的新企业版，升级时下载、校验后交给安装包运行，服务会自动重启。",
-    "currentOpen": "当前是开源版。检查 Console 给这台机器所在平台的新企业版，升级时下载、校验后交给安装包运行，服务会自动重启。",
-    "whatChanges": "升级后：程序在 {{root}}，数据还在原来的目录（第一次启动迁进自带的 PostgreSQL，原来的数据留着），授权沿用这台机器上的；之后照旧用 flocks start|stop|restart|status|logs|update。",
-    "whatChangesWindows": "升级后：程序在 {{root}}，企业版作为「FlocksPro Core」服务随开机启动；开源版的数据复制一份给企业版（原来的目录留着），授权沿用这台机器上的。安装时 Windows 会弹出管理员确认框。",
-    "systemd": "这台机器由 systemd 管（开源版离线包）：升级要以 root 运行安装包，这里可以把安装包下载好，再按给出的命令执行。",
+    "currentPrevious": "当前为旧版企业版 {{version}}。升级期间，服务将自动重启。",
+    "currentOpen": "升级期间，服务将自动重启。",
+    "whatChanges": "升级后：程序位于 {{root}}，数据目录不变；首次启动会把现有数据复制到企业版自带的 PostgreSQL，原数据文件保留且不再更新；授权沿用当前机器上的授权。之后仍可使用 flocks start|stop|restart|status|logs|update 管理服务。",
+    "whatChangesWindows": "升级后：程序位于 {{root}}，企业版作为「FlocksPro Core」服务随开机启动；开源版的数据会复制一份给企业版，原目录保留且不再更新；授权沿用当前机器上的授权。安装时 Windows 会弹出管理员确认框。",
+    "systemd": "当前开源版由 systemd 管理。请下载安装包，并使用 root 权限按页面提供的命令运行。",
     "prepare": "{{account}} 还不能写 {{root}}：先用 root 执行一次（只要这一次），再回来升级。",
     "recheck": "已执行，重新检查",
     "check": "检查新版本",
@@ -136,7 +136,7 @@
   },
   "progress": {
     "downloading": "正在下载新企业版 {{version}}",
-    "installing": "安装包在运行（{{version}}）：开源版会先停下，企业版第一次启动要迁移数据，可能要几分钟。装好后这个页面会自动刷新。",
+    "installing": "正在升级至 {{version}}。开源版将停止，企业版首次启动需迁移数据，可能需要几分钟，安装完成后页面自动刷新。",
     "restarting": "开源版已经停下，企业版正在第一次启动（迁移数据）。它监听在这个地址时，页面会自动刷新；地址不同的话，装好后打开安装输出里的地址。",
     "finished": "新企业版 {{version}} 装好了，刷新页面即可。",
     "failed": "安装没有完成，开源版照常运行；原因看下面的安装输出。",

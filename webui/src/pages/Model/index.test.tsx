@@ -143,6 +143,7 @@ vi.mock('@/components/common/EntitySheet', () => ({
     submitLabel,
     onSubmit,
     onClose,
+    readOnly,
   }: {
     open?: boolean;
     children?: React.ReactNode;
@@ -150,13 +151,14 @@ vi.mock('@/components/common/EntitySheet', () => ({
     submitLabel?: React.ReactNode;
     onSubmit?: () => void;
     onClose?: () => void;
+    readOnly?: boolean;
   }) => open ? (
-    <div data-testid="entity-sheet">
+    <div data-testid="entity-sheet" data-read-only={readOnly ? 'true' : undefined}>
       <div>{children}</div>
       <button type="button" aria-label="Close sheet" onClick={onClose}>Close</button>
-      <button type="button" disabled={submitDisabled} onClick={onSubmit}>
+      {!readOnly && <button type="button" disabled={submitDisabled} onClick={onSubmit}>
         {submitLabel}
-      </button>
+      </button>}
     </div>
   ) : null,
 }));
@@ -987,9 +989,10 @@ describe('ModelPage member access', () => {
     const sheet = await screen.findByTestId('entity-sheet');
     expect(within(sheet).getByText('detail.configAdminOnly')).toBeInTheDocument();
     expect(within(sheet).getByRole('group')).toBeDisabled();
-    const save = within(sheet).getByRole('button', { name: 'Save' });
-    expect(save).toBeDisabled();
-    await user.click(save);
+    // A details view: no save or cancel, the sheet still closes.
+    expect(sheet).toHaveAttribute('data-read-only', 'true');
+    expect(within(sheet).queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
+    expect(within(sheet).getByRole('button', { name: 'Close sheet' })).toBeInTheDocument();
     expect(mocks.createDefinition).not.toHaveBeenCalled();
     expect(mocks.updateModelSettings).not.toHaveBeenCalled();
   });

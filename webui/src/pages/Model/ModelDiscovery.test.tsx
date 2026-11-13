@@ -219,3 +219,46 @@ it.each(['threatbook-cn-llm', 'threatbook-io-llm'])('shows the dedicated model-l
   expect(api.discoverModels).not.toHaveBeenCalled();
   expect(api.saveModelInventory).not.toHaveBeenCalled();
 });
+
+// v0.21 #27: "Internal server error" said what failed, in the user's words; a refusal keeps its own words.
+it('says the connection check failed when the server fails, and keeps a refusal as the service said it', async () => {
+  const user = userEvent.setup();
+  api.checkKey.mockRejectedValueOnce({ response: { status: 500, data: { error: 'InternalServerError', message: 'Internal server error' } } });
+  render(<ProviderKeyCheck providerId="openai-compatible" credentials={{ api_key: 'k', base_url: 'http://a..b/v1' }} />);
+  await user.click(screen.getByRole('button', { name: 'compact.check' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('compact.checkFailed');
+  expect(screen.getByRole('alert')).not.toHaveTextContent('Internal server error');
+
+  api.checkKey.mockRejectedValueOnce({ response: { status: 403, data: { detail: 'Administrator access required' } } });
+  await user.click(screen.getByRole('button', { name: 'compact.check' }));
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Administrator access required'));
+});
+
+it('says fetching the model list failed when the server fails', async () => {
+  const user = userEvent.setup();
+  api.discoverModels.mockRejectedValueOnce({ response: { status: 500, data: { error: 'InternalServerError', message: 'Internal server error' } } });
+  render(<ModelDiscovery providerId="openai-compatible" mode="import" credentials={{ api_key: 'k', base_url: 'http://a..b/v1' }} />);
+  await user.click(fetchButton());
+  expect(await screen.findByText('discovery.requestFailed')).toBeInTheDocument();
+  expect(screen.queryByText('Internal server error')).not.toBeInTheDocument();
+});
+
+// A server failure that names its cause keeps it: only the bare catch-all is replaced.
+const gatewayDown = { response: { status: 503, data: { error: 'HTTPException', message: '模型网关暂不可用，请联系网关管理员' } } };
+
+it('keeps the reason a failing server gives for the connection check', async () => {
+  const user = userEvent.setup();
+  api.checkKey.mockRejectedValueOnce(gatewayDown);
+  render(<ProviderKeyCheck providerId="openai-compatible" credentials={{ api_key: 'k', base_url: 'http://gw.example/v1' }} />);
+  await user.click(screen.getByRole('button', { name: 'compact.check' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('模型网关暂不可用，请联系网关管理员');
+});
+
+it('keeps the reason a failing server gives for fetching the model list', async () => {
+  const user = userEvent.setup();
+  api.discoverModels.mockRejectedValueOnce(gatewayDown);
+  render(<ModelDiscovery providerId="openai-compatible" mode="import" credentials={{ api_key: 'k', base_url: 'http://gw.example/v1' }} />);
+  await user.click(fetchButton());
+  expect(await screen.findByText('模型网关暂不可用，请联系网关管理员')).toBeInTheDocument();
+  expect(screen.queryByText('discovery.requestFailed')).not.toBeInTheDocument();
+});

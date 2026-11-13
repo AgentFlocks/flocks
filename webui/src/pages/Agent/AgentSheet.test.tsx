@@ -112,6 +112,7 @@ vi.mock('react-i18next', () => ({
         'edit.guidePanelTitle': 'Rex 辅助修改',
         'edit.guidePanelDesc': '编辑描述',
         'edit.nativeGuidePanelDesc': '内置编辑描述',
+        'edit.nativeSubagentGuidePanelDesc': '内置子 Agent 编辑描述',
         'edit.nativeGuideActions': [
           {
             label: '检查模型策略',
@@ -234,6 +235,18 @@ describe('AgentSheet', () => {
     expect(props.rexSystemContext).toContain('Skills：agent-builder');
   });
 
+  it('names the primary agent when it is the built-in one being edited', () => {
+    render(
+      <AgentSheet
+        agent={makeAgent({ name: 'rex', native: true, mode: 'primary' })}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    expect(capturedEntitySheetProps.at(-1).rexGuidePanelDesc).toBe('内置编辑描述');
+  });
+
   it('uses a model and temperature guide when editing a native agent', () => {
     render(
       <AgentSheet
@@ -252,7 +265,8 @@ describe('AgentSheet', () => {
     const props = capturedEntitySheetProps.at(-1);
     expect(props.mode).toBe('edit');
     expect(props.initialTab).toBe('rex');
-    expect(props.rexGuidePanelDesc).toBe('内置编辑描述');
+    // A built-in subagent and the primary agent say the same scope in their own words.
+    expect(props.rexGuidePanelDesc).toBe('内置子 Agent 编辑描述');
     expect(props.rexGuideGroups).toEqual([
       {
         title: '编辑引导',

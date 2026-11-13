@@ -287,7 +287,8 @@ describe('SkillPage', () => {
     await screen.findByText('first');
     fireEvent.click(screen.getByRole('button', { name: 'deleteNamed' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('failed: write denied'));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('pluginGroups:errors.partial'));
+    expect(tMock).toHaveBeenCalledWith('pluginGroups:errors.failedItem', { item: 'failed', reason: 'write denied' });
     expect(listMock).toHaveBeenCalledOnce();
     expect(updateGroupMock).toHaveBeenCalledTimes(2);
     expect(screen.getByRole('button', { name: 'Ops 1' })).toBeInTheDocument();

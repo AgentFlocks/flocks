@@ -690,6 +690,27 @@ async def test_non_http_url_is_rejected_without_network(discovery_runtime, upstr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("base_url", ["http://a..b/v1", "http://" + "x" * 64 + ".example.com/v1"])
+async def test_host_name_the_resolver_cannot_encode_is_an_invalid_url(base_url, discovery_runtime, monkeypatch):
+    # v0.21 #27: these used to escape the resolver check as UnicodeError and
+    # answer 500 "Internal server error". The real resolver check runs here
+    # (the upstream fixture stubs it); the transport only records requests.
+    requests = []
+    real_client = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(200, json={"data": []}))
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(discovery_runtime.module.httpx, "AsyncClient", factory)
+    result = await discovery_runtime.module.discover_models("openai-compatible", api_key="sk-test", base_url=base_url)  # secret-guard: allow 误报：测试用假 key
+
+    assert result["status"] == "error"
+    assert result["code"] == "invalid_base_url"
+    assert not requests
+
+
+@pytest.mark.asyncio
 async def test_missing_url_and_key_are_distinguished(discovery_runtime, upstream):
     missing_url = await discovery_runtime.module.discover_models("openai-compatible")
     missing_key = await discovery_runtime.module.discover_models("openai")

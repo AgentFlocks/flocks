@@ -38,60 +38,68 @@ vi.mock('./badges', () => ({
   EnabledBadge: () => null,
 }));
 
-vi.mock('../ToolSheets', () => ({
-  buildMCPConfigFromForm: (formData: {
-    connType: 'stdio' | 'sse';
-    command: string;
-    args: string;
-    url: string;
-  }) => (
-    formData.connType === 'stdio'
-      ? {
-          type: 'stdio',
-          command: formData.command,
-          args: formData.args,
-        }
-      : {
-          type: 'sse',
-          url: formData.url,
-        }
-  ),
-  getMCPFormError: () => null,
-  buildMCPFormDataFromConfig: (
-    name: string,
-    config?: { type?: 'stdio' | 'sse' | 'local' | 'remote'; url?: string } | null,
-    fallbackUrl?: string,
-  ) => ({
-    name,
-    connType: config?.type === 'stdio' || config?.type === 'local' ? 'stdio' : 'sse',
-    command: '',
-    args: '',
-    url: config?.url ?? fallbackUrl ?? '',
-  }),
-  MCPFormFields: ({
-    formData,
-    onChange,
-    onTestConnection,
-    testResult,
-  }: {
-    formData: { url: string };
-    onChange?: (fields: { url: string }) => void;
-    onTestConnection: () => void;
-    testResult: { message: string } | null;
-  }) => (
-    <div>
-      <input
-        aria-label="service-url"
-        value={formData.url}
-        onChange={(event) => onChange?.({ url: event.target.value })}
-      />
-      <button type="button" onClick={onTestConnection}>
-        trigger-test
-      </button>
-      {testResult && <div>{testResult.message}</div>}
-    </div>
-  ),
-}));
+vi.mock('../ToolSheets', async (importOriginal) => {
+  // The real outcome helpers, so a refused test shows the reason the service gave.
+  const { mcpTestOutcome, mcpTestFailure } = await importOriginal<typeof import('../ToolSheets')>();
+  return {
+    mcpTestOutcome,
+    mcpTestFailure,
+    buildMCPConfigFromForm: (formData: {
+      connType: 'stdio' | 'sse';
+      command: string;
+      args: string;
+      url: string;
+    }) => (
+      formData.connType === 'stdio'
+        ? {
+            type: 'stdio',
+            command: formData.command,
+            args: formData.args,
+          }
+        : {
+            type: 'sse',
+            url: formData.url,
+          }
+    ),
+    getMCPFormError: () => null,
+    getMCPFieldErrors: () => ({}),
+    clearMCPFieldErrors: (errors: Record<string, string>) => errors,
+    buildMCPFormDataFromConfig: (
+      name: string,
+      config?: { type?: 'stdio' | 'sse' | 'local' | 'remote'; url?: string } | null,
+      fallbackUrl?: string,
+    ) => ({
+      name,
+      connType: config?.type === 'stdio' || config?.type === 'local' ? 'stdio' : 'sse',
+      command: '',
+      args: '',
+      url: config?.url ?? fallbackUrl ?? '',
+    }),
+    MCPFormFields: ({
+      formData,
+      onChange,
+      onTestConnection,
+      testResult,
+    }: {
+      formData: { url: string };
+      onChange?: (fields: { url: string }) => void;
+      onTestConnection: () => void;
+      testResult: { message: string } | null;
+    }) => (
+      <div>
+        <input
+          aria-label="service-url"
+          value={formData.url}
+          onChange={(event) => onChange?.({ url: event.target.value })}
+        />
+        <button type="button" onClick={onTestConnection}>
+          trigger-test
+        </button>
+        {testResult && <div>{testResult.message}</div>}
+      </div>
+    ),
+  };
+});
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({

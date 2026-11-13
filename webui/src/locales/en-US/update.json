@@ -83,8 +83,8 @@
     "restarting": "Starting the service again; this page will say when it is done.",
     "restarted": "The service was restarted and data was not touched. The components this upgrade installed cannot be undone and may already be the new ones: check ~/.flocks/run/upgrade-result.json on the server, resolve the cause, then upgrade again."
   },
-  "enterpriseDesc": "This machine has an enterprise licence, so this upgrades it to the new enterprise edition: the program goes to {{root}}, its data and licence stay, and the web address stays the same. The open edition stops first, and the first start migrates data, which can take minutes.",
-  "enterpriseInstalling": "The open edition stops first, and the first start of the enterprise edition migrates data, which can take minutes. This page refreshes by itself when it is done.",
+  "enterpriseDesc": "The program will be installed in {{root}}. Existing data and the licence are carried over, and the web address stays the same. The open edition stops during the upgrade; the first start migrates data, which can take a few minutes.",
+  "enterpriseInstalling": "The open edition stops, and the enterprise edition’s first start migrates the data, which can take a few minutes; the page refreshes automatically when the installation finishes.",
   "enterpriseStageLabels": {
     "fetching": "Download the new enterprise installer",
     "restarting": "Install the new enterprise edition"

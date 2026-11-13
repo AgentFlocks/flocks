@@ -1047,7 +1047,7 @@ def start_installer(path: Path, offer: InstallerOffer, attempt: str | None = Non
     if _WINDOWS:
         return _start_windows_installer(path, offer, attempt)
     if run_by_systemd():
-        raise EnterpriseUpgradeError(f"这台机器由 systemd 管，要以 root 执行：{installer_command(str(path))}")
+        raise EnterpriseUpgradeError(f"当前开源版由 systemd 管理，请使用 root 权限运行：{installer_command(str(path))}")
     if not install_root_ready():
         raise EnterpriseUpgradeError(f"先用 root 执行一次：{prepare_command()}")
     prior_result = _prior_installation_result()

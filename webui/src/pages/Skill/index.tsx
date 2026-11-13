@@ -23,7 +23,7 @@ import { isSkillDefinitionReadOnly, skillAPI, Skill } from '@/api/skill';
 import SkillSheet from './SkillSheet';
 import SkillInstallDialog from './SkillInstallDialog';
 import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-groups/GroupNav';
-import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection, groupNoun } from '@/components/plugin-groups/groupView';
 import { usePluginViewMode } from '@/hooks/usePluginViewMode';
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
 import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
@@ -118,7 +118,7 @@ export default function SkillPage() {
     key: skill.name, name: skill.name, group: skill.group,
     // Skills found in ~/.claude/skills are not built in, but only user skills are written to.
     readOnlyReason: skill.group_readonly
-      ? t(skill.source === 'claude' ? 'pluginGroups:readOnly.externalSkill' : 'pluginGroups:readOnly.system')
+      ? t(skill.source === 'claude' ? 'pluginGroups:readOnly.externalSkill' : 'pluginGroups:readOnly.system', groupNoun(t, 'skill'))
       : isSkillDefinitionReadOnly(skill) ? t('pluginGroups:readOnly.builtinSkill') : undefined,
   });
   const groupItems = visibleSkills.map(asGroupItem);
@@ -133,17 +133,17 @@ export default function SkillPage() {
   };
   const moveGroup = async (key: string, group: string | null) => {
     const inventory = await loadGroupItems();
-    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, refreshGroupingInventory, t);
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, refreshGroupingInventory, t, false, 'skill');
   };
   const createGroup = async (key: string, group: string) => {
     const inventory = await loadGroupItems();
     if (inventory.some((item) => matchesGroup(item.group, group))) throw new Error(t('pluginGroups:validation.duplicate'));
-    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, refreshGroupingInventory, t);
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, refreshGroupingInventory, t, false, 'skill');
   };
   const changeGroup = async (from: string, to: string | null) => {
     const inventory = await loadGroupItems();
     if (to !== null && inventory.some((item) => matchesGroup(item.group, to))) throw new Error(t('pluginGroups:validation.duplicate'));
-    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveGroup, refreshGroupingInventory, t, true);
+    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveGroup, refreshGroupingInventory, t, true, 'skill');
   };
 
   const enabledCount = useMemo(
@@ -418,7 +418,7 @@ export default function SkillPage() {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-3 pt-3 md:flex-row">
-        <GroupNav inventoryComplete={!loading && !error} preferenceKey="skill" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
+        <GroupNav itemKind="skill" inventoryComplete={!loading && !error} preferenceKey="skill" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="flex-1 overflow-y-auto px-4 py-3 max-md:px-0">
         {visibleSkills.length === 0 ? (
