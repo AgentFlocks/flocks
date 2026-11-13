@@ -539,6 +539,34 @@ async def test_project_list_reports_unreachable_worktree_as_unreadable(
     assert fetched.json()["pathStatus"] == "unreadable"
 
 
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="needs POSIX directory search permission enforced for this account",
+)
+@pytest.mark.asyncio
+async def test_create_project_reports_unreachable_directory_as_not_readable(
+    client: AsyncClient,
+    tmp_path: Path,
+):
+    """INC-61BE1F94: a folder the service account cannot reach is a permission to
+    grant, not a missing directory, and never a 500 carrying the server's path."""
+
+    parent = tmp_path / "svc-denied"
+    worktree = parent / "repo"
+    worktree.mkdir(parents=True)
+    parent.chmod(0o600)
+    try:
+        response = await client.post(
+            "/api/project",
+            json={"name": "Denied", "worktree": str(worktree)},
+        )
+    finally:
+        parent.chmod(0o700)
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST, response.text
+    assert response.json()["message"] == "Project directory is not readable"
+
+
 @pytest.mark.asyncio
 async def test_folder_browser_starts_at_home_when_path_is_omitted(
     client: AsyncClient,

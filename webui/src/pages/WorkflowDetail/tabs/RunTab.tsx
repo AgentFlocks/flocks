@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, type Dispatch, type SetStateAction } from 'react';
 import {
   Loader2, ChevronDown, ChevronRight, StopCircle,
   Clock, CheckCircle, XCircle, AlertCircle, FlaskConical,
@@ -14,10 +14,16 @@ import CopyButton from '@/components/common/CopyButton';
 import WorkflowStatusBadge from '@/components/common/WorkflowStatusBadge';
 import { extractErrorMessage } from '@/utils/error';
 
+/**
+ * How the tab hands the latest execution to whoever holds it. Like a state setter it also takes
+ * an updater, which is given the execution held at the moment the update is applied.
+ */
+export type LatestExecutionChange = Dispatch<SetStateAction<WorkflowExecution | null>>;
+
 interface RunTabProps {
   workflow: Workflow;
   latestExecution: WorkflowExecution | null;
-  onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
+  onLatestExecutionChange?: LatestExecutionChange;
   onExecutionSettled?: () => void;
   sections?: RunTabSection[];
   embedded?: boolean;
@@ -34,6 +40,42 @@ function getExecutionDisplayStatus(execution?: WorkflowExecution | null): string
     return execution.currentPhase;
   }
   return execution.status;
+}
+
+/** An execution the test section made up to say why a run never started: it has no id. */
+function isLocalRunFailure(execution: WorkflowExecution | null): boolean {
+  return !!execution && !execution.id;
+}
+
+/** Room left under the result card when the panel is scrolled to show it. */
+const RESULT_CARD_MARGIN = 12;
+
+/**
+ * Scroll the panel the result card sits in, far enough for the card's bottom edge to show but
+ * never past its top. Only that panel moves: `scrollIntoView` would also scroll every ancestor
+ * that can be scrolled from code, the page's `overflow-hidden` shell included.
+ *
+ * `shownHeight` is how tall the card was when it was last brought into view, or null when this is
+ * the first time. After the first time the panel only follows the card as it grows, and only
+ * while its top is still in view, so a user who has scrolled elsewhere is not pulled back.
+ * Returns how tall the card is now.
+ */
+function keepResultCardInView(card: HTMLElement, shownHeight: number | null): number | null {
+  let panel = card.parentElement;
+  while (panel && !/^(auto|scroll)$/.test(window.getComputedStyle(panel).overflowY)) {
+    panel = panel.parentElement;
+  }
+  const box = card.getBoundingClientRect();
+  if (!panel || box.height === 0) return shownHeight;
+  const view = panel.getBoundingClientRect();
+  const viewBottom = Math.min(view.bottom, window.innerHeight);
+  if (shownHeight !== null) {
+    const topInView = box.top >= view.top && box.top < viewBottom;
+    if (box.height <= shownHeight || !topInView) return box.height;
+  }
+  const hidden = box.bottom + RESULT_CARD_MARGIN - viewBottom;
+  if (hidden > 0) panel.scrollTop += Math.min(hidden, Math.max(box.top - view.top, 0));
+  return box.height;
 }
 
 function getExecutionDisplayMessage(
@@ -450,6 +492,20 @@ function TestSection({
   const lastSavedInputsRef = useRef(inputs);
   const saveTimerRef = useRef<number | null>(null);
   const saveFeedbackTimerRef = useRef<number | null>(null);
+  const resultCardRef = useRef<HTMLDivElement | null>(null);
+  // The run the user has just asked for, from the answer to the request until the run ends. Its
+  // result card sits under the button, often below what the panel shows, so it is brought into
+  // view. Executions that got here another way (the latest from the history, say) are left alone.
+  const requestedRunRef = useRef<{ id: string; shownHeight: number | null } | null>(null);
+
+  useLayoutEffect(() => {
+    const requested = requestedRunRef.current;
+    if (!requested || !execution || execution.id !== requested.id) return;
+    if (resultCardRef.current) {
+      requested.shownHeight = keepResultCardInView(resultCardRef.current, requested.shownHeight);
+    }
+    if (execution.status !== 'running') requestedRunRef.current = null;
+  }, [execution]);
 
   useEffect(() => {
     workflowAPI.getSampleInputs(workflow.id).then(res => {
@@ -598,10 +654,12 @@ function TestSection({
     setStopping(false);
     try {
       const res = await workflowAPI.run(workflow.id, { inputs: parsed });
+      requestedRunRef.current = { id: res.data.id, shownHeight: null };
       onExecutionChange?.(res.data);
     } catch (err: any) {
+      requestedRunRef.current = { id: '', shownHeight: null };
       setRunning(false);
-      const msg = err?.response?.data?.detail || err?.message || t('detail.run.runFailed');
+      const msg = extractErrorMessage(err, t('detail.run.runFailed'));
       onExecutionChange?.({
         id: '',
         workflowId: workflow.id,
@@ -685,7 +743,7 @@ function TestSection({
           </button>
 
           {execution && (
-            <div className="border border-gray-200 rounded-lg overflow-hidden">
+            <div ref={resultCardRef} className="border border-gray-200 rounded-lg overflow-hidden">
               <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
                 <WorkflowStatusBadge status={displayStatus} />
                 {execution.duration != null && (
@@ -951,7 +1009,7 @@ function HistorySection({
   workflowId: string;
   latestExecutionId?: string;
   focusExecutionId?: string;
-  onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
+  onLatestExecutionChange?: LatestExecutionChange;
   embedded?: boolean;
   hideSectionHeader?: boolean;
 }) {
@@ -962,6 +1020,15 @@ function HistorySection({
   const [selectedExec, setSelectedExec] = useState<WorkflowExecution | null>(null);
   const [focusedExecutionError, setFocusedExecutionError] = useState('');
   const executionNotFoundText = t('detail.run.executionNotFound');
+
+  // A test run that could not be started leaves an execution with no id in the test section, to
+  // say why (TestSection.handleRun). It is not in the history, so a history refresh must not swap
+  // it for an older run or clear it; the next run replaces it. Whether to keep it is decided
+  // against the execution held when the update is applied: the history answers later, and what
+  // this section last rendered with may be out of date by then.
+  const syncLatestExecution = useCallback((execution: WorkflowExecution | null) => {
+    onLatestExecutionChange?.((current) => (isLocalRunFailure(current) ? current : execution));
+  }, [onLatestExecutionChange]);
 
   const loadFocusedExecution = useCallback(async (executionId: string): Promise<WorkflowExecution | null> => {
     try {
@@ -993,7 +1060,7 @@ function HistorySection({
       if (focusExecutionId) {
         const focusedExecution = nextHistory.find((item: WorkflowExecution) => item.id === focusExecutionId) ?? null;
         if (focusedExecution) {
-          onLatestExecutionChange?.(focusedExecution);
+          syncLatestExecution(focusedExecution);
           setSelectedExec(focusedExecution);
           setExpanded(true);
         }
@@ -1002,12 +1069,12 @@ function HistorySection({
           ? nextHistory.find((item: WorkflowExecution) => item.id === latestExecutionId)
           : nextHistory[0];
         if (matchingExecution) {
-          onLatestExecutionChange?.(matchingExecution);
+          syncLatestExecution(matchingExecution);
         } else if (!latestExecutionId) {
-          onLatestExecutionChange?.(nextHistory[0]);
+          syncLatestExecution(nextHistory[0]);
         }
       } else if (!latestExecutionId) {
-        onLatestExecutionChange?.(null);
+        syncLatestExecution(null);
       }
       setSelectedExec(prev => {
         if (!prev) return null;
@@ -1038,16 +1105,16 @@ function HistorySection({
       if (focusExecutionId) {
         const focusedExecution = nextHistory.find((item) => item.id === focusExecutionId) ?? null;
         setSelectedExec(focusedExecution);
-        if (focusedExecution) onLatestExecutionChange?.(focusedExecution);
+        if (focusedExecution) syncLatestExecution(focusedExecution);
       } else if (nextHistory.length > 0) {
-        onLatestExecutionChange?.(nextHistory[0]);
+        syncLatestExecution(nextHistory[0]);
       } else {
-        onLatestExecutionChange?.(null);
+        syncLatestExecution(null);
       }
     } finally {
       setLoading(false);
     }
-  }, [executionNotFoundText, focusExecutionId, latestExecutionId, loadFocusedExecution, onLatestExecutionChange, workflowId]);
+  }, [executionNotFoundText, focusExecutionId, latestExecutionId, loadFocusedExecution, syncLatestExecution, workflowId]);
 
   const hasRunning = history.some(e => e.status === 'running');
 

@@ -550,6 +550,11 @@
     "enabled": "已启用",
     "disabled": "已禁用",
     "updating": "更新中…",
+    "serviceDisabledApi": "所属 API 服务「{{service}}」未启用，这个工具不能单独启用。请先在「API 集成」里启用该服务。",
+    "serviceDisabledDevice": "所属设备插件「{{service}}」还没有启用的设备，这个工具不能单独启用。请先在「设备接入」添加或启用设备。",
+    "goToApiService": "去启用服务",
+    "goToDevices": "前往设备接入",
+    "enableNotApplied": "工具没有启用成功，请检查它所属的服务是否已启用。",
     "noDescription": "暂无描述"
   },
 

@@ -1,7 +1,56 @@
 import { describe, expect, it } from 'vitest';
-import { extractErrorMessage, isServiceRefusal } from './error';
+import { extractErrorMessage, extractServerMessage, isServiceRefusal } from './error';
+import { backendError } from '@/test/helpers';
+
+describe('extractServerMessage', () => {
+  it.each([
+    ['the exception handler', backendError(403, '目录不在允许的范围内'), '目录不在允许的范围内'],
+    ['a structured detail', backendError(403, { code: 'license_inactive', message: '授权已过期' }), '授权已过期'],
+    ['the framework', { response: { data: { detail: '工作流由部署统一管理，不能修改' } } }, '工作流由部署统一管理，不能修改'],
+    ['a structured framework detail', { response: { data: { detail: { code: 'c', message: '需要确认' } } } }, '需要确认'],
+    ['the validation envelope', { response: { data: {
+      error: 'ValidationError', message: 'Request validation failed',
+      details: [{ loc: ['body', 'name'], msg: 'Field required' }],
+    } } }, 'name: Field required'],
+  ])('reads the reason from %s', (_name, err, expected) => {
+    expect(extractServerMessage(err)).toBe(expected);
+  });
+
+  it.each([
+    ['a body with no reason in it', backendError(500, { code: 'gone' })],
+    // The catch-all handler's answer to an unexpected fault: it says that it failed, not why.
+    ['the catch-all fault', Object.assign(new Error('Request failed with status code 500'), {
+      response: { status: 500, data: { error: 'InternalServerError', message: 'Internal server error' } },
+    })],
+    ['a proxy page', Object.assign(new Error('Request failed with status code 502'), { response: { status: 502, data: '<html>502 Bad Gateway</html>' } })],
+    ['no answer', new Error('Network Error')],
+    ['text', 'Plain error'],
+    ['nothing', null],
+  ])('gives nothing for %s, not what the transport says', (_name, err) => {
+    expect(extractServerMessage(err)).toBeUndefined();
+  });
+});
 
 describe('extractErrorMessage', () => {
+  it('shows the message inside a structured detail instead of the status code line', () => {
+    expect(extractErrorMessage(backendError(403, { code: 'license_inactive', message: '授权已过期' }), 'Fallback'))
+      .toBe('授权已过期');
+    expect(extractErrorMessage({ response: { data: { detail: { code: 'c', message: '需要确认' } } }, message: 'Transport error' }, 'Fallback'))
+      .toBe('需要确认');
+  });
+
+  it('still shows the line of the catch-all fault, which says more than the status code', () => {
+    expect(extractErrorMessage({
+      response: { status: 500, data: { error: 'InternalServerError', message: 'Internal server error' } },
+      message: 'Request failed with status code 500',
+    }, 'Fallback')).toBe('Internal server error');
+  });
+
+  it('falls back to the transport, then to the fallback, when the body gives no reason', () => {
+    expect(extractErrorMessage(backendError(500, { code: 'gone' }), 'Fallback')).toBe('Request failed with status code 500');
+    expect(extractErrorMessage({ response: { data: { message: { code: 'gone' } } } }, 'Fallback')).toBe('Fallback');
+  });
+
   it.each([
     [{ response: { data: { detail: 'Denied', message: 'Other' } } }, 'Denied'],
     [{ response: { data: { message: 'Backend message' } } }, 'Backend message'],

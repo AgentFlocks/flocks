@@ -14,6 +14,7 @@ from flocks.provider.provider import (
     StreamChunk,
 )
 from flocks.provider.sdk.openai_base import format_openai_messages
+from flocks.provider.tls import has_custom_tls, httpx_verify
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.azure")
@@ -21,6 +22,8 @@ log = Log.create(service="provider.azure")
 
 class AzureProvider(BaseProvider):
     """Azure OpenAI provider"""
+
+    SUPPORTS_TLS_SETTINGS = True
 
     def __init__(self):
         super().__init__(provider_id="azure", name="Azure OpenAI")
@@ -56,13 +59,23 @@ class AzureProvider(BaseProvider):
                     "AZURE_OPENAI_API_VERSION", "2025-04-01-preview"
                 )
 
+                client_kwargs: Dict[str, Any] = {}
+                # verify_ssl / ca_cert from the provider options; without them
+                # the SDK keeps building its own default client.
+                settings = (self._config.custom_settings if self._config else None) or {}
+                if has_custom_tls(settings):
+                    from openai import DefaultAsyncHttpxClient
+
+                    client_kwargs["http_client"] = DefaultAsyncHttpxClient(verify=httpx_verify(settings))
+
                 # Create client
                 self._client = AsyncAzureOpenAI(
                     api_key=api_key,
                     azure_endpoint=endpoint,
                     api_version=api_version,
+                    **client_kwargs,
                 )
-                self.log.info("azure.client.created", {"endpoint": endpoint})
+                self.log.info("azure.client.created", {"endpoint": endpoint, "custom_tls": bool(client_kwargs)})
 
             except ImportError:
                 raise ImportError("openai package not installed. Install with: pip install openai")

@@ -41,6 +41,7 @@ from flocks.provider.sdk.openai_base import (
     resolve_openai_token_limit,
     resolve_verify_ssl,
 )
+from flocks.provider.tls import httpx_verify
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.openai_compatible")
@@ -49,6 +50,7 @@ log = Log.create(service="provider.openai_compatible")
 class OpenAICompatibleProvider(BaseProvider):
     """OpenAI Compatible API provider"""
 
+    SUPPORTS_TLS_SETTINGS = True
     _MINIMAX_EMPTY_RESPONSE_RETRY_DELAY_SECONDS = 3
     
     def __init__(self):
@@ -112,7 +114,7 @@ class OpenAICompatibleProvider(BaseProvider):
                     trust_env = _coerce_bool(custom_settings.get("trust_env"), trust_env)
                 http_client = create_openai_http_client(
                     trust_env=trust_env,
-                    verify=verify_ssl,
+                    verify=httpx_verify(custom_settings, trust_env=trust_env),
                     timeout=DEFAULT_HTTP_TIMEOUT,
                     custom_settings=custom_settings,
                 )

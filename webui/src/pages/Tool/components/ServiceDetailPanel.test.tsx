@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MCPServerDetailPanel } from './ServiceDetailPanel';
+import { backendError } from '@/test/helpers';
 
 const { currentLanguage, mcpAPI } = vi.hoisted(() => ({
   currentLanguage: { value: 'zh-CN' },
@@ -37,66 +38,68 @@ vi.mock('./badges', () => ({
   EnabledBadge: () => null,
 }));
 
-vi.mock('../ToolSheets', () => ({
-  buildMCPConfigFromForm: (formData: {
-    connType: 'stdio' | 'sse';
-    command: string;
-    args: string;
-    url: string;
-  }) => (
-    formData.connType === 'stdio'
-      ? {
-          type: 'stdio',
-          command: formData.command,
-          args: formData.args,
-        }
-      : {
-          type: 'sse',
-          url: formData.url,
-        }
-  ),
-  getMCPFormError: () => null,
-  getMCPFieldErrors: () => ({}),
-  clearMCPFieldErrors: (errors: Record<string, string>) => errors,
-  mcpTestOutcome: (data: { success?: boolean; message?: string; tools_count?: number }) => ({
-    success: data.success ?? false, message: data.message ?? '', tools_count: data.tools_count,
-  }),
-  mcpTestFailure: (err: { message?: string }) => ({ success: false, message: err?.message ?? '' }),
-  buildMCPFormDataFromConfig: (
-    name: string,
-    config?: { type?: 'stdio' | 'sse' | 'local' | 'remote'; url?: string } | null,
-    fallbackUrl?: string,
-  ) => ({
-    name,
-    connType: config?.type === 'stdio' || config?.type === 'local' ? 'stdio' : 'sse',
-    command: '',
-    args: '',
-    url: config?.url ?? fallbackUrl ?? '',
-  }),
-  MCPFormFields: ({
-    formData,
-    onChange,
-    onTestConnection,
-    testResult,
-  }: {
-    formData: { url: string };
-    onChange?: (fields: { url: string }) => void;
-    onTestConnection: () => void;
-    testResult: { message: string } | null;
-  }) => (
-    <div>
-      <input
-        aria-label="service-url"
-        value={formData.url}
-        onChange={(event) => onChange?.({ url: event.target.value })}
-      />
-      <button type="button" onClick={onTestConnection}>
-        trigger-test
-      </button>
-      {testResult && <div>{testResult.message}</div>}
-    </div>
-  ),
-}));
+vi.mock('../ToolSheets', async (importOriginal) => {
+  // The real outcome helpers, so a refused test shows the reason the service gave.
+  const { mcpTestOutcome, mcpTestFailure } = await importOriginal<typeof import('../ToolSheets')>();
+  return {
+    mcpTestOutcome,
+    mcpTestFailure,
+    buildMCPConfigFromForm: (formData: {
+      connType: 'stdio' | 'sse';
+      command: string;
+      args: string;
+      url: string;
+    }) => (
+      formData.connType === 'stdio'
+        ? {
+            type: 'stdio',
+            command: formData.command,
+            args: formData.args,
+          }
+        : {
+            type: 'sse',
+            url: formData.url,
+          }
+    ),
+    getMCPFormError: () => null,
+    getMCPFieldErrors: () => ({}),
+    clearMCPFieldErrors: (errors: Record<string, string>) => errors,
+    buildMCPFormDataFromConfig: (
+      name: string,
+      config?: { type?: 'stdio' | 'sse' | 'local' | 'remote'; url?: string } | null,
+      fallbackUrl?: string,
+    ) => ({
+      name,
+      connType: config?.type === 'stdio' || config?.type === 'local' ? 'stdio' : 'sse',
+      command: '',
+      args: '',
+      url: config?.url ?? fallbackUrl ?? '',
+    }),
+    MCPFormFields: ({
+      formData,
+      onChange,
+      onTestConnection,
+      testResult,
+    }: {
+      formData: { url: string };
+      onChange?: (fields: { url: string }) => void;
+      onTestConnection: () => void;
+      testResult: { message: string } | null;
+    }) => (
+      <div>
+        <input
+          aria-label="service-url"
+          value={formData.url}
+          onChange={(event) => onChange?.({ url: event.target.value })}
+        />
+        <button type="button" onClick={onTestConnection}>
+          trigger-test
+        </button>
+        {testResult && <div>{testResult.message}</div>}
+      </div>
+    ),
+  };
+});
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -152,6 +155,8 @@ vi.mock('react-i18next', () => ({
         'detail.threatbookMcp.migrateToChina': isChinese ? '改为中国区配置' : 'Switch to China',
         'alert.connectionOk': '连接成功',
       };
+      // A failure alert carries its reason as the `error` value; show it so a test can read it.
+      if (typeof options?.error === 'string') return `${key}: ${options.error}`;
       return (translations[key] ?? key).replace('{{region}}', String(options?.region ?? ''));
     },
     i18n: {
@@ -291,6 +296,85 @@ describe('MCPServerDetailPanel', () => {
     expect(onStatusChange).toHaveBeenCalledTimes(1);
     expect(mcpAPI.get).toHaveBeenCalledTimes(2);
     expect(mcpAPI.testExisting).not.toHaveBeenCalled();
+  });
+
+  function renderDemoPanel() {
+    render(
+      <MCPServerDetailPanel
+        server={server}
+        serverTools={[]}
+        onConnect={vi.fn()}
+        onDisconnect={vi.fn()}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+        onStatusChange={vi.fn().mockResolvedValue(undefined)}
+        onRemove={vi.fn()}
+        onSelectTool={vi.fn()}
+      />,
+    );
+  }
+
+  it('says why the connection test was refused instead of the bare status code', async () => {
+    const user = userEvent.setup();
+    mcpAPI.testExisting.mockRejectedValue(backendError(400, 'MCP 服务地址不在允许的范围内'));
+    renderDemoPanel();
+
+    await screen.findByLabelText('service-url');
+    await user.click(screen.getByRole('button', { name: 'trigger-test' }));
+
+    expect(await screen.findByText('MCP 服务地址不在允许的范围内')).toBeInTheDocument();
+    expect(screen.queryByText(/status code 400/)).not.toBeInTheDocument();
+  });
+
+  it('says why the configuration could not be saved instead of the bare status code', async () => {
+    const user = userEvent.setup();
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    try {
+      mcpAPI.update.mockRejectedValue(backendError(403, '只有管理员可以修改 MCP 配置'));
+      renderDemoPanel();
+
+      const urlInput = await screen.findByLabelText('service-url');
+      await user.clear(urlInput);
+      await user.type(urlInput, 'https://saved.example.com/mcp');
+      await user.click(screen.getByRole('button', { name: '保存' }));
+
+      await waitFor(() => expect(alertSpy).toHaveBeenCalledWith('alert.saveFailed: 只有管理员可以修改 MCP 配置'));
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('says why the saved ThreatBook MCP key could not be shown', async () => {
+    const user = userEvent.setup();
+    mcpAPI.get.mockResolvedValue({
+      ...detailResponse,
+      data: {
+        ...detailResponse.data,
+        name: 'threatbook_mcp',
+        config: { type: 'sse', url: 'https://mcp.threatbook.cn/mcp?apikey={secret:threatbook_mcp_key}' },
+      },
+    });
+    mcpAPI.getCredentials.mockResolvedValue({
+      data: { has_credential: true, secret_id: 'threatbook_mcp_key', api_key_masked: '************' }, // secret-guard: allow (the name of a secret, not its value)
+    });
+    mcpAPI.revealCredentials.mockRejectedValue(backendError(403, '只有管理员可以查看密钥'));
+
+    render(
+      <MCPServerDetailPanel
+        server={{ ...server, name: 'threatbook_mcp' }}
+        serverTools={[]}
+        onConnect={vi.fn()}
+        onDisconnect={vi.fn()}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+        onRemove={vi.fn()}
+        onSelectTool={vi.fn()}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: '编辑配置' }));
+    await user.click(screen.getByTitle('显示'));
+
+    expect(await screen.findByText('只有管理员可以查看密钥')).toBeInTheDocument();
+    expect(screen.getByLabelText('API Key *')).toHaveValue('************');
   });
 
   it('shows the China free key link for ThreatBook MCP in Chinese', async () => {

@@ -16,6 +16,7 @@ import {
   THREATBOOK_REGION_CONFIG,
 } from "@/constants/threatbook";
 import type { MCPCredentials, MCPServer } from "@/types";
+import { extractErrorMessage } from "@/utils/error";
 
 interface Props {
   serverName: string;
@@ -115,10 +116,10 @@ export default function ThreatBookMCPConfigPanel({
       } catch (error: any) {
         setResult({
           success: false,
-          message:
-            error.response?.data?.detail ||
-            error.message ||
+          message: extractErrorMessage(
+            error,
             t("detail.threatbookMcp.revealFailed"),
+          ),
         });
         return;
       } finally {
@@ -159,10 +160,10 @@ export default function ThreatBookMCPConfigPanel({
     } catch (error: any) {
       setResult({
         success: false,
-        message:
-          error.response?.data?.detail ||
-          error.message ||
+        message: extractErrorMessage(
+          error,
           t("detail.threatbookMcp.saveFailed"),
+        ),
       });
     } finally {
       setSaving(false);
@@ -182,10 +183,10 @@ export default function ThreatBookMCPConfigPanel({
     } catch (error: any) {
       setResult({
         success: false,
-        message:
-          error.response?.data?.detail ||
-          error.message ||
+        message: extractErrorMessage(
+          error,
           t("detail.threatbookMcp.testFailed"),
+        ),
       });
     } finally {
       setTesting(false);

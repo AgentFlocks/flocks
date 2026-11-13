@@ -98,6 +98,7 @@ import {
 } from '@/utils/imageUpload';
 import type { Message, MessagePart, SessionGoalState, ToolState } from '@/types';
 import type { SessionExecutionMode } from '@/utils/sessionExecutionMode';
+import { extractErrorMessage } from '@/utils/error';
 import {
   buildInstructionDisplayText,
   fetchSessionChatCommands,
@@ -3627,7 +3628,7 @@ export default function SessionChat({
         });
       });
     } catch (err: any) {
-      const detail = err?.response?.data?.detail ?? err?.message ?? t('chat.upload.errorGeneric');
+      const detail = extractErrorMessage(err, t('chat.upload.errorGeneric'));
       setAttachments((prev) => prev.map((attachment) => (
         entries.some((entry) => entry.id === attachment.id)
           ? { ...attachment, status: 'error', error: detail }
@@ -3984,10 +3985,9 @@ export default function SessionChat({
       onExecutionModeAccepted?.(promptExecutionMode);
     } catch (err: any) {
       const statusCode = err?.response?.status;
-      const detail = err?.response?.data?.detail;
       const message = statusCode === 409
         ? t('chat.queue.full')
-        : detail || err?.message || t('chat.queue.enqueueFailed');
+        : extractErrorMessage(err, t('chat.queue.enqueueFailed'));
       toast.error(message);
       throw err;
     }
@@ -4401,7 +4401,7 @@ export default function SessionChat({
     try {
       await saveQueuedEdit(item);
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.updateFailed'));
+      toast.error(extractErrorMessage(err, t('chat.queue.updateFailed')));
     }
   }, [saveQueuedEdit, t, toast]);
 
@@ -4409,7 +4409,7 @@ export default function SessionChat({
     try {
       await removeQueuedPrompt(item);
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.removeFailed'));
+      toast.error(extractErrorMessage(err, t('chat.queue.removeFailed')));
     }
   }, [removeQueuedPrompt, t, toast]);
 
@@ -4423,7 +4423,7 @@ export default function SessionChat({
       suppressStreamingUntilIdleRef.current = false;
       setIsStreaming(true);
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.runNowFailed'));
+      toast.error(extractErrorMessage(err, t('chat.queue.runNowFailed')));
     }
   }, [runQueuedPromptNow, t, toast]);
 

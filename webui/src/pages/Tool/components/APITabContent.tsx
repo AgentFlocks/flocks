@@ -41,6 +41,8 @@ interface APITabContentProps {
   onRefreshTools: () => Promise<void>;
   onServiceCountChange?: (count: number) => void;
   refreshKey?: number;
+  /** Open this service's detail panel; a new nonce repeats the request. */
+  focusService?: { id: string; nonce: number } | null;
   viewMode?: 'list' | 'cards';
   catalogEntries: MCPCatalogEntry[];
   catalogCategories: Record<string, MCPCatalogCategory>;
@@ -58,6 +60,7 @@ export default function APITabContent({
   onRefreshTools,
   onServiceCountChange,
   refreshKey,
+  focusService,
   viewMode = 'list',
   catalogEntries,
   catalogCategories,
@@ -106,6 +109,14 @@ export default function APITabContent({
   useEffect(() => {
     fetchServices();
   }, [fetchServices, refreshKey]);
+
+  // The panel renders once the service is in the loaded list, so the request
+  // may arrive before the first fetch has finished.
+  const focusServiceId = focusService?.id;
+  const focusServiceNonce = focusService?.nonce;
+  useEffect(() => {
+    if (focusServiceId) setSelectedServiceId(focusServiceId);
+  }, [focusServiceId, focusServiceNonce]);
 
   const selectedService = useMemo(
     () => (selectedServiceId ? services.find((service) => service.id === selectedServiceId) ?? null : null),
@@ -228,7 +239,7 @@ export default function APITabContent({
       onConfiguredChange(entryId);
       setCredModalEntry(null);
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+      alert(extractErrorMessage(err, t('alert.unknownError')));
       setInstalling(null);
       return;
     }
@@ -242,7 +253,7 @@ export default function APITabContent({
         alert(t('alert.mcpConfiguredDisabled', { name: entryName }));
       }
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+      alert(extractErrorMessage(err, t('alert.unknownError')));
     } finally {
       setInstalling(null);
     }
@@ -257,7 +268,7 @@ export default function APITabContent({
       shouldConnect = installRes.data?.config?.enabled !== false;
       onConfiguredChange(entry.id);
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+      alert(extractErrorMessage(err, t('alert.unknownError')));
       setInstalling(null);
       return;
     }
@@ -271,7 +282,7 @@ export default function APITabContent({
         alert(t('alert.mcpConfiguredDisabled', { name: entry.name }));
       }
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+      alert(extractErrorMessage(err, t('alert.unknownError')));
     } finally {
       setInstalling(null);
     }
@@ -285,7 +296,7 @@ export default function APITabContent({
       await onRefreshTools();
       await fetchServices();
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+      alert(extractErrorMessage(err, t('alert.unknownError')));
     } finally {
       setInstalling(null);
     }
@@ -301,7 +312,7 @@ export default function APITabContent({
       });
       setServices((prev) => prev.map((s) => (s.id === serviceId ? res.data : s)));
     } catch (err: any) {
-      alert(err.response?.data?.detail || err.message);
+      alert(extractErrorMessage(err, t('alert.unknownError')));
     }
   };
 
@@ -316,7 +327,7 @@ export default function APITabContent({
       await onRefreshTools();
       await fetchServices();
     } catch (err: any) {
-      alert(t('alert.deleteFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.deleteFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setInstalling(null);
     }

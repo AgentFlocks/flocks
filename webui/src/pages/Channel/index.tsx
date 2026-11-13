@@ -1818,7 +1818,7 @@ function TelegramPanel({ config, agentOptions, onChange, onRefresh }: TelegramPa
       setPairingState('done');
       setTimeout(() => setPairingState('idle'), 3000);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail ?? err?.message ?? '';
+      const detail = extractErrorMessage(err, '');
       toast.error(t('telegram.pairingError'), detail);
       setPairingState('idle');
     }
@@ -2575,7 +2575,7 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
         }
       }, 1500);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail ?? err?.message ?? '';
+      const detail = extractErrorMessage(err, '');
       setQrError(detail);
       setQrPhase('error');
     }
@@ -2937,7 +2937,7 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
         }
       }, 2000);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail ?? err?.message ?? '';
+      const detail = extractErrorMessage(err, '');
       setQrError(detail);
       setQrPhase('error');
     }

@@ -16,6 +16,7 @@ from flocks.provider.provider import (
     StreamChunk,
 )
 from flocks.provider.sdk.openai_base import build_reasoning_metadata
+from flocks.provider.tls import has_custom_tls, httpx_verify
 from flocks.provider.token_usage import normalize_usage
 from flocks.utils.log import Log
 
@@ -38,6 +39,7 @@ class AnthropicProvider(BaseProvider):
     """Anthropic (Claude) provider with tool support."""
 
     CATALOG_ID = "anthropic"
+    SUPPORTS_TLS_SETTINGS = True
     _INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14"
     _FINE_GRAINED_TOOL_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14"
     _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
@@ -67,15 +69,23 @@ class AnthropicProvider(BaseProvider):
                 
                 # Support custom base URL from config
                 base_url = self._config.base_url if self._config else None
-                
+                client_kwargs: Dict[str, Any] = {"api_key": api_key}
+                # verify_ssl / ca_cert from the provider options; without them
+                # the SDK keeps building its own default client.
+                settings = getattr(self._config, "custom_settings", None) or {}
+                if has_custom_tls(settings):
+                    from anthropic import DefaultAsyncHttpxClient
+
+                    client_kwargs["http_client"] = DefaultAsyncHttpxClient(verify=httpx_verify(settings))
+
                 if base_url:
                     log.info("anthropic.client.init", {
                         "base_url": base_url,
                         "has_api_key": bool(api_key),
+                        "custom_tls": "http_client" in client_kwargs,
                     })
-                    self._client = AsyncAnthropic(api_key=api_key, base_url=base_url)
-                else:
-                    self._client = AsyncAnthropic(api_key=api_key)
+                    client_kwargs["base_url"] = base_url
+                self._client = AsyncAnthropic(**client_kwargs)
             except ImportError:
                 raise ImportError("anthropic package not installed. Install with: pip install anthropic")
         return self._client

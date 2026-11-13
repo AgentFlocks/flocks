@@ -13,6 +13,7 @@ from flocks.config.config_writer import ConfigWriter
 from flocks.provider.model_catalog import get_raw_catalog
 from flocks.provider.model_discovery import THREATBOOK_MODEL_LIST_PROVIDERS, discover_models, is_known_non_chat_model
 from flocks.provider.provider import Provider
+from flocks.provider.tls import MAX_CA_CERT_CHARS
 from flocks.server.auth import require_admin
 from flocks.server.config_mutation import serialized_config_mutation
 from flocks.server.routes.provider import _ensure_provider_initialized, _load_dynamic_providers
@@ -24,6 +25,21 @@ class DiscoverModelsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     api_key: str | None = Field(None, max_length=16384)
     base_url: str | None = Field(None, max_length=4096)
+    # TLS settings a form has not saved yet (flocks.provider.tls); unset ones
+    # keep the stored values.
+    verify_ssl: bool | None = None
+    ca_cert: str | None = Field(None, max_length=MAX_CA_CERT_CHARS)
+
+    def tls_overrides(self) -> dict | None:
+        """The TLS settings this request names, to put in place of the stored ones."""
+        if self.verify_ssl is None and self.ca_cert is None:
+            return None
+        overrides: dict = {}
+        if self.verify_ssl is not None:
+            overrides["verify_ssl"] = self.verify_ssl
+        if self.ca_cert is not None:
+            overrides["ca_cert"] = self.ca_cert
+        return overrides
 
 
 ModelIdentifier = Annotated[str, StringConstraints(min_length=1, max_length=512)]
@@ -83,7 +99,9 @@ async def discover_provider_models(
     ):
         raise HTTPException(404, "Provider not found")
     body = body or DiscoverModelsRequest()
-    return await discover_models(provider_id, api_key=body.api_key, base_url=body.base_url)
+    return await discover_models(
+        provider_id, api_key=body.api_key, base_url=body.base_url, tls_overrides=body.tls_overrides()
+    )
 
 
 @router.post("/{provider_id}/import-models")
@@ -245,7 +263,8 @@ async def check_provider_key(provider_id: str, body: DiscoverModelsRequest, _adm
     await _ensure_provider_initialized()
     if provider_id not in get_raw_catalog() and ConfigWriter.get_provider_raw(provider_id) is None and provider_id not in Provider._providers:
         raise HTTPException(404, "Provider not found")
-    result = await discover_models(provider_id, api_key=body.api_key, base_url=body.base_url)
+    tls_overrides = body.tls_overrides()
+    result = await discover_models(provider_id, api_key=body.api_key, base_url=body.base_url, tls_overrides=tls_overrides)
     if result["source"] != "api" or result["status"] != "success":
         return {"status": "invalid" if result["code"] in {"authentication_failed", "missing_credentials"} else "unverified", "code": result["code"]}
     # ThreatBook uses a successful live model-list response as its validation
@@ -255,6 +274,11 @@ async def check_provider_key(provider_id: str, body: DiscoverModelsRequest, _adm
     # A public models endpoint does not prove that a key is valid. Require
     # rejection of an unrelated credential before reporting authentication.
     import secrets
-    control = await discover_models(provider_id, api_key="flocks-probe-" + secrets.token_urlsafe(24), base_url=body.base_url)
+    control = await discover_models(
+        provider_id,
+        api_key="flocks-probe-" + secrets.token_urlsafe(24),  # secret-guard: allow (random probe key, not a credential)
+        base_url=body.base_url,
+        tls_overrides=tls_overrides,
+    )
     verified = control["code"] in {"authentication_failed", "permission_denied"}
     return {"status": "valid" if verified else "unverified", "code": "key_valid" if verified else "key_check_unsupported"}

@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 import threading
 import time
-from typing import Annotated, List, Optional, Dict, Any, Literal, Sequence
+from typing import Annotated, List, NamedTuple, Optional, Dict, Any, Literal, Sequence
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from pydantic_core import PydanticCustomError
@@ -54,6 +54,21 @@ class ToolInfoResponse(BaseModel):
     group: Optional[str] = Field(None, description="Optional plugin group")
     group_readonly: bool = False
     enabled_customized: bool = Field(False, description="True if an enabled override is recorded in flocks.json tool_settings")
+    service_enabled: Optional[bool] = Field(
+        None,
+        description=(
+            "Enabled flag of the API service that gates this tool; null when no service gates it. "
+            "While it is false the tool stays disabled and a request to enable it is not applied."
+        ),
+    )
+    service_integration_type: Optional[str] = Field(
+        None,
+        description=(
+            "integration_type of that service as the API service list reports it. "
+            "'device' means the service is managed on the Device Integration page, "
+            "not in the API service list, wherever the plugin is installed."
+        ),
+    )
     requires_confirmation: bool = Field(False, description="Requires confirmation")
 
 
@@ -199,6 +214,8 @@ class ToolListIndexItem:
     requires_confirmation: bool
     group: Optional[str] = None
     group_readonly: bool = False
+    service_enabled: Optional[bool] = None
+    service_integration_type: Optional[str] = None
 
 
 _TOOL_SUMMARY_CACHE_TTL_SECONDS = 5.0
@@ -242,8 +259,9 @@ def _get_tool_summary_items() -> List[ToolListIndexItem]:
         ):
             return list(_tool_summary_cache_items)
 
+        services = _ServiceLookup()
         items = tuple(
-            _build_tool_index_item(t)
+            _build_tool_index_item(t, services=services)
             for t in ToolRegistry.list_tools()
             if t.name not in _INTERNAL_TOOL_NAMES
         )
@@ -295,13 +313,22 @@ def _get_tool_source(tool_info: ToolInfo) -> tuple:
     return "custom", None
 
 
-def _build_tool_response(t: ToolInfo, *, include_parameters: bool = True) -> ToolInfoResponse:
-    """Build ToolInfoResponse with source info and overlay metadata."""
+def _build_tool_response(
+    t: ToolInfo,
+    *,
+    include_parameters: bool = True,
+    services: Optional["_ServiceLookup"] = None,
+) -> ToolInfoResponse:
+    """Build ToolInfoResponse with source info and overlay metadata.
+
+    Pass one ``services`` lookup when building many rows for one response.
+    """
     source, source_name = _get_tool_source(t)
     setting = ConfigWriter.get_tool_setting(t.name) or {}
     customized = "enabled" in setting
     enabled_default = _get_default_enabled(t)
     parameters = [p.model_dump() for p in t.parameters] if include_parameters else []
+    state = _resolve_tool_enabled_state(t, source=source, source_name=source_name, services=services)
     return ToolInfoResponse(
         name=t.name,
         group=normalize_tool_group(t.group if t.group_readonly else setting.get("group", t.group)),
@@ -314,17 +341,20 @@ def _build_tool_response(t: ToolInfo, *, include_parameters: bool = True) -> Too
         vendor=t.vendor,
         parameters=parameters,
         parameters_count=len(t.parameters),
-        enabled=_get_effective_tool_enabled(t, source=source, source_name=source_name),
+        enabled=state.enabled,
         enabled_default=enabled_default,
         enabled_customized=customized,
+        service_enabled=state.service_enabled,
+        service_integration_type=state.service_integration_type,
         requires_confirmation=t.requires_confirmation,
     )
 
 
-def _build_tool_index_item(t: ToolInfo) -> ToolListIndexItem:
+def _build_tool_index_item(t: ToolInfo, *, services: Optional["_ServiceLookup"] = None) -> ToolListIndexItem:
     """Build the lightweight index row used by the paged list endpoint."""
     source, source_name = _get_tool_source(t)
     setting = ConfigWriter.get_tool_setting(t.name) or {}
+    state = _resolve_tool_enabled_state(t, source=source, source_name=source_name, services=services)
     return ToolListIndexItem(
         name=t.name,
         group=normalize_tool_group(t.group if t.group_readonly else setting.get("group", t.group)),
@@ -336,9 +366,11 @@ def _build_tool_index_item(t: ToolInfo) -> ToolListIndexItem:
         source_name=source_name,
         vendor=t.vendor,
         parameters_count=len(t.parameters),
-        enabled=_get_effective_tool_enabled(t, source=source, source_name=source_name),
+        enabled=state.enabled,
         enabled_default=_get_default_enabled(t),
         enabled_customized="enabled" in setting,
+        service_enabled=state.service_enabled,
+        service_integration_type=state.service_integration_type,
         requires_confirmation=t.requires_confirmation,
     )
 
@@ -359,6 +391,8 @@ def _tool_index_item_to_response(item: ToolListIndexItem) -> ToolInfoResponse:
         enabled=item.enabled,
         enabled_default=item.enabled_default,
         enabled_customized=item.enabled_customized,
+        service_enabled=item.service_enabled,
+        service_integration_type=item.service_integration_type,
         requires_confirmation=item.requires_confirmation,
     )
 
@@ -792,6 +826,87 @@ def _get_effective_tool_enabled(
     return tool_info.enabled and _get_api_service_enabled(source_name)
 
 
+class _ServiceLookup:
+    """API service facts for the tool rows of one response, read once each.
+
+    ``ConfigWriter.get_api_service_raw`` re-reads and parses ``flocks.json``
+    on every call and a list response builds one row per tool, so a lookup
+    shared by those rows asks about each service once instead of once per
+    tool.  It must not outlive the response it was created for.
+    """
+
+    def __init__(self) -> None:
+        self._enabled: Dict[str, bool] = {}
+        self._integration_type: Dict[str, Optional[str]] = {}
+
+    def enabled(self, service_id: str) -> bool:
+        if service_id not in self._enabled:
+            from flocks.server.routes.provider import _get_api_service_enabled
+
+            self._enabled[service_id] = _get_api_service_enabled(service_id)
+        return self._enabled[service_id]
+
+    def integration_type(self, service_id: str) -> Optional[str]:
+        """Return the service's ``integration_type`` as the service list reports it.
+
+        The API service list is the reference: a service it reports as
+        ``device`` is left out of the API tab and managed on the device
+        page.  The tool's own ``source`` only says which plugin directory
+        it was loaded from, which can differ.
+        """
+        if service_id not in self._integration_type:
+            value: Any = None
+            try:
+                from flocks.server.routes.provider import _load_api_service_summary_metadata_data
+
+                value = (_load_api_service_summary_metadata_data(service_id) or {}).get("integration_type")
+            except Exception as exc:
+                # Unreadable metadata must not take the tool list down with it.
+                log.debug("tool.service_integration_type.failed", {"service": service_id, "error": str(exc)})
+            normalized = value.strip().lower() if isinstance(value, str) else ""
+            self._integration_type[service_id] = normalized or None
+        return self._integration_type[service_id]
+
+
+class _ToolEnabledState(NamedTuple):
+    enabled: bool
+    service_enabled: Optional[bool]
+    service_integration_type: Optional[str]
+
+
+def _resolve_tool_enabled_state(
+    tool_info: ToolInfo,
+    *,
+    source: Optional[str],
+    source_name: Optional[str],
+    services: Optional[_ServiceLookup] = None,
+) -> _ToolEnabledState:
+    """Return the enabled state of a tool and the facts about what gates it.
+
+    ``enabled`` is exactly :func:`_get_effective_tool_enabled`.
+    ``service_enabled`` is the flag of the API service that gates the tool,
+    ``None`` when no service does.  Two gates exist: PATCH refuses to open a
+    tool whose ``provider`` service is off (:func:`_service_allows_enable`),
+    and the effective state of api/device tools is ANDed with the service
+    named by ``source_name``; for YAML api/device tools they are the same
+    service.  ``service_integration_type`` says where that service is
+    managed.  Clients need both to explain why such a tool is off, cannot
+    be switched on, and where to go instead.
+    """
+    effective_gate = source_name if source in ("api", "device") and source_name else None
+    gates = [gate for gate in dict.fromkeys((tool_info.provider, effective_gate)) if gate]
+    if not gates:
+        return _ToolEnabledState(tool_info.enabled, None, None)
+    services = services or _ServiceLookup()
+    flags = {gate: services.enabled(gate) for gate in gates}
+    enabled = tool_info.enabled
+    if effective_gate:
+        enabled = enabled and flags[effective_gate]
+    # The service to send the user to: the one that is off, else the owner.
+    blocking = next((gate for gate in gates if not flags[gate]), gates[0])
+    return _ToolEnabledState(enabled, all(flags.values()), services.integration_type(blocking))
+
+
 def _set_global_tool_enabled(tool: Any, desired: bool) -> bool:
     """Persist and apply the global enabled state for a registry tool."""
     with ToolRegistry._refresh_lock:
@@ -866,7 +981,8 @@ async def list_tools(
             )
     
     tools = ToolRegistry.list_tools(category=cat_filter)
-    result = [_build_tool_response(t) for t in tools if t.name not in _INTERNAL_TOOL_NAMES]
+    services = _ServiceLookup()
+    result = [_build_tool_response(t, services=services) for t in tools if t.name not in _INTERNAL_TOOL_NAMES]
     
     # Apply source filter if specified
     if source:

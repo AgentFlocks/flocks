@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ArchivedDataPanel from './ArchivedDataPanel';
+import { backendError } from '@/test/helpers';
 
 const { sessionApi, toast } = vi.hoisted(() => ({
   sessionApi: {
@@ -51,6 +52,14 @@ describe('ArchivedDataPanel', () => {
     sessionApi.list.mockResolvedValue([archivedSession]);
     sessionApi.restore.mockResolvedValue({ ...archivedSession, status: 'active' });
     sessionApi.delete.mockResolvedValue(true);
+  });
+
+  it('says why the archived sessions could not be loaded instead of the bare status code', async () => {
+    sessionApi.list.mockRejectedValue(backendError(403, '只有管理员可以查看归档数据'));
+    render(<ArchivedDataPanel />);
+
+    expect(await screen.findByText('只有管理员可以查看归档数据')).toBeInTheDocument();
+    expect(screen.queryByText(/status code 403/)).not.toBeInTheDocument();
   });
 
   it('loads archived sessions and restores one', async () => {

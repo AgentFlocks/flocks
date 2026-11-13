@@ -156,7 +156,7 @@ export default function MCPTabContent({
       await fetchServers();
       await onRefreshTools();
     } catch (err: any) {
-      alert(t('alert.removeFailed', { error: err.response?.data?.detail ?? err.message }));
+      alert(t('alert.removeFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     }
   };
 
@@ -304,7 +304,7 @@ export default function MCPTabContent({
       shouldConnect = installRes.data?.config?.enabled !== false;
       onConfiguredChange(entry.id);
     } catch (err: any) {
-      alert(t('alert.configFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.configFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
       setInstalling(null);
       return false;
     }
@@ -319,7 +319,7 @@ export default function MCPTabContent({
         alert(t('alert.mcpConfiguredDisabled', { name: entry.name }));
       }
     } catch (err: any) {
-      alert(t('alert.connectFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.connectFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setInstalling(null);
     }
@@ -370,7 +370,7 @@ export default function MCPTabContent({
       await fetchServers();
       await onRefreshTools();
     } catch (err: any) {
-      alert(t('alert.saveFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.saveFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setInstalling(null);
     }
@@ -824,7 +824,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
       const res = await toolAPI.test(tool.name, params);
       setTestResult({ success: true, data: res.data });
     } catch (err: any) {
-      setTestResult({ success: false, error: err.response?.data?.detail ?? err.message });
+      setTestResult({ success: false, error: extractErrorMessage(err, t('alert.unknownError')) });
     } finally {
       setTesting(false);
     }

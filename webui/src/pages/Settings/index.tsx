@@ -30,6 +30,7 @@ import {
   type SettingsSectionId,
 } from '@/utils/settingsSections';
 import { preloadI18nNamespaces } from '@/i18nResources';
+import { extractErrorMessage } from '@/utils/error';
 import DataRetentionSection from './DataRetentionSection';
 
 type LazySettingsModule = { default: ComponentType<any> };
@@ -183,7 +184,7 @@ function PreferencesPanel() {
         if (!cancelled) {
           showToastError(
             toolFailureSettingLoadFailedMessage,
-            err?.response?.data?.detail || err?.message,
+            extractErrorMessage(err, ''),
           );
         }
       })
@@ -204,7 +205,7 @@ function PreferencesPanel() {
       await updateProductName(normalizedDisplayName || null);
       showToastSuccess(t('displayNameSaved'));
     } catch (err: any) {
-      showToastError(t('displayNameSaveFailed'), err?.response?.data?.detail || err?.message);
+      showToastError(t('displayNameSaveFailed'), extractErrorMessage(err, ''));
     } finally {
       setSavingDisplayName(false);
     }
@@ -216,7 +217,7 @@ function PreferencesPanel() {
       await updateProductName(null);
       showToastSuccess(t('displayNameSaved'));
     } catch (err: any) {
-      showToastError(t('displayNameSaveFailed'), err?.response?.data?.detail || err?.message);
+      showToastError(t('displayNameSaveFailed'), extractErrorMessage(err, ''));
     } finally {
       setSavingDisplayName(false);
     }
@@ -232,7 +233,7 @@ function PreferencesPanel() {
       await uploadProductFavicon(file);
       showToastSuccess(t('faviconSaved'));
     } catch (err: any) {
-      showToastError(t('faviconSaveFailed'), err?.response?.data?.detail || err?.message);
+      showToastError(t('faviconSaveFailed'), extractErrorMessage(err, ''));
     } finally {
       setSavingFavicon(false);
     }
@@ -244,7 +245,7 @@ function PreferencesPanel() {
       await resetProductFavicon();
       showToastSuccess(t('faviconSaved'));
     } catch (err: any) {
-      showToastError(t('faviconSaveFailed'), err?.response?.data?.detail || err?.message);
+      showToastError(t('faviconSaveFailed'), extractErrorMessage(err, ''));
     } finally {
       setSavingFavicon(false);
     }
@@ -260,7 +261,7 @@ function PreferencesPanel() {
     } catch (err: any) {
       showToastError(
         t('toolFailureSettingSaveFailed'),
-        err?.response?.data?.detail || err?.message,
+        extractErrorMessage(err, ''),
       );
     } finally {
       setSavingToolFailure(false);

@@ -25,11 +25,18 @@ import {
   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
 } from '@/api/provider';
 import ProviderKeyCheck from './ProviderKeyCheck';
+import ProviderTlsSettings, {
+  DEFAULT_PROVIDER_TLS,
+  allTlsRequestFields,
+  savedProviderTls,
+  tlsRequestFields,
+  type ProviderTlsValue,
+} from './ProviderTlsSettings';
 import ProviderCatalogPicker from './ProviderCatalogPicker';
 import ModelDiscovery, { ModelImportSummary, toModelImport } from './ModelDiscovery';
 import TokenUsageCard from './TokenUsageCard';
 import { formatPricePerMillion, formatPricingPerMillion, formatPricingTierRange, isPricingFree } from '@/utils/modelPricing';
-import { extractErrorMessage } from '@/utils/error';
+import { extractErrorMessage, extractServerMessage } from '@/utils/error';
 import {
   convertCurrencyAmount,
   getConvertedTotalCost,
@@ -1353,6 +1360,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   const [providerName, setProviderName] = useState('');
   const [azureDeploymentName, setAzureDeploymentName] = useState('');
   const [azureDeploymentDisplayName, setAzureDeploymentDisplayName] = useState('');
+  const [tls, setTls] = useState<ProviderTlsValue>(DEFAULT_PROVIDER_TLS);
 
   // Model selection (for catalog providers)
   const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
@@ -1404,6 +1412,11 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     [catalog, selectedCatalogId]
   );
 
+  // SSL settings of the new gateway, sent whole: the checks run under the
+  // catalog id, whose stored settings may belong to another gateway.
+  const tlsFields = selectedCatalog?.tls_configurable ? allTlsRequestFields(tls) : {};
+  const connection = { api_key: apiKey.trim(), base_url: baseUrl.trim() || undefined, ...tlsFields };
+
   // Get credential fields for the selected provider
   const credentialFields = useMemo<CatalogCredentialField[]>(() => {
     if (!selectedCatalog) return [];
@@ -1429,6 +1442,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       setProviderName('');
       setAzureDeploymentName('');
       setAzureDeploymentDisplayName('');
+      setTls(DEFAULT_PROVIDER_TLS);
     }
   };
 
@@ -1472,6 +1486,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
           api_key: apiKey.trim() || 'not-needed',
           description: description.trim() || selectedCatalog?.description || undefined,
           skip_catalog_bootstrap: true,
+          ...tlsFields,
         });
         toast.success(t('providerAdded'), providerName.trim());
         setSavedProviderId(created.data.id);
@@ -1485,6 +1500,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
         api_key: apiKey.trim() || 'not-needed',
         base_url: baseUrl.trim() || undefined,
         skip_catalog_bootstrap: true,
+        ...tlsFields,
       });
       const selectedCandidates = [...discoveredModels];
       if (azureModelId) {
@@ -1543,12 +1559,12 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
           latency: res.data.latency_ms,
         });
       } catch (err: any) {
-        setModelTestResult({ success: false, message: err.response?.data?.detail || 'Request failed' });
+        setModelTestResult({ success: false, message: extractServerMessage(err) || 'Request failed' });
       } finally {
         setModelTesting(false);
       }
     } catch (err: any) {
-      toast.error(t('operationFailed'), err.response?.data?.detail || err.message);
+      toast.error(t('operationFailed'), extractErrorMessage(err, ''));
     } finally {
       setAddingModel(false);
     }
@@ -1816,12 +1832,16 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                   </div>
                 )}
 
-                <ProviderKeyCheck providerId={selectedCatalogId} credentials={{ api_key: apiKey.trim(), base_url: baseUrl.trim() || undefined }} disabled={saving} />
+                {selectedCatalog.tls_configurable && (
+                  <ProviderTlsSettings value={tls} onChange={setTls} disabled={saving} />
+                )}
+
+                <ProviderKeyCheck providerId={selectedCatalogId} credentials={connection} disabled={saving} />
                 <ModelDiscovery
                   providerId={selectedCatalogId}
                   mode="stage"
                   newInstance={selectedCatalogId === 'openai-compatible'}
-                  credentials={{ api_key: apiKey.trim(), base_url: baseUrl.trim() || undefined }}
+                  credentials={connection}
                   disabled={saving}
                   onReadyChange={setDiscoveryReady}
                   onSelectionChange={setDiscoveredModels}
@@ -2149,13 +2169,12 @@ function AddModelDialog({ provider, models, loadingModels, onClose, onCreated, i
           latency: res.data.latency_ms,
         });
       } catch (err: any) {
-        setTestResult({ success: false, message: err.response?.data?.detail || 'Request failed' });
+        setTestResult({ success: false, message: extractServerMessage(err) || 'Request failed' });
       } finally {
         setTesting(false);
       }
     } catch (err: any) {
-      const detail = err.response?.data?.detail || err.message;
-      toast.error(t('operationFailed'), detail);
+      toast.error(t('operationFailed'), extractErrorMessage(err, ''));
     } finally {
       setLoading(false);
     }
@@ -2331,6 +2350,9 @@ function ConfigureProviderDialog({ provider, existingCredentials, loadingModels,
   // sending this one back would undo a rotation made elsewhere in the meantime.
   const [openedApiKey] = useState(() => (existingCredentials?.api_key ?? '').trim());
   const [baseUrl, setBaseUrl] = useState(existingCredentials?.base_url ?? '');
+  const tlsConfigurable = !!existingCredentials?.tls_configurable;
+  const [savedTls] = useState(() => savedProviderTls(existingCredentials));
+  const [tls, setTls] = useState<ProviderTlsValue>(savedTls);
   const [name, setName] = useState(provider.name);
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -2339,7 +2361,12 @@ function ConfigureProviderDialog({ provider, existingCredentials, loadingModels,
   const [saveError, setSaveError] = useState<string | null>(null);
   const lock = useRef(false);
   const custom = provider.id === 'openai-compatible' || provider.id.startsWith('custom-');
-  const credentials = { api_key: apiKey.trim() || undefined, base_url: baseUrl.trim() || undefined };
+  // Unsaved SSL changes go with the checks below and with the save.
+  const credentials = {
+    api_key: apiKey.trim() || undefined,
+    base_url: baseUrl.trim() || undefined,
+    ...(tlsConfigurable ? tlsRequestFields(tls, savedTls) : {}),
+  };
   const save = async () => {
     if (lock.current || !ready || loadingModels) return;
     if (!apiKey.trim() && !existingCredentials?.has_credential && !providerAllowsEmptyApiKey(provider.id)) { setSaveError(t('discovery.codes.missing_credentials')); return; }
@@ -2374,6 +2401,7 @@ function ConfigureProviderDialog({ provider, existingCredentials, loadingModels,
           </div>
           <input id="provider-base-url" aria-describedby={provider.id === 'threatbook-io-llm' ? 'provider-node-notice' : undefined} value={baseUrl} disabled={saving} onChange={e => setBaseUrl(e.target.value)} placeholder="https://api.example.com/v1" className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm font-normal" />
         </div>
+        {tlsConfigurable && <ProviderTlsSettings value={tls} onChange={setTls} disabled={saving} />}
         <ProviderKeyCheck providerId={provider.id} credentials={credentials} disabled={saving} />
       </div>
       <ModelDiscovery providerId={provider.id} mode="stage" existingModelIds={models.map(model => model.id)} credentials={credentials} disabled={saving} onInventoryChange={setInventory} onReadyChange={setReady} onAddModel={onAddModel} />

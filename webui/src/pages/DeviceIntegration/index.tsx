@@ -26,6 +26,7 @@ import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
 import { usePluginViewMode, type PluginViewMode } from '@/hooks/usePluginViewMode';
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
+import { extractServerMessage } from '@/utils/error';
 
 // ============================================================================
 // Constants
@@ -47,9 +48,7 @@ function SessionChatFallback() {
 /** Pull the backend's human-readable error detail (e.g. "机房名称已存在")
  *  out of an axios error, falling back to a generic message. */
 function errDetail(err: unknown, fallback: string): string {
-  return (
-    (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || fallback
-  );
+  return extractServerMessage(err) || fallback;
 }
 
 // ============================================================================

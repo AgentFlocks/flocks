@@ -18,6 +18,7 @@ import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-grou
 import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection, groupNoun } from '@/components/plugin-groups/groupView';
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
 import { usePluginViewMode, type PluginViewMode } from '@/hooks/usePluginViewMode';
+import { extractErrorMessage } from '@/utils/error';
 
 // ============================================================================
 // Main Page Component
@@ -104,7 +105,7 @@ export default function AgentPage() {
       }
       await refetch(false);
     } catch (err: any) {
-      alert(t('error.updateFailed', { detail: err.response?.data?.detail ?? err.message }));
+      alert(t('error.updateFailed', { detail: extractErrorMessage(err, '') }));
     } finally {
       setTogglingAgents((prev) => ({ ...prev, [agent.name]: false }));
     }

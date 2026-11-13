@@ -24,7 +24,16 @@ from flocks.config.config_writer import ConfigWriter
 from flocks.provider.credential import UNSENDABLE_API_KEY_MESSAGE, api_key_is_sendable
 from flocks.provider.model_catalog import get_raw_catalog
 from flocks.provider.provider import Provider
-from flocks.provider.sdk.openai_base import _coerce_bool, resolve_verify_ssl
+from flocks.provider.sdk.openai_base import _coerce_bool
+from flocks.provider.tls import (
+    LEGACY_VERIFY_SSL_KEY,
+    TLS_ERROR_HINTS,
+    TLS_OPTION_KEYS,
+    VERIFY_SSL_KEY,
+    CACertError,
+    classify_tls_error,
+    httpx_verify,
+)
 
 MAX_MODELS = 1000
 MAX_PAGES = 10
@@ -157,23 +166,40 @@ def _resolve_option(value: Any, secrets: Any) -> str | None:
     return _usable(value)
 
 
-def _transport_settings(options: dict, sdk_settings: Any) -> dict[str, bool]:
+def _transport_settings(options: dict, sdk_settings: Any, tls_overrides: dict | None = None) -> dict[str, Any]:
     """TLS verification and proxy use, by the rules the provider's own client follows.
 
-    Same contract as sdk/openai_base.py: ``verify_ssl`` (or the older
-    ``ssl_verify``) in the provider options, and the ambient proxy settings
-    unless FLOCKS_HTTP_TRUST_ENV or the options' ``trust_env`` turn them off.
+    Same contract as the provider clients (flocks.provider.tls): ``verify_ssl``
+    (or the older ``ssl_verify``) and ``ca_cert`` in the provider options, and
+    the ambient proxy settings unless FLOCKS_HTTP_TRUST_ENV or the options'
+    ``trust_env`` turn them off. *tls_overrides* are the TLS settings a
+    settings form has not saved yet; each one replaces the stored value of
+    that setting only, so a form that sends just the switch keeps the stored
+    CA certificate.
     """
-    settings = options or (sdk_settings if isinstance(sdk_settings, dict) else {})
+    settings = dict(options or (sdk_settings if isinstance(sdk_settings, dict) else {}))
+    overrides = {key: value for key, value in (tls_overrides or {}).items() if key in TLS_OPTION_KEYS}
+    if VERIFY_SSL_KEY in overrides:
+        settings.pop(LEGACY_VERIFY_SSL_KEY, None)  # the older spelling must not outvote the new value
+    settings.update(overrides)
     trust_env = _coerce_bool(os.getenv("FLOCKS_HTTP_TRUST_ENV"), True)
     if "trust_env" in settings:
         trust_env = _coerce_bool(settings.get("trust_env"), trust_env)
-    return {"verify": resolve_verify_ssl(settings, default=True), "trust_env": trust_env}
+    try:
+        verify = httpx_verify(settings, trust_env=trust_env)
+    except CACertError as error:
+        raise DiscoveryError("invalid_ca_cert", str(error)) from error
+    return {"verify": verify, "trust_env": trust_env}
 
 
 async def _resolve_connection(
-    provider_id: str, raw: dict, catalog: dict, api_key: str | None, base_url: str | None
-) -> tuple[str | None, str | None, dict[str, bool]]:
+    provider_id: str,
+    raw: dict,
+    catalog: dict,
+    api_key: str | None,
+    base_url: str | None,
+    tls_overrides: dict | None = None,
+) -> tuple[str | None, str | None, dict[str, Any]]:
     resolved_options: dict = {}
     try:
         config = await Config.get()
@@ -253,7 +279,9 @@ async def _resolve_connection(
     )
     if provider_id in {"openai-compatible", "cherry"} and base_url is None and not (stored_url or env_url):
         effective_url = None
-    transport = _transport_settings(resolved_options or _dict(raw_options), getattr(sdk_config, "custom_settings", None))
+    transport = _transport_settings(
+        resolved_options or _dict(raw_options), getattr(sdk_config, "custom_settings", None), tls_overrides
+    )
     return effective_key, effective_url, transport
 
 
@@ -538,9 +566,17 @@ def _catalog_result(provider_id: str, raw: dict, protocol: str | None, already_a
 
 
 async def discover_models(
-    provider_id: str, *, api_key: str | None = None, base_url: str | None = None
+    provider_id: str,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    tls_overrides: dict | None = None,
 ) -> dict[str, Any]:
-    """Fetch models without saving configuration or mutating a provider client."""
+    """Fetch models without saving configuration or mutating a provider client.
+
+    *tls_overrides* (``verify_ssl`` / ``ca_cert``) stand in for the stored TLS
+    settings, so a form can check a gateway before its settings are saved.
+    """
     raw = ConfigWriter.get_provider_raw(provider_id) or {}
     catalog = get_raw_catalog().get(provider_id, {})
     protocol = _protocol(provider_id, raw, catalog)
@@ -551,7 +587,9 @@ async def discover_models(
             result = _catalog_result(provider_id, raw, protocol, already_added)
         else:
             async with asyncio.timeout(DISCOVERY_TIMEOUT_SECONDS):
-                key, url, transport = await _resolve_connection(provider_id, raw, catalog, api_key, base_url)
+                key, url, transport = await _resolve_connection(
+                    provider_id, raw, catalog, api_key, base_url, tls_overrides
+                )
                 url = _endpoint(_validate_base_url(url), protocol)
                 if not key and not _no_auth_allowed(provider_id, raw, protocol):
                     raise DiscoveryError("missing_credentials", "Configure credentials before fetching models.")
@@ -677,12 +715,13 @@ async def discover_models(
             "truncated": False,
             "models": [],
         }
-    except httpx.TransportError:
+    except httpx.TransportError as error:
+        tls_code = classify_tls_error(error)
         result = {
             "source": "none",
             "status": "error",
-            "code": "connection_error",
-            "message": "Could not connect to the provider model listing endpoint.",
+            "code": tls_code or "connection_error",
+            "message": TLS_ERROR_HINTS[tls_code] if tls_code else "Could not connect to the provider model listing endpoint.",
             "truncated": False,
             "models": [],
         }
