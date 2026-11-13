@@ -885,7 +885,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const routeSceneId = routeWorkspace && sceneWorkspaceIdOf(routeWorkspace)
     ? workspaceIdFromPath(location.pathname) : null;
   useEffect(() => {
-    if (!navStateReady || webuiContractNavError || viewingScenes || !routeSceneId) return;
+    if (!navStateReady || webuiContractNavError || viewingScenes || !routeSceneId || routeSceneId === SOC_WORKSPACE_ID) return;
     if (!openSceneWorkspaces.some((workspace) => workspace.id === routeSceneId)) {
       navigate(SCENE_SUITES_PATH, { replace: true });
     }
