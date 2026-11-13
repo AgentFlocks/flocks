@@ -1,28 +1,28 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.14.8",
+  "packageVersion": "1.14.9",
   "target": "2026.11.12.2-linux-amd64",
-  "status": "Monitoring three-color accents accepted on local 5173; Linux target pending",
+  "status": "Agent workshop sidebar simplification accepted on local 5173; Linux target pending",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
     "branch": "zw_dev",
-    "commit": "f6a4481c698d2a527e69328bc25a91e0267bda0a",
+    "commit": "ee34cc2af124e3bfc4fcc16adde420ba19ab21bb",
     "baseline": "730da6897fbcd85d0b67e22cf13ecd4531161b9d"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.14.8-pro-2026.11.12.2-full.tar.gz",
-  "sha256": "b00d4bf4f5f882e16ec4804942a5b631c46edfaf8ce8446f94941a29c3b7a143",
+  "archive": "releases/flocks-customizations-1.14.9-pro-2026.11.12.2-full.tar.gz",
+  "sha256": "472f66caf535e9143776524fb62e6e964dcf6fe3d88a3ebbd17fa8d00e1409de",
   "payloadFiles": 492,
   "validation": "verification.json",
   "limits": [
-    "Linux-amd64 remote installation and real XDR/model/mail chain still require user execution.",
-    "Local 5173 acceptance uses isolated projects and synthetic XDR/provider responses with actual task execution, storage, sessions and SSE.",
-    "This change only affects task-center presentation, retaining monitoring failures and recovery state."
+    "Linux-amd64 remote installation pending user Gitee sync and bash update-flocks.sh.",
+    "Local UI acceptance uses the existing darwin-arm64 Pro instance at 127.0.0.1:5173.",
+    "Only sidebar visibility and knowledge accumulation route ownership changed; data and direct routes retained."
   ],
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "358 SessionChat regressions, TypeScript and paired Pro build passed; real 5173 streaming/complete/failure colors, dark theme; 492 payload hashes, repeat without restart and baseline restore.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.14.8.zip",
-  "offlineRepositoryArchiveSha256": "cb373118df810d7da3b90181c6d287914878ea418089b867c4b98105aca58b91"
+  "validationScope": "95 navigation regressions, 53 installer/updater tests, TypeScript and paired Pro build passed; real 5173 sidebar, refresh, module switch, retained direct routes; 492 payload hashes, repeat without restart and baseline restore.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.14.9.zip",
+  "offlineRepositoryArchiveSha256": "b7e8b3cad6b9a295a2e1c70ca8c6d65cc9b376a467ff9bd8e31a226f8006e5e4"
 }
