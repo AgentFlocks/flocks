@@ -1,5 +1,5 @@
 import React from 'react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import RunTab from './RunTab';
@@ -557,6 +557,153 @@ describe('RunTab', () => {
 
       expect(await screen.findByText(/"marker": "next-run"/)).toBeInTheDocument();
       expect(screen.queryByText(reason)).not.toBeInTheDocument();
+    });
+  });
+
+  describe('bringing the result of a test run into view', () => {
+    const acceptedRun: WorkflowExecution = {
+      id: 'exec-new',
+      workflowId: 'wf-1',
+      inputParams: {},
+      status: 'running',
+      startedAt: Date.now(),
+      executionLog: [],
+    };
+    const finishedRun: WorkflowExecution = {
+      ...acceptedRun,
+      status: 'success',
+      outputResults: { marker: 'finished' },
+      duration: 1,
+    };
+    let measure: { mockRestore: () => void } | undefined;
+
+    afterEach(() => {
+      measure?.mockRestore();
+      measure = undefined;
+    });
+
+    /**
+     * jsdom lays nothing out, so the test says where things are: the panel shows what lies between
+     * 100 and 500, and the result card is wherever `card` puts it. Nothing else is ever measured.
+     */
+    function layOut(card: () => [top: number, bottom: number]) {
+      measure = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+        const [top, bottom] = this.getAttribute('data-testid') === 'panel' ? [100, 500] : card();
+        return { top, bottom, left: 0, right: 320, width: 320, height: bottom - top, x: 0, y: top, toJSON: () => ({}) };
+      });
+    }
+
+    /** The tab inside a panel the user scrolls, as it sits in the page. */
+    function renderInPanel(ui: React.ReactElement = <ControlledRunTab />) {
+      render(<div data-testid="panel" style={{ overflowY: 'auto' }}>{ui}</div>);
+      return screen.getByTestId('panel');
+    }
+
+    /** Hold back the history responses from now on; the returned function answers them. */
+    function holdHistory() {
+      let answer!: (history: WorkflowExecution[]) => void;
+      const held = new Promise<{ data: WorkflowExecution[] }>((resolve) => {
+        answer = (history) => resolve({ data: history });
+      });
+      workflowAPI.getHistory.mockReturnValue(held);
+      return async (history: WorkflowExecution[]) => {
+        await waitFor(() => {
+          expect(workflowAPI.getHistory.mock.results.some((result) => result.value === held)).toBe(true);
+        });
+        await act(async () => {
+          answer(history);
+        });
+      };
+    }
+
+    it('shows why a run was refused without the user having to scroll down to it', async () => {
+      const user = userEvent.setup();
+      workflowAPI.run.mockRejectedValue(new Error('Workflow not found: wf-1'));
+      layOut(() => [490, 562]);
+      const panel = renderInPanel();
+      await screen.findByText('暂无执行记录');
+
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+      expect(await screen.findByText('Workflow not found: wf-1')).toBeInTheDocument();
+      expect(panel.scrollTop).toBe(562 + 12 - 500);
+    });
+
+    it('shows a result taller than the panel from its top', async () => {
+      const user = userEvent.setup();
+      workflowAPI.run.mockRejectedValue(new Error('Workflow not found: wf-1'));
+      layOut(() => [490, 1200]);
+      const panel = renderInPanel();
+      await screen.findByText('暂无执行记录');
+
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+      expect(await screen.findByText('Workflow not found: wf-1')).toBeInTheDocument();
+      expect(panel.scrollTop).toBe(490 - 100);
+    });
+
+    it('keeps the result in view as the run it started finishes and the card grows', async () => {
+      const user = userEvent.setup();
+      workflowAPI.run.mockResolvedValue({ data: acceptedRun });
+      let card: [number, number] = [490, 530];
+      layOut(() => card);
+      const panel = renderInPanel();
+      await screen.findByText('暂无执行记录');
+      const answerHistory = holdHistory();
+
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+      await waitFor(() => expect(panel.scrollTop).toBe(530 + 12 - 500));
+
+      card = [448, 648];
+      await answerHistory([finishedRun]);
+      expect(screen.getByText(/"marker": "finished"/)).toBeInTheDocument();
+      expect(panel.scrollTop).toBe(42 + 648 + 12 - 500);
+    });
+
+    it('does not pull the panel back once the user has scrolled away from a run in progress', async () => {
+      const user = userEvent.setup();
+      workflowAPI.run.mockResolvedValue({ data: acceptedRun });
+      let card: [number, number] = [490, 530];
+      layOut(() => card);
+      const panel = renderInPanel();
+      await screen.findByText('暂无执行记录');
+      const answerHistory = holdHistory();
+
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+      await waitFor(() => expect(panel.scrollTop).toBe(42));
+
+      panel.scrollTop = 0;
+      card = [560, 760];
+      await answerHistory([finishedRun]);
+      expect(screen.getByText(/"marker": "finished"/)).toBeInTheDocument();
+      expect(panel.scrollTop).toBe(0);
+    });
+
+    it('does not fight the user over the scroll position while the run has nothing new to show', async () => {
+      const user = userEvent.setup();
+      workflowAPI.run.mockResolvedValue({ data: acceptedRun });
+      let card: [number, number] = [490, 530];
+      layOut(() => card);
+      const panel = renderInPanel();
+      await screen.findByText('暂无执行记录');
+      const answerHistory = holdHistory();
+
+      await user.click(screen.getByRole('button', { name: '测试运行' }));
+      await waitFor(() => expect(panel.scrollTop).toBe(42));
+
+      panel.scrollTop = 30;
+      card = [470, 510];
+      await answerHistory([{ ...acceptedRun }]);
+      expect(panel.scrollTop).toBe(30);
+    });
+
+    it('leaves the panel where it is when the page opens on a result from the history', async () => {
+      workflowAPI.getHistory.mockResolvedValue({ data: [finishedRun] });
+      layOut(() => [490, 700]);
+      const panel = renderInPanel();
+
+      expect(await screen.findByText(/"marker": "finished"/)).toBeInTheDocument();
+      expect(panel.scrollTop).toBe(0);
     });
   });
 
