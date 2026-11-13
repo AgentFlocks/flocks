@@ -326,6 +326,82 @@ async def test_session_create_applies_agent_directory_and_memory_policy(
 
 
 @pytest.mark.asyncio
+async def test_agent_policy_never_turns_memory_back_on_for_a_child(
+    policy_storage,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A delegatable dedicated agent whose own policy keeps Memory on.
+    delegate = AgentInfo(
+        name="dedicated-delegate",
+        mode="subagent",
+        tools=["bash"],
+        memory_enabled=True,
+        require_dedicated_session=True,
+    )
+    agents = {"rex": _ordinary_agent(), delegate.name: delegate}
+
+    async def get(name):
+        return agents.get(name)
+
+    monkeypatch.setattr(Agent, "get", get)
+    parent = await Session.create(
+        project_id="policy-project", directory=str(tmp_path), agent="rex", memory_enabled=False,
+    )
+    child = await Session.create(
+        project_id="policy-project", directory=str(tmp_path), agent=delegate.name, parent_id=parent.id,
+    )
+    root = await Session.create(project_id="policy-project", directory=str(tmp_path), agent=delegate.name)
+
+    prepared_child = await prepare_session_for_agent(child, delegate)
+    prepared_root = await prepare_session_for_agent(root, delegate)
+
+    assert child.memory_enabled is False
+    assert prepared_child.memory_enabled is False
+    assert (await Session.get_by_id_unfiltered(child.id)).memory_enabled is False
+    # Without a parent that keeps no Memory, the agent's policy still applies.
+    assert prepared_root.memory_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_agent_policy_keeps_memory_off_when_the_parent_cannot_be_read(
+    policy_storage,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delegate = AgentInfo(
+        name="dedicated-delegate",
+        mode="subagent",
+        tools=["bash"],
+        memory_enabled=True,
+        require_dedicated_session=True,
+    )
+    agents = {"rex": _ordinary_agent(), delegate.name: delegate}
+
+    async def get(name):
+        return agents.get(name)
+
+    monkeypatch.setattr(Agent, "get", get)
+    parent = await Session.create(
+        project_id="policy-project", directory=str(tmp_path), agent="rex", memory_enabled=False,
+    )
+    child = await Session.create(
+        project_id="policy-project", directory=str(tmp_path), agent=delegate.name, parent_id=parent.id,
+    )
+    read = Session.get_by_id_unfiltered.__func__
+
+    async def unreadable_parent(cls, session_id):
+        # A failed read comes back as no session (Session.get_by_id).
+        return None if session_id == parent.id else await read(cls, session_id)
+
+    monkeypatch.setattr(Session, "get_by_id_unfiltered", classmethod(unreadable_parent))
+    prepared = await prepare_session_for_agent(child, delegate)
+
+    assert prepared.memory_enabled is False
+    assert (await Session.get_by_id_unfiltered(child.id)).memory_enabled is False
+
+
+@pytest.mark.asyncio
 async def test_isolated_agent_binding_cannot_be_switched_away(
     policy_storage,
     tmp_path: Path,

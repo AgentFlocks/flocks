@@ -19,6 +19,21 @@ class AgentSessionPolicyError(ValueError):
     """Raised when an isolated agent is selected in a non-empty session."""
 
 
+async def _may_turn_memory_on(session: SessionInfo) -> bool:
+    """Whether an agent's Memory policy may turn Memory on for ``session``.
+
+    Not for a child its parent keeps out of Memory (Session.create). When the
+    parent cannot be read, only for a session that keeps Memory already.
+    """
+    parent_id = getattr(session, "parent_id", None)
+    if not parent_id:
+        return True
+    parent = await Session.get_by_id_unfiltered(parent_id)
+    if parent is None:
+        return bool(getattr(session, "memory_enabled", False))
+    return parent.memory_enabled is not False
+
+
 async def prepare_session_for_agent(
     session: SessionInfo,
     agent: AgentInfo,
@@ -85,7 +100,9 @@ async def prepare_session_for_agent(
             directory.chmod(0o700)
             updates["directory"] = str(directory.resolve())
         if agent.memory_enabled is not None:
-            updates["memory_enabled"] = agent.memory_enabled
+            # The agent's policy, except that it never turns Memory back on
+            # for a child its parent keeps out of Memory (Session.create).
+            updates["memory_enabled"] = agent.memory_enabled and await _may_turn_memory_on(current)
 
         updated = await Session._update_locked(
             current.project_id,
