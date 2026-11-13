@@ -731,10 +731,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       { name: t('skills'), href: '/skills', icon: Sparkles },
       { name: t('workflows'), href: '/workflows', icon: Workflow },
     ] },
-    { id: 'knowledge-memory', name: t('knowledgeAndMemory'), items: [
-      { name: t('knowledgeBase'), href: '/workspace?tab=knowledge', icon: Database },
-      { name: t('memory'), href: '/workspace?tab=memory', icon: Brain },
-    ] },
     { id: 'tools-models', name: t('toolsAndModels'), items: [
       { name: t('tools'), href: '/tools', icon: Wrench },
       { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
