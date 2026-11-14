@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.6",
+  "packageVersion": "1.15.7",
   "target": "2026.11.13-linux-amd64",
-  "status": "Project memory labels and daily example backfill accepted on local 5173; Linux remote pending",
+  "status": "Persistent overviews in all three submodules accepted on local 5173; Linux remote pending",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
     "branch": "codex/pro-1113-enhancements",
-    "commit": "632fe71f296ca8e7e45dbefa02155f22539d43f5",
+    "commit": "108de3c88af6e3b136fa89adc6dc45d2b32ff291",
     "baseline": "2bc02382874a226ef63d20cab3734220ad752225"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.15.6-pro-2026.11.13-full.tar.gz",
-  "sha256": "7ba818b93ae9e10901edadd065e6b45223bd0515a943e7922f72abe5e5efed9a",
+  "archive": "releases/flocks-customizations-1.15.7-pro-2026.11.13-full.tar.gz",
+  "sha256": "92670d6bd4c8688a3a6dde9b71e2c7ff51e6826275257ed6155594d307fa0420",
   "payloadFiles": 559,
   "validation": "verification.json",
   "limits": [
@@ -22,7 +22,7 @@
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "154 knowledge/memory backend, 50 Knowledge UI, 27 installer regressions; two paired Pro builds; owner-scoped project labels and real-file precedence in isolated route tests; native 5173 67 continuous dates, actual example download and refresh; 568 payload hashes; existing real memory fingerprint unchanged.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.15.6.zip",
-  "offlineRepositoryArchiveSha256": "6f57dea2288cf89cd70bfbf9b9d41052a5a4a8a25de1d57f2ad17609de092000"
+  "validationScope": "50 Knowledge UI and 27 installer regressions; two paired Pro builds; native 5173 outputs, knowledge and memory overviews visible without expansion and retained while reading files; module switching and refresh; 568 native payload hashes; real memory fingerprint unchanged.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.15.7.zip",
+  "offlineRepositoryArchiveSha256": "721ee1c137dedec1e95b87167ea40e3e39c9fbf7a0b7669832e998c91ee72717"
 }

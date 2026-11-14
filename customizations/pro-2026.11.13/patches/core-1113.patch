@@ -130146,7 +130146,7 @@ index 33cc78a8..6af81f61 100644
    "scheduled": {
      "emptyTitle": "No Scheduled Tasks",
 diff --git a/webui/src/locales/en-US/workspace.json b/webui/src/locales/en-US/workspace.json
-index 92448208..9ec2d910 100644
+index 92448208..4e4ae65b 100644
 --- a/webui/src/locales/en-US/workspace.json
 +++ b/webui/src/locales/en-US/workspace.json
 @@ -86,7 +86,7 @@
@@ -130158,11 +130158,10 @@ index 92448208..9ec2d910 100644
      "selected": "{{count}} selected",
      "selectName": "Select {{name}}",
      "clearSelection": "Clear selection",
-@@ -274,7 +274,90 @@
+@@ -274,6 +274,103 @@
        "unknown": "Unknown",
        "uploaded": "Uploaded",
        "active": "Active"
--    }
 +    },
 +    "catalog": {
 +      "resize": "Resize knowledge categories and results",
@@ -130238,18 +130237,31 @@ index 92448208..9ec2d910 100644
 +      "unsupportedDescription": "Download the file to view it locally.",
 +      "truncated": "This file is large; only the first {{limit}} is shown."
 +    },
-+    "guide": {
-+      "title": "About this module",
-+      "outputs": "Daily outputs: browse task reports, analyses and attachments by date. Select a file to read or download the original.",
-+      "knowledge": "Knowledge: read source highlights and reusable experience by domain. Check the linked sources and browse earlier versions.",
-+      "memory": "Memory files: review preferences, project context and daily notes saved by agents. Notes appear when recorded and are not daily work reports."
-+    },
 +    "memoryProjectHint": "Project experience and context",
 +    "memoryExample": "Example",
-+    "memoryExampleNotice": "Illustrative backfill, not a real session record. Used for display only; actual daily memory takes precedence."
++    "memoryExampleNotice": "Illustrative backfill, not a real session record. Used for display only; actual daily memory takes precedence.",
++    "moduleGuideTitle": "Overview",
++    "moduleGuideSource": "Content source",
++    "moduleGuideUsage": "How to use",
++    "moduleGuides": {
++      "outputs": {
++        "overview": "Browse task reports, analyses and attachments by date to review work outputs.",
++        "source": "Original files from the personal, shared and historical output directories available to your account.",
++        "usage": "Find a date or filename on the left, select a file to preview it, or download the full original."
++      },
++      "knowledge": {
++        "overview": "Explore business sources by domain and find highlights and reusable experience.",
++        "source": "Organized from sources available to your account. Model summaries and source excerpts are labeled; earlier content remains in version history.",
++        "usage": "Select a domain, read the overview and check its sources. Update as allowed by the page status; unresolved points still require review."
++      },
++      "memory": {
++        "overview": "Review saved preferences, ongoing agreements, project context and daily notes so later tasks can build on earlier work.",
++        "source": "Includes user profiles, global and project memory, and daily notes from actual sessions. Entries marked Example are illustrative supplements.",
++        "usage": "Expand a project or select a date to read its file. Actual daily memory takes precedence; illustrative supplements are excluded from agent memory context."
++      }
+     }
    },
    "memory": {
-     "title": "Memory Files",
 diff --git a/webui/src/locales/zh-CN/agent.json b/webui/src/locales/zh-CN/agent.json
 index 313ad5e1..5f94368a 100644
 --- a/webui/src/locales/zh-CN/agent.json
@@ -130550,7 +130562,7 @@ index e58252ce..062351bf 100644
    "latestVersion": "最新版本",
    "coreVersion": "Core 版本",
 diff --git a/webui/src/locales/zh-CN/workspace.json b/webui/src/locales/zh-CN/workspace.json
-index 201f5599..466d6b66 100644
+index 201f5599..7b9ce6a4 100644
 --- a/webui/src/locales/zh-CN/workspace.json
 +++ b/webui/src/locales/zh-CN/workspace.json
 @@ -86,7 +86,7 @@
@@ -130562,11 +130574,10 @@ index 201f5599..466d6b66 100644
      "selected": "已选择 {{count}} 项",
      "selectName": "选择 {{name}}",
      "clearSelection": "清除选择",
-@@ -274,7 +274,90 @@
+@@ -274,6 +274,103 @@
        "unknown": "未知",
        "uploaded": "已上传",
        "active": "可用"
--    }
 +    },
 +    "catalog": {
 +      "resize": "拖拽调整知识领域与结果区域高度",
@@ -130642,18 +130653,31 @@ index 201f5599..466d6b66 100644
 +      "unsupportedDescription": "你可以下载该文件后在本机查看。",
 +      "truncated": "文件较大，当前仅展示前 {{limit}} 内容。"
 +    },
-+    "guide": {
-+      "title": "模块介绍",
-+      "outputs": "日常产出：按日期查阅任务生成的报告、分析和附件，选择文件即可阅读或下载原文。",
-+      "knowledge": "知识沉淀：按业务领域阅读资料要点和可复用经验，通过来源资料核对依据，历史版本保留此前的整理内容。",
-+      "memory": "记忆文件：查看 Agent 保存的用户偏好、项目背景和每日记忆，帮助后续任务延续上下文；每日记忆按实际记录产生，不等同于每日工作报告。"
-+    },
 +    "memoryProjectHint": "项目经验与上下文",
 +    "memoryExample": "示例补录",
-+    "memoryExampleNotice": "示例补录：非真实会话记录，仅用于页面展示；同日真实记忆优先显示。"
++    "memoryExampleNotice": "示例补录：非真实会话记录，仅用于页面展示；同日真实记忆优先显示。",
++    "moduleGuideTitle": "模块概述",
++    "moduleGuideSource": "内容来源",
++    "moduleGuideUsage": "使用方式",
++    "moduleGuides": {
++      "outputs": {
++        "overview": "集中查阅任务生成的报告、分析结果与附件，按日期回看工作产出。",
++        "source": "来自当前账号可见的个人、共享及历史产出目录，保留原文件内容。",
++        "usage": "从左侧按日期或文件名查找，选择文件预览；需要完整内容时下载原文。"
++      },
++      "knowledge": {
++        "overview": "将分散的业务资料按领域组织，便于查找资料要点和可复用的经验。",
++        "source": "基于当前账号可访问的产出资料整理；模型归纳与原文摘录会分别标注，历史版本保留此前内容。",
++        "usage": "选择知识领域阅读总览，点击来源核对原文；新增或变更资料可按页面更新状态整理，待确认事项仍需复核。"
++      },
++      "memory": {
++        "overview": "查看 Agent 保存的用户偏好、长期约定、项目背景和每日上下文，让后续任务延续已有信息。",
++        "source": "包含用户档案、全局记忆、项目记忆和每日记忆；每日记录按实际会话产生，标有“示例补录”的内容为虚拟展示资料。",
++        "usage": "展开项目名称或选择日期阅读文件；同日真实记忆优先显示，示例补录不进入 Agent 的真实记忆上下文。"
++      }
+     }
    },
    "memory": {
-     "title": "记忆文件",
 diff --git a/webui/src/pages/Channel/index.test.tsx b/webui/src/pages/Channel/index.test.tsx
 index b4675433..93ab3fd0 100644
 --- a/webui/src/pages/Channel/index.test.tsx
@@ -132483,10 +132507,10 @@ index 00000000..2775a09e
 +});
 diff --git a/webui/src/pages/Knowledge/index.tsx b/webui/src/pages/Knowledge/index.tsx
 new file mode 100644
-index 00000000..9e0a9a92
+index 00000000..96c151d7
 --- /dev/null
 +++ b/webui/src/pages/Knowledge/index.tsx
-@@ -0,0 +1,703 @@
+@@ -0,0 +1,704 @@
 +import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 +import { useSearchParams } from 'react-router-dom';
 +import {
@@ -132981,13 +133005,6 @@ index 00000000..9e0a9a92
 +        icon={<LibraryBig className="h-8 w-8" />}
 +      />
 +
-+      <section aria-label={t('knowledge.guide.title', { defaultValue: '模块介绍' })} className="mb-4 rounded-xl border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
-+        <p>{t(`knowledge.guide.${view}`)}</p>
-+        <details className="mt-2 text-xs">
-+          <summary className="cursor-pointer text-zinc-500">{t('knowledge.guide.title', { defaultValue: '模块介绍' })}</summary>
-+          <dl className="mt-2 grid gap-2 sm:grid-cols-3">{(['outputs', 'knowledge', 'memory'] as const).map((item) => <div key={item}><dt className="font-semibold text-zinc-800 dark:text-zinc-200">{t(`knowledge.tabs.${item}`)}</dt><dd className="mt-1 leading-relaxed">{t(`knowledge.guide.${item}`)}</dd></div>)}</dl>
-+        </details>
-+      </section>
 +      <div ref={splitRef} data-testid="knowledge-split" className={`flex min-h-0 flex-1 overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 ${stacked ? 'flex-col' : ''}`}>
 +        <aside id="knowledge-navigation" data-testid="knowledge-navigation" style={stacked ? { height: '45%' } : { width: visibleSidebarWidth }} className="flex min-h-0 shrink-0 flex-col">
 +          <div className="border-b border-zinc-200 p-3 dark:border-zinc-800">
@@ -133120,6 +133137,14 @@ index 00000000..9e0a9a92
 +        ><span className="absolute inset-y-0 left-1/2 w-px bg-zinc-200 group-hover:bg-red-300 group-focus-visible:bg-red-400 dark:bg-zinc-800" /></div>}
 +
 +        <main className={`flex min-h-0 min-w-0 flex-1 flex-col ${stacked ? 'border-t border-zinc-200 dark:border-zinc-800' : ''}`}>
++          <section aria-label={`${t(`knowledge.tabs.${view}`)} · ${t('knowledge.moduleGuideTitle')}`} className="shrink-0 border-b border-zinc-200 bg-zinc-50/60 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-800/20">
++            <h2 className="text-sm font-semibold text-zinc-800 dark:text-zinc-100">{t(`knowledge.tabs.${view}`)} · {t('knowledge.moduleGuideTitle')}</h2>
++            <p className="mt-1 text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">{t(`knowledge.moduleGuides.${view}.overview`)}</p>
++            <dl className="mt-2 grid gap-x-6 gap-y-2 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400 xl:grid-cols-2">
++              <div><dt className="inline font-medium text-zinc-700 dark:text-zinc-300">{t('knowledge.moduleGuideSource')}：</dt><dd className="inline">{t(`knowledge.moduleGuides.${view}.source`)}</dd></div>
++              <div><dt className="inline font-medium text-zinc-700 dark:text-zinc-300">{t('knowledge.moduleGuideUsage')}：</dt><dd className="inline">{t(`knowledge.moduleGuides.${view}.usage`)}</dd></div>
++            </dl>
++          </section>
 +          {selected ? (
 +            <>
 +              <header className="flex min-h-[68px] items-center justify-between gap-4 border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
