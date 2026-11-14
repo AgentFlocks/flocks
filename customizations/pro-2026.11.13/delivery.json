@@ -1,28 +1,28 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.1",
+  "packageVersion": "1.15.2",
   "target": "2026.11.13-linux-amd64",
-  "status": "Concise monitoring summaries accepted on authenticated local 5173; Linux remote pending",
+  "status": "Provider-scoped CNY dashboard accepted on local 5173; Linux remote pending",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
     "branch": "codex/pro-1113-enhancements",
-    "commit": "f4f7ffa45455970954c8bc100f5aa66c0fc3bc56",
+    "commit": "91e8742f45b25db0217268e5938e8382faf0a161",
     "baseline": "2bc02382874a226ef63d20cab3734220ad752225"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.15.1-pro-2026.11.13-full.tar.gz",
-  "sha256": "b198c77e69aa6f02710fd9fb7fe16ed70223aae006e4099f0e016b0c0e805912",
+  "archive": "releases/flocks-customizations-1.15.2-pro-2026.11.13-full.tar.gz",
+  "sha256": "705874c8a7b39bcc341f0a4bf5ad1f0acb91b09771886120a6699b630d2ed8db",
   "payloadFiles": 492,
   "validation": "verification.json",
   "limits": [
     "Linux-amd64 remote installation and real XDR/model/mail chain still require user execution.",
-    "Local 5173 is user-approved 11.13 enhanced Core on native Mac Pro 11.12.2; authenticated synthetic summary API checked without external device/model/mail calls.",
-    "Only wording changes; decisions, notification policy and stored historical messages remain unchanged."
+    "Local 5173 uses approved 11.13 enhanced Core on native Mac Pro 11.12.2. Existing local providers are Alibaba and ThreatBook; private_models covered in component regression.",
+    "Illustrative historical tokens and CNY costs; actual usage storage and billing are unchanged. Anchors persist per browser/account/provider; no new calls means no added tokens."
   ],
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "50 Core monitoring regressions; 5173 authenticated API verifies pending/inconclusive/failure summaries; 501 native payload hashes; Linux package uses paired official 11.13 sources.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.15.1.zip",
-  "offlineRepositoryArchiveSha256": "1217b9685aa55eea62fa06b76f6afe9d5285cecda5fddf8b3eb322c137520009"
+  "validationScope": "77 model UI/helper regressions, 18 provider/pricing regressions, 27 installer tests; two paired Pro builds; 5173 configured count, scoped totals, refresh and cache details; live-delta logic covered by component regression; 501 native payload hashes.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.15.2.zip",
+  "offlineRepositoryArchiveSha256": "5510d278c1c3ba6368ecb1e5d65852c1087fd4778ba6faaed0aade25b47df64b"
 }

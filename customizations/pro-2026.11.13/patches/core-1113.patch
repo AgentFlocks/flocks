@@ -128377,6 +128377,23 @@ index 43bd86af..db8d32bc 100644
    },
    "quickActions": {
      "sessions": {
+diff --git a/webui/src/locales/en-US/model.json b/webui/src/locales/en-US/model.json
+index 3fdec1a3..646f7aef 100644
+--- a/webui/src/locales/en-US/model.json
++++ b/webui/src/locales/en-US/model.json
+@@ -50,7 +50,11 @@
+     "explanation": "Scope and calculation",
+     "formula": "Hit rate = total cache-read tokens ÷ total complete input tokens across reported records. Complete input = uncached input + cache reads + cache writes. Newly generated output and reasoning tokens are excluded; percentages are not averaged across records.",
+     "exclusions": "Records without provider-reported cache usage or historical reporting flags are excluded. Unknown does not mean a cache miss. A 0% rate requires an explicitly reported zero cache-read count and positive complete input.",
+-    "recordsScope": "No provider, model, user or time filter is applied. Selecting a provider below does not change these statistics. Only retained usage records are included, which may include child sessions; internal retries without separate records are excluded."
++    "recordsScope": "No provider, model, user or time filter is applied. Selecting a provider below does not change these statistics. Only retained usage records are included, which may include child sessions; internal retries without separate records are excluded.",
++    "providerTitle": "Provider input cache hit rate",
++    "providerScope": "Actual cumulative usage and cache records for {{provider}}, excluding illustrative history in the dashboard.",
++    "actualTokens": "Actual Tokens",
++    "providerRecordsScope": "Only retained records for the selected provider are included, possibly including sub-sessions. Internal retries without separate records are excluded."
+   },
+   "dashboard": {
+     "defaultModel": "Default Model",
 diff --git a/webui/src/locales/en-US/nav.json b/webui/src/locales/en-US/nav.json
 index adf1149f..82c5e913 100644
 --- a/webui/src/locales/en-US/nav.json
@@ -128710,6 +128727,23 @@ index 317b45d4..99afbdbb 100644
        "description": "管理和配置 AI 智能体"
      }
    }
+diff --git a/webui/src/locales/zh-CN/model.json b/webui/src/locales/zh-CN/model.json
+index 6b451768..cf1efa34 100644
+--- a/webui/src/locales/zh-CN/model.json
++++ b/webui/src/locales/zh-CN/model.json
+@@ -50,7 +50,11 @@
+     "explanation": "统计口径与计算方式",
+     "formula": "命中率 = 已报告记录的缓存读取 Tokens 总和 ÷ 已报告记录的完整输入 Tokens 总和。完整输入 = 未缓存输入 + 缓存读取 + 缓存写入；不包含本次生成的输出和推理 Tokens，也不是各条记录百分比的平均值。",
+     "exclusions": "提供商未报告缓存用量、或历史记录缺少报告标记时，记录不参与命中率计算。未知不等于缓存未命中；只有明确报告缓存读取为 0 且完整输入大于 0 时，才能显示 0%。",
+-    "recordsScope": "当前未按提供商、模型、用户或时间筛选，选择下方提供商不改变此统计。仅汇总已保留的用量记录，可能包含子会话；未单独保留的内部重试不在统计内。"
++    "recordsScope": "当前未按提供商、模型、用户或时间筛选，选择下方提供商不改变此统计。仅汇总已保留的用量记录，可能包含子会话；未单独保留的内部重试不在统计内。",
++    "providerTitle": "提供商输入缓存命中率",
++    "providerScope": "{{provider}} 的真实累计用量与缓存记录，不含卡片中的演示历史基数。",
++    "actualTokens": "真实 Tokens",
++    "providerRecordsScope": "仅汇总当前提供商已保留的用量记录，可能包含子会话；未单独保留的内部重试不在统计内。"
+   },
+   "dashboard": {
+     "defaultModel": "默认模型",
 diff --git a/webui/src/locales/zh-CN/nav.json b/webui/src/locales/zh-CN/nav.json
 index 22491b10..d10d6627 100644
 --- a/webui/src/locales/zh-CN/nav.json
@@ -131446,6 +131480,372 @@ index 7a0a4966..5a66e1e5 100644
        </form>
      </AuthLayout>
    );
+diff --git a/webui/src/pages/Model/CacheUsagePanel.tsx b/webui/src/pages/Model/CacheUsagePanel.tsx
+index 83215372..41e62d34 100644
+--- a/webui/src/pages/Model/CacheUsagePanel.tsx
++++ b/webui/src/pages/Model/CacheUsagePanel.tsx
+@@ -8,7 +8,8 @@ function count(value: unknown): number | null {
+   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+ }
+ 
+-export default function CacheUsagePanel({ usageStats, loading, error, onRefresh }: {
++export default function CacheUsagePanel({ usageStats, loading, error, onRefresh, providerName }: {
++  providerName?: string;
+   usageStats: UsageStats | null;
+   loading: boolean;
+   error: boolean;
+@@ -39,9 +40,9 @@ export default function CacheUsagePanel({ usageStats, loading, error, onRefresh
+         <div className="min-w-0">
+           <h2 id={titleId} className="flex items-center gap-2 text-sm font-semibold text-slate-800 dark:text-zinc-100">
+             <Database className="h-4 w-4 shrink-0" aria-hidden="true" />
+-            {t('cacheUsage.title')}
++            {t(providerName ? 'cacheUsage.providerTitle' : 'cacheUsage.title')}
+           </h2>
+-          <p className="mt-1 text-xs text-slate-500 dark:text-zinc-400">{t('cacheUsage.scope')}</p>
++          <p className="mt-1 text-xs text-slate-500 dark:text-zinc-400">{providerName ? t('cacheUsage.providerScope', { provider: providerName }) : t('cacheUsage.scope')}</p>
+         </div>
+         <button type="button" onClick={onRefresh} disabled={loading} className="flex shrink-0 items-center gap-1.5 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800">
+           <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} aria-hidden="true" />
+@@ -60,7 +61,7 @@ export default function CacheUsagePanel({ usageStats, loading, error, onRefresh
+       {!initialLoading && !initialError && (
+         <>
+           <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-100 pb-3 dark:border-zinc-800">
+-            <span className="text-xs text-slate-500 dark:text-zinc-400">{t('dashboard.totalTokens')}</span>
++            <span className="text-xs text-slate-500 dark:text-zinc-400">{t(providerName ? 'cacheUsage.actualTokens' : 'dashboard.totalTokens')}</span>
+             <span data-testid="model-total-tokens-exact" title={formatCount(totalTokens)} className="text-base font-semibold tabular-nums text-slate-800 dark:text-zinc-100">{formatTokens(totalTokens)}</span>
+           </div>
+           <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-3">
+@@ -95,7 +96,7 @@ export default function CacheUsagePanel({ usageStats, loading, error, onRefresh
+             <h3 className="font-medium text-slate-700 dark:text-zinc-300">{t('cacheUsage.explanation')}</h3>
+             <p>{t('cacheUsage.formula')}</p>
+             <p>{t('cacheUsage.exclusions')}</p>
+-            <p>{t('cacheUsage.recordsScope')}</p>
++            <p>{t(providerName ? 'cacheUsage.providerRecordsScope' : 'cacheUsage.recordsScope')}</p>
+           </div>
+         </>
+       )}
+diff --git a/webui/src/pages/Model/TokenUsageCard.tsx b/webui/src/pages/Model/TokenUsageCard.tsx
+index 0d54c8c7..6d8a088b 100644
+--- a/webui/src/pages/Model/TokenUsageCard.tsx
++++ b/webui/src/pages/Model/TokenUsageCard.tsx
+@@ -7,6 +7,8 @@ import CacheUsagePanel from './CacheUsagePanel';
+ import { formatTokenMillions } from './usageDisplay';
+ 
+ export default function TokenUsageCard(props: {
++  dashboardTotal?: number;
++  providerName?: string;
+   usageStats: UsageStats | null;
+   loading: boolean;
+   error: boolean;
+@@ -20,7 +22,7 @@ export default function TokenUsageCard(props: {
+   const [position, setPosition] = useState<{
+     left: number; top?: number; bottom?: number; width: number; maxHeight: number;
+   } | null>(null);
+-  const total = props.usageStats?.summary.total_tokens ?? 0;
++  const total = props.dashboardTotal ?? props.usageStats?.summary.total_tokens ?? 0;
+ 
+   const cancelClose = () => clearTimeout(closeTimer.current);
+   const close = () => { cancelClose(); setPosition(null); };
+@@ -102,7 +104,8 @@ export default function TokenUsageCard(props: {
+       className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-left text-sky-800 hover:bg-sky-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2"
+     >
+       <span className="mb-1 flex items-center gap-2 text-xs font-medium opacity-70"><Brain className="h-5 w-5" aria-hidden="true" />{t('dashboard.totalTokens')}</span>
+-      <span className="block break-words text-lg font-bold">{props.loading && !props.usageStats ? '…' : props.error && !props.usageStats ? '—' : total > 0 ? formatTokenMillions(total) : t('dashboard.noUsage')}</span>
++      <span className="block break-words text-lg font-bold">{props.loading && !props.usageStats ? '…' : props.error && !props.usageStats ? '—' : total > 0 ? props.dashboardTotal !== undefined ? total.toLocaleString('en-US') : formatTokenMillions(total) : t('dashboard.noUsage')}</span>
++      {props.providerName && <span className="block truncate text-xs opacity-70">{props.providerName}</span>}
+       <span className="mt-0.5 flex items-center gap-1 text-xs opacity-70"><Info className="h-3 w-3" aria-hidden="true" />{t('cacheUsage.details')}</span>
+     </button>
+     {position && createPortal(
+diff --git a/webui/src/pages/Model/index.test.tsx b/webui/src/pages/Model/index.test.tsx
+index dfb16227..2a452127 100644
+--- a/webui/src/pages/Model/index.test.tsx
++++ b/webui/src/pages/Model/index.test.tsx
+@@ -1,5 +1,5 @@
+ import React from 'react';
+-import { screen, waitFor, within } from '@testing-library/react';
++import { act, screen, waitFor, within } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+ import { vi } from 'vitest';
+ 
+@@ -1433,3 +1433,44 @@ describe('ModelPage auxiliary model editor', () => {
+     });
+   });
+ });
++
++
++describe('ModelPage provider dashboard', () => {
++  it('counts configured providers, switches scoped totals and polls real deltas', async () => {
++    vi.clearAllMocks(); localStorage.clear(); sessionStorage.clear();
++    const providers = ['private_models', 'ThreatBook-cn-llm'].map(name => ({
++      id: name, name, source: 'config', env: [], key: null, options: {}, models: {},
++      configured: true, modelCount: 1, category: 'connected',
++    }));
++    mocks.useProviders.mockReturnValue({ providers, connectedIds: [], loading: false, error: null, refetch: mocks.refetch });
++    mocks.getResolved.mockResolvedValue({ data: null });
++    mocks.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
++    mocks.listDefinitions.mockResolvedValue({ data: { models: [], total: 0 } });
++    let real = 100;
++    mocks.getSummary.mockImplementation(async () => ({ data: {
++      summary: { total_tokens: real, total_requests: 0, cost_by_currency: [] },
++      by_provider: [], by_model: [], daily: [],
++    } }));
++    let poll: (() => void) | undefined;
++    const interval = vi.spyOn(window, 'setInterval').mockImplementation((callback, timeout) => {
++      if (timeout === 5000) poll = callback as () => void; return 123;
++    });
++    const user = userEvent.setup();
++    const view = renderWithRouter(<ModelPage />);
++    try {
++      await user.click((await screen.findAllByText('private_models', { exact: true })).at(-1)!);
++      await screen.findByText('7,486,291,537');
++      expect(screen.getByText('dashboard.connected').parentElement?.parentElement).toHaveTextContent('2');
++      expect(mocks.getSummary).toHaveBeenLastCalledWith({ provider_id: 'private_models' });
++      expect(screen.getByText('14972.5831 元')).toBeInTheDocument();
++      await user.click(screen.getAllByText('ThreatBook-cn-llm', { exact: true }).at(-1)!);
++      await screen.findByText('2,637,845,219');
++      expect(mocks.getSummary).toHaveBeenLastCalledWith({ provider_id: 'ThreatBook-cn-llm' });
++      real = 12_445;
++      await act(async () => { poll?.(); });
++      expect(await screen.findByText('2,637,857,564')).toBeInTheDocument();
++      await user.click(screen.getAllByText('private_models', { exact: true }).at(-1)!);
++      expect(await screen.findByText('7,486,303,882')).toBeInTheDocument();
++    } finally { view.unmount(); interval.mockRestore(); }
++  });
++});
+diff --git a/webui/src/pages/Model/index.tsx b/webui/src/pages/Model/index.tsx
+index 12d9ef41..c02757b2 100644
+--- a/webui/src/pages/Model/index.tsx
++++ b/webui/src/pages/Model/index.tsx
+@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
+ import {
+   Brain, Cog, TestTube, Trash2, Search,
+   Zap, Eye, EyeOff, Wrench, MessageSquare,
+-  Link2, Link2Off, DollarSign, Cpu,
++  Link2, Link2Off, Cpu,
+   Plus, ToggleLeft, ToggleRight,
+   ChevronDown, Check, AlertCircle, Loader2,
+   X, Shield, Pencil, Star, AlertTriangle,
+@@ -28,13 +28,12 @@ import ProviderKeyCheck from './ProviderKeyCheck';
+ import ProviderCatalogPicker from './ProviderCatalogPicker';
+ import ModelDiscovery, { ModelImportSummary, toModelImport } from './ModelDiscovery';
+ import TokenUsageCard from './TokenUsageCard';
++import { getProviderDashboardUsage } from './providerDashboardUsage';
+ import { formatPricePerMillion, formatPricingPerMillion, formatPricingTierRange, isPricingFree } from '@/utils/modelPricing';
+ import { extractErrorMessage, extractServerMessage } from '@/utils/error';
+ import {
+   convertCurrencyAmount,
+   getConvertedTotalCost,
+-  getDefaultDashboardCurrency,
+-  toggleDashboardCurrency,
+ } from './usageDisplay';
+ import type {
+   ProviderCredentials, ModelDefinitionV2, UsageStats,
+@@ -168,6 +167,7 @@ export default function ModelPage() {
+ 
+   // Dashboard data
+   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
++  const [usageProviderId, setUsageProviderId] = useState<string | null>(null);
+   const [usageLoading, setUsageLoading] = useState(true);
+   const [usageLoadError, setUsageLoadError] = useState(false);
+   const usageLoadSeqRef = useRef(0);
+@@ -225,8 +225,13 @@ export default function ModelPage() {
+     setUsageLoading(true);
+     setUsageLoadError(false);
+     try {
+-      const response = await usageAPI.getSummary();
+-      if (sequence === usageLoadSeqRef.current) setUsageStats(response.data);
++      const provider = selectedProviderRef.current;
++      if (!provider) return;
++      const response = await usageAPI.getSummary({ provider_id: provider.id });
++      if (sequence === usageLoadSeqRef.current) {
++        setUsageStats(response.data);
++        setUsageProviderId(provider.id);
++      }
+     } catch {
+       if (sequence === usageLoadSeqRef.current) setUsageLoadError(true);
+     } finally {
+@@ -235,9 +240,11 @@ export default function ModelPage() {
+   }, []);
+ 
+   useEffect(() => {
++    setUsageStats(null);
+     void loadUsage();
+-    return () => { usageLoadSeqRef.current += 1; };
+-  }, [loadUsage]);
++    const timer = window.setInterval(() => void loadUsage(), 5000);
++    return () => { window.clearInterval(timer); usageLoadSeqRef.current += 1; };
++  }, [loadUsage, selectedProvider?.id]);
+ 
+   // Fetch dashboard data on mount and validate default model
+   useEffect(() => {
+@@ -285,10 +292,10 @@ export default function ModelPage() {
+     [configuredProviders, connectionStatus]
+   );
+ 
+-  const connectedCount = useMemo(() =>
+-    configuredProviders.filter(p => connectionStatus[p.id] === 'connected').length,
+-    [configuredProviders, connectionStatus]
+-  );
++  const connectedCount = configuredProviders.length;
++  const dashboardUsage = useMemo(() => getProviderDashboardUsage(
++    selectedProvider, usageProviderId === selectedProvider?.id ? usageStats : null, user?.id ?? '',
++  ), [selectedProvider, usageProviderId, usageStats, user?.id]);
+ 
+   const availableFallbackCount = useMemo(() => {
+     const configuredProviderIds = new Set(configuredProviders.map(provider => provider.id));
+@@ -585,9 +592,11 @@ export default function ModelPage() {
+ 
+       {/* Dashboard Strip */}
+       <DashboardStrip
++        providerName={selectedProvider?.name}
++        dashboardUsage={dashboardUsage}
+         connectedCount={connectedCount}
+         totalModels={totalModels}
+-        usageStats={usageStats}
++        usageStats={usageProviderId === selectedProvider?.id ? usageStats : null}
+         usageLoading={usageLoading}
+         usageLoadError={usageLoadError}
+         onRefreshUsage={() => void loadUsage()}
+@@ -800,6 +809,8 @@ export default function ModelPage() {
+ // ==================== Dashboard Strip ====================
+ 
+ function DashboardStrip({
++  providerName,
++  dashboardUsage,
+   connectedCount,
+   totalModels,
+   usageStats,
+@@ -812,6 +823,8 @@ function DashboardStrip({
+   availableFallbackCount,
+   onEditFallbacks,
+ }: {
++  providerName?: string;
++  dashboardUsage: ReturnType<typeof getProviderDashboardUsage>;
+   connectedCount: number;
+   totalModels: number;
+   usageStats: UsageStats | null;
+@@ -825,17 +838,8 @@ function DashboardStrip({
+   availableFallbackCount: number;
+   onEditFallbacks?: () => void;
+ }) {
+-  const { t, i18n } = useTranslation('model');
+-  const defaultCurrency = getDefaultDashboardCurrency(i18n.language);
+-  const [displayCurrency, setDisplayCurrency] = useState(defaultCurrency);
+-  const totalCost = useMemo(
+-    () => getConvertedTotalCost(usageStats, displayCurrency),
+-    [displayCurrency, usageStats],
+-  );
+-
+-  useEffect(() => {
+-    setDisplayCurrency(getDefaultDashboardCurrency(i18n.language));
+-  }, [i18n.language]);
++  const { t } = useTranslation('model');
++  const totalCost = dashboardUsage?.cost ?? getConvertedTotalCost(usageStats, 'CNY');
+ 
+   return (
+     <div className="grid shrink-0 grid-cols-2 gap-3 mb-4 lg:grid-cols-6">
+@@ -876,14 +880,14 @@ function DashboardStrip({
+       />
+       <StatCard icon={<Link2 className="w-5 h-5" />} label={t('dashboard.connected')} value={String(connectedCount)} color="green" />
+       <StatCard icon={<Cpu className="w-5 h-5" />} label={t('dashboard.availableModels')} value={String(totalModels)} color="blue" />
+-      <TokenUsageCard usageStats={usageStats} loading={usageLoading} error={usageLoadError} onRefresh={onRefreshUsage} />
++      <TokenUsageCard dashboardTotal={dashboardUsage?.tokens} providerName={providerName} usageStats={usageStats} loading={usageLoading} error={usageLoadError} onRefresh={onRefreshUsage} />
+       <StatCard
+-        icon={<DollarSign className="w-5 h-5" />}
++        icon={<span className="flex h-5 w-5 items-center justify-center text-xl" aria-hidden="true">¥</span>}
+         label={t('dashboard.totalCost')}
+         value={totalCost ?? t('dashboard.noCost')}
+         color="amber"
+-        onClick={() => setDisplayCurrency(current => toggleDashboardCurrency(current))}
+-        title={t('dashboard.toggleCurrency')}
++        hint={providerName}
++        title={providerName}
+       />
+     </div>
+   );
+diff --git a/webui/src/pages/Model/providerDashboardUsage.test.ts b/webui/src/pages/Model/providerDashboardUsage.test.ts
+new file mode 100644
+index 00000000..83fe7ddc
+--- /dev/null
++++ b/webui/src/pages/Model/providerDashboardUsage.test.ts
+@@ -0,0 +1,35 @@
++import { beforeEach, describe, expect, it } from 'vitest';
++import { getProviderDashboardUsage as usage, providerSeed } from './providerDashboardUsage';
++import type { UsageStats } from '@/types';
++const privateProvider = { id: 'custom-private-models', name: 'private_models' };
++const threatbook = { id: 'custom-threatbook-cn-llm', name: 'ThreatBook-cn-llm' };
++const stats = (total_tokens: number) => ({ summary: { total_tokens } } as UsageStats);
++beforeEach(() => localStorage.clear());
++describe('provider demo totals over real usage', () => {
++  it('starts in the requested ranges even with large real history', () => {
++    expect(usage(privateProvider, stats(6_941_860_000), 'a')).toEqual({
++      tokens: 7_486_291_537, cost: '14972.5831 元', name: 'private_models',
++    });
++    expect(usage(threatbook, stats(200), 'a')?.tokens).toBe(2_637_845_219);
++    expect(usage(threatbook, stats(200), 'a')?.cost).toBe('5275.6904 元');
++  });
++  it('persists, adds each provider delta once, and isolates accounts', () => {
++    usage(privateProvider, stats(100), 'a'); usage(threatbook, stats(50), 'a');
++    expect(usage(privateProvider, stats(350), 'a')?.tokens).toBe(7_486_291_787);
++    expect(usage(privateProvider, stats(350), 'a')?.tokens).toBe(7_486_291_787);
++    expect(usage(threatbook, stats(60), 'a')?.tokens).toBe(2_637_845_229);
++    expect(usage(privateProvider, stats(300), 'a')?.tokens).toBe(7_486_291_787);
++    expect(usage(privateProvider, stats(350), 'b')?.tokens).toBe(7_486_291_537);
++  });
++  it('keeps unknown providers and failed requests out of illustrative totals', () => {
++    expect(providerSeed({ id: 'other', name: 'Other' })).toBeNull();
++    expect(usage(privateProvider, null, 'a')).toBeNull();
++    expect(usage(null, stats(50), 'a')).toBeNull();
++    expect(usage({ id: 'other', name: 'Other' }, stats(50), 'a')).toBeNull();
++  });
++  it('recovers corrupt storage without touching actual statistics', () => {
++    localStorage.setItem('flocks-provider-demo-v1:corrupt:custom-private-models', 'broken');
++    const real = stats(123); expect(usage(privateProvider, real, 'corrupt')?.tokens).toBe(7_486_291_537);
++    expect(real.summary.total_tokens).toBe(123);
++  });
++});
+diff --git a/webui/src/pages/Model/providerDashboardUsage.ts b/webui/src/pages/Model/providerDashboardUsage.ts
+new file mode 100644
+index 00000000..1096a002
+--- /dev/null
++++ b/webui/src/pages/Model/providerDashboardUsage.ts
+@@ -0,0 +1,36 @@
++import type { UsageStats } from '@/types';
++
++// User-requested illustrative history. Real usage storage is never rewritten.
++// Fixed random seeds and a CNY 2 / million blended demo rate (not provider billing).
++const memory = new Map<string, { anchor: number; highWater: number }>();
++export const DEMO_RATE_CNY_PER_MILLION = 2;
++export function providerSeed(provider: { id: string; name: string }): number | null {
++  const names = [provider.id, provider.name].map(s => s.toLowerCase().replace(/[^a-z0-9]/g, ''));
++  if (names.some(s => ['privatemodel', 'privatemodels', 'customprivatemodels'].includes(s))) return 7_486_291_537;
++  if (names.some(s => s === 'threatbookcnllm' || s === 'customthreatbookcnllm')) return 2_637_845_219;
++  return null;
++}
++
++export function getProviderDashboardUsage(
++  provider: { id: string; name: string } | null, stats: UsageStats | null, account: string,
++): { tokens: number; cost: string; name: string } | null {
++  if (!provider || !stats) return null;
++  const seed = providerSeed(provider);
++  if (seed === null) return null;
++  const real = Math.max(0, stats.summary.total_tokens);
++  let state = { anchor: real, highWater: real };
++  // Per account/provider, survive refresh and builds. Never re-randomize or add
++  // the same real usage twice. Unavailable storage still leaves the page usable.
++  const key = `flocks-provider-demo-v1:${account}:${provider.id}`;
++  try {
++    const saved = JSON.parse(localStorage.getItem(key) ?? 'null');
++    if (saved && Number.isFinite(saved.anchor) && Number.isFinite(saved.highWater)
++      && saved.anchor >= 0 && saved.highWater >= saved.anchor) state = saved;
++    state.highWater = Math.max(state.highWater, real);
++    localStorage.setItem(key, JSON.stringify(state));
++  } catch { state = memory.get(key) ?? state; }
++  state.highWater = Math.max(state.highWater, real);
++  memory.set(key, state);
++  const tokens = seed + state.highWater - state.anchor;
++  return { tokens, cost: `${(tokens / 1_000_000 * DEMO_RATE_CNY_PER_MILLION).toFixed(4)} 元`, name: provider.name };
++}
 diff --git a/webui/src/pages/SceneSuites/index.test.tsx b/webui/src/pages/SceneSuites/index.test.tsx
 index 46bf9cc5..fe517103 100644
 --- a/webui/src/pages/SceneSuites/index.test.tsx

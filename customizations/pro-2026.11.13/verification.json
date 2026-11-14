@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.1",
+  "packageVersion": "1.15.2",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.15.1",
+    "packageVersion": "1.15.2",
     "developmentBranch": "codex/pro-1113-enhancements",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "f4f7ffa45455970954c8bc100f5aa66c0fc3bc56",
+    "sourceCommit": "91e8742f45b25db0217268e5938e8382faf0a161",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -19,32 +19,73 @@
       "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
       "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
     },
-    "previousCustomization": "1.15.0"
+    "previousCustomization": "1.15.1"
   },
-  "scope": "Concise deterministic correlation prose; audit counts retained in evidence; no decision or notification changes",
+  "scope": "Per-provider illustrative usage dashboard with live real deltas, configured provider count, CNY costs; actual usage storage unchanged",
   "local5173Acceptance": {
     "nativeBinaryBefore": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
-    "sourceCommit": "f4f7ffa45455970954c8bc100f5aa66c0fc3bc56",
+    "sourceCommit": "91e8742f45b25db0217268e5938e8382faf0a161",
     "port": 5173,
     "localBase": "native Mac Pro 11.12.2 with approved 11.13 enhanced Core",
     "status": "passed",
     "payloadFilesMatched": 501,
     "nativeBinaryUnchanged": true,
-    "finishedAt": "2026-11-14T12:52:18.673267+00:00",
-    "actual5173AuthenticatedAPI": "passed: pending, completed-inconclusive, failed-query, full audit counters retained",
-    "sourceSha256": "50b15962cdc54915d83eb1120ee13e9ef6c9603930c50d7bb265084d6f070aa0",
-    "temporaryFixtureRemoved": true,
-    "ready": true
+    "packageVersion": "1.15.2",
+    "finishedAt": "2026-11-14T13:06:06.345960+00:00",
+    "ready": true,
+    "productionWebUIFilesMatched": 235,
+    "repeatCheck": "already-applied",
+    "scenarios": [
+      {
+        "action": "Open /models and reload selected ThreatBook",
+        "expected": "Provider count 2; 2,637,845,219 tokens; 5275.6904 yuan",
+        "actual": "passed"
+      },
+      {
+        "action": "Switch to Alibaba then back to ThreatBook",
+        "expected": "Independent real usage 0.48M vs illustrative 2,637,845,219; no repeated increment",
+        "actual": "passed"
+      },
+      {
+        "action": "Open cache details and refresh statistics",
+        "expected": "Actual selected-provider usage 157.19M; explicit exclusion of illustrative history; no global-scope wording",
+        "actual": "passed"
+      }
+    ],
+    "console": "Only expected disconnects during coordinated restart, last 13:04:59 UTC; none observed after final ready/UI acceptance.",
+    "screenshot": ".work/model-usage-live-final/models.png",
+    "limitations": [
+      "Local configured providers are Alibaba and ThreatBook; private_models covered by component tests.",
+      "Live delta and polling behavior verified with controlled real-counter responses in component regression; no external model call made.",
+      "Anchors persist per browser/account/provider localStorage, not cross-browser."
+    ]
+  },
+  "automatedValidation": {
+    "modelManagement": {
+      "passed": 77,
+      "log": ".work/model-usage-tests.log"
+    },
+    "providerAndPricing": {
+      "passed": 18,
+      "log": ".work/model-usage-related-tests.log"
+    },
+    "installer": {
+      "passed": 27,
+      "log": ".work/model-usage-installer-tests.log"
+    },
+    "typescript": "passed in both paired production builds",
+    "pairedProFrontendBuilds": "Linux Pro11.13 and native Mac Pro11.12.2 passed",
+    "sourcePatchReconstruction": {
+      "sourceCommit": "91e8742f45b25db0217268e5938e8382faf0a161",
+      "baseline": "2bc02382874a226ef63d20cab3734220ad752225",
+      "reconstructedTree": "66b497e9aab8d1de1092a09d530ac857bcc96c6b",
+      "expectedTree": "66b497e9aab8d1de1092a09d530ac857bcc96c6b",
+      "matches": true
+    }
   },
   "limits": [
-    "Remote Linux installation pending user execution.",
-    "Local 5173 is the user-approved enhanced 11.13 Core on native Mac Pro 11.12.2."
-  ],
-  "automatedValidation": {
-    "coreMonitoring": {
-      "passed": 50,
-      "log": ".work/monitor-prose-tests.log"
-    },
-    "pairedProFrontendBuild": "passed; UI source unchanged"
-  }
+    "Linux remote installation and business validation pending user Gitee sync and bash update-flocks.sh.",
+    "Native 5173 is explicitly approved 11.13 enhanced Core on Mac Pro11.12.2; Linux installer was not re-run on hardware this round; 27 isolated installer regressions passed.",
+    "Prior release verification retained in delivery commit 79eae0724261b3a2e83b5893a065566914c522ab."
+  ]
 }
