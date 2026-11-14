@@ -1,28 +1,28 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.9",
+  "packageVersion": "1.15.10",
   "target": "2026.11.13-linux-amd64",
-  "status": "Task diagnosis card and digital agent accepted on local 5173; Linux remote pending",
+  "status": "SOC page return caching accepted on local 5173; Linux remote pending",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
     "branch": "codex/pro-1113-enhancements",
-    "commit": "7ca7b4732cb0e8128130504114e7824ee97d90f4",
+    "commit": "20ba6f45108b30ea466a62fc8ac13e2ac2dc8fcc",
     "baseline": "2bc02382874a226ef63d20cab3734220ad752225"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.15.9-pro-2026.11.13-full.tar.gz",
-  "sha256": "cdcfe38c3ae4edb89f1246f4754adf7602dc3ae3a5c9e54d6ba15ddcb1ca76b6",
-  "payloadFiles": 575,
+  "archive": "releases/flocks-customizations-1.15.10-pro-2026.11.13-full.tar.gz",
+  "sha256": "39fcfddc883b6db48523611731f5fd2ec6fbb6b503c633b9cae311ea819cd5cb",
+  "payloadFiles": 582,
   "validation": "verification.json",
   "limits": [
-    "Linux-amd64 remote installation requires user Gitee sync and bash update-flocks.sh.",
-    "Local 5173 uses approved 11.13 enhanced Core on native Mac Pro11.12.2.",
-    "Log collection is bounded and admin-only. Missing logs and model failures are explicitly reported; no automatic repair or retry."
+    "Native Mac Pro11.12.2 with approved 11.13 enhanced Core; remote Linux needs user Gitee sync and bash update-flocks.sh.",
+    "Host keepalive works with existing installed SOC pages; enhanced query-cache clients are also shipped in Core/Pro single-item update templates. Existing user plugin files are not overwritten remotely.",
+    "No measured remote latency or populated local alert evidence is claimed."
   ],
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "15 diagnosis backend, 67 related UI, 11 tool and 27 installer regressions; paired Linux and Mac Pro builds; actual native 5173 failed-task card, evidence, model explanation, refresh and digital agent checks.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.15.9.zip",
-  "offlineRepositoryArchiveSha256": "a835c6f632fb6f66aaad60f9c54420909b0d3562cdb4063e0142935fcee6641f"
+  "validationScope": "36 related UI/cache/host regressions, 27 installer checks, paired Pro builds; real 5173 navigation retains time range, keyword and timeline state across other SOC pages and workbench; 591 native payloads and 236 frontend files matched.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.15.10.zip",
+  "offlineRepositoryArchiveSha256": "6951ee51fc30cb4d508baef782a4cd2f55a3ac9ca18d71f545a3c5750887644f"
 }

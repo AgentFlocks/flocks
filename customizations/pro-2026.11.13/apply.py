@@ -190,7 +190,9 @@ def allowed_path(name):
     soc_files = {'index.json', 'plugins/webuis/soc_ui/manifest.json',
                  'plugins/webuis/soc_ui/workspace.json',
                  *('plugins/webuis/soc_ui/soc_dashboard/src/' + file for file in
-                   ('Page.tsx', 'stepCards.ts', 'dashboardCache.ts'))}
+                   ('Page.tsx', 'stepCards.ts', 'dashboardCache.ts')),
+                 *('plugins/webuis/soc_ui/' + page + '/src/' + file for page in
+                   ('soc_overview', 'soc_alerts') for file in ('index.tsx', 'queryCache.ts'))}
     if name.startswith(soc_root) and name[len(soc_root):] in soc_files:
         return
     if not name.startswith(('flocks/flocks/','flocks/.flocks/flockshub/','flocks/.flocks/plugins/','webui-dist/')):

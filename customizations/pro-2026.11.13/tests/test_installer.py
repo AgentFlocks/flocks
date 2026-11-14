@@ -34,6 +34,7 @@ def installation(tmp_path, monkeypatch):
         'runtime_root':'runtime','runtime_manifest':'runtime-manifest.json','python':'runtime/python/bin/python3','webui_dist':'runtime/webui-dist'})
     original = {'flocks/flocks/demo.py':b'original\n','webui-dist/index.html':b'old-ui',
                 'webui-dist/assets/old.js':b'old-js','flocks/native.so':b'\x7fELFfixture'}
+    original['python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/soc_overview/src/index.tsx'] = b'original-overview'
     original['python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/workspace.json'] = b'original-pro-soc'
     original['python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/soc_cases/src/index.tsx'] = b'preserved-pro-cases'
     original['webui-dist/flocks-webui-manifest.json'] = json.dumps({'repositories':{
@@ -50,6 +51,8 @@ def installation(tmp_path, monkeypatch):
     desired = {'flocks/flocks/demo.py':b'enhanced\n','flocks/flocks/enhancements/new.py':b'feature',
                'webui-dist/index.html':b'new-ui','webui-dist/assets/new.js':b'new-js',
                'webui-dist/flocks-webui-manifest.json':b'{"enhanced":true}'}
+    desired['python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/soc_overview/src/index.tsx'] = b'cached-overview'
+    desired['python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/soc_alerts/src/queryCache.ts'] = b'query-cache'
     desired['python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/workspace.json'] = b'enhanced-pro-soc'
     desired['python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/soc_dashboard/src/dashboardCache.ts'] = b'cache-source'
     payload=[]
@@ -422,6 +425,9 @@ def build_sources(tmp_path,monkeypatch):
             page=source/'.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/src'
             page.mkdir(parents=True)
             for file in ('Page.tsx','stepCards.ts','dashboardCache.ts'):(page/file).write_text('fixture source')
+            for name in ('soc_overview','soc_alerts'):
+                client=page.parent.parent/name/'src';client.mkdir(parents=True)
+                for file in ('index.tsx','queryCache.ts'):(client/file).write_text('fixture cache source')
         subprocess.run(['git','init','-q',str(source)],check=True)
         subprocess.run(['git','-C',str(source),'add',scope,'hub' if label=='pro' else '.flocks'],check=True)
         subprocess.run(['git','-C',str(source),'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture baseline'],check=True)
@@ -464,7 +470,7 @@ def test_build_includes_committed_customization_branch_runtime_source(build_sour
     with tarfile.open(archive) as package:
         assert package.extractfile('home-dashboard/payload/flocks/flocks/new_feature.py').read()==b'NEW_FEATURE = True\n'
         pro_ui=json.loads(package.extractfile('home-dashboard/payload/python/share/flockspro/hub/soc-workspace/plugins/webuis/soc_ui/manifest.json').read())
-        assert pro_ui['version']=='1.18.1'
+        assert pro_ui['version']=='1.18.2'
         assert pro_ui['permissions']['tools']==['soc_case_manage']
         assert not any('/soc_cases/' in name for name in package.getnames())
         manifest=json.load(package.extractfile('home-dashboard/payload-manifest.json'))

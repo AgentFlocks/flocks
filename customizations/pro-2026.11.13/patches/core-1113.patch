@@ -1,5 +1,5 @@
 diff --git a/.flocks/flockshub/index.json b/.flocks/flockshub/index.json
-index ef33f5ca..8aa6244b 100644
+index ef33f5ca..2a1a5d49 100644
 --- a/.flocks/flockshub/index.json
 +++ b/.flocks/flockshub/index.json
 @@ -14689,7 +14689,7 @@
@@ -7,7 +7,7 @@ index ef33f5ca..8aa6244b 100644
        "description": "SOC workspace pages for posture, overview, and alert investigation.",
        "descriptionCn": "SOC 工作区页面，包含态势、SOC 总览和告警调查。",
 -      "version": "1.1.13",
-+      "version": "1.18.1",
++      "version": "1.18.2",
        "category": "workflow-automation",
        "tags": [
          "siem",
@@ -346,7 +346,7 @@ index 7190d97a..ba6edbd8 100644
    "license": "MIT",
    "homepage": "",
 diff --git a/.flocks/flockshub/plugins/webuis/soc_ui/manifest.json b/.flocks/flockshub/plugins/webuis/soc_ui/manifest.json
-index 1b7394d4..4cbcfebb 100644
+index 1b7394d4..e3d45076 100644
 --- a/.flocks/flockshub/plugins/webuis/soc_ui/manifest.json
 +++ b/.flocks/flockshub/plugins/webuis/soc_ui/manifest.json
 @@ -5,7 +5,7 @@
@@ -354,10 +354,173 @@ index 1b7394d4..4cbcfebb 100644
    "description": "SOC workspace pages for posture, overview, and alert investigation.",
    "descriptionCn": "SOC 工作区页面，包含态势、SOC 总览和告警调查。",
 -  "version": "1.1.13",
-+  "version": "1.18.1",
++  "version": "1.18.2",
    "author": "Flocks Team",
    "license": "MIT",
    "homepage": "",
+diff --git a/.flocks/flockshub/plugins/webuis/soc_ui/soc_alerts/src/index.tsx b/.flocks/flockshub/plugins/webuis/soc_ui/soc_alerts/src/index.tsx
+index 100b4e88..c8680476 100644
+--- a/.flocks/flockshub/plugins/webuis/soc_ui/soc_alerts/src/index.tsx
++++ b/.flocks/flockshub/plugins/webuis/soc_ui/soc_alerts/src/index.tsx
+@@ -1,4 +1,5 @@
+ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
++import { useCachedQuery } from './queryCache';
+ import { api } from '@flocks/webui-contract-sdk';
+ import { filterOptionText, matchesFilterOptionSearch } from './filterValues';
+ 
+@@ -1530,10 +1531,7 @@ function TimeRefreshPopover({
+ export default function SocAlertsPage() {
+   const english = isEnglishLocale();
+   const tr = useCallback((text: string) => (english ? EN_TEXT[text] || text : text), [english]);
+-  const [data, setData] = useState(EMPTY_DATA);
+   const [selectedIncident, setSelectedIncident] = useState<IncidentCluster | null>(null);
+-  const [loading, setLoading] = useState(true);
+-  const [error, setError] = useState('');
+   const [keyword, setKeyword] = useState('');
+   const [filtersOpen, setFiltersOpen] = useState(true);
+   const [page, setPage] = useState(1);
+@@ -1546,31 +1544,14 @@ export default function SocAlertsPage() {
+   const [openMenu, setOpenMenu] = useState<string | null>(null);
+   const [showMoreFilters, setShowMoreFilters] = useState(false);
+   const [timelineOpen, setTimelineOpen] = useState(true);
+-  const loadSeqRef = useRef(0);
+-
+-  const load = useCallback(async (activeTimeFilter: TimeFilterState, activeFilters: Record<FilterKey, string[]>) => {
+-    const loadSeq = loadSeqRef.current + 1;
+-    loadSeqRef.current = loadSeq;
+-    setLoading(true);
+-    setError('');
+-    try {
+-      const response = await api
+-        .contract('soc-alerts', 'soc.alerts.operations')
+-        .operation<AlertOperationsData>('list', { params: { limit: QUERY_LIMIT, ...timeFilterParams(activeTimeFilter), ...contractFilterParams(activeFilters) } });
+-      if (loadSeq !== loadSeqRef.current) return;
+-      setData(normalizeData(response.data));
+-    } catch (err) {
+-      if (loadSeq !== loadSeqRef.current) return;
+-      setError(err instanceof Error ? err.message : tr('SOC 告警数据源请求失败'));
+-      setData(EMPTY_DATA);
+-    } finally {
+-      if (loadSeq === loadSeqRef.current) setLoading(false);
+-    }
+-  }, [tr]);
+-
+-  useEffect(() => {
+-    void load(appliedTimeFilter, appliedFilters);
+-  }, [appliedFilters, appliedTimeFilter, load]);
++  const [revision, setRevision] = useState(0);
++  const { data, loading, error, hasData, load: refreshAlerts } = useCachedQuery(
++    'alerts', [appliedTimeFilter, appliedFilters], EMPTY_DATA,
++    async () => normalizeData((await api.contract('soc-alerts', 'soc.alerts.operations')
++      .operation<AlertOperationsData>('list', { params: { limit: QUERY_LIMIT, ...timeFilterParams(appliedTimeFilter), ...contractFilterParams(appliedFilters) } })).data),
++    tr('SOC 告警数据源请求失败'), revision,
++  );
++  const load = useCallback((_time: TimeFilterState, _filters: Record<FilterKey, string[]>) => refreshAlerts(), [refreshAlerts]);
+ 
+   const filterOptions = useMemo(() => (
+     Object.fromEntries(FILTER_CONFIGS.map((config) => [config.key,
+@@ -1616,6 +1597,7 @@ export default function SocAlertsPage() {
+   }, [openMenu]);
+ 
+   const runQuery = useCallback(() => {
++    setRevision(value => value + 1);
+     const nextFilters = cloneFilters(selectedFilters);
+     setAppliedKeyword(keyword);
+     setAppliedFilters(nextFilters);
+@@ -1625,6 +1607,7 @@ export default function SocAlertsPage() {
+   }, [keyword, selectedFilters, timeFilter]);
+ 
+   const applyTimeRefresh = useCallback((nextTimeFilter: TimeFilterState, nextRefreshKey: RefreshKey) => {
++    setRevision(value => value + 1);
+     setTimeFilter(nextTimeFilter);
+     setAppliedTimeFilter(nextTimeFilter);
+     setRefreshKey(nextRefreshKey);
+@@ -1633,6 +1616,7 @@ export default function SocAlertsPage() {
+   }, []);
+ 
+   const resetQuery = useCallback(() => {
++    setRevision(value => value + 1);
+     const defaults = cloneFilters(DEFAULT_FILTER_VALUES);
+     setKeyword('');
+     setSelectedFilters(defaults);
+@@ -1779,7 +1763,7 @@ export default function SocAlertsPage() {
+           </div>
+         )}
+ 
+-        {loading || error || filteredIncidents.length === 0 ? (
++        {loading || (error && !hasData) || filteredIncidents.length === 0 ? (
+           <div className="m-6 rounded border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500" role="status">
+             {loading ? tr('正在查询告警…') : error ? (
+               <button type="button" onClick={() => void load(appliedTimeFilter, appliedFilters)} className="text-blue-600">{tr('重试')}</button>
+diff --git a/.flocks/flockshub/plugins/webuis/soc_ui/soc_alerts/src/queryCache.ts b/.flocks/flockshub/plugins/webuis/soc_ui/soc_alerts/src/queryCache.ts
+new file mode 100644
+index 00000000..c7411232
+--- /dev/null
++++ b/.flocks/flockshub/plugins/webuis/soc_ui/soc_alerts/src/queryCache.ts
+@@ -0,0 +1,63 @@
++import { useCallback, useEffect, useRef, useState } from 'react';
++import { useCurrentUser, usePaneActive } from '@flocks/webui-contract-sdk';
++
++// Memory only: never write alert evidence to browser storage.
++export const FRESH_MS = 30_000;
++export const RETAIN_MS = 5 * 60_000;
++const entries = new Map<string, { data?: unknown; savedAt: number; pending?: Promise<unknown> }>();
++let owner = '';
++export function clearQueryCache() { entries.clear(); owner = ''; }
++export function queryEntry(scope: string, key: string) {
++  if (owner !== scope) { entries.clear(); owner = scope; }
++  const now = Date.now();
++  for (const [k, e] of entries) if (!e.pending && now - e.savedAt >= RETAIN_MS) entries.delete(k);
++  return entries.get(key);
++}
++export async function cachedQuery<T>(scope: string, key: string, fetcher: () => Promise<T>, force = false): Promise<T> {
++  let entry = queryEntry(scope, key);
++  if (entry?.pending) return entry.pending as Promise<T>;
++  if (!force && entry?.data !== undefined && Date.now() - entry.savedAt < FRESH_MS) return entry.data as T;
++  entry = entry || { savedAt: 0 };
++  entries.set(key, entry);
++  const current = entry;
++  current.pending = Promise.resolve().then(fetcher).then(data => {
++    if (owner === scope && entries.get(key) === current) { current.data = data; current.savedAt = Date.now(); }
++    return data;
++  }).finally(() => { current.pending = undefined; });
++  while (entries.size > 8) {
++    const victim = [...entries].find(([k, e]) => k !== key && !e.pending);
++    if (!victim) break;
++    entries.delete(victim[0]);
++  }
++  return current.pending as Promise<T>;
++}
++export function useCachedQuery<T>(page: string, params: unknown, empty: T, fetcher: () => Promise<T>, failure: string, revision = 0) {
++  const user = useCurrentUser?.();
++  const active = usePaneActive?.() ?? true;
++  const scope = JSON.stringify([user?.id ?? null, user?.username ?? null]);
++  const key = JSON.stringify([scope, page, params], (name, value) => {
++    if (value && typeof value === 'object' && value.mode === 'relative') return { mode: value.mode, range: value.range };
++    return value;
++  });
++  const snapshot = queryEntry(scope, key)?.data as T | undefined;
++  const [state, setState] = useState({ key, data: snapshot ?? empty, loading: snapshot === undefined, error: '' });
++  const seq = useRef(0);
++  const latest = useRef(key); latest.current = key;
++  const fetchRef = useRef(fetcher); fetchRef.current = fetcher;
++  const load = useCallback(async (force = true) => {
++    if (!active) return;
++    const version = ++seq.current;
++    const cached = queryEntry(scope, key)?.data as T | undefined;
++    setState({ key, data: cached ?? empty, loading: cached === undefined, error: '' });
++    try {
++      const fetch = fetchRef.current;
++      const data = await cachedQuery(scope, key, fetch, force);
++      if (version === seq.current && latest.current === key) setState({ key, data, loading: false, error: '' });
++    } catch (err) {
++      if (version === seq.current && latest.current === key) setState({ key, data: cached ?? empty, loading: false, error: err instanceof Error ? err.message : failure });
++    }
++  }, [key, scope, empty, failure, active]);
++  useEffect(() => { void load(revision > 0); return () => { ++seq.current; }; }, [load, revision]);
++  const visible = state.key === key ? state : { key, data: snapshot ?? empty, loading: snapshot === undefined, error: '' };
++  return { ...visible, load, hasData: queryEntry(scope, key)?.data !== undefined };
++}
 diff --git a/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/api/handlers.py b/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/api/handlers.py
 index bb070ee7..76b95de5 100644
 --- a/.flocks/flockshub/plugins/webuis/soc_ui/soc_dashboard/api/handlers.py
@@ -1670,25 +1833,45 @@ index 00000000..5ba40a28
 +  return state;
 +}
 diff --git a/.flocks/flockshub/plugins/webuis/soc_ui/soc_overview/src/index.tsx b/.flocks/flockshub/plugins/webuis/soc_ui/soc_overview/src/index.tsx
-index f2617473..23718907 100644
+index f2617473..ef459a9d 100644
 --- a/.flocks/flockshub/plugins/webuis/soc_ui/soc_overview/src/index.tsx
 +++ b/.flocks/flockshub/plugins/webuis/soc_ui/soc_overview/src/index.tsx
-@@ -289,6 +289,7 @@ function truncate(value: string, max = 34) {
+@@ -1,4 +1,5 @@
+ import { useCallback, useEffect, useMemo, useState } from 'react';
++import { useCachedQuery } from './queryCache';
+ import { api } from '@flocks/webui-contract-sdk';
+ 
+ type TimeRangeKey = '15m' | '1h' | '2h' | '24h' | 'today' | '7d' | '30d';
+@@ -287,33 +288,45 @@ function truncate(value: string, max = 34) {
+ }
+ 
  export default function SocOverviewPage() {
-   const [stats, setStats] = useState(EMPTY_STATS);
-   const [loading, setLoading] = useState(true);
+-  const [stats, setStats] = useState(EMPTY_STATS);
+-  const [loading, setLoading] = useState(true);
+-  const [error, setError] = useState('');
++
 +  const [exporting, setExporting] = useState(false);
-   const [error, setError] = useState('');
++  const [exportError, setError] = useState('');
    const [timeFilter, setTimeFilter] = useState<TimeFilterState>(() => createRelativeTimeFilter(DEFAULT_TIME_RANGE));
    const [refreshKey, setRefreshKey] = useState<RefreshKey>('off');
-@@ -307,6 +308,26 @@ export default function SocOverviewPage() {
-     }
-   }, []);
+   const [timeMenuOpen, setTimeMenuOpen] = useState(false);
  
+-  const load = useCallback(async (activeTimeFilter: TimeFilterState) => {
+-    setLoading(true);
++  const { data: stats, loading, error: queryError, load: refreshStats } = useCachedQuery(
++    'overview', timeFilter, EMPTY_STATS,
++    async () => mergeStats((await api.page.get('/stats', { params: timeFilterParams(timeFilter) })).data),
++    'SOC 总览数据加载失败',
++  );
++  const error = exportError || queryError;
++  const load = useCallback((_filter: TimeFilterState) => refreshStats(), [refreshStats]);
++
 +  const exportDiagnostics = async () => {
 +    setExporting(true);
-+    setError('');
-+    try {
+     setError('');
+     try {
+-      const response = await api.page.get('/stats', { params: timeFilterParams(activeTimeFilter) });
+-      setStats(mergeStats(response.data));
 +      const response = await api.get('/api/soc-workspace/diagnostics');
 +      const url = URL.createObjectURL(new Blob([JSON.stringify(response.data, null, 2)], { type: 'application/json' }));
 +      const link = document.createElement('a');
@@ -1698,17 +1881,27 @@ index f2617473..23718907 100644
 +      link.click();
 +      link.remove();
 +      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-+    } catch (err) {
+     } catch (err) {
+-      setError(err instanceof Error ? err.message : 'SOC 总览数据加载失败');
 +      setError('SOC 诊断导出失败：请确认已使用管理员账号，并已更新 Flocks 主程序。页面不可用时可收集日志目录中的 soc-workspace-diagnostics.jsonl 及轮转文件。');
-+    } finally {
+     } finally {
+-      setLoading(false);
 +      setExporting(false);
-+    }
+     }
+-  }, []);
 +  };
-+
+ 
    const refresh = useCallback(() => {
      void load(timeFilter);
    }, [load, timeFilter]);
-@@ -382,6 +403,7 @@ export default function SocOverviewPage() {
+ 
+-  useEffect(() => {
+-    void load(timeFilter);
+-  }, [load, timeFilter]);
+ 
+   useEffect(() => {
+     const intervalMs = REFRESH_INTERVAL_MS[refreshKey];
+@@ -382,6 +395,7 @@ export default function SocOverviewPage() {
              onApply={applyTimeRefresh}
              onClose={() => setTimeMenuOpen(false)}
            />
@@ -1716,15 +1909,84 @@ index f2617473..23718907 100644
            <button type="button" onClick={refresh}>{loading ? '刷新中' : '刷新'}</button>
          </div>
        </header>
+diff --git a/.flocks/flockshub/plugins/webuis/soc_ui/soc_overview/src/queryCache.ts b/.flocks/flockshub/plugins/webuis/soc_ui/soc_overview/src/queryCache.ts
+new file mode 100644
+index 00000000..c7411232
+--- /dev/null
++++ b/.flocks/flockshub/plugins/webuis/soc_ui/soc_overview/src/queryCache.ts
+@@ -0,0 +1,63 @@
++import { useCallback, useEffect, useRef, useState } from 'react';
++import { useCurrentUser, usePaneActive } from '@flocks/webui-contract-sdk';
++
++// Memory only: never write alert evidence to browser storage.
++export const FRESH_MS = 30_000;
++export const RETAIN_MS = 5 * 60_000;
++const entries = new Map<string, { data?: unknown; savedAt: number; pending?: Promise<unknown> }>();
++let owner = '';
++export function clearQueryCache() { entries.clear(); owner = ''; }
++export function queryEntry(scope: string, key: string) {
++  if (owner !== scope) { entries.clear(); owner = scope; }
++  const now = Date.now();
++  for (const [k, e] of entries) if (!e.pending && now - e.savedAt >= RETAIN_MS) entries.delete(k);
++  return entries.get(key);
++}
++export async function cachedQuery<T>(scope: string, key: string, fetcher: () => Promise<T>, force = false): Promise<T> {
++  let entry = queryEntry(scope, key);
++  if (entry?.pending) return entry.pending as Promise<T>;
++  if (!force && entry?.data !== undefined && Date.now() - entry.savedAt < FRESH_MS) return entry.data as T;
++  entry = entry || { savedAt: 0 };
++  entries.set(key, entry);
++  const current = entry;
++  current.pending = Promise.resolve().then(fetcher).then(data => {
++    if (owner === scope && entries.get(key) === current) { current.data = data; current.savedAt = Date.now(); }
++    return data;
++  }).finally(() => { current.pending = undefined; });
++  while (entries.size > 8) {
++    const victim = [...entries].find(([k, e]) => k !== key && !e.pending);
++    if (!victim) break;
++    entries.delete(victim[0]);
++  }
++  return current.pending as Promise<T>;
++}
++export function useCachedQuery<T>(page: string, params: unknown, empty: T, fetcher: () => Promise<T>, failure: string, revision = 0) {
++  const user = useCurrentUser?.();
++  const active = usePaneActive?.() ?? true;
++  const scope = JSON.stringify([user?.id ?? null, user?.username ?? null]);
++  const key = JSON.stringify([scope, page, params], (name, value) => {
++    if (value && typeof value === 'object' && value.mode === 'relative') return { mode: value.mode, range: value.range };
++    return value;
++  });
++  const snapshot = queryEntry(scope, key)?.data as T | undefined;
++  const [state, setState] = useState({ key, data: snapshot ?? empty, loading: snapshot === undefined, error: '' });
++  const seq = useRef(0);
++  const latest = useRef(key); latest.current = key;
++  const fetchRef = useRef(fetcher); fetchRef.current = fetcher;
++  const load = useCallback(async (force = true) => {
++    if (!active) return;
++    const version = ++seq.current;
++    const cached = queryEntry(scope, key)?.data as T | undefined;
++    setState({ key, data: cached ?? empty, loading: cached === undefined, error: '' });
++    try {
++      const fetch = fetchRef.current;
++      const data = await cachedQuery(scope, key, fetch, force);
++      if (version === seq.current && latest.current === key) setState({ key, data, loading: false, error: '' });
++    } catch (err) {
++      if (version === seq.current && latest.current === key) setState({ key, data: cached ?? empty, loading: false, error: err instanceof Error ? err.message : failure });
++    }
++  }, [key, scope, empty, failure, active]);
++  useEffect(() => { void load(revision > 0); return () => { ++seq.current; }; }, [load, revision]);
++  const visible = state.key === key ? state : { key, data: snapshot ?? empty, loading: snapshot === undefined, error: '' };
++  return { ...visible, load, hasData: queryEntry(scope, key)?.data !== undefined };
++}
 diff --git a/.flocks/flockshub/plugins/webuis/soc_ui/workspace.json b/.flocks/flockshub/plugins/webuis/soc_ui/workspace.json
-index e3240b32..0934ccb4 100644
+index e3240b32..78ebd865 100644
 --- a/.flocks/flockshub/plugins/webuis/soc_ui/workspace.json
 +++ b/.flocks/flockshub/plugins/webuis/soc_ui/workspace.json
 @@ -1,13 +1,13 @@
  {
    "id": "soc_ui",
 -  "version": "1.1.13",
-+  "version": "1.18.1",
++  "version": "1.18.2",
    "title": "SOC 工作区",
    "titleEn": "SOC Workspace",
    "icon": "ShieldCheck",
@@ -149208,10 +149470,44 @@ index 00000000..ef1d93f2
 +  "recoveryMaxMinutes": 120
 +}
 diff --git a/webui/src/pages/WebUIContractWorkspaceHost/index.test.tsx b/webui/src/pages/WebUIContractWorkspaceHost/index.test.tsx
-index 783503cb..35fc9bca 100644
+index 783503cb..b7f3b792 100644
 --- a/webui/src/pages/WebUIContractWorkspaceHost/index.test.tsx
 +++ b/webui/src/pages/WebUIContractWorkspaceHost/index.test.tsx
-@@ -233,6 +233,20 @@ describe('WebUIContractWorkspaceHost', () => {
+@@ -224,6 +224,33 @@ describe('WebUIContractWorkspaceHost', () => {
+     expect(seen[0]).toMatchObject({ workspaceId: 'code_audit_ui', suiteId: 'code-audit-workspace', reason: 'license', suite: null });
+   });
+ 
++  it('keeps visited SOC overview and alerts mounted across other pages and preserves their DOM', async () => {
++    const data = useWebUIContractPagesMock.getMockImplementation()!();
++    const workspace = data.workspaces[0];
++    workspace.id = 'soc_ui'; workspace.route = '/contracts/webui/workspaces/soc_ui';
++    workspace.pages[0].id = 'soc-overview'; workspace.pages[1].id = 'soc-alerts';
++    workspace.pages.forEach((page: any) => { page.workspaceId = 'soc_ui'; });
++    workspace.sections = [];
++    useWebUIContractPagesMock.mockReturnValue(data);
++    render(<MemoryRouter initialEntries={[workspace.route + '/soc-overview']}>
++      <Link to={workspace.route + '/soc-overview'}>Overview</Link>
++      <Link to={workspace.route + '/soc-alerts'}>Alerts</Link>
++      <Link to={workspace.route + '/' + workspace.pages[2].id}>Other</Link>
++      <Routes><Route path="/contracts/webui/workspaces/:workspaceId/:pageId?" element={<WebUIContractWorkspaceHost />} /></Routes>
++    </MemoryRouter>);
++    const overview = await screen.findByText('page:soc-overview');
++    expect(overview).toBeVisible(); expect(screen.queryByText('page:soc-alerts')).toBeNull();
++    fireEvent.click(screen.getByRole('link', { name: 'Alerts' }));
++    const alerts = await screen.findByText('page:soc-alerts');
++    expect(overview).not.toBeVisible(); expect(alerts).toBeVisible();
++    fireEvent.click(screen.getByRole('link', { name: 'Other' }));
++    await waitFor(() => expect(alerts).not.toBeVisible());
++    fireEvent.click(screen.getByRole('link', { name: 'Overview' }));
++    await waitFor(() => expect(overview).toBeVisible()); expect(screen.getByText('page:soc-overview')).toBe(overview);
++    fireEvent.click(screen.getByRole('link', { name: 'Alerts' }));
++    await waitFor(() => expect(alerts).toBeVisible()); expect(screen.getByText('page:soc-alerts')).toBe(alerts);
++  });
++
+   it('redirects the workspace root to its default page', async () => {
+     renderHostAt('/contracts/webui/workspaces/scene_workspace');
+ 
+@@ -233,6 +260,20 @@ describe('WebUIContractWorkspaceHost', () => {
      expect(screen.queryByText('workspace.selectPage')).not.toBeInTheDocument();
    });
  
@@ -149233,18 +149529,27 @@ index 783503cb..35fc9bca 100644
      useWebUIContractPagesMock.mockReturnValue({
        pages: [], loading: false, error: null, refetch: vi.fn(),
 diff --git a/webui/src/pages/WebUIContractWorkspaceHost/index.tsx b/webui/src/pages/WebUIContractWorkspaceHost/index.tsx
-index ecab52eb..b8638fdc 100644
+index ecab52eb..58acd091 100644
 --- a/webui/src/pages/WebUIContractWorkspaceHost/index.tsx
 +++ b/webui/src/pages/WebUIContractWorkspaceHost/index.tsx
-@@ -7,6 +7,7 @@ import { hubAPI, type HubSceneSuite } from '@/api/hub';
+@@ -7,6 +7,8 @@ import { hubAPI, type HubSceneSuite } from '@/api/hub';
  import ExtensionSlot from '@/components/extensions/ExtensionSlot';
  import { useDelayedVisible } from '@/hooks/useDelayedVisible';
  import { ThemeContext } from '@/contexts/ThemeContext';
 +import { SOC_WORKSPACE_ID } from '@/utils/navPartitions';
++import { AuthContext } from '@/contexts/authState';
  import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
  import PageRuntimeHost from '@/pages/WebUIContractPageHost/PageRuntimeHost';
  import { buildWebUIContractWorkspacePageList, buildWebUIContractWorkspaceSections, findWorkspaceSection, workspaceSectionHref } from '@/utils/webuiContractWorkspaceSections';
-@@ -171,7 +172,8 @@ export default function WebUIContractWorkspaceHost() {
+@@ -26,6 +28,7 @@ export default function WebUIContractWorkspaceHost() {
+   const { theme, setTemporaryThemeOverride } = useContext(ThemeContext);
+   // Hidden tabs stay mounted; the override must follow the tab on screen.
+   const paneActive = useContext(PaneActiveContext);
++  const auth = useContext(AuthContext);
+   // A workspace that is missing may belong to a suite an extension locked;
+   // say so instead of "not found".
+   const [missingSuite, setMissingSuite] = useState<HubSceneSuite | null>(null);
+@@ -171,7 +174,8 @@ export default function WebUIContractWorkspaceHost() {
  
    if (!pageId) {
      // Opening the workspace itself lands on its default page instead of an empty frame.
@@ -149254,6 +149559,52 @@ index ecab52eb..b8638fdc 100644
        ?? pages.find((page) => page.buildStatus === 'ready')
        ?? pages[0];
      const defaultSection = sections.find(section => section.pages.some(page => page.id === defaultPage.id));
+@@ -186,15 +190,38 @@ export default function WebUIContractWorkspaceHost() {
+     ? 'h-full min-w-0 overflow-x-auto'
+     : 'h-full min-w-0 overflow-x-auto p-6';
+ 
++  return <WorkspacePages key={JSON.stringify([workspaceId, auth?.user?.id ?? null])}
++    workspace={workspace} currentPage={currentPage} pageContentClassName={pageContentClassName}
++    locationKey={location.key} paneActive={paneActive} />;
++}
++
++type WorkspacePagesProps = {
++  workspace: NonNullable<ReturnType<typeof useWebUIContractPages>['workspaces'][number]>;
++  currentPage: NonNullable<ReturnType<typeof useWebUIContractPages>['workspaces'][number]['pages'][number]>;
++  pageContentClassName: string; locationKey: string; paneActive: boolean;
++};
++function WorkspacePages({ workspace, currentPage, pageContentClassName, locationKey, paneActive }: WorkspacePagesProps) {
++  const cacheable = workspace.id === SOC_WORKSPACE_ID && ['soc-overview', 'soc-alerts'].includes(currentPage.id);
++  const [visited, setVisited] = useState<string[]>([]);
++  useEffect(() => {
++    if (cacheable) setVisited(previous => previous.includes(currentPage.id) ? previous : [...previous, currentPage.id]);
++  }, [cacheable, currentPage.id]);
++  const cachedIds = new Set([...visited, ...(cacheable ? [currentPage.id] : [])]);
++  const cachedPages = workspace.pages.filter(page => cachedIds.has(page.id) && page.enabled);
+   return (
+     <div className="bg-zinc-50 dark:bg-zinc-950 h-full min-h-0 overflow-hidden">
+-      <div className={pageContentClassName}>
+-        <PageRuntimeHost
+-          key={`${currentPage.id}:${location.key}`}
+-          pageId={currentPage.id}
+-          initialBuildHash={currentPage.buildStatus === 'ready' ? currentPage.buildHash : undefined}
+-        />
+-      </div>
++      {cachedPages.map(page => {
++        const active = page.id === currentPage.id;
++        return <div key={page.id} hidden={!active} className={active ? pageContentClassName : 'h-full min-w-0 overflow-x-auto p-6'}>
++          <PaneActiveContext.Provider value={paneActive && active}>
++            <PageRuntimeHost pageId={page.id} initialBuildHash={page.buildStatus === 'ready' ? page.buildHash : undefined} />
++          </PaneActiveContext.Provider>
++        </div>;
++      })}
++      {!cacheable && <div className={pageContentClassName}>
++        <PageRuntimeHost key={`${currentPage.id}:${locationKey}`} pageId={currentPage.id}
++          initialBuildHash={currentPage.buildStatus === 'ready' ? currentPage.buildHash : undefined} />
++      </div>}
+     </div>
+   );
+ }
 diff --git a/webui/src/pages/Workflow/index.tsx b/webui/src/pages/Workflow/index.tsx
 index 6feb32a3..2f8e71cb 100644
 --- a/webui/src/pages/Workflow/index.tsx
@@ -149913,16 +150264,19 @@ index 8d3fc300..2bfe59fa 100644
  ];
 diff --git a/webui/src/test/mocks/socContractSdk.ts b/webui/src/test/mocks/socContractSdk.ts
 new file mode 100644
-index 00000000..6c5a5189
+index 00000000..4e536e23
 --- /dev/null
 +++ b/webui/src/test/mocks/socContractSdk.ts
-@@ -0,0 +1,6 @@
+@@ -0,0 +1,9 @@
 +// Match the host-provided client while allowing each test to install its SDK.
 +export const api = new Proxy({}, {
 +  get(_target, key) {
 +    return (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__.api[key];
 +  },
 +}) as any;
++
++export const useCurrentUser = () => (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__?.useCurrentUser?.();
++export const usePaneActive = () => true;
 diff --git a/webui/src/types/index.ts b/webui/src/types/index.ts
 index 52739150..ac547fca 100644
 --- a/webui/src/types/index.ts
@@ -150146,6 +150500,24 @@ index dfeeade6..07c2c2b1 100644
    return pathname.match(WORKSPACE_ROUTE_RE)?.[1] ?? null;
  }
  
+diff --git a/webui/src/utils/socAlertInvestigationFilters.test.tsx b/webui/src/utils/socAlertInvestigationFilters.test.tsx
+index 1cd1312d..abde8d93 100644
+--- a/webui/src/utils/socAlertInvestigationFilters.test.tsx
++++ b/webui/src/utils/socAlertInvestigationFilters.test.tsx
+@@ -1,3 +1,4 @@
++import { clearQueryCache } from '../../../.flocks/flockshub/plugins/webuis/soc_ui/soc_alerts/src/queryCache';
+ import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+ import { beforeEach, describe, expect, it, vi } from 'vitest';
+ 
+@@ -34,7 +35,7 @@ function select(label: string, choice: string) {
+ }
+ 
+ describe('alert investigation filtering', () => {
+-  beforeEach(() => { sdk.operation.mockReset(); window.localStorage.setItem('flocks-language', 'zh-CN'); });
++  beforeEach(() => { clearQueryCache(); sdk.operation.mockReset(); window.localStorage.setItem('flocks-language', 'zh-CN'); });
+ 
+   it('loads SE-only non-HTTP alerts with no implicit source or protocol filters', async () => {
+     serve([records[0]]);
 diff --git a/webui/src/utils/socDashboardCache.test.ts b/webui/src/utils/socDashboardCache.test.ts
 new file mode 100644
 index 00000000..40b87a62
@@ -150693,10 +151065,11 @@ index 39cc42d6..b36beb00 100644
      const fallback = pageGetMock.getMockImplementation()!;
 diff --git a/webui/src/utils/socOverviewDiagnostics.test.tsx b/webui/src/utils/socOverviewDiagnostics.test.tsx
 new file mode 100644
-index 00000000..13b21006
+index 00000000..14ab31cb
 --- /dev/null
 +++ b/webui/src/utils/socOverviewDiagnostics.test.tsx
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,35 @@
++import { clearQueryCache } from '../../../.flocks/flockshub/plugins/webuis/soc_ui/soc_overview/src/queryCache';
 +import React from 'react';
 +import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 +import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -150705,7 +151078,7 @@ index 00000000..13b21006
 +vi.mock('@flocks/webui-contract-sdk', () => import('../test/mocks/socContractSdk'));
 +
 +const get = vi.fn();
-+beforeEach(() => {
++beforeEach(() => { clearQueryCache();
 +  (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__ = { React, api: {
 +    get, page: { get: vi.fn().mockResolvedValue({ data: {} }) },
 +  } };
@@ -150730,6 +151103,64 @@ index 00000000..13b21006
 +  fireEvent.click(screen.getByRole('button', { name: '导出 SOC 诊断' }));
 +  expect(await screen.findByText(/SOC 诊断导出失败/)).toBeInTheDocument();
 +  expect(screen.getByRole('button', { name: '导出 SOC 诊断' })).toBeEnabled();
++});
+diff --git a/webui/src/utils/socQueryCache.test.tsx b/webui/src/utils/socQueryCache.test.tsx
+new file mode 100644
+index 00000000..77dbf50c
+--- /dev/null
++++ b/webui/src/utils/socQueryCache.test.tsx
+@@ -0,0 +1,52 @@
++import { act, renderHook, waitFor } from '@testing-library/react';
++import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
++import * as overview from '../../../.flocks/flockshub/plugins/webuis/soc_ui/soc_overview/src/queryCache';
++import * as alerts from '../../../.flocks/flockshub/plugins/webuis/soc_ui/soc_alerts/src/queryCache';
++let user = { id: 'a', username: 'a' };
++vi.mock('@flocks/webui-contract-sdk', () => ({ useCurrentUser: () => user, usePaneActive: () => true }));
++const empty = { count: 0 };
++for (const [name, cache] of Object.entries({ overview, alerts })) describe(`${name} memory cache`, () => {
++  beforeEach(() => { cache.clearQueryCache(); user = { id: 'a', username: 'a' }; });
++  afterEach(() => { vi.useRealTimers(); });
++  it('reuses a fresh snapshot after remount with a moving relative time window', async () => {
++    const fetch = vi.fn().mockResolvedValue({ count: 7 });
++    const mount = (start: string) => renderHook(() => cache.useCachedQuery(name, { mode: 'relative', range: '7d', start }, empty, fetch, 'failed'));
++    const first = mount('first'); await waitFor(() => expect(first.result.current.data.count).toBe(7)); first.unmount();
++    const second = mount('later'); expect(second.result.current.data.count).toBe(7); expect(second.result.current.loading).toBe(false);
++    await act(async () => {}); expect(fetch).toHaveBeenCalledTimes(1);
++    await act(async () => { await second.result.current.load(); }); expect(fetch).toHaveBeenCalledTimes(2);
++  });
++  it('merges overlapping slow requests and retains a same-query snapshot on failure', async () => {
++    let resolve!: (v: unknown) => void;
++    const fetch = vi.fn(() => new Promise(r => { resolve = r; }));
++    const a = cache.cachedQuery('a', 'key', fetch); const b = cache.cachedQuery('a', 'key', fetch, true);
++    await Promise.resolve(); expect(fetch).toHaveBeenCalledTimes(1); resolve({ count: 5 });
++    expect(await a).toEqual(await b);
++    await expect(cache.cachedQuery('a', 'key', () => Promise.reject(new Error('offline')), true)).rejects.toThrow('offline');
++    expect(cache.queryEntry('a', 'key')?.data).toEqual({ count: 5 });
++  });
++  it('isolates filters and accounts and ignores old requests after switching', async () => {
++    let resolve!: (v: { count: number }) => void;
++    const fetch = vi.fn().mockImplementationOnce(() => new Promise(r => { resolve = r; })).mockResolvedValue({ count: 2 });
++    const h = renderHook(({filter}) => cache.useCachedQuery(name, filter, empty, fetch, 'failed'), { initialProps: { filter: 'old' } });
++    await act(async () => {}); h.rerender({ filter: 'new' }); await waitFor(() => expect(h.result.current.data.count).toBe(2));
++    await act(async () => { resolve({ count: 99 }); }); expect(h.result.current.data.count).toBe(2);
++    user = { id: 'b', username: 'b' }; fetch.mockReturnValue(new Promise(() => {})); h.rerender({ filter: 'new' });
++    expect(h.result.current.data).toEqual(empty); expect(h.result.current.loading).toBe(true);
++  });
++  it('shows retained data during revalidation and keeps it readable on failure', async () => {
++    const fetch = vi.fn().mockResolvedValue({ count: 8 });
++    const h = renderHook(() => cache.useCachedQuery(name, 'same', empty, fetch, 'failed'));
++    await waitFor(() => expect(h.result.current.data.count).toBe(8));
++    fetch.mockRejectedValue(new Error('offline')); await act(async () => { await h.result.current.load(); });
++    expect(h.result.current.data.count).toBe(8); expect(h.result.current.loading).toBe(false); expect(h.result.current.error).toBe('offline');
++  });
++  it('expires snapshots, refreshes stale results and bounds stored filters', async () => {
++    vi.useFakeTimers(); const fetch = vi.fn().mockResolvedValue(1);
++    await cache.cachedQuery('a', 'first', fetch); vi.advanceTimersByTime(cache.FRESH_MS + 1);
++    expect(cache.queryEntry('a', 'first')?.data).toBe(1); await cache.cachedQuery('a', 'first', fetch); expect(fetch).toHaveBeenCalledTimes(2);
++    for (let i = 0; i < 12; i++) await cache.cachedQuery('a', `filter${i}`, fetch);
++    expect(cache.queryEntry('a', 'first')).toBeUndefined(); vi.advanceTimersByTime(cache.RETAIN_MS);
++    expect(cache.queryEntry('a', 'filter11')).toBeUndefined();
++  });
 +});
 diff --git a/webui/src/utils/socStepCards.test.ts b/webui/src/utils/socStepCards.test.ts
 new file mode 100644

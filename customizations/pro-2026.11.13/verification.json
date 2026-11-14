@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.9",
+  "packageVersion": "1.15.10",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.15.9",
+    "packageVersion": "1.15.10",
     "developmentBranch": "codex/pro-1113-enhancements",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "7ca7b4732cb0e8128130504114e7824ee97d90f4",
+    "sourceCommit": "20ba6f45108b30ea466a62fc8ac13e2ac2dc8fcc",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -19,101 +19,63 @@
       "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
       "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
     },
-    "previousCustomization": "1.15.8"
+    "previousCustomization": "1.15.9"
   },
-  "scope": "Failed-task diagnosis card and visible digital troubleshooting agent; bounded admin-only evidence tool, sanitized provider analysis, explicit basic fallback, evidence and follow-up chat. Preserves daily operations workflows and existing features.",
+  "scope": "Preserve SOC overview and alert investigation page instances and state across navigation; bounded account/query memory cache, deduplicated slow requests, stale refresh and failure retention. Paired Pro SOC client templates preserve native extra pages and policies.",
   "local5173Acceptance": {
     "nativeBinaryBefore": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
-    "sourceCommit": "7ca7b4732cb0e8128130504114e7824ee97d90f4",
+    "sourceCommit": "20ba6f45108b30ea466a62fc8ac13e2ac2dc8fcc",
     "port": 5173,
     "localBase": "native Mac Pro 11.12.2 with approved 11.13 enhanced Core",
     "status": "passed",
-    "payloadFilesMatched": 584,
+    "payloadFilesMatched": 591,
     "nativeBinaryUnchanged": true,
     "realMemoryFilesUnchanged": true,
-    "packageVersion": "1.15.9",
-    "finishedAt": "2026-11-14T16:26:53.362143+00:00",
+    "packageVersion": "1.15.10",
+    "finishedAt": "2026-11-14T17:23:06.515910+00:00",
     "ready": true,
     "productionWebUIFilesMatched": 236,
     "repeatCheck": "already-applied",
     "scenarios": [
-      {
-        "scenario": "Existing failed workflow detail",
-        "steps": "Task Center > failed > 2026-09-20 knowledge execution > help investigate",
-        "actual": "Card placed after recorded error; no default model yields explicit basic explanation; missing component translated to plain Chinese.",
-        "passed": true
-      },
-      {
-        "scenario": "Temporary configured model and evidence",
-        "steps": "Expand optional model picker; choose existing Alibaba deepseek-v4.1-flash-1017; investigate; expand evidence",
-        "actual": "Real provider returned analysis; known blocker stays concise; E1 references exact failed execution. No logs matched the historical date window, explicitly reported; no current-system or recovery claim.",
-        "passed": true
-      },
-      {
-        "scenario": "Current data and related regression",
-        "steps": "Observe Task Center after reversible install",
-        "actual": "3 existing active daily operations schedules and 6 completed runs remain visible. All 584 payload hashes match; native Go and real memory fingerprints unchanged.",
-        "passed": true
-      },
-      {
-        "scenario": "Follow-up agent conversation",
-        "steps": "Continue asking troubleshooting agent from final card with temporary selected model",
-        "actual": "Actual persisted conversation streamed a response and called task_failure_evidence for the same execution ID. Tool completed read-only; response distinguishes missing historical logs and node-order uncertainty.",
-        "passed": true
-      },
-      {
-        "scenario": "Visible digital employee and refresh",
-        "steps": "Same browser tab navigates to /agents, selects operations support group, then reloads",
-        "actual": "Native visible 排障助手 in 运行保障; described purpose and delegatable state correct; retained after refresh.",
-        "passed": true
-      },
-      {
-        "scenario": "Refresh/cache and final console",
-        "steps": "Return to Task Center, reopen same failed task and same temporary model, investigate, expand evidence",
-        "actual": "Restored server cached result with original analysis timestamp 2026-11-15 00:24:32; no new final console errors.",
-        "passed": true
-      }
+      "SOC overview -> alert investigation -> overview: retained selected 24h time range, no full-page loader",
+      "Alert investigation keyword and collapsed timeline retained after overview and after workbench -> SOC -> alert investigation",
+      "Cleared temporary unsent keyword and restored original 7d range/timeline expansion",
+      "Manual overview refresh worked",
+      "Installed only four page source files with full page-directory backups; compiled two real bundles with native Pro interpreter",
+      "No new console error after final frontend reload; earlier network errors occurred during planned service restart",
+      "Current real alert window is empty; populated-result failures/races/isolation covered by automated tests"
     ],
+    "pageBuilds": {
+      "soc-overview": "31ff538c66c1807e",
+      "soc-alerts": "b443c03e4815f7c3"
+    },
     "limits": [
-      "Native Mac Pro11.12.2 with user-approved 11.13 enhanced Core; remote Linux requires user Gitee sync and bash update-flocks.sh."
-    ],
-    "acceptanceNotes": [
-      "An earlier multi-tab browser run had API timeouts. Read-only PG observations and CLI dashboard remained healthy; after closing agent-created duplicate pages, single-tab final flows had no new console errors. Browser connection contention is an inference, not a confirmed server defect.",
-      "Temporary administrator-only local coroutine diagnostic endpoint was removed; final installed source and payload hashes match.",
-      "Historical failed execution had no matching log files in its date window. Log matching, truncation, credential scrubbing and authorization are additionally covered by isolated tests."
+      "Native Mac Pro11.12.2 with approved 11.13 enhanced Core; remote Linux needs user Gitee sync and bash update-flocks.sh.",
+      "Host keepalive works with existing installed SOC pages; enhanced query-cache clients are also shipped in Core/Pro single-item update templates. Existing user plugin files are not overwritten remotely.",
+      "No measured remote latency or populated local alert evidence is claimed."
     ]
   },
   "automatedValidation": {
-    "diagnosisBackend": {
-      "passed": 15,
-      "log": ".work/diagnosis-integrated-backend.log"
-    },
     "relatedUI": {
-      "passed": 67,
-      "log": ".work/diagnosis-ui.log"
-    },
-    "toolRegistry": {
-      "passed": 11,
-      "log": ".work/diagnosis-tools.log"
+      "passed": 36,
+      "log": "/tmp/soc-cache-final-tests.log"
     },
     "installer": {
       "passed": 27,
-      "log": ".work/diagnosis-installer.log"
+      "log": "/tmp/soc-cache-installer.log"
     },
-    "pairedProProductionBuilds": "Linux Pro11.13 and native Mac Pro11.12.2 passed TypeScript and Vite builds",
+    "pairedProProductionBuilds": "Linux Pro11.13 and native Mac Pro11.12.2 passed TypeScript/Vite",
     "sourcePatchReconstruction": {
-      "sourceCommit": "7ca7b4732cb0e8128130504114e7824ee97d90f4",
+      "sourceCommit": "20ba6f45108b30ea466a62fc8ac13e2ac2dc8fcc",
       "baseline": "2bc02382874a226ef63d20cab3734220ad752225",
-      "reconstructedTree": "de162840cfe2e1209edb0d06d136e21506756b20",
-      "expectedTree": "de162840cfe2e1209edb0d06d136e21506756b20",
+      "reconstructedTree": "93ea58e8a87ec9d333445ccd1557789972adfd82",
+      "expectedTree": "93ea58e8a87ec9d333445ccd1557789972adfd82",
       "matches": true
-    },
-    "dailyOperationsRegression": {
-      "passed": 11,
-      "log": ".work/diagnosis-integrated-backend.log"
     }
   },
   "limits": [
-    "Native Mac Pro11.12.2 with user-approved 11.13 enhanced Core; remote Linux requires user Gitee sync and bash update-flocks.sh."
+    "Native Mac Pro11.12.2 with approved 11.13 enhanced Core; remote Linux needs user Gitee sync and bash update-flocks.sh.",
+    "Host keepalive works with existing installed SOC pages; enhanced query-cache clients are also shipped in Core/Pro single-item update templates. Existing user plugin files are not overwritten remotely.",
+    "No measured remote latency or populated local alert evidence is claimed."
   ]
 }

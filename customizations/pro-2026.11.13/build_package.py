@@ -134,14 +134,18 @@ def build(core,pro,frontend):
         value = json.loads((pro_soc/relative).read_text())
         if relative == 'index.json':
             for item in value['plugins']:
-                if item['type'] == 'webui' and item['id'] == 'soc_ui': item['version'] = '1.18.1'
+                if item['type'] == 'webui' and item['id'] == 'soc_ui': item['version'] = '1.18.2'
         else:
-            value['version'] = '1.18.1'
+            value['version'] = '1.18.2'
             if relative.endswith('workspace.json'): value['defaultPageId'] = 'soc-dashboard'
         pro_changes[relative] = (json.dumps(value, ensure_ascii=False, indent=2)+'\n').encode()
     for file in ('Page.tsx','stepCards.ts','dashboardCache.ts'):
         relative = 'plugins/webuis/soc_ui/soc_dashboard/src/'+file
         pro_changes[relative] = (core/'.flocks/flockshub'/relative).read_bytes()
+    for page in ('soc_overview', 'soc_alerts'):
+        for file in ('index.tsx', 'queryCache.ts'):
+            relative = f'plugins/webuis/soc_ui/{page}/src/{file}'
+            pro_changes[relative] = (core/'.flocks/flockshub'/relative).read_bytes()
     for relative, data in pro_changes.items():
         name = 'python/share/flockspro/hub/soc-workspace/'+relative
         destination = staging/'payload'/name
