@@ -131525,7 +131525,7 @@ index 83215372..41e62d34 100644
          </>
        )}
 diff --git a/webui/src/pages/Model/TokenUsageCard.tsx b/webui/src/pages/Model/TokenUsageCard.tsx
-index 0d54c8c7..6d8a088b 100644
+index 0d54c8c7..075d3f6b 100644
 --- a/webui/src/pages/Model/TokenUsageCard.tsx
 +++ b/webui/src/pages/Model/TokenUsageCard.tsx
 @@ -7,6 +7,8 @@ import CacheUsagePanel from './CacheUsagePanel';
@@ -131546,18 +131546,16 @@ index 0d54c8c7..6d8a088b 100644
  
    const cancelClose = () => clearTimeout(closeTimer.current);
    const close = () => { cancelClose(); setPosition(null); };
-@@ -102,7 +104,8 @@ export default function TokenUsageCard(props: {
-       className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-left text-sky-800 hover:bg-sky-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2"
+@@ -103,6 +105,7 @@ export default function TokenUsageCard(props: {
      >
        <span className="mb-1 flex items-center gap-2 text-xs font-medium opacity-70"><Brain className="h-5 w-5" aria-hidden="true" />{t('dashboard.totalTokens')}</span>
--      <span className="block break-words text-lg font-bold">{props.loading && !props.usageStats ? '…' : props.error && !props.usageStats ? '—' : total > 0 ? formatTokenMillions(total) : t('dashboard.noUsage')}</span>
-+      <span className="block break-words text-lg font-bold">{props.loading && !props.usageStats ? '…' : props.error && !props.usageStats ? '—' : total > 0 ? props.dashboardTotal !== undefined ? total.toLocaleString('en-US') : formatTokenMillions(total) : t('dashboard.noUsage')}</span>
+       <span className="block break-words text-lg font-bold">{props.loading && !props.usageStats ? '…' : props.error && !props.usageStats ? '—' : total > 0 ? formatTokenMillions(total) : t('dashboard.noUsage')}</span>
 +      {props.providerName && <span className="block truncate text-xs opacity-70">{props.providerName}</span>}
        <span className="mt-0.5 flex items-center gap-1 text-xs opacity-70"><Info className="h-3 w-3" aria-hidden="true" />{t('cacheUsage.details')}</span>
      </button>
      {position && createPortal(
 diff --git a/webui/src/pages/Model/index.test.tsx b/webui/src/pages/Model/index.test.tsx
-index dfb16227..2a452127 100644
+index dfb16227..7bce857f 100644
 --- a/webui/src/pages/Model/index.test.tsx
 +++ b/webui/src/pages/Model/index.test.tsx
 @@ -1,5 +1,5 @@
@@ -131597,18 +131595,18 @@ index dfb16227..2a452127 100644
 +    const view = renderWithRouter(<ModelPage />);
 +    try {
 +      await user.click((await screen.findAllByText('private_models', { exact: true })).at(-1)!);
-+      await screen.findByText('7,486,291,537');
++      await screen.findByText('7486.29M');
 +      expect(screen.getByText('dashboard.connected').parentElement?.parentElement).toHaveTextContent('2');
 +      expect(mocks.getSummary).toHaveBeenLastCalledWith({ provider_id: 'private_models' });
-+      expect(screen.getByText('14972.5831 元')).toBeInTheDocument();
++      expect(screen.getByText('14972.58 元')).toBeInTheDocument();
 +      await user.click(screen.getAllByText('ThreatBook-cn-llm', { exact: true }).at(-1)!);
-+      await screen.findByText('2,637,845,219');
++      await screen.findByText('2637.85M');
 +      expect(mocks.getSummary).toHaveBeenLastCalledWith({ provider_id: 'ThreatBook-cn-llm' });
 +      real = 12_445;
 +      await act(async () => { poll?.(); });
-+      expect(await screen.findByText('2,637,857,564')).toBeInTheDocument();
++      expect(await screen.findByText('2637.86M')).toBeInTheDocument();
 +      await user.click(screen.getAllByText('private_models', { exact: true }).at(-1)!);
-+      expect(await screen.findByText('7,486,303,882')).toBeInTheDocument();
++      expect(await screen.findByText('7486.30M')).toBeInTheDocument();
 +    } finally { view.unmount(); interval.mockRestore(); }
 +  });
 +});
@@ -131765,7 +131763,7 @@ index 12d9ef41..c02757b2 100644
    );
 diff --git a/webui/src/pages/Model/providerDashboardUsage.test.ts b/webui/src/pages/Model/providerDashboardUsage.test.ts
 new file mode 100644
-index 00000000..83fe7ddc
+index 00000000..2e14cb03
 --- /dev/null
 +++ b/webui/src/pages/Model/providerDashboardUsage.test.ts
 @@ -0,0 +1,35 @@
@@ -131779,10 +131777,10 @@ index 00000000..83fe7ddc
 +describe('provider demo totals over real usage', () => {
 +  it('starts in the requested ranges even with large real history', () => {
 +    expect(usage(privateProvider, stats(6_941_860_000), 'a')).toEqual({
-+      tokens: 7_486_291_537, cost: '14972.5831 元', name: 'private_models',
++      tokens: 7_486_291_537, cost: '14972.58 元', name: 'private_models',
 +    });
 +    expect(usage(threatbook, stats(200), 'a')?.tokens).toBe(2_637_845_219);
-+    expect(usage(threatbook, stats(200), 'a')?.cost).toBe('5275.6904 元');
++    expect(usage(threatbook, stats(200), 'a')?.cost).toBe('5275.69 元');
 +  });
 +  it('persists, adds each provider delta once, and isolates accounts', () => {
 +    usage(privateProvider, stats(100), 'a'); usage(threatbook, stats(50), 'a');
@@ -131806,7 +131804,7 @@ index 00000000..83fe7ddc
 +});
 diff --git a/webui/src/pages/Model/providerDashboardUsage.ts b/webui/src/pages/Model/providerDashboardUsage.ts
 new file mode 100644
-index 00000000..1096a002
+index 00000000..e0ae2be9
 --- /dev/null
 +++ b/webui/src/pages/Model/providerDashboardUsage.ts
 @@ -0,0 +1,36 @@
@@ -131844,8 +131842,43 @@ index 00000000..1096a002
 +  state.highWater = Math.max(state.highWater, real);
 +  memory.set(key, state);
 +  const tokens = seed + state.highWater - state.anchor;
-+  return { tokens, cost: `${(tokens / 1_000_000 * DEMO_RATE_CNY_PER_MILLION).toFixed(4)} 元`, name: provider.name };
++  return { tokens, cost: `${(tokens / 1_000_000 * DEMO_RATE_CNY_PER_MILLION).toFixed(2)} 元`, name: provider.name };
 +}
+diff --git a/webui/src/pages/Model/usageDisplay.test.ts b/webui/src/pages/Model/usageDisplay.test.ts
+index a399342a..e70d8d6b 100644
+--- a/webui/src/pages/Model/usageDisplay.test.ts
++++ b/webui/src/pages/Model/usageDisplay.test.ts
+@@ -41,8 +41,8 @@ describe('usageDisplay helpers', () => {
+   });
+ 
+   it('converts grouped costs to the target currency', () => {
+-    expect(getConvertedTotalCost(usageStats, 'CNY')).toBe('¥22.7500');
+-    expect(getConvertedTotalCost(usageStats, 'USD')).toBe('$3.2500');
++    expect(getConvertedTotalCost(usageStats, 'CNY')).toBe('¥22.75');
++    expect(getConvertedTotalCost(usageStats, 'USD')).toBe('$3.25');
+   });
+ 
+   it('converts individual amounts between USD and CNY', () => {
+diff --git a/webui/src/pages/Model/usageDisplay.ts b/webui/src/pages/Model/usageDisplay.ts
+index a0909fc9..585b1166 100644
+--- a/webui/src/pages/Model/usageDisplay.ts
++++ b/webui/src/pages/Model/usageDisplay.ts
+@@ -6,12 +6,12 @@ export type DashboardCurrency = 'USD' | 'CNY';
+ 
+ function formatCurrencyAmount(currency: string, amount: number): string {
+   if (currency === 'USD') {
+-    return `$${amount.toFixed(4)}`;
++    return `$${amount.toFixed(2)}`;
+   }
+   if (currency === 'CNY') {
+-    return `¥${amount.toFixed(4)}`;
++    return `¥${amount.toFixed(2)}`;
+   }
+-  return `${currency} ${amount.toFixed(4)}`;
++  return `${currency} ${amount.toFixed(2)}`;
+ }
+ 
+ export function formatTokenMillions(totalTokens: number): string {
 diff --git a/webui/src/pages/SceneSuites/index.test.tsx b/webui/src/pages/SceneSuites/index.test.tsx
 index 46bf9cc5..fe517103 100644
 --- a/webui/src/pages/SceneSuites/index.test.tsx

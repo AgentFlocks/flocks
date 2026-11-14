@@ -1,10 +1,10 @@
 # Flocks Pro 2026.11.13 定制增强包
 
-增强包版本：**1.15.2**。仅适用于 `2026.11.13-linux-amd64`、Pro `c16ed13499b3ca721e3549893d5507c506bc2c58`、Core `2bc02382874a226ef63d20cab3734220ad752225`，运行树保护策略必须为 `native`。
+增强包版本：**1.15.3**。仅适用于 `2026.11.13-linux-amd64`、Pro `c16ed13499b3ca721e3549893d5507c506bc2c58`、Core `2bc02382874a226ef63d20cab3734220ad752225`，运行树保护策略必须为 `native`。
 
 ## 本次迁移
 
-将 1.14.10 的全部增强合并到官方 11.13 配对 Core，保留新版上游修复。增强源码为 [91e8742f](https://github.com/AgentFlocks/flocksdev/commit/91e8742f45b25db0217268e5938e8382faf0a161)，开发分支 `codex/pro-1113-enhancements`；可复现差异保存在 `patches/core-1113.patch`。
+将 1.14.10 的全部增强合并到官方 11.13 配对 Core，保留新版上游修复。增强源码为 [e643df9b](https://github.com/AgentFlocks/flocksdev/commit/e643df9bb835f67bd3886735ab106619f05cc903)，开发分支 `codex/pro-1113-enhancements`；可复现差异保存在 `patches/core-1113.patch`。
 
 保留以下能力：
 
@@ -78,6 +78,11 @@ python3 build_package.py --core .work/core-1113 --pro .work/pro-1113 --frontend 
 
 已连接 Provider 卡片按已配置数量统计，不再依赖是否手动测试过连接。总 Tokens、总费用及真实缓存详情均随所选 Provider 切换，每 5 秒自动刷新真实统计；总费用固定人民币，图标为 ¥，两个演示 Provider 的金额单位为元。
 
-用户指定的虚拟历史基数：private_model/private_models（含 custom-private-models）7,486,291,537 Tokens；ThreatBook-cn-llm 2,637,845,219 Tokens。演示总费用统一按每百万 Tokens 2 元估算，初始分别 14,972.5831 元、5,275.6904 元，并按真实 Tokens 增量继续增长；不是 Provider 实际账单。没有新调用时不自动制造用量。
+用户指定的虚拟历史基数：private_model/private_models（含 custom-private-models）7,486,291,537 Tokens；ThreatBook-cn-llm 2,637,845,219 Tokens。演示总费用统一按每百万 Tokens 2 元估算，初始分别 14,972.58 元、5,275.69 元，并按真实 Tokens 增量继续增长；不是 Provider 实际账单。没有新调用时不自动制造用量。
 
 首次成功读取各 Provider 时保存真实统计锚点，后续仅累加超过锚点的真实用量，避免历史真实总量再次叠加导致超出要求区间。锚点和最高值按账号/Provider 保存于当前浏览器 localStorage，刷新、切换和升级不重置；新浏览器或清除站点存储会重新从基数开始，不跨浏览器同步。真实用量数据库、模型定价、配置及缓存明细不改写；缓存详情继续显示真实统计。其他 Provider 仍显示自己的真实数据。
+
+
+## 1.15.3 数字显示格式
+
+总 Tokens 恢复原有 M 单位并固定两位小数，费用固定两位小数。初始 private_models 为 7486.29M、14972.58 元；ThreatBook-cn-llm 为 2637.85M、5275.69 元。仅改变展示精度，完整计数、基数、已存锚点、Provider 切换与真实增量均保留。

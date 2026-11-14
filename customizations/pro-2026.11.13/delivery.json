@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.2",
+  "packageVersion": "1.15.3",
   "target": "2026.11.13-linux-amd64",
-  "status": "Provider-scoped CNY dashboard accepted on local 5173; Linux remote pending",
+  "status": "Two-decimal M tokens and CNY dashboard accepted on local 5173; Linux remote pending",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
     "branch": "codex/pro-1113-enhancements",
-    "commit": "91e8742f45b25db0217268e5938e8382faf0a161",
+    "commit": "e643df9bb835f67bd3886735ab106619f05cc903",
     "baseline": "2bc02382874a226ef63d20cab3734220ad752225"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.15.2-pro-2026.11.13-full.tar.gz",
-  "sha256": "705874c8a7b39bcc341f0a4bf5ad1f0acb91b09771886120a6699b630d2ed8db",
+  "archive": "releases/flocks-customizations-1.15.3-pro-2026.11.13-full.tar.gz",
+  "sha256": "62e18638755f1180df5c6fced9929cbf6882ca79096b983031a980318c6429cf",
   "payloadFiles": 492,
   "validation": "verification.json",
   "limits": [
@@ -22,7 +22,7 @@
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "77 model UI/helper regressions, 18 provider/pricing regressions, 27 installer tests; two paired Pro builds; 5173 configured count, scoped totals, refresh and cache details; live-delta logic covered by component regression; 501 native payload hashes.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.15.2.zip",
-  "offlineRepositoryArchiveSha256": "5510d278c1c3ba6368ecb1e5d65852c1087fd4778ba6faaed0aade25b47df64b"
+  "validationScope": "77 model UI/helper regressions; two paired Pro builds; 5173 configured count, scoped totals, refresh and cache details; live-delta logic covered by component regression; 501 native payload hashes.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.15.3.zip",
+  "offlineRepositoryArchiveSha256": "f051834650b25e696604844fffdf3f8eb0bd3f5c66a734ba9c2f108d85e8ba9e"
 }

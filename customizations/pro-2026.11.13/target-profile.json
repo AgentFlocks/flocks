@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.2",
+  "packageVersion": "1.15.3",
   "developmentBranch": "codex/pro-1113-enhancements",
   "sourceRepository": "AgentFlocks/flocksdev",
-  "sourceCommit": "91e8742f45b25db0217268e5938e8382faf0a161",
+  "sourceCommit": "e643df9bb835f67bd3886735ab106619f05cc903",
   "deploymentMode": "source-overlay",
   "installerProtocol": 2,
   "edition": "flockspro",
@@ -16,5 +16,5 @@
     "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
     "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
   },
-  "previousCustomization": "1.15.1"
+  "previousCustomization": "1.15.2"
 }
