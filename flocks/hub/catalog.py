@@ -103,6 +103,50 @@ def _read_yaml(path: Path) -> dict[str, Any]:
         return {}
 
 
+@_once_per_build
+def _read_plugin_json(path: Path) -> dict[str, Any]:
+    """A local plugin's JSON, ``{}`` when it is not a readable object.
+
+    _read_yaml and _frontmatter already read a plugin's own broken file this
+    way: what someone wrote into their plugin directory decides how that plugin
+    is listed, not whether the catalog can be built.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.warn("hub.plugin_file.invalid", {"path": str(path), "error": str(exc)})
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _string_items(value: Any) -> list[str]:
+    """The strings of a list field; ``tools:`` with nothing after it reads as null."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set, dict)):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def _read_local_plugin(reader, *args) -> Optional[HubPluginManifest]:
+    """``reader(*args)`` -- ending in the plugin's id and root -- or None when it fails.
+
+    Scanning the plugin directories is how the whole catalog gets built, so a
+    plugin someone left half-written costs that plugin its place in the listing
+    and nothing else.
+    """
+    try:
+        return reader(*args)
+    except tool_tree.Superseded:
+        raise
+    except Exception as exc:
+        log.warn(
+            "hub.local_plugin.unreadable",
+            {"id": str(args[-2]), "path": str(args[-1]), "type": type(exc).__name__, "error": str(exc)},
+        )
+        return None
+
+
 def _path_signature(path: Path) -> tuple[str, int, int]:
     try:
         stat = path.stat()
@@ -448,7 +492,7 @@ def _agent_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     if not agent_file.is_file():
         return None
     data = _read_yaml(agent_file)
-    tools = [str(item) for item in data.get("tools", []) if isinstance(item, str)]
+    tools = _string_items(data.get("tools"))
     network = any(item in {"websearch", "webfetch"} or item.endswith("_query") for item in tools)
     shell = "bash" in tools
     filesystem = "write" if any(item in {"edit", "write"} for item in tools) else "read"
@@ -459,7 +503,7 @@ def _agent_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
         description=str(data.get("description") or data.get("description_cn") or ""),
         description_cn=str(data.get("description_cn") or "") or None,
         category="detection",
-        tags=_safe_tags([str(item) for item in data.get("tags", []) if isinstance(item, str)]),
+        tags=_safe_tags(_string_items(data.get("tags"))),
         use_cases=["alert-triage"],
         capabilities=["llm-agent"],
         entrypoints=[item for item in ("agent.yaml", str(data.get("prompt_file") or "prompt.md")) if (root / item).exists()],
@@ -477,7 +521,7 @@ def _workflow_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest
     workflow_file = root / "workflow.json"
     if not workflow_file.is_file() and not (root / "workflow.md").is_file():
         return None
-    data = _read_json(workflow_file) if workflow_file.is_file() else {}
+    data = _read_plugin_json(workflow_file) if workflow_file.is_file() else {}
     entrypoints = [name for name in ("workflow.json", "workflow.md") if (root / name).exists()]
     description_raw = str(data.get("description") or "")
     description_en = str(data.get("description_en") or "").strip()
@@ -663,12 +707,12 @@ def _discover_system_plugin_roots() -> dict[tuple[PluginType, str], Path]:
         if not base.is_dir():
             continue
         for child in sorted(base.iterdir(), key=lambda item: item.name):
-            if _is_plugin_dir(child) and detector(child.name, child):
+            if _is_plugin_dir(child) and _read_local_plugin(detector, child.name, child):
                 roots[(plugin_type, child.name)] = child
 
     tools_root = local.install_root("tool", "project")
     for directory in _iter_tool_plugin_dirs(tools_root):
-        manifest = _tool_manifest(directory.name, directory)
+        manifest = _read_local_plugin(_tool_manifest, directory.name, directory)
         if manifest:
             # The manifest type already reflects ``integration_type:
             # device`` (see :func:`_tool_manifest`), so we just defer
@@ -731,7 +775,7 @@ def _discover_bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
     for tools_root in bundled_tool_plugin_roots():
         for directory in _iter_tool_plugin_dirs(tools_root):
             name = directory.name
-            manifest = _tool_manifest(name, directory)
+            manifest = _read_local_plugin(_tool_manifest, name, directory)
             if not manifest:
                 continue
             # First-wins: keep the highest-priority bundled root entry
@@ -827,7 +871,7 @@ def _build_catalog_entries(
     for (system_type, system_id), root in _system_plugin_roots().items():
         if (system_type, system_id) in seen:
             continue
-        manifest = _manifest_for_system_root(system_type, system_id, root)
+        manifest = _read_local_plugin(_manifest_for_system_root, system_type, system_id, root)
         if manifest:
             entries.append(_entry_from_system_manifest(manifest, root))
             seen.add((system_type, system_id))
@@ -842,7 +886,7 @@ def _build_catalog_entries(
     for (bundled_type, bundled_id), root in _bundled_tool_roots().items():
         if (bundled_type, bundled_id) in seen:
             continue
-        manifest = _manifest_for_system_root(bundled_type, bundled_id, root)
+        manifest = _read_local_plugin(_manifest_for_system_root, bundled_type, bundled_id, root)
         if manifest:
             entries.append(_entry_from_bundled_tool(manifest, root, records, inferred_installs))
             seen.add((bundled_type, bundled_id))
