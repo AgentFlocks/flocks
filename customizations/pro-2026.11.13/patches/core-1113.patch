@@ -99667,10 +99667,10 @@ index 00000000..fb1b1c21
 +    return result
 diff --git a/flocks/server/routes/knowledge_experience_daily.py b/flocks/server/routes/knowledge_experience_daily.py
 new file mode 100644
-index 00000000..f21be699
+index 00000000..be1263e8
 --- /dev/null
 +++ b/flocks/server/routes/knowledge_experience_daily.py
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,439 @@
 +"""Fast, daily-frozen knowledge snapshots from bounded, authorized excerpts.
 +
 +No source file is changed. Metadata cursors and day seals live in the same
@@ -99752,6 +99752,7 @@ index 00000000..f21be699
 +    value["daily"] = _daily(record, context["settings"], historical=version is not None)
 +    if _published(record):
 +        value.update({key: record[key] for key in ("content", "updated_at", "version", "coverage", "changes")})
++        value["content"] = readable_extractive(value["content"])
 +        value.update(status="ready", sources=[engine._public_source(source) for source in record.get("sources", [])])
 +        diagnostics = (record.get("daily_state") or {}).get("diagnostics")
 +        if diagnostics:
@@ -99880,16 +99881,54 @@ index 00000000..f21be699
 +    return source, cleaned
 +
 +
++def _readable_sections(body: str) -> str:
++    sections = re.split(r"(?m)^#{3,4} ", body)
++    groups = {}
++    for section in sections:
++        if "\n\n> " not in section or "\n\n来源： " not in section:
++            continue
++        heading, rest = section.split("\n\n> ", 1)
++        quote, references = rest.rsplit("\n\n来源： ", 1)
++        # Metadata and raw structured evidence remain available via Sources;
++        # they are not prose highlights. Apply only to our generated envelope.
++        if re.search(r"\.(?:json|csv|xml)(?:（|\s|$)", heading, re.I):
++            continue
++        key = quote.strip()
++        if key not in groups:
++            groups[key] = [heading.strip(), []]
++        for reference in re.findall(r"\[S-[a-zA-Z0-9_-]+\]", references):
++            if reference not in groups[key][1]:
++                groups[key][1].append(reference)
++    if not groups:
++        return "本版暂无可独立阅读的文档摘录，请从下方来源资料查看原文。"
++    return "## 本次资料摘要\n\n" + "\n\n".join(
++        "### " + heading + "\n\n> " + quote + "\n\n来源： " + " ".join(refs)
++        for quote, (heading, refs) in groups.items())
++
++
++def readable_extractive(text: str) -> str:
++    """Adapt only known fallback envelopes; never rewrite stored history."""
++    if text.startswith("## 本次资料摘要\n\n"):
++        return _readable_sections(text.split("\n\n", 1)[1])
++    if not text.startswith("## 资料要点摘编（自动整理）\n"):
++        return text
++    marker = "\n\n### 本轮资料中的要点\n\n"
++    if marker not in text:
++        return "本版未保留可独立阅读的资料摘录，请从下方来源资料查看原文。"
++    # Current sources follow inherited versions and have unescaped headings.
++    body = text.rsplit(marker, 1)[1].split("\n\n### 使用边界\n", 1)[0].strip()
++    return _readable_sections(body)
++
++
 +def _extractive(category: dict, selected: list[tuple[dict, str]], previous_text: str) -> str:
-+    lines = ["## 资料要点摘编（自动整理）", "本次采用有限资料摘录，未进行模型归纳，不代表已覆盖全部历史资料或已确认处置结论。"]
-+    if previous_text:
-+        lines += ["### 沿用上版要点（节选）", _quote(_bounded(previous_text, 400))]
-+    lines.append("### 本轮资料中的要点")
++    # A fallback is an excerpt of this batch, never a cumulative summary.
++    # History retains earlier knowledge; recursively quoting it corrupts both
++    # readability and provenance because inherited citations are no longer live.
++    lines = ["## 本次资料摘要"]
 +    for source, excerpt in selected:
-+        lines += ["#### " + _quote(source["name"]) + "（" + _quote(str(source["date"] or "日期未记录")) + "）",
-+                  "> " + _quote(_bounded(excerpt, 300)).replace("\n", "\n> "), "来源： [" + source["id"] + "]"]
-+    lines += ["### 使用边界", "以上是原文节选，建议、异常描述和待确认事项保留原意；不能据此声称问题已解决，请结合来源全文复核。"]
-+    return "\n\n".join(lines)
++        lines += ["### " + _quote(source["name"]) + "（" + _quote(str(source["date"] or "日期未记录")) + "）",
++                  "> " + _quote(_bounded(excerpt, 600)).replace("\n", "\n> "), "来源： [" + source["id"] + "]"]
++    return readable_extractive("\n\n".join(lines))
 +
 +
 +def _seal_reused(engine, context: dict, category_id: str, record: dict) -> None:
@@ -99946,7 +99985,7 @@ index 00000000..f21be699
 +            model.last_validation_error_code = None
 +            state = (saved or {}).get("daily_state") or {}
 +            nodes = [node for node in index["files"] if node["category"] == definition["id"] and
-+                     node["kind"] != "process" and node["is_text_file"]]
++                     node["kind"] == "document" and node["is_text_file"]]
 +            nodes.sort(key=lambda node: (str(node.get("date") or ""), float(node.get("modified_at") or 0), node["root"], node["path"]), reverse=True)
 +            if _published(saved) and not isinstance(state.get("seen"), dict):
 +                state = _legacy_baseline(engine, saved, nodes, not index["truncated"])
@@ -100006,7 +100045,7 @@ index 00000000..f21be699
 +                    counts["unchanged"] += 1
 +                    results.append(empty)
 +                    continue
-+                previous_text = _bounded(_clean(saved["content"]), settings["previousSummaryChars"]) if _published(saved) else ""
++                previous_text = _bounded(_clean(readable_extractive(saved["content"])), settings["previousSummaryChars"]) if _published(saved) else ""
 +                pieces = [{"text": excerpt, "ids": [source["id"]], "name": _clean(source["name"]),
 +                           "date": source["date"], "sampled_excerpt": True} for source, excerpt in selected]
 +                if previous_text:
@@ -106161,10 +106200,10 @@ index 00000000..2f511319
 +        self.assertNotIn(self.user.id, self.api._errors)
 diff --git a/tests/customization/test_knowledge_experience_daily.py b/tests/customization/test_knowledge_experience_daily.py
 new file mode 100644
-index 00000000..3abd4ec5
+index 00000000..09dc45b6
 --- /dev/null
 +++ b/tests/customization/test_knowledge_experience_daily.py
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,520 @@
 +"""Daily-sampled behavior uses disposable data and deterministic model fakes."""
 +from __future__ import annotations
 +
@@ -106309,7 +106348,7 @@ index 00000000..3abd4ec5
 +        current = self.current()
 +        self.assertEqual(current["status"], "ready")
 +        self.assertEqual(current["daily"]["generation_method"], "extractive")
-+        self.assertIn("资料要点摘编", current["content"])
++        self.assertIn("本次资料摘要", current["content"])
 +        self.assertIn("设备离线", current["content"])
 +        for private in ("abc123", "tokenSecret", "sk-123456789abcdefgh", "https://", "<script>", "S-aaaaaaaaaaaa"):
 +            self.assertNotIn(private, current["content"])
@@ -106319,6 +106358,53 @@ index 00000000..3abd4ec5
 +        self.next_day()
 +        await self.update()
 +        self.assertEqual(self.current()["daily"]["generation_method"], "extractive")
++
++    async def test_repeated_fallback_never_embeds_previous_publication(self):
++        self.source(text="设备离线，需人工确认。")
++        await self.module.update_for_user(self.alice, None, "device-inspection")
++        for index in range(4):
++            self.next_day()
++            self.source(f"巡检新增{index}.md", f"本轮设备{index}待核实。")
++            await self.module.update_for_user(self.alice, None, "device-inspection")
++            content = self.current()["content"]
++            self.assertEqual(content.count("## 本次资料摘要"), 1)
++            self.assertNotIn("沿用上版", content)
++            self.assertNotIn("设备离线", content)
++            self.assertIn(f"本轮设备{index}待核实", content)
++        self.assertEqual(len(self.module.list_history(self.alice, "device-inspection")), 5)
++
++    async def test_legacy_fallback_read_is_non_mutating_and_keeps_current_quotes(self):
++        self.source()
++        await self.update()
++        record = self.saved()
++        record["content"] = ("## 资料要点摘编（自动整理）\n\n说明\n\n"
++                             "### 沿用上版要点（节选）\n\n旧的重复内容\n\n"
++                             "### 本轮资料中的要点\n\n#### 巡检报告\n\n> 设备离线，需确认。\n\n来源： [S-abcdef123456]\n\n"
++                             "### 使用边界\n\n说明")
++        self.current_path().write_text(json.dumps(record, ensure_ascii=False))
++        before = self.current_path().read_bytes()
++        with patch.object(self.module, "_scan", side_effect=AssertionError("read must not scan")):
++            content = self.current()["content"]
++        self.assertIn("设备离线，需确认", content)
++        self.assertNotIn("旧的重复内容", content)
++        self.assertEqual(before, self.current_path().read_bytes())
++        self.assertEqual(self.daily.readable_extractive("## 模型总结\n需要人工确认"), "## 模型总结\n需要人工确认")
++
++    async def test_structured_evidence_is_not_a_summary_and_duplicate_quotes_merge(self):
++        self.source("巡检附件.json", '{"status":"unknown"}')
++        self.source("巡检甲.md", "设备离线，需人工确认。")
++        self.source("巡检乙.md", "设备离线，需人工确认。")
++        await self.module.update_for_user(self.alice, None, "device-inspection")
++        current = self.current()
++        self.assertEqual(current["content"].count("设备离线，需人工确认"), 1)
++        self.assertEqual(len(current["sources"]), 2)
++        self.assertNotIn("unknown", current["content"])
++        for source in current["sources"]:
++            self.assertIn(source["id"], current["content"])
++        legacy = ("## 本次资料摘要\n\n### meta.json（2026-11-09）\n\n> raw metadata\n\n来源： [S-111111111111]\n\n"
++                  "### 巡检报告（2026-11-09）\n\n> 需人工确认\n\n来源： [S-222222222222]")
++        self.assertNotIn("raw metadata", self.daily.readable_extractive(legacy))
++        self.assertIn("需人工确认", self.daily.readable_extractive(legacy))
 +
 +    async def test_no_model_and_exhausted_budget_publish_extracts_without_failing_domains(self):
 +        self.source()
@@ -128446,7 +128532,7 @@ index 33cc78a8..6af81f61 100644
    "scheduled": {
      "emptyTitle": "No Scheduled Tasks",
 diff --git a/webui/src/locales/en-US/workspace.json b/webui/src/locales/en-US/workspace.json
-index 92448208..a8e0441d 100644
+index 92448208..c25e22c2 100644
 --- a/webui/src/locales/en-US/workspace.json
 +++ b/webui/src/locales/en-US/workspace.json
 @@ -86,7 +86,7 @@
@@ -128458,7 +128544,7 @@ index 92448208..a8e0441d 100644
      "selected": "{{count}} selected",
      "selectName": "Select {{name}}",
      "clearSelection": "Clear selection",
-@@ -274,6 +274,80 @@
+@@ -274,6 +274,86 @@
        "unknown": "Unknown",
        "uploaded": "Uploaded",
        "active": "Active"
@@ -128536,6 +128622,12 @@ index 92448208..a8e0441d 100644
 +      "unsupportedTitle": "Preview is not available",
 +      "unsupportedDescription": "Download the file to view it locally.",
 +      "truncated": "This file is large; only the first {{limit}} is shown."
++    },
++    "guide": {
++      "title": "About this module",
++      "outputs": "Daily outputs: browse task reports, analyses and attachments by date. Select a file to read or download the original.",
++      "knowledge": "Knowledge: read source highlights and reusable experience by domain. Check the linked sources and browse earlier versions.",
++      "memory": "Memory files: review preferences, project context and daily notes saved by agents. Notes appear when recorded and are not daily work reports."
      }
    },
    "memory": {
@@ -128839,7 +128931,7 @@ index e58252ce..062351bf 100644
    "latestVersion": "最新版本",
    "coreVersion": "Core 版本",
 diff --git a/webui/src/locales/zh-CN/workspace.json b/webui/src/locales/zh-CN/workspace.json
-index 201f5599..9c2c229a 100644
+index 201f5599..c414654a 100644
 --- a/webui/src/locales/zh-CN/workspace.json
 +++ b/webui/src/locales/zh-CN/workspace.json
 @@ -86,7 +86,7 @@
@@ -128851,7 +128943,7 @@ index 201f5599..9c2c229a 100644
      "selected": "已选择 {{count}} 项",
      "selectName": "选择 {{name}}",
      "clearSelection": "清除选择",
-@@ -274,6 +274,80 @@
+@@ -274,6 +274,86 @@
        "unknown": "未知",
        "uploaded": "已上传",
        "active": "可用"
@@ -128929,6 +129021,12 @@ index 201f5599..9c2c229a 100644
 +      "unsupportedTitle": "暂不支持在线预览",
 +      "unsupportedDescription": "你可以下载该文件后在本机查看。",
 +      "truncated": "文件较大，当前仅展示前 {{limit}} 内容。"
++    },
++    "guide": {
++      "title": "模块介绍",
++      "outputs": "日常产出：按日期查阅任务生成的报告、分析和附件，选择文件即可阅读或下载原文。",
++      "knowledge": "知识沉淀：按业务领域阅读资料要点和可复用经验，通过来源资料核对依据，历史版本保留此前的整理内容。",
++      "memory": "记忆文件：查看 Agent 保存的用户偏好、项目背景和每日记忆，帮助后续任务延续上下文；每日记忆按实际记录产生，不等同于每日工作报告。"
      }
    },
    "memory": {
@@ -129701,10 +129799,10 @@ index 00000000..e76beb9c
 +}
 diff --git a/webui/src/pages/Knowledge/ExperienceOverview.tsx b/webui/src/pages/Knowledge/ExperienceOverview.tsx
 new file mode 100644
-index 00000000..283b1393
+index 00000000..f11cc46c
 --- /dev/null
 +++ b/webui/src/pages/Knowledge/ExperienceOverview.tsx
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,285 @@
 +import { useEffect, useMemo, useRef, useState } from 'react';
 +import ReactMarkdown from 'react-markdown';
 +import remarkGfm from 'remark-gfm';
@@ -129922,10 +130020,34 @@ index 00000000..283b1393
 +      </div>}
 +      {loading && !data && <div role="status" className="flex justify-center p-12"><Loader2 className="h-6 w-6 animate-spin text-zinc-400" /></div>}
 +      {data && <>
-+        {dailyLocked && <p className="mb-4 text-xs text-zinc-500">{t('knowledge.experience.frozenUntilTomorrow', { defaultValue: '今日内容已保存；次日有新增或变更资料时再更新。' })}</p>}
++
 +        {data.status !== 'ready' && <div role="status" className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
 +          {statusText[data.status]}{data.error && <p className="mt-1 break-words text-xs">{data.error}</p>}
 +        </div>}
++        {!daily && hasPublication && data.pending_coverage && <div className="mb-5 flex flex-wrap gap-x-5 gap-y-2 rounded-lg border border-amber-200 px-3 py-2.5 text-xs text-amber-800 dark:border-amber-900 dark:text-amber-300">
++          <span>{t('knowledge.experience.attemptCoverage', { defaultValue: '本轮处理资料' })}：{data.pending_coverage.processed} / {data.pending_coverage.total}</span>
++          <span>{t('knowledge.experience.skipped', { defaultValue: '跳过' })} {data.pending_coverage.skipped} · {t('knowledge.experience.fileReadFailures', { defaultValue: '文件读取失败' })} {data.pending_coverage.failed}</span>
++          {data.pending_coverage.pending !== undefined && <span>{t('knowledge.experience.pending', { defaultValue: '待处理' })} {data.pending_coverage.pending}</span>}
++          {data.pending_coverage.generation_failed && <span>{t('knowledge.experience.generationIncomplete', { defaultValue: '本轮生成未完成' })}</span>}
++          {data.pending_coverage.incomplete && <span>{t('knowledge.experience.scanIncomplete', { defaultValue: '扫描未完成，统计可能不完整' })}</span>}
++        </div>}
++        {data.content ? <><article className="prose prose-sm max-w-none break-words dark:prose-invert">
++          <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml urlTransform={(url) => /^#knowledge-source-\d+$/.test(url) ? url : ''}
++            components={{
++              img: () => null,
++              a: ({ href, children }) => {
++                const match = href?.match(/^#knowledge-source-(\d+)$/);
++                const source = match ? data.sources[Number(match[1])] : undefined;
++                return source ? <button type="button" disabled={opening} onClick={() => void openSource(source)} className="text-sky-600 underline disabled:opacity-50">[{children}]</button> : <span>{children}</span>;
++              },
++            }}>{markdown}</ReactMarkdown>
++        </article><p className="mb-3 text-xs text-zinc-400">{daily?.generation_method === 'extractive'
++          ? t('knowledge.experience.extractiveNotice', { defaultValue: '原文摘录，保留待确认事项；本次仅展示所列资料，完整内容请查看来源及历史版本。' })
++          : daily?.generation_method === 'reused'
++            ? t('knowledge.experience.reusedNotice', { defaultValue: '沿用已发布内容，请结合来源资料复核。' })
++            : t('knowledge.experience.reviewNotice', { defaultValue: '模型归纳，请结合来源资料复核' })}</p></> : data.status !== 'empty' && <p className="py-8 text-center text-sm text-zinc-500">{t('knowledge.experience.noPublished', { defaultValue: '暂无已发布的经验内容。' })}</p>}
++        <details className="mt-5 rounded-lg border border-zinc-200 p-3 text-xs text-zinc-500 dark:border-zinc-800"><summary className="cursor-pointer">{t('knowledge.experience.processingDetails', { defaultValue: '整理范围与更新详情' })}</summary>
++        {dailyLocked && <p className="mb-4 text-xs text-zinc-500">{t('knowledge.experience.frozenUntilTomorrow', { defaultValue: '今日内容已保存；次日有新增或变更资料时再更新。' })}</p>}
 +        <div className="mb-5 flex flex-wrap gap-x-5 gap-y-2 rounded-lg bg-zinc-50 px-3 py-2.5 text-xs text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-400">
 +          {daily ? <>
 +          {daily.mode !== 'reused' && <span>{version
@@ -129950,28 +130072,7 @@ index 00000000..283b1393
 +          {data.version && <span>{t('knowledge.experience.publishedChanges', { defaultValue: '已发布版本变化' })}：+{data.changes.added} / {t('knowledge.experience.modified', { defaultValue: '修订' })} {data.changes.modified} / {t('knowledge.experience.removed', { defaultValue: '移除' })} {data.changes.removed}</span>}
 +          </> : <span>{t('knowledge.experience.coveragePending', { defaultValue: '首次更新完成后展示覆盖统计' })}</span>}
 +        </div>
-+        {!daily && hasPublication && data.pending_coverage && <div className="mb-5 flex flex-wrap gap-x-5 gap-y-2 rounded-lg border border-amber-200 px-3 py-2.5 text-xs text-amber-800 dark:border-amber-900 dark:text-amber-300">
-+          <span>{t('knowledge.experience.attemptCoverage', { defaultValue: '本轮处理资料' })}：{data.pending_coverage.processed} / {data.pending_coverage.total}</span>
-+          <span>{t('knowledge.experience.skipped', { defaultValue: '跳过' })} {data.pending_coverage.skipped} · {t('knowledge.experience.fileReadFailures', { defaultValue: '文件读取失败' })} {data.pending_coverage.failed}</span>
-+          {data.pending_coverage.pending !== undefined && <span>{t('knowledge.experience.pending', { defaultValue: '待处理' })} {data.pending_coverage.pending}</span>}
-+          {data.pending_coverage.generation_failed && <span>{t('knowledge.experience.generationIncomplete', { defaultValue: '本轮生成未完成' })}</span>}
-+          {data.pending_coverage.incomplete && <span>{t('knowledge.experience.scanIncomplete', { defaultValue: '扫描未完成，统计可能不完整' })}</span>}
-+        </div>}
-+        {data.content ? <><p className="mb-3 text-xs text-zinc-400">{daily?.generation_method === 'extractive'
-+          ? t('knowledge.experience.extractiveNotice', { defaultValue: '资料要点摘编 · 根据原文自动整理，非模型分析结果，请结合来源复核。' })
-+          : daily?.generation_method === 'reused'
-+            ? t('knowledge.experience.reusedNotice', { defaultValue: '沿用已发布内容，请结合来源资料复核。' })
-+            : t('knowledge.experience.reviewNotice', { defaultValue: '模型归纳，请结合来源资料复核' })}</p><article className="prose prose-sm max-w-none break-words dark:prose-invert">
-+          <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml urlTransform={(url) => /^#knowledge-source-\d+$/.test(url) ? url : ''}
-+            components={{
-+              img: () => null,
-+              a: ({ href, children }) => {
-+                const match = href?.match(/^#knowledge-source-(\d+)$/);
-+                const source = match ? data.sources[Number(match[1])] : undefined;
-+                return source ? <button type="button" disabled={opening} onClick={() => void openSource(source)} className="text-sky-600 underline disabled:opacity-50">[{children}]</button> : <span>{children}</span>;
-+              },
-+            }}>{markdown}</ReactMarkdown>
-+        </article></> : data.status !== 'empty' && <p className="py-8 text-center text-sm text-zinc-500">{t('knowledge.experience.noPublished', { defaultValue: '暂无已发布的经验内容。' })}</p>}
++        </details>
 +        {data.sources.length > 0 && <section className="mt-8 border-t border-zinc-200 pt-4 dark:border-zinc-800">
 +          <h3 className="mb-3 text-sm font-semibold">{t('knowledge.experience.sources', { defaultValue: '来源资料' })} · {data.sources.length}</h3>
 +          <div className="space-y-1">
@@ -129989,7 +130090,7 @@ index 00000000..283b1393
 +}
 diff --git a/webui/src/pages/Knowledge/index.test.tsx b/webui/src/pages/Knowledge/index.test.tsx
 new file mode 100644
-index 00000000..582c2b7e
+index 00000000..2775a09e
 --- /dev/null
 +++ b/webui/src/pages/Knowledge/index.test.tsx
 @@ -0,0 +1,763 @@
@@ -130421,7 +130522,7 @@ index 00000000..582c2b7e
 +    mocks.experience.mockResolvedValue({ data: { ...experience, daily: { ...daily, generation_method: 'extractive' },
 +      error: '旧的模型调用失败', pending_coverage: { total: 2001, processed: 0, failed: 0, skipped: 0, generation_failed: true } } });
 +    renderWithRouter(<ExperienceOverview category="device-inspection" onOpenSource={vi.fn()} />);
-+    expect(await screen.findByText('资料要点摘编 · 根据原文自动整理，非模型分析结果，请结合来源复核。')).toBeInTheDocument();
++    expect(await screen.findByText('原文摘录，保留待确认事项；本次仅展示所列资料，完整内容请查看来源及历史版本。')).toBeInTheDocument();
 +    expect(screen.getByRole('heading', { name: '巡检经验' })).toBeInTheDocument();
 +    expect(screen.queryByText(/模型归纳/)).not.toBeInTheDocument();
 +    expect(screen.queryByText(/更新失败|旧的模型调用失败|本轮生成未完成/)).not.toBeInTheDocument();
@@ -130496,7 +130597,7 @@ index 00000000..582c2b7e
 +    mocks.experience.mockResolvedValue({ data: { ...experience, daily: { ...daily, mode: 'reused', generation_method: 'extractive', sample_count: 0 } } });
 +    renderWithRouter(<ExperienceOverview category="device-inspection" onOpenSource={vi.fn()} />);
 +    expect(await screen.findByText('本次沿用已发布总结')).toBeInTheDocument();
-+    expect(screen.getByText('资料要点摘编 · 根据原文自动整理，非模型分析结果，请结合来源复核。')).toBeInTheDocument();
++    expect(screen.getByText('原文摘录，保留待确认事项；本次仅展示所列资料，完整内容请查看来源及历史版本。')).toBeInTheDocument();
 +    expect(screen.queryByText(/本次抽样|模型归纳|剩余增量/)).not.toBeInTheDocument();
 +  });
 +
@@ -130758,10 +130859,10 @@ index 00000000..582c2b7e
 +});
 diff --git a/webui/src/pages/Knowledge/index.tsx b/webui/src/pages/Knowledge/index.tsx
 new file mode 100644
-index 00000000..e928200e
+index 00000000..16985652
 --- /dev/null
 +++ b/webui/src/pages/Knowledge/index.tsx
-@@ -0,0 +1,694 @@
+@@ -0,0 +1,701 @@
 +import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 +import { useSearchParams } from 'react-router-dom';
 +import {
@@ -131255,6 +131356,13 @@ index 00000000..e928200e
 +        icon={<LibraryBig className="h-8 w-8" />}
 +      />
 +
++      <section aria-label={t('knowledge.guide.title', { defaultValue: '模块介绍' })} className="mb-4 rounded-xl border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
++        <p>{t(`knowledge.guide.${view}`)}</p>
++        <details className="mt-2 text-xs">
++          <summary className="cursor-pointer text-zinc-500">{t('knowledge.guide.title', { defaultValue: '模块介绍' })}</summary>
++          <dl className="mt-2 grid gap-2 sm:grid-cols-3">{(['outputs', 'knowledge', 'memory'] as const).map((item) => <div key={item}><dt className="font-semibold text-zinc-800 dark:text-zinc-200">{t(`knowledge.tabs.${item}`)}</dt><dd className="mt-1 leading-relaxed">{t(`knowledge.guide.${item}`)}</dd></div>)}</dl>
++        </details>
++      </section>
 +      <div ref={splitRef} data-testid="knowledge-split" className={`flex min-h-0 flex-1 overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 ${stacked ? 'flex-col' : ''}`}>
 +        <aside id="knowledge-navigation" data-testid="knowledge-navigation" style={stacked ? { height: '45%' } : { width: visibleSidebarWidth }} className="flex min-h-0 shrink-0 flex-col">
 +          <div className="border-b border-zinc-200 p-3 dark:border-zinc-800">

@@ -1,28 +1,28 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.4",
+  "packageVersion": "1.15.5",
   "target": "2026.11.13-linux-amd64",
-  "status": "Usage request scheduling and cached display accepted on local 5173; Linux remote pending",
+  "status": "Readable knowledge highlights and module guides accepted on local 5173; Linux remote pending",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
     "branch": "codex/pro-1113-enhancements",
-    "commit": "284b1ca73bbe25dad7637381c707ae6f5172edfb",
+    "commit": "955632db1e9b88486d460f04637e821370b83356",
     "baseline": "2bc02382874a226ef63d20cab3734220ad752225"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.15.4-pro-2026.11.13-full.tar.gz",
-  "sha256": "57899ab0c0fd0312cf987e4d12e04173ba5784b35ee1a521b14da7379446456c",
+  "archive": "releases/flocks-customizations-1.15.5-pro-2026.11.13-full.tar.gz",
+  "sha256": "4d6c73f977e07011b0c4eaf615187116b60574d9bc85d267ebae4b7a3e780d59",
   "payloadFiles": 492,
   "validation": "verification.json",
   "limits": [
-    "Linux-amd64 remote installation and real XDR/model/mail chain still require user execution.",
-    "Local 5173 uses approved 11.13 enhanced Core on native Mac Pro 11.12.2. Existing local providers are Alibaba and ThreatBook; private_models covered in component regression.",
-    "Illustrative historical tokens and CNY costs; actual usage storage and billing are unchanged. Anchors persist per browser/account/provider; no new calls means no added tokens."
+    "Linux-amd64 remote installation requires user Gitee sync and bash update-flocks.sh.",
+    "Local 5173 uses approved 11.13 enhanced Core on native Mac Pro11.12.2.",
+    "Extractive fallback shows this batch only; previous publications remain in history. Legacy display is adapted without rewriting stored data."
   ],
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "80 model UI/helper regressions including 16-second slow-response scheduling; two paired Pro builds; 5173 configured count, scoped totals, refresh and cache details; live-delta logic covered by component regression; 501 native payload hashes.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.15.4.zip",
-  "offlineRepositoryArchiveSha256": "c404931dbf880cf23b7f9dbe6e4a846eda4ee3b19a6a4640cf83635b4c4db59f"
+  "validationScope": "140 knowledge backend, 50 Knowledge UI, 27 installer regressions; two paired Pro builds; native 5173 authenticated module switching, generation, history, source preview, refresh, collapsed processing details; 501 payload hashes.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.15.5.zip",
+  "offlineRepositoryArchiveSha256": "6bfd460b0a9f25d963199ad2e844341b6f9e7fc76237d9691b65a5610f13b18b"
 }

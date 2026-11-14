@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.4",
+  "packageVersion": "1.15.5",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.15.4",
+    "packageVersion": "1.15.5",
     "developmentBranch": "codex/pro-1113-enhancements",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "284b1ca73bbe25dad7637381c707ae6f5172edfb",
+    "sourceCommit": "955632db1e9b88486d460f04637e821370b83356",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -19,51 +19,58 @@
       "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
       "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
     },
-    "previousCustomization": "1.15.3"
+    "previousCustomization": "1.15.4"
   },
-  "scope": "Prevent 5-second polling from discarding slow responses; share outstanding requests, restore per-account/provider real snapshots and show illustrative totals without network dependency",
+  "scope": "Readable knowledge source highlights, remove recursive fallback inheritance, non-mutating legacy read adapter, module guides and collapsible processing details",
   "local5173Acceptance": {
     "nativeBinaryBefore": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
-    "sourceCommit": "284b1ca73bbe25dad7637381c707ae6f5172edfb",
+    "sourceCommit": "955632db1e9b88486d460f04637e821370b83356",
     "port": 5173,
     "localBase": "native Mac Pro 11.12.2 with approved 11.13 enhanced Core",
     "status": "passed",
     "payloadFilesMatched": 501,
     "nativeBinaryUnchanged": true,
-    "packageVersion": "1.15.4",
-    "finishedAt": "2026-11-14T15:13:25.343856+00:00",
+    "packageVersion": "1.15.5",
+    "finishedAt": "2026-11-14T15:23:52.307982+00:00",
     "ready": true,
     "productionWebUIFilesMatched": 235,
     "repeatCheck": "already-applied",
     "scenarios": [
-      "Authenticated native Chrome /models preserves provider count, M units and two-decimal CNY fees.",
-      "Switch Alibaba and ThreatBook; each provider restores its own totals and real cache details.",
-      "Reload selected ThreatBook and open real cache details; actual 157.19M usage and 3100 requests remain available.",
-      "Controlled 16-second response test: one outstanding request, response accepted, next poll only 5 seconds after completion; late provider response cannot overwrite selection.",
-      "Persistent real snapshot survives remount; failures preserve it; different accounts remain isolated."
+      "Authenticated Chrome: all three content modules display the matching guide; memory MEMORY.md renders original headings and download link.",
+      "Native 5173 alert-domain Update produced a real 5-source publication; model fallback completes and freezes the day.",
+      "Final code reload presents only readable document excerpts, merges identical workflow.md quotes with both source citations, keeps structured evidence in Sources.",
+      "Switching the saved historical version renders the same readable excerpt; source citation opens the full original Markdown and returns to the domain.",
+      "Processing details and module guide default collapsed; published version, timestamp and source provenance remain available."
     ],
     "limits": [
-      "Local providers are Alibaba and ThreatBook; private_models verified by component regression.",
-      "Linux remote pending user installation."
+      "Local native Mac Pro11.12.2 with user-approved 11.13 enhanced Core; remote Linux installation pending user.",
+      "Legacy nested publications and repeated fallback verified with isolated regression fixtures; local account initially had no published alert-domain summary."
     ]
   },
   "automatedValidation": {
-    "modelManagement": {
-      "passed": 80,
-      "log": ".work/model-speed-tests.log"
+    "knowledgeBackend": {
+      "passed": 140,
+      "log": ".work/knowledge-backend-tests.log"
     },
-    "pairedProProductionBuilds": "Linux Pro 11.13 and native Mac Pro11.12.2 both passed TypeScript and Vite builds",
+    "knowledgeUI": {
+      "passed": 50,
+      "log": ".work/knowledge-ui-tests.log"
+    },
+    "installer": {
+      "passed": 27,
+      "log": ".work/knowledge-installer-tests.log"
+    },
+    "pairedProProductionBuilds": "Linux Pro11.13 and native Mac Pro11.12.2 passed TypeScript and Vite builds",
     "sourcePatchReconstruction": {
-      "sourceCommit": "284b1ca73bbe25dad7637381c707ae6f5172edfb",
+      "sourceCommit": "955632db1e9b88486d460f04637e821370b83356",
       "baseline": "2bc02382874a226ef63d20cab3734220ad752225",
-      "reconstructedTree": "a00a57b20372c941d10d73b683bf7d4214139b9f",
-      "expectedTree": "a00a57b20372c941d10d73b683bf7d4214139b9f",
+      "reconstructedTree": "7d39acf9f8cee72c55495c8ef0fd84ba12522ffe",
+      "expectedTree": "7d39acf9f8cee72c55495c8ef0fd84ba12522ffe",
       "matches": true
     }
   },
   "limits": [
-    "Native 5173 runs the user-approved 11.13 enhanced Core on Mac Pro11.12.2.",
-    "Remote Linux installation remains pending user Gitee sync and bash update-flocks.sh.",
-    "Slow-network cases verified with controlled 16-second response tests; local warm authenticated API navigation and DOM read measured 279ms before the fix, not remote server latency."
+    "Local native Mac Pro11.12.2 with user-approved 11.13 enhanced Core; remote Linux installation pending user.",
+    "Legacy nested publications and repeated fallback verified with isolated regression fixtures; local account initially had no published alert-domain summary."
   ]
 }
