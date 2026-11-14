@@ -15178,13 +15178,14 @@ index 00000000..060a7631
 +
 +没有明确的节点顺序证据时，不得说“第一步”“首个节点”，也不得声称其他步骤全部未执行。历史失败只解释当次记录，不代表系统当前仍有同样问题；恢复情况要看后续成功执行记录。首句用普通中文说明缺少什么条件，不堆砌模块路径或代码名，技术名称放在排查依据中核对。
 diff --git a/flocks/agent/agents/rex/agent.yaml b/flocks/agent/agents/rex/agent.yaml
-index 5c88bf7b..983acbeb 100644
+index 5c88bf7b..46d2cb08 100644
 --- a/flocks/agent/agents/rex/agent.yaml
 +++ b/flocks/agent/agents/rex/agent.yaml
 @@ -1,9 +1,10 @@
  name: rex
- group: 系统辅助
+-group: 系统辅助
 -name_cn: Rex 主智能体
++group: 安全任务统筹
 +name_cn: Rex 智能安全组长
  description: >-
    Powerful AI orchestrator for security operations. Analyzes threats,
@@ -15193,6 +15194,74 @@ index 5c88bf7b..983acbeb 100644
  mode: primary
  hidden: false
  color: "#00CED1"
+diff --git a/flocks/agent/business_groups.py b/flocks/agent/business_groups.py
+new file mode 100644
+index 00000000..dd86dc59
+--- /dev/null
++++ b/flocks/agent/business_groups.py
+@@ -0,0 +1,29 @@
++"""Business defaults for the known security specialists and legacy installs.
++
++Only legacy catalog labels are upgraded in memory. User config overlays are
++applied afterwards by the registry; files, capabilities and visibility stay put.
++"""
++from flocks.agent.agent import AgentInfo
++
++# name: (business group, legacy catalog group)
++BUSINESS_GROUPS = {
++    "rex": ("安全任务统筹", "系统辅助"),
++    "api-security": ("网络与应用安全", "安全研判"),
++    "ndr-analyst": ("网络与应用安全", "安全研判"),
++    "host-forensics": ("主机安全", "安全研判"),
++    "host-forensics-fast": ("主机安全", "安全研判"),
++    "asset-survey": ("资产暴露面", "威胁情报"),
++    "hrti-threat-intelligence": ("威胁与漏洞情报", "威胁情报"),
++    "vul-threat-intelligence": ("威胁与漏洞情报", "威胁情报"),
++    "ti-analyst": ("威胁与漏洞情报", "威胁情报"),
++    "phishing-detector": ("邮件安全", "安全研判"),
++    "device-inspector": ("运行保障", "平台集成"),
++    "flocks-troubleshooter": ("运行保障", "运行保障"),
++}
++
++
++def with_business_group(agent: AgentInfo) -> AgentInfo:
++    default = BUSINESS_GROUPS.get(agent.name)
++    if default is None or agent.group not in (None, "", default[1]):
++        return agent
++    return agent.model_copy(update={"group": default[0]})
+diff --git a/flocks/agent/registry.py b/flocks/agent/registry.py
+index 532b075f..e8742b57 100644
+--- a/flocks/agent/registry.py
++++ b/flocks/agent/registry.py
+@@ -40,6 +40,7 @@ from flocks.agent.agent import (
+     DelegationTrigger,
+     normalize_agent_group,
+ )
++from flocks.agent.business_groups import with_business_group
+ import flocks.agent.delegatable_settings as delegatable_settings
+ from flocks.agent.toolset import agent_declares_tool
+ from flocks.agent.tool_permissions import permission_items_to_ruleset
+@@ -521,6 +522,10 @@ class Agent:
+                 continue
+             result[name] = info
+ 
++        # Upgrade known legacy catalog groups in memory, before explicit user overlays.
++        result = {name: info if name in managed_names else with_business_group(info)
++                  for name, info in result.items()}
++
+         # Group overlays also apply to runtime/Storage registrations. Copy the
+         # result rather than mutating the registered source definition.
+         for key, value in (cfg.agent or {}).items():
+@@ -717,7 +722,8 @@ class Agent:
+         if resolved in managed_agent_ids():
+             return None
+         definitions = await asyncio.to_thread(scan_and_load)
+-        return definitions.get(resolved)
++        definition = definitions.get(resolved)
++        return with_business_group(definition) if definition is not None else None
+ 
+     @classmethod
+     async def validate_group_settings(cls, updates: Dict[str, Any]) -> None:
 diff --git a/flocks/channel/base.py b/flocks/channel/base.py
 index e19138a9..0d9c46e8 100644
 --- a/flocks/channel/base.py
@@ -103592,6 +103661,83 @@ index 43f8d686..105831e0 100644
          from flocks.project.project import Project
  
          async with Project.lifecycle_guard(project_id):
+diff --git a/flocks/skill/business_groups.py b/flocks/skill/business_groups.py
+new file mode 100644
+index 00000000..9c1d0240
+--- /dev/null
++++ b/flocks/skill/business_groups.py
+@@ -0,0 +1,50 @@
++"""Display defaults for known skills; never rewrite installed skill files."""
++
++SECURITY_GROUPS = {
++    'skyeye-sensor-use': ('网络安全', '平台集成'),
++    'skyeye-use': ('网络安全', '平台集成'),
++    'tdp-use': ('网络安全', '平台集成'),
++    'onesig-use': ('网络安全', '平台集成'),
++    'sangfor-edr-use': ('终端与主机安全', '平台集成'),
++    'onesec-use': ('终端与主机安全', '平台集成'),
++    'qingteng-use': ('终端与主机安全', '平台集成'),
++    'sangfor-xdr-use': ('安全运营与设备接入', '平台集成'),
++    'device-integration-guide': ('安全运营与设备接入', '平台集成'),
++    'chaitin-cli': ('安全运营与设备接入', None),
++    'ndr-alert-analysis': ('告警研判与取证', '安全研判'),
++    'analyzing-browser-forensics-with-hindsight': ('告警研判与取证', None),
++    'browser-use': ('浏览器与桌面自动化', '系统辅助'),
++    'web2cli': ('浏览器与桌面自动化', '系统辅助'),
++    'onboarding': ('运行保障', '系统辅助'),
++    'workflow-builder': ('能力编排与开发', '系统辅助'),
++    'workflow-config-guide': ('能力编排与开发', '系统辅助'),
++    'skill-builder': ('能力编排与开发', '系统辅助'),
++    'agent-builder': ('能力编排与开发', '系统辅助'),
++    'tool-builder': ('能力编排与开发', '系统辅助'),
++    'webui-page-builder': ('能力编排与开发', '系统辅助'),
++}
++PARADEV_GROUPS = {
++    'browser': '浏览器与桌面自动化', 'computer': '浏览器与桌面自动化',
++    'panes': '浏览器与桌面自动化',
++    'plugins': '开发环境与集成', 'setup': '开发环境与集成',
++    'integrations': '开发环境与集成', 'contribute': '开发环境与集成',
++    'environment': '开发环境与集成',
++    '10x': '协作与成果输出', 'standup': '协作与成果输出',
++    'automate': '协作与成果输出', 'orchestrate': '协作与成果输出',
++    'page': '协作与成果输出', 'doctor': '运行保障', 'feedback': '运行保障',
++}
++
++
++def business_skill_group(data: dict):
++    name, current = data.get('name'), data.get('group')
++    default = SECURITY_GROUPS.get(name)
++    # An explicit blank is a user decision to ungroup, not a missing default.
++    if 'group' in data and (not current or default is None or current != default[1]):
++        return current
++    if default:
++        return default[0]
++    # Generic names such as "page" are not enough to identify external skills.
++    description = str(data.get('description', '')).lower()
++    if name in PARADEV_GROUPS and ('paradev' in description or 'superset' in description):
++        return PARADEV_GROUPS[name]
++    return current
+diff --git a/flocks/skill/skill.py b/flocks/skill/skill.py
+index 90b14f83..e9ff4e67 100644
+--- a/flocks/skill/skill.py
++++ b/flocks/skill/skill.py
+@@ -22,6 +22,7 @@ from pydantic_core import PydanticCustomError
+ 
+ from flocks.utils.log import Log
+ from flocks.project.instance import Instance
++from flocks.skill.business_groups import business_skill_group
+ 
+ 
+ log = Log.create(service="skill")
+@@ -472,7 +473,7 @@ class Skill:
+ 
+             return SkillInfo(
+                 name=name,
+-                group=data.get("group"),
++                group=business_skill_group(data),
+                 description=description,
+                 location=filepath,
+                 source=source,
 diff --git a/flocks/task/background.py b/flocks/task/background.py
 index 78f55105..e735c5a0 100644
 --- a/flocks/task/background.py
@@ -106767,6 +106913,58 @@ index 58710462..ae24c650 100644
  [tool.ruff]
  line-length = 120
  target-version = "py312"
+diff --git a/tests/agent/test_business_groups.py b/tests/agent/test_business_groups.py
+new file mode 100644
+index 00000000..d709ff6d
+--- /dev/null
++++ b/tests/agent/test_business_groups.py
+@@ -0,0 +1,46 @@
++from unittest.mock import AsyncMock, patch
++
++import pytest
++
++from flocks.agent.agent import AgentInfo
++from flocks.agent.business_groups import BUSINESS_GROUPS, with_business_group
++from flocks.agent.registry import Agent
++from flocks.config.config import ConfigInfo
++
++
++@pytest.mark.parametrize('name', BUSINESS_GROUPS)
++def test_legacy_copy_classification_preserves_capabilities_and_source(name):
++    target, old = BUSINESS_GROUPS[name]
++    agent = AgentInfo(name=name, group=old, tools=['kept-tool'], hidden=True, group_readonly=True)
++    updated = with_business_group(agent)
++    assert updated.group == target
++    assert updated.model_dump(exclude={'group'}) == agent.model_dump(exclude={'group'})
++    assert agent.group == old
++
++
++@pytest.mark.parametrize('group', [None, ''])
++def test_ungrouped_api_agent_receives_business_default(group):
++    assert with_business_group(AgentInfo(name='api-security', group=group)).group == '网络与应用安全'
++
++
++def test_unknown_agents_and_custom_business_labels_are_preserved():
++    unknown = AgentInfo(name='user-specialist', group='安全研判')
++    custom = AgentInfo(name='ndr-analyst', group='用户专用分组')
++    assert with_business_group(unknown) is unknown
++    assert with_business_group(custom) is custom
++
++
++@pytest.mark.parametrize('group', ['用户专用分组', '安全研判', ''])
++async def test_registry_user_override_wins_over_legacy_defaults(group, tmp_path, monkeypatch):
++    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "runtime"))
++    agent = AgentInfo(name='api-security', group=None, mode='subagent', tools=['kept-tool'])
++    Agent.register(agent.name, agent)
++    try:
++        cfg = ConfigInfo(agent={agent.name: {'group': group}})
++        with patch('flocks.agent.registry.Config.get', AsyncMock(return_value=cfg)):
++            loaded = await Agent._load_agents()
++        assert loaded[agent.name].group == group
++        assert loaded[agent.name].tools == ['kept-tool']
++        assert agent.group == ''
++    finally:
++        Agent.unregister(agent.name)
 diff --git a/tests/channel/test_email.py b/tests/channel/test_email.py
 index 6303afb3..c9487c06 100644
 --- a/tests/channel/test_email.py
@@ -126122,6 +126320,53 @@ index 00000000..5c4af1a4
 +            assert list((storage / 'workspace/outputs' / attempts[0]['business_date']).glob('host-security-monitor-*.md'))
 +    finally:
 +        reset_current_auth_user(token)
+diff --git a/tests/skill/test_business_groups.py b/tests/skill/test_business_groups.py
+new file mode 100644
+index 00000000..75508e3f
+--- /dev/null
++++ b/tests/skill/test_business_groups.py
+@@ -0,0 +1,41 @@
++import pytest
++from flocks.skill.skill import Skill
++from flocks.skill.business_groups import SECURITY_GROUPS, business_skill_group
++
++
++@pytest.mark.parametrize('name', SECURITY_GROUPS)
++def test_known_legacy_and_missing_skill_groups(name):
++    target, legacy = SECURITY_GROUPS[name]
++    data = {'name': name, 'description': 'Existing instructions'}
++    assert business_skill_group(data) == target
++    if legacy:
++        assert business_skill_group(dict(data, group=legacy)) == target
++
++
++@pytest.mark.parametrize('group', ['', '用户专用分类'])
++def test_frontmatter_user_group_and_content_are_preserved(tmp_path, group):
++    p = tmp_path / 'SKILL.md'
++    body = f'---\nname: tdp-use\ndescription: Existing instructions\ngroup: "{group}"\n---\n# Keep instruction body\n'
++    p.write_text(body)
++    skill = Skill._parse_skill_md(str(p), source='user')
++    assert skill.group == group
++    assert p.read_text() == body
++
++
++def test_generic_external_name_requires_product_identity():
++    assert business_skill_group({'name': 'browser', 'description': 'A custom skill'}) is None
++    assert business_skill_group({'name': 'browser', 'description': 'Paradev browser control'}) == '浏览器与桌面自动化'
++    assert business_skill_group({'name': 'not-known', 'description': 'Paradev helper'}) is None
++
++
++def test_shipped_skill_headers_receive_the_business_groups():
++    from pathlib import Path
++    root = Path(__file__).resolve().parents[2] / '.flocks/plugins/skills'
++    matched = []
++    for path in root.rglob('SKILL.md'):
++        skill = Skill._parse_skill_md(str(path), source='project')
++        if skill and skill.name in SECURITY_GROUPS:
++            assert skill.group == SECURITY_GROUPS[skill.name][0], skill.name
++            matched.append(skill.name)
++    assert len(matched) == 19
++    assert 'web2cli' in matched
 diff --git a/tests/task/test_diagnosis.py b/tests/task/test_diagnosis.py
 new file mode 100644
 index 00000000..a2e7a0d2

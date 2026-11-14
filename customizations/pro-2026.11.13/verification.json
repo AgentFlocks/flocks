@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.11",
+  "packageVersion": "1.15.12",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.15.11",
+    "packageVersion": "1.15.12",
     "developmentBranch": "codex/workflow-business-groups",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "c6f93ebebcad81e63e09df38be32763e3421d8ab",
+    "sourceCommit": "c2b8026f31743a57443e14638a49ebc79014205a",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -19,59 +19,74 @@
       "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
       "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
     },
-    "previousCustomization": "1.15.10"
+    "previousCustomization": "1.15.11"
   },
-  "scope": "Classify seven bundled SOC workflows by business purpose through native metadata; preserve readonly definitions and all 1.15.10 features.",
+  "scope": "Business classification of digital employees and team skills, including known legacy installed copies, without rewriting user files; retains 1.15.11 workflow classification and 1.15.10 SOC return caching.",
   "local5173Acceptance": {
     "nativeBinaryBefore": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
-    "sourceCommit": "c6f93ebebcad81e63e09df38be32763e3421d8ab",
+    "sourceCommit": "c2b8026f31743a57443e14638a49ebc79014205a",
     "port": 5173,
     "localBase": "native Mac Pro 11.12.2 with approved 11.13 enhanced Core",
     "status": "passed",
-    "payloadFilesMatched": 591,
+    "payloadFilesMatched": 594,
     "nativeBinaryUnchanged": true,
     "realMemoryFilesUnchanged": true,
-    "packageVersion": "1.15.11",
-    "groupCounts": {
-      "网络威胁分析": 4,
-      "告警运营与研判": 6,
-      "资产与设备巡检": 2,
-      "每日运营成果": 4,
-      "漏洞与情报": 2,
-      "知识沉淀": 1
-    },
-    "ungrouped": 0,
-    "totalWorkflows": 19,
-    "noCustomWorkflowSidebarGroup": true,
-    "refreshPersistence": true,
-    "consoleErrors": 0,
+    "userDefinitionsAndConfigsUnchanged": 63,
     "productionWebUIFilesMatched": 236,
     "repeatCheck": "already-applied",
-    "ready": true
+    "ready": true,
+    "packageVersion": "1.15.12",
+    "finishedAt": "2026-11-14T17:37:44.788282+00:00",
+    "agentGroups": {
+      "安全任务统筹": 1,
+      "网络与应用安全": 2,
+      "主机安全": 2,
+      "资产暴露面": 1,
+      "威胁与漏洞情报": 2,
+      "邮件安全": 1,
+      "运行保障": 1
+    },
+    "skillGroups": {
+      "网络安全": 4,
+      "终端与主机安全": 3,
+      "告警研判与取证": 2,
+      "安全运营与设备接入": 3,
+      "浏览器与桌面自动化": 5,
+      "开发环境与集成": 5,
+      "协作与成果输出": 5,
+      "运行保障": 2
+    },
+    "ungroupedAgents": 0,
+    "ungroupedSkills": 0,
+    "workflowClassificationRegression": true,
+    "refreshPersistence": true,
+    "skillNativeFilter": 12,
+    "consoleErrors": 0
   },
   "automatedValidation": {
-    "filesystemWorkflow": {
-      "passed": 18,
-      "log": ".work/workflow-groups-tests.log"
+    "agentSkillAndAgentRoutes": {
+      "passed": 148,
+      "log": ".work/agent-skill-groups-tests.log"
     },
     "groupNavigationUI": {
       "passed": 27,
       "log": ".work/workflow-groups-ui-tests.log"
     },
-    "pairedProProductionBuilds": "Linux Pro11.13 and native Mac Pro11.12.2 passed TypeScript and Vite builds",
-    "sourcePatchReconstruction": {
-      "sourceCommit": "c6f93ebebcad81e63e09df38be32763e3421d8ab",
-      "baseline": "2bc02382874a226ef63d20cab3734220ad752225",
-      "tree": "343e78aaf9c35a9d84205f520dff5077e2068af8",
-      "reproduced": true
-    },
     "installer": {
       "passed": 27,
-      "log": ".work/workflow-groups-installer-tests.log"
-    }
+      "log": ".work/catalog-groups-installer-tests.log"
+    },
+    "pairedProProductionBuilds": "Linux Pro11.13 and native Mac Pro11.12.2 passed TypeScript and Vite builds",
+    "sourcePatchReconstruction": {
+      "sourceCommit": "c2b8026f31743a57443e14638a49ebc79014205a",
+      "baseline": "2bc02382874a226ef63d20cab3734220ad752225",
+      "tree": "78fbc7a68607767a1af2f0240d8b9e7eb998c11b",
+      "reproduced": true
+    },
+    "skillDefinitionFilesUnchanged": 19
   },
   "limits": [
     "Local 5173 uses approved 11.13 enhanced Core on native Mac Pro11.12.2; remote Linux requires user Gitee sync and bash update-flocks.sh.",
-    "Existing user workflow group assignments are preserved; remote counts depend on installed user workflows."
+    "Remote counts depend on installed content and visibility; user explicit groups and unknown custom definitions are retained."
   ]
 }

@@ -1,18 +1,18 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.11",
+  "packageVersion": "1.15.12",
   "target": "2026.11.13-linux-amd64",
-  "status": "Seven bundled SOC workflows classified by business purpose; accepted on local 5173; remote Linux pending",
+  "status": "Digital employees, team skills and workflows classified by business purpose; accepted on local 5173; remote Linux pending",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
     "branch": "codex/workflow-business-groups",
-    "commit": "c6f93ebebcad81e63e09df38be32763e3421d8ab",
+    "commit": "c2b8026f31743a57443e14638a49ebc79014205a",
     "baseline": "2bc02382874a226ef63d20cab3734220ad752225"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.15.11-pro-2026.11.13-full.tar.gz",
-  "sha256": "a1a5ce1f845984b5dfd92687a9b64765c665ae26fa834c0b5d33caf0435065b0",
-  "payloadFiles": 582,
+  "archive": "releases/flocks-customizations-1.15.12-pro-2026.11.13-full.tar.gz",
+  "sha256": "aadd55595f150ef342fa09e2512f5af429bb73a848684d33cad8aefcc99e13a5",
+  "payloadFiles": 586,
   "validation": "verification.json",
   "limits": [
     "Local 5173 uses approved 11.13 enhanced Core on native Mac Pro11.12.2.",
@@ -21,7 +21,7 @@
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "18 filesystem workflow, 27 group navigation and 27 installer regressions; paired Pro production builds; 5173 business group membership, counts and refresh persistence; package payload hash inspection.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.15.11.zip",
-  "offlineRepositoryArchiveSha256": "ce25aef0ed1f2bf3ce11cf43c5768f8c921fbff96ee398a3ac184e0872bf9348"
+  "validationScope": "148 agent/skill/route, 27 group navigation and 27 installer regressions; paired Pro builds; actual 5173 agent and skill groups, membership, refresh, source filter and workflow regression; unchanged user definitions/configs.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.15.12.zip",
+  "offlineRepositoryArchiveSha256": "66e0ffeb02ec8a23bae910102198f122d47da8d8b76256b6232b847582265a51"
 }
