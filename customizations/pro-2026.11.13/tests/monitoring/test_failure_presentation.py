@@ -29,10 +29,11 @@ def test_summary_separates_failed_execution_from_finished_inconclusive_assessmen
               event('failed', state='system_wait'), event('not-started')]
     result = facts(errors=['TDP 关联查询时间参数校验失败'])
     summary = analysis_summary(result, events, {('xdr', '192.0.2.1'): [item['key'] for item in events]})
-    assert '确认风险 1 条、无风险 0 条、待判定 3 条' in summary.text
-    assert '已完成调查但证据不足 1 条；调查未完成 2 条' in summary.text
-    assert '结果汇总完成，不代表事件调查全部成功' in summary.text
-    assert '程序故障不能当作证据不足或无风险结论' in summary.text
+    assert '确认风险 1 条、待判定 3 条' in summary.text
+    assert '无风险 0 条' in summary.details
+    assert '1 条调查已完成但证据不足；2 条调查尚未完成' in summary.text
+    assert '结果尚不完整' in summary.text
+    assert '系统故障不作无风险或证据不足结论' in summary.text
     assert summary.success is True  # Correlation reporting completed; the failing investigation did not.
     assert '结果汇总完成，不代表每条事件都已调查成功' in step_purpose('关联分析', {})
 

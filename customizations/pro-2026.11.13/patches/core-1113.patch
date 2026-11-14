@@ -96721,10 +96721,10 @@ index 00000000..01c3e67c
 +    return json.dumps(value, ensure_ascii=False, default=str)
 diff --git a/flocks/monitoring/summaries.py b/flocks/monitoring/summaries.py
 new file mode 100644
-index 00000000..73c2b18c
+index 00000000..e53a005b
 --- /dev/null
 +++ b/flocks/monitoring/summaries.py
-@@ -0,0 +1,406 @@
+@@ -0,0 +1,439 @@
 +"""Deterministic, bounded plain-text step summaries from already queried facts."""
 +from dataclasses import dataclass, field
 +import re
@@ -96844,12 +96844,12 @@ index 00000000..73c2b18c
 +    return text
 +
 +
-+def investigation_progress_summary(result, events):
++def investigation_progress_counts(result, events):
 +    """Separate a completed inconclusive assessment from work that never finished."""
 +    recorded = any(isinstance(event.get('investigation'), dict) for event in events)
 +    supplied = result.get('investigation_incomplete')
 +    if not recorded and type(supplied) is not int:
-+        return ''  # Legacy records cannot establish which unknowns were uninvestigated.
++        return None  # Legacy records cannot establish which unknowns were uninvestigated.
 +    def state(event):
 +        value = event.get('investigation')
 +        return value.get('state') if isinstance(value, dict) else None
@@ -96858,6 +96858,14 @@ index 00000000..73c2b18c
 +                      and not event.get('assessment', {}).get('ended') for event in events))
 +    inconclusive = (sum(state(event) == 'ready' and event.get('risk') == 'unknown'
 +                        for event in events) if recorded else max(0, result.get('unknown', 0) - incomplete))
++    return inconclusive, incomplete
++
++
++def investigation_progress_summary(result, events):
++    counts = investigation_progress_counts(result, events)
++    if counts is None:
++        return ''
++    inconclusive, incomplete = counts
 +    return f'已完成调查但证据不足 {inconclusive} 条；调查未完成 {incomplete} 条。'
 +
 +
@@ -96923,20 +96931,45 @@ index 00000000..73c2b18c
 +def analysis_summary(result, events, groups):
 +    related = [keys for keys in groups.values() if len(keys) > 1]
 +    if not events and result['errors']:
-+        return Summary('关联分析已跳过：事件查询未完整成功，没有可分析的完整事件批次。不能将此次失败理解为查询到 0 条事件。此前收到的回信是否完成跟进，以本轮回信及回查记录为准。')
-+    text = f"关联结果已整理：{event_sources_summary(result, len(events))}，形成 {len(related)} 个同设备、同主机关联组，涉及 {sum(map(len, related))} 条事件；确认风险 {result['risk']} 条、无风险 {result.get('benign', 0)} 条、待判定 {result['unknown']} 条。"
-+    text += f"其中 {result.get('analyzed', 0)} 条已有调查结论。"
-+    text += investigation_progress_summary(result, events)
++        return Summary('查询未完整成功，已跳过关联分析；不能据此判断没有告警。')
++    total = len(events)
++    if all(type(result.get(key)) is int for key in ('query_events', 'resumed_events', 'query_resumed_overlap')):
++        text = (f"本轮查询未完整成功，已取得 {result['query_events']} 条事件" if result.get('query_complete') is False
++                else f"本轮查询返回 {result['query_events']} 条事件")
++        text += f"，另有历史待办 {result['resumed_events']} 条" if result['resumed_events'] else '，无历史待办'
++        if result['query_resumed_overlap']:
++            text += f"（重合 {result['query_resumed_overlap']} 条，已去重）"
++        if result.get('rechecked_events'):
++            text += f"，另核验历史事件 {result['rechecked_events']} 条"
++        text += '。'
++    else:
++        text = f'本轮纳入 {total} 条事件。'
++    text += (f'按同设备、同主机形成 {len(related)} 个关联组，涉及 {sum(map(len, related))} 条事件。'
++             if related else '未形成多事件关联组，不代表没有关联主机。')
++    # Keep the audit renderer unchanged; the conversation omits zero counters.
++    progress = investigation_progress_summary(result, events)
++    counts = investigation_progress_counts(result, events)
++    inconclusive, incomplete = counts if counts is not None else (None, None)
++    if total == 1 and result['unknown'] == 1:
++        text += ('调查尚未完成，风险待判定。' if incomplete == 1 else
++                 '调查已完成，但证据不足，风险仍待判定。' if inconclusive == 1 else '风险待判定。')
++    else:
++        verdicts = [f'{name} {count} 条' for name, count in
++                    [('确认风险', result['risk']), ('无风险', result.get('benign', 0)), ('待判定', result['unknown'])] if count]
++        if verdicts:
++            text += '、'.join(verdicts) + '。'
++        states = [f'{count} 条{state}' for count, state in
++                  [(inconclusive, '调查已完成但证据不足'), (incomplete, '调查尚未完成')] if count]
++        if states:
++            text += '；'.join(states) + '。'
 +    if result['errors']:
-+        text += f"有 {len(result['errors'])} 项查询或调查未完成，结果不完整；请查看对应失败步骤。"
-+        text += '本步骤完成只表示结果汇总完成，不代表事件调查全部成功；程序故障不能当作证据不足或无风险结论。'
-+    if len(events) == 1:
-+        text += '本轮只有一条事件，因此没有多事件关联组；这不表示没有关联主机。'
-+    text += '只有当前版本、引用实际行为证据且高置信确认的风险才通知责任人；无风险和证据不足分别在事件列表保留，后者尚未排除风险。处置完成以 XDR 回查事实为准。'
++        text += f"有 {len(result['errors'])} 项查询或调查失败，结果尚不完整；系统故障不作无风险或证据不足结论。"
++    text += '\n\n仅对当前事件版本中有实际行为证据、高置信确认的风险通知责任人。无风险与证据不足事件保留在列表，证据不足不代表风险已排除；处置以 XDR 回查为准。'
 +    by_key = {event['key']: event for event in events}
 +    lines = (f"{i}. 主机：{label(by_key[keys[0]].get('host'), limit=100)}；关联事件：" + '；'.join(event_label(by_key[key]) for key in keys[:20]) + (f'；另 {len(keys)-20} 条事件见上方各页查询明细' if len(keys) > 20 else '') + '。'
 +             for i, keys in enumerate(related, 1))
 +    lines = list(lines) + [f"事件：{event_label(event)}；研判说明：{label(event.get('reason'), limit=500)}；与本轮同设备、同主机的其他事件关联 {len(event.get('related', []))} 条。" for event in events]
++    lines.insert(0, f"完整统计：{event_sources_summary(result, total)}；确认风险 {result['risk']} 条、无风险 {result.get('benign', 0)} 条、待判定 {result['unknown']} 条；已有调查结论 {result.get('analyzed', 0)} 条。" + progress)
 +    return Summary(text, detail_lines(lines, len(lines)))
 +
 +
@@ -108753,6 +108786,50 @@ index 00000000..87771e58
 +
 +def test_related_alert_id_validation_does_not_coerce_or_change_ids():
 +    assert c.related_alert_ids({'alertIds': ['a-1', 'a-1', 3, {}, '.', '..', '../bad', 'x' * 201]}) == ['a-1']
+diff --git a/tests/monitoring/test_analysis_prose.py b/tests/monitoring/test_analysis_prose.py
+new file mode 100644
+index 00000000..7ffbe3dc
+--- /dev/null
++++ b/tests/monitoring/test_analysis_prose.py
+@@ -0,0 +1,38 @@
++import pytest
++from flocks.monitoring.summaries import analysis_summary
++
++pytestmark = pytest.mark.no_database
++
++def sample(**changes):
++    r=dict(risk=0,benign=0,unknown=1,analyzed=0,errors=[],query_events=1,resumed_events=0,query_resumed_overlap=0,investigation_incomplete=1)
++    r.update(changes)
++    e=dict(key='one',id='one',risk='unknown',host='192.0.2.1',related=[],investigation={'state':'pending'})
++    return r,e
++
++def test_single_pending_event_is_natural_and_zero_counters_stay_in_evidence():
++    r,e=sample()
++    s=analysis_summary(r,[e],{'host':['one']})
++    assert s.text.startswith('本轮查询返回 1 条事件，无历史待办。未形成多事件关联组，不代表没有关联主机。调查尚未完成，风险待判定。\n\n')
++    assert '0 条' not in s.text and '已有调查结论 0 条' in s.details
++    assert '当前事件版本' in s.text and '高置信' in s.text and 'XDR 回查' in s.text
++    assert len(s.text)<200
++
++def test_finished_inconclusive_is_not_presented_as_unfinished():
++    r,e=sample(investigation_incomplete=0,analyzed=1)
++    e['investigation']['state']='ready'
++    s=analysis_summary(r,[e],{})
++    assert '调查已完成，但证据不足' in s.text and '调查尚未完成' not in s.text
++
++def test_partial_query_and_overlap_are_kept_without_claiming_no_alerts():
++    r,e=sample(query_complete=False,resumed_events=2,query_resumed_overlap=1,errors=['query failure'])
++    s=analysis_summary(r,[e],{})
++    assert '查询未完整成功' in s.text and '历史待办 2 条' in s.text and '重合 1 条，已去重' in s.text
++    assert '系统故障不作无风险或证据不足结论' in s.text
++    s=analysis_summary(r,[],{})
++    assert '不能据此判断没有告警' in s.text
++
++def test_legacy_unknown_does_not_invent_investigation_progress():
++    r,e=sample()
++    r.pop('investigation_incomplete');e.pop('investigation')
++    s=analysis_summary(r,[e],{})
++    assert '风险待判定' in s.text and '调查尚未完成' not in s.text and '调查已完成' not in s.text
 diff --git a/tests/monitoring/test_assessment.py b/tests/monitoring/test_assessment.py
 new file mode 100644
 index 00000000..a314c7cd
@@ -113609,10 +113686,10 @@ index 00000000..d395fcb1
 +    assert 'PRIVATE' not in json.dumps(captured)
 diff --git a/tests/monitoring/test_failure_presentation.py b/tests/monitoring/test_failure_presentation.py
 new file mode 100644
-index 00000000..d20123ad
+index 00000000..e0cc7073
 --- /dev/null
 +++ b/tests/monitoring/test_failure_presentation.py
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,106 @@
 +"""Execution failures must remain distinguishable from inconclusive security assessments."""
 +import pytest
 +
@@ -113644,10 +113721,11 @@ index 00000000..d20123ad
 +              event('failed', state='system_wait'), event('not-started')]
 +    result = facts(errors=['TDP 关联查询时间参数校验失败'])
 +    summary = analysis_summary(result, events, {('xdr', '192.0.2.1'): [item['key'] for item in events]})
-+    assert '确认风险 1 条、无风险 0 条、待判定 3 条' in summary.text
-+    assert '已完成调查但证据不足 1 条；调查未完成 2 条' in summary.text
-+    assert '结果汇总完成，不代表事件调查全部成功' in summary.text
-+    assert '程序故障不能当作证据不足或无风险结论' in summary.text
++    assert '确认风险 1 条、待判定 3 条' in summary.text
++    assert '无风险 0 条' in summary.details
++    assert '1 条调查已完成但证据不足；2 条调查尚未完成' in summary.text
++    assert '结果尚不完整' in summary.text
++    assert '系统故障不作无风险或证据不足结论' in summary.text
 +    assert summary.success is True  # Correlation reporting completed; the failing investigation did not.
 +    assert '结果汇总完成，不代表每条事件都已调查成功' in step_purpose('关联分析', {})
 +
@@ -121978,7 +122056,7 @@ index 00000000..ee86fdd6
 +    assert '都向已配置的责任人发送一封测试通知' in summary.text
 diff --git a/tests/monitoring/test_step_summaries.py b/tests/monitoring/test_step_summaries.py
 new file mode 100644
-index 00000000..b5de98c8
+index 00000000..61b1f762
 --- /dev/null
 +++ b/tests/monitoring/test_step_summaries.py
 @@ -0,0 +1,189 @@
@@ -122103,7 +122181,7 @@ index 00000000..b5de98c8
 +        assert attempt['status'] == 'failed'
 +        assert len(await rows('SELECT * FROM monitor_observations')) == (100 if mode == 'late_failure' else 0)
 +        assert not await rows('SELECT * FROM monitor_cursors')
-+        assert ('已保存查询结果 100 条' if mode == 'late_failure' else '查询未完整结束') in combined
++        assert ('已取得 100 条事件' if mode == 'late_failure' else '查询未完整结束') in combined
 +        if mode == 'query_failure':
 +            assert not any(step['tool'] == '关联分析' for step in steps)
 +        assert '上次查询进度保持不变' in combined
@@ -122122,7 +122200,7 @@ index 00000000..b5de98c8
 +        assert any(step['tool'] == '调查取证：Fixture XDR' for step in steps)
 +        assert '原事件' in combined
 +        result = json.loads(attempt['result'])
-+        assert f"确认风险 {result['risk']} 条、无风险 {result.get('benign', 0)} 条、待判定 {result['unknown']} 条" in texts[-1].text
++        assert f"确认风险 {result['risk']} 条、无风险 {result.get('benign', 0)} 条、待判定 {result['unknown']} 条" in texts[-1].metadata['details']
 +        if mode == 'partial':
 +            assert attempt['status'] == 'failed'
 +            assert '关联实体响应缺失' in combined

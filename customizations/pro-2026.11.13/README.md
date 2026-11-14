@@ -1,10 +1,10 @@
 # Flocks Pro 2026.11.13 定制增强包
 
-增强包版本：**1.15.0**。仅适用于 `2026.11.13-linux-amd64`、Pro `c16ed13499b3ca721e3549893d5507c506bc2c58`、Core `2bc02382874a226ef63d20cab3734220ad752225`，运行树保护策略必须为 `native`。
+增强包版本：**1.15.1**。仅适用于 `2026.11.13-linux-amd64`、Pro `c16ed13499b3ca721e3549893d5507c506bc2c58`、Core `2bc02382874a226ef63d20cab3734220ad752225`，运行树保护策略必须为 `native`。
 
 ## 本次迁移
 
-将 1.14.10 的全部增强合并到官方 11.13 配对 Core，保留新版上游修复。增强源码为 [f6ab71f1](https://github.com/AgentFlocks/flocksdev/commit/f6ab71f148367a83bf4c3d535dcbaf34f559317f)，开发分支 `codex/pro-1113-enhancements`；可复现差异保存在 `patches/core-1113.patch`。
+将 1.14.10 的全部增强合并到官方 11.13 配对 Core，保留新版上游修复。增强源码为 [f4f7ffa4](https://github.com/AgentFlocks/flocksdev/commit/f4f7ffa45455970954c8bc100f5aa66c0fc3bc56)，开发分支 `codex/pro-1113-enhancements`；可复现差异保存在 `patches/core-1113.patch`。
 
 保留以下能力：
 
@@ -67,3 +67,8 @@ python3 build_package.py --core .work/core-1113 --pro .work/pro-1113 --frontend 
 实际检查、代码及负载哈希见 `verification.json`。本机 5173 的基础发行仍是 11.12.2-darwin-arm64；本地验收使用临时本机基线清单和本包相同业务源码、前端，不替换原生文件。此验收与 Linux 11.13 原版安装器隔离验证分别记录，不将本机功能验证称为 Linux 实机验证。
 
 远程服务器不由智能体部署。上传后仍需用户同步 Gitee、执行更新脚本并回传结果；真实 XDR、模型服务和邮件收发需远程业务验收。
+
+
+## 1.15.1 监测关联总结精简
+
+关联总结由固定程序模板生成，改为本轮结果、调查状态与必要通知边界两段；零值统计和完整调查结论计数移入折叠依据。保留历史待办、去重、查询不完整与系统故障提示，区分调查未完成和调查完成但证据不足。仅影响新生成的总结，已有对话和业务数据不改写。

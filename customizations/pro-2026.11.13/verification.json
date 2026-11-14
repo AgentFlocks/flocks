@@ -1,14 +1,12 @@
 {
   "schemaVersion": 1,
-  "recordedAt": "2026-11-14T20:19:04.493774+08:00",
-  "packageVersion": "1.15.0",
-  "target": "2026.11.13-linux-amd64",
-  "source": {
+  "packageVersion": "1.15.1",
+  "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.15.0",
+    "packageVersion": "1.15.1",
     "developmentBranch": "codex/pro-1113-enhancements",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "f6ab71f148367a83bf4c3d535dcbaf34f559317f",
+    "sourceCommit": "f4f7ffa45455970954c8bc100f5aa66c0fc3bc56",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -21,72 +19,32 @@
       "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
       "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
     },
-    "previousCustomization": "1.14.10"
+    "previousCustomization": "1.15.0"
   },
-  "checks": {
-    "frontend": {
-      "passed": 3079,
-      "files": 236,
-      "typecheckAndPairedProBuild": true
-    },
-    "coreMonitoringIngestCertificates": {
-      "passed": 1558,
-      "skipped": 3,
-      "skippedReason": "Kafka broker integration not configured"
-    },
-    "installerUpdaterSQLiteOverlay": {
-      "passed": 55
-    },
-    "proPostgresFocused": {
-      "passed": 11
-    },
-    "proPostgresLifecycleConversationRoundEndMail": {
-      "passed": 174,
-      "database": "isolated PostgreSQL schema per test",
-      "goSourceCommit": "c16ed13499b3ca721e3549893d5507c506bc2c58",
-      "nativeModules": "local 11.12.2 darwin-arm64; affected task/workflow source interfaces match 11.13; exact 11.13 Linux native runtime separately imported"
-    },
-    "sourcePatchReverseCheck": true
-  },
-  "local5173": {
+  "scope": "Concise deterministic correlation prose; audit counts retained in evidence; no decision or notification changes",
+  "local5173Acceptance": {
+    "nativeBinaryBefore": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
+    "sourceCommit": "f4f7ffa45455970954c8bc100f5aa66c0fc3bc56",
     "port": 5173,
-    "localRelease": "2026.11.12.2-darwin-arm64",
-    "packageVersion": "1.15.0",
-    "filesMatched": 492,
-    "repeatNoRestart": true,
-    "baselineRestoredAndReady": true,
+    "localBase": "native Mac Pro 11.12.2 with approved 11.13 enhanced Core",
+    "status": "passed",
+    "payloadFilesMatched": 501,
     "nativeBinaryUnchanged": true,
-    "uiCases": [
-      "brand",
-      "hidden workshop sidebar",
-      "knowledge accumulation",
-      "hidden agents",
-      "SOC dashboard default route",
-      "expanded task panel",
-      "refresh",
-      "task center",
-      "scene suite list"
-    ],
-    "limitations": [
-      "installed monitoring suite incomplete before acceptance; monitoring direct page redirects to suite manager",
-      "no real XDR/model/mail business execution"
-    ],
-    "console": "No application errors after startup; deployment restart network errors and browser extension errors excluded"
+    "finishedAt": "2026-11-14T12:52:18.673267+00:00",
+    "actual5173AuthenticatedAPI": "passed: pending, completed-inconclusive, failed-query, full audit counters retained",
+    "sourceSha256": "50b15962cdc54915d83eb1120ee13e9ef6c9603930c50d7bb265084d6f070aa0",
+    "temporaryFixtureRemoved": true,
+    "ready": true
   },
-  "linux1113": {
-    "environment": "isolated official linux-amd64 release under Docker amd64 emulation on macOS",
-    "officialBundleSha256": "dfca270ee3976c9a5d5372fdcd41091ae6f82f9926562fa2451e209a261cbe2c",
-    "buildId": "c16ed13",
-    "protection": "native",
-    "payloadBaselineMismatches": 0,
-    "payloadFilesMatched": 492,
-    "apply": true,
-    "repeatAlreadyApplied": true,
-    "restore": true,
-    "originalUpgradeVerifyBeforeAndAfter": true,
-    "exactNativeRuntimeAppAndMonitoringImport": true,
-    "fixtureNote": "Extraction/copy modes were restored to signed runtime manifest values before verification; hashes and verifier were not bypassed; no service or license was installed"
-  },
-  "remoteStatus": "Uploaded package requires user Gitee sync and bash update-flocks.sh; actual server installation and real XDR/model/mail business acceptance pending",
-  "payloadManifestSha256": "7e180765904d15ceb40ea2f9408cd9d8b4b9372172322a26e451eba007a6a64d"
+  "limits": [
+    "Remote Linux installation pending user execution.",
+    "Local 5173 is the user-approved enhanced 11.13 Core on native Mac Pro 11.12.2."
+  ],
+  "automatedValidation": {
+    "coreMonitoring": {
+      "passed": 50,
+      "log": ".work/monitor-prose-tests.log"
+    },
+    "pairedProFrontendBuild": "passed; UI source unchanged"
+  }
 }
