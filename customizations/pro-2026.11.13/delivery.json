@@ -1,28 +1,27 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.10",
+  "packageVersion": "1.15.11",
   "target": "2026.11.13-linux-amd64",
-  "status": "SOC page return caching accepted on local 5173; Linux remote pending",
+  "status": "Seven bundled SOC workflows classified by business purpose; accepted on local 5173; remote Linux pending",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
-    "branch": "codex/pro-1113-enhancements",
-    "commit": "20ba6f45108b30ea466a62fc8ac13e2ac2dc8fcc",
+    "branch": "codex/workflow-business-groups",
+    "commit": "c6f93ebebcad81e63e09df38be32763e3421d8ab",
     "baseline": "2bc02382874a226ef63d20cab3734220ad752225"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.15.10-pro-2026.11.13-full.tar.gz",
-  "sha256": "39fcfddc883b6db48523611731f5fd2ec6fbb6b503c633b9cae311ea819cd5cb",
+  "archive": "releases/flocks-customizations-1.15.11-pro-2026.11.13-full.tar.gz",
+  "sha256": "a1a5ce1f845984b5dfd92687a9b64765c665ae26fa834c0b5d33caf0435065b0",
   "payloadFiles": 582,
   "validation": "verification.json",
   "limits": [
-    "Native Mac Pro11.12.2 with approved 11.13 enhanced Core; remote Linux needs user Gitee sync and bash update-flocks.sh.",
-    "Host keepalive works with existing installed SOC pages; enhanced query-cache clients are also shipped in Core/Pro single-item update templates. Existing user plugin files are not overwritten remotely.",
-    "No measured remote latency or populated local alert evidence is claimed."
+    "Local 5173 uses approved 11.13 enhanced Core on native Mac Pro11.12.2.",
+    "Remote Linux requires user Gitee sync and bash update-flocks.sh."
   ],
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "36 related UI/cache/host regressions, 27 installer checks, paired Pro builds; real 5173 navigation retains time range, keyword and timeline state across other SOC pages and workbench; 591 native payloads and 236 frontend files matched.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.15.10.zip",
-  "offlineRepositoryArchiveSha256": "6951ee51fc30cb4d508baef782a4cd2f55a3ac9ca18d71f545a3c5750887644f"
+  "validationScope": "18 filesystem workflow, 27 group navigation and 27 installer regressions; paired Pro production builds; 5173 business group membership, counts and refresh persistence; package payload hash inspection.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.15.11.zip",
+  "offlineRepositoryArchiveSha256": "ce25aef0ed1f2bf3ce11cf43c5768f8c921fbff96ee398a3ac184e0872bf9348"
 }

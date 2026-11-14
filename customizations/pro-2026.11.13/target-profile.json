@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.10",
-  "developmentBranch": "codex/pro-1113-enhancements",
+  "packageVersion": "1.15.11",
+  "developmentBranch": "codex/workflow-business-groups",
   "sourceRepository": "AgentFlocks/flocksdev",
-  "sourceCommit": "20ba6f45108b30ea466a62fc8ac13e2ac2dc8fcc",
+  "sourceCommit": "c6f93ebebcad81e63e09df38be32763e3421d8ab",
   "deploymentMode": "source-overlay",
   "installerProtocol": 2,
   "edition": "flockspro",
@@ -16,5 +16,5 @@
     "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
     "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
   },
-  "previousCustomization": "1.15.9"
+  "previousCustomization": "1.15.10"
 }

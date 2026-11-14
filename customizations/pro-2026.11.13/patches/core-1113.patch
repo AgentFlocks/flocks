@@ -13123,12 +13123,12 @@ index 6a983b51..a32bae85 100644
 +response_hints: 保留完整 API 响应。各接口响应字段、数据字典及分页说明见交付包 references/document-api.json 和 API-REFERENCE.md；字段值按本接口解释。
 diff --git a/.flocks/plugins/workflows/custom-soc-alert-fusion/meta.json b/.flocks/plugins/workflows/custom-soc-alert-fusion/meta.json
 new file mode 100644
-index 00000000..6c0f9f50
+index 00000000..7c706baa
 --- /dev/null
 +++ b/.flocks/plugins/workflows/custom-soc-alert-fusion/meta.json
 @@ -0,0 +1,3 @@
 +{
-+  "group": "自定义工作流"
++  "group": "告警运营与研判"
 +}
 diff --git a/.flocks/plugins/workflows/custom-soc-alert-fusion/workflow.json b/.flocks/plugins/workflows/custom-soc-alert-fusion/workflow.json
 new file mode 100644
@@ -13369,12 +13369,12 @@ index 00000000..840051a4
 +报告区分“分析已完成”和“业务处置状态”，包含来源标记、有效/无效计数、规则依据、证据输入行号、人工待办、通知展示配置及边界说明。邮箱读取共享 `flocks/workflow/custom_soc_suite_settings.json` 的 `emailDisplay`，缺配置明确失败；通知只进入报告，未发邮件。任何恢复或闭环结论仅表示提供的输入证据满足本工作流规则，不修改真实设备或任务。
 diff --git a/.flocks/plugins/workflows/custom-soc-closure-report/meta.json b/.flocks/plugins/workflows/custom-soc-closure-report/meta.json
 new file mode 100644
-index 00000000..6c0f9f50
+index 00000000..fc828f90
 --- /dev/null
 +++ b/.flocks/plugins/workflows/custom-soc-closure-report/meta.json
 @@ -0,0 +1,3 @@
 +{
-+  "group": "自定义工作流"
++  "group": "每日运营成果"
 +}
 diff --git a/.flocks/plugins/workflows/custom-soc-closure-report/workflow.json b/.flocks/plugins/workflows/custom-soc-closure-report/workflow.json
 new file mode 100644
@@ -13615,12 +13615,12 @@ index 00000000..4cea7097
 +报告区分“分析已完成”和“业务处置状态”，包含来源标记、有效/无效计数、规则依据、证据输入行号、人工待办、通知展示配置及边界说明。邮箱读取共享 `flocks/workflow/custom_soc_suite_settings.json` 的 `emailDisplay`，缺配置明确失败；通知只进入报告，未发邮件。任何恢复或闭环结论仅表示提供的输入证据满足本工作流规则，不修改真实设备或任务。
 diff --git a/.flocks/plugins/workflows/custom-soc-device-health/meta.json b/.flocks/plugins/workflows/custom-soc-device-health/meta.json
 new file mode 100644
-index 00000000..6c0f9f50
+index 00000000..cd7acfb4
 --- /dev/null
 +++ b/.flocks/plugins/workflows/custom-soc-device-health/meta.json
 @@ -0,0 +1,3 @@
 +{
-+  "group": "自定义工作流"
++  "group": "资产与设备巡检"
 +}
 diff --git a/.flocks/plugins/workflows/custom-soc-device-health/workflow.json b/.flocks/plugins/workflows/custom-soc-device-health/workflow.json
 new file mode 100644
@@ -13861,12 +13861,12 @@ index 00000000..37983571
 +报告区分“分析已完成”和“业务处置状态”，包含来源标记、有效/无效计数、规则依据、证据输入行号、人工待办、通知展示配置及边界说明。邮箱读取共享 `flocks/workflow/custom_soc_suite_settings.json` 的 `emailDisplay`，缺配置明确失败；通知只进入报告，未发邮件。任何恢复或闭环结论仅表示提供的输入证据满足本工作流规则，不修改真实设备或任务。
 diff --git a/.flocks/plugins/workflows/custom-soc-ndr-dns/meta.json b/.flocks/plugins/workflows/custom-soc-ndr-dns/meta.json
 new file mode 100644
-index 00000000..6c0f9f50
+index 00000000..7b00d431
 --- /dev/null
 +++ b/.flocks/plugins/workflows/custom-soc-ndr-dns/meta.json
 @@ -0,0 +1,3 @@
 +{
-+  "group": "自定义工作流"
++  "group": "网络威胁分析"
 +}
 diff --git a/.flocks/plugins/workflows/custom-soc-ndr-dns/workflow.json b/.flocks/plugins/workflows/custom-soc-ndr-dns/workflow.json
 new file mode 100644
@@ -14113,12 +14113,12 @@ index 00000000..7996e96c
 +报告区分“分析已完成”和“业务处置状态”，包含来源标记、有效/无效计数、规则依据、证据输入行号、人工待办、通知展示配置及边界说明。邮箱读取共享 `flocks/workflow/custom_soc_suite_settings.json` 的 `emailDisplay`，缺配置明确失败；通知只进入报告，未发邮件。任何恢复或闭环结论仅表示提供的输入证据满足本工作流规则，不修改真实设备或任务。
 diff --git a/.flocks/plugins/workflows/custom-soc-ndr-egress/meta.json b/.flocks/plugins/workflows/custom-soc-ndr-egress/meta.json
 new file mode 100644
-index 00000000..6c0f9f50
+index 00000000..7b00d431
 --- /dev/null
 +++ b/.flocks/plugins/workflows/custom-soc-ndr-egress/meta.json
 @@ -0,0 +1,3 @@
 +{
-+  "group": "自定义工作流"
++  "group": "网络威胁分析"
 +}
 diff --git a/.flocks/plugins/workflows/custom-soc-ndr-egress/workflow.json b/.flocks/plugins/workflows/custom-soc-ndr-egress/workflow.json
 new file mode 100644
@@ -14359,12 +14359,12 @@ index 00000000..0b03d5c7
 +报告区分“分析已完成”和“业务处置状态”，包含来源标记、有效/无效计数、规则依据、证据输入行号、人工待办、通知展示配置及边界说明。邮箱读取共享 `flocks/workflow/custom_soc_suite_settings.json` 的 `emailDisplay`，缺配置明确失败；通知只进入报告，未发邮件。任何恢复或闭环结论仅表示提供的输入证据满足本工作流规则，不修改真实设备或任务。
 diff --git a/.flocks/plugins/workflows/custom-soc-ndr-exfil/meta.json b/.flocks/plugins/workflows/custom-soc-ndr-exfil/meta.json
 new file mode 100644
-index 00000000..6c0f9f50
+index 00000000..7b00d431
 --- /dev/null
 +++ b/.flocks/plugins/workflows/custom-soc-ndr-exfil/meta.json
 @@ -0,0 +1,3 @@
 +{
-+  "group": "自定义工作流"
++  "group": "网络威胁分析"
 +}
 diff --git a/.flocks/plugins/workflows/custom-soc-ndr-exfil/workflow.json b/.flocks/plugins/workflows/custom-soc-ndr-exfil/workflow.json
 new file mode 100644
@@ -14605,12 +14605,12 @@ index 00000000..a846b18d
 +报告区分“分析已完成”和“业务处置状态”，包含来源标记、有效/无效计数、规则依据、证据输入行号、人工待办、通知展示配置及边界说明。邮箱读取共享 `flocks/workflow/custom_soc_suite_settings.json` 的 `emailDisplay`，缺配置明确失败；通知只进入报告，未发邮件。任何恢复或闭环结论仅表示提供的输入证据满足本工作流规则，不修改真实设备或任务。
 diff --git a/.flocks/plugins/workflows/custom-soc-ndr-lateral/meta.json b/.flocks/plugins/workflows/custom-soc-ndr-lateral/meta.json
 new file mode 100644
-index 00000000..6c0f9f50
+index 00000000..7b00d431
 --- /dev/null
 +++ b/.flocks/plugins/workflows/custom-soc-ndr-lateral/meta.json
 @@ -0,0 +1,3 @@
 +{
-+  "group": "自定义工作流"
++  "group": "网络威胁分析"
 +}
 diff --git a/.flocks/plugins/workflows/custom-soc-ndr-lateral/workflow.json b/.flocks/plugins/workflows/custom-soc-ndr-lateral/workflow.json
 new file mode 100644

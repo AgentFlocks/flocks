@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.10",
+  "packageVersion": "1.15.11",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.15.10",
-    "developmentBranch": "codex/pro-1113-enhancements",
+    "packageVersion": "1.15.11",
+    "developmentBranch": "codex/workflow-business-groups",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "20ba6f45108b30ea466a62fc8ac13e2ac2dc8fcc",
+    "sourceCommit": "c6f93ebebcad81e63e09df38be32763e3421d8ab",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -19,63 +19,59 @@
       "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
       "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
     },
-    "previousCustomization": "1.15.9"
+    "previousCustomization": "1.15.10"
   },
-  "scope": "Preserve SOC overview and alert investigation page instances and state across navigation; bounded account/query memory cache, deduplicated slow requests, stale refresh and failure retention. Paired Pro SOC client templates preserve native extra pages and policies.",
+  "scope": "Classify seven bundled SOC workflows by business purpose through native metadata; preserve readonly definitions and all 1.15.10 features.",
   "local5173Acceptance": {
     "nativeBinaryBefore": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
-    "sourceCommit": "20ba6f45108b30ea466a62fc8ac13e2ac2dc8fcc",
+    "sourceCommit": "c6f93ebebcad81e63e09df38be32763e3421d8ab",
     "port": 5173,
     "localBase": "native Mac Pro 11.12.2 with approved 11.13 enhanced Core",
     "status": "passed",
     "payloadFilesMatched": 591,
     "nativeBinaryUnchanged": true,
     "realMemoryFilesUnchanged": true,
-    "packageVersion": "1.15.10",
-    "finishedAt": "2026-11-14T17:23:06.515910+00:00",
-    "ready": true,
+    "packageVersion": "1.15.11",
+    "groupCounts": {
+      "网络威胁分析": 4,
+      "告警运营与研判": 6,
+      "资产与设备巡检": 2,
+      "每日运营成果": 4,
+      "漏洞与情报": 2,
+      "知识沉淀": 1
+    },
+    "ungrouped": 0,
+    "totalWorkflows": 19,
+    "noCustomWorkflowSidebarGroup": true,
+    "refreshPersistence": true,
+    "consoleErrors": 0,
     "productionWebUIFilesMatched": 236,
     "repeatCheck": "already-applied",
-    "scenarios": [
-      "SOC overview -> alert investigation -> overview: retained selected 24h time range, no full-page loader",
-      "Alert investigation keyword and collapsed timeline retained after overview and after workbench -> SOC -> alert investigation",
-      "Cleared temporary unsent keyword and restored original 7d range/timeline expansion",
-      "Manual overview refresh worked",
-      "Installed only four page source files with full page-directory backups; compiled two real bundles with native Pro interpreter",
-      "No new console error after final frontend reload; earlier network errors occurred during planned service restart",
-      "Current real alert window is empty; populated-result failures/races/isolation covered by automated tests"
-    ],
-    "pageBuilds": {
-      "soc-overview": "31ff538c66c1807e",
-      "soc-alerts": "b443c03e4815f7c3"
-    },
-    "limits": [
-      "Native Mac Pro11.12.2 with approved 11.13 enhanced Core; remote Linux needs user Gitee sync and bash update-flocks.sh.",
-      "Host keepalive works with existing installed SOC pages; enhanced query-cache clients are also shipped in Core/Pro single-item update templates. Existing user plugin files are not overwritten remotely.",
-      "No measured remote latency or populated local alert evidence is claimed."
-    ]
+    "ready": true
   },
   "automatedValidation": {
-    "relatedUI": {
-      "passed": 36,
-      "log": "/tmp/soc-cache-final-tests.log"
+    "filesystemWorkflow": {
+      "passed": 18,
+      "log": ".work/workflow-groups-tests.log"
+    },
+    "groupNavigationUI": {
+      "passed": 27,
+      "log": ".work/workflow-groups-ui-tests.log"
+    },
+    "pairedProProductionBuilds": "Linux Pro11.13 and native Mac Pro11.12.2 passed TypeScript and Vite builds",
+    "sourcePatchReconstruction": {
+      "sourceCommit": "c6f93ebebcad81e63e09df38be32763e3421d8ab",
+      "baseline": "2bc02382874a226ef63d20cab3734220ad752225",
+      "tree": "343e78aaf9c35a9d84205f520dff5077e2068af8",
+      "reproduced": true
     },
     "installer": {
       "passed": 27,
-      "log": "/tmp/soc-cache-installer.log"
-    },
-    "pairedProProductionBuilds": "Linux Pro11.13 and native Mac Pro11.12.2 passed TypeScript/Vite",
-    "sourcePatchReconstruction": {
-      "sourceCommit": "20ba6f45108b30ea466a62fc8ac13e2ac2dc8fcc",
-      "baseline": "2bc02382874a226ef63d20cab3734220ad752225",
-      "reconstructedTree": "93ea58e8a87ec9d333445ccd1557789972adfd82",
-      "expectedTree": "93ea58e8a87ec9d333445ccd1557789972adfd82",
-      "matches": true
+      "log": ".work/workflow-groups-installer-tests.log"
     }
   },
   "limits": [
-    "Native Mac Pro11.12.2 with approved 11.13 enhanced Core; remote Linux needs user Gitee sync and bash update-flocks.sh.",
-    "Host keepalive works with existing installed SOC pages; enhanced query-cache clients are also shipped in Core/Pro single-item update templates. Existing user plugin files are not overwritten remotely.",
-    "No measured remote latency or populated local alert evidence is claimed."
+    "Local 5173 uses approved 11.13 enhanced Core on native Mac Pro11.12.2; remote Linux requires user Gitee sync and bash update-flocks.sh.",
+    "Existing user workflow group assignments are preserved; remote counts depend on installed user workflows."
   ]
 }
