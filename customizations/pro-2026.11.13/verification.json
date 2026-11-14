@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.3",
+  "packageVersion": "1.15.4",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.15.3",
+    "packageVersion": "1.15.4",
     "developmentBranch": "codex/pro-1113-enhancements",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "e643df9bb835f67bd3886735ab106619f05cc903",
+    "sourceCommit": "284b1ca73bbe25dad7637381c707ae6f5172edfb",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -19,26 +19,28 @@
       "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
       "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
     },
-    "previousCustomization": "1.15.2"
+    "previousCustomization": "1.15.3"
   },
-  "scope": "Display tokens in M with two decimals and costs with two decimals; preserve full real counters, demo seeds, anchors and polling",
+  "scope": "Prevent 5-second polling from discarding slow responses; share outstanding requests, restore per-account/provider real snapshots and show illustrative totals without network dependency",
   "local5173Acceptance": {
     "nativeBinaryBefore": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
-    "sourceCommit": "e643df9bb835f67bd3886735ab106619f05cc903",
+    "sourceCommit": "284b1ca73bbe25dad7637381c707ae6f5172edfb",
     "port": 5173,
     "localBase": "native Mac Pro 11.12.2 with approved 11.13 enhanced Core",
     "status": "passed",
     "payloadFilesMatched": 501,
     "nativeBinaryUnchanged": true,
-    "packageVersion": "1.15.3",
-    "finishedAt": "2026-11-14T14:13:57.528724+00:00",
+    "packageVersion": "1.15.4",
+    "finishedAt": "2026-11-14T15:13:25.343856+00:00",
     "ready": true,
     "productionWebUIFilesMatched": 235,
     "repeatCheck": "already-applied",
     "scenarios": [
-      "Authenticated native Chrome /models shows connected providers=2, Tokens=2637.85M and CNY=5275.69 元.",
-      "Reload preserves the selected provider, demo anchor and two-decimal display.",
-      "Model component tests cover private_models=7486.29M / 14972.58 元 and live-delta rounded display."
+      "Authenticated native Chrome /models preserves provider count, M units and two-decimal CNY fees.",
+      "Switch Alibaba and ThreatBook; each provider restores its own totals and real cache details.",
+      "Reload selected ThreatBook and open real cache details; actual 157.19M usage and 3100 requests remain available.",
+      "Controlled 16-second response test: one outstanding request, response accepted, next poll only 5 seconds after completion; late provider response cannot overwrite selection.",
+      "Persistent real snapshot survives remount; failures preserve it; different accounts remain isolated."
     ],
     "limits": [
       "Local providers are Alibaba and ThreatBook; private_models verified by component regression.",
@@ -47,21 +49,21 @@
   },
   "automatedValidation": {
     "modelManagement": {
-      "passed": 77,
-      "log": ".work/model-format-tests.log"
+      "passed": 80,
+      "log": ".work/model-speed-tests.log"
     },
     "pairedProProductionBuilds": "Linux Pro 11.13 and native Mac Pro11.12.2 both passed TypeScript and Vite builds",
     "sourcePatchReconstruction": {
-      "sourceCommit": "e643df9bb835f67bd3886735ab106619f05cc903",
+      "sourceCommit": "284b1ca73bbe25dad7637381c707ae6f5172edfb",
       "baseline": "2bc02382874a226ef63d20cab3734220ad752225",
-      "reconstructedTree": "a1ec32766fbca991c76fd6ba76b032e9f36bbee9",
-      "expectedTree": "a1ec32766fbca991c76fd6ba76b032e9f36bbee9",
+      "reconstructedTree": "a00a57b20372c941d10d73b683bf7d4214139b9f",
+      "expectedTree": "a00a57b20372c941d10d73b683bf7d4214139b9f",
       "matches": true
     }
   },
   "limits": [
     "Native 5173 runs the user-approved 11.13 enhanced Core on Mac Pro11.12.2.",
     "Remote Linux installation remains pending user Gitee sync and bash update-flocks.sh.",
-    "Previous broader installation and usage verification retained in delivery commit 232c0d7f97c2ebb551decb80f5ab4747a2bb7509."
+    "Slow-network cases verified with controlled 16-second response tests; local warm authenticated API navigation and DOM read measured 279ms before the fix, not remote server latency."
   ]
 }

@@ -131525,7 +131525,7 @@ index 83215372..41e62d34 100644
          </>
        )}
 diff --git a/webui/src/pages/Model/TokenUsageCard.tsx b/webui/src/pages/Model/TokenUsageCard.tsx
-index 0d54c8c7..075d3f6b 100644
+index 0d54c8c7..cf684fad 100644
 --- a/webui/src/pages/Model/TokenUsageCard.tsx
 +++ b/webui/src/pages/Model/TokenUsageCard.tsx
 @@ -7,6 +7,8 @@ import CacheUsagePanel from './CacheUsagePanel';
@@ -131546,26 +131546,42 @@ index 0d54c8c7..075d3f6b 100644
  
    const cancelClose = () => clearTimeout(closeTimer.current);
    const close = () => { cancelClose(); setPosition(null); };
-@@ -103,6 +105,7 @@ export default function TokenUsageCard(props: {
+@@ -102,7 +104,8 @@ export default function TokenUsageCard(props: {
+       className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-left text-sky-800 hover:bg-sky-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2"
      >
        <span className="mb-1 flex items-center gap-2 text-xs font-medium opacity-70"><Brain className="h-5 w-5" aria-hidden="true" />{t('dashboard.totalTokens')}</span>
-       <span className="block break-words text-lg font-bold">{props.loading && !props.usageStats ? '…' : props.error && !props.usageStats ? '—' : total > 0 ? formatTokenMillions(total) : t('dashboard.noUsage')}</span>
+-      <span className="block break-words text-lg font-bold">{props.loading && !props.usageStats ? '…' : props.error && !props.usageStats ? '—' : total > 0 ? formatTokenMillions(total) : t('dashboard.noUsage')}</span>
++      <span className="block break-words text-lg font-bold">{props.loading && !props.usageStats && props.dashboardTotal === undefined ? '…' : props.error && !props.usageStats && props.dashboardTotal === undefined ? '—' : total > 0 ? formatTokenMillions(total) : t('dashboard.noUsage')}</span>
 +      {props.providerName && <span className="block truncate text-xs opacity-70">{props.providerName}</span>}
        <span className="mt-0.5 flex items-center gap-1 text-xs opacity-70"><Info className="h-3 w-3" aria-hidden="true" />{t('cacheUsage.details')}</span>
      </button>
      {position && createPortal(
 diff --git a/webui/src/pages/Model/index.test.tsx b/webui/src/pages/Model/index.test.tsx
-index dfb16227..7bce857f 100644
+index dfb16227..77374ca4 100644
 --- a/webui/src/pages/Model/index.test.tsx
 +++ b/webui/src/pages/Model/index.test.tsx
-@@ -1,5 +1,5 @@
+@@ -1,9 +1,10 @@
  import React from 'react';
 -import { screen, waitFor, within } from '@testing-library/react';
 +import { act, screen, waitFor, within } from '@testing-library/react';
  import userEvent from '@testing-library/user-event';
  import { vi } from 'vitest';
  
-@@ -1433,3 +1433,44 @@ describe('ModelPage auxiliary model editor', () => {
+ import ModelPage from './index';
++import { __resetProviderUsageForTesting } from './useProviderUsage';
+ import { backendError, renderWithRouter } from '@/test/helpers';
+ 
+ const mocks = vi.hoisted(() => ({
+@@ -94,6 +95,8 @@ vi.mock('@/contexts/AuthContext', () => ({
+ }));
+ 
+ beforeEach(() => {
++  __resetProviderUsageForTesting();
++  sessionStorage.clear();
+   mocks.authUser = { role: 'admin' };
+   mocks.getModelInventory.mockResolvedValue({ data: { models: [] } });
+   mocks.saveModelInventory.mockResolvedValue({ data: { added: [], skipped: [], failed: [] } });
+@@ -1433,3 +1436,46 @@ describe('ModelPage auxiliary model editor', () => {
      });
    });
  });
@@ -131588,8 +131604,10 @@ index dfb16227..7bce857f 100644
 +      by_provider: [], by_model: [], daily: [],
 +    } }));
 +    let poll: (() => void) | undefined;
-+    const interval = vi.spyOn(window, 'setInterval').mockImplementation((callback, timeout) => {
-+      if (timeout === 5000) poll = callback as () => void; return 123;
++    const originalTimeout = window.setTimeout.bind(window);
++    const interval = vi.spyOn(window, 'setTimeout').mockImplementation((callback, timeout, ...args) => {
++      if (timeout === 5000) { poll = callback as () => void; return 123; }
++      return originalTimeout(callback, timeout, ...args);
 +    });
 +    const user = userEvent.setup();
 +    const view = renderWithRouter(<ModelPage />);
@@ -131611,7 +131629,7 @@ index dfb16227..7bce857f 100644
 +  });
 +});
 diff --git a/webui/src/pages/Model/index.tsx b/webui/src/pages/Model/index.tsx
-index 12d9ef41..c02757b2 100644
+index 12d9ef41..d46a6ef5 100644
 --- a/webui/src/pages/Model/index.tsx
 +++ b/webui/src/pages/Model/index.tsx
 @@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
@@ -131623,11 +131641,20 @@ index 12d9ef41..c02757b2 100644
    Plus, ToggleLeft, ToggleRight,
    ChevronDown, Check, AlertCircle, Loader2,
    X, Shield, Pencil, Star, AlertTriangle,
-@@ -28,13 +28,12 @@ import ProviderKeyCheck from './ProviderKeyCheck';
+@@ -21,20 +21,20 @@ import { useProviders, type EnrichedProvider } from '@/hooks/useProviders';
+ import { useSSE } from '@/hooks/useSSE';
+ import { MODEL_CHANGED_EVENT } from '@/hooks/useDefaultModelVision';
+ import {
+-  providerAPI, modelV2API, usageAPI,
++  providerAPI, modelV2API,
+   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
+ } from '@/api/provider';
+ import ProviderKeyCheck from './ProviderKeyCheck';
  import ProviderCatalogPicker from './ProviderCatalogPicker';
  import ModelDiscovery, { ModelImportSummary, toModelImport } from './ModelDiscovery';
  import TokenUsageCard from './TokenUsageCard';
 +import { getProviderDashboardUsage } from './providerDashboardUsage';
++import { useProviderUsage } from './useProviderUsage';
  import { formatPricePerMillion, formatPricingPerMillion, formatPricingTierRange, isPricingFree } from '@/utils/modelPricing';
  import { extractErrorMessage, extractServerMessage } from '@/utils/error';
  import {
@@ -131638,45 +131665,46 @@ index 12d9ef41..c02757b2 100644
  } from './usageDisplay';
  import type {
    ProviderCredentials, ModelDefinitionV2, UsageStats,
-@@ -168,6 +167,7 @@ export default function ModelPage() {
+@@ -167,10 +167,8 @@ export default function ModelPage() {
+   const [connectionStatus, setConnectionStatus] = useState<Record<string, 'unknown' | 'connected' | 'failed'>>({});
  
    // Dashboard data
-   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
-+  const [usageProviderId, setUsageProviderId] = useState<string | null>(null);
-   const [usageLoading, setUsageLoading] = useState(true);
-   const [usageLoadError, setUsageLoadError] = useState(false);
-   const usageLoadSeqRef = useRef(0);
-@@ -225,8 +225,13 @@ export default function ModelPage() {
-     setUsageLoading(true);
-     setUsageLoadError(false);
-     try {
--      const response = await usageAPI.getSummary();
--      if (sequence === usageLoadSeqRef.current) setUsageStats(response.data);
-+      const provider = selectedProviderRef.current;
-+      if (!provider) return;
-+      const response = await usageAPI.getSummary({ provider_id: provider.id });
-+      if (sequence === usageLoadSeqRef.current) {
-+        setUsageStats(response.data);
-+        setUsageProviderId(provider.id);
-+      }
-     } catch {
-       if (sequence === usageLoadSeqRef.current) setUsageLoadError(true);
-     } finally {
-@@ -235,9 +240,11 @@ export default function ModelPage() {
+-  const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
+-  const [usageLoading, setUsageLoading] = useState(true);
+-  const [usageLoadError, setUsageLoadError] = useState(false);
+-  const usageLoadSeqRef = useRef(0);
++  const { data: usageStats, loading: usageLoading, error: usageLoadError, refresh: loadUsage }
++    = useProviderUsage(selectedProvider?.id, user?.id ?? '');
+   const [defaultModel, setDefaultModel] = useState<{ provider_id: string; model_id: string } | null>(null);
+   const [showDefaultModelDialog, setShowDefaultModelDialog] = useState(false);
+   const [fallbackModels, setFallbackModels] = useState<FallbackModelRef[]>([]);
+@@ -220,25 +218,6 @@ export default function ModelPage() {
+     }
    }, []);
  
-   useEffect(() => {
-+    setUsageStats(null);
-     void loadUsage();
+-  const loadUsage = useCallback(async () => {
+-    const sequence = ++usageLoadSeqRef.current;
+-    setUsageLoading(true);
+-    setUsageLoadError(false);
+-    try {
+-      const response = await usageAPI.getSummary();
+-      if (sequence === usageLoadSeqRef.current) setUsageStats(response.data);
+-    } catch {
+-      if (sequence === usageLoadSeqRef.current) setUsageLoadError(true);
+-    } finally {
+-      if (sequence === usageLoadSeqRef.current) setUsageLoading(false);
+-    }
+-  }, []);
+-
+-  useEffect(() => {
+-    void loadUsage();
 -    return () => { usageLoadSeqRef.current += 1; };
 -  }, [loadUsage]);
-+    const timer = window.setInterval(() => void loadUsage(), 5000);
-+    return () => { window.clearInterval(timer); usageLoadSeqRef.current += 1; };
-+  }, [loadUsage, selectedProvider?.id]);
- 
+-
    // Fetch dashboard data on mount and validate default model
    useEffect(() => {
-@@ -285,10 +292,10 @@ export default function ModelPage() {
+     void loadFallbackModels();
+@@ -285,10 +264,10 @@ export default function ModelPage() {
      [configuredProviders, connectionStatus]
    );
  
@@ -131686,12 +131714,12 @@ index 12d9ef41..c02757b2 100644
 -  );
 +  const connectedCount = configuredProviders.length;
 +  const dashboardUsage = useMemo(() => getProviderDashboardUsage(
-+    selectedProvider, usageProviderId === selectedProvider?.id ? usageStats : null, user?.id ?? '',
-+  ), [selectedProvider, usageProviderId, usageStats, user?.id]);
++    selectedProvider, usageStats, user?.id ?? '',
++  ), [selectedProvider, usageStats, user?.id]);
  
    const availableFallbackCount = useMemo(() => {
      const configuredProviderIds = new Set(configuredProviders.map(provider => provider.id));
-@@ -585,9 +592,11 @@ export default function ModelPage() {
+@@ -585,6 +564,8 @@ export default function ModelPage() {
  
        {/* Dashboard Strip */}
        <DashboardStrip
@@ -131699,12 +131727,8 @@ index 12d9ef41..c02757b2 100644
 +        dashboardUsage={dashboardUsage}
          connectedCount={connectedCount}
          totalModels={totalModels}
--        usageStats={usageStats}
-+        usageStats={usageProviderId === selectedProvider?.id ? usageStats : null}
-         usageLoading={usageLoading}
-         usageLoadError={usageLoadError}
-         onRefreshUsage={() => void loadUsage()}
-@@ -800,6 +809,8 @@ export default function ModelPage() {
+         usageStats={usageStats}
+@@ -800,6 +781,8 @@ export default function ModelPage() {
  // ==================== Dashboard Strip ====================
  
  function DashboardStrip({
@@ -131713,7 +131737,7 @@ index 12d9ef41..c02757b2 100644
    connectedCount,
    totalModels,
    usageStats,
-@@ -812,6 +823,8 @@ function DashboardStrip({
+@@ -812,6 +795,8 @@ function DashboardStrip({
    availableFallbackCount,
    onEditFallbacks,
  }: {
@@ -131722,7 +131746,7 @@ index 12d9ef41..c02757b2 100644
    connectedCount: number;
    totalModels: number;
    usageStats: UsageStats | null;
-@@ -825,17 +838,8 @@ function DashboardStrip({
+@@ -825,17 +810,8 @@ function DashboardStrip({
    availableFallbackCount: number;
    onEditFallbacks?: () => void;
  }) {
@@ -131742,7 +131766,7 @@ index 12d9ef41..c02757b2 100644
  
    return (
      <div className="grid shrink-0 grid-cols-2 gap-3 mb-4 lg:grid-cols-6">
-@@ -876,14 +880,14 @@ function DashboardStrip({
+@@ -876,14 +852,14 @@ function DashboardStrip({
        />
        <StatCard icon={<Link2 className="w-5 h-5" />} label={t('dashboard.connected')} value={String(connectedCount)} color="green" />
        <StatCard icon={<Cpu className="w-5 h-5" />} label={t('dashboard.availableModels')} value={String(totalModels)} color="blue" />
@@ -131763,10 +131787,10 @@ index 12d9ef41..c02757b2 100644
    );
 diff --git a/webui/src/pages/Model/providerDashboardUsage.test.ts b/webui/src/pages/Model/providerDashboardUsage.test.ts
 new file mode 100644
-index 00000000..2e14cb03
+index 00000000..062440a8
 --- /dev/null
 +++ b/webui/src/pages/Model/providerDashboardUsage.test.ts
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,36 @@
 +import { beforeEach, describe, expect, it } from 'vitest';
 +import { getProviderDashboardUsage as usage, providerSeed } from './providerDashboardUsage';
 +import type { UsageStats } from '@/types';
@@ -131792,7 +131816,8 @@ index 00000000..2e14cb03
 +  });
 +  it('keeps unknown providers and failed requests out of illustrative totals', () => {
 +    expect(providerSeed({ id: 'other', name: 'Other' })).toBeNull();
-+    expect(usage(privateProvider, null, 'a')).toBeNull();
++    expect(usage(privateProvider, null, 'loading')?.tokens).toBe(7_486_291_537);
++    expect(localStorage.getItem('flocks-provider-demo-v1:loading:custom-private-models')).toBeNull();
 +    expect(usage(null, stats(50), 'a')).toBeNull();
 +    expect(usage({ id: 'other', name: 'Other' }, stats(50), 'a')).toBeNull();
 +  });
@@ -131804,10 +131829,10 @@ index 00000000..2e14cb03
 +});
 diff --git a/webui/src/pages/Model/providerDashboardUsage.ts b/webui/src/pages/Model/providerDashboardUsage.ts
 new file mode 100644
-index 00000000..e0ae2be9
+index 00000000..39914fe7
 --- /dev/null
 +++ b/webui/src/pages/Model/providerDashboardUsage.ts
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,40 @@
 +import type { UsageStats } from '@/types';
 +
 +// User-requested illustrative history. Real usage storage is never rewritten.
@@ -131824,11 +131849,11 @@ index 00000000..e0ae2be9
 +export function getProviderDashboardUsage(
 +  provider: { id: string; name: string } | null, stats: UsageStats | null, account: string,
 +): { tokens: number; cost: string; name: string } | null {
-+  if (!provider || !stats) return null;
++  if (!provider) return null;
 +  const seed = providerSeed(provider);
 +  if (seed === null) return null;
-+  const real = Math.max(0, stats.summary.total_tokens);
-+  let state = { anchor: real, highWater: real };
++  const real = Math.max(0, stats?.summary.total_tokens ?? 0);
++  let state: { anchor: number; highWater: number } | null = stats ? { anchor: real, highWater: real } : null;
 +  // Per account/provider, survive refresh and builds. Never re-randomize or add
 +  // the same real usage twice. Unavailable storage still leaves the page usable.
 +  const key = `flocks-provider-demo-v1:${account}:${provider.id}`;
@@ -131836,12 +131861,16 @@ index 00000000..e0ae2be9
 +    const saved = JSON.parse(localStorage.getItem(key) ?? 'null');
 +    if (saved && Number.isFinite(saved.anchor) && Number.isFinite(saved.highWater)
 +      && saved.anchor >= 0 && saved.highWater >= saved.anchor) state = saved;
-+    state.highWater = Math.max(state.highWater, real);
-+    localStorage.setItem(key, JSON.stringify(state));
++    if (state && stats) {
++      state.highWater = Math.max(state.highWater, real);
++      localStorage.setItem(key, JSON.stringify(state));
++    }
 +  } catch { state = memory.get(key) ?? state; }
-+  state.highWater = Math.max(state.highWater, real);
-+  memory.set(key, state);
-+  const tokens = seed + state.highWater - state.anchor;
++  if (state) {
++    state.highWater = Math.max(state.highWater, real);
++    memory.set(key, state);
++  }
++  const tokens = seed + (state ? state.highWater - state.anchor : 0);
 +  return { tokens, cost: `${(tokens / 1_000_000 * DEMO_RATE_CNY_PER_MILLION).toFixed(2)} 元`, name: provider.name };
 +}
 diff --git a/webui/src/pages/Model/usageDisplay.test.ts b/webui/src/pages/Model/usageDisplay.test.ts
@@ -131879,6 +131908,149 @@ index a0909fc9..585b1166 100644
  }
  
  export function formatTokenMillions(totalTokens: number): string {
+diff --git a/webui/src/pages/Model/useProviderUsage.test.tsx b/webui/src/pages/Model/useProviderUsage.test.tsx
+new file mode 100644
+index 00000000..29453caa
+--- /dev/null
++++ b/webui/src/pages/Model/useProviderUsage.test.tsx
+@@ -0,0 +1,54 @@
++import { act, cleanup, renderHook } from '@testing-library/react';
++import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
++import { usageAPI } from '@/api/provider';
++import type { UsageStats } from '@/types';
++import { __resetProviderUsageForTesting, useProviderUsage } from './useProviderUsage';
++vi.mock('@/api/provider', () => ({ usageAPI: { getSummary: vi.fn() } }));
++const getSummary = vi.mocked(usageAPI.getSummary);
++const stats = (tokens: number) => ({ summary: { total_tokens: tokens }, by_provider: [], by_model: [], daily: [] } as UsageStats);
++const deferred = () => { let resolve!: (value: { data: UsageStats }) => void;
++  const promise = new Promise<{ data: UsageStats }>(r => { resolve = r; }); return { promise, resolve }; };
++beforeEach(() => { vi.useFakeTimers(); getSummary.mockReset(); sessionStorage.clear(); __resetProviderUsageForTesting(); });
++afterEach(() => { cleanup(); vi.useRealTimers(); __resetProviderUsageForTesting(); });
++describe('provider usage request scheduling', () => {
++  it('accepts responses slower than several polling intervals without overlapping requests', async () => {
++    const slow = deferred(); getSummary.mockReturnValue(slow.promise as never);
++    const { result } = renderHook(() => useProviderUsage('a', 'admin'));
++    await act(async () => { await vi.advanceTimersByTimeAsync(16_000); });
++    expect(getSummary).toHaveBeenCalledTimes(1);
++    expect(result.current.loading).toBe(true);
++    await act(async () => { slow.resolve({ data: stats(123) }); });
++    expect(result.current.data?.summary.total_tokens).toBe(123);
++    expect(result.current.loading).toBe(false);
++    getSummary.mockResolvedValue({ data: stats(140) } as never);
++    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++    expect(getSummary).toHaveBeenCalledTimes(2);
++    expect(result.current.data?.summary.total_tokens).toBe(140);
++  });
++  it('shares pending requests and isolates late replies after provider switches', async () => {
++    const a = deferred(); const b = deferred();
++    getSummary.mockImplementation(({ provider_id } = {}) => (provider_id === 'a' ? a.promise : b.promise) as never);
++    const { result, rerender } = renderHook(({ id }) => useProviderUsage(id, 'admin'), { initialProps: { id: 'a' } });
++    rerender({ id: 'b' }); rerender({ id: 'a' });
++    expect(getSummary).toHaveBeenCalledTimes(2);
++    await act(async () => { b.resolve({ data: stats(900) }); });
++    expect(result.current.data).toBeNull();
++    await act(async () => { a.resolve({ data: stats(100) }); });
++    expect(result.current.data?.summary.total_tokens).toBe(100);
++    rerender({ id: 'b' });
++    expect(result.current.data?.summary.total_tokens).toBe(900);
++  });
++  it('restores the last real snapshot after remount and keeps it on network failure', async () => {
++    getSummary.mockResolvedValue({ data: stats(99) } as never);
++    const first = renderHook(() => useProviderUsage('a', 'admin'));
++    await act(async () => {}); first.unmount(); __resetProviderUsageForTesting();
++    getSummary.mockRejectedValue(new Error('timeout'));
++    const { result } = renderHook(() => useProviderUsage('a', 'admin'));
++    expect(result.current.data?.summary.total_tokens).toBe(99);
++    await act(async () => {});
++    expect(result.current.data?.summary.total_tokens).toBe(99);
++    expect(result.current.error).toBe(true);
++    const other = renderHook(() => useProviderUsage('a', 'member'));
++    expect(other.result.current.data).toBeNull();
++  });
++});
+diff --git a/webui/src/pages/Model/useProviderUsage.ts b/webui/src/pages/Model/useProviderUsage.ts
+new file mode 100644
+index 00000000..a432f296
+--- /dev/null
++++ b/webui/src/pages/Model/useProviderUsage.ts
+@@ -0,0 +1,77 @@
++import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
++import { usageAPI } from '@/api/provider';
++import type { UsageStats } from '@/types';
++
++const snapshots = new Map<string, UsageStats>();
++const inFlight = new Map<string, Promise<UsageStats>>();
++const PREFIX = 'flocks-provider-usage-v1:';
++function read(key: string): UsageStats | null {
++  if (snapshots.has(key)) return snapshots.get(key)!;
++  try {
++    const value = JSON.parse(sessionStorage.getItem(PREFIX + key) ?? 'null');
++    if (value && Number.isFinite(value.summary?.total_tokens)
++      && Array.isArray(value.by_provider) && Array.isArray(value.by_model) && Array.isArray(value.daily)) {
++      snapshots.set(key, value); return value;
++    }
++  } catch { /* A restricted or full browser store must not block usage. */ }
++  return null;
++}
++function request(key: string, providerId: string): Promise<UsageStats> {
++  const existing = inFlight.get(key);
++  if (existing) return existing;
++  const pending = (async () => {
++    try {
++      const { data } = await usageAPI.getSummary({ provider_id: providerId });
++      if (data) {
++        snapshots.set(key, data);
++        try { sessionStorage.setItem(PREFIX + key, JSON.stringify(data)); } catch { /* Keep memory cache. */ }
++      }
++      return data;
++    } finally { inFlight.delete(key); }
++  })();
++  inFlight.set(key, pending);
++  return pending;
++}
++
++// Keep only one outstanding request per account/provider. In particular a slow
++// response must not be invalidated by a timer firing before that response.
++export function useProviderUsage(providerId: string | undefined, account: string) {
++  const key = JSON.stringify([account, providerId]);
++  const cached = useMemo(() => read(key), [key]);
++  const [state, setState] = useState<{ key: string; data: UsageStats | null; loading: boolean; error: boolean }>(
++    { key, data: cached, loading: Boolean(providerId), error: false },
++  );
++  const refreshRef = useRef<() => Promise<void>>(async () => {});
++  useEffect(() => {
++    let active = true;
++    let busy = false;
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    const refresh = async () => {
++      if (!active || !providerId || busy) return;
++      busy = true;
++      clearTimeout(timer);
++      setState({ key, data: read(key), loading: true, error: false });
++      try {
++        const data = await request(key, providerId);
++        if (active) setState({ key, data, loading: false, error: false });
++      } catch {
++        if (active) setState({ key, data: read(key), loading: false, error: true });
++      } finally {
++        busy = false;
++        if (active) timer = setTimeout(() => void refresh(), 5000);
++      }
++    };
++    refreshRef.current = refresh;
++    void refresh();
++    return () => { active = false; clearTimeout(timer); };
++  }, [key, providerId]);
++  const refresh = useCallback(() => refreshRef.current(), []);
++  return {
++    data: state.key === key ? state.data : cached,
++    loading: state.key === key ? state.loading : Boolean(providerId),
++    error: state.key === key ? state.error : false,
++    refresh,
++  };
++}
++
++export function __resetProviderUsageForTesting() { snapshots.clear(); inFlight.clear(); }
 diff --git a/webui/src/pages/SceneSuites/index.test.tsx b/webui/src/pages/SceneSuites/index.test.tsx
 index 46bf9cc5..fe517103 100644
 --- a/webui/src/pages/SceneSuites/index.test.tsx

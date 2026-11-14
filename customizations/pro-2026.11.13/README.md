@@ -1,10 +1,10 @@
 # Flocks Pro 2026.11.13 定制增强包
 
-增强包版本：**1.15.3**。仅适用于 `2026.11.13-linux-amd64`、Pro `c16ed13499b3ca721e3549893d5507c506bc2c58`、Core `2bc02382874a226ef63d20cab3734220ad752225`，运行树保护策略必须为 `native`。
+增强包版本：**1.15.4**。仅适用于 `2026.11.13-linux-amd64`、Pro `c16ed13499b3ca721e3549893d5507c506bc2c58`、Core `2bc02382874a226ef63d20cab3734220ad752225`，运行树保护策略必须为 `native`。
 
 ## 本次迁移
 
-将 1.14.10 的全部增强合并到官方 11.13 配对 Core，保留新版上游修复。增强源码为 [e643df9b](https://github.com/AgentFlocks/flocksdev/commit/e643df9bb835f67bd3886735ab106619f05cc903)，开发分支 `codex/pro-1113-enhancements`；可复现差异保存在 `patches/core-1113.patch`。
+将 1.14.10 的全部增强合并到官方 11.13 配对 Core，保留新版上游修复。增强源码为 [284b1ca7](https://github.com/AgentFlocks/flocksdev/commit/284b1ca73bbe25dad7637381c707ae6f5172edfb)，开发分支 `codex/pro-1113-enhancements`；可复现差异保存在 `patches/core-1113.patch`。
 
 保留以下能力：
 
@@ -86,3 +86,12 @@ python3 build_package.py --core .work/core-1113 --pro .work/pro-1113 --frontend 
 ## 1.15.3 数字显示格式
 
 总 Tokens 恢复原有 M 单位并固定两位小数，费用固定两位小数。初始 private_models 为 7486.29M、14972.58 元；ThreatBook-cn-llm 为 2637.85M、5275.69 元。仅改变展示精度，完整计数、基数、已存锚点、Provider 切换与真实增量均保留。
+
+
+## 1.15.4 用量加载性能修复
+
+旧实现每5秒发起新请求并推进序号；接口耗时超过5秒时，旧响应一直被后续请求作废，导致加载状态持续不结束。切换时清空统计且演示基数依赖真实接口，进一步放大等待。
+
+现在按账号与Provider合并在途请求，在请求结束后5秒才发起下一轮，慢响应不会被定时器丢弃。真实统计保存在内存及当前标签页sessionStorage中，切换、返回与刷新优先展示已有快照，再后台更新；失败保留已有快照并提示重试。首次没有快照时，演示卡片直接显示原固定基数或localStorage中的累计值，真实缓存明细仍等待真实接口，不伪造缓存记录。只有成功读取真实统计后才初始化真实增量锚点，保留既有localStorage数据。
+
+80项模型回归包含16秒延迟不重叠且正常显示、Provider切换乱序、挂起请求复用、刷新恢复快照及失败回退；未修改原生Pro数据库、回填逻辑或后端权限。本机暖用量接口连同浏览器导航与读取约0.28秒，此观测不代表远程接口耗时。
