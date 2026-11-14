@@ -83,7 +83,7 @@ def load_installed_records() -> dict[str, InstalledPluginRecord]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
-    records = raw.get("plugins", raw)
+    records = raw.get("plugins", raw) if isinstance(raw, dict) else None
     if not isinstance(records, dict):
         return {}
     result: dict[str, InstalledPluginRecord] = {}
