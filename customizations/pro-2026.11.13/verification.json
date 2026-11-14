@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.8",
+  "packageVersion": "1.15.9",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.15.8",
-    "developmentBranch": "codex/daily-operations",
+    "packageVersion": "1.15.9",
+    "developmentBranch": "codex/pro-1113-enhancements",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "7e0acfbb8db974d3429fce0bce0d4ace2f1733a5",
+    "sourceCommit": "7ca7b4732cb0e8128130504114e7824ee97d90f4",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -19,63 +19,101 @@
       "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
       "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
     },
-    "previousCustomization": "1.15.7"
+    "previousCustomization": "1.15.8"
   },
-  "scope": "Three native daily workflows with administrator-owned leadership reports, closure followups and operations value analysis; run-now controls and daily scheduling.",
+  "scope": "Failed-task diagnosis card and visible digital troubleshooting agent; bounded admin-only evidence tool, sanitized provider analysis, explicit basic fallback, evidence and follow-up chat. Preserves daily operations workflows and existing features.",
   "local5173Acceptance": {
     "nativeBinaryBefore": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
-    "sourceCommit": "7e0acfbb8db974d3429fce0bce0d4ace2f1733a5",
+    "sourceCommit": "7ca7b4732cb0e8128130504114e7824ee97d90f4",
     "port": 5173,
     "localBase": "native Mac Pro 11.12.2 with approved 11.13 enhanced Core",
     "status": "passed",
-    "payloadFilesMatched": 579,
+    "payloadFilesMatched": 584,
     "nativeBinaryUnchanged": true,
     "realMemoryFilesUnchanged": true,
-    "packageVersion": "1.15.8",
-    "finishedAt": "2026-11-14T16:06:36.867581+00:00",
+    "packageVersion": "1.15.9",
+    "finishedAt": "2026-11-14T16:26:53.362143+00:00",
     "ready": true,
-    "productionWebUIFilesMatched": 235,
+    "productionWebUIFilesMatched": 236,
     "repeatCheck": "already-applied",
     "scenarios": [
-      "Authenticated 5173 task center displays exactly three newly enabled workflow schedules at 08:30/08:40/08:50 Asia/Shanghai; previous schedules retained.",
-      "All three run-now buttons trigger native task executions that finish completed. Final source 7e0acfbb runs are 2026-11-15 00:04:57 Beijing time.",
-      "Final three outputs each have Markdown, HTML and JSON in the actual Pro account-scoped outputs directory; prior run artifacts remain unmodified.",
-      "Knowledge outputs lists the reports, previews readable Markdown, downloads exact original bytes, and restores the same report after refresh.",
-      "Inactive monitoring remains inactive and produces explicit coverage gaps and unknown risk headlines; no historical work or security success is fabricated.",
-      "579 native payload files and 235 web assets match, original native binary and real memory fingerprint unchanged; repeat check already-applied."
+      {
+        "scenario": "Existing failed workflow detail",
+        "steps": "Task Center > failed > 2026-09-20 knowledge execution > help investigate",
+        "actual": "Card placed after recorded error; no default model yields explicit basic explanation; missing component translated to plain Chinese.",
+        "passed": true
+      },
+      {
+        "scenario": "Temporary configured model and evidence",
+        "steps": "Expand optional model picker; choose existing Alibaba deepseek-v4.1-flash-1017; investigate; expand evidence",
+        "actual": "Real provider returned analysis; known blocker stays concise; E1 references exact failed execution. No logs matched the historical date window, explicitly reported; no current-system or recovery claim.",
+        "passed": true
+      },
+      {
+        "scenario": "Current data and related regression",
+        "steps": "Observe Task Center after reversible install",
+        "actual": "3 existing active daily operations schedules and 6 completed runs remain visible. All 584 payload hashes match; native Go and real memory fingerprints unchanged.",
+        "passed": true
+      },
+      {
+        "scenario": "Follow-up agent conversation",
+        "steps": "Continue asking troubleshooting agent from final card with temporary selected model",
+        "actual": "Actual persisted conversation streamed a response and called task_failure_evidence for the same execution ID. Tool completed read-only; response distinguishes missing historical logs and node-order uncertainty.",
+        "passed": true
+      },
+      {
+        "scenario": "Visible digital employee and refresh",
+        "steps": "Same browser tab navigates to /agents, selects operations support group, then reloads",
+        "actual": "Native visible 排障助手 in 运行保障; described purpose and delegatable state correct; retained after refresh.",
+        "passed": true
+      },
+      {
+        "scenario": "Refresh/cache and final console",
+        "steps": "Return to Task Center, reopen same failed task and same temporary model, investigate, expand evidence",
+        "actual": "Restored server cached result with original analysis timestamp 2026-11-15 00:24:32; no new final console errors.",
+        "passed": true
+      }
     ],
     "limits": [
-      "Local user-approved native Mac Pro11.12.2 with enhanced 11.13 Core; remote Linux installation pending user Gitee sync and bash update-flocks.sh.",
-      "Local monitor is disabled and preceding day has no task starts; nonempty operational statistics are covered by isolated tests, not claimed as local business evidence.",
-      "HTML is generated and downloadable; direct browser file URL visual inspection was blocked by URL policy. Markdown live preview and download were verified.",
-      "Expected network errors during controlled restarts were observed; no later browser errors were returned after final report refresh."
+      "Native Mac Pro11.12.2 with user-approved 11.13 enhanced Core; remote Linux requires user Gitee sync and bash update-flocks.sh."
+    ],
+    "acceptanceNotes": [
+      "An earlier multi-tab browser run had API timeouts. Read-only PG observations and CLI dashboard remained healthy; after closing agent-created duplicate pages, single-tab final flows had no new console errors. Browser connection contention is an inference, not a confirmed server defect.",
+      "Temporary administrator-only local coroutine diagnostic endpoint was removed; final installed source and payload hashes match.",
+      "Historical failed execution had no matching log files in its date window. Log matching, truncation, credential scrubbing and authorization are additionally covered by isolated tests."
     ]
   },
   "automatedValidation": {
-    "workflowAndTasks": {
-      "passed": 68,
-      "log": ".work/daily-operations-tests.log"
+    "diagnosisBackend": {
+      "passed": 15,
+      "log": ".work/diagnosis-integrated-backend.log"
     },
-    "taskUI": {
-      "passed": 8,
-      "log": ".work/daily-operations-ui-tests.log"
+    "relatedUI": {
+      "passed": 67,
+      "log": ".work/diagnosis-ui.log"
+    },
+    "toolRegistry": {
+      "passed": 11,
+      "log": ".work/diagnosis-tools.log"
     },
     "installer": {
       "passed": 27,
-      "log": ".work/daily-operations-installer-tests.log"
+      "log": ".work/diagnosis-installer.log"
     },
     "pairedProProductionBuilds": "Linux Pro11.13 and native Mac Pro11.12.2 passed TypeScript and Vite builds",
     "sourcePatchReconstruction": {
-      "sourceCommit": "7e0acfbb8db974d3429fce0bce0d4ace2f1733a5",
+      "sourceCommit": "7ca7b4732cb0e8128130504114e7824ee97d90f4",
       "baseline": "2bc02382874a226ef63d20cab3734220ad752225",
-      "tree": "b1a0ead791732d90b31fa7acb3762f2c0d8325a5",
-      "reproduced": true
+      "reconstructedTree": "de162840cfe2e1209edb0d06d136e21506756b20",
+      "expectedTree": "de162840cfe2e1209edb0d06d136e21506756b20",
+      "matches": true
+    },
+    "dailyOperationsRegression": {
+      "passed": 11,
+      "log": ".work/diagnosis-integrated-backend.log"
     }
   },
   "limits": [
-    "Local user-approved native Mac Pro11.12.2 with enhanced 11.13 Core; remote Linux installation pending user Gitee sync and bash update-flocks.sh.",
-    "Local monitor is disabled and preceding day has no task starts; nonempty operational statistics are covered by isolated tests, not claimed as local business evidence.",
-    "HTML is generated and downloadable; direct browser file URL visual inspection was blocked by URL policy. Markdown live preview and download were verified.",
-    "Expected network errors during controlled restarts were observed; no later browser errors were returned after final report refresh."
+    "Native Mac Pro11.12.2 with user-approved 11.13 enhanced Core; remote Linux requires user Gitee sync and bash update-flocks.sh."
   ]
 }

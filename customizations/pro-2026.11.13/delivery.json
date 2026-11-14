@@ -1,28 +1,28 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.8",
+  "packageVersion": "1.15.9",
   "target": "2026.11.13-linux-amd64",
-  "status": "Three daily operations workflows accepted on local 5173; Linux remote pending",
+  "status": "Task diagnosis card and digital agent accepted on local 5173; Linux remote pending",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
-    "branch": "codex/daily-operations",
-    "commit": "7e0acfbb8db974d3429fce0bce0d4ace2f1733a5",
+    "branch": "codex/pro-1113-enhancements",
+    "commit": "7ca7b4732cb0e8128130504114e7824ee97d90f4",
     "baseline": "2bc02382874a226ef63d20cab3734220ad752225"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.15.8-pro-2026.11.13-full.tar.gz",
-  "sha256": "7fecafbbce76fd86cf0f63fe783b80bc4a0009f86cb00e713f8204446a7dd622",
-  "payloadFiles": 570,
+  "archive": "releases/flocks-customizations-1.15.9-pro-2026.11.13-full.tar.gz",
+  "sha256": "cdcfe38c3ae4edb89f1246f4754adf7602dc3ae3a5c9e54d6ba15ddcb1ca76b6",
+  "payloadFiles": 575,
   "validation": "verification.json",
   "limits": [
     "Linux-amd64 remote installation requires user Gitee sync and bash update-flocks.sh.",
     "Local 5173 uses approved 11.13 enhanced Core on native Mac Pro11.12.2.",
-    "Daily supplements are explicitly fictional examples stored separately from agent memory; real daily files always take precedence. Fixed example range 2026-09-09 through 2026-11-14."
+    "Log collection is bounded and admin-only. Missing logs and model failures are explicitly reported; no automatic repair or retry."
   ],
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "68 workflow/task and 27 installer regressions, 8 Task UI regressions; two paired Pro builds; native 5173 three workflow schedulers and actual runs, output preview/download and refresh; 579 native payload hashes; real memory fingerprint unchanged.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.15.8.zip",
-  "offlineRepositoryArchiveSha256": "10ecf2c9e63c16b6835e02b585b3d573c7c54f1c625527bc1780c7fa13ae7931"
+  "validationScope": "15 diagnosis backend, 67 related UI, 11 tool and 27 installer regressions; paired Linux and Mac Pro builds; actual native 5173 failed-task card, evidence, model explanation, refresh and digital agent checks.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.15.9.zip",
+  "offlineRepositoryArchiveSha256": "a835c6f632fb6f66aaad60f9c54420909b0d3562cdb4063e0142935fcee6641f"
 }
