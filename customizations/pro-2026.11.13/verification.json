@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.7",
+  "packageVersion": "1.15.8",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.15.7",
-    "developmentBranch": "codex/pro-1113-enhancements",
+    "packageVersion": "1.15.8",
+    "developmentBranch": "codex/daily-operations",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "108de3c88af6e3b136fa89adc6dc45d2b32ff291",
+    "sourceCommit": "7e0acfbb8db974d3429fce0bce0d4ace2f1733a5",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -19,53 +19,63 @@
       "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
       "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
     },
-    "previousCustomization": "1.15.6"
+    "previousCustomization": "1.15.7"
   },
-  "scope": "Each outputs, knowledge and memory content pane has a persistent module overview with purpose, source and usage. No expansion needed; retained while reading.",
+  "scope": "Three native daily workflows with administrator-owned leadership reports, closure followups and operations value analysis; run-now controls and daily scheduling.",
   "local5173Acceptance": {
     "nativeBinaryBefore": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
-    "sourceCommit": "108de3c88af6e3b136fa89adc6dc45d2b32ff291",
+    "sourceCommit": "7e0acfbb8db974d3429fce0bce0d4ace2f1733a5",
     "port": 5173,
     "localBase": "native Mac Pro 11.12.2 with approved 11.13 enhanced Core",
     "status": "passed",
-    "payloadFilesMatched": 568,
+    "payloadFilesMatched": 579,
     "nativeBinaryUnchanged": true,
     "realMemoryFilesUnchanged": true,
-    "packageVersion": "1.15.7",
-    "finishedAt": "2026-11-14T15:50:12.252746+00:00",
+    "packageVersion": "1.15.8",
+    "finishedAt": "2026-11-14T16:06:36.867581+00:00",
     "ready": true,
     "productionWebUIFilesMatched": 235,
     "repeatCheck": "already-applied",
     "scenarios": [
-      "Authenticated native Chrome switches outputs, knowledge and memory: each displays its own persistent overview, source and usage without expanding a control.",
-      "Memory example preview opens with the memory-specific overview still visible above file details; existing illustrative badges remain.",
-      "Knowledge domain opens the existing alert summary below the knowledge-specific overview; refreshing restores both overview and content.",
-      "Outputs overview explains date browsing, available output roots, previews and downloads; module switching updates the wording immediately.",
-      "Browser console has no errors; all 568 native payload files and 235 web assets match, original Go binary and real memory fingerprint unchanged; repeat check already-applied."
+      "Authenticated 5173 task center displays exactly three newly enabled workflow schedules at 08:30/08:40/08:50 Asia/Shanghai; previous schedules retained.",
+      "All three run-now buttons trigger native task executions that finish completed. Final source 7e0acfbb runs are 2026-11-15 00:04:57 Beijing time.",
+      "Final three outputs each have Markdown, HTML and JSON in the actual Pro account-scoped outputs directory; prior run artifacts remain unmodified.",
+      "Knowledge outputs lists the reports, previews readable Markdown, downloads exact original bytes, and restores the same report after refresh.",
+      "Inactive monitoring remains inactive and produces explicit coverage gaps and unknown risk headlines; no historical work or security success is fabricated.",
+      "579 native payload files and 235 web assets match, original native binary and real memory fingerprint unchanged; repeat check already-applied."
     ],
     "limits": [
-      "Native Mac Pro11.12.2 with user-approved 11.13 enhanced Core; remote Linux requires user Gitee sync and bash update-flocks.sh."
+      "Local user-approved native Mac Pro11.12.2 with enhanced 11.13 Core; remote Linux installation pending user Gitee sync and bash update-flocks.sh.",
+      "Local monitor is disabled and preceding day has no task starts; nonempty operational statistics are covered by isolated tests, not claimed as local business evidence.",
+      "HTML is generated and downloadable; direct browser file URL visual inspection was blocked by URL policy. Markdown live preview and download were verified.",
+      "Expected network errors during controlled restarts were observed; no later browser errors were returned after final report refresh."
     ]
   },
   "automatedValidation": {
-    "knowledgeUI": {
-      "passed": 50,
-      "log": ".work/module-overview-ui-tests.log"
+    "workflowAndTasks": {
+      "passed": 68,
+      "log": ".work/daily-operations-tests.log"
+    },
+    "taskUI": {
+      "passed": 8,
+      "log": ".work/daily-operations-ui-tests.log"
     },
     "installer": {
       "passed": 27,
-      "log": ".work/module-overview-installer-tests.log"
+      "log": ".work/daily-operations-installer-tests.log"
     },
     "pairedProProductionBuilds": "Linux Pro11.13 and native Mac Pro11.12.2 passed TypeScript and Vite builds",
     "sourcePatchReconstruction": {
-      "sourceCommit": "108de3c88af6e3b136fa89adc6dc45d2b32ff291",
+      "sourceCommit": "7e0acfbb8db974d3429fce0bce0d4ace2f1733a5",
       "baseline": "2bc02382874a226ef63d20cab3734220ad752225",
-      "reconstructedTree": "5bd766cc05401961bf10eee1607bb421be0f764f",
-      "expectedTree": "5bd766cc05401961bf10eee1607bb421be0f764f",
-      "matches": true
+      "tree": "b1a0ead791732d90b31fa7acb3762f2c0d8325a5",
+      "reproduced": true
     }
   },
   "limits": [
-    "Native Mac Pro11.12.2 with user-approved 11.13 enhanced Core; remote Linux requires user Gitee sync and bash update-flocks.sh."
+    "Local user-approved native Mac Pro11.12.2 with enhanced 11.13 Core; remote Linux installation pending user Gitee sync and bash update-flocks.sh.",
+    "Local monitor is disabled and preceding day has no task starts; nonempty operational statistics are covered by isolated tests, not claimed as local business evidence.",
+    "HTML is generated and downloadable; direct browser file URL visual inspection was blocked by URL policy. Markdown live preview and download were verified.",
+    "Expected network errors during controlled restarts were observed; no later browser errors were returned after final report refresh."
   ]
 }

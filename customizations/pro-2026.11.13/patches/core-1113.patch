@@ -14587,6 +14587,264 @@ index 00000000..faa40b04
 +执行时动态生成 `~/.flocks/workspace/outputs/<YYYY-MM-DD>/security-operations/custom-soc-ndr-lateral/<唯一批次>.md` 和同名 `.json`。后续阶段不写文件，只有最后的保存节点落盘；文件名不来自输入。目录后代符号链接拒绝，受信的 `~/.flocks` 部署别名可使用符号链接。安全落盘要求POSIX目录描述符支持（macOS/Linux）；不支持的平台明确报错，仍可单步查看报告编制结果。
 +
 +报告区分“分析已完成”和“业务处置状态”，包含来源标记、有效/无效计数、规则依据、证据输入行号、人工待办、通知展示配置及边界说明。邮箱读取共享 `flocks/workflow/custom_soc_suite_settings.json` 的 `emailDisplay`，缺配置明确失败；通知只进入报告，未发邮件。任何恢复或闭环结论仅表示提供的输入证据满足本工作流规则，不修改真实设备或任务。
+diff --git a/.flocks/plugins/workflows/daily-operations-brief/meta.json b/.flocks/plugins/workflows/daily-operations-brief/meta.json
+new file mode 100644
+index 00000000..72b71f07
+--- /dev/null
++++ b/.flocks/plugins/workflows/daily-operations-brief/meta.json
+@@ -0,0 +1,7 @@
++{
++  "name": "安全运营领导日报",
++  "description": "每日生成可追溯的管理成果；真实记录、明确数据边界，不使用合成样本。",
++  "category": "安全运营成果",
++  "group": "每日运营成果",
++  "status": "active"
++}
+diff --git a/.flocks/plugins/workflows/daily-operations-brief/workflow.json b/.flocks/plugins/workflows/daily-operations-brief/workflow.json
+new file mode 100644
+index 00000000..8c7494ab
+--- /dev/null
++++ b/.flocks/plugins/workflows/daily-operations-brief/workflow.json
+@@ -0,0 +1,54 @@
++{
++  "name": "安全运营领导日报",
++  "description": "每日生成可追溯的管理成果；真实记录、明确数据边界，不使用合成样本。",
++  "start": "读取真实记录",
++  "nodes": [
++    {
++      "id": "读取真实记录",
++      "type": "python",
++      "description": "按前一日时间窗读取任务执行，按当前管理员及安装范围读取监测；数据不可用时标记缺口。",
++      "code": "from flocks.workflow.daily_operations import run_stage\noutputs = run_stage('brief', 'collect', inputs)"
++    },
++    {
++      "id": "分析指标与待办",
++      "type": "python",
++      "description": "计算有明确分母的执行指标，区分任务失败、观察项和风险待办。",
++      "code": "from flocks.workflow.daily_operations import run_stage\noutputs = run_stage('brief', 'analyze', inputs)"
++    },
++    {
++      "id": "编制领导成果",
++      "type": "python",
++      "description": "输出一页结论、指标依据、建议推进清单与可追溯索引。",
++      "code": "from flocks.workflow.daily_operations import run_stage\noutputs = run_stage('brief', 'compose', inputs)"
++    },
++    {
++      "id": "保存报告与统计依据",
++      "type": "python",
++      "description": "按当前日期保存到成果管理员的日常产出；不覆盖既有文件，不发送通知。",
++      "code": "from flocks.workflow.daily_operations import run_stage\noutputs = run_stage('brief', 'publish', inputs)"
++    }
++  ],
++  "edges": [
++    {
++      "from": "读取真实记录",
++      "to": "分析指标与待办",
++      "mapping": {
++        "state": "state"
++      }
++    },
++    {
++      "from": "分析指标与待办",
++      "to": "编制领导成果",
++      "mapping": {
++        "state": "state"
++      }
++    },
++    {
++      "from": "编制领导成果",
++      "to": "保存报告与统计依据",
++      "mapping": {
++        "state": "state"
++      }
++    }
++  ]
++}
+diff --git a/.flocks/plugins/workflows/daily-operations-brief/workflow.md b/.flocks/plugins/workflows/daily-operations-brief/workflow.md
+new file mode 100644
+index 00000000..3a81fd72
+--- /dev/null
++++ b/.flocks/plugins/workflows/daily-operations-brief/workflow.md
+@@ -0,0 +1,7 @@
++# 安全运营领导日报
++
++读取记录 → 分析指标与待办 → 编制成果 → 保存报告与统计依据。
++
++每天北京时间运行一次，报告统计前一个自然日；待办为生成时快照。成果保存在任务归属管理员的日常产出。首次初始化选择首位有效管理员；已存在的任务不会在重启时重置暂停状态和调度设置。
++
++任务执行成功不代表安全事件已处置。负责人、时限和验收要求为建议，未自动派单、发送通知或修改设备状态。
+diff --git a/.flocks/plugins/workflows/daily-operations-followup/meta.json b/.flocks/plugins/workflows/daily-operations-followup/meta.json
+new file mode 100644
+index 00000000..e1e7600b
+--- /dev/null
++++ b/.flocks/plugins/workflows/daily-operations-followup/meta.json
+@@ -0,0 +1,7 @@
++{
++  "name": "重点风险闭环督办",
++  "description": "每日生成可追溯的管理成果；真实记录、明确数据边界，不使用合成样本。",
++  "category": "安全运营成果",
++  "group": "每日运营成果",
++  "status": "active"
++}
+diff --git a/.flocks/plugins/workflows/daily-operations-followup/workflow.json b/.flocks/plugins/workflows/daily-operations-followup/workflow.json
+new file mode 100644
+index 00000000..d0a8a106
+--- /dev/null
++++ b/.flocks/plugins/workflows/daily-operations-followup/workflow.json
+@@ -0,0 +1,54 @@
++{
++  "name": "重点风险闭环督办",
++  "description": "每日生成可追溯的管理成果；真实记录、明确数据边界，不使用合成样本。",
++  "start": "读取真实记录",
++  "nodes": [
++    {
++      "id": "读取真实记录",
++      "type": "python",
++      "description": "按前一日时间窗读取任务执行，按当前管理员及安装范围读取监测；数据不可用时标记缺口。",
++      "code": "from flocks.workflow.daily_operations import run_stage\noutputs = run_stage('followup', 'collect', inputs)"
++    },
++    {
++      "id": "分析指标与待办",
++      "type": "python",
++      "description": "计算有明确分母的执行指标，区分任务失败、观察项和风险待办。",
++      "code": "from flocks.workflow.daily_operations import run_stage\noutputs = run_stage('followup', 'analyze', inputs)"
++    },
++    {
++      "id": "编制领导成果",
++      "type": "python",
++      "description": "输出一页结论、指标依据、建议推进清单与可追溯索引。",
++      "code": "from flocks.workflow.daily_operations import run_stage\noutputs = run_stage('followup', 'compose', inputs)"
++    },
++    {
++      "id": "保存报告与统计依据",
++      "type": "python",
++      "description": "按当前日期保存到成果管理员的日常产出；不覆盖既有文件，不发送通知。",
++      "code": "from flocks.workflow.daily_operations import run_stage\noutputs = run_stage('followup', 'publish', inputs)"
++    }
++  ],
++  "edges": [
++    {
++      "from": "读取真实记录",
++      "to": "分析指标与待办",
++      "mapping": {
++        "state": "state"
++      }
++    },
++    {
++      "from": "分析指标与待办",
++      "to": "编制领导成果",
++      "mapping": {
++        "state": "state"
++      }
++    },
++    {
++      "from": "编制领导成果",
++      "to": "保存报告与统计依据",
++      "mapping": {
++        "state": "state"
++      }
++    }
++  ]
++}
+diff --git a/.flocks/plugins/workflows/daily-operations-followup/workflow.md b/.flocks/plugins/workflows/daily-operations-followup/workflow.md
+new file mode 100644
+index 00000000..b31930c1
+--- /dev/null
++++ b/.flocks/plugins/workflows/daily-operations-followup/workflow.md
+@@ -0,0 +1,7 @@
++# 重点风险闭环督办
++
++读取记录 → 分析指标与待办 → 编制成果 → 保存报告与统计依据。
++
++每天北京时间运行一次，报告统计前一个自然日；待办为生成时快照。成果保存在任务归属管理员的日常产出。首次初始化选择首位有效管理员；已存在的任务不会在重启时重置暂停状态和调度设置。
++
++任务执行成功不代表安全事件已处置。负责人、时限和验收要求为建议，未自动派单、发送通知或修改设备状态。
+diff --git a/.flocks/plugins/workflows/daily-operations-value/meta.json b/.flocks/plugins/workflows/daily-operations-value/meta.json
+new file mode 100644
+index 00000000..f626bcf8
+--- /dev/null
++++ b/.flocks/plugins/workflows/daily-operations-value/meta.json
+@@ -0,0 +1,7 @@
++{
++  "name": "运营成效与优化建议",
++  "description": "每日生成可追溯的管理成果；真实记录、明确数据边界，不使用合成样本。",
++  "category": "安全运营成果",
++  "group": "每日运营成果",
++  "status": "active"
++}
+diff --git a/.flocks/plugins/workflows/daily-operations-value/workflow.json b/.flocks/plugins/workflows/daily-operations-value/workflow.json
+new file mode 100644
+index 00000000..030ec460
+--- /dev/null
++++ b/.flocks/plugins/workflows/daily-operations-value/workflow.json
+@@ -0,0 +1,54 @@
++{
++  "name": "运营成效与优化建议",
++  "description": "每日生成可追溯的管理成果；真实记录、明确数据边界，不使用合成样本。",
++  "start": "读取真实记录",
++  "nodes": [
++    {
++      "id": "读取真实记录",
++      "type": "python",
++      "description": "按前一日时间窗读取任务执行，按当前管理员及安装范围读取监测；数据不可用时标记缺口。",
++      "code": "from flocks.workflow.daily_operations import run_stage\noutputs = run_stage('value', 'collect', inputs)"
++    },
++    {
++      "id": "分析指标与待办",
++      "type": "python",
++      "description": "计算有明确分母的执行指标，区分任务失败、观察项和风险待办。",
++      "code": "from flocks.workflow.daily_operations import run_stage\noutputs = run_stage('value', 'analyze', inputs)"
++    },
++    {
++      "id": "编制领导成果",
++      "type": "python",
++      "description": "输出一页结论、指标依据、建议推进清单与可追溯索引。",
++      "code": "from flocks.workflow.daily_operations import run_stage\noutputs = run_stage('value', 'compose', inputs)"
++    },
++    {
++      "id": "保存报告与统计依据",
++      "type": "python",
++      "description": "按当前日期保存到成果管理员的日常产出；不覆盖既有文件，不发送通知。",
++      "code": "from flocks.workflow.daily_operations import run_stage\noutputs = run_stage('value', 'publish', inputs)"
++    }
++  ],
++  "edges": [
++    {
++      "from": "读取真实记录",
++      "to": "分析指标与待办",
++      "mapping": {
++        "state": "state"
++      }
++    },
++    {
++      "from": "分析指标与待办",
++      "to": "编制领导成果",
++      "mapping": {
++        "state": "state"
++      }
++    },
++    {
++      "from": "编制领导成果",
++      "to": "保存报告与统计依据",
++      "mapping": {
++        "state": "state"
++      }
++    }
++  ]
++}
+diff --git a/.flocks/plugins/workflows/daily-operations-value/workflow.md b/.flocks/plugins/workflows/daily-operations-value/workflow.md
+new file mode 100644
+index 00000000..dffa79f6
+--- /dev/null
++++ b/.flocks/plugins/workflows/daily-operations-value/workflow.md
+@@ -0,0 +1,7 @@
++# 运营成效与优化建议
++
++读取记录 → 分析指标与待办 → 编制成果 → 保存报告与统计依据。
++
++每天北京时间运行一次，报告统计前一个自然日；待办为生成时快照。成果保存在任务归属管理员的日常产出。首次初始化选择首位有效管理员；已存在的任务不会在重启时重置暂停状态和调度设置。
++
++任务执行成功不代表安全事件已处置。负责人、时限和验收要求为建议，未自动派单、发送通知或修改设备状态。
 diff --git a/README.md b/README.md
 index 90b44329..207068a3 100644
 --- a/README.md
@@ -103703,6 +103961,22 @@ index 96e152d8..6ccf0340 100644
      @classmethod
      async def _publish_execution_update(cls, execution: TaskExecution) -> None:
          try:
+diff --git a/flocks/task/plugin.py b/flocks/task/plugin.py
+index fc4a9bed..d6f685e4 100644
+--- a/flocks/task/plugin.py
++++ b/flocks/task/plugin.py
+@@ -115,8 +115,6 @@ async def seed_tasks_from_plugin(project_dir: Optional[Path] = None) -> int:
+         if sources:
+             PluginLoader.load_for_extension("TASKS", sources, project_tasks_dir)
+ 
+-    if not _collected_specs:
+-        log.info("task.plugin.no_specs")
+-        return 0
+-
+-    return await upsert_task_specs(_collected_specs)
++    created = await upsert_task_specs(_collected_specs) if _collected_specs else 0
++    from flocks.workflow.daily_operations import seed_schedulers
++    return created + await seed_schedulers()
 diff --git a/flocks/task/plugin_sync.py b/flocks/task/plugin_sync.py
 index 1c27a582..f33e4e4d 100644
 --- a/flocks/task/plugin_sync.py
@@ -104869,6 +105143,305 @@ index 00000000..ef1d93f2
 +  "recoveryMinMinutes": 40,
 +  "recoveryMaxMinutes": 120
 +}
+diff --git a/flocks/workflow/daily_operations.py b/flocks/workflow/daily_operations.py
+new file mode 100644
+index 00000000..7435c2bd
+--- /dev/null
++++ b/flocks/workflow/daily_operations.py
+@@ -0,0 +1,293 @@
++"""Daily leadership deliverables from existing records; no model or device calls.
++
++Native task/workflow engines retain scheduling, leases and cancellation. Reports
++belong to one active administrator; monitoring queries are restricted to that
++owner and the currently installed projects. This is not an incident detector.
++"""
++from __future__ import annotations
++
++from collections import Counter
++from datetime import datetime, timedelta, timezone
++import html
++import json
++import os
++import re
++import uuid
++from zoneinfo import ZoneInfo
++
++TZ = ZoneInfo("Asia/Shanghai")
++LIMIT = 2000
++DEFINITIONS = {
++    "brief": ("安全运营领导日报", "30 8 * * *", "08:30"),
++    "followup": ("重点风险闭环督办", "40 8 * * *", "08:40"),
++    "value": ("运营成效与优化建议", "50 8 * * *", "08:50"),
++}
++PREFIX = "daily-operations-"
++
++
++async def seed_schedulers():
++    """Create once; never reset a user's pause, edits or next execution time."""
++    from flocks.auth.service import AuthService
++    from flocks.task.manager import TaskManager
++    from flocks.task.store import TaskStore
++    from flocks.task.models import ExecutionMode, SchedulerMode, TaskSource, TaskTrigger
++    users = await AuthService.list_users()
++    admins = [u for u in users if u.role == "admin" and u.status == "active"]
++    if not admins:
++        return 0
++    owner = admins[0]
++    created = 0
++    for kind, (title, cron, clock) in DEFINITIONS.items():
++        key = "builtin:" + PREFIX + kind
++        if await TaskStore.get_scheduler_by_dedup_key(key):
++            continue
++        await TaskManager.create_scheduler(
++            title=title, description=f"每天{clock}（北京时间）生成前一日成果与当前待办；报告保存在管理员日常产出。真实记录、统计依据与改进建议可追溯。",
++            mode=SchedulerMode.CRON, execution_mode=ExecutionMode.WORKFLOW,
++            workflow_id=PREFIX + kind, created_by=owner.id, dedup_key=key,
++            source=TaskSource(source_type="scheduled_trigger", user_prompt=title),
++            trigger=TaskTrigger(cron=cron, timezone="Asia/Shanghai", cron_description=f"每天 {clock}（北京时间）"),
++            context={"daily_operations_owner": owner.id},
++            tags=["每日成果", "领导汇报", "工作流"], category="安全运营成果",
++        )
++        created += 1
++    return created
++
++
++def period(now=None):
++    now = (now or datetime.now(timezone.utc)).astimezone(TZ)
++    end = now.replace(hour=0, minute=0, second=0, microsecond=0)
++    return now, end - timedelta(days=1), end
++
++
++def safe(value, length=100):
++    text = re.sub(r"[\r\n\t|<>]", " ", str(value or "未提供"))
++    text = re.sub(r"(?i)(?:bearer\s+\S+|(?:password|token|secret|api[_-]?key)\s*[:=]\s*\S+)", "[已隐藏]", text)
++    return "".join(c for c in text if ord(c) >= 32)[:length]
++
++
++async def collect(kind):
++    from flocks.auth.context import get_current_auth_user
++    from flocks.auth.service import AuthService
++    from flocks.task.store import TaskStore
++    scheduler = await TaskStore.get_scheduler_by_dedup_key("builtin:" + PREFIX + kind)
++    if scheduler is None or scheduler.workflow_id != PREFIX + kind:
++        raise PermissionError("每日成果任务未注册或工作流关联已变更")
++    owner_id = scheduler.context.get("daily_operations_owner")
++    owner = await AuthService.get_user_by_id(owner_id) if owner_id else None
++    principal = get_current_auth_user()
++    if owner is None or owner.role != "admin" or owner.status != "active":
++        raise PermissionError("成果接收管理员不可用，请重新配置任务归属")
++    if principal is not None and (principal.role != "admin" or principal.id != owner.id):
++        raise PermissionError("仅成果归属管理员可以手动运行此工作流")
++    now, start, end = period()
++    records, total = await TaskStore.list_executions(started_after=start, started_before=end, limit=LIMIT)
++    # Some backends include the upper bound; enforce the documented [start,end).
++    records = [r for r in records if r.started_at and start <= r.started_at.astimezone(TZ) < end
++               and not (r.workflow_id or "").startswith(PREFIX)]
++    tasks = [{"id": r.id, "title": safe(r.title), "status": str(getattr(r.status, "value", r.status)),
++              "mode": str(getattr(r.execution_mode, "value", r.execution_mode)),
++              "priority": str(getattr(r.priority, "value", r.priority)),
++              "scheduler": r.scheduler_id} for r in records]
++    schedulers, scheduler_total = await TaskStore.list_schedulers(limit=LIMIT)
++    data = {"kind": kind, "title": DEFINITIONS[kind][0], "owner": owner.id, "username": owner.username,
++            "generatedAt": now.isoformat(), "businessDate": start.date().isoformat(),
++            "window": [start.isoformat(), end.isoformat()], "tasks": tasks,
++            "schedulerCount": scheduler_total,
++            "activeSchedulers": sum(str(getattr(s.status, "value", s.status)) == "active" for s in schedulers),
++            "gaps": [], "monitor": None}
++    if total > LIMIT or scheduler_total > LIMIT:
++        data["gaps"].append("任务数据超过2000条上限，以下任务指标为截断样本，不能视为完整总量。")
++    try:
++        from flocks.monitoring.store import connection, read_only_diagnostics
++        with read_only_diagnostics():
++            async with connection() as db:
++                await db.execute("BEGIN")
++                async def query(sql, args=()):
++                    cur = await db.execute(sql, args)
++                    return [dict(row) for row in await cur.fetchall()]
++                installations = await query("SELECT scope,project,ready,scheduler_id FROM monitor_installations WHERE owner=? AND installed=1", (owner.id,))
++                counts = Counter()
++                followups = []
++                runs = Counter()
++                events = 0
++                coverage_ready = bool(installations)
++                for installation in installations:
++                    scope, project = installation["scope"], installation["project"]
++                    args = (owner.id, scope, project)
++                    active = await query("SELECT status FROM task_schedulers WHERE id=?", (installation["scheduler_id"],))
++                    if not installation["ready"] or not active or active[0]["status"] != "active":
++                        coverage_ready = False
++                        data["gaps"].append("有监测范围尚未就绪或调度已停用；现存事件记录不代表全天监测覆盖，不能用空记录判断无风险。")
++                    for row in await query("SELECT status,COUNT(*) AS n FROM monitor_attempts WHERE owner=? AND scope=? AND project=? AND business_date=? GROUP BY status", args + (data["businessDate"],)):
++                        runs[row["status"]] += row["n"]
++                    obs = await query("SELECT COUNT(DISTINCT o.event_key) AS n FROM monitor_observations o JOIN monitor_attempts a ON a.id=o.attempt_id WHERE a.owner=? AND a.scope=? AND a.project=? AND a.business_date=?", args + (data["businessDate"],))
++                    events += obs[0]["n"]
++                    for row in await query("SELECT state,COUNT(*) AS n FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? GROUP BY state", args):
++                        counts[row["state"]] += row["n"]
++                    followups.extend(await query("SELECT event_key,scope,device,state,watch_count,updated_at FROM monitor_event_followup WHERE owner=? AND scope=? AND project=? AND state IN ('risk_open','pending','queued','writing','watching') ORDER BY updated_at LIMIT 20", args))
++                data["monitor"] = {"installations": len(installations), "coverageReady": coverage_ready, "runs": dict(runs), "observedEvents": events,
++                                   "currentStates": dict(counts), "followups": followups[:20]}
++                if not installations:
++                    data["gaps"].append("本成果管理员尚无已安装的监测范围；安全事件数据未接入，不能据此判断无风险。")
++    except Exception as exc:
++        data["gaps"].append(f"监测记录暂不可读（{type(exc).__name__}）；安全事件指标未知，本报告保留任务执行统计。")
++    return data
++
++
++def analyze(data):
++    counts = Counter(t["status"] for t in data["tasks"])
++    completed, failed = counts["completed"], counts["failed"]
++    terminal = completed + failed + counts["cancelled"]
++    monitor = data.get("monitor") or {}
++    states = monitor.get("currentStates", {})
++    data["metrics"] = {"started": len(data["tasks"]), "completed": completed, "failed": failed,
++                       "cancelled": counts["cancelled"], "unfinished": sum(v for k, v in counts.items() if k not in {"completed", "failed", "cancelled"}),
++                       "workflowCompleted": sum(t["status"] == "completed" and t["mode"] == "workflow" for t in data["tasks"]),
++                       "completionRate": round(100 * completed / terminal, 1) if terminal else None,
++                       "riskOpen": states.get("risk_open", 0) if monitor.get("coverageReady") else None,
++                       "watching": states.get("watching", 0) if monitor.get("coverageReady") else None}
++    actions = []
++    if failed:
++        actions.append(("P1", "恢复失败执行链路", f"前一日有{failed}次执行失败；先查看任务中心原始错误与最后成功步骤，再决定重试。", "平台运维/值班人员", "下次日报前", "重试成功记录及失败原因说明"))
++    if states.get("risk_open"):
++        actions.append(("P1", "核对未闭环风险", f"当前保存{states['risk_open']}条risk_open待办；逐项核对最新XDR状态、处置和复测证据。", "安全运营/资产负责人（待确认）", "今日优先确认", "处置记录、源端回查和复测证据"))
++    if states.get("watching"):
++        actions.append(("P2", "补齐观察事件的证据", f"当前{states['watching']}条观察项；先补查证据，再判断风险，不直接计为攻击或误报。", "安全分析人员（待确认）", "下次日报前", "可核对的取证来源与调查结论"))
++    if data["gaps"]:
++        actions.append(("P1", "补齐数据口径", "；".join(data["gaps"]), "平台管理员", "今日确认", "数据源可读、范围与采集时间明确"))
++    if not actions:
++        actions.append(("P3", "抽样复核与保持观察", "当前记录未形成上述督办项；抽查已完成执行及源端处置证据，不能据此保证整体安全。", "值班人员", "下次日报前", "抽样核验记录"))
++    data["actions"] = actions
++    return data
++
++
++def compose(data):
++    m = data["metrics"]
++    mon = data.get("monitor") or {}
++    rate = "暂无可计算数据" if m["completionRate"] is None else f"{m['completionRate']}%"
++    risk = "未知（监测数据未就绪）" if m["riskOpen"] is None else f"{m['riskOpen']} 条"
++    intro = {
++        "brief": "为管理者集中呈现前一日工作完成情况、当前风险待办和需要协调的行动。",
++        "followup": "把尚需核验的风险与执行阻断转成可分派、可验收的清单，推动下一轮闭环。",
++        "value": "用实际执行记录说明自动化已经完成的工作，并提出下一步可验证的改进。",
++    }[data["kind"]]
++    lines = [f"# {data['title']}", f"**业务日期：{data['businessDate']}｜生成时间：{data['generatedAt']}**", "", intro, "",
++             "## 一页结论", "",
++             f"前一日记录到 **{m['started']} 次任务启动**，其中 **{m['completed']} 次完成、{m['failed']} 次失败**；已结束执行的完成占比为 **{rate}**。其中工作流完成 **{m['workflowCompleted']} 次**。",
++             f"当前监测台账中的未闭环风险为 **{risk}**。风险待办是生成时的状态快照，与前一日新增风险数量不同。", "",
++             "## 关键指标与统计口径", "", "| 指标 | 数值 | 说明 |", "| --- | ---: | --- |",
++             f"| 启动执行 | {m['started']} | 前一自然日开始，排除本套件三项成果任务 |",
++             f"| 完成 / 失败 / 取消 | {m['completed']} / {m['failed']} / {m['cancelled']} | 读取时的执行状态，不是安全事件处置数量 |",
++             f"| 未结束 | {m['unfinished']} | 前一日启动、生成时尚未结束 |",
++             f"| 完成占比 | {rate} | 完成 ÷（完成+失败+取消）；不含未结束执行 |",
++             f"| 工作流完成 | {m['workflowCompleted']} | 实际工作流执行记录，不折算人天、成本或拦截攻击数 |",
++             f"| 当前启用调度 | {data['activeSchedulers']} / {data['schedulerCount']} | 实例任务中心快照，包含本套件 |",
++             f"| 前一日监测轮次 | {sum(mon.get('runs', {}).values()) if mon.get('installations') else '未知'} | 轮次不是事件数，失败不计作成功巡检 |",
++             f"| 前一日观测事件 | {mon.get('observedEvents', '未知') if mon.get('installations') else '未知'} | 同一安装范围内按事件键去重；跨范围不合并 |", ""]
++    if data["kind"] == "followup":
++        lines += ["## 重点待办线索", "", "以下线索用于定位待办，不作已处置或已复发结论。负责人和时限为建议，尚未创建工单。", "",
++                  "| 线索 | 当前状态 | 观察轮数 | 最后更新 |", "| --- | --- | ---: | --- |"]
++        for row in mon.get("followups", []):
++            key = safe(row["event_key"], 140)
++            lines.append(f"| 事件索引 {key} | {safe(row['state'])} | {row['watch_count']} | {safe(row['updated_at'])} |")
++        if not mon.get("followups"):
++            lines.append("| 暂无可展示的待办线索 | 需结合数据覆盖范围核对 | — | — |")
++    if data["kind"] == "value":
++        lines += ["## 已有成果与下一步投入", "",
++                  f"- **执行交付**：前一日已完成{m['completed']}次任务，其中{m['workflowCompleted']}次为工作流；可在任务中心逐项核对。",
++                  f"- **稳定性改进**：先复盘{m['failed']}次失败执行，按原因归类后再决定优化配置、输入还是代码。",
++                  "- **知识复用**：把成功执行中可复用的操作和证据整理到知识沉淀，保留原报告来源；本工作流没有自动确认或写入经验结论。",
++                  "- **下次验证**：按相同口径复核失败执行与待办变化；当前版本不计算历史趋势，也不估算节省人力和经济收益。", ""]
++    lines += ["## 建议推进清单", "", "| 优先级 | 行动 | 依据与操作 | 建议协同方 | 建议时限 | 验收证据 |", "| --- | --- | --- | --- | --- | --- |"]
++    lines += ["| " + " | ".join(safe(v, 300) for v in row) + " |" for row in data["actions"]]
++    lines += ["", "## 执行证据索引", "", "任务中心按以下执行编号核对，报告不复制原始错误、告警报文或凭据。", "",
++              "| 执行编号 | 任务 | 状态 |", "| --- | --- | --- |"]
++    ordered = sorted(data["tasks"], key=lambda t: t["status"] != "failed")
++    lines += [f"| {safe(t['id'])} | {safe(t['title'])} | {safe(t['status'])} |" for t in ordered[:20]]
++    if not ordered:
++        lines.append("| 无记录 | 前一日未读取到任务启动记录，不能视为已完成工作 | — |")
++    if len(ordered) > 20:
++        lines.append(f"\n正文仅列20条索引，完整有界统计依据见随附JSON（{len(ordered)}条）。")
++    lines += ["", "## 数据边界", "",
++              f"- 时间窗口：{data['window'][0]} 至 {data['window'][1]}，左闭右开。",
++              "- 任务统计为管理员可见的实例任务记录；监测仅限成果归属管理员已安装范围，不读取其他账号监测内容。",
++              "- 三项日报由固定规则整理真实记录，不使用内置样本；记录为空、读取失败或截断均明确标记。",
++              "- 任务成功不等同于风险已消除；源端关闭不等同于已完成复测。此工作流不调用设备、不发送消息、不修改处置状态。"]
++    lines += ["- " + gap for gap in data["gaps"]]
++    data["markdown"] = "\n".join(lines) + "\n"
++    return data
++
++
++def render_html(data):
++    """Offline, printable report with escaped text and no scripts or remote assets."""
++    body = []
++    table = False
++    for line in data["markdown"].splitlines():
++        if line.startswith("| "):
++            if set(line.replace("|", "").replace("-", "").replace(":", "").strip()) == set():
++                continue
++            if not table:
++                body.append('<div class="table"><table>')
++                table = True
++            cells = [html.escape(cell.strip()) for cell in line.strip("|").split("|")]
++            body.append("<tr>" + "".join("<td>" + cell + "</td>" for cell in cells) + "</tr>")
++            continue
++        if table:
++            body.append("</table></div>")
++            table = False
++        text = html.escape(line.replace("**", ""))
++        if line.startswith("# "):
++            continue
++        if line.startswith("## "):
++            body.append("<h2>" + text[3:] + "</h2>")
++        elif line.startswith("- "):
++            body.append('<p class="bullet">' + text[2:] + "</p>")
++        elif text:
++            body.append("<p>" + text + "</p>")
++    if table:
++        body.append("</table></div>")
++    m = data["metrics"]
++    cards = "".join(f'<div class="kpi"><span>{label}</span><strong>{value}</strong></div>' for label, value in [
++        ("已完成执行", m["completed"]), ("工作流完成", m["workflowCompleted"]),
++        ("需复盘的失败", m["failed"]), ("未闭环风险", m["riskOpen"] if m["riskOpen"] is not None else "待核对")])
++    return '''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
++<title>''' + html.escape(data["title"]) + '''</title><style>
++*{box-sizing:border-box}body{margin:0;background:#edf2f7;color:#243447;font:15px/1.8 system-ui,-apple-system,"PingFang SC",sans-serif}main{max-width:1100px;margin:36px auto;background:white;border-radius:18px;overflow:hidden;box-shadow:0 18px 60px #19334d14}header{background:#142d45;color:white;padding:38px 48px}header small{letter-spacing:3px;color:#a4d2e4}h1{font-size:32px;letter-spacing:1px;margin:10px 0}header p{color:#c1d3df;margin:0}.content{padding:28px 48px 48px}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:30px}.kpi{border:1px solid #e1e9ee;background:#f7fafc;border-radius:12px;padding:18px}.kpi span{color:#607487;display:block;font-size:13px}.kpi strong{display:block;font-size:32px;color:#156c83}h2{margin-top:32px;font-size:19px;border-left:4px solid #168aa1;padding-left:12px}.table{overflow:auto;border:1px solid #e0e8ef;border-radius:10px;margin:16px 0}table{border-collapse:collapse;width:100%;font-size:13px}td{border-bottom:1px solid #e6edf2;padding:12px;vertical-align:top;min-width:90px}tr:first-child{background:#eff5f8;font-weight:650}tr:last-child td{border:0}.bullet{padding-left:16px;border-left:2px solid #d5e5ed}footer{padding:16px 48px;background:#f2f7fa;color:#627789;font-size:12px}@media(max-width:700px){main{margin:0;border-radius:0}header,.content{padding:24px}.metrics{grid-template-columns:repeat(2,1fr)}h1{font-size:25px}}@media print{body{background:white}main{box-shadow:none;margin:0;max-width:none}header{background:white;color:#142d45;border-bottom:3px solid #142d45}header small,header p{color:#36586b}.kpi{break-inside:avoid}h2{break-after:avoid}tr{break-inside:avoid}footer{background:white}}
++</style><main><header><small>FLOCKS · 每日运营成果</small><h1>''' + html.escape(data["title"]) + '''</h1><p>业务日期 ''' + data["businessDate"] + ''' · 北京时间</p></header><div class="content"><div class="metrics">''' + cards + '</div>' + "\n".join(body) + '''</div><footer>依据已保存的实际记录生成 · 统计窗口、数据缺口与建议事项见正文 · 支持浏览器打印为 PDF</footer></main></html>'''
++
++
++def publish(data):
++    from flocks.workspace.manager import WorkspaceManager
++    root = WorkspaceManager.get_instance().get_default_outputs_dir(username=data["username"], user_id=data["owner"], today=datetime.now(TZ).date())
++    # A new run gets a distinct name. Never overwrite an existing user's file.
++    stem = f"{data['title']}-{data['businessDate']}-{uuid.uuid4().hex[:8]}"
++    outputs = {}
++    evidence = {k: v for k, v in data.items() if k not in {"markdown", "username", "owner"}}
++    for ext, content in {"md": data["markdown"], "html": render_html(data), "json": json.dumps(evidence, ensure_ascii=False, indent=2)}.items():
++        target = root / (stem + "." + ext)
++        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
++        with os.fdopen(fd, "w", encoding="utf-8") as stream:
++            stream.write(content)
++        outputs[ext] = str(target)
++    return {"title": data["title"], "businessDate": data["businessDate"], "files": outputs,
++            "summary": f"已生成《{data['title']}》及统计依据；完成{data['metrics']['completed']}次、失败{data['metrics']['failed']}次。" + ("存在数据缺口，请核对报告边界。" if data["gaps"] else ""),
++            "dataGaps": data["gaps"]}
++
++
++def run_stage(kind, stage, inputs):
++    if kind not in DEFINITIONS:
++        raise ValueError("未知成果工作流")
++    if stage == "collect":
++        from flocks.workflow._async_runtime import run_sync
++        return {"state": run_sync(collect(kind))}
++    state = inputs["state"]
++    if state.get("kind") != kind:
++        raise ValueError("成果状态与工作流不一致")
++    if stage == "analyze":
++        return {"state": analyze(state)}
++    if stage == "compose":
++        return {"state": compose(state)}
++    if stage == "publish":
++        return publish(state)
++    raise ValueError("未知成果阶段")
 diff --git a/flocks/workflow/error_fields.py b/flocks/workflow/error_fields.py
 new file mode 100644
 index 00000000..24e36c22
@@ -105997,6 +106570,128 @@ index 808d7088..5ae192dc 100644
  @pytest.fixture(autouse=True)
  def _node_only_where_a_test_says(monkeypatch):
      """A test says what PATH holds; a Node.js the machine running it has elsewhere is no answer."""
+diff --git a/tests/customization/test_daily_operations.py b/tests/customization/test_daily_operations.py
+new file mode 100644
+index 00000000..0872d4b0
+--- /dev/null
++++ b/tests/customization/test_daily_operations.py
+@@ -0,0 +1,116 @@
++import json
++from datetime import datetime, timezone
++from pathlib import Path
++from types import SimpleNamespace as NS
++from unittest import IsolatedAsyncioTestCase, TestCase
++from unittest.mock import AsyncMock, patch
++
++from flocks.workflow import daily_operations as d
++
++
++def sample():
++    return {'kind':'brief','title':'安全运营领导日报','businessDate':'2026-11-13',
++            'generatedAt':'2026-11-14T08:30:00+08:00','owner':'admin-id','username':'admin',
++            'window':['2026-11-13T00:00:00+08:00','2026-11-14T00:00:00+08:00'],
++            'tasks':[{'id':'exec1','title':'真实工作流','status':'completed','mode':'workflow','priority':'normal','scheduler':'s1'},
++                     {'id':'exec2','title':'失败执行','status':'failed','mode':'agent','priority':'normal','scheduler':'s2'},
++                     {'id':'exec3','title':'执行中','status':'running','mode':'agent','priority':'normal','scheduler':'s3'}],
++            'schedulerCount':7,'activeSchedulers':6,'gaps':[],'monitor':None}
++
++
++class Reports(TestCase):
++    def test_previous_business_day_uses_beijing_midnight(self):
++        _, start, end = d.period(datetime(2026,11,13,17,10,tzinfo=timezone.utc))
++        self.assertEqual(start.isoformat(), '2026-11-13T00:00:00+08:00')
++        self.assertEqual(end.isoformat(), '2026-11-14T00:00:00+08:00')
++
++    def test_completed_ratio_excludes_inflight_and_is_not_closure(self):
++        data=d.compose(d.analyze(sample()))
++        self.assertEqual(data['metrics']['completionRate'],50.0)
++        self.assertIsNone(data['metrics']['riskOpen'])
++        self.assertIn('未知（监测数据未就绪）',data['markdown'])
++        self.assertIn('不等同于风险已消除',data['markdown'])
++
++    def test_paused_monitoring_never_produces_zero_risk_headline(self):
++        data=sample();data['monitor']={'installations':1,'coverageReady':False,'currentStates':{},'runs':{}}
++        data=d.compose(d.analyze(data))
++        self.assertIsNone(data['metrics']['riskOpen'])
++        self.assertIn('未知（监测数据未就绪）',data['markdown'])
++
++    def test_empty_data_does_not_claim_success_or_zero_risk(self):
++        data=sample();data['tasks']=[];data=d.compose(d.analyze(data))
++        self.assertIsNone(data['metrics']['completionRate'])
++        self.assertIn('不能视为已完成工作',data['markdown'])
++        self.assertNotIn('100.0%',data['markdown'])
++
++    def test_html_escapes_untrusted_text_and_is_offline(self):
++        data=sample();data['tasks'][0]['title']='<script>alert(1)</script>'
++        data=d.compose(d.analyze(data));data['markdown']+='\n<script>alert(1)</script>\n'
++        text=d.render_html(data)
++        self.assertNotIn('<script>',text)
++        self.assertNotIn('src=',text)
++        self.assertIn('&lt;script&gt;',text)
++        self.assertIn('@media print',text)
++
++    def test_reports_are_distinct_and_evidence_is_not_fabricated(self):
++        for kind in d.DEFINITIONS:
++            data=sample();data['kind']=kind;data['title']=d.DEFINITIONS[kind][0]
++            text=d.compose(d.analyze(data))['markdown']
++            self.assertIn(data['title'],text)
++            self.assertIn('exec1',text)
++            if kind=='followup':self.assertIn('重点待办线索',text)
++            if kind=='value':self.assertIn('已有成果与下一步投入',text)
++
++    def test_repeated_publish_preserves_old_reports_and_account_scope(self):
++        import tempfile
++        from flocks.workspace.manager import WorkspaceManager
++        with tempfile.TemporaryDirectory() as temp:
++            root=Path(temp)
++            mgr=NS(get_default_outputs_dir=lambda **kwargs:root)
++            with patch.object(WorkspaceManager,'get_instance',return_value=mgr):
++                data=d.compose(d.analyze(sample()))
++                first=d.publish(data);second=d.publish(data)
++            self.assertEqual(len(list(root.glob('*'))),6)
++            self.assertNotEqual(first['files']['md'],second['files']['md'])
++            self.assertEqual(set(first['files']),{'md','json','html'})
++            evidence=json.loads(Path(first['files']['json']).read_text())
++            self.assertNotIn('owner',evidence)
++            self.assertEqual(evidence['metrics']['completed'],1)
++
++
++class AuthorizationAndSeeding(IsolatedAsyncioTestCase):
++    async def test_existing_paused_schedules_are_never_reset(self):
++        from flocks.auth.service import AuthService
++        from flocks.task.store import TaskStore
++        from flocks.task.manager import TaskManager
++        with patch.object(AuthService,'list_users',AsyncMock(return_value=[NS(id='a',role='admin',status='active')])), patch.object(TaskStore,'get_scheduler_by_dedup_key',AsyncMock(return_value=NS(status='disabled'))), patch.object(TaskManager,'create_scheduler',AsyncMock()) as create:
++            self.assertEqual(await d.seed_schedulers(),0)
++            create.assert_not_called()
++
++    async def test_exactly_three_daily_workflow_schedules_are_created(self):
++        from flocks.auth.service import AuthService
++        from flocks.task.store import TaskStore
++        from flocks.task.manager import TaskManager
++        with patch.object(AuthService,'list_users',AsyncMock(return_value=[NS(id='a',role='admin',status='active')])), patch.object(TaskStore,'get_scheduler_by_dedup_key',AsyncMock(return_value=None)), patch.object(TaskManager,'create_scheduler',AsyncMock()) as create:
++            self.assertEqual(await d.seed_schedulers(),3)
++            calls=[call.kwargs for call in create.call_args_list]
++            self.assertEqual({c['trigger'].cron for c in calls},{'30 8 * * *','40 8 * * *','50 8 * * *'})
++            self.assertTrue(all(c['execution_mode'].value=='workflow' and c['workflow_id'].startswith(d.PREFIX) for c in calls))
++
++    async def test_other_principal_cannot_read_report_owner_data(self):
++        from flocks.auth.service import AuthService
++        from flocks.auth.context import AuthUser,set_current_auth_user,reset_current_auth_user
++        from flocks.task.store import TaskStore
++        token=set_current_auth_user(AuthUser(id='other',username='other',role='member'))
++        try:
++            with patch.object(TaskStore,'get_scheduler_by_dedup_key',AsyncMock(return_value=NS(workflow_id=d.PREFIX+'brief',context={'daily_operations_owner':'a'}))), patch.object(AuthService,'get_user_by_id',AsyncMock(return_value=NS(id='a',role='admin',status='active'))), patch.object(TaskStore,'list_executions',AsyncMock()) as read:
++                with self.assertRaises(PermissionError):await d.collect('brief')
++                read.assert_not_called()
++        finally:reset_current_auth_user(token)
++
++    async def test_disabled_report_owner_stops_before_collecting_records(self):
++        from flocks.auth.service import AuthService
++        from flocks.task.store import TaskStore
++        with patch.object(TaskStore,'get_scheduler_by_dedup_key',AsyncMock(return_value=NS(workflow_id=d.PREFIX+'brief',context={'daily_operations_owner':'a'}))), patch.object(AuthService,'get_user_by_id',AsyncMock(return_value=NS(id='a',role='admin',status='disabled'))), patch.object(TaskStore,'list_executions',AsyncMock()) as read:
++            with self.assertRaises(PermissionError):await d.collect('brief')
++            read.assert_not_called()
 diff --git a/tests/customization/test_home_usage.py b/tests/customization/test_home_usage.py
 new file mode 100644
 index 00000000..0704da43
@@ -130107,7 +130802,7 @@ index adf1149f..82c5e913 100644
 +  "knowledge": "Knowledge Center"
  }
 diff --git a/webui/src/locales/en-US/task.json b/webui/src/locales/en-US/task.json
-index 33cc78a8..6af81f61 100644
+index 33cc78a8..7d6c15d7 100644
 --- a/webui/src/locales/en-US/task.json
 +++ b/webui/src/locales/en-US/task.json
 @@ -124,7 +124,33 @@
@@ -130145,6 +130840,17 @@ index 33cc78a8..6af81f61 100644
    },
    "scheduled": {
      "emptyTitle": "No Scheduled Tasks",
+@@ -144,7 +170,9 @@
+     "toggleEnable": "Click to enable",
+     "toggleDisable": "Click to disable",
+     "actionFailed": "Operation failed",
+-    "deleteFailed": "Delete failed"
++    "deleteFailed": "Delete failed",
++    "dailyRunNow": "Run now",
++    "dailyRunQueued": "Queued. View report generation progress in the task queue."
+   },
+   "services": {
+     "filterAll": "All",
 diff --git a/webui/src/locales/en-US/workspace.json b/webui/src/locales/en-US/workspace.json
 index 92448208..4e4ae65b 100644
 --- a/webui/src/locales/en-US/workspace.json
@@ -130512,7 +131218,7 @@ index 22491b10..d10d6627 100644
 +  "knowledge": "知识沉淀"
  }
 diff --git a/webui/src/locales/zh-CN/task.json b/webui/src/locales/zh-CN/task.json
-index b49dd2f2..bbd95722 100644
+index b49dd2f2..df077b74 100644
 --- a/webui/src/locales/zh-CN/task.json
 +++ b/webui/src/locales/zh-CN/task.json
 @@ -124,7 +124,33 @@
@@ -130550,6 +131256,17 @@ index b49dd2f2..bbd95722 100644
    },
    "scheduled": {
      "emptyTitle": "暂无定时任务",
+@@ -144,7 +170,9 @@
+     "toggleEnable": "点击启用",
+     "toggleDisable": "点击停用",
+     "actionFailed": "操作失败",
+-    "deleteFailed": "删除失败"
++    "deleteFailed": "删除失败",
++    "dailyRunNow": "立即执行",
++    "dailyRunQueued": "已加入任务队列，可在任务队列查看报告生成进度"
+   },
+   "services": {
+     "filterAll": "全部",
 diff --git a/webui/src/locales/zh-CN/update.json b/webui/src/locales/zh-CN/update.json
 index e58252ce..062351bf 100644
 --- a/webui/src/locales/zh-CN/update.json
@@ -146653,6 +147370,63 @@ index 0f2d768d..33fc824c 100644
              <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
                {emptyText}
              </div>
+diff --git a/webui/src/pages/Task/ScheduledSection.tsx b/webui/src/pages/Task/ScheduledSection.tsx
+index 1fb79615..38c762be 100644
+--- a/webui/src/pages/Task/ScheduledSection.tsx
++++ b/webui/src/pages/Task/ScheduledSection.tsx
+@@ -1,6 +1,6 @@
+ import { useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+-import { Calendar, Clock, Trash2, ToggleLeft, ToggleRight } from 'lucide-react';
++import { Calendar, Clock, Play, Trash2, ToggleLeft, ToggleRight } from 'lucide-react';
+ import LoadingSpinner from '@/components/common/LoadingSpinner';
+ import EmptyState from '@/components/common/EmptyState';
+ import { useToast } from '@/components/common/Toast';
+@@ -19,11 +19,26 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
+     { limit: 100, scheduledOnly: true },
+     { pollInterval: 10000 },
+   );
++  const [runningTasks, setRunningTasks] = useState<Set<string>>(new Set());
+   const toast = useToast();
+   const confirm = useConfirm();
+ 
+   const refresh = () => { refetch(); onRefreshGlobal(); };
+ 
++  const handleRun = async (task: TaskScheduler) => {
++    if (runningTasks.has(task.id)) return;
++    setRunningTasks(previous => new Set(previous).add(task.id));
++    try {
++      await taskAPI.runScheduler(task.id);
++      toast.success(t('scheduled.dailyRunQueued'));
++      refresh();
++    } catch (err: unknown) {
++      toast.error(t('scheduled.actionFailed'), extractErrorMessage(err));
++    } finally {
++      setRunningTasks(previous => { const next = new Set(previous); next.delete(task.id); return next; });
++    }
++  };
++
+   const handleToggle = async (task: TaskScheduler) => {
+     try {
+       if (task.status === 'active') await taskAPI.disableScheduler(task.id);
+@@ -138,6 +153,17 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
+                       </td>
+                       <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                         <div className="flex items-center justify-end gap-1">
++                          {task.executionMode === 'workflow' && task.workflowID?.startsWith('daily-operations-') && (
++                            <button
++                              onClick={() => handleRun(task)}
++                              disabled={!enabled || runningTasks.has(task.id)}
++                              aria-label={`${t('scheduled.dailyRunNow')}：${task.title}`}
++                              title={t('scheduled.dailyRunNow')}
++                              className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs text-sky-700 hover:bg-sky-50 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
++                            >
++                              <Play className="w-3.5 h-3.5" />{t('scheduled.dailyRunNow')}
++                            </button>
++                          )}
+                           <button
+                             onClick={(e) => { e.stopPropagation(); handleToggle(task); }}
+                             title={enabled ? t('scheduled.toggleDisable') : t('scheduled.toggleEnable')}
 diff --git a/webui/src/pages/Task/TaskExecutionRecord.tsx b/webui/src/pages/Task/TaskExecutionRecord.tsx
 new file mode 100644
 index 00000000..9d0b12df
