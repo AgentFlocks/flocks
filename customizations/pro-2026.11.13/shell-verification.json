@@ -1,0 +1,32 @@
+{
+  "entry": "bash update-flocks.sh",
+  "packageVersion": "1.15.0",
+  "tests": "test_shell_updater.py included in 55 passing installer/updater/SQLite-overlay tests",
+  "engineSha256": "bcf060297590a0be382aa3c52dc3e104817c356fe362cc2e47d92af210e097e6",
+  "shellSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
+  "localProAcceptance": {
+    "port": 5173,
+    "localRelease": "2026.11.12.2-darwin-arm64",
+    "packageVersion": "1.15.0",
+    "filesMatched": 492,
+    "repeatNoRestart": true,
+    "baselineRestoredAndReady": true,
+    "nativeBinaryUnchanged": true,
+    "uiCases": [
+      "brand",
+      "hidden workshop sidebar",
+      "knowledge accumulation",
+      "hidden agents",
+      "SOC dashboard default route",
+      "expanded task panel",
+      "refresh",
+      "task center",
+      "scene suite list"
+    ],
+    "limitations": [
+      "installed monitoring suite incomplete before acceptance; monitoring direct page redirects to suite manager",
+      "no real XDR/model/mail business execution"
+    ],
+    "console": "No application errors after startup; deployment restart network errors and browser extension errors excluded"
+  }
+}

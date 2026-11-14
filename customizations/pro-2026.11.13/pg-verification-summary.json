@@ -1,0 +1,9 @@
+{
+  "packageVersion": "1.15.0",
+  "focusedPassed": 11,
+  "lifecycleConversationRoundEndMailPassed": 174,
+  "sourceCommit": "f6ab71f148367a83bf4c3d535dcbaf34f559317f",
+  "proCommit": "c16ed13499b3ca721e3549893d5507c506bc2c58",
+  "isolation": "Go database-testcore compiled from 11.13 Pro source; independent schema per test; no business database",
+  "limitations": "local 11.12.2 darwin-arm64; affected task/workflow source interfaces match 11.13; exact 11.13 Linux native runtime separately imported"
+}
