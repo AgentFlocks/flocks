@@ -97472,10 +97472,10 @@ index 3b0c05d0..39c41871 100644
  
 diff --git a/flocks/server/routes/knowledge.py b/flocks/server/routes/knowledge.py
 new file mode 100644
-index 00000000..72d01e93
+index 00000000..369110ad
 --- /dev/null
 +++ b/flocks/server/routes/knowledge.py
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,463 @@
 +"""Read-only Knowledge Center APIs for curated outputs and memory files."""
 +
 +from __future__ import annotations
@@ -97499,6 +97499,9 @@ index 00000000..72d01e93
 +
 +
 +router = APIRouter()
++
++_MEMORY_EXAMPLES = Path(__file__).with_name("knowledge_memory_examples")
++_EXAMPLE_DATE = re.compile(r"^2026-(?:09|10|11)-\d{2}\.md$")
 +
 +_DATE_DIRECTORY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 +_MAX_TREE_DEPTH = 8
@@ -97691,7 +97694,7 @@ index 00000000..72d01e93
 +    }
 +
 +
-+def _list_memory_sync(memory_root: Path, project_ids: set[str]) -> dict[str, Any]:
++def _list_memory_sync(memory_root: Path, project_ids: set[str], project_names: dict[str, str] | None = None) -> dict[str, Any]:
 +    sections: list[dict[str, Any]] = []
 +    for section_id, filename in (("profile", "USER.md"), ("global", "MEMORY.md")):
 +        node = _memory_file_node(memory_root / filename, memory_root)
@@ -97705,7 +97708,8 @@ index 00000000..72d01e93
 +        node = _memory_file_node(project_file, memory_root)
 +        if node is not None:
 +            project_entries.append({
-+                "name": project_id,
++                "name": (project_names or {}).get(project_id) or "项目记忆（名称暂不可用）",
++                "description": f"项目经验与上下文 · {project_id}",
 +                "path": f"projects/{project_id}",
 +                "root": "memory",
 +                "root_label": "memory",
@@ -97731,6 +97735,16 @@ index 00000000..72d01e93
 +            node = _memory_file_node(child, memory_root)
 +            if node is not None:
 +                daily_entries.append(node)
++    # Presentation-only supplements live in the installed UI asset directory,
++    # never in the lifecycle-owned daily memory consumed by agents.
++    existing = {node["name"] for node in daily_entries}
++    for sample in _visible_children(_MEMORY_EXAMPLES):
++        if _EXAMPLE_DATE.fullmatch(sample.name) and sample.name not in existing:
++            node = _memory_file_node(sample, _MEMORY_EXAMPLES)
++            if node is not None:
++                node.update(path="daily-examples/" + sample.name, example=True)
++                daily_entries.append(node)
++    daily_entries.sort(key=lambda node: node["name"], reverse=True)
 +    if daily_entries:
 +        sections.append({"id": "daily", "entries": daily_entries})
 +    return {"sections": sections}
@@ -97756,6 +97770,14 @@ index 00000000..72d01e93
 +        parts = _path_parts(path)
 +    except ValueError as error:
 +        raise HTTPException(status_code=400, detail=str(error)) from error
++    if len(parts) == 2 and parts[0] == "daily-examples":
++        if not _EXAMPLE_DATE.fullmatch(parts[1]):
++            raise HTTPException(status_code=403, detail="Memory example is not available")
++        # Authentication above is required even though examples contain no user data.
++        try:
++            return _safe_target(_MEMORY_EXAMPLES, parts[1])
++        except ValueError as error:
++            raise HTTPException(status_code=400, detail=str(error)) from error
 +    allowed = (
 +        parts in {("USER.md",), ("MEMORY.md",)}
 +        or (len(parts) == 2 and parts[0] == "daily" and parts[1].endswith(".md"))
@@ -97808,8 +97830,11 @@ index 00000000..72d01e93
 +    memory_root = manager.get_memory_dir()
 +    if not memory_root.is_dir() or memory_root.is_symlink():
 +        return {"sections": []}
-+    project_ids = Project.registered_project_ids(user.id)
-+    return await asyncio.to_thread(_list_memory_sync, memory_root, project_ids)
++    def list_for_owner():
++        registry = Project._read_registry(user.id)
++        names = {entry.id: entry.name.strip() for entry in registry.projects if entry.removed_at is None}
++        return _list_memory_sync(memory_root, set(names), names)
++    return await asyncio.to_thread(list_for_owner)
 +
 +
 +async def _catalog_index(request: Request, refresh: bool = False):
@@ -100762,6 +100787,1547 @@ index 00000000..4c34b1e0
 +    "unclassified": "资料主题可能互不相关，按主题分组，不编造跨领域共性，不把软件调试笔记误写为安全处置成功案例。"
 +  }
 +}
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-09.md b/flocks/server/routes/knowledge_memory_examples/2026-09-09.md
+new file mode 100644
+index 00000000..4960bbeb
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-09.md
+@@ -0,0 +1,17 @@
++# 2026-09-09 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 工作流协作约定
++
++梳理输入字段、阶段输出和人工确认环节。
++
++## 可保留的经验
++
++分析完成与业务处置完成分别记录；通知和外部操作需要单独的执行证据。
++
++## 后续跟进
++
++检查失败分支及输入不完整时的提示。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-10.md b/flocks/server/routes/knowledge_memory_examples/2026-09-10.md
+new file mode 100644
+index 00000000..a61028c8
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-10.md
+@@ -0,0 +1,17 @@
++# 2026-09-10 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 日报与交接要点
++
++整理当日重点事项、待确认问题和下一步跟进方式。
++
++## 可保留的经验
++
++交接优先说明已知事实与资料缺口，避免用汇总数字替代问题说明。
++
++## 后续跟进
++
++后续根据真实记录补充负责人、处理结果及证据链接。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-11.md b/flocks/server/routes/knowledge_memory_examples/2026-09-11.md
+new file mode 100644
+index 00000000..08392261
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-11.md
+@@ -0,0 +1,17 @@
++# 2026-09-11 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 情报阅读经验
++
++比较情报发布时间、影响范围与本地环境的关联条件。
++
++## 可保留的经验
++
++情报可用于提出核查方向；未核对本地资产前不能认定已受影响。
++
++## 后续跟进
++
++继续核实版本、暴露条件和情报可信度。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-12.md b/flocks/server/routes/knowledge_memory_examples/2026-09-12.md
+new file mode 100644
+index 00000000..8a62fe69
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-12.md
+@@ -0,0 +1,17 @@
++# 2026-09-12 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 记忆维护约定
++
++区分长期偏好、项目背景和仅适用于当次任务的信息。
++
++## 可保留的经验
++
++长期记忆保留稳定约定；临时问题与待办保留日期和状态。
++
++## 后续跟进
++
++后续以真实会话压缩记录替换当日示例。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-13.md b/flocks/server/routes/knowledge_memory_examples/2026-09-13.md
+new file mode 100644
+index 00000000..069912fd
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-13.md
+@@ -0,0 +1,17 @@
++# 2026-09-13 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 告警研判上下文
++
++按来源、资产与时间窗口整理待研判告警，保留原始证据索引。
++
++## 可保留的经验
++
++同一事件的重复告警可合并阅读；缺少资产背景时保留待确认状态。
++
++## 后续跟进
++
++继续核对告警触发条件、资产用途和规则适用范围。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-14.md b/flocks/server/routes/knowledge_memory_examples/2026-09-14.md
+new file mode 100644
+index 00000000..bc7d73f6
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-14.md
+@@ -0,0 +1,17 @@
++# 2026-09-14 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 设备巡检经验
++
++梳理设备在线状态、采集链路和日志时间偏差的检查顺序。
++
++## 可保留的经验
++
++先确认采集是否完整，再解释告警数量变化；没有日志不能推断设备正常。
++
++## 后续跟进
++
++补充设备归属与维护窗口，保留异常复核入口。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-15.md b/flocks/server/routes/knowledge_memory_examples/2026-09-15.md
+new file mode 100644
+index 00000000..3414dc55
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-15.md
+@@ -0,0 +1,17 @@
++# 2026-09-15 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 知识整理方法
++
++将任务报告中的适用条件、排查步骤和注意事项分别归档。
++
++## 可保留的经验
++
++经验条目需要来源、时间和使用条件；历史结论不能直接套用到新事件。
++
++## 后续跟进
++
++复核相近主题，合并重复描述并保留不同来源。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-16.md b/flocks/server/routes/knowledge_memory_examples/2026-09-16.md
+new file mode 100644
+index 00000000..e0094c5a
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-16.md
+@@ -0,0 +1,17 @@
++# 2026-09-16 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 工作流协作约定
++
++梳理输入字段、阶段输出和人工确认环节。
++
++## 可保留的经验
++
++分析完成与业务处置完成分别记录；通知和外部操作需要单独的执行证据。
++
++## 后续跟进
++
++检查失败分支及输入不完整时的提示。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-17.md b/flocks/server/routes/knowledge_memory_examples/2026-09-17.md
+new file mode 100644
+index 00000000..c5e5ea9e
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-17.md
+@@ -0,0 +1,17 @@
++# 2026-09-17 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 日报与交接要点
++
++整理当日重点事项、待确认问题和下一步跟进方式。
++
++## 可保留的经验
++
++交接优先说明已知事实与资料缺口，避免用汇总数字替代问题说明。
++
++## 后续跟进
++
++后续根据真实记录补充负责人、处理结果及证据链接。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-18.md b/flocks/server/routes/knowledge_memory_examples/2026-09-18.md
+new file mode 100644
+index 00000000..4887f347
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-18.md
+@@ -0,0 +1,17 @@
++# 2026-09-18 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 情报阅读经验
++
++比较情报发布时间、影响范围与本地环境的关联条件。
++
++## 可保留的经验
++
++情报可用于提出核查方向；未核对本地资产前不能认定已受影响。
++
++## 后续跟进
++
++继续核实版本、暴露条件和情报可信度。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-19.md b/flocks/server/routes/knowledge_memory_examples/2026-09-19.md
+new file mode 100644
+index 00000000..cc476d1f
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-19.md
+@@ -0,0 +1,17 @@
++# 2026-09-19 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 记忆维护约定
++
++区分长期偏好、项目背景和仅适用于当次任务的信息。
++
++## 可保留的经验
++
++长期记忆保留稳定约定；临时问题与待办保留日期和状态。
++
++## 后续跟进
++
++后续以真实会话压缩记录替换当日示例。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-20.md b/flocks/server/routes/knowledge_memory_examples/2026-09-20.md
+new file mode 100644
+index 00000000..85db21a1
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-20.md
+@@ -0,0 +1,17 @@
++# 2026-09-20 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 告警研判上下文
++
++按来源、资产与时间窗口整理待研判告警，保留原始证据索引。
++
++## 可保留的经验
++
++同一事件的重复告警可合并阅读；缺少资产背景时保留待确认状态。
++
++## 后续跟进
++
++继续核对告警触发条件、资产用途和规则适用范围。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-21.md b/flocks/server/routes/knowledge_memory_examples/2026-09-21.md
+new file mode 100644
+index 00000000..6f67cd70
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-21.md
+@@ -0,0 +1,17 @@
++# 2026-09-21 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 设备巡检经验
++
++梳理设备在线状态、采集链路和日志时间偏差的检查顺序。
++
++## 可保留的经验
++
++先确认采集是否完整，再解释告警数量变化；没有日志不能推断设备正常。
++
++## 后续跟进
++
++补充设备归属与维护窗口，保留异常复核入口。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-22.md b/flocks/server/routes/knowledge_memory_examples/2026-09-22.md
+new file mode 100644
+index 00000000..45aff0cb
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-22.md
+@@ -0,0 +1,17 @@
++# 2026-09-22 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 知识整理方法
++
++将任务报告中的适用条件、排查步骤和注意事项分别归档。
++
++## 可保留的经验
++
++经验条目需要来源、时间和使用条件；历史结论不能直接套用到新事件。
++
++## 后续跟进
++
++复核相近主题，合并重复描述并保留不同来源。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-23.md b/flocks/server/routes/knowledge_memory_examples/2026-09-23.md
+new file mode 100644
+index 00000000..eefdc3dc
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-23.md
+@@ -0,0 +1,17 @@
++# 2026-09-23 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 工作流协作约定
++
++梳理输入字段、阶段输出和人工确认环节。
++
++## 可保留的经验
++
++分析完成与业务处置完成分别记录；通知和外部操作需要单独的执行证据。
++
++## 后续跟进
++
++检查失败分支及输入不完整时的提示。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-24.md b/flocks/server/routes/knowledge_memory_examples/2026-09-24.md
+new file mode 100644
+index 00000000..66202928
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-24.md
+@@ -0,0 +1,17 @@
++# 2026-09-24 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 日报与交接要点
++
++整理当日重点事项、待确认问题和下一步跟进方式。
++
++## 可保留的经验
++
++交接优先说明已知事实与资料缺口，避免用汇总数字替代问题说明。
++
++## 后续跟进
++
++后续根据真实记录补充负责人、处理结果及证据链接。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-25.md b/flocks/server/routes/knowledge_memory_examples/2026-09-25.md
+new file mode 100644
+index 00000000..8b22819c
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-25.md
+@@ -0,0 +1,17 @@
++# 2026-09-25 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 情报阅读经验
++
++比较情报发布时间、影响范围与本地环境的关联条件。
++
++## 可保留的经验
++
++情报可用于提出核查方向；未核对本地资产前不能认定已受影响。
++
++## 后续跟进
++
++继续核实版本、暴露条件和情报可信度。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-26.md b/flocks/server/routes/knowledge_memory_examples/2026-09-26.md
+new file mode 100644
+index 00000000..13d33579
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-26.md
+@@ -0,0 +1,17 @@
++# 2026-09-26 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 记忆维护约定
++
++区分长期偏好、项目背景和仅适用于当次任务的信息。
++
++## 可保留的经验
++
++长期记忆保留稳定约定；临时问题与待办保留日期和状态。
++
++## 后续跟进
++
++后续以真实会话压缩记录替换当日示例。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-27.md b/flocks/server/routes/knowledge_memory_examples/2026-09-27.md
+new file mode 100644
+index 00000000..431931a1
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-27.md
+@@ -0,0 +1,17 @@
++# 2026-09-27 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 告警研判上下文
++
++按来源、资产与时间窗口整理待研判告警，保留原始证据索引。
++
++## 可保留的经验
++
++同一事件的重复告警可合并阅读；缺少资产背景时保留待确认状态。
++
++## 后续跟进
++
++继续核对告警触发条件、资产用途和规则适用范围。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-28.md b/flocks/server/routes/knowledge_memory_examples/2026-09-28.md
+new file mode 100644
+index 00000000..f64421e0
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-28.md
+@@ -0,0 +1,17 @@
++# 2026-09-28 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 设备巡检经验
++
++梳理设备在线状态、采集链路和日志时间偏差的检查顺序。
++
++## 可保留的经验
++
++先确认采集是否完整，再解释告警数量变化；没有日志不能推断设备正常。
++
++## 后续跟进
++
++补充设备归属与维护窗口，保留异常复核入口。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-29.md b/flocks/server/routes/knowledge_memory_examples/2026-09-29.md
+new file mode 100644
+index 00000000..218effb6
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-29.md
+@@ -0,0 +1,17 @@
++# 2026-09-29 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 知识整理方法
++
++将任务报告中的适用条件、排查步骤和注意事项分别归档。
++
++## 可保留的经验
++
++经验条目需要来源、时间和使用条件；历史结论不能直接套用到新事件。
++
++## 后续跟进
++
++复核相近主题，合并重复描述并保留不同来源。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-09-30.md b/flocks/server/routes/knowledge_memory_examples/2026-09-30.md
+new file mode 100644
+index 00000000..268acf3c
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-09-30.md
+@@ -0,0 +1,17 @@
++# 2026-09-30 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 工作流协作约定
++
++梳理输入字段、阶段输出和人工确认环节。
++
++## 可保留的经验
++
++分析完成与业务处置完成分别记录；通知和外部操作需要单独的执行证据。
++
++## 后续跟进
++
++检查失败分支及输入不完整时的提示。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-01.md b/flocks/server/routes/knowledge_memory_examples/2026-10-01.md
+new file mode 100644
+index 00000000..68bc97c5
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-01.md
+@@ -0,0 +1,17 @@
++# 2026-10-01 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 日报与交接要点
++
++整理当日重点事项、待确认问题和下一步跟进方式。
++
++## 可保留的经验
++
++交接优先说明已知事实与资料缺口，避免用汇总数字替代问题说明。
++
++## 后续跟进
++
++后续根据真实记录补充负责人、处理结果及证据链接。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-02.md b/flocks/server/routes/knowledge_memory_examples/2026-10-02.md
+new file mode 100644
+index 00000000..93b6b721
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-02.md
+@@ -0,0 +1,17 @@
++# 2026-10-02 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 情报阅读经验
++
++比较情报发布时间、影响范围与本地环境的关联条件。
++
++## 可保留的经验
++
++情报可用于提出核查方向；未核对本地资产前不能认定已受影响。
++
++## 后续跟进
++
++继续核实版本、暴露条件和情报可信度。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-03.md b/flocks/server/routes/knowledge_memory_examples/2026-10-03.md
+new file mode 100644
+index 00000000..47235d46
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-03.md
+@@ -0,0 +1,17 @@
++# 2026-10-03 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 记忆维护约定
++
++区分长期偏好、项目背景和仅适用于当次任务的信息。
++
++## 可保留的经验
++
++长期记忆保留稳定约定；临时问题与待办保留日期和状态。
++
++## 后续跟进
++
++后续以真实会话压缩记录替换当日示例。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-04.md b/flocks/server/routes/knowledge_memory_examples/2026-10-04.md
+new file mode 100644
+index 00000000..12e16002
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-04.md
+@@ -0,0 +1,17 @@
++# 2026-10-04 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 告警研判上下文
++
++按来源、资产与时间窗口整理待研判告警，保留原始证据索引。
++
++## 可保留的经验
++
++同一事件的重复告警可合并阅读；缺少资产背景时保留待确认状态。
++
++## 后续跟进
++
++继续核对告警触发条件、资产用途和规则适用范围。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-05.md b/flocks/server/routes/knowledge_memory_examples/2026-10-05.md
+new file mode 100644
+index 00000000..94905efb
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-05.md
+@@ -0,0 +1,17 @@
++# 2026-10-05 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 设备巡检经验
++
++梳理设备在线状态、采集链路和日志时间偏差的检查顺序。
++
++## 可保留的经验
++
++先确认采集是否完整，再解释告警数量变化；没有日志不能推断设备正常。
++
++## 后续跟进
++
++补充设备归属与维护窗口，保留异常复核入口。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-06.md b/flocks/server/routes/knowledge_memory_examples/2026-10-06.md
+new file mode 100644
+index 00000000..05262f5d
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-06.md
+@@ -0,0 +1,17 @@
++# 2026-10-06 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 知识整理方法
++
++将任务报告中的适用条件、排查步骤和注意事项分别归档。
++
++## 可保留的经验
++
++经验条目需要来源、时间和使用条件；历史结论不能直接套用到新事件。
++
++## 后续跟进
++
++复核相近主题，合并重复描述并保留不同来源。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-07.md b/flocks/server/routes/knowledge_memory_examples/2026-10-07.md
+new file mode 100644
+index 00000000..f6404ba1
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-07.md
+@@ -0,0 +1,17 @@
++# 2026-10-07 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 工作流协作约定
++
++梳理输入字段、阶段输出和人工确认环节。
++
++## 可保留的经验
++
++分析完成与业务处置完成分别记录；通知和外部操作需要单独的执行证据。
++
++## 后续跟进
++
++检查失败分支及输入不完整时的提示。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-08.md b/flocks/server/routes/knowledge_memory_examples/2026-10-08.md
+new file mode 100644
+index 00000000..80fe3237
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-08.md
+@@ -0,0 +1,17 @@
++# 2026-10-08 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 日报与交接要点
++
++整理当日重点事项、待确认问题和下一步跟进方式。
++
++## 可保留的经验
++
++交接优先说明已知事实与资料缺口，避免用汇总数字替代问题说明。
++
++## 后续跟进
++
++后续根据真实记录补充负责人、处理结果及证据链接。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-09.md b/flocks/server/routes/knowledge_memory_examples/2026-10-09.md
+new file mode 100644
+index 00000000..006a918d
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-09.md
+@@ -0,0 +1,17 @@
++# 2026-10-09 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 情报阅读经验
++
++比较情报发布时间、影响范围与本地环境的关联条件。
++
++## 可保留的经验
++
++情报可用于提出核查方向；未核对本地资产前不能认定已受影响。
++
++## 后续跟进
++
++继续核实版本、暴露条件和情报可信度。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-10.md b/flocks/server/routes/knowledge_memory_examples/2026-10-10.md
+new file mode 100644
+index 00000000..fe3b4f74
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-10.md
+@@ -0,0 +1,17 @@
++# 2026-10-10 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 记忆维护约定
++
++区分长期偏好、项目背景和仅适用于当次任务的信息。
++
++## 可保留的经验
++
++长期记忆保留稳定约定；临时问题与待办保留日期和状态。
++
++## 后续跟进
++
++后续以真实会话压缩记录替换当日示例。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-11.md b/flocks/server/routes/knowledge_memory_examples/2026-10-11.md
+new file mode 100644
+index 00000000..834f587a
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-11.md
+@@ -0,0 +1,17 @@
++# 2026-10-11 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 告警研判上下文
++
++按来源、资产与时间窗口整理待研判告警，保留原始证据索引。
++
++## 可保留的经验
++
++同一事件的重复告警可合并阅读；缺少资产背景时保留待确认状态。
++
++## 后续跟进
++
++继续核对告警触发条件、资产用途和规则适用范围。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-12.md b/flocks/server/routes/knowledge_memory_examples/2026-10-12.md
+new file mode 100644
+index 00000000..70bd1a43
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-12.md
+@@ -0,0 +1,17 @@
++# 2026-10-12 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 设备巡检经验
++
++梳理设备在线状态、采集链路和日志时间偏差的检查顺序。
++
++## 可保留的经验
++
++先确认采集是否完整，再解释告警数量变化；没有日志不能推断设备正常。
++
++## 后续跟进
++
++补充设备归属与维护窗口，保留异常复核入口。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-13.md b/flocks/server/routes/knowledge_memory_examples/2026-10-13.md
+new file mode 100644
+index 00000000..37854eaf
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-13.md
+@@ -0,0 +1,17 @@
++# 2026-10-13 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 知识整理方法
++
++将任务报告中的适用条件、排查步骤和注意事项分别归档。
++
++## 可保留的经验
++
++经验条目需要来源、时间和使用条件；历史结论不能直接套用到新事件。
++
++## 后续跟进
++
++复核相近主题，合并重复描述并保留不同来源。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-14.md b/flocks/server/routes/knowledge_memory_examples/2026-10-14.md
+new file mode 100644
+index 00000000..ec337e9c
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-14.md
+@@ -0,0 +1,17 @@
++# 2026-10-14 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 工作流协作约定
++
++梳理输入字段、阶段输出和人工确认环节。
++
++## 可保留的经验
++
++分析完成与业务处置完成分别记录；通知和外部操作需要单独的执行证据。
++
++## 后续跟进
++
++检查失败分支及输入不完整时的提示。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-15.md b/flocks/server/routes/knowledge_memory_examples/2026-10-15.md
+new file mode 100644
+index 00000000..879a1f54
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-15.md
+@@ -0,0 +1,17 @@
++# 2026-10-15 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 日报与交接要点
++
++整理当日重点事项、待确认问题和下一步跟进方式。
++
++## 可保留的经验
++
++交接优先说明已知事实与资料缺口，避免用汇总数字替代问题说明。
++
++## 后续跟进
++
++后续根据真实记录补充负责人、处理结果及证据链接。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-16.md b/flocks/server/routes/knowledge_memory_examples/2026-10-16.md
+new file mode 100644
+index 00000000..4b3fb1a6
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-16.md
+@@ -0,0 +1,17 @@
++# 2026-10-16 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 情报阅读经验
++
++比较情报发布时间、影响范围与本地环境的关联条件。
++
++## 可保留的经验
++
++情报可用于提出核查方向；未核对本地资产前不能认定已受影响。
++
++## 后续跟进
++
++继续核实版本、暴露条件和情报可信度。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-17.md b/flocks/server/routes/knowledge_memory_examples/2026-10-17.md
+new file mode 100644
+index 00000000..d8f2520a
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-17.md
+@@ -0,0 +1,17 @@
++# 2026-10-17 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 记忆维护约定
++
++区分长期偏好、项目背景和仅适用于当次任务的信息。
++
++## 可保留的经验
++
++长期记忆保留稳定约定；临时问题与待办保留日期和状态。
++
++## 后续跟进
++
++后续以真实会话压缩记录替换当日示例。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-18.md b/flocks/server/routes/knowledge_memory_examples/2026-10-18.md
+new file mode 100644
+index 00000000..8f4ed893
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-18.md
+@@ -0,0 +1,17 @@
++# 2026-10-18 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 告警研判上下文
++
++按来源、资产与时间窗口整理待研判告警，保留原始证据索引。
++
++## 可保留的经验
++
++同一事件的重复告警可合并阅读；缺少资产背景时保留待确认状态。
++
++## 后续跟进
++
++继续核对告警触发条件、资产用途和规则适用范围。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-19.md b/flocks/server/routes/knowledge_memory_examples/2026-10-19.md
+new file mode 100644
+index 00000000..fdbe9c3d
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-19.md
+@@ -0,0 +1,17 @@
++# 2026-10-19 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 设备巡检经验
++
++梳理设备在线状态、采集链路和日志时间偏差的检查顺序。
++
++## 可保留的经验
++
++先确认采集是否完整，再解释告警数量变化；没有日志不能推断设备正常。
++
++## 后续跟进
++
++补充设备归属与维护窗口，保留异常复核入口。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-20.md b/flocks/server/routes/knowledge_memory_examples/2026-10-20.md
+new file mode 100644
+index 00000000..e4ff6c25
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-20.md
+@@ -0,0 +1,17 @@
++# 2026-10-20 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 知识整理方法
++
++将任务报告中的适用条件、排查步骤和注意事项分别归档。
++
++## 可保留的经验
++
++经验条目需要来源、时间和使用条件；历史结论不能直接套用到新事件。
++
++## 后续跟进
++
++复核相近主题，合并重复描述并保留不同来源。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-21.md b/flocks/server/routes/knowledge_memory_examples/2026-10-21.md
+new file mode 100644
+index 00000000..3a4af8a3
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-21.md
+@@ -0,0 +1,17 @@
++# 2026-10-21 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 工作流协作约定
++
++梳理输入字段、阶段输出和人工确认环节。
++
++## 可保留的经验
++
++分析完成与业务处置完成分别记录；通知和外部操作需要单独的执行证据。
++
++## 后续跟进
++
++检查失败分支及输入不完整时的提示。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-22.md b/flocks/server/routes/knowledge_memory_examples/2026-10-22.md
+new file mode 100644
+index 00000000..e8b19e56
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-22.md
+@@ -0,0 +1,17 @@
++# 2026-10-22 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 日报与交接要点
++
++整理当日重点事项、待确认问题和下一步跟进方式。
++
++## 可保留的经验
++
++交接优先说明已知事实与资料缺口，避免用汇总数字替代问题说明。
++
++## 后续跟进
++
++后续根据真实记录补充负责人、处理结果及证据链接。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-23.md b/flocks/server/routes/knowledge_memory_examples/2026-10-23.md
+new file mode 100644
+index 00000000..4ca5217c
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-23.md
+@@ -0,0 +1,17 @@
++# 2026-10-23 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 情报阅读经验
++
++比较情报发布时间、影响范围与本地环境的关联条件。
++
++## 可保留的经验
++
++情报可用于提出核查方向；未核对本地资产前不能认定已受影响。
++
++## 后续跟进
++
++继续核实版本、暴露条件和情报可信度。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-24.md b/flocks/server/routes/knowledge_memory_examples/2026-10-24.md
+new file mode 100644
+index 00000000..094009cd
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-24.md
+@@ -0,0 +1,17 @@
++# 2026-10-24 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 记忆维护约定
++
++区分长期偏好、项目背景和仅适用于当次任务的信息。
++
++## 可保留的经验
++
++长期记忆保留稳定约定；临时问题与待办保留日期和状态。
++
++## 后续跟进
++
++后续以真实会话压缩记录替换当日示例。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-25.md b/flocks/server/routes/knowledge_memory_examples/2026-10-25.md
+new file mode 100644
+index 00000000..0850464b
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-25.md
+@@ -0,0 +1,17 @@
++# 2026-10-25 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 告警研判上下文
++
++按来源、资产与时间窗口整理待研判告警，保留原始证据索引。
++
++## 可保留的经验
++
++同一事件的重复告警可合并阅读；缺少资产背景时保留待确认状态。
++
++## 后续跟进
++
++继续核对告警触发条件、资产用途和规则适用范围。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-26.md b/flocks/server/routes/knowledge_memory_examples/2026-10-26.md
+new file mode 100644
+index 00000000..36ab5f1a
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-26.md
+@@ -0,0 +1,17 @@
++# 2026-10-26 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 设备巡检经验
++
++梳理设备在线状态、采集链路和日志时间偏差的检查顺序。
++
++## 可保留的经验
++
++先确认采集是否完整，再解释告警数量变化；没有日志不能推断设备正常。
++
++## 后续跟进
++
++补充设备归属与维护窗口，保留异常复核入口。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-27.md b/flocks/server/routes/knowledge_memory_examples/2026-10-27.md
+new file mode 100644
+index 00000000..670cf356
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-27.md
+@@ -0,0 +1,17 @@
++# 2026-10-27 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 知识整理方法
++
++将任务报告中的适用条件、排查步骤和注意事项分别归档。
++
++## 可保留的经验
++
++经验条目需要来源、时间和使用条件；历史结论不能直接套用到新事件。
++
++## 后续跟进
++
++复核相近主题，合并重复描述并保留不同来源。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-28.md b/flocks/server/routes/knowledge_memory_examples/2026-10-28.md
+new file mode 100644
+index 00000000..cd71b75c
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-28.md
+@@ -0,0 +1,17 @@
++# 2026-10-28 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 工作流协作约定
++
++梳理输入字段、阶段输出和人工确认环节。
++
++## 可保留的经验
++
++分析完成与业务处置完成分别记录；通知和外部操作需要单独的执行证据。
++
++## 后续跟进
++
++检查失败分支及输入不完整时的提示。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-29.md b/flocks/server/routes/knowledge_memory_examples/2026-10-29.md
+new file mode 100644
+index 00000000..b0f4ce42
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-29.md
+@@ -0,0 +1,17 @@
++# 2026-10-29 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 日报与交接要点
++
++整理当日重点事项、待确认问题和下一步跟进方式。
++
++## 可保留的经验
++
++交接优先说明已知事实与资料缺口，避免用汇总数字替代问题说明。
++
++## 后续跟进
++
++后续根据真实记录补充负责人、处理结果及证据链接。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-30.md b/flocks/server/routes/knowledge_memory_examples/2026-10-30.md
+new file mode 100644
+index 00000000..31405b0e
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-30.md
+@@ -0,0 +1,17 @@
++# 2026-10-30 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 情报阅读经验
++
++比较情报发布时间、影响范围与本地环境的关联条件。
++
++## 可保留的经验
++
++情报可用于提出核查方向；未核对本地资产前不能认定已受影响。
++
++## 后续跟进
++
++继续核实版本、暴露条件和情报可信度。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-10-31.md b/flocks/server/routes/knowledge_memory_examples/2026-10-31.md
+new file mode 100644
+index 00000000..440123cc
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-10-31.md
+@@ -0,0 +1,17 @@
++# 2026-10-31 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 记忆维护约定
++
++区分长期偏好、项目背景和仅适用于当次任务的信息。
++
++## 可保留的经验
++
++长期记忆保留稳定约定；临时问题与待办保留日期和状态。
++
++## 后续跟进
++
++后续以真实会话压缩记录替换当日示例。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-01.md b/flocks/server/routes/knowledge_memory_examples/2026-11-01.md
+new file mode 100644
+index 00000000..fcae797f
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-01.md
+@@ -0,0 +1,17 @@
++# 2026-11-01 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 告警研判上下文
++
++按来源、资产与时间窗口整理待研判告警，保留原始证据索引。
++
++## 可保留的经验
++
++同一事件的重复告警可合并阅读；缺少资产背景时保留待确认状态。
++
++## 后续跟进
++
++继续核对告警触发条件、资产用途和规则适用范围。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-02.md b/flocks/server/routes/knowledge_memory_examples/2026-11-02.md
+new file mode 100644
+index 00000000..d9ff6468
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-02.md
+@@ -0,0 +1,17 @@
++# 2026-11-02 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 设备巡检经验
++
++梳理设备在线状态、采集链路和日志时间偏差的检查顺序。
++
++## 可保留的经验
++
++先确认采集是否完整，再解释告警数量变化；没有日志不能推断设备正常。
++
++## 后续跟进
++
++补充设备归属与维护窗口，保留异常复核入口。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-03.md b/flocks/server/routes/knowledge_memory_examples/2026-11-03.md
+new file mode 100644
+index 00000000..1e028add
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-03.md
+@@ -0,0 +1,17 @@
++# 2026-11-03 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 知识整理方法
++
++将任务报告中的适用条件、排查步骤和注意事项分别归档。
++
++## 可保留的经验
++
++经验条目需要来源、时间和使用条件；历史结论不能直接套用到新事件。
++
++## 后续跟进
++
++复核相近主题，合并重复描述并保留不同来源。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-04.md b/flocks/server/routes/knowledge_memory_examples/2026-11-04.md
+new file mode 100644
+index 00000000..bff98119
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-04.md
+@@ -0,0 +1,17 @@
++# 2026-11-04 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 工作流协作约定
++
++梳理输入字段、阶段输出和人工确认环节。
++
++## 可保留的经验
++
++分析完成与业务处置完成分别记录；通知和外部操作需要单独的执行证据。
++
++## 后续跟进
++
++检查失败分支及输入不完整时的提示。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-05.md b/flocks/server/routes/knowledge_memory_examples/2026-11-05.md
+new file mode 100644
+index 00000000..5e23b6a4
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-05.md
+@@ -0,0 +1,17 @@
++# 2026-11-05 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 日报与交接要点
++
++整理当日重点事项、待确认问题和下一步跟进方式。
++
++## 可保留的经验
++
++交接优先说明已知事实与资料缺口，避免用汇总数字替代问题说明。
++
++## 后续跟进
++
++后续根据真实记录补充负责人、处理结果及证据链接。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-06.md b/flocks/server/routes/knowledge_memory_examples/2026-11-06.md
+new file mode 100644
+index 00000000..162a8b02
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-06.md
+@@ -0,0 +1,17 @@
++# 2026-11-06 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 情报阅读经验
++
++比较情报发布时间、影响范围与本地环境的关联条件。
++
++## 可保留的经验
++
++情报可用于提出核查方向；未核对本地资产前不能认定已受影响。
++
++## 后续跟进
++
++继续核实版本、暴露条件和情报可信度。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-07.md b/flocks/server/routes/knowledge_memory_examples/2026-11-07.md
+new file mode 100644
+index 00000000..31558a86
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-07.md
+@@ -0,0 +1,17 @@
++# 2026-11-07 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 记忆维护约定
++
++区分长期偏好、项目背景和仅适用于当次任务的信息。
++
++## 可保留的经验
++
++长期记忆保留稳定约定；临时问题与待办保留日期和状态。
++
++## 后续跟进
++
++后续以真实会话压缩记录替换当日示例。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-08.md b/flocks/server/routes/knowledge_memory_examples/2026-11-08.md
+new file mode 100644
+index 00000000..9466f458
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-08.md
+@@ -0,0 +1,17 @@
++# 2026-11-08 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 告警研判上下文
++
++按来源、资产与时间窗口整理待研判告警，保留原始证据索引。
++
++## 可保留的经验
++
++同一事件的重复告警可合并阅读；缺少资产背景时保留待确认状态。
++
++## 后续跟进
++
++继续核对告警触发条件、资产用途和规则适用范围。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-09.md b/flocks/server/routes/knowledge_memory_examples/2026-11-09.md
+new file mode 100644
+index 00000000..ed3fde42
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-09.md
+@@ -0,0 +1,17 @@
++# 2026-11-09 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 设备巡检经验
++
++梳理设备在线状态、采集链路和日志时间偏差的检查顺序。
++
++## 可保留的经验
++
++先确认采集是否完整，再解释告警数量变化；没有日志不能推断设备正常。
++
++## 后续跟进
++
++补充设备归属与维护窗口，保留异常复核入口。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-10.md b/flocks/server/routes/knowledge_memory_examples/2026-11-10.md
+new file mode 100644
+index 00000000..8e841752
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-10.md
+@@ -0,0 +1,17 @@
++# 2026-11-10 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 知识整理方法
++
++将任务报告中的适用条件、排查步骤和注意事项分别归档。
++
++## 可保留的经验
++
++经验条目需要来源、时间和使用条件；历史结论不能直接套用到新事件。
++
++## 后续跟进
++
++复核相近主题，合并重复描述并保留不同来源。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-11.md b/flocks/server/routes/knowledge_memory_examples/2026-11-11.md
+new file mode 100644
+index 00000000..a2e5aafa
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-11.md
+@@ -0,0 +1,17 @@
++# 2026-11-11 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 工作流协作约定
++
++梳理输入字段、阶段输出和人工确认环节。
++
++## 可保留的经验
++
++分析完成与业务处置完成分别记录；通知和外部操作需要单独的执行证据。
++
++## 后续跟进
++
++检查失败分支及输入不完整时的提示。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-12.md b/flocks/server/routes/knowledge_memory_examples/2026-11-12.md
+new file mode 100644
+index 00000000..8d105427
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-12.md
+@@ -0,0 +1,17 @@
++# 2026-11-12 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 日报与交接要点
++
++整理当日重点事项、待确认问题和下一步跟进方式。
++
++## 可保留的经验
++
++交接优先说明已知事实与资料缺口，避免用汇总数字替代问题说明。
++
++## 后续跟进
++
++后续根据真实记录补充负责人、处理结果及证据链接。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-13.md b/flocks/server/routes/knowledge_memory_examples/2026-11-13.md
+new file mode 100644
+index 00000000..a3b73bdf
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-13.md
+@@ -0,0 +1,17 @@
++# 2026-11-13 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 情报阅读经验
++
++比较情报发布时间、影响范围与本地环境的关联条件。
++
++## 可保留的经验
++
++情报可用于提出核查方向；未核对本地资产前不能认定已受影响。
++
++## 后续跟进
++
++继续核实版本、暴露条件和情报可信度。
++
++同日有真实每日记忆后，页面优先展示真实文件。
+diff --git a/flocks/server/routes/knowledge_memory_examples/2026-11-14.md b/flocks/server/routes/knowledge_memory_examples/2026-11-14.md
+new file mode 100644
+index 00000000..0164685a
+--- /dev/null
++++ b/flocks/server/routes/knowledge_memory_examples/2026-11-14.md
+@@ -0,0 +1,17 @@
++# 2026-11-14 每日记忆 · 示例补录
++
++> 本文为用户要求补齐日期而编写的虚拟示例，不是当天会话压缩记录，也不证明实际执行过巡检、研判、通知或处置。仅用于记忆文件页面展示，不会加入 Agent 的真实记忆上下文。
++
++## 记忆维护约定
++
++区分长期偏好、项目背景和仅适用于当次任务的信息。
++
++## 可保留的经验
++
++长期记忆保留稳定约定；临时问题与待办保留日期和状态。
++
++## 后续跟进
++
++后续以真实会话压缩记录替换当日示例。
++
++同日有真实每日记忆后，页面优先展示真实文件。
 diff --git a/flocks/server/routes/security_monitoring.py b/flocks/server/routes/security_monitoring.py
 new file mode 100644
 index 00000000..e0add10b
@@ -107319,10 +108885,10 @@ index 00000000..06f2ea14
 +    unittest.main()
 diff --git a/tests/customization/test_knowledge_routes.py b/tests/customization/test_knowledge_routes.py
 new file mode 100644
-index 00000000..6cfd5c5c
+index 00000000..12bbe8b1
 --- /dev/null
 +++ b/tests/customization/test_knowledge_routes.py
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,124 @@
 +"""Knowledge route authentication and filesystem isolation."""
 +from __future__ import annotations
 +
@@ -107361,7 +108927,7 @@ index 00000000..6cfd5c5c
 +            username = request.headers.get("x-test-user")
 +            if username not in self.roots:
 +                raise HTTPException(401, "authentication required")
-+            return SimpleNamespace(username=username, role="user")
++            return SimpleNamespace(id=username, username=username, role="user")
 +        self.addCleanup(patch.stopall)
 +        patch.object(knowledge, "require_user", side_effect=require_user).start()
 +        patch.object(knowledge.WorkspaceManager, "get_instance", return_value=object()).start()
@@ -107397,6 +108963,52 @@ index 00000000..6cfd5c5c
 +        response = self.client.get("/api/knowledge/file", params={"source": "outputs", "root": "personal", "path": "alice_巡检报告.md"}, headers={"x-test-user": "alice"})
 +        self.assertEqual(response.status_code, 200)
 +        self.assertEqual(response.json()["content"], "alice report")
++
++    def test_memory_names_are_owner_scoped_and_examples_never_modify_real_memory(self):
++        import hashlib
++        memory = Path(self.temporary.name) / "memory"
++        (memory / "projects/prj_alice").mkdir(parents=True)
++        (memory / "projects/prj_bob").mkdir(parents=True)
++        (memory / "daily").mkdir()
++        (memory / "projects/prj_alice/MEMORY.md").write_text("真实项目记忆")
++        (memory / "projects/prj_bob/MEMORY.md").write_text("其他账号")
++        real = memory / "daily/2026-11-13.md"
++        real.write_text("真实日记，不能覆盖")
++        before = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in memory.rglob("*") if p.is_file()}
++        manager = SimpleNamespace(ensure_dirs=lambda: None, get_memory_dir=lambda: memory)
++        def registry(owner):
++            return SimpleNamespace(projects=[SimpleNamespace(id="prj_" + owner, name="告警研判项目" if owner == "alice" else "其他用户项目", removed_at=None)])
++        with patch.object(self.routes.WorkspaceManager, "get_instance", return_value=manager), \
++             patch.object(self.routes.Project, "_read_registry", side_effect=registry):
++            result = self.client.get("/api/knowledge/memory", headers={"x-test-user":"alice"})
++            self.assertEqual(result.status_code, 200)
++            sections = {item["id"]: item["entries"] for item in result.json()["sections"]}
++            self.assertEqual(sections["projects"][0]["name"], "告警研判项目")
++            self.assertEqual(sections["projects"][0]["path"], "projects/prj_alice")
++            self.assertNotIn("其他用户", str(sections))
++            daily = sections["daily"]
++            self.assertEqual(len(daily), 67)
++            original = next(item for item in daily if item["name"] == "2026-11-13.md")
++            self.assertNotIn("example", original)
++            self.assertEqual(original["path"], "daily/2026-11-13.md")
++            sample = next(item for item in daily if item["name"] == "2026-11-12.md")
++            self.assertTrue(sample["example"])
++            for endpoint in ("file", "download"):
++                response = self.client.get("/api/knowledge/" + endpoint, params={"source":"memory", "path":sample["path"]}, headers={"x-test-user":"alice"})
++                self.assertEqual(response.status_code, 200)
++                body = response.json()["content"] if endpoint == "file" else response.text
++                self.assertIn("虚拟示例", body)
++                self.assertIn("不会加入 Agent", body)
++            self.assertEqual(self.client.get("/api/knowledge/memory").status_code, 401)
++        self.assertEqual(before, {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in memory.rglob("*") if p.is_file()})
++
++    def test_example_paths_remain_authenticated_and_reject_escape_and_missing_dates(self):
++        for path, status in (("daily-examples/../USER.md", 400), ("daily-examples/2026-11-99.md",404),
++                             ("daily-examples/2027-01-01.md",403), ("daily-examples/.hidden.md",400)):
++            response = self.client.get("/api/knowledge/file", params={"source":"memory","path":path},headers={"x-test-user":"alice"})
++            self.assertEqual(response.status_code, status, response.text)
++        response = self.client.get("/api/knowledge/file", params={"source":"memory","path":"daily-examples/2026-11-12.md"})
++        self.assertEqual(response.status_code, 401)
 +
 +
 +if __name__ == "__main__":
@@ -124764,10 +126376,10 @@ index 5db0b669..c44d8d28 100644
      client.get<HubCatalogEntry[]>('/api/hub/catalog', { params }),
 diff --git a/webui/src/api/knowledge.ts b/webui/src/api/knowledge.ts
 new file mode 100644
-index 00000000..48e5690b
+index 00000000..23999350
 --- /dev/null
 +++ b/webui/src/api/knowledge.ts
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,172 @@
 +import client from './client';
 +
 +export type KnowledgeSource = 'outputs' | 'memory';
@@ -124784,6 +126396,8 @@ index 00000000..48e5690b
 +  modified_at?: number;
 +  is_text_file?: boolean;
 +  children?: KnowledgeNode[];
++  description?: string;
++  example?: boolean;
 +}
 +
 +export interface OutputGroup {
@@ -128532,7 +130146,7 @@ index 33cc78a8..6af81f61 100644
    "scheduled": {
      "emptyTitle": "No Scheduled Tasks",
 diff --git a/webui/src/locales/en-US/workspace.json b/webui/src/locales/en-US/workspace.json
-index 92448208..c25e22c2 100644
+index 92448208..9ec2d910 100644
 --- a/webui/src/locales/en-US/workspace.json
 +++ b/webui/src/locales/en-US/workspace.json
 @@ -86,7 +86,7 @@
@@ -128544,10 +130158,11 @@ index 92448208..c25e22c2 100644
      "selected": "{{count}} selected",
      "selectName": "Select {{name}}",
      "clearSelection": "Clear selection",
-@@ -274,6 +274,86 @@
+@@ -274,7 +274,90 @@
        "unknown": "Unknown",
        "uploaded": "Uploaded",
        "active": "Active"
+-    }
 +    },
 +    "catalog": {
 +      "resize": "Resize knowledge categories and results",
@@ -128628,9 +130243,13 @@ index 92448208..c25e22c2 100644
 +      "outputs": "Daily outputs: browse task reports, analyses and attachments by date. Select a file to read or download the original.",
 +      "knowledge": "Knowledge: read source highlights and reusable experience by domain. Check the linked sources and browse earlier versions.",
 +      "memory": "Memory files: review preferences, project context and daily notes saved by agents. Notes appear when recorded and are not daily work reports."
-     }
++    },
++    "memoryProjectHint": "Project experience and context",
++    "memoryExample": "Example",
++    "memoryExampleNotice": "Illustrative backfill, not a real session record. Used for display only; actual daily memory takes precedence."
    },
    "memory": {
+     "title": "Memory Files",
 diff --git a/webui/src/locales/zh-CN/agent.json b/webui/src/locales/zh-CN/agent.json
 index 313ad5e1..5f94368a 100644
 --- a/webui/src/locales/zh-CN/agent.json
@@ -128931,7 +130550,7 @@ index e58252ce..062351bf 100644
    "latestVersion": "最新版本",
    "coreVersion": "Core 版本",
 diff --git a/webui/src/locales/zh-CN/workspace.json b/webui/src/locales/zh-CN/workspace.json
-index 201f5599..c414654a 100644
+index 201f5599..466d6b66 100644
 --- a/webui/src/locales/zh-CN/workspace.json
 +++ b/webui/src/locales/zh-CN/workspace.json
 @@ -86,7 +86,7 @@
@@ -128943,10 +130562,11 @@ index 201f5599..c414654a 100644
      "selected": "已选择 {{count}} 项",
      "selectName": "选择 {{name}}",
      "clearSelection": "清除选择",
-@@ -274,6 +274,86 @@
+@@ -274,7 +274,90 @@
        "unknown": "未知",
        "uploaded": "已上传",
        "active": "可用"
+-    }
 +    },
 +    "catalog": {
 +      "resize": "拖拽调整知识领域与结果区域高度",
@@ -129027,9 +130647,13 @@ index 201f5599..c414654a 100644
 +      "outputs": "日常产出：按日期查阅任务生成的报告、分析和附件，选择文件即可阅读或下载原文。",
 +      "knowledge": "知识沉淀：按业务领域阅读资料要点和可复用经验，通过来源资料核对依据，历史版本保留此前的整理内容。",
 +      "memory": "记忆文件：查看 Agent 保存的用户偏好、项目背景和每日记忆，帮助后续任务延续上下文；每日记忆按实际记录产生，不等同于每日工作报告。"
-     }
++    },
++    "memoryProjectHint": "项目经验与上下文",
++    "memoryExample": "示例补录",
++    "memoryExampleNotice": "示例补录：非真实会话记录，仅用于页面展示；同日真实记忆优先显示。"
    },
    "memory": {
+     "title": "记忆文件",
 diff --git a/webui/src/pages/Channel/index.test.tsx b/webui/src/pages/Channel/index.test.tsx
 index b4675433..93ab3fd0 100644
 --- a/webui/src/pages/Channel/index.test.tsx
@@ -130859,10 +132483,10 @@ index 00000000..2775a09e
 +});
 diff --git a/webui/src/pages/Knowledge/index.tsx b/webui/src/pages/Knowledge/index.tsx
 new file mode 100644
-index 00000000..16985652
+index 00000000..9e0a9a92
 --- /dev/null
 +++ b/webui/src/pages/Knowledge/index.tsx
-@@ -0,0 +1,701 @@
+@@ -0,0 +1,703 @@
 +import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 +import { useSearchParams } from 'react-router-dom';
 +import {
@@ -131014,7 +132638,7 @@ index 00000000..16985652
 +                  ? 'bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-300'
 +                  : 'text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800'
 +              }`}
-+              title={node.name}
++              title={node.description || node.name}
 +            >
 +              {node.type === 'directory'
 +                ? open
@@ -131022,7 +132646,8 @@ index 00000000..16985652
 +                  : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
 +                : <span className="w-3.5 shrink-0" />}
 +              <FileTypeIcon node={node} />
-+              <span className="min-w-0 flex-1 truncate">{node.name}</span>
++              <span className="min-w-0 flex-1"><span className="block truncate">{node.name}</span>{node.description && <span className="block truncate text-[10px] font-normal text-zinc-400">{t('knowledge.memoryProjectHint', { defaultValue: '项目经验与上下文' })}</span>}</span>
++              {node.example && <span className="shrink-0 rounded bg-sky-50 px-1.5 py-0.5 text-[10px] text-sky-700 dark:bg-sky-950 dark:text-sky-300">{t('knowledge.memoryExample', { defaultValue: '示例补录' })}</span>}
 +              {source === 'outputs' && node.root !== 'personal' && (
 +                <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
 +                  {t(`knowledge.rootLabels.${node.root}`)}
@@ -131104,7 +132729,7 @@ index 00000000..16985652
 +    );
 +  }
 +  if (ext === 'pdf') {
-+    return <iframe title={node.name} src={knowledgeAPI.previewUrl(source, node)} className="h-full w-full border-0 bg-white" />;
++    return <iframe title={node.description || node.name} src={knowledgeAPI.previewUrl(source, node)} className="h-full w-full border-0 bg-white" />;
 +  }
 +  if (!node.is_text_file || content === null) {
 +    return (
@@ -131534,6 +133159,7 @@ index 00000000..16985652
 +                  </div>}
 +                </div>
 +              )}
++              {selected.example && <p className="border-b border-sky-100 bg-sky-50 px-5 py-2 text-xs text-sky-800 dark:border-sky-900 dark:bg-sky-950/30 dark:text-sky-300">{t('knowledge.memoryExampleNotice', { defaultValue: '示例补录：非真实会话记录，仅用于页面展示；同日真实记忆优先显示。' })}</p>}
 +              {contentTruncated && (
 +                <div className="border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-700 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
 +                  {t('knowledge.preview.truncated', { limit: formatBytes(previewLimit) })}

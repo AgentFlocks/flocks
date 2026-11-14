@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.5",
+  "packageVersion": "1.15.6",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.15.5",
+    "packageVersion": "1.15.6",
     "developmentBranch": "codex/pro-1113-enhancements",
     "sourceRepository": "AgentFlocks/flocksdev",
-    "sourceCommit": "955632db1e9b88486d460f04637e821370b83356",
+    "sourceCommit": "632fe71f296ca8e7e45dbefa02155f22539d43f5",
     "deploymentMode": "source-overlay",
     "installerProtocol": 2,
     "edition": "flockspro",
@@ -19,58 +19,59 @@
       "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
       "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
     },
-    "previousCustomization": "1.15.4"
+    "previousCustomization": "1.15.5"
   },
-  "scope": "Readable knowledge source highlights, remove recursive fallback inheritance, non-mutating legacy read adapter, module guides and collapsible processing details",
+  "scope": "Project registry display names, isolated illustrative daily files from 2026-09-09 through 2026-11-14, real daily memory precedence",
   "local5173Acceptance": {
     "nativeBinaryBefore": "1e3f297c9715a40996c422afd1e377efd529640f45a3c13cf8d05b8b32857a75",
-    "sourceCommit": "955632db1e9b88486d460f04637e821370b83356",
+    "sourceCommit": "632fe71f296ca8e7e45dbefa02155f22539d43f5",
     "port": 5173,
     "localBase": "native Mac Pro 11.12.2 with approved 11.13 enhanced Core",
     "status": "passed",
-    "payloadFilesMatched": 501,
+    "payloadFilesMatched": 568,
     "nativeBinaryUnchanged": true,
-    "packageVersion": "1.15.5",
-    "finishedAt": "2026-11-14T15:23:52.307982+00:00",
+    "realMemoryFilesUnchanged": true,
+    "packageVersion": "1.15.6",
+    "finishedAt": "2026-11-14T15:43:54.462519+00:00",
     "ready": true,
     "productionWebUIFilesMatched": 235,
     "repeatCheck": "already-applied",
     "scenarios": [
-      "Authenticated Chrome: all three content modules display the matching guide; memory MEMORY.md renders original headings and download link.",
-      "Native 5173 alert-domain Update produced a real 5-source publication; model fallback completes and freezes the day.",
-      "Final code reload presents only readable document excerpts, merges identical workflow.md quotes with both source citations, keeps structured evidence in Sources.",
-      "Switching the saved historical version renders the same readable excerpt; source citation opens the full original Markdown and returns to the domain.",
-      "Processing details and module guide default collapsed; published version, timestamp and source provenance remain available."
+      "Authenticated native Chrome memory page lists 67 consecutive daily dates from 2026-09-09 through 2026-11-14 with example badges.",
+      "Opening 2026-11-11 renders illustrative content, explicit non-real-session notice and download link; browser download bytes match the packaged Markdown.",
+      "Refreshing retains the selected example preview; browser console has no errors.",
+      "Project label mapping, owner isolation and real daily-file precedence are covered by isolated authenticated route regressions; native local projects have no active MEMORY.md file, so the project group remains absent.",
+      "Installer inspect matches all 568 native payload files, original Go binary unchanged and original memory fingerprint unchanged; repeated installation is already-applied."
     ],
     "limits": [
       "Local native Mac Pro11.12.2 with user-approved 11.13 enhanced Core; remote Linux installation pending user.",
-      "Legacy nested publications and repeated fallback verified with isolated regression fixtures; local account initially had no published alert-domain summary."
+      "Local project memory files were previously removed; registered-name display is verified with isolated authenticated route fixtures, not claimed as a populated native UI test. Remote project labels must resolve against the remote registry."
     ]
   },
   "automatedValidation": {
-    "knowledgeBackend": {
-      "passed": 140,
-      "log": ".work/knowledge-backend-tests.log"
+    "knowledgeMemoryBackend": {
+      "passed": 154,
+      "log": ".work/memory-backend-tests.log"
     },
     "knowledgeUI": {
       "passed": 50,
-      "log": ".work/knowledge-ui-tests.log"
+      "log": ".work/memory-ui-tests.log"
     },
     "installer": {
       "passed": 27,
-      "log": ".work/knowledge-installer-tests.log"
+      "log": ".work/memory-installer-tests.log"
     },
     "pairedProProductionBuilds": "Linux Pro11.13 and native Mac Pro11.12.2 passed TypeScript and Vite builds",
     "sourcePatchReconstruction": {
-      "sourceCommit": "955632db1e9b88486d460f04637e821370b83356",
+      "sourceCommit": "632fe71f296ca8e7e45dbefa02155f22539d43f5",
       "baseline": "2bc02382874a226ef63d20cab3734220ad752225",
-      "reconstructedTree": "7d39acf9f8cee72c55495c8ef0fd84ba12522ffe",
-      "expectedTree": "7d39acf9f8cee72c55495c8ef0fd84ba12522ffe",
+      "reconstructedTree": "886992e46a17ab3328a980bb7c8824e48dbf8eb3",
+      "expectedTree": "886992e46a17ab3328a980bb7c8824e48dbf8eb3",
       "matches": true
     }
   },
   "limits": [
     "Local native Mac Pro11.12.2 with user-approved 11.13 enhanced Core; remote Linux installation pending user.",
-    "Legacy nested publications and repeated fallback verified with isolated regression fixtures; local account initially had no published alert-domain summary."
+    "Local project memory files were previously removed; registered-name display is verified with isolated authenticated route fixtures, not claimed as a populated native UI test. Remote project labels must resolve against the remote registry."
   ]
 }
