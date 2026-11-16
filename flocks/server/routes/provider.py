@@ -1608,7 +1608,8 @@ async def update_api_service(provider_id: str, request: APIServiceUpdateRequest)
         statuses = await _read_api_service_status_cache()
         matched_count = 0
         if request.enabled is not None:
-            matched_count = _set_api_service_tools_enabled(provider_id, request.enabled)
+            async with ToolRegistry.write_lock():
+                matched_count = _set_api_service_tools_enabled(provider_id, request.enabled)
             if request.enabled:
                 status_payload = statuses.get(provider_id, {})
                 if status_payload.get("status") == "disabled":
@@ -1712,6 +1713,7 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
     """
     from flocks.hub.installer import uninstall_plugin
     from flocks.security import get_secret_manager
+    from flocks.tool.registry import ToolRegistry
 
     try:
         if _is_api_service_builtin(provider_id):
@@ -1749,7 +1751,8 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
             statuses.pop(provider_id, None)
             await _write_api_service_status_cache(statuses)
 
-        matched_count = _set_api_service_tools_enabled(provider_id, False)
+        async with ToolRegistry.write_lock():
+            matched_count = _set_api_service_tools_enabled(provider_id, False)
 
         uninstalled_plugin = False
         if backing_plugin is not None:

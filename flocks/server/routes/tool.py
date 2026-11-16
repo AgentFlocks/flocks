@@ -1204,7 +1204,8 @@ async def update_tool(
 
         if desired:
             if not tool.info.enabled:
-                _set_global_tool_enabled(tool, True)
+                async with ToolRegistry.write_lock():
+                    _set_global_tool_enabled(tool, True)
             removed = await delete_device_tool_setting(device_id, tool_name)
             log.info("tool.device.updated.reset_to_global", {
                 "name": tool_name,
@@ -1226,7 +1227,7 @@ async def update_tool(
         return _build_tool_response(tool.info)
 
     # --- Global mode (native settings, without rescanning plugin files) ---
-    with ToolRegistry._refresh_lock:
+    async with ToolRegistry.write_lock():
         if desired is not None:
             _set_global_tool_enabled(tool, desired)
         if "group" in request.model_fields_set and not tool.info.group_readonly:
@@ -1259,7 +1260,7 @@ async def reset_tool_setting(tool_name: str, _admin: object = Depends(require_ad
             detail=f"Tool not found: {tool_name}",
         )
 
-    with ToolRegistry._refresh_lock:
+    async with ToolRegistry.write_lock():
         removed = ConfigWriter.delete_tool_setting(tool_name, field="enabled")
         default = _get_default_enabled(tool.info)
         new_enabled = default and _service_allows_enable(tool.info)
@@ -1465,7 +1466,9 @@ async def refresh_tools(_admin: object = Depends(require_admin)):
         ("plugin", ToolRegistry.refresh_plugin_tools),
     ):
         try:
-            refresh()
+            # Each reload re-reads every source and takes seconds: run it off
+            # the event loop so the rest of the server keeps answering.
+            await asyncio.to_thread(refresh)
             stages[stage] = "success"
         except ToolRefreshError as exc:
             stages[stage] = "error"
@@ -1737,9 +1740,10 @@ async def create_tool(request: CreateToolRequest, _admin: object = Depends(requi
             tool.info.source = "plugin_yaml"
         if request.provider:
             tool.info.provider = request.provider
-        ToolRegistry.register(tool)
-        if tool.info.name not in ToolRegistry._plugin_tool_names:
-            ToolRegistry._plugin_tool_names.append(tool.info.name)
+        async with ToolRegistry.write_lock():
+            ToolRegistry.register(tool)
+            if tool.info.name not in ToolRegistry._plugin_tool_names:
+                ToolRegistry._plugin_tool_names.append(tool.info.name)
         _invalidate_tool_summary_cache()
     except Exception as e:
         log.error("tool.create.register_error", {"error": str(e), "name": request.name})
@@ -1843,9 +1847,10 @@ async def update_plugin_tool(name: str, request: UpdateToolRequest, _admin: obje
             tool = yaml_to_tool(raw, yaml_path)
             if not tool.info.source:
                 tool.info.source = "plugin_yaml"
-            ToolRegistry.register(tool)
-            ToolRegistry._sync_api_service_states()
-            ToolRegistry._apply_tool_settings()
+            async with ToolRegistry.write_lock():
+                ToolRegistry.register(tool)
+                ToolRegistry._sync_api_service_states()
+                ToolRegistry._apply_tool_settings()
             _invalidate_tool_summary_cache()
             return _build_tool_response(tool.info)
     except Exception as e:
@@ -1897,7 +1902,8 @@ async def delete_tool(name: str, _admin: object = Depends(require_admin)):
     # installation record consistent even when the in-memory refresh fails.
     cleanup_errors: List[str] = []
     try:
-        ToolRegistry.refresh_plugin_tools()
+        # A full plugin reload takes seconds: never on the event loop.
+        await asyncio.to_thread(ToolRegistry.refresh_plugin_tools)
     except Exception as e:
         refresh_error = str(e)
         cleanup_errors.append(f"registry refresh: {refresh_error}")
@@ -1962,7 +1968,8 @@ async def reload_tool(name: str, _admin: object = Depends(require_admin)):
         tool = yaml_to_tool(raw, yaml_path)
         if not tool.info.source:
             tool.info.source = "plugin_yaml"
-        ToolRegistry.register(tool)
+        async with ToolRegistry.write_lock():
+            ToolRegistry.register(tool)
         _invalidate_tool_summary_cache()
         log.info("tool.reloaded", {"name": name})
         return _build_tool_response(tool.info)

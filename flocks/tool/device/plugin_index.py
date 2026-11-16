@@ -37,6 +37,9 @@ _template_cache: Optional[list[DeviceTemplate]] = None
 _template_cache_epoch = 0
 _template_cache_lock = threading.Lock()
 
+# Serializes create_custom_device_template's check-then-write.
+_custom_template_lock = threading.Lock()
+
 # Forced runtime refreshes are coalesced, see _refresh_device_plugin_runtime.
 _runtime_refresh_cond = threading.Condition()
 _runtime_refresh_owner: Optional[int] = None
@@ -170,20 +173,26 @@ def create_custom_device_template(body: CustomDeviceTemplateCreate) -> DeviceTem
         validated_tools.append((tool_name, tool.model_dump(exclude_none=True)))
 
     provider_yaml = _custom_provider_yaml(body)
-    target.mkdir(parents=True, exist_ok=True)
-    _write_yaml(target / "_provider.yaml", provider_yaml)
-    for tool_name, tool_data in validated_tools:
-        _write_yaml(target / f"{tool_name}.yaml", _custom_tool_yaml(tool_data, service_id))
+    # Requests run this on worker threads: the existence check, the files and
+    # the install record are one step, or two requests for the same id both
+    # pass the check and write over each other.
+    with _custom_template_lock:
+        if target.exists() and hub_local.has_install_payload("device", target):
+            raise FileExistsError(f"device plugin '{plugin_id}' already exists")
+        target.mkdir(parents=True, exist_ok=True)
+        _write_yaml(target / "_provider.yaml", provider_yaml)
+        for tool_name, tool_data in validated_tools:
+            _write_yaml(target / f"{tool_name}.yaml", _custom_tool_yaml(tool_data, service_id))
 
-    record = hub_local.make_record(
-        plugin_type="device",
-        plugin_id=plugin_id,
-        version=body.version or "0.0.0",
-        source="custom",
-        install_path=target,
-        scope="global",
-    )
-    hub_local.save_installed_record(record)
+        record = hub_local.make_record(
+            plugin_type="device",
+            plugin_id=plugin_id,
+            version=body.version or "0.0.0",
+            source="custom",
+            install_path=target,
+            scope="global",
+        )
+        hub_local.save_installed_record(record)
 
     _refresh_device_plugin_runtime()
 
@@ -250,7 +259,9 @@ def _reload_device_plugin_runtime() -> bool:
     discover_api_service_descriptors(refresh=True)
     reloaded = True
     try:
-        ToolRegistry.refresh_plugin_tools()
+        # The page asks on every return to the window; with no plugin file
+        # changed since the last clean load the registry is already current.
+        ToolRegistry.refresh_plugin_tools_if_changed()
     except Exception as exc:  # defensive runtime isolation: log, keep serving
         log.warn("device.templates.tool_refresh_failed", {"error": str(exc)})
         reloaded = False

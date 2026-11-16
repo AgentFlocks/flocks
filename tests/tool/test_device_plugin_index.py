@@ -38,6 +38,15 @@ def _write_tool(root: Path, name: str = "device_ping") -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_recorded_clean_plugin_load(monkeypatch):
+    """A clean plugin load recorded by an earlier test would let forced
+    refreshes here skip the (stubbed) reload they are about."""
+    from flocks.tool.registry import ToolRegistry
+
+    monkeypatch.setattr(ToolRegistry, "_plugin_sources_stamp", None)
+
+
 def _reset_env(monkeypatch, tmp_path):
     from flocks.config.config import Config
     from flocks.config import api_versioning
@@ -265,6 +274,39 @@ def test_device_template_refresh_reloads_plugin_tools(monkeypatch, tmp_path):
     assert calls == ["refresh"]
 
 
+def test_forced_template_refresh_skips_the_reload_when_no_plugin_file_changed(monkeypatch, tmp_path):
+    """The page forces a refresh on every return to the window. With no plugin
+    file changed since the last clean load, the tool registry is not reloaded
+    (seconds of CPU each time), but the template index is still rebuilt."""
+    from flocks.tool.device import plugin_index
+
+    _reset_env(monkeypatch, tmp_path)
+    calls: list[str] = []
+    fingerprint = ["same"]
+
+    monkeypatch.setattr(plugin_index.hub_catalog, "list_catalog", lambda plugin_type=None: [])
+    monkeypatch.setattr(
+        plugin_index.ToolRegistry,
+        "refresh_plugin_tools",
+        classmethod(lambda cls: calls.append("refresh") or []),
+    )
+    monkeypatch.setattr(
+        plugin_index.ToolRegistry,
+        "_plugin_sources_fingerprint",
+        classmethod(lambda cls: (fingerprint[0],)),
+    )
+    monkeypatch.setattr(plugin_index.ToolRegistry, "_plugin_sources_stamp", ("same",))
+    monkeypatch.setattr(plugin_index, "_template_cache", ["stale index"])
+
+    assert plugin_index.list_device_templates(refresh=True) == []
+    assert calls == []
+    assert plugin_index._template_cache == []
+
+    fingerprint[0] = "a plugin file changed"
+    assert plugin_index.list_device_templates(refresh=True) == []
+    assert calls == ["refresh"]
+
+
 def test_create_custom_device_template_writes_user_plugin(monkeypatch, tmp_path):
     from flocks.tool.device import plugin_index
 
@@ -307,6 +349,59 @@ def test_create_custom_device_template_writes_user_plugin(monkeypatch, tmp_path)
     assert provider["service_id"] == "custom_demo_api"
     assert tool["provider"] == "custom_demo_api"
     assert records["plugins"]["device:custom_demo"]["type"] == "device"
+
+
+def test_concurrent_custom_templates_with_one_id_are_created_once(monkeypatch, tmp_path):
+    """The route creates templates on worker threads: the existence check and
+    the writes are one step, or both requests pass the check and both 'win'."""
+    from flocks.tool.device import plugin_index
+
+    _reset_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(plugin_index.hub_catalog, "list_catalog", lambda plugin_type=None: [])
+    monkeypatch.setattr(plugin_index.hub_catalog, "system_plugin_root", lambda plugin_type, plugin_id: None)
+    monkeypatch.setattr(plugin_index.ToolRegistry, "refresh_plugin_tools", classmethod(lambda cls: []))
+    monkeypatch.setattr(plugin_index.ToolRegistry, "init", classmethod(lambda cls: None))
+    monkeypatch.setattr(plugin_index.ToolRegistry, "list_tools", classmethod(lambda cls: []))
+
+    both_checked = threading.Barrier(2, timeout=5)
+    write_yaml = plugin_index._write_yaml
+
+    def slow_first_write(path, data):
+        # Both requests reach the writes before either has written anything.
+        if path.name == "_provider.yaml":
+            try:
+                both_checked.wait()
+            except threading.BrokenBarrierError:
+                pass
+        write_yaml(path, data)
+
+    monkeypatch.setattr(plugin_index, "_write_yaml", slow_first_write)
+    body = CustomDeviceTemplateCreate(
+        plugin_id="custom_race",
+        name="Custom Race",
+        service_id="custom_race_api",
+        tools=[{"name": "custom_race_ping", "description": "Ping", "handler": {"type": "http", "path": "/ping"}}],
+    )
+    outcomes: list[str] = []
+    outcomes_lock = threading.Lock()
+
+    def create() -> None:
+        try:
+            plugin_index.create_custom_device_template(body)
+            outcome = "created"
+        except FileExistsError:
+            outcome = "exists"
+        with outcomes_lock:
+            outcomes.append(outcome)
+
+    threads = [threading.Thread(target=create) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+        assert not thread.is_alive()
+
+    assert sorted(outcomes) == ["created", "exists"]
 
 
 def test_device_template_route_is_not_shadowed_by_device_id(monkeypatch):
