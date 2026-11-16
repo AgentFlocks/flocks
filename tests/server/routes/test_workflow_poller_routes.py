@@ -257,3 +257,81 @@ async def test_legacy_config_save_edits_the_existing_trigger_in_place(
     assert response.status_code == 200, response.text
     same_type = [trigger for trigger in persisted[0] if trigger.type == trigger_type]
     assert [trigger.id for trigger in same_type] == [custom_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("endpoint", "trigger_type", "manager_path", "settings"),
+    [
+        ("kafka-config", "kafka", "flocks.ingest.kafka.manager.default_manager", {"inputTopic": "alerts"}),
+        ("poller-config", "schedule", "flocks.workflow.poller_manager.default_manager", {"intervalSeconds": 60}),
+        ("syslog-config", "syslog", "flocks.ingest.syslog.manager.default_manager", {"port": 5514}),
+    ],
+)
+@pytest.mark.parametrize(
+    "concurrency",
+    [
+        None,
+        {"policy": "allow", "maxParallel": 6, "queueSize": 1000},
+        {"policy": "queue", "maxParallel": 3, "queueSize": 250},
+    ],
+)
+async def test_legacy_config_stop_start_preserves_concurrency(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    trigger_type: str,
+    manager_path: str,
+    settings: dict[str, Any],
+    concurrency: dict[str, Any] | None,
+) -> None:
+    from flocks.workflow.triggers.models import TriggerDefinition
+
+    expected = concurrency or {"policy": "allow", "maxParallel": 1, "queueSize": 100}
+    trigger_id = f"custom-{trigger_type}"
+    preserved_fields = {
+        "name": "Alert input",
+        "description": "Keep fields absent from the config form",
+        "filter": {"expr": "$.body.severity == 'high'"},
+        "testSamples": [{"name": "sample", "payload": {"severity": "high"}, "headers": {}, "query": {}}],
+    }
+    triggers = [] if concurrency is None else [
+        {"id": trigger_id, "type": trigger_type, "enabled": True,
+         "concurrency": concurrency, **preserved_fields}
+    ]
+    data = {"workflowJson": {
+        "start": "n1",
+        "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+        "edges": [],
+        "triggers": triggers,
+    }}
+    restart_states: list[bool] = []
+
+    def _fake_write(workflow_id: str, workflow_json: dict[str, Any], *args: Any, **kwargs: Any) -> None:
+        # Exercise real trigger serialization/persistence, then reload it on restart.
+        data["workflowJson"] = workflow_json
+
+    async def _fake_restart(workflow_id: str) -> dict[str, Any]:
+        saved = data["workflowJson"]["triggers"]
+        assert len(saved) == 1
+        trigger = TriggerDefinition.model_validate(saved[0])
+        assert trigger.concurrency.model_dump() == expected
+        if concurrency is not None:
+            assert trigger.id == trigger_id
+            for field, value in preserved_fields.items():
+                assert saved[0][field] == value
+        restart_states.append(trigger.enabled)
+        return {"workflowId": workflow_id, "state": "running" if trigger.enabled else "stopped"}
+
+    monkeypatch.setattr(workflow_routes, "_read_workflow_from_fs", lambda workflow_id: data)
+    monkeypatch.setattr(workflow_routes, "_write_workflow_to_fs", _fake_write)
+    monkeypatch.setattr(manager_path, SimpleNamespace(restart_workflow=_fake_restart))
+
+    for enabled in (False, True, False, True):
+        response = await client.post(
+            f"/api/workflow/wf-1/{endpoint}", json={**settings, "enabled": enabled},
+        )
+        assert response.status_code == 200, response.text
+        assert data["workflowJson"]["triggers"][0]["concurrency"] == expected
+
+    assert restart_states == [False, True, False, True]

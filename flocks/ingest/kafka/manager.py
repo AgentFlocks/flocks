@@ -64,13 +64,9 @@ from flocks.workflow.triggers.models import (
 log = Log.create(service="kafka.manager")
 
 
-# Maximum concurrent workflow executions per workflow to avoid FD exhaustion and
-# database write contention. Kafka messages can carry large JSON payloads, so keep
-# this bounded even when a trigger requests a larger worker pool.
-_MAX_CONCURRENT_EXECUTIONS = 8
-# Maximum number of buffered Kafka messages per workflow.  Unlike syslog we do
-# not drop on overflow; a full queue applies backpressure to the consumer loop.
-_MAX_QUEUE_SIZE = 1000
+# Per-workflow resource limits; a full queue applies backpressure to Kafka.
+_MAX_CONCURRENT_EXECUTIONS = 20
+_MAX_QUEUE_SIZE = 5000
 # Maximum time we wait for the consumer to either connect successfully or fail
 # during ``restart_workflow`` so the HTTP save endpoint can surface connection
 # errors instead of pretending the consumer is running.
