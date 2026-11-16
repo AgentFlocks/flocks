@@ -165,7 +165,8 @@ async def route_create_custom_device_template(body: CustomDeviceTemplateCreate, 
     # which is an admin-level change to what the agent can execute.
     require_admin(request)
     try:
-        return create_custom_device_template(body)
+        # Writing the template reloads every plugin tool: keep it off the event loop.
+        return await asyncio.to_thread(create_custom_device_template, body)
     except FileExistsError as exc:
         raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail=str(exc))
     except ValueError as exc:
@@ -374,7 +375,8 @@ async def route_update_device_tool(
         if not tool.info.enabled:
             from flocks.server.routes.tool import _set_global_tool_enabled
 
-            _set_global_tool_enabled(tool, True)
+            async with ToolRegistry.write_lock():
+                _set_global_tool_enabled(tool, True)
         await delete_device_tool_setting(device_id, tool_name)
         enabled_device = None
     else:
