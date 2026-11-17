@@ -60,46 +60,57 @@ export default function ApplicationFields({ form, problems, onChange, idPrefix =
   const { t } = useTranslation('flockspro');
   const fieldError = (field: ApplicationField) =>
     problems[field] ? <p className="mt-1 text-xs text-red-600">{t(`apply.problems.${problems[field]}`)}</p> : null;
+  const label = 'mb-1 block text-sm text-gray-600';
   return (
     <div className="space-y-3">
-      <div>
-        <label htmlFor={`${idPrefix}-type`} className="mb-1 block text-sm text-gray-600">{t('apply.fields.licenseType')}</label>
-        <select id={`${idPrefix}-type`} className={INPUT} value={form.license_type} disabled={disabled}
-          onChange={(e) => onChange('license_type', e.target.value)}>
-          <option value="poc">{t('apply.licenseTypes.poc')}</option>
-          <option value="commercial">{t('apply.licenseTypes.commercial')}</option>
-        </select>
+      <h3 className="text-sm font-semibold text-gray-900">{t('licencePage.dialog.section')}</h3>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div>
+          <label htmlFor={`${idPrefix}-product`} className={label}>{t('licencePage.dialog.product')}</label>
+          <input id={`${idPrefix}-product`} className={`${INPUT} bg-gray-50 text-gray-500`} value="FlocksPro" readOnly />
+        </div>
+        <div>
+          <label htmlFor={`${idPrefix}-type`} className={label}>{t('apply.fields.licenseType')}</label>
+          <select id={`${idPrefix}-type`} className={INPUT} value={form.license_type} disabled={disabled}
+            onChange={(e) => onChange('license_type', e.target.value)}>
+            <option value="poc">{t('apply.licenseTypes.poc')}</option>
+            <option value="commercial">{t('apply.licenseTypes.commercial')}</option>
+          </select>
+        </div>
+        <div>
+          <input id={`${idPrefix}-company`} className={INPUT} value={form.company} maxLength={200} disabled={disabled}
+            aria-label={t('apply.fields.company')} placeholder={t('apply.placeholders.company')}
+            onChange={(e) => onChange('company', e.target.value)} aria-invalid={Boolean(problems.company)} />
+          {fieldError('company')}
+        </div>
+        <div>
+          <input id={`${idPrefix}-name`} className={INPUT} value={form.applicant_name} maxLength={100} disabled={disabled}
+            aria-label={t('apply.fields.applicantName')} placeholder={t('apply.placeholders.applicantName')}
+            onChange={(e) => onChange('applicant_name', e.target.value)} aria-invalid={Boolean(problems.applicant_name)} />
+          {fieldError('applicant_name')}
+        </div>
+        <div>
+          <input id={`${idPrefix}-email`} type="email" className={INPUT} value={form.applicant_email} maxLength={200} disabled={disabled}
+            aria-label={t('apply.fields.email')} placeholder={t('apply.placeholders.email')}
+            onChange={(e) => onChange('applicant_email', e.target.value)} aria-invalid={Boolean(problems.applicant_email)} />
+          {fieldError('applicant_email')}
+        </div>
+        <div>
+          <input id={`${idPrefix}-phone`} type="tel" className={INPUT} value={form.applicant_phone} maxLength={40} disabled={disabled}
+            aria-label={t('apply.fields.phone')} placeholder={t('apply.placeholders.phone')}
+            onChange={(e) => onChange('applicant_phone', e.target.value)} aria-invalid={Boolean(problems.applicant_phone)} />
+          {fieldError('applicant_phone')}
+        </div>
+        <input id={`${idPrefix}-sales`} className={`${INPUT} sm:col-span-2`} value={form.sales_rep_name ?? ''} maxLength={100} disabled={disabled}
+          aria-label={t('apply.fields.salesRep')} placeholder={t('apply.placeholders.salesRep')}
+          onChange={(e) => onChange('sales_rep_name', e.target.value)} />
       </div>
       <div>
-        <input id={`${idPrefix}-company`} className={INPUT} value={form.company} maxLength={200} disabled={disabled}
-          aria-label={t('apply.fields.company')} placeholder={t('apply.placeholders.company')}
-          onChange={(e) => onChange('company', e.target.value)} aria-invalid={Boolean(problems.company)} />
-        {fieldError('company')}
+        <label htmlFor={`${idPrefix}-notes`} className={label}>{t('licencePage.dialog.notes')}</label>
+        <textarea id={`${idPrefix}-notes`} className={INPUT} rows={2} value={form.notes ?? ''} maxLength={2000} disabled={disabled}
+          placeholder={t('licencePage.dialog.notesPlaceholder')}
+          onChange={(e) => onChange('notes', e.target.value)} />
       </div>
-      <div>
-        <input id={`${idPrefix}-name`} className={INPUT} value={form.applicant_name} maxLength={100} disabled={disabled}
-          aria-label={t('apply.fields.applicantName')} placeholder={t('apply.placeholders.applicantName')}
-          onChange={(e) => onChange('applicant_name', e.target.value)} aria-invalid={Boolean(problems.applicant_name)} />
-        {fieldError('applicant_name')}
-      </div>
-      <div>
-        <input id={`${idPrefix}-email`} type="email" className={INPUT} value={form.applicant_email} maxLength={200} disabled={disabled}
-          aria-label={t('apply.fields.email')} placeholder={t('apply.placeholders.email')}
-          onChange={(e) => onChange('applicant_email', e.target.value)} aria-invalid={Boolean(problems.applicant_email)} />
-        {fieldError('applicant_email')}
-      </div>
-      <div>
-        <input id={`${idPrefix}-phone`} type="tel" className={INPUT} value={form.applicant_phone} maxLength={40} disabled={disabled}
-          aria-label={t('apply.fields.phone')} placeholder={t('apply.placeholders.phone')}
-          onChange={(e) => onChange('applicant_phone', e.target.value)} aria-invalid={Boolean(problems.applicant_phone)} />
-        {fieldError('applicant_phone')}
-      </div>
-      <input id={`${idPrefix}-sales`} className={INPUT} value={form.sales_rep_name ?? ''} maxLength={100} disabled={disabled}
-        aria-label={t('apply.fields.salesRep')} placeholder={t('apply.placeholders.salesRep')}
-        onChange={(e) => onChange('sales_rep_name', e.target.value)} />
-      <textarea id={`${idPrefix}-notes`} className={INPUT} rows={3} value={form.notes ?? ''} maxLength={2000} disabled={disabled}
-        aria-label={t('apply.fields.notes')} placeholder={t('apply.placeholders.notes')}
-        onChange={(e) => onChange('notes', e.target.value)} />
     </div>
   );
 }

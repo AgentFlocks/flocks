@@ -160,35 +160,35 @@ describe('AccountMenu', () => {
     expect(onNavigate).toHaveBeenCalledOnce();
   });
 
-  it('marks the enterprise edition with the red Pro tag, and the open edition with none', () => {
+  it('marks the enterprise edition with the gold PRO mark on its Flocks Pro entry, and the open edition with none', () => {
     const { unmount } = render(
       <MemoryRouter>
-        <AccountMenu {...versionProps} username="admin" roleLabel="管理员" initial="A" editionBadge="Pro" onLogout={vi.fn()}
-          extensionItems={[{ id: 'pro', name: 'Flocks Pro', href: '/settings/flockspro', icon: Crown, highlight: true, badge: 'Pro', badgeTone: 'danger' }]} />
+        <AccountMenu {...versionProps} username="admin" roleLabel="管理员" initial="A" onLogout={vi.fn()}
+          extensionItems={[{ id: 'pro', name: 'Flocks Pro', href: '/settings/flockspro', icon: Crown, highlight: true, badge: 'PRO', badgeTone: 'pro' }]} />
       </MemoryRouter>,
     );
-    // On the avatar, seen without opening the menu (and with the sidebar collapsed).
-    expect(screen.getByTestId('edition-badge')).toHaveTextContent('Pro');
-    expect(screen.getByTestId('edition-badge')).toHaveClass('bg-red-600');
+    // Nothing on the avatar or beside the version: the mark is the entry's.
+    expect(screen.queryByTestId('pro-badge')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal' }));
     const menu = screen.getByRole('menu');
-    const tags = within(menu).getAllByText('Pro');
-    expect(tags).toHaveLength(2);
-    for (const tag of tags) expect(tag).toHaveClass('bg-red-600');
+    const marks = within(menu).getAllByTestId('pro-badge');
+    expect(marks).toHaveLength(1);
+    expect(marks[0]).toHaveTextContent('PRO');
+    expect(marks[0].className).toContain('from-[#fff6d4]');
+    expect(marks[0]).not.toHaveClass('bg-red-600');
+    expect(within(menu).getByRole('menuitem', { name: /Flocks Pro/ })).toContainElement(marks[0]);
     unmount();
 
     render(
       <MemoryRouter>
         <AccountMenu {...versionProps} username="admin" roleLabel="管理员" initial="A" onLogout={vi.fn()}
-          extensionItems={[{ id: 'pro', name: 'Flocks Pro', href: '/settings/flockspro', icon: Crown, highlight: true, badge: 'PRO', badgeTone: 'muted' }]} />
+          extensionItems={[{ id: 'pro', name: 'Flocks Pro', href: '/settings/flockspro', icon: Crown, highlight: true }]} />
       </MemoryRouter>,
     );
-    expect(screen.queryByTestId('edition-badge')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal' }));
-    const quiet = within(screen.getByRole('menu')).getByText('PRO');
-    expect(quiet).toHaveClass('border');
-    expect(quiet).not.toHaveClass('bg-red-600');
-    expect(quiet).not.toHaveClass('bg-ui-action');
+    const open = within(screen.getByRole('menu'));
+    expect(open.getByRole('menuitem', { name: 'Flocks Pro' })).toBeInTheDocument();
+    expect(open.queryByTestId('pro-badge')).not.toBeInTheDocument();
   });
 });
 

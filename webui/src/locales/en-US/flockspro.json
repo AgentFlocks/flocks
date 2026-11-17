@@ -252,5 +252,99 @@
   "offlinePage": {
     "consoleUnavailable": "This machine cannot reach Console, so cloud sign-in, online applications and licence sync are unavailable for now. Use \"Apply offline\" below to generate an application file, then import the licence file you get back under \"Licence file\".",
     "consoleUnavailableLicensed": "This machine cannot reach Console, so cloud sign-in, licence sync and the version check are unavailable for now. The licence is on this machine and carries over when you upgrade with the offline installer."
+  },
+  "licencePage": {
+    "title": "Flocks Pro licence",
+    "description": "Manage the platform, module and scene suite licences: licensed offline, or online with the cloud account.",
+    "apply": {
+      "title": "Licence application",
+      "cloud": "Cloud account",
+      "online": "Online",
+      "offline": "Offline",
+      "checking": "Checking the network",
+      "signedIn": "Signed in",
+      "signedOut": "Signed out",
+      "account": "Cloud account: {{name}}",
+      "signInHint": "Sign in to the cloud account to apply online",
+      "signInFirst": "Sign in to the cloud account to apply online",
+      "applyOnline": "Apply online",
+      "applyOffline": "Apply offline",
+      "login": "Sign in to the cloud account",
+      "logout": "Sign out",
+      "recheck": "Check the network again",
+      "licensed": "This machine holds a good licence; there is nothing to apply for. Renewals and quota changes come in with a sync under Licence information.",
+      "outstanding": "Application {{id}} is under way; no new application until it is done.",
+      "inReview": "Application {{id}} ({{status}}) is under review; see Application records below.",
+      "toTake": "Application {{id}} was approved: take the licence under Application records below, then upgrade to the enterprise edition."
+    },
+    "info": {
+      "title": "Licence information",
+      "sync": "Sync the licence",
+      "syncOffline": "Go online to sync",
+      "syncSignIn": "Sign in to the cloud account to sync",
+      "syncNothing": "This machine has no licence yet",
+      "import": "Import licence",
+      "platform": "Platform licence",
+      "platformType": "Platform",
+      "openEdition": "Open-source edition",
+      "licensed": "Licensed",
+      "lapsed": "No longer valid",
+      "previousPackage": "Previous enterprise edition {{version}}",
+      "itemsNote": "Modules and scene suites can be applied for once on Pro"
+    },
+    "records": {
+      "title": "Application records",
+      "count": "({{count}})",
+      "platform": "Pro licence application",
+      "id": "Application"
+    },
+    "version": {
+      "title": "Product version",
+      "open": "Flocks open-source edition {{version}}",
+      "previous": "Flocks Pro {{version}} (previous enterprise edition)",
+      "checkOffline": "Go online to check for a new version"
+    },
+    "table": {
+      "label": "Licences",
+      "item": "Item",
+      "type": "Type",
+      "licence": "Licence ID",
+      "source": "Source / identity",
+      "quota": "Quota",
+      "status": "Status",
+      "expires": "Expires",
+      "actions": "Actions",
+      "daysLeft": "({{count}} days left)",
+      "lapsed": "(no longer valid)"
+    },
+    "dialog": {
+      "close": "Close",
+      "onlineTitle": "Apply online",
+      "onlineTip": "Console reviews the application; once approved, take the licence under Application records.",
+      "offlineTitle": "Application details",
+      "offlineTip": "Download the application file for whoever issues licences; import the licence file that comes back under Import licence.",
+      "section": "Pro licence",
+      "product": "Edition",
+      "notes": "Notes (optional)",
+      "notesPlaceholder": "What it is for, the workload, the token usage and how many people use it.",
+      "download": "Download the application file",
+      "done": "Done",
+      "offlineNext": "The application file was downloaded. Import the licence file under Import licence once it comes back."
+    },
+    "import": {
+      "title": "Import licence",
+      "tip": "Import the licence file (license.json) issued for this machine.",
+      "drop": "Click or drop the licence file here",
+      "go": "Import",
+      "chooseFirst": "Choose the licence file first"
+    },
+    "launcher": {
+      "title": "Apply for Flocks Pro",
+      "signInTitle": "Sign in to the cloud account",
+      "signIn": "Sign in",
+      "toRecords": "See the application records",
+      "back": "Back to the application",
+      "importedTitle": "Licence imported"
+    }
   }
 }

@@ -65,6 +65,7 @@ import {
 import registry, { type ExtensionNavItem } from '@ext/registry';
 import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
+import { formatProductVersion } from '@/utils/productVersion';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import { BackendStatusBanner } from '@/components/common/BackendStatusBanner';
 import { InstallationResultBanner } from '@/components/common/InstallationResultBanner';
@@ -144,11 +145,8 @@ interface LayoutProps {
   contentRoutes?: RouteObject[];
 }
 
-function formatUpdateVersion(version?: string | null): string | null {
-  const raw = (version || '').trim();
-  if (!raw) return null;
-  return /^([a-z]+-)?v/i.test(raw) ? raw : `v${raw}`;
-}
+// Versions on screen are written one way: v<year>.<month>.<day>.<build> (utils/productVersion).
+const formatUpdateVersion = formatProductVersion;
 
 function currentProductVersion(info: VersionInfo): string | null {
   return info.current_version || null;
@@ -189,7 +187,9 @@ function buildUpdateNotification(
     return {
       id: `whats-new-${info.channel}-${releaseKey}`,
       kind: 'whats_new',
-      title: isZh ? `${productName} ${bundleVersion} 更新内容` : `What's new in ${productName} ${bundleVersion}`,
+      title: isZh
+        ? `${productName} ${formatProductVersion(bundleVersion)} 更新内容`
+        : `What's new in ${productName} ${formatProductVersion(bundleVersion)}`,
       summary,
       body: releaseNotes,
       highlights: [],
@@ -1049,7 +1049,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           roleLabel={accountRoleLabel}
           initial={accountInitial}
           version={displayVersion}
-          editionBadge={registry.editionBadge}
           update={versionUpdate}
           extensionItems={extensionNavItems.accountMenu}
           onCheckUpdate={openManualUpdateCheck}

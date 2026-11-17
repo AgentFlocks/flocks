@@ -5,15 +5,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import QuickDialog, { LICENCE_CHANGED_EVENT } from './QuickDialog';
 
 // Case list (编号 | 场景):
-//   QD1 Console answers: the online hint; signed out, the form waits for the sign-in, which is offered
-//   QD2 signed in, the application is checked as the server checks it, sent, and followed on the page
+//   QD1 Console answers, signed out: the cloud sign-in first (as the design's login dialog), the licence
+//       file importable instead
+//   QD2 signed in: the application is checked as the server checks it, sent, the page underneath told,
+//       and followed on the page
 //   QD3 an application under review: what it is, and the page that follows it, instead of the form
-//   QD4 Console out of reach: the offline hint; the form makes an application file with this machine's
-//       fingerprint, copied or downloaded; nothing goes to Console
-//   QD5 the administrator takes the other way: online warned it may fail when Console was out of reach
-//   QD6 a licence file imported: the machine has a licence, the page underneath is told, and the way
-//       on is the upgrade on the Flocks Pro page; a refusal says why and changes nothing
-//   QD7 a machine with a licence already: no form, the way on to the upgrade
+//   QD4 Console out of reach: the offline application, nothing of the cloud account; the application file
+//       (with this machine's fingerprint) is downloaded at once, copied or saved again; nothing goes to Console
+//   QD6 a licence file imported from the dialog: the page underneath is told, the import is said, and the
+//       way on is the Flocks Pro page; a refusal says why and changes nothing
+//   QD7 a machine with a licence already: straight on to the Flocks Pro page, as the design's entry does
 //   QD8 an install the enterprise core runs: nothing to apply for here
 
 const api = vi.hoisted(() => ({
@@ -98,36 +99,36 @@ describe('Flocks Pro quick dialog', () => {
     api.consoleLoginSession.mockResolvedValue({ logged_in: false });
     api.consoleConnectivity.mockResolvedValue({ configured: true, online: true, console_host: 'console.example', checked_at: '' });
     api.copyText.mockResolvedValue(undefined);
+    // The application file is saved through a link to a blob.
+    URL.createObjectURL = vi.fn(() => 'blob:application');
+    URL.revokeObjectURL = vi.fn();
   });
 
-  it('QD1 online and signed out: the form waits for the cloud sign-in', async () => {
-    const dialog = await (async () => { open(); return screen.findByRole('dialog'); })();
-    expect(await within(dialog).findByText('network.online console.example')).toBeInTheDocument();
-    expect(await within(dialog).findByTestId('apply-hint')).toHaveTextContent('quick.onlineHint');
-    expect(await within(dialog).findByText('quick.signInFirst')).toBeInTheDocument();
-    expect(within(dialog).getByLabelText('apply.fields.company')).toBeDisabled();
-    expect(within(dialog).getByRole('button', { name: 'apply.submit' })).toBeDisabled();
-    api.startConsoleLogin.mockRejectedValueOnce(new Error('console down'));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'consoleLogin.loginAction' }));
+  it('QD1 online and signed out: the cloud sign-in first, the licence file importable instead', async () => {
+    const user = userEvent.setup();
+    api.startConsoleLogin.mockResolvedValue({ passport_login_url: `${window.location.pathname}#signed-in` });
+    open();
+    const dialog = await screen.findByRole('dialog', { name: 'licencePage.launcher.signInTitle' });
+    expect(within(dialog).getByText('licencePage.apply.signInHint')).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText('apply.fields.company')).toBeNull();
+    expect(within(dialog).getByRole('button', { name: 'licencePage.info.import' })).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'licencePage.launcher.signIn' }));
     await waitFor(() => expect(api.startConsoleLogin).toHaveBeenCalledWith(`${window.location.origin}/flockspro-upgrade/callback`));
-    expect(await within(dialog).findByRole('alert')).toBeInTheDocument();
   });
 
   it('QD2 signed in: the application is checked, sent, and followed on the page', async () => {
     const user = userEvent.setup();
-    api.consoleLoginSession.mockResolvedValue({ logged_in: true, account_name: 'ops@acme.example' });
+    api.consoleLoginSession.mockResolvedValue({ logged_in: true, account_name: 'ops@example.com' });
     api.apply.mockResolvedValue({ request_id: 'req_9', status: 'pending' });
     const onClose = open();
-    const dialog = await screen.findByRole('dialog');
-    await waitFor(() => expect(within(dialog).getByLabelText('apply.fields.company')).not.toBeDisabled());
-    expect(within(dialog).getByText('ops@acme.example')).toBeInTheDocument();
-    await fill(user, dialog, 'not-an-email');
+    const dialog = await screen.findByRole('dialog', { name: 'licencePage.launcher.title' });
+    expect(within(dialog).getByText('licencePage.dialog.onlineTip')).toBeInTheDocument();
+    await fill(user, dialog, 'li@acme');
     await user.click(within(dialog).getByRole('button', { name: 'apply.submit' }));
-    expect(await within(dialog).findByText('apply.problems.email')).toBeInTheDocument();
+    expect(within(dialog).getByText('apply.problems.email')).toBeInTheDocument();
     expect(api.apply).not.toHaveBeenCalled();
 
-    await user.clear(within(dialog).getByLabelText('apply.fields.email'));
-    await user.type(within(dialog).getByLabelText('apply.fields.email'), 'li@acme.example');
+    await user.type(within(dialog).getByLabelText('apply.fields.email'), '.example');
     const changed = vi.fn();
     window.addEventListener(LICENCE_CHANGED_EVENT, changed);
     await user.click(within(dialog).getByRole('button', { name: 'apply.submit' }));
@@ -137,106 +138,84 @@ describe('Flocks Pro quick dialog', () => {
     await waitFor(() => expect(api.apply).toHaveBeenCalledWith(expect.objectContaining({
       license_type: 'poc', company: 'Acme', applicant_email: 'li@acme.example', sales_rep_name: null, notes: null,
     })));
-    expect(api.offlineApplication).not.toHaveBeenCalled();
     expect(await within(dialog).findByText('quick.submitted req_9')).toBeInTheDocument();
-    await user.click(within(dialog).getByRole('button', { name: 'quick.followOnPage' }));
+    await user.click(within(dialog).getByRole('button', { name: 'licencePage.launcher.toRecords' }));
     expect(onClose).toHaveBeenCalled();
     expect(screen.getByTestId('path')).toHaveTextContent('/settings/flockspro');
   });
 
   it('QD3 an application under review stands in the way of a new one', async () => {
-    api.consoleLoginSession.mockResolvedValue({ logged_in: true, account_name: 'ops@acme.example' });
-    api.applications.mockResolvedValue({ items: [{ request_id: 'req_5', status: 'reviewing', can_take: false, licence_over: false }], note: null });
+    api.consoleLoginSession.mockResolvedValue({ logged_in: true, account_name: 'ops@example.com' });
+    api.applications.mockResolvedValue({ items: [{ request_id: 'req_1', status: 'pending', can_take: false }], note: null });
     open();
-    const dialog = await screen.findByRole('dialog');
-    expect(await within(dialog).findByText('quick.inReview req_5 apply.status.reviewing')).toBeInTheDocument();
+    const dialog = await screen.findByRole('dialog', { name: 'licencePage.launcher.title' });
+    expect(await within(dialog).findByText('quick.inReview req_1 apply.status.pending')).toBeInTheDocument();
     expect(within(dialog).queryByLabelText('apply.fields.company')).toBeNull();
+    expect(within(dialog).getByRole('button', { name: 'licencePage.launcher.toRecords' })).toBeInTheDocument();
   });
 
-  it('QD4 offline: the form makes an application file with this machine, and nothing goes to Console', async () => {
+  it('QD4 offline: the application file at once, with this machine, and nothing of the cloud account', async () => {
     const user = userEvent.setup();
     api.consoleConnectivity.mockResolvedValue({ configured: true, online: false, console_host: 'console.example', checked_at: '' });
     api.offlineApplication.mockResolvedValue(OFFLINE_APPLICATION);
-    const createObjectURL = vi.fn(() => 'blob:x');
-    const revokeObjectURL = vi.fn();
-    Object.assign(URL, { createObjectURL, revokeObjectURL });
     open();
-    const dialog = await screen.findByRole('dialog');
-    expect(await within(dialog).findByText('network.offline console.example')).toBeInTheDocument();
-    expect(await within(dialog).findByTestId('apply-hint')).toHaveTextContent('quick.offlineHint');
-    expect(within(dialog).queryByText('quick.signInFirst')).toBeNull();
+    const dialog = await screen.findByRole('dialog', { name: 'licencePage.launcher.title' });
+    expect(within(dialog).getByText('licencePage.dialog.offlineTip')).toBeInTheDocument();
+    // Offline there is no cloud account to sign in to: nothing of it shows.
+    expect(within(dialog).queryByText(/licencePage\.apply\.signInHint|licencePage\.launcher\.signIn/)).toBeNull();
+    expect(within(dialog).queryByRole('button', { name: 'licencePage.launcher.signIn' })).toBeNull();
     await fill(user, dialog);
-    await user.click(within(dialog).getByRole('button', { name: 'offlineApply.generate' }));
-    const result = await within(dialog).findByTestId('offline-application');
-    expect(within(result).getByText(OFFLINE_APPLICATION.machine)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'licencePage.dialog.download' }));
+
+    expect(await within(dialog).findByTestId('offline-application')).toHaveTextContent('0123456789abcdef0123456789abcdef');
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    expect(api.offlineApplication).toHaveBeenCalledWith(expect.objectContaining({ company: 'Acme', applicant_name: 'Li Lei' }));
     expect(api.apply).not.toHaveBeenCalled();
     expect(api.applications).not.toHaveBeenCalled();
-
-    await user.click(within(result).getByRole('button', { name: 'offlineApply.copy' }));
-    const copied = api.copyText.mock.calls[0][0] as string;
-    expect(copied).toContain('offlineApply.textTitle');
-    expect(copied).toContain(OFFLINE_APPLICATION.machine);
-    expect(copied).toContain('Acme');
-    await user.click(within(result).getByRole('button', { name: 'offlineApply.download' }));
-    expect(createObjectURL).toHaveBeenCalledOnce();
-    await user.click(within(dialog).getByRole('button', { name: /quick\.toImport/ }));
-    expect(within(dialog).getByRole('tab', { name: 'quick.tabImport' })).toHaveAttribute('aria-selected', 'true');
-    expect(within(dialog).getByText('quick.importHintOffline')).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'offlineApply.copy' }));
+    expect(api.copyText).toHaveBeenCalledWith(expect.stringContaining('0123456789abcdef0123456789abcdef'));
   });
 
-  it('QD5 the administrator takes the other way; online warned when Console was out of reach', async () => {
-    api.consoleConnectivity.mockResolvedValue({ configured: true, online: false, console_host: 'console.example', checked_at: '' });
-    open();
-    const dialog = await screen.findByRole('dialog');
-    await within(dialog).findByText('quick.offlineHint');
-    fireEvent.click(within(dialog).getByRole('button', { name: 'quick.modeOnline' }));
-    expect(await within(dialog).findByText('quick.onlineUnreachable')).toBeInTheDocument();
-    expect(within(dialog).getByTestId('apply-hint')).toHaveTextContent('quick.onlineHint');
-  });
-
-  it('QD6 a licence file imported: the page underneath is told and the way on is the upgrade', async () => {
+  it('QD6 a licence file imported: the page underneath is told and the way on is the Flocks Pro page', async () => {
     const user = userEvent.setup();
+    api.importLicence.mockRejectedValueOnce({ response: { data: { detail: '这份授权绑定的是另一台机器：请用这台机器的申请信息重新申请' } } });
+    const onClose = open();
+    let dialog = await screen.findByRole('dialog', { name: 'licencePage.launcher.signInTitle' });
+    await user.click(within(dialog).getByRole('button', { name: 'licencePage.info.import' }));
+    dialog = await screen.findByRole('dialog', { name: 'licencePage.import.title' });
+    const go = within(dialog).getByRole('button', { name: 'licencePage.import.go' });
+    expect(go).toBeDisabled();
+    await user.upload(within(dialog).getByTestId('quick-import-file'), new File(['{"key":"a.b.c"}'], 'license.json', { type: 'application/json' }));
+    expect(within(dialog).getByText('license.json')).toBeInTheDocument();
+    await user.click(go);
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('另一台机器');
+    expect(onClose).not.toHaveBeenCalled();
+
+    api.importLicence.mockResolvedValue({ licence: { license_id: 'lic_off_1', license_status: 'poc', expires_at: 1802649569 }, situation: LICENSED });
     const changed = vi.fn();
     window.addEventListener(LICENCE_CHANGED_EVENT, changed);
-    try {
-      api.importLicence.mockRejectedValueOnce({ response: { status: 409, data: { detail: '这份授权绑定的是另一台机器' } } });
-      open();
-      const dialog = await screen.findByRole('dialog');
-      await within(dialog).findByTestId('apply-hint');
-      await user.click(within(dialog).getByRole('tab', { name: 'quick.tabImport' }));
-      const file = within(dialog).getByTestId('quick-import-file');
-      await user.upload(file, new File(['{"key":"a.b.c"}'], 'license.json', { type: 'application/json' }));
-      expect(await within(dialog).findByRole('alert')).toHaveTextContent('这份授权绑定的是另一台机器');
-      expect(changed).not.toHaveBeenCalled();
-
-      api.importLicence.mockResolvedValueOnce({ licence: { license_id: 'lic_off_1', license_status: 'poc', expires_at: 1802649569 }, situation: LICENSED });
-      await user.upload(within(dialog).getByTestId('quick-import-file'), new File(['{"key":"a.b.c"}'], 'license.json', { type: 'application/json' }));
-      const licensed = await within(dialog).findByTestId('quick-licensed');
-      expect(within(licensed).getByRole('status')).toHaveTextContent('licenceFile.importedUntil lic_off_1');
-      expect(api.importLicence).toHaveBeenLastCalledWith('{"key":"a.b.c"}');
-      expect(changed).toHaveBeenCalledOnce();
-      await user.click(within(licensed).getByRole('button', { name: 'quick.toUpgrade' }));
-      expect(screen.getByTestId('path')).toHaveTextContent('/settings/flockspro');
-    } finally {
-      window.removeEventListener(LICENCE_CHANGED_EVENT, changed);
-    }
+    await user.click(go);
+    await waitFor(() => expect(changed).toHaveBeenCalledOnce());
+    window.removeEventListener(LICENCE_CHANGED_EVENT, changed);
+    expect(api.importLicence).toHaveBeenLastCalledWith('{"key":"a.b.c"}');
+    expect(api.toast.success).toHaveBeenCalledWith('licencePage.launcher.importedTitle', expect.stringContaining('lic_off_1'));
+    expect(onClose).toHaveBeenCalled();
+    expect(screen.getByTestId('path')).toHaveTextContent('/settings/flockspro');
   });
 
-  it('QD7 a machine with a licence already: no form, the way on to the upgrade', async () => {
+  it('QD7 a machine with a licence already: straight on to the Flocks Pro page', async () => {
     api.situation.mockResolvedValue(LICENSED);
-    open();
-    const dialog = await screen.findByRole('dialog');
-    const licensed = await within(dialog).findByTestId('quick-licensed');
-    expect(within(licensed).getByText('quick.licensedTitle lic_off_1')).toBeInTheDocument();
-    expect(within(dialog).queryByRole('tab')).toBeNull();
-    expect(within(licensed).getByRole('button', { name: 'quick.toUpgrade' })).toBeInTheDocument();
+    const onClose = open();
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(screen.getByTestId('path')).toHaveTextContent('/settings/flockspro');
+    expect(api.apply).not.toHaveBeenCalled();
   });
 
   it('QD8 an install the enterprise core runs: nothing to apply for here', async () => {
     api.situation.mockResolvedValue({ ...OPEN, available: false });
     open();
-    const dialog = await screen.findByRole('dialog');
-    expect(await within(dialog).findByText('quick.unavailable')).toBeInTheDocument();
-    expect(within(dialog).queryByRole('tab')).toBeNull();
+    const dialog = await screen.findByRole('dialog', { name: 'licencePage.launcher.title' });
+    expect(within(dialog).getByText('quick.unavailable')).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText('apply.fields.company')).toBeNull();
   });
 });

@@ -32,6 +32,16 @@ export function applicationText(application: OfflineApplication, t: TFunction): 
   ].filter(Boolean).join('\n');
 }
 
+/** Saves the application as a file, the way it is handed over. */
+export function downloadApplication(application: OfflineApplication): void {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(application, null, 2)], { type: 'application/json' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `flocks-pro-application-${application.machine ? application.machine.slice(0, 12) : 'unbound'}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function OfflineApplicationResult({ application }: { application: OfflineApplication }) {
   const { t } = useTranslation('flockspro');
   const toast = useToast();
@@ -45,14 +55,7 @@ export default function OfflineApplicationResult({ application }: { application:
     }
   };
 
-  const download = () => {
-    const url = URL.createObjectURL(new Blob([JSON.stringify(application, null, 2)], { type: 'application/json' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `flocks-pro-application-${application.machine ? application.machine.slice(0, 12) : 'unbound'}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
+  const download = () => downloadApplication(application);
 
   return (
     <div className="space-y-3" data-testid="offline-application">

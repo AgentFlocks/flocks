@@ -925,7 +925,7 @@ describe('Layout chrome', () => {
       expect.objectContaining({
         id,
         kind: 'whats_new',
-        title: 'Acme Suite v2026.10.16 更新内容',
+        title: 'Acme Suite v2026.10.16.0 更新内容',
         body: '报告中心不再列出空报告',
         version: 'v2026.10.16',
       }),
@@ -948,7 +948,7 @@ describe('Layout chrome', () => {
     await waitFor(() => expect(notificationModal).toHaveBeenCalled());
     expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-acme-v2026.11.5');
     expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
-      expect.objectContaining({ title: 'Acme Suite v2026.11.5 更新内容', body: '这一版的发布说明', version: 'v2026.11.5' }),
+      expect.objectContaining({ title: 'Acme Suite v2026.11.05.0 更新内容', body: '这一版的发布说明', version: 'v2026.11.5' }),
     ]);
   });
 
@@ -960,7 +960,7 @@ describe('Layout chrome', () => {
     await waitFor(() => expect(notificationModal).toHaveBeenCalled());
     expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-bundle-v2026.10.16-core-v2026.10.15-component-v2026.10.16');
     expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
-      expect.objectContaining({ title: 'Acme Suite v2026.10.16 更新内容', version: 'v2026.10.16' }),
+      expect.objectContaining({ title: 'Acme Suite v2026.10.16.0 更新内容', version: 'v2026.10.16' }),
     ]);
   });
 
@@ -980,7 +980,7 @@ describe('Layout chrome', () => {
     await waitFor(() => expect(notificationModal).toHaveBeenCalled());
     expect(getNotificationAckStatus).not.toHaveBeenCalledWith(dismissedId);
     expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
-      expect.objectContaining({ body: '组件 2026.10.17 的说明', title: 'Acme Suite v2026.10.16 更新内容' }),
+      expect.objectContaining({ body: '组件 2026.10.17 的说明', title: 'Acme Suite v2026.10.16.0 更新内容' }),
     ]);
   });
 
@@ -1002,7 +1002,7 @@ describe('Layout chrome', () => {
     expect(notificationModal.mock.lastCall?.[0].notifications).toEqual([
       expect.objectContaining({
         id: 'whats-new-2026.10.15',
-        title: 'Flocks v2026.10.15 更新内容',
+        title: 'Flocks v2026.10.15.0 更新内容',
         body: 'OSS 2026.10.15 notes',
       }),
     ]);
