@@ -1,6 +1,6 @@
-import { useState } from 'react';
-import type { FormEvent, ReactNode } from 'react';
-import { KeyRound, Loader2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import type { FormEvent } from 'react';
+import { Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import {
   enterpriseUpgradeApi,
@@ -8,24 +8,32 @@ import {
   type LicenceApplication,
   type LicenceApplicationForm,
   type LicenceApplications,
-  type OfflineApplication,
 } from '@/api/enterpriseUpgrade';
-import { LICENCE_PRIMARY, LICENCE_SECONDARY, LicenceDialog, LicenceTag, type LicenceTagTone } from '@/components/licence/LicenceUi';
+import { useToast } from '@/components/common/Toast';
+import {
+  LICENCE_PRIMARY,
+  LICENCE_RECORD_ACTION,
+  LICENCE_SECONDARY,
+  LicenceDialog,
+  LicenceRecords,
+  LicenceScopePicker,
+  type LicenceRecord,
+  type LicenceTagTone,
+} from '@/components/licence/LicenceUi';
 import { extractErrorMessage } from '@/utils/error';
-import ApplicationFields, { EMPTY_APPLICATION, checkApplication, cleanApplication, type ApplicationProblems } from './ApplicationFields';
+import ApplicationFields, { ApplicationNotes, EMPTY_APPLICATION, checkApplication, cleanApplication, type ApplicationProblems } from './ApplicationFields';
 import type { LicenceMode } from './connectivity';
-import OfflineApplicationResult, { downloadApplication } from './OfflineApplicationResult';
-import { DANGER, ERROR, GO, NOTE, SECONDARY, formatDateTime } from './styles';
+import { downloadApplication } from './OfflineApplicationResult';
+import { ERROR, NOTE, formatDateTime } from './styles';
 
 // The application for a licence, on a machine that has none it can go by (flocks/updater/enterprise_application.py).
-// Online the form goes to Console for review; an approved licence is taken here, and the page moves on to
-// the upgrade as for a machine that had the Python enterprise package. Offline (Console cannot be reached
-// from here) the same form makes an application file to hand over, and the licence file that comes back
-// is imported on the page. The applications this machine sent are its application records.
+// Online the form goes to Console for review, and the licence it brings is taken here once approved; the page
+// then moves on to the upgrade as for a machine that had the Python enterprise package. Offline (Console cannot
+// be reached from here) the same form becomes an application file to hand over, and the licence file that comes
+// back is imported on the page. The applications this machine sent are its application records.
 
 /** Waiting for review: no second application meanwhile, nor while a good licence waits to be taken. */
 export const IN_REVIEW = new Set(['pending', 'reviewing']);
-const REVIEWED = new Set(['approved', 'activated', 'rejected']);
 
 /** The application under way, if any: one in review, or one whose licence waits to be taken. */
 export function outstandingApplication(applications: LicenceApplications | null): LicenceApplication | null {
@@ -39,19 +47,20 @@ interface DialogProps {
   onSent: () => void;
   /** After a Console call failed: the sign-in may be gone, the page reads it again. */
   onConsoleRefused?: () => void;
-  /** Offline, once the application file is made: on to importing the licence file that comes back. */
-  onImport: () => void;
 }
 
-/** The application form in its dialog: sent to Console online, made into an application file offline. */
-export function ApplicationDialog({ mode, onClose, onSent, onConsoleRefused, onImport }: DialogProps) {
+/**
+ * The application form in its dialog: sent to Console online, made into an application file (downloaded
+ * at once) offline. The open edition applies for Pro only: the modules and scene suites come after it.
+ */
+export function ApplicationDialog({ mode, onClose, onSent, onConsoleRefused }: DialogProps) {
   const { t } = useTranslation('flockspro');
+  const toast = useToast();
   const offline = mode === 'offline';
   const [form, setForm] = useState<LicenceApplicationForm>(EMPTY_APPLICATION);
   const [problems, setProblems] = useState<ApplicationProblems>({});
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [made, setMade] = useState<OfflineApplication | null>(null);
 
   const set = (field: keyof LicenceApplicationForm, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -68,12 +77,13 @@ export function ApplicationDialog({ mode, onClose, onSent, onConsoleRefused, onI
     try {
       if (offline) {
         const application = await enterpriseUpgradeApi.offlineApplication(cleanApplication(form));
-        // Saved at once, as the button says; kept in the dialog to be copied or saved again.
         downloadApplication(application);
-        setMade(application);
+        toast.success(t('licencePage.dialog.downloaded'));
+        onClose();
         return;
       }
       await enterpriseUpgradeApi.apply(cleanApplication(form));
+      toast.success(t('licencePage.dialog.sent'));
       onSent();
       onClose();
     } catch (err) {
@@ -85,6 +95,7 @@ export function ApplicationDialog({ mode, onClose, onSent, onConsoleRefused, onI
   };
 
   const formId = offline ? 'licence-offline-form' : 'licence-online-form';
+  const idPrefix = offline ? 'offline-apply' : 'apply';
   return (
     <LicenceDialog
       title={t(offline ? 'licencePage.dialog.offlineTitle' : 'licencePage.dialog.onlineTitle')}
@@ -92,37 +103,38 @@ export function ApplicationDialog({ mode, onClose, onSent, onConsoleRefused, onI
       onClose={onClose}
       busy={submitting}
       testId="licence-application-dialog"
-      footerStart={made ? (
-        <button type="button" onClick={() => setMade(null)} className={LICENCE_SECONDARY}>{t('quick.editAgain')}</button>
-      ) : undefined}
-      footer={made ? (
+      footer={(
         <>
-          <button type="button" onClick={onClose} className={LICENCE_SECONDARY}>{t('licencePage.dialog.done')}</button>
-          <button type="button" onClick={onImport} className={LICENCE_PRIMARY}>{t('licencePage.info.import')}</button>
-        </>
-      ) : (
-        <>
-          <button type="button" onClick={onClose} disabled={submitting} className={LICENCE_SECONDARY}>{t('apply.cancel')}</button>
+          <button type="button" onClick={onClose} disabled={submitting} className={LICENCE_SECONDARY}>{t('licencePage.dialog.cancel')}</button>
           <button type="submit" form={formId} disabled={submitting} className={LICENCE_PRIMARY}>
             {submitting && <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
-            {t(offline ? 'licencePage.dialog.download' : 'apply.submit')}
+            {t(offline ? 'licencePage.dialog.download' : 'licencePage.dialog.submit')}
           </button>
         </>
       )}
     >
-      {made ? (
-        <>
-          <OfflineApplicationResult application={made} />
-          <p className="text-sm text-gray-500">{t('licencePage.dialog.offlineNext')}</p>
-        </>
-      ) : (
-        <form id={formId} className="space-y-4" onSubmit={(event) => void submit(event)} noValidate>
-          <ApplicationFields form={form} problems={problems} onChange={set} idPrefix={offline ? 'offline-apply' : 'apply'} />
-        </form>
-      )}
+      <form id={formId} className="space-y-4" onSubmit={(event) => void submit(event)} noValidate>
+        {/* This edition applies for Pro; the modules and scene suites are asked for once it is Pro. */}
+        <LicenceScopePicker
+          platform={{ label: t('licencePage.dialog.scopeUpgrade'), checked: true, disabled: true }}
+          items={{ label: t('licencePage.dialog.scopeItems'), checked: false, disabled: true, note: t('licencePage.dialog.scopeItemsAfterPro') }}
+          onChange={() => undefined}
+        />
+        <div className="border-t border-gray-100 pt-4">
+          <ApplicationFields form={form} problems={problems} onChange={set} idPrefix={idPrefix} disabled={submitting} />
+        </div>
+        <ApplicationNotes value={form.notes ?? ''} onChange={(value) => set('notes', value)} idPrefix={idPrefix} disabled={submitting} />
+      </form>
       {submitError && <div className={ERROR} role="alert">{submitError}</div>}
     </LicenceDialog>
   );
+}
+
+function statusTone(status: string): LicenceTagTone {
+  if (status === 'approved' || status === 'activated') return 'success';
+  if (status === 'rejected') return 'error';
+  if (status === 'cancelled' || status === 'expired_unactivated') return 'muted';
+  return 'warning';
 }
 
 interface RecordsProps {
@@ -131,20 +143,27 @@ interface RecordsProps {
   onReload: () => void;
   onTaken: (situation: EnterpriseSituation) => void;
   onConsoleRefused?: () => void;
+  /**
+   * Whether an approved application's licence is taken without being asked (online, signed in, and no
+   * licence this machine can go by): "it takes effect once approved". Its button stays for a take that
+   * did not work.
+   */
+  autoTake?: boolean;
 }
 
-/** The applications this machine sent, newest first, with what can be done with each. */
-export function ApplicationRecords({ applications, loadError, onReload, onTaken, onConsoleRefused }: RecordsProps) {
+/** The applications this machine sent, newest first, one line each, with what can still be done with each. */
+export function ApplicationRecords({ applications, loadError, onReload, onTaken, onConsoleRefused, autoTake = false }: RecordsProps) {
   const { t } = useTranslation('flockspro');
+  const toast = useToast();
   const [acting, setActing] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const items = applications?.items ?? [];
-  // Open while there is something to do with one (in review, a licence to take), as the records say what.
-  const [open, setOpen] = useState<boolean | null>(null);
-  const shown = open ?? Boolean(outstandingApplication(applications));
+  // Each approved application is taken without being asked once per visit: a take that failed is not retried
+  // on its own (its button does).
+  const autoTried = useRef(new Set<string>());
 
   const withdraw = async (item: LicenceApplication) => {
-    if (!window.confirm(t('apply.withdrawConfirm'))) return;
+    if (!window.confirm(t('licencePage.records.withdrawConfirm'))) return;
     setActing(item.request_id);
     setActionError(null);
     try {
@@ -158,11 +177,12 @@ export function ApplicationRecords({ applications, loadError, onReload, onTaken,
     }
   };
 
-  const take = async (item: LicenceApplication) => {
+  const take = async (item: LicenceApplication, unasked = false) => {
     setActing(item.request_id);
     setActionError(null);
     try {
       const result = await enterpriseUpgradeApi.take(item.request_id);
+      if (unasked) toast.success(t('licencePage.records.autoTaken', { id: item.request_id }));
       onTaken(result.situation);
     } catch (err) {
       setActionError(extractErrorMessage(err, t('apply.errors.take')));
@@ -173,112 +193,64 @@ export function ApplicationRecords({ applications, loadError, onReload, onTaken,
     }
   };
 
-  return (
-    <details
-      open={shown}
-      onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}
-      className="border-t border-gray-100 pt-4"
-      data-testid="application-records"
-    >
-      <summary className="cursor-pointer text-sm text-gray-700">
-        {t('licencePage.records.title')}
-        {items.length > 0 && <span className="ml-1 text-xs text-gray-500">{t('licencePage.records.count', { count: items.length })}</span>}
-      </summary>
-      <div className="mt-3 space-y-3">
-        {loadError && <div className={ERROR}>{loadError}</div>}
-        {applications?.note && <div className={NOTE}>{applications.note}</div>}
-        {actionError && <div className={ERROR}>{actionError}</div>}
-        {items.length > 0 ? (
-          <ul className="space-y-3" aria-label={t('apply.listLabel')}>
-            {items.map((item) => (
-              <ApplicationRow
-                key={item.request_id}
-                item={item}
-                acting={acting === item.request_id}
-                disabled={acting !== null}
-                onRefresh={onReload}
-                onWithdraw={() => void withdraw(item)}
-                onTake={() => void take(item)}
-              />
-            ))}
-          </ul>
-        ) : applications && (
-          <p className="text-sm text-gray-500">{t('apply.none')}</p>
-        )}
-      </div>
-    </details>
-  );
-}
+  const takeRef = useRef(take);
+  takeRef.current = take;
+  useEffect(() => {
+    if (!autoTake || acting) return;
+    const ready = items.find((item) => item.can_take && !item.licence_over && !autoTried.current.has(item.request_id));
+    if (!ready) return;
+    autoTried.current.add(ready.request_id);
+    void takeRef.current(ready, true);
+  }, [autoTake, acting, items]);
 
-function statusTone(status: string): LicenceTagTone {
-  if (status === 'approved' || status === 'activated') return 'success';
-  if (status === 'rejected') return 'error';
-  if (status === 'cancelled' || status === 'expired_unactivated') return 'muted';
-  return 'warning';
-}
+  const records: LicenceRecord[] = items.map((item) => {
+    // What was issued once it was, what was asked for before.
+    const kind = item.license_status || item.license_type;
+    const changed = formatDateTime(item.updated_at || item.created_at);
+    const fields: LicenceRecord['fields'] = [[t('licencePage.records.fields.id'), item.request_id]];
+    if (item.company) fields.push([t('licencePage.records.fields.company'), item.company]);
+    if (item.applicant_name) fields.push([t('licencePage.records.fields.applicant'), item.applicant_name]);
+    if (kind) fields.push([t('licencePage.records.fields.type'), t(`licenceStatus.${kind}`, { defaultValue: kind })]);
+    if (changed) fields.push([t('licencePage.records.fields.updated'), changed]);
+    if (item.license_id) fields.push([t('licencePage.records.fields.licence'), item.license_id]);
+    const busy = acting === item.request_id;
+    return {
+      key: item.request_id,
+      testId: `application-${item.request_id}`,
+      title: t('licencePage.records.upgrade'),
+      status: { label: t(`licencePage.records.status.${item.status}`, { defaultValue: item.status }), tone: statusTone(item.status) },
+      activated: item.status === 'activated' ? t('licencePage.records.activated') : null,
+      fields,
+      reason: item.status === 'rejected' && item.reason ? t('licencePage.records.reason', { text: item.reason }) : null,
+      actions: (item.can_withdraw || item.can_take) ? (
+        <>
+          {item.can_withdraw && (
+            <button type="button" onClick={() => void withdraw(item)} disabled={acting !== null} className={LICENCE_RECORD_ACTION}>
+              {t('licencePage.records.withdraw')}
+            </button>
+          )}
+          {item.can_take && (
+            <button type="button" onClick={() => void take(item)} disabled={acting !== null} className={LICENCE_RECORD_ACTION}>
+              {busy && <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin" />}
+              {t('licencePage.records.take')}
+            </button>
+          )}
+        </>
+      ) : null,
+    };
+  });
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex min-w-0 items-baseline justify-between gap-3 sm:block">
-      <div className="shrink-0 text-xs text-gray-500">{label}</div>
-      <div className="min-w-0 break-all text-sm text-gray-800">{children}</div>
-    </div>
-  );
-}
-
-function ApplicationRow({
-  item, acting, disabled, onRefresh, onWithdraw, onTake,
-}: {
-  item: LicenceApplication;
-  acting: boolean;
-  disabled: boolean;
-  onRefresh: () => void;
-  onWithdraw: () => void;
-  onTake: () => void;
-}) {
-  const { t } = useTranslation('flockspro');
-  // Console's words on it once reviewed (the page of 2026.10.19 kept the applicant's notes there before).
-  const reviewed = REVIEWED.has(item.status);
-  const rejected = item.status === 'rejected';
-  // What was issued once it was, what was asked for before.
-  const kind = item.license_status || item.license_type;
-  const expires = formatDateTime(item.expires_at);
-  const changed = formatDateTime(item.updated_at || item.created_at);
-  return (
-    <li className={`space-y-3 rounded-lg border p-4 ${rejected ? 'border-red-200 bg-red-50/30' : 'border-gray-200'}`}>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-sm font-medium text-gray-900">{t('licencePage.records.platform')}</span>
-        <LicenceTag tone={statusTone(item.status)}>{t(`apply.status.${item.status}`, { defaultValue: item.status })}</LicenceTag>
-      </div>
-      <div className="grid gap-2 sm:grid-cols-3">
-        <Field label={t('licencePage.records.id')}>{item.request_id}</Field>
-        {item.company && <Field label={t('apply.fields.company')}>{item.company}</Field>}
-        {item.applicant_name && <Field label={t('apply.fields.applicantName')}>{item.applicant_name}</Field>}
-        {kind && <Field label={t('apply.fields.licenseType')}>{t(`licenceStatus.${kind}`, { defaultValue: kind })}</Field>}
-        {changed && <Field label={t('apply.updatedAt')}>{changed}</Field>}
-        {item.license_id && (
-          <Field label={t('licence.id')}>{expires ? t('apply.issuedUntil', { id: item.license_id, date: expires }) : item.license_id}</Field>
-        )}
-      </div>
-      {reviewed && (item.reason || item.suggestion) && (
-        <div className={`rounded-lg border px-3 py-2 text-xs ${rejected ? 'border-red-200 bg-red-50 text-red-700' : 'border-gray-200 bg-gray-50 text-gray-700'}`}>
-          {rejected && <div className="font-medium">{t('apply.rejectedTitle')}</div>}
-          {item.reason && <div className="mt-1 break-words">{t('apply.reason', { text: item.reason })}</div>}
-          {item.suggestion && <div className="mt-1 break-words">{t('apply.suggestion', { text: item.suggestion })}</div>}
-        </div>
+    <LicenceRecords
+      records={records}
+      defaultOpen={Boolean(outstandingApplication(applications))}
+      notices={(
+        <>
+          {loadError && <div className={ERROR}>{loadError}</div>}
+          {applications?.note && <div className={NOTE}>{applications.note}</div>}
+          {actionError && <div className={ERROR} role="alert">{actionError}</div>}
+        </>
       )}
-      <div className="flex flex-wrap items-center gap-2">
-        <button type="button" onClick={onRefresh} disabled={disabled} className={SECONDARY}>{t('apply.refresh')}</button>
-        {item.can_withdraw && (
-          <button type="button" onClick={onWithdraw} disabled={disabled} className={DANGER}>{t('apply.withdraw')}</button>
-        )}
-        {item.can_take && (
-          <button type="button" onClick={onTake} disabled={disabled} className={`${GO} ml-auto`}>
-            {acting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <KeyRound className="h-4 w-4" aria-hidden="true" />}
-            {t('apply.take')}
-          </button>
-        )}
-      </div>
-    </li>
+    />
   );
 }

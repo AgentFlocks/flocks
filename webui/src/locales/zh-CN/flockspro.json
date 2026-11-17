@@ -275,11 +275,14 @@
       "licensed": "这台机器已有有效授权，不用再申请；续期和额度变更在「授权信息」里同步。",
       "outstanding": "已有授权申请 {{id}} 在处理中，处理完之前不能提交新的申请。",
       "inReview": "申请 {{id}}（{{status}}）在审核中，结果见下方「申请记录」。",
-      "toTake": "申请 {{id}} 已通过：在下方「申请记录」里点「启用授权」，之后就能升级到企业版。"
+      "toTake": "申请 {{id}} 已通过：在下方「申请记录」里点「启用授权」，之后就能升级到企业版。",
+      "logoutTitle": "退出云账号",
+      "logoutConfirm": "退出后在线申请需要重新登录。",
+      "outstandingPlatform": "当前已有平台授权申请在处理中"
     },
     "info": {
       "title": "授权信息",
-      "sync": "同步授权信息",
+      "sync": "刷新授权与申请记录",
       "syncOffline": "请先联网后同步",
       "syncSignIn": "请登录云账号后同步",
       "syncNothing": "这台机器还没有授权",
@@ -290,19 +293,67 @@
       "licensed": "已授权",
       "lapsed": "已失效",
       "previousPackage": "旧版企业版 {{version}}",
-      "itemsNote": "升级为 Pro 后可申请模块和场景套件授权"
+      "itemsNote": "升级为 Pro 后可申请模块和场景套件授权",
+      "term": {
+        "expired": "已到期",
+        "near": "即将到期",
+        "online": "授权{{state}}，请在线申请续期或导入新的授权文件。",
+        "signedOut": "授权{{state}}，请登录云账号申请续期或导入新的授权文件。",
+        "offline": "授权{{state}}，请导入新的授权文件。"
+      },
+      "savedPlatform": "Flocks Pro 授权已保存在当前机器，升级至企业版时将沿用该授权。"
     },
     "records": {
       "title": "申请记录",
       "count": "（{{count}}）",
       "platform": "Pro 授权申请",
-      "id": "申请编号"
+      "id": "申请编号",
+      "empty": "暂无申请记录",
+      "upgrade": "升级 Pro",
+      "renew": "Pro 授权续期",
+      "items": "模块 / 场景 · {{items}}",
+      "activated": "已激活",
+      "reason": "审核意见：{{text}}",
+      "withdraw": "撤回",
+      "withdrawConfirm": "撤回这份申请？撤回后可以重新申请。",
+      "take": "启用授权",
+      "autoTaken": "申请 {{id}} 已审批通过，授权已启用",
+      "fields": {
+        "id": "申请编号",
+        "company": "企业名称",
+        "applicant": "申请人",
+        "type": "授权类型",
+        "updated": "审批状态更新时间",
+        "licence": "License ID",
+        "time": "申请时间"
+      },
+      "status": {
+        "pending": "待审批",
+        "reviewing": "审批中",
+        "approved": "审批通过",
+        "activated": "审批通过",
+        "rejected": "审批未通过",
+        "cancelled": "已撤回",
+        "expired_unactivated": "已超时",
+        "unknown": "状态未知",
+        "not_submitted": "未提交"
+      },
+      "itemStatus": {
+        "pending": "已提交",
+        "approved": "审批通过",
+        "granted": "审批通过",
+        "rejected": "审批未通过",
+        "declined": "审批未通过",
+        "unknown": "结果待确认"
+      }
     },
     "version": {
       "title": "产品版本",
       "open": "Flocks 开源版 {{version}}",
       "previous": "Flocks Pro {{version}}（旧版企业版）",
-      "checkOffline": "请联网后检查新版本"
+      "checkOffline": "请联网后检查新版本",
+      "check": "检查新版本",
+      "downgrade": "降级为开源版"
     },
     "table": {
       "label": "授权项",
@@ -320,7 +371,7 @@
     "dialog": {
       "close": "关闭",
       "onlineTitle": "在线申请",
-      "onlineTip": "提交申请，由 Console 审核；审核通过后在「申请记录」里启用授权。",
+      "onlineTip": "提交申请，审批通过后自动启用。",
       "offlineTitle": "填写申请信息",
       "offlineTip": "下载申请文件，交给授权管理员；获取授权文件后，在“导入授权”中上传。",
       "section": "Pro 授权信息",
@@ -329,14 +380,53 @@
       "notesPlaceholder": "请填写使用场景、任务情况、Token 用量及使用人数。",
       "download": "下载申请文件",
       "done": "完成",
-      "offlineNext": "申请文件已下载。拿到授权文件后点「导入授权」导入。"
+      "offlineNext": "申请文件已下载。拿到授权文件后点「导入授权」导入。",
+      "cancel": "取消",
+      "submit": "提交申请",
+      "scope": "申请范围",
+      "scopeUpgrade": "升级 Pro",
+      "scopeRenew": "Pro 授权续期",
+      "scopeItems": "模块 / 场景授权",
+      "scopeItemsAfterPro": "升级为 Pro 后可申请",
+      "scopePending": "申请处理中",
+      "scopeRequired": "请选择申请范围。",
+      "itemsTitle": "选择模块 / 场景套件",
+      "itemsRequired": "请选择需要申请的授权项。",
+      "itemsPending": "所选授权项已有申请处理中，请勿重复提交。",
+      "licenseType": "申请的授权类型",
+      "placeholders": {
+        "company": "公司（必填）",
+        "name": "申请人姓名（必填）",
+        "email": "申请人邮箱（必填）",
+        "phone": "申请人电话（必填）"
+      },
+      "problems": {
+        "required": "请填写公司、申请人姓名、申请人邮箱和申请人电话",
+        "email": "请输入有效的申请人邮箱",
+        "phone": "请输入有效的申请人电话（支持国际号码）"
+      },
+      "sent": "申请已记录",
+      "downloaded": "已下载申请文件，请交给授权管理员",
+      "downloadFailed": "申请文件下载失败，请重试",
+      "choice": {
+        "licensed": "已授权",
+        "near": "即将到期",
+        "pending": "申请处理中",
+        "unlicensed": "未授权"
+      },
+      "licenseTypes": {
+        "poc": "POC授权（90天）",
+        "commercial": "商用授权（365天）"
+      }
     },
     "import": {
       "title": "导入授权",
       "tip": "导入授权管理员签发的授权文件（license.json）。",
       "drop": "点击或拖拽上传授权证书文件",
       "go": "导入",
-      "chooseFirst": "先选择授权文件"
+      "chooseFirst": "先选择授权文件",
+      "okTitle": "授权导入成功",
+      "failTitle": "授权导入失败"
     },
     "launcher": {
       "title": "申请 Flocks Pro",
@@ -344,7 +434,8 @@
       "signIn": "登录",
       "toRecords": "查看申请记录",
       "back": "返回申请",
-      "importedTitle": "授权导入成功"
+      "importedTitle": "授权导入成功",
+      "outstanding": "已有平台授权申请处理中，请查看申请记录。"
     }
   }
 }

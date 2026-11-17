@@ -275,11 +275,14 @@
       "licensed": "This machine holds a good licence; there is nothing to apply for. Renewals and quota changes come in with a sync under Licence information.",
       "outstanding": "Application {{id}} is under way; no new application until it is done.",
       "inReview": "Application {{id}} ({{status}}) is under review; see Application records below.",
-      "toTake": "Application {{id}} was approved: take the licence under Application records below, then upgrade to the enterprise edition."
+      "toTake": "Application {{id}} was approved: take the licence under Application records below, then upgrade to the enterprise edition.",
+      "logoutTitle": "Sign out of the cloud account",
+      "logoutConfirm": "After signing out, applying online needs a new sign-in.",
+      "outstandingPlatform": "A platform licence application is already being processed"
     },
     "info": {
       "title": "Licence information",
-      "sync": "Sync the licence",
+      "sync": "Refresh licences and applications",
       "syncOffline": "Go online to sync",
       "syncSignIn": "Sign in to the cloud account to sync",
       "syncNothing": "This machine has no licence yet",
@@ -290,19 +293,67 @@
       "licensed": "Licensed",
       "lapsed": "No longer valid",
       "previousPackage": "Previous enterprise edition {{version}}",
-      "itemsNote": "Modules and scene suites can be applied for once on Pro"
+      "itemsNote": "Modules and scene suites can be applied for once on Pro",
+      "term": {
+        "expired": "has expired",
+        "near": "expires soon",
+        "online": "The licence {{state}}: apply online for a renewal, or import a new licence file.",
+        "signedOut": "The licence {{state}}: sign in to the cloud account to apply for a renewal, or import a new licence file.",
+        "offline": "The licence {{state}}: import a new licence file."
+      },
+      "savedPlatform": "The Flocks Pro licence is saved on this machine; the enterprise edition keeps it after the upgrade."
     },
     "records": {
       "title": "Application records",
       "count": "({{count}})",
       "platform": "Pro licence application",
-      "id": "Application"
+      "id": "Application",
+      "empty": "No applications yet",
+      "upgrade": "Upgrade to Pro",
+      "renew": "Pro licence renewal",
+      "items": "Modules / scenes · {{items}}",
+      "activated": "Activated",
+      "reason": "Review note: {{text}}",
+      "withdraw": "Withdraw",
+      "withdrawConfirm": "Withdraw this application? You can apply again afterwards.",
+      "take": "Activate licence",
+      "autoTaken": "Application {{id}} was approved and its licence is now active",
+      "fields": {
+        "id": "Application",
+        "company": "Company",
+        "applicant": "Applicant",
+        "type": "Licence type",
+        "updated": "Status updated",
+        "licence": "License ID",
+        "time": "Applied"
+      },
+      "status": {
+        "pending": "Pending",
+        "reviewing": "Reviewing",
+        "approved": "Approved",
+        "activated": "Approved",
+        "rejected": "Not approved",
+        "cancelled": "Withdrawn",
+        "expired_unactivated": "Timed out",
+        "unknown": "Unknown",
+        "not_submitted": "Not submitted"
+      },
+      "itemStatus": {
+        "pending": "Submitted",
+        "approved": "Approved",
+        "granted": "Approved",
+        "rejected": "Not approved",
+        "declined": "Not approved",
+        "unknown": "To be confirmed"
+      }
     },
     "version": {
       "title": "Product version",
       "open": "Flocks open-source edition {{version}}",
       "previous": "Flocks Pro {{version}} (previous enterprise edition)",
-      "checkOffline": "Go online to check for a new version"
+      "checkOffline": "Go online to check for a new version",
+      "check": "Check for new version",
+      "downgrade": "Downgrade to the open-source edition"
     },
     "table": {
       "label": "Licences",
@@ -320,7 +371,7 @@
     "dialog": {
       "close": "Close",
       "onlineTitle": "Apply online",
-      "onlineTip": "Console reviews the application; once approved, take the licence under Application records.",
+      "onlineTip": "Submit the application; it takes effect once approved.",
       "offlineTitle": "Application details",
       "offlineTip": "Download the application file for whoever issues licences; import the licence file that comes back under Import licence.",
       "section": "Pro licence",
@@ -329,14 +380,53 @@
       "notesPlaceholder": "What it is for, the workload, the token usage and how many people use it.",
       "download": "Download the application file",
       "done": "Done",
-      "offlineNext": "The application file was downloaded. Import the licence file under Import licence once it comes back."
+      "offlineNext": "The application file was downloaded. Import the licence file under Import licence once it comes back.",
+      "cancel": "Cancel",
+      "submit": "Submit application",
+      "scope": "Apply for",
+      "scopeUpgrade": "Upgrade to Pro",
+      "scopeRenew": "Pro licence renewal",
+      "scopeItems": "Module / scene licences",
+      "scopeItemsAfterPro": "available after upgrading to Pro",
+      "scopePending": "being processed",
+      "scopeRequired": "Choose what to apply for.",
+      "itemsTitle": "Choose modules / scene suites",
+      "itemsRequired": "Choose the licences to apply for.",
+      "itemsPending": "An application for a chosen item is already being processed.",
+      "licenseType": "Licence type",
+      "placeholders": {
+        "company": "Company (required)",
+        "name": "Applicant name (required)",
+        "email": "Applicant email (required)",
+        "phone": "Applicant phone (required)"
+      },
+      "problems": {
+        "required": "Fill in the company, applicant name, applicant email and applicant phone",
+        "email": "Enter a valid applicant email",
+        "phone": "Enter a valid applicant phone (international numbers are fine)"
+      },
+      "sent": "Application recorded",
+      "downloaded": "Application file downloaded: hand it to the licence administrator",
+      "downloadFailed": "The application file could not be downloaded; try again",
+      "choice": {
+        "licensed": "Licensed",
+        "near": "Expires soon",
+        "pending": "Being processed",
+        "unlicensed": "Not licensed"
+      },
+      "licenseTypes": {
+        "poc": "POC License (90 days)",
+        "commercial": "Commercial License (365 days)"
+      }
     },
     "import": {
       "title": "Import licence",
       "tip": "Import the licence file (license.json) issued for this machine.",
       "drop": "Click or drop the licence file here",
       "go": "Import",
-      "chooseFirst": "Choose the licence file first"
+      "chooseFirst": "Choose the licence file first",
+      "okTitle": "Licence imported",
+      "failTitle": "Licence import failed"
     },
     "launcher": {
       "title": "Apply for Flocks Pro",
@@ -344,7 +434,8 @@
       "signIn": "Sign in",
       "toRecords": "See the application records",
       "back": "Back to the application",
-      "importedTitle": "Licence imported"
+      "importedTitle": "Licence imported",
+      "outstanding": "A platform licence application is already being processed; see the application records."
     }
   }
 }

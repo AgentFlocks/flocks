@@ -4,7 +4,7 @@ import { INPUT } from './styles';
 
 // The fields of an application for a licence: the same whether it goes to Console for review (online)
 // or into an application file handed to whoever issues licences (offline). Checked here as the server
-// checks them (flocks/server/routes/enterprise_upgrade.py).
+// checks them (flocks/server/routes/enterprise_upgrade.py); what is wrong is said in one line under them.
 
 export type ApplicationField = 'company' | 'applicant_name' | 'applicant_email' | 'applicant_phone';
 export type ApplicationProblems = Partial<Record<ApplicationField, string>>;
@@ -38,6 +38,15 @@ export function checkApplication(form: LicenceApplicationForm): ApplicationProbl
   return problems;
 }
 
+/** The one line said under the fields: a field left empty first, then the email, then the phone. */
+export function applicationProblem(problems: ApplicationProblems): 'required' | 'email' | 'phone' | null {
+  const found = Object.values(problems);
+  if (found.includes('required')) return 'required';
+  if (found.includes('email')) return 'email';
+  if (found.includes('phone')) return 'phone';
+  return null;
+}
+
 /** The form as it is sent: optional fields left empty go as none. */
 export function cleanApplication(form: LicenceApplicationForm): LicenceApplicationForm {
   return {
@@ -56,61 +65,59 @@ interface Props {
   disabled?: boolean;
 }
 
+/** The Pro part of an application: the edition, the licence type, the company and the applicant. */
 export default function ApplicationFields({ form, problems, onChange, idPrefix = 'apply', disabled = false }: Props) {
   const { t } = useTranslation('flockspro');
-  const fieldError = (field: ApplicationField) =>
-    problems[field] ? <p className="mt-1 text-xs text-red-600">{t(`apply.problems.${problems[field]}`)}</p> : null;
+  const problem = applicationProblem(problems);
   const label = 'mb-1 block text-sm text-gray-600';
   return (
-    <div className="space-y-3">
+    <section className="space-y-3" data-platform-fields>
       <h3 className="text-sm font-semibold text-gray-900">{t('licencePage.dialog.section')}</h3>
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
         <div>
           <label htmlFor={`${idPrefix}-product`} className={label}>{t('licencePage.dialog.product')}</label>
           <input id={`${idPrefix}-product`} className={`${INPUT} bg-gray-50 text-gray-500`} value="FlocksPro" readOnly />
         </div>
         <div>
-          <label htmlFor={`${idPrefix}-type`} className={label}>{t('apply.fields.licenseType')}</label>
+          <label htmlFor={`${idPrefix}-type`} className={label}>{t('licencePage.dialog.licenseType')}</label>
           <select id={`${idPrefix}-type`} className={INPUT} value={form.license_type} disabled={disabled}
             onChange={(e) => onChange('license_type', e.target.value)}>
-            <option value="poc">{t('apply.licenseTypes.poc')}</option>
-            <option value="commercial">{t('apply.licenseTypes.commercial')}</option>
+            <option value="poc">{t('licencePage.dialog.licenseTypes.poc')}</option>
+            <option value="commercial">{t('licencePage.dialog.licenseTypes.commercial')}</option>
           </select>
         </div>
-        <div>
-          <input id={`${idPrefix}-company`} className={INPUT} value={form.company} maxLength={200} disabled={disabled}
-            aria-label={t('apply.fields.company')} placeholder={t('apply.placeholders.company')}
-            onChange={(e) => onChange('company', e.target.value)} aria-invalid={Boolean(problems.company)} />
-          {fieldError('company')}
-        </div>
-        <div>
-          <input id={`${idPrefix}-name`} className={INPUT} value={form.applicant_name} maxLength={100} disabled={disabled}
-            aria-label={t('apply.fields.applicantName')} placeholder={t('apply.placeholders.applicantName')}
-            onChange={(e) => onChange('applicant_name', e.target.value)} aria-invalid={Boolean(problems.applicant_name)} />
-          {fieldError('applicant_name')}
-        </div>
-        <div>
-          <input id={`${idPrefix}-email`} type="email" className={INPUT} value={form.applicant_email} maxLength={200} disabled={disabled}
-            aria-label={t('apply.fields.email')} placeholder={t('apply.placeholders.email')}
-            onChange={(e) => onChange('applicant_email', e.target.value)} aria-invalid={Boolean(problems.applicant_email)} />
-          {fieldError('applicant_email')}
-        </div>
-        <div>
-          <input id={`${idPrefix}-phone`} type="tel" className={INPUT} value={form.applicant_phone} maxLength={40} disabled={disabled}
-            aria-label={t('apply.fields.phone')} placeholder={t('apply.placeholders.phone')}
-            onChange={(e) => onChange('applicant_phone', e.target.value)} aria-invalid={Boolean(problems.applicant_phone)} />
-          {fieldError('applicant_phone')}
-        </div>
-        <input id={`${idPrefix}-sales`} className={`${INPUT} sm:col-span-2`} value={form.sales_rep_name ?? ''} maxLength={100} disabled={disabled}
-          aria-label={t('apply.fields.salesRep')} placeholder={t('apply.placeholders.salesRep')}
-          onChange={(e) => onChange('sales_rep_name', e.target.value)} />
+        <input id={`${idPrefix}-company`} className={INPUT} value={form.company} maxLength={200} disabled={disabled}
+          aria-label={t('licencePage.dialog.placeholders.company')} placeholder={t('licencePage.dialog.placeholders.company')}
+          onChange={(e) => onChange('company', e.target.value)} aria-invalid={Boolean(problems.company)} />
+        <input id={`${idPrefix}-name`} className={INPUT} value={form.applicant_name} maxLength={100} disabled={disabled}
+          aria-label={t('licencePage.dialog.placeholders.name')} placeholder={t('licencePage.dialog.placeholders.name')}
+          onChange={(e) => onChange('applicant_name', e.target.value)} aria-invalid={Boolean(problems.applicant_name)} />
+        <input id={`${idPrefix}-email`} type="email" className={INPUT} value={form.applicant_email} maxLength={200} disabled={disabled}
+          aria-label={t('licencePage.dialog.placeholders.email')} placeholder={t('licencePage.dialog.placeholders.email')}
+          onChange={(e) => onChange('applicant_email', e.target.value)} aria-invalid={Boolean(problems.applicant_email)} />
+        <input id={`${idPrefix}-phone`} type="tel" className={INPUT} value={form.applicant_phone} maxLength={40} disabled={disabled}
+          aria-label={t('licencePage.dialog.placeholders.phone')} placeholder={t('licencePage.dialog.placeholders.phone')}
+          onChange={(e) => onChange('applicant_phone', e.target.value)} aria-invalid={Boolean(problems.applicant_phone)} />
       </div>
-      <div>
-        <label htmlFor={`${idPrefix}-notes`} className={label}>{t('licencePage.dialog.notes')}</label>
-        <textarea id={`${idPrefix}-notes`} className={INPUT} rows={2} value={form.notes ?? ''} maxLength={2000} disabled={disabled}
-          placeholder={t('licencePage.dialog.notesPlaceholder')}
-          onChange={(e) => onChange('notes', e.target.value)} />
-      </div>
+      {problem && <p role="alert" className="text-xs text-red-600" data-testid="application-problem">{t(`licencePage.dialog.problems.${problem}`)}</p>}
+    </section>
+  );
+}
+
+/** The application's notes, under everything it is for. */
+export function ApplicationNotes({ value, onChange, idPrefix = 'apply', disabled = false }: {
+  value: string;
+  onChange: (value: string) => void;
+  idPrefix?: string;
+  disabled?: boolean;
+}) {
+  const { t } = useTranslation('flockspro');
+  return (
+    <div>
+      <label htmlFor={`${idPrefix}-notes`} className="mb-1 block text-sm font-semibold text-gray-900">{t('licencePage.dialog.notes')}</label>
+      <textarea id={`${idPrefix}-notes`} className={INPUT} rows={2} value={value} maxLength={2000} disabled={disabled}
+        placeholder={t('licencePage.dialog.notesPlaceholder')}
+        onChange={(e) => onChange(e.target.value)} />
     </div>
   );
 }
