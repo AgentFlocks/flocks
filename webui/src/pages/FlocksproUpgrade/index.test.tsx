@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -33,8 +33,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 //   FP19 Console answering: the licence file can be imported too while the machine has no licence
 //   FP20 an application sent from the account menu's dialog while the page is kept: listed without a reload
 //   FP21 the versions shown are written v<year>.<month>.<day>.<build>
-//   FP19b the licence import takes what was chosen last, a file or pasted text, never the other
+//   FP19b the licence import takes the file chosen last (a file only: nothing is pasted)
 //   FP5e a cloud sign-in that cannot be read is offered again, not hidden
+//   FP22 one panel: the application, the licence information and the product version, in that order
+//   FP23 signing out asks first; cancelled, nothing happens
+//   FP24 a licence running out (30 days or fewer): said in its status and under the table; still in force
+//        nothing can be applied for here, so online, signed out or offline the way is a new licence file
+//   FP24b a licence run out: applied for again, so the hint says how (online signed in, signed out, offline)
+//   FP25 an approved application's licence is taken without being asked (online, signed in, no licence
+//        here), once; offline or signed out it waits for its button
+//   FP25b nothing is taken before the first check of Console's reach is back; found offline, nothing at all
+//   FP26 the online application is for Pro only in this edition: the modules and scene suites come after it
 
 const { situation, check, start, progress, applications, apply, withdraw, take, syncLicence, consoleLoginSession } = vi.hoisted(() => ({
   situation: vi.fn(),
@@ -67,7 +76,8 @@ const { startConsoleLogin, logoutConsoleLogin, clientPost, clientGet, consoleCon
 }));
 vi.mock('@/api/auth', () => ({ authApi: { consoleLoginSession, startConsoleLogin, logoutConsoleLogin, consoleConnectivity } }));
 vi.mock('@/api/client', () => ({ default: { get: clientGet, post: clientPost } }));
-vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ success: vi.fn(), error: vi.fn() }) }));
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+vi.mock('@/components/common/Toast', () => ({ useToast: () => toast }));
 vi.mock('react-i18next', () => {
   // One function, as react-i18next hands out for a language.
   const t = (key: string, options?: Record<string, unknown>) =>
@@ -120,6 +130,15 @@ beforeEach(() => {
 const row = () => screen.getByTestId('platform-row');
 const applyOnline = () => screen.getByRole('button', { name: 'licencePage.apply.applyOnline' });
 const sync = () => screen.getByRole('button', { name: /^licencePage\.info\.sync/ });
+// The reason a button cannot be used is on its wrapper (a disabled button has no tooltip of its own).
+const reasonOf = (button: HTMLElement) => button.parentElement?.getAttribute('title');
+const checkVersion = () => screen.getByRole('button', { name: 'licencePage.version.check' });
+const FIELD = {
+  company: 'licencePage.dialog.placeholders.company',
+  name: 'licencePage.dialog.placeholders.name',
+  email: 'licencePage.dialog.placeholders.email',
+  phone: 'licencePage.dialog.placeholders.phone',
+};
 
 const pending = {
   request_id: 'req_1', status: 'pending', license_type: 'poc', company: 'Acme', applicant_name: 'Li Lei',
@@ -149,7 +168,7 @@ describe('Flocks Pro page of the open edition', () => {
     expect(applyOnline()).toBeDisabled();
     expect(screen.getByTestId('apply-blocked')).toHaveTextContent('licencePage.apply.licensed');
 
-    await userEvent.click(screen.getByRole('button', { name: 'upgrade.check' }));
+    await userEvent.click(checkVersion());
     expect(await screen.findByText('upgrade.offer v2026.11.05.0 linux-arm64')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'upgrade.start v2026.11.05.0' }));
 
@@ -157,7 +176,7 @@ describe('Flocks Pro page of the open edition', () => {
     const status = await screen.findByRole('status');
     expect(within(status).getByText('progress.installing v2026.11.05.0')).toBeInTheDocument();
     // While it runs, nothing starts a second one.
-    expect(screen.getByRole('button', { name: 'upgrade.check' })).toBeDisabled();
+    expect(checkVersion()).toBeDisabled();
     expect(screen.getByRole('button', { name: 'licencePage.apply.logout' })).toBeDisabled();
   });
 
@@ -184,7 +203,7 @@ describe('Flocks Pro page of the open edition', () => {
     render(<FlocksproUpgradePage />);
 
     expect(await screen.findByText('upgrade.systemd')).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: 'upgrade.check' }));
+    await userEvent.click(checkVersion());
     await userEvent.click(await screen.findByRole('button', { name: 'upgrade.download' }));
 
     expect(await screen.findByText('progress.command')).toBeInTheDocument();
@@ -214,8 +233,8 @@ describe('Flocks Pro page of the open edition', () => {
     expect(within(row()).getByTestId('edition-status')).toHaveTextContent('licencePage.info.openEdition');
     expect(screen.getByText('licencePage.info.itemsNote')).toBeInTheDocument();
     await waitFor(() => expect(applyOnline()).toBeEnabled());
-    expect(await screen.findByText('apply.none')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'upgrade.check' })).not.toBeInTheDocument();
+    expect(await screen.findByText('licencePage.records.empty')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'licencePage.version.check' })).not.toBeInTheDocument();
     expect(screen.queryByTestId('saved-hint')).not.toBeInTheDocument();
     expect(screen.getByText('machine.openNote')).toBeInTheDocument();
   });
@@ -234,7 +253,7 @@ describe('Flocks Pro page of the open edition', () => {
     check.mockRejectedValue({ response: { data: { detail: 'Console 还没有给授权 lic-old-7 的新企业版安装包（linux-arm64）' } } });
     render(<FlocksproUpgradePage />);
 
-    await userEvent.click(await screen.findByRole('button', { name: 'upgrade.check' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'licencePage.version.check' }));
     expect(await screen.findByText(/Console 还没有给授权 lic-old-7/)).toBeInTheDocument();
     expect(start).not.toHaveBeenCalled();
   });
@@ -249,7 +268,7 @@ describe('Flocks Pro page of the open edition', () => {
     render(<FlocksproUpgradePage />);
 
     expect(await screen.findByText(/ops@example\.com/)).toBeInTheDocument();
-    await userEvent.click(await screen.findByRole('button', { name: 'upgrade.check' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'licencePage.version.check' }));
     expect(await screen.findByText(/要先登录才给安装包/)).toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'licencePage.apply.login' })).toBeInTheDocument();
     expect(screen.getByTestId('cloud-status')).toHaveTextContent('licencePage.apply.signedOut');
@@ -266,7 +285,7 @@ describe('Flocks Pro page of the open edition', () => {
     progress.mockResolvedValue(null);
     render(<FlocksproUpgradePage />);
 
-    await userEvent.click(await screen.findByRole('button', { name: 'upgrade.check' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'licencePage.version.check' }));
     await userEvent.click(await screen.findByRole('button', { name: 'upgrade.start v2026.11.05.0' }));
     expect(await screen.findByRole('button', { name: 'licencePage.apply.login' })).toBeInTheDocument();
     expect(consoleLoginSession).toHaveBeenCalledTimes(2);
@@ -315,20 +334,25 @@ describe('Flocks Pro page of the open edition', () => {
     await userEvent.click(applyOnline());
     const dialog = screen.getByRole('dialog', { name: 'licencePage.dialog.onlineTitle' });
     expect(within(dialog).getByText('licencePage.dialog.onlineTip')).toBeInTheDocument();
-    const send = within(dialog).getByRole('button', { name: 'apply.submit' });
-    await userEvent.type(screen.getByLabelText('apply.fields.company'), 'Acme');
-    await userEvent.type(screen.getByLabelText('apply.fields.applicantName'), 'Li Lei');
-    await userEvent.type(screen.getByLabelText('apply.fields.email'), 'li@acme');
-    await userEvent.type(screen.getByLabelText('apply.fields.phone'), '12-34');
+    const send = within(dialog).getByRole('button', { name: 'licencePage.dialog.submit' });
+    // Empty: one line says what is missing.
     await userEvent.click(send);
-    expect(screen.getByText('apply.problems.email')).toBeInTheDocument();
-    expect(screen.getByText('apply.problems.phone')).toBeInTheDocument();
+    expect(within(dialog).getByTestId('application-problem')).toHaveTextContent('licencePage.dialog.problems.required');
+    await userEvent.type(screen.getByLabelText(FIELD.company), 'Acme');
+    await userEvent.type(screen.getByLabelText(FIELD.name), 'Li Lei');
+    await userEvent.type(screen.getByLabelText(FIELD.email), 'li@acme');
+    await userEvent.type(screen.getByLabelText(FIELD.phone), '12-34');
+    await userEvent.click(send);
+    expect(within(dialog).getByTestId('application-problem')).toHaveTextContent('licencePage.dialog.problems.email');
+    expect(apply).not.toHaveBeenCalled();
+    await userEvent.type(screen.getByLabelText(FIELD.email), '.example');
+    await userEvent.click(send);
+    expect(within(dialog).getByTestId('application-problem')).toHaveTextContent('licencePage.dialog.problems.phone');
     expect(apply).not.toHaveBeenCalled();
 
-    await userEvent.type(screen.getByLabelText('apply.fields.email'), '.example');
-    await userEvent.clear(screen.getByLabelText('apply.fields.phone'));
-    await userEvent.type(screen.getByLabelText('apply.fields.phone'), '+86 138 0000 0000');
-    await userEvent.selectOptions(screen.getByLabelText('apply.fields.licenseType'), 'commercial');
+    await userEvent.clear(screen.getByLabelText(FIELD.phone));
+    await userEvent.type(screen.getByLabelText(FIELD.phone), '+86 138 0000 0000');
+    await userEvent.selectOptions(screen.getByLabelText('licencePage.dialog.licenseType'), 'commercial');
     applications.mockResolvedValue({ items: [pending], note: null });
     await userEvent.click(send);
 
@@ -337,14 +361,21 @@ describe('Flocks Pro page of the open edition', () => {
       license_type: 'commercial', company: 'Acme', applicant_name: 'Li Lei',
       applicant_email: 'li@acme.example', applicant_phone: '+86 138 0000 0000', sales_rep_name: null, notes: null,
     });
-    const list = await screen.findByRole('list', { name: 'apply.listLabel' });
-    expect(within(list).getByText('apply.status.pending')).toBeInTheDocument();
-    expect(within(list).getByText('Acme')).toBeInTheDocument();
+    expect(toast.success).toHaveBeenCalledWith('licencePage.dialog.sent');
+    const list = await screen.findByRole('list', { name: 'licencePage.records.title' });
+    // One line: what was applied for, its status, then its fields.
+    const record = within(list).getByTestId('application-req_1');
+    expect(within(record).getByText('licencePage.records.upgrade')).toBeInTheDocument();
+    expect(within(record).getByText('licencePage.records.status.pending')).toBeInTheDocument();
+    expect(within(record).getByText('licencePage.records.fields.id')).toBeInTheDocument();
+    expect(within(record).getByText('Acme')).toBeInTheDocument();
+    expect(within(record).getByText('Li Lei')).toBeInTheDocument();
     // One open application at a time: the dialog is gone, does not open again, and the card says why.
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(applyOnline()).toBeDisabled();
+    expect(reasonOf(applyOnline())).toBe('licencePage.apply.outstanding req_1');
     expect(screen.getByTestId('apply-blocked')).toHaveTextContent('licencePage.apply.outstanding req_1');
-    expect(screen.getByTestId('application-outstanding')).toHaveTextContent('licencePage.apply.inReview req_1 apply.status.pending');
+    expect(screen.getByTestId('application-outstanding')).toHaveTextContent('licencePage.apply.inReview req_1 licencePage.records.status.pending');
     expect(screen.getByTestId('application-records')).toHaveAttribute('open');
   });
 
@@ -355,20 +386,23 @@ describe('Flocks Pro page of the open edition', () => {
 
     await waitFor(() => expect(applyOnline()).toBeEnabled());
     await userEvent.click(applyOnline());
-    await userEvent.type(screen.getByLabelText('apply.fields.company'), 'Acme');
-    await userEvent.type(screen.getByLabelText('apply.fields.applicantName'), 'Li Lei');
-    await userEvent.type(screen.getByLabelText('apply.fields.email'), 'li@acme.example');
-    await userEvent.type(screen.getByLabelText('apply.fields.phone'), '+86 138 0000 0000');
-    await userEvent.click(screen.getByRole('button', { name: 'apply.submit' }));
+    await userEvent.type(screen.getByLabelText(FIELD.company), 'Acme');
+    await userEvent.type(screen.getByLabelText(FIELD.name), 'Li Lei');
+    await userEvent.type(screen.getByLabelText(FIELD.email), 'li@acme.example');
+    await userEvent.type(screen.getByLabelText(FIELD.phone), '+86 138 0000 0000');
+    await userEvent.click(screen.getByRole('button', { name: 'licencePage.dialog.submit' }));
 
     const dialog = screen.getByRole('dialog', { name: 'licencePage.dialog.onlineTitle' });
     expect(await within(dialog).findByText(/开源版太旧/)).toBeInTheDocument();
-    await userEvent.click(within(dialog).getByRole('button', { name: 'apply.cancel' }));
+    expect(toast.success).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'licencePage.dialog.cancel' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   it('FP8 takes an approved licence and moves on to the upgrade', async () => {
     situation.mockResolvedValue({ ...base, previous: null });
+    // Signed out, nothing is taken without being asked: the record's button takes it.
+    consoleLoginSession.mockResolvedValue({ logged_in: false });
     applications.mockResolvedValue({
       items: [{ ...pending, status: 'approved', license_id: 'lic_1', expires_at: 1798761600, reason: '通过', can_take: true }],
       note: null,
@@ -379,18 +413,22 @@ describe('Flocks Pro page of the open edition', () => {
     });
     render(<FlocksproUpgradePage />);
 
-    expect(await screen.findByText(/apply\.issuedUntil lic_1/)).toBeInTheDocument();
-    expect(screen.getByText('apply.reason 通过')).toBeInTheDocument();
+    const record = await screen.findByTestId('application-req_1');
+    expect(within(record).getByText('lic_1')).toBeInTheDocument();
+    expect(within(record).getByText('licencePage.records.status.approved')).toBeInTheDocument();
+    // Approved: no review note said (that is for a refusal).
+    expect(screen.queryByText(/licencePage\.records\.reason/)).toBeNull();
     expect(screen.getByTestId('application-outstanding')).toHaveTextContent('licencePage.apply.toTake req_1');
-    await userEvent.click(screen.getByRole('button', { name: 'apply.take' }));
+    expect(take).not.toHaveBeenCalled();
+    await userEvent.click(within(record).getByRole('button', { name: 'licencePage.records.take' }));
 
     await waitFor(() => expect(take).toHaveBeenCalledWith('req_1'));
     // A licence from the application, no Python package: not called the old edition.
-    expect(await screen.findByTestId('saved-hint')).toHaveTextContent('machine.licensedNote');
+    expect(await screen.findByTestId('saved-hint')).toHaveTextContent('licencePage.info.savedPlatform');
     expect(within(row()).getByText('lic_1')).toBeInTheDocument();
     expect(within(row()).getByTestId('edition-status')).toHaveTextContent('licencePage.info.licensed');
     expect(applyOnline()).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'upgrade.check' })).toBeInTheDocument();
+    expect(checkVersion()).toBeInTheDocument();
   });
 
   it('FP9 asks to sign in first, shows what Console could not answer, and asks before a withdrawal', async () => {
@@ -402,7 +440,7 @@ describe('Flocks Pro page of the open edition', () => {
 
     expect(await screen.findByText('licencePage.apply.signInHint')).toBeInTheDocument();
     expect(screen.getByText(/云账号登录已失效/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: 'apply.withdraw' }));
+    await userEvent.click(screen.getByRole('button', { name: 'licencePage.records.withdraw' }));
     expect(confirm).toHaveBeenCalled();
     expect(withdraw).not.toHaveBeenCalled();
 
@@ -410,9 +448,9 @@ describe('Flocks Pro page of the open edition', () => {
     applications.mockResolvedValue({ items: [], note: null });
     cleanup();
     render(<FlocksproUpgradePage />);
-    expect(await screen.findByText('apply.none')).toBeInTheDocument();
+    expect(await screen.findByText('licencePage.records.empty')).toBeInTheDocument();
     expect(applyOnline()).toBeDisabled();
-    expect(applyOnline()).toHaveAttribute('title', 'licencePage.apply.signInFirst');
+    expect(reasonOf(applyOnline())).toBe('licencePage.apply.signInFirst');
     confirm.mockRestore();
   });
 
@@ -429,7 +467,7 @@ describe('Flocks Pro page of the open edition', () => {
     expect(await screen.findByTestId('product-version')).toHaveTextContent('licencePage.version.previous v2026.10.19.0');
     expect(await screen.findByText('apply.pendingSubmission')).toBeInTheDocument();
     // No licence, so nothing to check with Console yet.
-    expect(screen.queryByRole('button', { name: 'upgrade.check' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'licencePage.version.check' })).not.toBeInTheDocument();
 
     await userEvent.click(await screen.findByRole('button', { name: 'licencePage.apply.login' }));
     const card = screen.getByTestId('licence-apply');
@@ -445,8 +483,8 @@ describe('Flocks Pro page of the open edition', () => {
     });
     render(<FlocksproUpgradePage />);
 
-    expect(await screen.findByRole('button', { name: 'apply.take' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'apply.withdraw' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'licencePage.records.take' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'licencePage.records.withdraw' })).not.toBeInTheDocument();
     expect(applyOnline()).toBeDisabled();
     expect(screen.queryByText('apply.pendingSubmission')).not.toBeInTheDocument();
   });
@@ -457,8 +495,9 @@ describe('Flocks Pro page of the open edition', () => {
 
     expect(await within(await screen.findByTestId('platform-row')).findByText(id)).toBeInTheDocument();
     expect(within(row()).getByTitle(id)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'upgrade.check' })).toBeEnabled();
+    expect(checkVersion()).toBeEnabled();
     expect(screen.queryByText('licence.invalidHint')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('licence-term-hint')).not.toBeInTheDocument();
   });
 
   it('FP12b cuts a long licence id in the line only', async () => {
@@ -471,15 +510,18 @@ describe('Flocks Pro page of the open edition', () => {
     expect(cell.textContent).toContain('ubuntu-22.04-c');
   });
 
+  // As the backend reports them: a licence expired, revoked or past its date comes with `lapsed`
+  // (flocks/updater/enterprise.py `licence_lapsed`), so the machine may apply again.
   it.each([
-    ['expired by its status', { license_status: 'expired' }, 'licenceStatus.expired'],
-    ['revoked', { license_status: 'revoked' }, 'licenceStatus.revoked'],
-    ['past its date', { expires_at: 1000000000 }, 'licencePage.info.lapsed'],
-  ])('FP13 a licence %s is shown as no longer valid', async (_name, change, said) => {
+    ['expired by its status', { license_status: 'expired', lapsed: true }, 'licenceStatus.expired', 'licencePage.info.term.online licencePage.info.term.expired'],
+    ['revoked', { license_status: 'revoked', lapsed: true }, 'licenceStatus.revoked', 'licence.invalidHint'],
+    ['past its date', { expires_at: 1000000000, lapsed: true }, 'licencePage.info.lapsed', 'licencePage.info.term.online licencePage.info.term.expired'],
+  ])('FP13 a licence %s is shown as no longer valid', async (_name, change, said, hint) => {
     situation.mockResolvedValue({ ...base, previous: { ...previous, ...change } });
     render(<FlocksproUpgradePage />);
 
-    expect(await screen.findByText('licence.invalidHint')).toBeInTheDocument();
+    // Run out: what to do about it (here online and signed in); revoked: that it no longer counts.
+    expect(await screen.findByText(hint)).toBeInTheDocument();
     const tag = within(row()).getByTestId('edition-status');
     expect(tag).toHaveTextContent(said);
     expect(tag.className).toContain('text-red-700');
@@ -491,6 +533,7 @@ describe('Flocks Pro page of the open edition', () => {
 
     expect(await within(await screen.findByTestId('platform-row')).findByTestId('edition-status')).toHaveTextContent('licencePage.info.licensed');
     expect(screen.queryByText('licence.invalidHint')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('licence-term-hint')).not.toBeInTheDocument();
   });
 
   it('FP13c a licence with no date and no quota shows nothing it does not know', async () => {
@@ -598,20 +641,33 @@ describe('Flocks Pro page of the open edition', () => {
     expect(screen.queryByText('licence.syncUnchanged')).not.toBeInTheDocument();
   });
 
-  it('FP14g nothing to sync without a licence, offline, or (this edition) signed out: the button says why', async () => {
+  it('FP14g the refresh: online and signed in also without a licence (the applications); offline or (this edition) signed out it says why', async () => {
     situation.mockResolvedValue({ ...base, previous: null });
-    const { unmount } = render(<FlocksproUpgradePage />);
+    const first = render(<FlocksproUpgradePage />);
     await screen.findByTestId('platform-row');
-    expect(sync()).toBeDisabled();
-    expect(sync()).toHaveAttribute('title', 'licencePage.info.syncNothing');
-    unmount();
+    await waitFor(() => expect(sync()).toBeEnabled());
+    expect(sync()).toHaveAccessibleName('licencePage.info.sync');
+    // No licence: only the applications are read again, no licence sync.
+    const listed = applications.mock.calls.length;
+    await userEvent.click(sync());
+    await waitFor(() => expect(applications.mock.calls.length).toBeGreaterThan(listed));
+    expect(syncLicence).not.toHaveBeenCalled();
+    expect(clientPost).not.toHaveBeenCalled();
+    first.unmount();
 
     situation.mockResolvedValue({ ...base, previous: noPackage });
     consoleLoginSession.mockResolvedValue({ logged_in: false });
-    render(<FlocksproUpgradePage />);
+    const second = render(<FlocksproUpgradePage />);
     await screen.findByTestId('cloud-status');
     expect(sync()).toBeDisabled();
-    expect(sync()).toHaveAttribute('title', 'licencePage.info.syncSignIn');
+    expect(reasonOf(sync())).toBe('licencePage.info.syncSignIn');
+    second.unmount();
+
+    situation.mockResolvedValue({ ...base, available: false });
+    render(<FlocksproUpgradePage />);
+    await screen.findByTestId('platform-row');
+    expect(sync()).toBeDisabled();
+    expect(reasonOf(sync())).toBe('quick.unavailable');
   });
 
   const lapsed = { ...noPackage, license_status: 'poc', expires_at: 1790740045, lapsed: true };
@@ -620,12 +676,12 @@ describe('Flocks Pro page of the open edition', () => {
     situation.mockResolvedValue({ ...base, previous: lapsed });
     render(<FlocksproUpgradePage />);
 
-    expect(await screen.findByText('licence.invalidHint')).toBeInTheDocument();
+    expect(await screen.findByTestId('licence-term-hint')).toHaveAttribute('data-term', 'expired');
     expect(within(row()).getByTestId('edition-status').className).toContain('text-red-700');
     await waitFor(() => expect(applyOnline()).toBeEnabled());
     expect(sync()).toBeEnabled();
     expect(screen.queryByTestId('saved-hint')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'upgrade.check' })).toBeInTheDocument();
+    expect(checkVersion()).toBeInTheDocument();
   });
 
   it('FP17b renewed at Console: a sync brings it back to a machine with a licence, no application', async () => {
@@ -640,7 +696,7 @@ describe('Flocks Pro page of the open edition', () => {
     expect(await screen.findByText('licence.syncChanged')).toBeInTheDocument();
     await waitFor(() => expect(within(row()).getByTestId('edition-status')).toHaveTextContent('licencePage.info.licensed'));
     expect(applyOnline()).toBeDisabled();
-    expect(screen.getByTestId('saved-hint')).toHaveTextContent('machine.licensedNote');
+    expect(screen.getByTestId('saved-hint')).toHaveTextContent('licencePage.info.savedPlatform');
   });
 
   it('FP17c still over after a sync: the machine can still apply, and the page says Console had nothing new', async () => {
@@ -666,14 +722,14 @@ describe('Flocks Pro page of the open edition', () => {
 
     applications.mockResolvedValue({ items: [{ ...approved, can_take: true }], note: null });
     const second = render(<FlocksproUpgradePage />);
-    await screen.findByRole('button', { name: 'apply.take' });
+    await screen.findByRole('button', { name: 'licencePage.records.take' });
     expect(applyOnline()).toBeDisabled();
     second.unmount();
 
     // Over by the terms it was issued with: it can be taken (it may have been renewed), and waits on nothing.
     applications.mockResolvedValue({ items: [{ ...approved, can_take: true, licence_over: true }], note: null });
     render(<FlocksproUpgradePage />);
-    await screen.findByRole('button', { name: 'apply.take' });
+    await screen.findByRole('button', { name: 'licencePage.records.take' });
     await waitFor(() => expect(applyOnline()).toBeEnabled());
   });
 
@@ -681,7 +737,7 @@ describe('Flocks Pro page of the open edition', () => {
     situation.mockResolvedValue({ ...base, previous: { ...noPackage, expires_at: 1790740045, lapsed: false } });
     render(<FlocksproUpgradePage />);
 
-    expect(await screen.findByText('licence.invalidHint')).toBeInTheDocument();
+    expect(await screen.findByTestId('licence-term-hint')).toHaveAttribute('data-term', 'expired');
     expect(applyOnline()).toBeDisabled();
   });
 
@@ -690,11 +746,14 @@ describe('Flocks Pro page of the open edition', () => {
     check.mockResolvedValue(offer);
     render(<FlocksproUpgradePage />);
 
-    await userEvent.click(await screen.findByRole('button', { name: 'upgrade.check' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'licencePage.version.check' }));
     expect(await screen.findByText(/upgrade\.offer/)).toBeInTheDocument();
 
     consoleLoginSession.mockResolvedValue({ logged_in: false });
     await userEvent.click(await screen.findByRole('button', { name: 'licencePage.apply.logout' }));
+    const asked = await screen.findByRole('dialog', { name: 'licencePage.apply.logoutTitle' });
+    expect(within(asked).getByText('licencePage.apply.logoutConfirm')).toBeInTheDocument();
+    await userEvent.click(within(asked).getByRole('button', { name: 'licencePage.apply.logout' }));
 
     expect(logoutConsoleLogin).toHaveBeenCalledTimes(1);
     expect(await screen.findByRole('button', { name: 'licencePage.apply.login' })).toBeInTheDocument();
@@ -708,6 +767,8 @@ describe('Flocks Pro page of the open edition', () => {
     render(<FlocksproUpgradePage />);
 
     await userEvent.click(await screen.findByRole('button', { name: 'licencePage.apply.logout' }));
+    const asked = await screen.findByRole('dialog', { name: 'licencePage.apply.logoutTitle' });
+    await userEvent.click(within(asked).getByRole('button', { name: 'licencePage.apply.logout' }));
     expect(await screen.findByText('boom')).toBeInTheDocument();
   });
 
@@ -733,17 +794,19 @@ describe('Flocks Pro page of the open edition', () => {
     expect(within(card).queryByText('licencePage.apply.signInHint')).toBeNull();
     expect(screen.queryByRole('button', { name: 'licencePage.apply.login' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'licencePage.apply.applyOnline' })).toBeNull();
-    // The application makes a file to hand over, downloaded at once.
+    // The application makes a file to hand over, downloaded at once; the dialog closes and says so.
     await user.click(screen.getByRole('button', { name: 'licencePage.apply.applyOffline' }));
     const dialog = await screen.findByRole('dialog', { name: 'licencePage.dialog.offlineTitle' });
     expect(within(dialog).getByText('licencePage.dialog.offlineTip')).toBeInTheDocument();
-    await user.type(within(dialog).getByLabelText('apply.fields.company'), 'Acme');
-    await user.type(within(dialog).getByLabelText('apply.fields.applicantName'), 'Li Lei');
-    await user.type(within(dialog).getByLabelText('apply.fields.email'), 'li@acme.example');
-    await user.type(within(dialog).getByLabelText('apply.fields.phone'), '+86 138 0000 0000');
+    await user.type(within(dialog).getByLabelText(FIELD.company), 'Acme');
+    await user.type(within(dialog).getByLabelText(FIELD.name), 'Li Lei');
+    await user.type(within(dialog).getByLabelText(FIELD.email), 'li@acme.example');
+    await user.type(within(dialog).getByLabelText(FIELD.phone), '+86 138 0000 0000');
     await user.click(within(dialog).getByRole('button', { name: 'licencePage.dialog.download' }));
-    expect(await within(dialog).findByTestId('offline-application')).toHaveTextContent('0123456789abcdef0123456789abcdef');
-    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(URL.createObjectURL).toHaveBeenCalledTimes(1));
+    expect(offlineApplication).toHaveBeenCalledWith(expect.objectContaining({ company: 'Acme', applicant_phone: '+86 138 0000 0000' }));
+    expect(toast.success).toHaveBeenCalledWith('licencePage.dialog.downloaded');
+    expect(screen.queryByRole('dialog')).toBeNull();
     expect(apply).not.toHaveBeenCalled();
 
     // On to the licence file that comes back: the page moves on to the machine with a licence.
@@ -751,19 +814,22 @@ describe('Flocks Pro page of the open edition', () => {
       licence: { license_id: 'lic_off_1', license_status: 'poc', expires_at: 1802649569 },
       situation: { ...open, previous: { ...previous, version: null, license_id: 'lic_off_1', license_status: 'poc', lapsed: false } },
     });
-    await user.click(within(dialog).getByRole('button', { name: 'licencePage.info.import' }));
+    await user.click(screen.getByRole('button', { name: 'licencePage.info.import' }));
     const importing = await screen.findByRole('dialog', { name: 'licencePage.import.title' });
     await user.upload(within(importing).getByTestId('licence-import-file'), new File(['{"key":"a.b.c"}'], 'license.json', { type: 'application/json' }));
     await user.click(within(importing).getByRole('button', { name: 'licencePage.import.go' }));
     await waitFor(() => expect(importLicence).toHaveBeenCalledWith('{"key":"a.b.c"}'));
     expect(await within(row()).findByText('lic_off_1')).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).toBeNull();
-    expect(screen.getByText(/licenceFile\.importedUntil lic_off_1/)).toBeInTheDocument();
+    expect(toast.success).toHaveBeenCalledWith('licencePage.import.okTitle', expect.stringMatching(/^licenceFile\.importedUntil lic_off_1/));
     // No version check without Console; the offline installer is the way.
-    expect(screen.getByRole('button', { name: 'upgrade.check' })).toBeDisabled();
+    expect(checkVersion()).toBeDisabled();
+    expect(reasonOf(checkVersion())).toBe('licencePage.version.checkOffline');
     expect(screen.getByTestId('upgrade-offline')).toHaveTextContent('upgrade.offline');
     expect(sync()).toBeDisabled();
-    expect(sync()).toHaveAttribute('title', 'licencePage.info.syncOffline');
+    expect(reasonOf(sync())).toBe('licencePage.info.syncOffline');
+    // Offline, nothing is taken or asked of Console without the administrator.
+    expect(take).not.toHaveBeenCalled();
   });
 
   it('FP19 Console answering: the licence file can be imported too while the machine has no licence', async () => {
@@ -775,39 +841,34 @@ describe('Flocks Pro page of the open edition', () => {
 
     await user.click(screen.getByRole('button', { name: 'licencePage.info.import' }));
     const dialog = await screen.findByRole('dialog', { name: 'licencePage.import.title' });
-    // Pasted instead of chosen.
-    await user.click(within(dialog).getByRole('button', { name: 'licenceFile.paste' }));
-    await user.type(within(dialog).getByLabelText('licenceFile.paste'), 'eyJ.a.b');
-    await user.click(within(dialog).getByRole('button', { name: 'licencePage.import.go' }));
+    // A file only: there is nothing to paste.
+    expect(within(dialog).queryByRole('textbox')).toBeNull();
+    const go = within(dialog).getByRole('button', { name: 'licencePage.import.go' });
+    expect(go).toBeDisabled();
+    await user.upload(within(dialog).getByTestId('licence-import-file'), new File(['eyJ.a.b'], 'license.json', { type: 'application/json' }));
+    await user.click(go);
     expect(importLicence).toHaveBeenCalledWith('eyJ.a.b');
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('不能导入');
+    // Refused: said in a notice, the dialog closes, the machine is as it was.
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('licencePage.import.failTitle', expect.stringContaining('不能导入')));
+    expect(screen.queryByRole('dialog')).toBeNull();
     expect(within(row()).getByTestId('edition-status')).toHaveTextContent('licencePage.info.openEdition');
   });
 
-  it('FP19b imports what was chosen last: a file chosen after pasting, or text pasted after choosing a file', async () => {
+  it('FP19b imports the file chosen last', async () => {
     const user = userEvent.setup();
     situation.mockResolvedValue({ ...base, previous: null });
-    importLicence.mockRejectedValue({ response: { data: { detail: '这份授权已在 2026-01-01 到期，不能导入' } } });
+    importLicence.mockRejectedValue({ response: { data: { detail: '不能导入' } } });
     render(<FlocksproUpgradePage />);
     await waitFor(() => expect(applyOnline()).toBeEnabled());
     await user.click(screen.getByRole('button', { name: 'licencePage.info.import' }));
     const dialog = await screen.findByRole('dialog', { name: 'licencePage.import.title' });
-    const go = within(dialog).getByRole('button', { name: 'licencePage.import.go' });
 
-    // Pasted first, then a file chosen: the file is what goes.
-    await user.click(within(dialog).getByRole('button', { name: 'licenceFile.paste' }));
-    await user.type(within(dialog).getByLabelText('licenceFile.paste'), 'eyJ.pasted.a');
-    await user.upload(within(dialog).getByTestId('licence-import-file'), new File(['{"key":"file.b"}'], 'license.json', { type: 'application/json' }));
-    expect(within(dialog).queryByLabelText('licenceFile.paste')).toBeNull();
-    await user.click(go);
-    await waitFor(() => expect(importLicence).toHaveBeenLastCalledWith('{"key":"file.b"}'));
-
-    // A file chosen first, then text pasted: the text is what goes.
-    await user.click(within(dialog).getByRole('button', { name: 'licenceFile.paste' }));
-    expect(within(dialog).queryByText('license.json')).toBeNull();
-    await user.type(within(dialog).getByLabelText('licenceFile.paste'), 'eyJ.pasted.c');
-    await user.click(go);
-    await waitFor(() => expect(importLicence).toHaveBeenLastCalledWith('eyJ.pasted.c'));
+    await user.upload(within(dialog).getByTestId('licence-import-file'), new File(['{"key":"first.a"}'], 'first.json', { type: 'application/json' }));
+    await user.upload(within(dialog).getByTestId('licence-import-file'), new File(['{"key":"second.b"}'], 'second.json', { type: 'application/json' }));
+    expect(within(dialog).getByText('second.json')).toBeInTheDocument();
+    expect(within(dialog).queryByText('first.json')).toBeNull();
+    await user.click(within(dialog).getByRole('button', { name: 'licencePage.import.go' }));
+    await waitFor(() => expect(importLicence).toHaveBeenLastCalledWith('{"key":"second.b"}'));
   });
 
   it('FP5e a sign-in that cannot be read is offered again rather than hidden', async () => {
@@ -821,7 +882,7 @@ describe('Flocks Pro page of the open edition', () => {
   it('FP20 an application sent from the menu dialog shows on the kept page without a reload', async () => {
     situation.mockResolvedValue({ ...base, previous: null });
     render(<FlocksproUpgradePage />);
-    expect(await screen.findByText('apply.none')).toBeInTheDocument();
+    expect(await screen.findByText('licencePage.records.empty')).toBeInTheDocument();
     expect(applications).toHaveBeenCalledTimes(1);
     applications.mockResolvedValue({ items: [pending], note: null });
     window.dispatchEvent(new Event('flocks-enterprise-licence-changed'));
@@ -835,5 +896,133 @@ describe('Flocks Pro page of the open edition', () => {
     render(<FlocksproUpgradePage />);
     expect(await screen.findByTestId('product-version')).toHaveTextContent('licencePage.version.open v2026.11.17.2');
     expect(clientGet).toHaveBeenCalledWith('/api/health');
+  });
+
+  it('FP22 one panel: the application, the licence information and the product version, in that order', async () => {
+    situation.mockResolvedValue(base);
+    render(<FlocksproUpgradePage />);
+    const panel = await screen.findByTestId('licence-panel');
+    const sections = [...panel.children].map((child) => child.getAttribute('data-testid'));
+    expect(sections).toEqual(['licence-apply', 'licence-info', 'licence-version']);
+    // The records are in the licence information, under the table.
+    expect(within(screen.getByTestId('licence-info')).getByTestId('application-records')).toBeInTheDocument();
+  });
+
+  it('FP23 signing out asks first; cancelled, nothing happens', async () => {
+    situation.mockResolvedValue(base);
+    render(<FlocksproUpgradePage />);
+    await userEvent.click(await screen.findByRole('button', { name: 'licencePage.apply.logout' }));
+    const asked = await screen.findByRole('dialog', { name: 'licencePage.apply.logoutTitle' });
+    await userEvent.click(within(asked).getByRole('button', { name: 'licencePage.dialog.cancel' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(logoutConsoleLogin).not.toHaveBeenCalled();
+    expect(screen.getByTestId('cloud-status')).toHaveTextContent('licencePage.apply.signedIn');
+  });
+
+  it.each([
+    ['online and signed in', { logged_in: true, account_name: 'ops@example.com' }, true],
+    ['signed out', { logged_in: false }, true],
+    ['offline', { logged_in: true, account_name: 'ops@example.com' }, false],
+  ])('FP24 a licence running out, %s: said in its status and under the table; a new file is the way', async (_name, login, online) => {
+    const soon = Math.floor(Date.now() / 1000) + 8 * 86400;
+    situation.mockResolvedValue({ ...base, previous: { ...previous, expires_at: soon } });
+    consoleLoginSession.mockResolvedValue(login);
+    consoleConnectivity.mockResolvedValue({ configured: true, online, console_host: 'console.example', checked_at: '' });
+    render(<FlocksproUpgradePage />);
+    const hint = await screen.findByTestId('licence-term-hint');
+    // Still in force: the application waits (its button says why), so the hint offers no application.
+    await waitFor(() => expect(hint).toHaveTextContent('licencePage.info.term.offline licencePage.info.term.near'));
+    expect(hint).toHaveAttribute('data-term', 'near');
+    const tag = within(row()).getByTestId('edition-status');
+    expect(tag).toHaveTextContent('licencePage.info.term.near');
+    expect(tag.className).toContain('text-amber-700');
+    if (online) {
+      expect(applyOnline()).toBeDisabled();
+      expect(reasonOf(applyOnline())).toBe('licencePage.apply.licensed');
+    }
+  });
+
+  it.each([
+    ['online and signed in', { logged_in: true, account_name: 'ops@example.com' }, true, 'licencePage.info.term.online'],
+    ['signed out', { logged_in: false }, true, 'licencePage.info.term.signedOut'],
+    ['offline', { logged_in: true, account_name: 'ops@example.com' }, false, 'licencePage.info.term.offline'],
+  ])('FP24b a licence run out, %s: applied for again, and the hint says how', async (_name, login, online, way) => {
+    situation.mockResolvedValue({ ...base, previous: { ...previous, expires_at: 1790740045, lapsed: true } });
+    consoleLoginSession.mockResolvedValue(login);
+    consoleConnectivity.mockResolvedValue({ configured: true, online, console_host: 'console.example', checked_at: '' });
+    render(<FlocksproUpgradePage />);
+    const hint = await screen.findByTestId('licence-term-hint');
+    await waitFor(() => expect(hint).toHaveTextContent(`${way} licencePage.info.term.expired`));
+    if (online && login.logged_in) await waitFor(() => expect(applyOnline()).toBeEnabled());
+  });
+
+  it('FP25 an approved application is taken without being asked, once; offline or signed out it waits for its button', async () => {
+    const approved = { ...pending, status: 'approved', license_id: 'lic_1', expires_at: 1798761600, can_take: true, can_withdraw: false };
+    situation.mockResolvedValue({ ...base, previous: null });
+    applications.mockResolvedValue({ items: [approved], note: null });
+    take.mockResolvedValue({
+      application: { ...approved, status: 'activated', can_take: false },
+      situation: { ...base, previous: { version: null, license_id: 'lic_1', license_status: 'poc', pro_enabled: false, expires_at: 1798761600 } },
+    });
+    const first = render(<FlocksproUpgradePage />);
+    await waitFor(() => expect(take).toHaveBeenCalledWith('req_1'));
+    expect(toast.success).toHaveBeenCalledWith('licencePage.records.autoTaken req_1');
+    expect(await within(row()).findByText('lic_1')).toBeInTheDocument();
+    expect(take).toHaveBeenCalledTimes(1);
+    first.unmount();
+
+    // A take that did not work is not tried again by itself: its button stays.
+    take.mockReset();
+    take.mockRejectedValue({ response: { data: { detail: 'Console 没有应答' } } });
+    const second = render(<FlocksproUpgradePage />);
+    await waitFor(() => expect(take).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('Console 没有应答')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'licencePage.records.take' })).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(take).toHaveBeenCalledTimes(1);
+    second.unmount();
+
+    // Offline: nothing taken without the administrator.
+    take.mockReset();
+    consoleConnectivity.mockResolvedValue({ configured: true, online: false, console_host: 'console.example', checked_at: '' });
+    render(<FlocksproUpgradePage />);
+    expect(await screen.findByRole('button', { name: 'licencePage.records.take' })).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(take).not.toHaveBeenCalled();
+  });
+
+  it('FP25b nothing is taken before the first check of Console\'s reach is back; found offline, nothing at all', async () => {
+    const approved = { ...pending, status: 'approved', license_id: 'lic_1', expires_at: 1798761600, can_take: true, can_withdraw: false };
+    situation.mockResolvedValue({ ...base, previous: null });
+    applications.mockResolvedValue({ items: [approved], note: null });
+    let answer: (value: unknown) => void = () => undefined;
+    consoleConnectivity.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    render(<FlocksproUpgradePage />);
+    // The sign-in and the approved application are in; the check of Console's reach is not.
+    expect(await screen.findByRole('button', { name: 'licencePage.records.take' })).toBeInTheDocument();
+    await waitFor(() => expect(consoleLoginSession).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(take).not.toHaveBeenCalled();
+    await act(async () => { answer({ configured: true, online: false, console_host: 'console.example', checked_at: '' }); });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(take).not.toHaveBeenCalled();
+  });
+
+  it('FP26 the online application is for Pro only in this edition: the modules and scene suites come after it', async () => {
+    situation.mockResolvedValue({ ...base, previous: null });
+    render(<FlocksproUpgradePage />);
+    await waitFor(() => expect(applyOnline()).toBeEnabled());
+    await userEvent.click(applyOnline());
+    const dialog = screen.getByRole('dialog', { name: 'licencePage.dialog.onlineTitle' });
+    const scope = within(dialog).getByTestId('licence-scope');
+    const [platform, items] = within(scope).getAllByRole('checkbox');
+    expect(platform).toBeChecked();
+    expect(platform).toBeDisabled();
+    expect(items).not.toBeChecked();
+    expect(items).toBeDisabled();
+    expect(within(scope).getByText('licencePage.dialog.scopeItemsAfterPro')).toBeInTheDocument();
+    // No sales contact field.
+    expect(within(dialog).queryByLabelText('apply.fields.salesRep')).toBeNull();
+    expect(within(dialog).getByLabelText('licencePage.dialog.notes')).toBeInTheDocument();
   });
 });

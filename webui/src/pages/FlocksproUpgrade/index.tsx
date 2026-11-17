@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowUpCircle, CheckCircle, KeyRound, Loader2, Package, RefreshCw, ShieldCheck } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle, CircleArrowUp, Loader2, Package, ShieldCheck } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import UpgradeFailureDetails, { failureOfEnterpriseUpgrade } from '@/components/common/UpgradeFailureDetails';
 import {
-  LICENCE_ICON_BUTTON,
   LICENCE_SECONDARY,
+  LICENCE_SECTION,
   LicenceApplyCard,
   LicenceExpiry,
+  LicencePanel,
+  LicenceSyncButton,
   LicenceTable,
   LicenceTableRow,
   LicenceTag,
+  LicenceTermHint,
+  licenceTerm,
 } from '@/components/licence/LicenceUi';
 import { authApi, type ConsoleLoginSessionStatus } from '@/api/auth';
 import client from '@/api/client';
@@ -28,13 +32,14 @@ import { ApplicationDialog, ApplicationRecords, outstandingApplication } from '.
 import { useConsoleConnectivity } from './connectivity';
 import LicenceImportDialog from './LicenceImport';
 import { LICENCE_CHANGED_EVENT } from './events';
-import { CARD, DONE, ERROR, GO, INFO, NOTE, compactIdentifier, daysRemaining, formatDateTime } from './styles';
+import { DONE, ERROR, GO, INFO, NOTE, compactIdentifier, daysRemaining, formatDateTime } from './styles';
 
-// The open edition's Flocks Pro page: the licence application (online with the cloud account, or offline
-// with an application file), what licence this machine holds, and the move to the enterprise edition
-// (flocks/updater/enterprise.py). It is laid out as the enterprise edition's page is (that build has its
-// own page here), and does what this edition can: the licence and the move, not the enterprise functions.
-// Whether Console answers from here decides the way to a licence; offline nothing of the cloud account shows.
+// The open edition's Flocks Pro page: one panel with the licence application (online with the cloud account,
+// or offline with an application file), what licence this machine holds with the applications it sent, and
+// the product version with the move to the enterprise edition (flocks/updater/enterprise.py). It is laid out
+// as the enterprise edition's page is (that build has its own page here), and does what this edition can: the
+// licence and the move, not the enterprise functions. Whether Console answers from here decides the way to a
+// licence; offline nothing of the cloud account shows.
 
 const INVALID_STATUSES = new Set(['revoked', 'expired', 'superseded']);
 
@@ -70,7 +75,6 @@ export default function FlocksproUpgradePage() {
   const [applications, setApplications] = useState<LicenceApplications | null>(null);
   const [applicationsError, setApplicationsError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<OpenDialog>(null);
-  const [imported, setImported] = useState<string | null>(null);
   const [offer, setOffer] = useState<InstallerOffer | null>(null);
   const [checking, setChecking] = useState(false);
   const [checkError, setCheckError] = useState<string | null>(null);
@@ -254,9 +258,9 @@ export default function FlocksproUpgradePage() {
     setSyncing(true);
     setSyncError(null);
     setSyncChanged(null);
-    setImported(null);
     try {
-      const changed = await syncWithConsole();
+      // The licence, where there is one; the applications are read again either way.
+      const changed = situation?.previous?.license_id ? await syncWithConsole() : null;
       if (mounted.current) setSyncChanged(changed);
     } catch (err) {
       if (mounted.current) setSyncError(extractErrorMessage(err, t('errors.sync')));
@@ -265,7 +269,7 @@ export default function FlocksproUpgradePage() {
     if (mounted.current) setSyncing(false);
   };
 
-  const header = <PageHeader title={t('licencePage.title')} description={t('licencePage.description')} icon={<KeyRound className="w-8 h-8" />} />;
+  const header = <PageHeader title={t('licencePage.title')} description={t('licencePage.description')} icon={<CircleArrowUp className="w-8 h-8" />} />;
   if (loadError) {
     return (
       <div className="space-y-6">
@@ -313,6 +317,9 @@ export default function FlocksproUpgradePage() {
 
   const invalid = previous && licensed ? licenceInvalid(previous) : false;
   const remaining = previous ? daysRemaining(previous.expires_at) : null;
+  // Revoked or replaced is said as such; run out, or running out, with what to do about it from here.
+  const withdrawn = invalid && ['revoked', 'superseded'].includes(String(previous?.license_status ?? '').toLowerCase());
+  const term = licensed && !withdrawn ? licenceTerm(remaining, invalid) : null;
   const quota = previous && [
     previous.max_admins ? t('licence.adminQuota', { count: previous.max_admins }) : null,
     previous.max_members ? t('licence.memberQuota', { count: previous.max_members }) : null,
@@ -324,174 +331,173 @@ export default function FlocksproUpgradePage() {
     <LicenceTag tone="error" testId="edition-status">
       {INVALID_STATUSES.has(status) ? t(`licenceStatus.${status}`) : t('licencePage.info.lapsed')}
     </LicenceTag>
+  ) : term === 'near' ? (
+    <LicenceTag tone="warning" testId="edition-status">{t('licencePage.info.term.near')}</LicenceTag>
   ) : (
     <LicenceTag tone="success" testId="edition-status">{t('licencePage.info.licensed')}</LicenceTag>
   );
-  const syncReason = !situation.available || !licensed
-    ? t('licencePage.info.syncNothing')
+  // Online and signed in it reads the licence and the applications from Console again. A Python package
+  // carries its own sync and does not need the cloud sign-in for it.
+  const syncReason = !situation.available
+    ? t('quick.unavailable')
     : offline
       ? t('licencePage.info.syncOffline')
       : !signedIn && !previous?.version
         ? t('licencePage.info.syncSignIn')
         : null;
-  // A Python package carries its own sync and does not need the cloud sign-in for it.
   const productVersion = formatProductVersion(version);
 
   return (
     <div className="space-y-6">
       {header}
 
-      <LicenceApplyCard
-        network={network}
-        account={consoleLogin ? { signedIn, name: consoleLogin.account_name } : null}
-        onLogin={() => void loginConsole()}
-        onLogout={() => void logoutConsole()}
-        onApplyOnline={() => setDialog('online')}
-        onApplyOffline={() => setDialog('offline')}
-        applyBlocked={applyBlocked}
-        busy={busy}
-      >
-        {consoleLoginError && <div className={ERROR}>{consoleLoginError}</div>}
-        {needsLicence && applications?.pending_submission && !outstanding && <div className={NOTE}>{t('apply.pendingSubmission')}</div>}
-        {outstanding && (
-          <div className={INFO} data-testid="application-outstanding">
-            {t(outstanding.can_take ? 'licencePage.apply.toTake' : 'licencePage.apply.inReview', {
-              id: outstanding.request_id,
-              status: t(`apply.status.${outstanding.status}`, { defaultValue: outstanding.status }),
-            })}
-          </div>
-        )}
-      </LicenceApplyCard>
+      <LicencePanel testId="licence-panel">
+        <LicenceApplyCard
+          network={network}
+          account={consoleLogin ? { signedIn, name: consoleLogin.account_name } : null}
+          onLogin={() => void loginConsole()}
+          onLogout={() => void logoutConsole()}
+          onApplyOnline={() => setDialog('online')}
+          onApplyOffline={() => setDialog('offline')}
+          applyBlocked={applyBlocked}
+          busy={busy}
+        >
+          {consoleLoginError && <div className={ERROR}>{consoleLoginError}</div>}
+          {needsLicence && applications?.pending_submission && !outstanding && <div className={NOTE}>{t('apply.pendingSubmission')}</div>}
+          {outstanding && (
+            <div className={INFO} data-testid="application-outstanding">
+              {t(outstanding.can_take ? 'licencePage.apply.toTake' : 'licencePage.apply.inReview', {
+                id: outstanding.request_id,
+                status: t(`licencePage.records.status.${outstanding.status}`, { defaultValue: outstanding.status }),
+              })}
+            </div>
+          )}
+        </LicenceApplyCard>
 
-      <section className={CARD} aria-labelledby="licence-info-title" data-testid="licence-info">
-        <div className="flex items-center justify-between gap-3 max-md:flex-wrap">
-          <h2 id="licence-info-title" className="flex items-center gap-2 text-lg font-semibold text-gray-900">
-            <ShieldCheck aria-hidden="true" className="h-5 w-5 text-gray-500" />
-            {t('licencePage.info.title')}
-          </h2>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void syncLicence()}
-              disabled={syncing || Boolean(syncReason)}
-              aria-label={syncReason ? `${t('licencePage.info.sync')}：${syncReason}` : t('licencePage.info.sync')}
-              title={syncReason ?? t('licencePage.info.sync')}
-              className={LICENCE_ICON_BUTTON}
-            >
-              <RefreshCw aria-hidden="true" className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
-            </button>
-            <button type="button" onClick={() => setDialog('import')} disabled={!situation.available || busy} className={LICENCE_SECONDARY}>
-              {t('licencePage.info.import')}
-            </button>
-          </div>
-        </div>
-
-        <LicenceTable testId="licence-table">
-          <LicenceTableRow
-            testId="platform-row"
-            cells={[
-              t('licencePage.info.platform'),
-              t('licencePage.info.platformType'),
-              licensed ? (
-                <span className="block" title={previous?.license_id ?? undefined}>
-                  <span className="font-mono text-xs">{compactIdentifier(previous?.license_id, 14, 10)}</span>
-                  {status && !INVALID_STATUSES.has(status) && (
-                    <span className="block text-xs text-gray-500">{t(`licenceStatus.${status}`, { defaultValue: status })}</span>
-                  )}
-                </span>
-              ) : '—',
-              previous?.version ? t('licencePage.info.previousPackage', { version: formatProductVersion(previous.version) }) : '—',
-              quota || '—',
-              statusTag,
-              licensed ? <LicenceExpiry value={formatDateTime(previous?.expires_at)} days={remaining} lapsed={invalid} /> : '—',
-            ]}
-          />
-        </LicenceTable>
-        {invalid && <div className={ERROR}>{t('licence.invalidHint')}</div>}
-        <p className="text-xs text-gray-500">{t('licencePage.info.itemsNote')}</p>
-        {licensed && !lapsed && (
-          <div className="rounded-lg bg-gray-50 px-4 py-3 text-sm text-gray-600" data-testid="saved-hint">
-            {t(previous?.version ? 'machine.previousNote' : 'machine.licensedNote')}
-          </div>
-        )}
-        {imported && <div className={DONE} role="status">{imported}</div>}
-        {syncError && <div className={ERROR}>{syncError}</div>}
-        {syncChanged === true && <div className={DONE} role="status">{t('licence.syncChanged')}</div>}
-        {syncChanged === false && <div className={NOTE} role="status">{t('licence.syncUnchanged')}</div>}
-        {situation.available && (
-          <ApplicationRecords
-            applications={applications}
-            loadError={applicationsError}
-            onReload={() => void loadApplications()}
-            onTaken={onTaken}
-            onConsoleRefused={refreshConsoleLogin}
-          />
-        )}
-      </section>
-
-      <section className={CARD} aria-labelledby="licence-version-title" data-testid="licence-version">
-        <div className="flex items-center justify-between gap-3 max-md:flex-wrap">
-          <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
-            <h2 id="licence-version-title" className="flex items-center gap-2 text-lg font-semibold text-gray-900">
-              <Package aria-hidden="true" className="h-5 w-5 text-gray-500" />
-              {t('licencePage.version.title')}
+        <section className={LICENCE_SECTION} aria-labelledby="licence-info-title" data-testid="licence-info">
+          <div className="flex items-center justify-between gap-3 max-md:flex-wrap">
+            <h2 id="licence-info-title" className="flex items-center gap-2 text-lg font-semibold text-gray-900">
+              <ShieldCheck aria-hidden="true" className="h-5 w-5 text-gray-500" />
+              {t('licencePage.info.title')}
             </h2>
-            <span className="text-sm text-gray-600" data-testid="product-version">
-              {previous?.version
-                ? t('licencePage.version.previous', { version: formatProductVersion(previous.version) })
-                : t('licencePage.version.open', { version: productVersion ?? '' }).trim()}
-            </span>
+            <div className="flex items-center gap-2">
+              <LicenceSyncButton onClick={() => void syncLicence()} busy={syncing} reason={syncReason} />
+              <button type="button" onClick={() => setDialog('import')} disabled={!situation.available || busy} className={LICENCE_SECONDARY}>
+                {t('licencePage.info.import')}
+              </button>
+            </div>
           </div>
-          {canDownload && (
-            <button
-              type="button"
-              onClick={() => void checkOffer()}
-              disabled={checking || busy || offline}
-              title={offline ? t('licencePage.version.checkOffline') : undefined}
-              className={LICENCE_SECONDARY}
-            >
-              {checking && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
-              {t('upgrade.check')}
-            </button>
-          )}
-        </div>
 
-        <div className="space-y-3" aria-labelledby="flockspro-upgrade">
-          <p id="flockspro-upgrade" className="text-sm font-medium text-gray-900">{t('upgrade.title')}</p>
-          <p className="text-sm text-gray-500">
-            {previous?.version ? t('upgrade.currentPrevious', { version: formatProductVersion(previous.version) }) : t('upgrade.currentOpen')}
-          </p>
-          <p className="text-sm text-gray-500">{t(windows ? 'upgrade.whatChangesWindows' : 'upgrade.whatChanges', { root: situation.install_root })}</p>
-          {!licensed && <div className={NOTE}>{t('machine.openNote')}</div>}
-          {situation.systemd && <div className={NOTE}>{t('upgrade.systemd')}</div>}
-          {situation.prepare_command && (
-            <div className={NOTE}>
-              {t('upgrade.prepare', { account: situation.account, root: situation.install_root })}
-              <Command text={situation.prepare_command} />
-              <button type="button" onClick={() => void load()} className={`${LICENCE_SECONDARY} mt-3`}>
-                {t('upgrade.recheck')}
-              </button>
+          <LicenceTable testId="licence-table">
+            <LicenceTableRow
+              testId="platform-row"
+              cells={[
+                t('licencePage.info.platform'),
+                t('licencePage.info.platformType'),
+                licensed ? (
+                  <span className="block" title={previous?.license_id ?? undefined}>
+                    <span className="font-mono text-xs">{compactIdentifier(previous?.license_id, 14, 10)}</span>
+                    {status && !INVALID_STATUSES.has(status) && (
+                      <span className="block text-xs text-gray-500">{t(`licenceStatus.${status}`, { defaultValue: status })}</span>
+                    )}
+                  </span>
+                ) : '—',
+                previous?.version ? t('licencePage.info.previousPackage', { version: formatProductVersion(previous.version) }) : '—',
+                quota || '—',
+                statusTag,
+                licensed ? <LicenceExpiry value={formatDateTime(previous?.expires_at)} days={remaining} lapsed={invalid} /> : '—',
+              ]}
+            />
+          </LicenceTable>
+          {withdrawn && <div className={ERROR}>{t('licence.invalidHint')}</div>}
+          <LicenceTermHint term={term} offline={offline} signedIn={signedIn} canApply={!applyBlocked} />
+          {!licensed && <p className="text-xs text-gray-500" data-testid="items-note">{t('licencePage.info.itemsNote')}</p>}
+          {licensed && !lapsed && (
+            <div className="rounded-lg bg-gray-50 px-4 py-3 text-sm text-gray-600" data-testid="saved-hint">
+              {previous?.version ? t('machine.previousNote') : t('licencePage.info.savedPlatform')}
             </div>
           )}
-          {canDownload && offline && <div className={NOTE} data-testid="upgrade-offline">{t(windows ? 'upgrade.offlineWindows' : 'upgrade.offline')}</div>}
-          {canDownload && !offline && consoleLogin && !signedIn && <div className={NOTE}>{t('upgrade.loginFirst')}</div>}
-          {checkError && <div className={ERROR}>{checkError}</div>}
-          {offer && (
-            <div className="flex items-center justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 max-md:flex-wrap">
-              <div className="min-w-0">
-                <p className="text-sm text-emerald-700">{t('upgrade.offer', { version: formatProductVersion(offer.version), platform: situation.platform })}</p>
-                <p className="break-all text-xs text-emerald-700">{offer.filename}</p>
+          {syncError && <div className={ERROR}>{syncError}</div>}
+          {syncChanged === true && <div className={DONE} role="status">{t('licence.syncChanged')}</div>}
+          {syncChanged === false && <div className={NOTE} role="status">{t('licence.syncUnchanged')}</div>}
+          {situation.available && (
+            <ApplicationRecords
+              applications={applications}
+              loadError={applicationsError}
+              onReload={() => void loadApplications()}
+              onTaken={onTaken}
+              onConsoleRefused={refreshConsoleLogin}
+              // Only once Console is known to be in reach: before the first check the page counts as online.
+              autoTake={!network.checking && !offline && signedIn && needsLicence}
+            />
+          )}
+        </section>
+
+        <section className={LICENCE_SECTION} aria-labelledby="licence-version-title" data-testid="licence-version">
+          <div className="flex items-center justify-between gap-3 max-md:flex-wrap">
+            <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
+              <h2 id="licence-version-title" className="flex items-center gap-2 text-lg font-semibold text-gray-900">
+                <Package aria-hidden="true" className="h-5 w-5 text-gray-500" />
+                {t('licencePage.version.title')}
+              </h2>
+              <span className="text-sm text-gray-600" data-testid="product-version">
+                {previous?.version
+                  ? t('licencePage.version.previous', { version: formatProductVersion(previous.version) })
+                  : t('licencePage.version.open', { version: productVersion ?? '' }).trim()}
+              </span>
+            </div>
+            {canDownload && (
+              <span title={offline ? t('licencePage.version.checkOffline') : undefined} className="inline-flex">
+                <button
+                  type="button"
+                  onClick={() => void checkOffer()}
+                  disabled={checking || busy || offline}
+                  className={LICENCE_SECONDARY}
+                >
+                  {checking && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+                  {t('licencePage.version.check')}
+                </button>
+              </span>
+            )}
+          </div>
+
+          <div className="space-y-3" aria-labelledby="flockspro-upgrade">
+            <p id="flockspro-upgrade" className="text-sm font-medium text-gray-900">{t('upgrade.title')}</p>
+            <p className="text-sm text-gray-500">
+              {previous?.version ? t('upgrade.currentPrevious', { version: formatProductVersion(previous.version) }) : t('upgrade.currentOpen')}
+            </p>
+            <p className="text-sm text-gray-500">{t(windows ? 'upgrade.whatChangesWindows' : 'upgrade.whatChanges', { root: situation.install_root })}</p>
+            {!licensed && <div className={NOTE}>{t('machine.openNote')}</div>}
+            {situation.systemd && <div className={NOTE}>{t('upgrade.systemd')}</div>}
+            {situation.prepare_command && (
+              <div className={NOTE}>
+                {t('upgrade.prepare', { account: situation.account, root: situation.install_root })}
+                <Command text={situation.prepare_command} />
+                <button type="button" onClick={() => void load()} className={`${LICENCE_SECONDARY} mt-3`}>
+                  {t('upgrade.recheck')}
+                </button>
               </div>
-              <button type="button" onClick={() => void startUpgrade()} disabled={busy} className={GO}>
-                {running ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ArrowUpCircle className="h-4 w-4" aria-hidden="true" />}
-                {situation.can_start ? t('upgrade.start', { version: formatProductVersion(offer.version) }) : t('upgrade.download')}
-              </button>
-            </div>
-          )}
-          {runError && <div className={ERROR}>{runError}</div>}
-          {upgrade && <UpgradeProgress upgrade={upgrade} serverGone={serverGone} />}
-        </div>
-      </section>
+            )}
+            {canDownload && offline && <div className={NOTE} data-testid="upgrade-offline">{t(windows ? 'upgrade.offlineWindows' : 'upgrade.offline')}</div>}
+            {canDownload && !offline && consoleLogin && !signedIn && <div className={NOTE}>{t('upgrade.loginFirst')}</div>}
+            {checkError && <div className={ERROR}>{checkError}</div>}
+            {offer && (
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 max-md:flex-wrap">
+                <div className="min-w-0">
+                  <p className="text-sm text-emerald-700">{t('upgrade.offer', { version: formatProductVersion(offer.version), platform: situation.platform })}</p>
+                  <p className="break-all text-xs text-emerald-700">{offer.filename}</p>
+                </div>
+                <button type="button" onClick={() => void startUpgrade()} disabled={busy} className={GO}>
+                  {running ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <ArrowUpCircle className="h-4 w-4" aria-hidden="true" />}
+                  {situation.can_start ? t('upgrade.start', { version: formatProductVersion(offer.version) }) : t('upgrade.download')}
+                </button>
+              </div>
+            )}
+            {runError && <div className={ERROR}>{runError}</div>}
+            {upgrade && <UpgradeProgress upgrade={upgrade} serverGone={serverGone} />}
+          </div>
+        </section>
+      </LicencePanel>
 
       {(dialog === 'online' || dialog === 'offline') && (
         <ApplicationDialog
@@ -499,7 +505,6 @@ export default function FlocksproUpgradePage() {
           onClose={() => setDialog(null)}
           onSent={() => void loadApplications()}
           onConsoleRefused={refreshConsoleLogin}
-          onImport={() => setDialog('import')}
         />
       )}
       {dialog === 'import' && (
@@ -509,7 +514,6 @@ export default function FlocksproUpgradePage() {
             setSituation(result.situation);
             setUpgrade(result.situation.upgrade);
             setSyncChanged(null);
-            setImported(result.message);
             setDialog(null);
             void loadApplications();
           }}

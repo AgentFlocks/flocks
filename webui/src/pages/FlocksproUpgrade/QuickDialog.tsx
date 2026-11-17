@@ -7,21 +7,19 @@ import {
   ENTERPRISE_UPGRADE_PAGE,
   enterpriseUpgradeApi,
   type EnterpriseSituation,
-  type LicenceApplication,
   type LicenceApplicationForm,
   type LicenceApplications,
-  type OfflineApplication,
 } from '@/api/enterpriseUpgrade';
 import { useToast } from '@/components/common/Toast';
 import { LICENCE_PRIMARY, LICENCE_SECONDARY, LicenceDialog } from '@/components/licence/LicenceUi';
 import { extractErrorMessage } from '@/utils/error';
 import { outstandingApplication } from './Application';
-import ApplicationFields, { EMPTY_APPLICATION, checkApplication, cleanApplication, type ApplicationProblems } from './ApplicationFields';
+import ApplicationFields, { ApplicationNotes, EMPTY_APPLICATION, checkApplication, cleanApplication, type ApplicationProblems } from './ApplicationFields';
 import { useConsoleConnectivity } from './connectivity';
 import { LICENCE_CHANGED_EVENT } from './events';
 import LicenceImportDialog from './LicenceImport';
-import OfflineApplicationResult, { downloadApplication } from './OfflineApplicationResult';
-import { DONE, ERROR, NOTE } from './styles';
+import { downloadApplication } from './OfflineApplicationResult';
+import { ERROR, NOTE } from './styles';
 
 // The account menu's Flocks Pro entry in the open edition: the quickest way to a licence, over the page.
 // The way follows whether Console answers from here: online the application goes to Console under the
@@ -47,8 +45,6 @@ export default function FlocksproQuickDialog({ onClose }: { onClose: () => void 
   const [problems, setProblems] = useState<ApplicationProblems>({});
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [submitted, setSubmitted] = useState<LicenceApplication | null>(null);
-  const [made, setMade] = useState<OfflineApplication | null>(null);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -118,18 +114,16 @@ export default function FlocksproQuickDialog({ onClose }: { onClose: () => void 
     setSubmitError(null);
     try {
       if (!offline) {
-        const application = await enterpriseUpgradeApi.apply(cleanApplication(form));
+        await enterpriseUpgradeApi.apply(cleanApplication(form));
         // The Flocks Pro page (kept mounted, or open underneath) lists it and follows it from now on.
         window.dispatchEvent(new Event(LICENCE_CHANGED_EVENT));
-        if (mounted.current) {
-          setSubmitted(application);
-          setForm(EMPTY_APPLICATION);
-        }
+        toast.success(t('licencePage.dialog.sent'));
       } else {
         const application = await enterpriseUpgradeApi.offlineApplication(cleanApplication(form));
         downloadApplication(application);
-        if (mounted.current) setMade(application);
+        toast.success(t('licencePage.dialog.downloaded'));
       }
+      onClose();
     } catch (err) {
       if (mounted.current) {
         setSubmitError(extractErrorMessage(err, offline ? t('offlineApply.failed') : t('apply.errors.submit')));
@@ -156,9 +150,9 @@ export default function FlocksproQuickDialog({ onClose }: { onClose: () => void 
             {t('licencePage.launcher.back')}
           </button>
         )}
-        onImported={(result) => {
+        onImported={() => {
+          // The dialog said it went in; the page (open underneath, or opened now) shows the licence.
           window.dispatchEvent(new Event(LICENCE_CHANGED_EVENT));
-          toast.success(t('licencePage.launcher.importedTitle'), result.message);
           goToPage();
         }}
       />
@@ -200,7 +194,7 @@ export default function FlocksproQuickDialog({ onClose }: { onClose: () => void 
         footerStart={importButton}
         footer={(
           <>
-            <button type="button" onClick={onClose} className={LICENCE_SECONDARY}>{t('apply.cancel')}</button>
+            <button type="button" onClick={onClose} className={LICENCE_SECONDARY}>{t('licencePage.dialog.cancel')}</button>
             <button type="button" onClick={() => void signIn()} className={LICENCE_PRIMARY}>{t('licencePage.launcher.signIn')}</button>
           </>
         )}
@@ -211,25 +205,19 @@ export default function FlocksproQuickDialog({ onClose }: { onClose: () => void 
     );
   }
 
-  if (!offline && (submitted || outstanding)) {
+  // Online with an application under way: nothing more to apply for here, its records are on the page.
+  if (!offline && outstanding) {
     return (
       <LicenceDialog
         title={t('licencePage.launcher.title')}
         onClose={onClose}
         testId="flockspro-quick"
-        footerStart={submitted ? undefined : importButton}
+        footerStart={importButton}
         footer={<button type="button" onClick={goToPage} className={LICENCE_PRIMARY}>{t('licencePage.launcher.toRecords')}</button>}
       >
-        {submitted ? (
-          <div className={DONE} role="status">{t('quick.submitted', { id: submitted.request_id })}</div>
-        ) : outstanding && (
-          <div className={NOTE}>
-            {t(outstanding.can_take ? 'quick.waitingToTake' : 'quick.inReview', {
-              id: outstanding.request_id,
-              status: t(`apply.status.${outstanding.status}`, { defaultValue: outstanding.status }),
-            })}
-          </div>
-        )}
+        <p className="text-sm text-gray-600" data-testid="quick-outstanding" data-request={outstanding.request_id}>
+          {t('licencePage.launcher.outstanding')}
+        </p>
       </LicenceDialog>
     );
   }
@@ -242,32 +230,21 @@ export default function FlocksproQuickDialog({ onClose }: { onClose: () => void 
       busy={submitting}
       testId="flockspro-quick"
       footerStart={importButton}
-      footer={made ? (
+      footer={(
         <>
-          <button type="button" onClick={() => setMade(null)} className={LICENCE_SECONDARY}>{t('quick.editAgain')}</button>
-          <button type="button" onClick={onClose} className={LICENCE_PRIMARY}>{t('licencePage.dialog.done')}</button>
-        </>
-      ) : (
-        <>
-          <button type="button" onClick={onClose} disabled={submitting} className={LICENCE_SECONDARY}>{t('apply.cancel')}</button>
+          <button type="button" onClick={onClose} disabled={submitting} className={LICENCE_SECONDARY}>{t('licencePage.dialog.cancel')}</button>
           <button type="submit" form="quick-apply-form" disabled={submitting} className={LICENCE_PRIMARY}>
             {submitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
-            {t(offline ? 'licencePage.dialog.download' : 'apply.submit')}
+            {t(offline ? 'licencePage.dialog.download' : 'licencePage.dialog.submit')}
           </button>
         </>
       )}
     >
-      {made ? (
-        <>
-          <OfflineApplicationResult application={made} />
-          <p className="text-sm text-gray-500">{t('licencePage.dialog.offlineNext')}</p>
-        </>
-      ) : (
-        <form id="quick-apply-form" className="space-y-4" onSubmit={(event) => void submit(event)} noValidate>
-          {!offline && applications?.pending_submission && <div className={NOTE}>{t('apply.pendingSubmission')}</div>}
-          <ApplicationFields form={form} problems={problems} onChange={set} idPrefix="quick-apply" />
-        </form>
-      )}
+      <form id="quick-apply-form" className="space-y-4" onSubmit={(event) => void submit(event)} noValidate>
+        {!offline && applications?.pending_submission && <div className={NOTE}>{t('apply.pendingSubmission')}</div>}
+        <ApplicationFields form={form} problems={problems} onChange={set} idPrefix="quick-apply" disabled={submitting} />
+        <ApplicationNotes value={form.notes ?? ''} onChange={(value) => set('notes', value)} idPrefix="quick-apply" disabled={submitting} />
+      </form>
       {submitError && <div className={ERROR} role="alert">{submitError}</div>}
     </LicenceDialog>
   );
