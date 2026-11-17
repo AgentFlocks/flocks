@@ -125,8 +125,8 @@ flocks stop
 ```
 
 The default service address is:
-- Flocks WebUI: `http://127.0.0.1:5173`
-- Remote access configurable via `flocks start --host <ip>`
+- Flocks WebUI: `http://127.0.0.1:5173` on this machine; the service listens on all interfaces (`0.0.0.0:5173`), so other machines open `http://<this machine's IP>:5173`
+- Keep it on this machine with `flocks start --host 127.0.0.1` (or `FLOCKS_HOST=127.0.0.1`)
 
 Flocks CLI usage: `flocks --help`
 
@@ -212,10 +212,18 @@ sudo chown -R <uid>:<gid> ~/.flocks
 ```
 
 ### 4.3 Remote Access to Flocks Service
+`flocks start` listens on all interfaces (`0.0.0.0`) by default, so other machines open
+`http://<this machine's IP>:5173` (allow the port in the firewall if one is on). To listen
+on one address only:
 ```bash
-flocks start --host 0.0.0.0
+flocks start --host 127.0.0.1   # this machine only
 ```
 If remote access from a virtual machine fails, please specify the host as the virtual machine's IP.
+
+The first administrator can only be created from this machine: open
+`http://127.0.0.1:5173` in a browser here, or run `flocks admin generate-one-time-password`
+here and sign in from anywhere as `admin` with the password it prints (you are asked to
+change it at first sign-in).
 
 The WebUI and API share the same service address and port. API requests use the
 same-origin `/api` path, keeping browser cookies and SSE on a single origin for
@@ -236,8 +244,10 @@ webhooks (`/api/channel/{channel_id}/webhook`) are public.
 
 Initial setup:
 
-1. Open the WebUI and complete the **bootstrap-admin** flow to create the
-   single `admin` account.
+1. Open the WebUI on the machine running Flocks and complete the
+   **bootstrap-admin** flow to create the single `admin` account. From another
+   machine, run `flocks admin generate-one-time-password` on the server instead and
+   sign in as `admin` with the printed password.
 2. The browser session cookie (`flocks_session`) is enough for the WebUI;
    no extra steps are required.
 

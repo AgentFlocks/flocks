@@ -2,6 +2,10 @@ import client from './client';
 
 export interface BootstrapStatus {
   bootstrapped: boolean;
+  /** Whether this browser may create the first administrator (only one on the server's own machine). */
+  setup_allowed?: boolean;
+  /** Where a browser on that machine reaches the service, when loopback reaches it. */
+  local_url?: string | null;
 }
 
 export interface LocalUser {
