@@ -273,12 +273,13 @@ export function readLicenceFile(file: File): Promise<string> {
 }
 
 /** The licence table's columns: item, type, licence id, source, quota, status, expiry (and actions). */
-// The narrowest the columns go add up to the table's min-width below (with the gaps and the padding), so a
-// laptop's content area holds the table whole and a phone scrolls it sideways, as the design does.
+// The narrowest the columns go add up to the table's min-width below (with the gaps and the padding). The
+// settings pages hold the table in at most 1100px, 988px in a 1280px window with the sidebar open: from there
+// up the table fits whole, actions column too; a phone scrolls it sideways, as the design does.
 export const LICENCE_TABLE_COLUMNS =
-  'grid grid-cols-[minmax(160px,1.4fr)_72px_minmax(150px,1fr)_minmax(150px,1fr)_minmax(120px,0.9fr)_96px_minmax(170px,1.1fr)] items-center gap-3';
+  'grid grid-cols-[minmax(144px,1.4fr)_64px_minmax(130px,1fr)_minmax(110px,1fr)_minmax(110px,0.9fr)_96px_minmax(156px,1.1fr)] items-center gap-2.5';
 export const LICENCE_TABLE_COLUMNS_WITH_ACTIONS =
-  'grid grid-cols-[minmax(160px,1.4fr)_72px_minmax(150px,1fr)_minmax(150px,1fr)_minmax(96px,0.8fr)_96px_minmax(170px,1.1fr)_minmax(96px,auto)] items-center gap-3';
+  'grid grid-cols-[minmax(144px,1.4fr)_64px_minmax(130px,1fr)_minmax(110px,1fr)_minmax(88px,0.8fr)_96px_minmax(156px,1.1fr)_minmax(90px,auto)] items-center gap-2.5';
 
 /** The table's frame and its header row; rows go inside. Wide: it scrolls on a narrow screen. */
 export function LicenceTable({ children, actions = false, testId }: { children: ReactNode; actions?: boolean; testId?: string }) {
@@ -286,7 +287,7 @@ export function LicenceTable({ children, actions = false, testId }: { children: 
   const columns = actions ? LICENCE_TABLE_COLUMNS_WITH_ACTIONS : LICENCE_TABLE_COLUMNS;
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-200" data-testid={testId}>
-      <div role="table" aria-label={t('licencePage.table.label')} className={actions ? 'min-w-[1120px]' : 'min-w-[1040px]'}>
+      <div role="table" aria-label={t('licencePage.table.label')} className={actions ? 'min-w-[980px]' : 'min-w-[904px]'}>
         <div role="row" className={`${columns} bg-gray-50 px-4 py-2.5 text-xs text-gray-500`}>
           <span role="columnheader">{t('licencePage.table.item')}</span>
           <span role="columnheader">{t('licencePage.table.type')}</span>
