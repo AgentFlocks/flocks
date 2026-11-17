@@ -14,7 +14,10 @@ import {
 } from '@/api/enterpriseUpgrade';
 import { extractErrorMessage, isServiceRefusal } from '@/utils/error';
 import LicenceApplicationCard from './Application';
+import { ConnectivityLine, useConsoleConnectivity } from './connectivity';
+import LicenceImport from './LicenceImport';
 import MachineHeading from './MachineHeading';
+import { LICENCE_CHANGED_EVENT } from './events';
 import {
   BOX,
   CARD,
@@ -34,6 +37,8 @@ import {
 // application for a licence when it has none it can go by (./Application), and the move to the
 // enterprise edition (flocks/updater/enterprise.py). It looks as the enterprise edition's page does (that build
 // has its own page here), and does what this edition can: the move, not the enterprise functions.
+// Whether Console answers from here decides the way to a licence: online (cloud account, an application
+// Console reviews) or offline (an application file handed over, the licence file that comes back imported).
 
 const INVALID_STATUSES = new Set(['revoked', 'expired', 'superseded']);
 
@@ -58,6 +63,7 @@ function licenceInvalid(previous: PreviousEdition): boolean {
 
 export default function FlocksproUpgradePage() {
   const { t } = useTranslation('flockspro');
+  const network = useConsoleConnectivity();
   const [situation, setSituation] = useState<EnterpriseSituation | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [consoleLogin, setConsoleLogin] = useState<ConsoleLoginSessionStatus | null>(null);
@@ -111,6 +117,12 @@ export default function FlocksproUpgradePage() {
   }, []);
   useEffect(() => {
     void load();
+  }, [load]);
+  // A licence imported from the account menu's dialog over this page.
+  useEffect(() => {
+    const reload = () => void load();
+    window.addEventListener(LICENCE_CHANGED_EVENT, reload);
+    return () => window.removeEventListener(LICENCE_CHANGED_EVENT, reload);
   }, [load]);
 
   // While a download or the installer runs and this page is not the one streaming it (a reload, a
@@ -257,6 +269,10 @@ export default function FlocksproUpgradePage() {
   // The Windows installer is a program run as an administrator: other words than the .run's.
   const windows = situation.platform.startsWith('windows-');
 
+  const offline = network.mode === 'offline';
+  // No licence it can go by: a licence file can be imported, online or not.
+  const needsLicence = (!licensed || lapsed) && situation.available;
+
   // A licence taken from an application here, with no Python package, is not the old edition.
   const title = previous?.version
     ? t('machine.previousTitle', { version: previous.version })
@@ -273,7 +289,7 @@ export default function FlocksproUpgradePage() {
             {previous?.version ? t('upgrade.currentPrevious', { version: previous.version }) : t('upgrade.currentOpen')}
           </p>
         </div>
-        {canDownload && (
+        {canDownload && !offline && (
           <button type="button" onClick={() => void checkOffer()} disabled={checking || busy} className={SECONDARY}>
             {checking && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
             {t('upgrade.check')}
@@ -294,7 +310,8 @@ export default function FlocksproUpgradePage() {
         </div>
       )}
 
-      {canDownload && consoleLogin && !signedIn && <div className={NOTE}>{t('upgrade.loginFirst')}</div>}
+      {canDownload && offline && <div className={NOTE} data-testid="upgrade-offline">{t(windows ? 'upgrade.offlineWindows' : 'upgrade.offline')}</div>}
+      {canDownload && !offline && consoleLogin && !signedIn && <div className={NOTE}>{t('upgrade.loginFirst')}</div>}
       {checkError && <div className={ERROR}>{checkError}</div>}
       {offer && (
         <div className="flex items-center justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 max-md:flex-wrap">
@@ -326,9 +343,15 @@ export default function FlocksproUpgradePage() {
   return (
     <div className="space-y-6">
       <PageHeader title="Flocks Pro" description={t('description')} icon={<ArrowUpCircle className="w-8 h-8" />} />
+      <ConnectivityLine state={network} />
 
       <section className={CARD} aria-labelledby="flockspro-console-login">
         <h2 id="flockspro-console-login" className="text-lg font-semibold text-gray-900">{t('consoleLogin.title')}</h2>
+        {offline && !signedIn ? (
+          <div className={NOTE} data-testid="console-unavailable">
+            {t(needsLicence ? 'offlinePage.consoleUnavailable' : 'offlinePage.consoleUnavailableLicensed')}
+          </div>
+        ) : (
         <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
           <div className="flex items-center justify-between gap-3 max-md:flex-wrap">
             <div className="text-sm text-gray-800">
@@ -353,17 +376,19 @@ export default function FlocksproUpgradePage() {
             )}
           </div>
         </div>
+        )}
         {consoleLoginError && <div className={ERROR}>{consoleLoginError}</div>}
       </section>
 
       {/* No licence it can go by: none at all, the Python package without one, or one no longer valid. */}
-      {(!licensed || lapsed) && situation.available ? (
+      {needsLicence ? (
         <LicenceApplicationCard
           title={title}
           description={description}
           note={machineNote}
           signedIn={signedIn}
           loginKnown={consoleLogin !== null}
+          mode={network.mode}
           onConsoleRefused={refreshConsoleLogin}
           onTaken={(next) => {
             setSituation(next);
@@ -380,6 +405,20 @@ export default function FlocksproUpgradePage() {
           {updateBox}
           {licenceBox}
           <div className={NOTE}>{machineNote}</div>
+        </section>
+      )}
+
+      {needsLicence && (
+        <section className={CARD} aria-labelledby="flockspro-licence-file">
+          <h2 id="flockspro-licence-file" className="text-lg font-semibold text-gray-900">{t('licenceFile.cardTitle')}</h2>
+          <LicenceImport
+            hint={t(offline ? 'licenceFile.hintOffline' : 'licenceFile.hintOnline')}
+            onImported={(result) => {
+              setSituation(result.situation);
+              setUpgrade(result.situation.upgrade);
+              setSyncChanged(null);
+            }}
+          />
         </section>
       )}
     </div>

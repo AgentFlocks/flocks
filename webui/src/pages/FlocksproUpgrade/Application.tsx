@@ -8,50 +8,26 @@ import {
   type LicenceApplication,
   type LicenceApplicationForm,
   type LicenceApplications,
+  type OfflineApplication,
 } from '@/api/enterpriseUpgrade';
 import { extractErrorMessage } from '@/utils/error';
+import ApplicationFields, { EMPTY_APPLICATION, checkApplication, cleanApplication, type ApplicationProblems } from './ApplicationFields';
+import type { LicenceMode } from './connectivity';
+import { LICENCE_CHANGED_EVENT } from './events';
 import MachineHeading from './MachineHeading';
-import { CARD, DANGER, ERROR, GO, INPUT, NOTE, PRIMARY, SECONDARY, formatDateTime } from './styles';
+import OfflineApplicationResult from './OfflineApplicationResult';
+import { CARD, DANGER, ERROR, GO, INFO, NOTE, PRIMARY, SECONDARY, formatDateTime } from './styles';
 
 // The application for a licence, on a machine that has none it can go by (flocks/updater/enterprise_application.py):
 // the form goes to Console for review; an approved licence is taken here, and the page moves on to
 // the upgrade as for a machine that had the Python enterprise package. The form opens in a dialog and
-// the application shows as the current request, as on the enterprise edition's page.
+// the application shows as the current request, as on the enterprise edition's page. Offline (Console
+// cannot be reached from here) the same form makes an application file to hand over instead, and the
+// licence file that comes back is imported on the page (./LicenceImport).
 
 /** Waiting for review: no second application meanwhile, nor while a good licence waits to be taken. */
 const IN_REVIEW = new Set(['pending', 'reviewing']);
 const REVIEWED = new Set(['approved', 'activated', 'rejected']);
-// As the server checks them (flocks/server/routes/enterprise_upgrade.py).
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const PHONE = /^[+\d\s()-]+$/;
-
-type Field = 'company' | 'applicant_name' | 'applicant_email' | 'applicant_phone';
-
-const EMPTY: LicenceApplicationForm = {
-  license_type: 'poc',
-  company: '',
-  applicant_name: '',
-  applicant_email: '',
-  applicant_phone: '',
-  sales_rep_name: '',
-  notes: '',
-};
-
-function phoneProblem(value: string): boolean {
-  const digits = value.replace(/\D/g, '').length;
-  const plus = (value.match(/\+/g) ?? []).length;
-  return !PHONE.test(value) || plus > 1 || (plus === 1 && !value.startsWith('+')) || digits < 6 || digits > 15;
-}
-
-function check(form: LicenceApplicationForm): Partial<Record<Field, string>> {
-  const problems: Partial<Record<Field, string>> = {};
-  for (const field of ['company', 'applicant_name', 'applicant_email', 'applicant_phone'] as Field[]) {
-    if (!form[field].trim()) problems[field] = 'required';
-  }
-  if (!problems.applicant_email && !EMAIL.test(form.applicant_email.trim())) problems.applicant_email = 'email';
-  if (!problems.applicant_phone && phoneProblem(form.applicant_phone.trim())) problems.applicant_phone = 'phone';
-  return problems;
-}
 
 interface Props {
   title: string;
@@ -66,14 +42,18 @@ interface Props {
   onConsoleRefused?: () => void;
   /** The way to the enterprise edition, below the applications. */
   children: ReactNode;
+  /** Online the form goes to Console; offline it makes an application file to hand over. */
+  mode?: LicenceMode;
 }
 
-export default function LicenceApplicationCard({ title, description, note, signedIn, loginKnown, onTaken, onConsoleRefused, children }: Props) {
+export default function LicenceApplicationCard({ title, description, note, signedIn, loginKnown, onTaken, onConsoleRefused, children, mode = 'online' }: Props) {
   const { t } = useTranslation('flockspro');
+  const offline = mode === 'offline';
   const [applications, setApplications] = useState<LicenceApplications | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [form, setForm] = useState<LicenceApplicationForm>(EMPTY);
-  const [problems, setProblems] = useState<Partial<Record<Field, string>>>({});
+  const [form, setForm] = useState<LicenceApplicationForm>(EMPTY_APPLICATION);
+  const [problems, setProblems] = useState<ApplicationProblems>({});
+  const [offlineApplication, setOfflineApplication] = useState<OfflineApplication | null>(null);
   const [dialog, setDialog] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -96,11 +76,18 @@ export default function LicenceApplicationCard({ title, description, note, signe
   useEffect(() => {
     void load();
   }, [load]);
+  // An application sent (or a licence imported) from the account menu's dialog while this page is kept.
+  useEffect(() => {
+    const reload = () => void load();
+    window.addEventListener(LICENCE_CHANGED_EVENT, reload);
+    return () => window.removeEventListener(LICENCE_CHANGED_EVENT, reload);
+  }, [load]);
 
   const items = applications?.items ?? [];
   // One at a time: no new application while one is under way or a licence waits to be taken.
   const outstanding = items.find((item) => IN_REVIEW.has(item.status) || (item.can_take && !item.licence_over));
-  const canApply = Boolean(applications) && !outstanding && signedIn;
+  // Offline nothing is sent: an application file can be made whatever this machine has asked Console before.
+  const canApply = offline || (Boolean(applications) && !outstanding && signedIn);
 
   const set = (field: keyof LicenceApplicationForm, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -109,23 +96,24 @@ export default function LicenceApplicationCard({ title, description, note, signe
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    const found = check(form);
+    const found = checkApplication(form);
     setProblems(found);
     if (Object.keys(found).length > 0) return;
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await enterpriseUpgradeApi.apply({
-        ...form,
-        sales_rep_name: form.sales_rep_name?.trim() || null,
-        notes: form.notes?.trim() || null,
-      });
-      setForm(EMPTY);
+      if (offline) {
+        // Kept in the dialog: the application file is copied or downloaded from there.
+        setOfflineApplication(await enterpriseUpgradeApi.offlineApplication(cleanApplication(form)));
+        return;
+      }
+      await enterpriseUpgradeApi.apply(cleanApplication(form));
+      setForm(EMPTY_APPLICATION);
       setDialog(false);
       await load();
     } catch (err) {
-      setSubmitError(extractErrorMessage(err, t('apply.errors.submit')));
-      onConsoleRefused?.();
+      setSubmitError(extractErrorMessage(err, offline ? t('offlineApply.failed') : t('apply.errors.submit')));
+      if (!offline) onConsoleRefused?.();
     } finally {
       setSubmitting(false);
     }
@@ -161,9 +149,6 @@ export default function LicenceApplicationCard({ title, description, note, signe
     }
   };
 
-  const fieldError = (field: Field) =>
-    problems[field] ? <p className="mt-1 text-xs text-red-600">{t(`apply.problems.${problems[field]}`)}</p> : null;
-
   return (
     <section className={CARD} aria-labelledby="flockspro-machine">
       <MachineHeading
@@ -174,17 +159,18 @@ export default function LicenceApplicationCard({ title, description, note, signe
             type="button"
             onClick={() => {
               setSubmitError(null);
+              setOfflineApplication(null);
               setDialog(true);
             }}
             disabled={!canApply}
             className={PRIMARY}
           >
-            {t('apply.open')}
+            {offline ? t('offlineApply.open') : t('apply.open')}
           </button>
         }
       />
 
-      {loginKnown && !signedIn && <div className={NOTE}>{t('apply.signInFirst')}</div>}
+      {!offline && loginKnown && !signedIn && <div className={NOTE}>{t('apply.signInFirst')}</div>}
       {loadError && <div className={ERROR}>{loadError}</div>}
       {applications?.note && <div className={NOTE}>{applications.note}</div>}
       {applications?.pending_submission && !outstanding && <div className={NOTE}>{t('apply.pendingSubmission')}</div>}
@@ -222,54 +208,29 @@ export default function LicenceApplicationCard({ title, description, note, signe
             onSubmit={(event) => void submit(event)}
             noValidate
           >
-            <h3 id="flockspro-apply-title" className="text-lg font-semibold text-gray-900">{t('apply.title')}</h3>
-            <div className="space-y-3">
-              <div>
-                <label htmlFor="apply-type" className="mb-1 block text-sm text-gray-600">{t('apply.fields.licenseType')}</label>
-                <select id="apply-type" className={INPUT} value={form.license_type}
-                  onChange={(e) => set('license_type', e.target.value)}>
-                  <option value="poc">{t('apply.licenseTypes.poc')}</option>
-                  <option value="commercial">{t('apply.licenseTypes.commercial')}</option>
-                </select>
-              </div>
-              <div>
-                <input id="apply-company" className={INPUT} value={form.company} maxLength={200}
-                  aria-label={t('apply.fields.company')} placeholder={t('apply.placeholders.company')}
-                  onChange={(e) => set('company', e.target.value)} aria-invalid={Boolean(problems.company)} />
-                {fieldError('company')}
-              </div>
-              <div>
-                <input id="apply-name" className={INPUT} value={form.applicant_name} maxLength={100}
-                  aria-label={t('apply.fields.applicantName')} placeholder={t('apply.placeholders.applicantName')}
-                  onChange={(e) => set('applicant_name', e.target.value)} aria-invalid={Boolean(problems.applicant_name)} />
-                {fieldError('applicant_name')}
-              </div>
-              <div>
-                <input id="apply-email" type="email" className={INPUT} value={form.applicant_email} maxLength={200}
-                  aria-label={t('apply.fields.email')} placeholder={t('apply.placeholders.email')}
-                  onChange={(e) => set('applicant_email', e.target.value)} aria-invalid={Boolean(problems.applicant_email)} />
-                {fieldError('applicant_email')}
-              </div>
-              <div>
-                <input id="apply-phone" type="tel" className={INPUT} value={form.applicant_phone} maxLength={40}
-                  aria-label={t('apply.fields.phone')} placeholder={t('apply.placeholders.phone')}
-                  onChange={(e) => set('applicant_phone', e.target.value)} aria-invalid={Boolean(problems.applicant_phone)} />
-                {fieldError('applicant_phone')}
-              </div>
-              <input id="apply-sales" className={INPUT} value={form.sales_rep_name ?? ''} maxLength={100}
-                aria-label={t('apply.fields.salesRep')} placeholder={t('apply.placeholders.salesRep')}
-                onChange={(e) => set('sales_rep_name', e.target.value)} />
-              <textarea id="apply-notes" className={INPUT} rows={3} value={form.notes ?? ''} maxLength={2000}
-                aria-label={t('apply.fields.notes')} placeholder={t('apply.placeholders.notes')}
-                onChange={(e) => set('notes', e.target.value)} />
-            </div>
+            <h3 id="flockspro-apply-title" className="text-lg font-semibold text-gray-900">{offline ? t('offlineApply.dialogTitle') : t('apply.title')}</h3>
+            {offline && <div className={INFO} data-testid="apply-hint">{t('offlineApply.dialogHint')}</div>}
+            {offlineApplication ? (
+              <OfflineApplicationResult application={offlineApplication} />
+            ) : (
+              <ApplicationFields form={form} problems={problems} onChange={set} />
+            )}
             {submitError && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{submitError}</div>}
             <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => setDialog(false)} className={SECONDARY}>{t('apply.cancel')}</button>
-              <button type="submit" disabled={submitting} className={PRIMARY}>
-                {submitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
-                {t('apply.submit')}
-              </button>
+              {offlineApplication ? (
+                <>
+                  <button type="button" onClick={() => setOfflineApplication(null)} className={SECONDARY}>{t('quick.editAgain')}</button>
+                  <button type="button" onClick={() => setDialog(false)} className={PRIMARY}>{t('quick.close')}</button>
+                </>
+              ) : (
+                <>
+                  <button type="button" onClick={() => setDialog(false)} className={SECONDARY}>{t('apply.cancel')}</button>
+                  <button type="submit" disabled={submitting} className={PRIMARY}>
+                    {submitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+                    {offline ? t('offlineApply.generate') : t('apply.submit')}
+                  </button>
+                </>
+              )}
             </div>
           </form>
         </div>

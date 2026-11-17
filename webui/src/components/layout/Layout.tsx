@@ -319,6 +319,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       icon: item.icon,
       highlight: item.highlight,
       badge: item.badge,
+      badgeTone: item.badgeTone,
+      dialog: item.dialog,
     });
     const visible = registry.navItems
       .filter((item) => !item.adminOnly || user?.role === 'admin')
@@ -1047,6 +1049,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           roleLabel={accountRoleLabel}
           initial={accountInitial}
           version={displayVersion}
+          editionBadge={registry.editionBadge}
           update={versionUpdate}
           extensionItems={extensionNavItems.accountMenu}
           onCheckUpdate={openManualUpdateCheck}

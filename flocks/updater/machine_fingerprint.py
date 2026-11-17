@@ -189,6 +189,28 @@ def machine_identity() -> tuple[str, str]:
     return "", ""
 
 
+def machine_fingerprints() -> set[str]:
+    """Every fingerprint this host goes by that can be read now -- its device id and the digest of its
+    identifier -- as the core holds a licence bound to either to this host; empty where none can be read.
+    Never raises: what cannot be read is left out. Blocking, as ``machine_identity`` is."""
+    found: set[str] = set()
+    if sys.platform.startswith("linux"):
+        found.add(_linux_device_id())
+        try:
+            found.add(fingerprint_of(_linux_machine_id()))
+        except MachineIdUnreadable:
+            pass
+    elif sys.platform == "darwin":
+        try:
+            uuid = _platform_uuid()
+        except MachineIdUnreadable:
+            uuid = ""
+        if uuid.strip() and uuid.strip() not in _PLACEHOLDER_UUIDS:
+            found.add(device_id_of(uuid.lower()))
+        found.add(fingerprint_of(uuid))
+    return {item for item in found if item}
+
+
 def machine_fingerprint() -> str:
     """This host's fingerprint (``machine_identity``); "" where it keeps no identifier."""
     return machine_identity()[0]

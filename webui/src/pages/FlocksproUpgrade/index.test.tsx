@@ -28,6 +28,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 //   FP15 signing out of the cloud account: the check goes, the sign-in comes back
 //   FP16 the backend has no such page: the old version came back after a failed upgrade
 //   FP17 a licence no longer valid: the machine may apply again, and the card stays to sync it
+//   FP18 Console out of reach: the cloud sign-in says so instead of offering itself, the application
+//        makes an application file to hand over (the offline hint), the version check is not offered,
+//        and the licence file that comes back is imported on the page, which moves on to the upgrade
+//   FP19 Console answering: the licence file card is there too while the machine has no licence,
+//        with the online words; a machine with a licence has none
+//   FP20 an application sent from the account menu's dialog while the page is kept: the page lists
+//        it without a reload
 
 const { situation, check, start, progress, applications, apply, withdraw, take, syncLicence, consoleLoginSession } = vi.hoisted(() => ({
   situation: vi.fn(),
@@ -43,15 +50,23 @@ const { situation, check, start, progress, applications, apply, withdraw, take, 
 }));
 
 vi.mock('@/api/enterpriseUpgrade', () => ({
-  enterpriseUpgradeApi: { situation, check, start, progress, applications, apply, withdraw, take, syncLicence },
+  enterpriseUpgradeApi: {
+    situation, check, start, progress, applications, apply, withdraw, take, syncLicence,
+    offlineApplication: (...args: unknown[]) => offlineApplication(...args),
+    importLicence: (...args: unknown[]) => importLicence(...args),
+  },
 }));
-const { startConsoleLogin, logoutConsoleLogin, clientPost } = vi.hoisted(() => ({
+const { startConsoleLogin, logoutConsoleLogin, clientPost, consoleConnectivity, offlineApplication, importLicence } = vi.hoisted(() => ({
   startConsoleLogin: vi.fn(),
   logoutConsoleLogin: vi.fn(),
   clientPost: vi.fn(),
+  consoleConnectivity: vi.fn(),
+  offlineApplication: vi.fn(),
+  importLicence: vi.fn(),
 }));
-vi.mock('@/api/auth', () => ({ authApi: { consoleLoginSession, startConsoleLogin, logoutConsoleLogin } }));
+vi.mock('@/api/auth', () => ({ authApi: { consoleLoginSession, startConsoleLogin, logoutConsoleLogin, consoleConnectivity } }));
 vi.mock('@/api/client', () => ({ default: { get: vi.fn(), post: clientPost } }));
+vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ success: vi.fn(), error: vi.fn() }) }));
 vi.mock('react-i18next', () => {
   // One function, as react-i18next hands out for a language.
   const t = (key: string, options?: Record<string, unknown>) =>
@@ -90,6 +105,7 @@ const offer = { url: 'https://console.example/r.run', sha256: 'a'.repeat(64), re
 
 beforeEach(() => {
   vi.clearAllMocks();
+  consoleConnectivity.mockResolvedValue({ configured: true, online: true, console_host: 'console.example', checked_at: '' });
   consoleLoginSession.mockResolvedValue({ logged_in: true, account_name: 'ops@example.com' });
   applications.mockResolvedValue({ items: [], note: null });
   clientPost.mockResolvedValue({ data: {} });
@@ -661,4 +677,77 @@ describe('Flocks Pro page of the open edition', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'consoleLogin.logoutAction' }));
     expect(await screen.findByText('boom')).toBeInTheDocument();
   });
+
+  it('FP18 Console out of reach: the offline way, from the application file to the licence file', async () => {
+    const user = userEvent.setup();
+    const open = { ...base, previous: null };
+    situation.mockResolvedValue(open);
+    consoleLoginSession.mockResolvedValue({ logged_in: false });
+    consoleConnectivity.mockResolvedValue({ configured: true, online: false, console_host: 'console.example', checked_at: '' });
+    offlineApplication.mockResolvedValue({
+      format: 'flocks-licence-application/1', product: 'Flocks Pro', license_type: 'poc', company: 'Acme', applicant_name: 'Li Lei',
+      applicant_email: 'li@acme.example', applicant_phone: '+86 138 0000 0000', sales_rep_name: null, notes: null,
+      replaces_license_id: null, machine: '0123456789abcdef0123456789abcdef', machine_kind: 'devid', install_id: 'inst-1',
+      hostname: 'h', platform: 'linux-arm64', flocks_version: '2026.11.9', applied_by: 'admin', created_at: '2026-11-17T00:00:00Z',
+    });
+    render(<FlocksproUpgradePage />);
+
+    expect(await screen.findByTestId('console-unavailable')).toHaveTextContent('offlinePage.consoleUnavailable');
+    expect(screen.queryByRole('button', { name: 'consoleLogin.loginAction' })).toBeNull();
+    expect(screen.queryByText('apply.signInFirst')).toBeNull();
+    // The application makes a file to hand over, signed in or not.
+    await user.click(screen.getByRole('button', { name: 'offlineApply.open' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByTestId('apply-hint')).toHaveTextContent('offlineApply.dialogHint');
+    await user.type(within(dialog).getByLabelText('apply.fields.company'), 'Acme');
+    await user.type(within(dialog).getByLabelText('apply.fields.applicantName'), 'Li Lei');
+    await user.type(within(dialog).getByLabelText('apply.fields.email'), 'li@acme.example');
+    await user.type(within(dialog).getByLabelText('apply.fields.phone'), '+86 138 0000 0000');
+    await user.click(within(dialog).getByRole('button', { name: 'offlineApply.generate' }));
+    expect(await within(dialog).findByTestId('offline-application')).toHaveTextContent('0123456789abcdef0123456789abcdef');
+    expect(apply).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole('button', { name: 'quick.close' }));
+
+    // The licence file that comes back: the page moves on to the machine with a licence.
+    importLicence.mockResolvedValue({
+      licence: { license_id: 'lic_off_1', license_status: 'poc', expires_at: 1802649569 },
+      situation: { ...open, previous: { ...previous, version: null, license_id: 'lic_off_1', license_status: 'poc', lapsed: false } },
+    });
+    expect(screen.getByText('licenceFile.hintOffline')).toBeInTheDocument();
+    await user.upload(screen.getByTestId('licence-import-file'), new File(['{"key":"a.b.c"}'], 'license.json', { type: 'application/json' }));
+    await waitFor(() => expect(importLicence).toHaveBeenCalledWith('{"key":"a.b.c"}'));
+    expect(await screen.findByTestId('licence-card')).toHaveTextContent('lic_off_1');
+    expect(screen.queryByText('licenceFile.cardTitle')).toBeNull();
+    expect(screen.getByTestId('console-unavailable')).toHaveTextContent('offlinePage.consoleUnavailableLicensed');
+    // No version check without Console; the offline installer is the way.
+    expect(screen.queryByRole('button', { name: 'upgrade.check' })).toBeNull();
+    expect(screen.getByTestId('upgrade-offline')).toHaveTextContent('upgrade.offline');
+  });
+
+  it('FP19 Console answering: the licence file card is there while the machine has no licence', async () => {
+    situation.mockResolvedValue({ ...base, previous: null });
+    const { unmount } = render(<FlocksproUpgradePage />);
+    expect(await screen.findByText('licenceFile.cardTitle')).toBeInTheDocument();
+    expect(screen.getByText('licenceFile.hintOnline')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'apply.open' })).toBeInTheDocument();
+    expect(screen.queryByTestId('console-unavailable')).toBeNull();
+    unmount();
+
+    situation.mockResolvedValue(base);
+    render(<FlocksproUpgradePage />);
+    await screen.findByTestId('licence-card');
+    expect(screen.queryByText('licenceFile.cardTitle')).toBeNull();
+  });
+
+  it('FP20 an application sent from the menu dialog shows on the kept page without a reload', async () => {
+    situation.mockResolvedValue({ ...base, previous: null });
+    render(<FlocksproUpgradePage />);
+    expect(await screen.findByText('apply.none')).toBeInTheDocument();
+    expect(applications).toHaveBeenCalledTimes(1);
+    applications.mockResolvedValue({ items: [pending], note: null });
+    window.dispatchEvent(new Event('flocks-enterprise-licence-changed'));
+    expect(await screen.findByText('req_1')).toBeInTheDocument();
+    expect(applications).toHaveBeenCalledTimes(2);
+  });
 });
+

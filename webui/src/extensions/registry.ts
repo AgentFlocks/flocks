@@ -56,6 +56,23 @@ export interface ExtensionNavItem {
   highlight?: boolean;
   /** `accountMenu` entries only: short tag at the end of the row (e.g. `NEW`). */
   badge?: string;
+  /**
+   * `accountMenu` entries only: how the tag is drawn. `action` (default) in the product's action colour,
+   * `muted` as a quiet outlined tag, `danger` in red in both themes (the edition tag's colour).
+   */
+  badgeTone?: 'action' | 'muted' | 'danger';
+  /**
+   * `accountMenu` entries only: open this component in a dialog over the current page instead of
+   * following `href`. It is given `onClose`; `href` stays the page the dialog may send people on to.
+   */
+  dialog?: ExtensionDialog;
+}
+
+/** A dialog an account-menu entry opens (see {@link ExtensionNavItem.dialog}). */
+export interface ExtensionDialog {
+  load: () => Promise<{ default: ComponentType<{ onClose: () => void }> }>;
+  /** i18n namespaces to preload before the dialog renders. */
+  i18nNamespaces?: string[];
 }
 
 export interface ExtensionSettingsGate {
@@ -162,6 +179,11 @@ export interface WebUIExtensionRegistry {
   updateChannel?: string;
   /** A build whose releases its own core installs: how the update dialog applies one. */
   releaseUpdate?: ReleaseUpdateSource;
+  /**
+   * The edition this build is, as a short tag (e.g. `Pro`) drawn in red beside the version in the
+   * account menu, so an install says which edition it runs at a glance. The open edition has none.
+   */
+  editionBadge?: string;
 }
 
 const registry: WebUIExtensionRegistry = {
@@ -177,7 +199,9 @@ const registry: WebUIExtensionRegistry = {
   ],
   navItems: [
     {
-      // Where it has always been: the account menu's framed row with the PRO tag.
+      // Where it has always been: the account menu's framed row. Its tag is a quiet one here: the red
+      // Pro tag says an install runs the enterprise edition. It opens the quick licence dialog (apply
+      // or import a licence file) over the page; the dialog links on to the Flocks Pro page.
       id: 'flockspro-upgrade',
       href: '/settings/flockspro',
       labelKey: 'flocksproUpgrade',
@@ -187,6 +211,11 @@ const registry: WebUIExtensionRegistry = {
       order: 0,
       highlight: true,
       badge: 'PRO',
+      badgeTone: 'muted',
+      dialog: {
+        load: () => import('../pages/FlocksproUpgrade/QuickDialog'),
+        i18nNamespaces: ['flockspro'],
+      },
     },
   ],
   settingsSections: [

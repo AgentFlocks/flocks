@@ -11,6 +11,9 @@ Case list (编号 | 场景):
       words, and taking a licence answers with the machine's new situation
   ER6 syncing the licence with Console: whether the terms changed; what stopped it as a 409 with its
       words
+  ER7 licensing offline: the application file from the form checked as above, the licence file's
+      import with the machine's new situation, refusals as a 409 with their words, a file far too big
+      refused before anything runs
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ async def test_er1_administrators_only(client: AsyncClient, monkeypatch: pytest.
     for method, path in (("get", ""), ("post", "/check"), ("post", "/start"), ("get", "/progress"),
                          ("get", "/applications"), ("post", "/applications"),
                          ("post", "/applications/req_1/withdraw"), ("post", "/applications/req_1/take"),
-                         ("post", "/licence/sync")):
+                         ("post", "/licence/sync"), ("post", "/applications/offline"), ("post", "/licence/import")):
         resp = await getattr(client, method)(f"/api/enterprise-upgrade{path}")
         assert resp.status_code == status.HTTP_403_FORBIDDEN, path
 
@@ -179,3 +182,52 @@ async def test_er6_syncing_the_licence(client: AsyncClient, monkeypatch: pytest.
     monkeypatch.setattr(enterprise_application, "sync_licence", stopped)
     resp = await client.post("/api/enterprise-upgrade/licence/sync")
     assert resp.status_code == status.HTTP_409_CONFLICT and "先登录云账号" in json.dumps(resp.json(), ensure_ascii=False)
+
+
+async def test_er7_licensing_offline(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(routes, "require_admin", _admin)
+    form = {"license_type": "poc", "company": "Acme", "applicant_name": "Li Lei",
+            "applicant_email": "li@acme.example", "applicant_phone": "+86 138 0000 0000"}
+    made: list[tuple[dict, str]] = []
+
+    async def offline_application(sent: dict, applied_by: str) -> dict:
+        made.append((sent, applied_by))
+        return {"format": "flocks-licence-application/1", "company": sent["company"], "machine": "0" * 32}
+
+    monkeypatch.setattr(enterprise_application, "offline_application", offline_application)
+    resp = await client.post("/api/enterprise-upgrade/applications/offline", json=form)
+    assert resp.status_code == 200 and resp.json()["application"]["machine"] == "0" * 32
+    assert made[0][1] == "admin" and made[0][0]["company"] == "Acme"
+    resp = await client.post("/api/enterprise-upgrade/applications/offline", json={**form, "applicant_email": "nope"})
+    assert resp.status_code == 422 and len(made) == 1
+
+    async def refused_application(sent: dict, applied_by: str) -> dict:
+        raise enterprise.EnterpriseUpgradeError("这台机器已经有企业版授权，直接升级即可")
+
+    monkeypatch.setattr(enterprise_application, "offline_application", refused_application)
+    resp = await client.post("/api/enterprise-upgrade/applications/offline", json=form)
+    assert resp.status_code == status.HTTP_409_CONFLICT and "已经有企业版授权" in json.dumps(resp.json(), ensure_ascii=False)
+
+    imported: list[str] = []
+
+    async def import_licence(content: str) -> dict:
+        imported.append(content)
+        return {"license_id": "lic_off_1", "license_status": "poc", "expires_at": 4102444800}
+
+    monkeypatch.setattr(enterprise_application, "import_licence", import_licence)
+    monkeypatch.setattr(enterprise, "situation", lambda: {"available": True, "previous": {"license_id": "lic_off_1"}})
+    resp = await client.post("/api/enterprise-upgrade/licence/import", json={"content": '{"key": "a.b.c"}'})
+    assert resp.status_code == 200
+    assert resp.json()["licence"]["license_id"] == "lic_off_1" and resp.json()["situation"]["previous"]["license_id"] == "lic_off_1"
+    assert imported == ['{"key": "a.b.c"}']
+    # Far bigger than any licence: refused before it is read.
+    resp = await client.post("/api/enterprise-upgrade/licence/import",
+                             json={"content": "x" * (enterprise_application.MAX_LICENCE_CHARS + 1)})
+    assert resp.status_code == 422 and len(imported) == 1
+
+    async def refused_import(content: str) -> dict:
+        raise enterprise.EnterpriseUpgradeError("这份授权绑定的是另一台机器：请用这台机器的申请信息重新申请")
+
+    monkeypatch.setattr(enterprise_application, "import_licence", refused_import)
+    resp = await client.post("/api/enterprise-upgrade/licence/import", json={"content": "a.b.c"})
+    assert resp.status_code == status.HTTP_409_CONFLICT and "另一台机器" in json.dumps(resp.json(), ensure_ascii=False)

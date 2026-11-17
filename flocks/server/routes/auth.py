@@ -464,6 +464,25 @@ async def console_login_session(request: Request) -> ConsoleLoginSessionResponse
     )
 
 
+class ConsoleConnectivityResponse(BaseModel):
+    configured: bool
+    online: bool
+    console_host: str = ""
+    checked_at: str
+
+
+@router.get(
+    "/console-login/connectivity",
+    response_model=ConsoleConnectivityResponse,
+    summary="这台机器现在连不连得上 Console：授权页据此给在线或离线的授权方式",
+)
+async def console_login_connectivity(request: Request, refresh: bool = False) -> ConsoleConnectivityResponse:
+    require_admin(request)
+    from flocks.console.connectivity import console_connectivity
+
+    return ConsoleConnectivityResponse(**await console_connectivity(refresh=refresh))
+
+
 @router.post("/console-login/logout", summary="退出 console 云账号登录")
 async def console_login_logout(request: Request) -> dict:
     require_admin(request)
