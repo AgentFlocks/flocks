@@ -457,3 +457,41 @@ async def test_console_login_upstream_http_error_maps_to_502(client: AsyncClient
     resp = await client.post("/api/auth/console-login/finish", json={"console_login_id": "x"})
     assert resp.status_code == status.HTTP_502_BAD_GATEWAY
     assert resp.json()["message"] == "console 登录服务调用失败，请稍后重试"
+
+
+async def test_console_connectivity_route(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+    """Administrators only; whether Console answers from here, as flocks.console.connectivity says."""
+    import httpx
+    from fastapi import HTTPException
+
+    from flocks.console import connectivity
+    from flocks.server.routes import auth as auth_routes
+
+    def member(_request):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin only")
+
+    monkeypatch.setattr(auth_routes, "require_admin", member)
+    resp = await client.get("/api/auth/console-login/connectivity")
+    assert resp.status_code == status.HTTP_403_FORBIDDEN
+
+    monkeypatch.setattr(auth_routes, "require_admin", lambda _req: _mock_admin())
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example")
+    connectivity.forget()
+    seen: list[httpx.Request] = []
+    real = httpx.AsyncClient
+
+    class Client(real):  # type: ignore[misc,valid-type]
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(lambda request: seen.append(request) or httpx.Response(503))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(connectivity.httpx, "AsyncClient", Client)
+    try:
+        resp = await client.get("/api/auth/console-login/connectivity", params={"refresh": "true"})
+    finally:
+        connectivity.forget()
+    assert resp.status_code == status.HTTP_200_OK
+    body = resp.json()
+    assert (body["configured"], body["online"], body["console_host"]) == (True, False, "console.example")
+    assert [str(request.url) for request in seen] == ["https://console.example/health"]
+

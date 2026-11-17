@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { Crown } from 'lucide-react';
 import AccountMenu, { FLOCKS_LLM_USAGE_URL } from './AccountMenu';
@@ -117,4 +117,78 @@ describe('AccountMenu', () => {
     expect(screen.getByTestId('path')).toHaveTextContent('/settings/edition');
     expect(onNavigate).toHaveBeenCalledOnce();
   });
+
+  it('opens an entry\'s dialog over the page instead of following its link, outside the sidebar', async () => {
+    const onNavigate = vi.fn();
+    const dialog = {
+      load: async () => ({
+        default: ({ onClose }: { onClose: () => void }) => (
+          <div role="dialog" aria-label="quick">
+            <button type="button" onClick={onClose}>close</button>
+          </div>
+        ),
+      }),
+    };
+    const { container } = render(
+      <MemoryRouter initialEntries={['/sessions']}>
+        <aside className="overflow-hidden">
+          <AccountMenu
+            {...versionProps}
+            username="admin"
+            roleLabel="管理员"
+            initial="A"
+            extensionItems={[{ id: 'edition', name: 'Upgrade', href: '/settings/edition', icon: Crown, highlight: true, badge: 'PRO', dialog }]}
+            onLogout={vi.fn()}
+            onNavigate={onNavigate}
+          />
+        </aside>
+        <Routes><Route path="*" element={<CurrentPath />} /></Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal' }));
+    const upgrade = within(screen.getByRole('menu')).getByRole('menuitem', { name: /Upgrade/ });
+    expect(upgrade.tagName).toBe('BUTTON');
+    expect(upgrade).toHaveAttribute('aria-haspopup', 'dialog');
+    fireEvent.click(upgrade);
+    const opened = await screen.findByRole('dialog', { name: 'quick' });
+    // Not inside the sidebar, whose transform would hold a fixed box in it.
+    expect(container.querySelector('aside')).not.toContainElement(opened);
+    expect(screen.getByTestId('path')).toHaveTextContent('/sessions');
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    fireEvent.click(within(opened).getByRole('button', { name: 'close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(onNavigate).toHaveBeenCalledOnce();
+  });
+
+  it('marks the enterprise edition with the gold PRO mark on its Flocks Pro entry, and the open edition with none', () => {
+    const { unmount } = render(
+      <MemoryRouter>
+        <AccountMenu {...versionProps} username="admin" roleLabel="管理员" initial="A" onLogout={vi.fn()}
+          extensionItems={[{ id: 'pro', name: 'Flocks Pro', href: '/settings/flockspro', icon: Crown, highlight: true, badge: 'PRO', badgeTone: 'pro' }]} />
+      </MemoryRouter>,
+    );
+    // Nothing on the avatar or beside the version: the mark is the entry's.
+    expect(screen.queryByTestId('pro-badge')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal' }));
+    const menu = screen.getByRole('menu');
+    const marks = within(menu).getAllByTestId('pro-badge');
+    expect(marks).toHaveLength(1);
+    expect(marks[0]).toHaveTextContent('PRO');
+    expect(marks[0].className).toContain('from-[#fff6d4]');
+    expect(marks[0]).not.toHaveClass('bg-red-600');
+    expect(within(menu).getByRole('menuitem', { name: /Flocks Pro/ })).toContainElement(marks[0]);
+    unmount();
+
+    render(
+      <MemoryRouter>
+        <AccountMenu {...versionProps} username="admin" roleLabel="管理员" initial="A" onLogout={vi.fn()}
+          extensionItems={[{ id: 'pro', name: 'Flocks Pro', href: '/settings/flockspro', icon: Crown, highlight: true }]} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'accountAndGlobal' }));
+    const open = within(screen.getByRole('menu'));
+    expect(open.getByRole('menuitem', { name: 'Flocks Pro' })).toBeInTheDocument();
+    expect(open.queryByTestId('pro-badge')).not.toBeInTheDocument();
+  });
 });
+

@@ -26,6 +26,7 @@ import {
   type UpgradeHandoffProgress,
 } from '@/api/update';
 import { checkRestartReadiness } from '@/utils/restartPolling';
+import { formatProductVersion } from '@/utils/productVersion';
 import UpgradeHandoffSteps, { useHandoffFailureMessage } from './UpgradeHandoffSteps';
 import UpgradeFailureDetails, { failureOfEnterpriseUpgrade, failureOfReleaseUpdate, type UpgradeFailure } from './UpgradeFailureDetails';
 import { ENTERPRISE_UPDATE_CHANNEL, UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
@@ -44,10 +45,9 @@ const ENTERPRISE_FAILED_STAGE: Record<string, UpdateProgress['stage']> = { downl
 
 export { UPDATE_DISMISSED_KEY };
 
+// Versions on screen are written one way: v<year>.<month>.<day>.<build> (utils/productVersion).
 function formatUpdateVersion(version?: string | null): string {
-  const raw = (version || '').trim();
-  if (!raw) return '—';
-  return /^\d/.test(raw) ? `v${raw}` : raw;
+  return formatProductVersion(version) ?? '—';
 }
 
 function clampPercent(value?: number | null): number | null {

@@ -15,6 +15,7 @@ import binascii
 import hashlib
 import json
 import os
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +26,13 @@ _PATCH_SECONDS = 60 * 86400
 #: Console signs its suite licences with the same key; one names the licence and is no patch.
 _SUITE_GRANT = "flocks-console-suite-grant/1"
 _TOKEN_FIELDS = ("key", "token", "activate_key")
+
+
+#: Held around every read-modify-write of the licence file -- the heartbeat adding the patch Console sent,
+#: a licence taken or imported -- so none writes back a copy read before another's write. Re-entrant: a
+#: caller holding it may call one that takes it again. No await inside: it is held by threads and by the
+#: event loop alike, for a file read and a file write.
+LICENCE_FILE_LOCK = threading.RLock()
 
 
 def licence_files() -> list[Path]:
@@ -46,16 +54,25 @@ def read_licence_file(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def token_claims(token: Any) -> dict[str, Any] | None:
-    """What a signed token says of itself, None for what does not read as one."""
+def _token_part(token: Any, index: int) -> dict[str, Any] | None:
     parts = token.split(".") if isinstance(token, str) else []
     if len(parts) != 3:
         return None
     try:
-        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+        part = json.loads(base64.urlsafe_b64decode(parts[index] + "=" * (-len(parts[index]) % 4)))
     except (ValueError, UnicodeDecodeError, binascii.Error):
         return None
-    return claims if isinstance(claims, dict) else None
+    return part if isinstance(part, dict) else None
+
+
+def token_claims(token: Any) -> dict[str, Any] | None:
+    """What a signed token says of itself, None for what does not read as one."""
+    return _token_part(token, 1)
+
+
+def token_header(token: Any) -> dict[str, Any] | None:
+    """A signed token's header (its alg and kid), None for what does not read as one."""
+    return _token_part(token, 0)
 
 
 def licence_token(data: dict[str, Any]) -> tuple[str, dict[str, Any]]:

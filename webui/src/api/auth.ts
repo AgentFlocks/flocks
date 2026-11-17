@@ -33,6 +33,16 @@ export interface ConsoleLoginFinishResult {
   updated_at?: string | null;
 }
 
+/** Whether this install reaches Console now (flocks.console.connectivity): what the licence pages offer. */
+export interface ConsoleConnectivity {
+  /** A Console address is set at all. */
+  configured: boolean;
+  /** Console answered just now (or within half a minute). */
+  online: boolean;
+  console_host: string;
+  checked_at: string;
+}
+
 export interface ConsoleLoginSessionStatus {
   logged_in: boolean;
   console_login_id?: string | null;
@@ -101,5 +111,13 @@ export const authApi = {
 
   logoutConsoleLogin: async (): Promise<void> => {
     await client.post('/api/auth/console-login/logout');
+  },
+
+  /** Whether Console can be reached from here; `refresh` asks it now rather than from the last half minute. */
+  consoleConnectivity: async (refresh = false): Promise<ConsoleConnectivity> => {
+    const response = await client.get('/api/auth/console-login/connectivity', {
+      params: refresh ? { refresh: true } : undefined,
+    });
+    return response.data;
   },
 };

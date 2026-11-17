@@ -1,6 +1,12 @@
+import { Suspense, lazy, useState, type ComponentType, type LazyExoticComponent } from 'react';
+import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ChevronUp, Gauge, LogOut, RefreshCw, Settings, type LucideIcon } from 'lucide-react';
+import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
+import ProBadge from '@/components/common/ProBadge';
+import { preloadI18nNamespaces } from '@/i18nResources';
+import type { ExtensionDialog } from '@ext/registry';
 import HeaderMenu, { MENU_ITEM_CLASS, MENU_SEPARATOR_CLASS } from './HeaderMenu';
 
 export const FLOCKS_LLM_USAGE_URL = 'https://portal.agentflocks.com';
@@ -15,6 +21,24 @@ export interface AccountMenuExtraItem {
   highlight?: boolean;
   /** Short tag shown at the end of the row. */
   badge?: string;
+  /** How the tag is drawn: the action colour (default), or the enterprise edition's gold PRO. */
+  badgeTone?: 'action' | 'pro';
+  /** Opened in a dialog over the page instead of following `href`. */
+  dialog?: ExtensionDialog;
+}
+
+const ACTION_BADGE_CLASS = 'shrink-0 rounded bg-ui-action px-1.5 text-[10px] font-semibold leading-4 text-ui-on-action';
+
+type DialogComponent = LazyExoticComponent<ComponentType<{ onClose: () => void }>>;
+// One lazy component per dialog loader, so reopening a dialog does not load (or remount) it anew.
+const dialogComponents = new WeakMap<ExtensionDialog, DialogComponent>();
+function dialogComponent(dialog: ExtensionDialog): DialogComponent {
+  let component = dialogComponents.get(dialog);
+  if (!component) {
+    component = lazy(() => Promise.all([dialog.load(), preloadI18nNamespaces(dialog.i18nNamespaces ?? [])]).then(([module]) => module));
+    dialogComponents.set(dialog, component);
+  }
+  return component;
 }
 
 interface AccountMenuProps {
@@ -37,7 +61,11 @@ export default function AccountMenu({
   version, update, extensionItems = [], onCheckUpdate, onLogout,
 }: AccountMenuProps) {
   const { t } = useTranslation('nav');
+  // The entry whose dialog is open over the page, if any.
+  const [dialogItem, setDialogItem] = useState<AccountMenuExtraItem | null>(null);
+  const Dialog = dialogItem?.dialog ? dialogComponent(dialogItem.dialog) : null;
   return (
+    <>
     <HeaderMenu
       label={t('accountAndGlobal', { name: username })}
       placement={collapsed ? 'beside' : 'above'}
@@ -82,21 +110,34 @@ export default function AccountMenu({
               <span className="block text-[11px] text-ui-muted">{t('modelUsageHint')}</span>
             </span>
           </a>
-          {extensionItems.map((item) => (
-            <Link
-              key={item.id}
-              to={item.href}
-              role="menuitem"
-              onClick={() => { close(); onNavigate?.(); }}
-              className={item.highlight ? `${MENU_ITEM_CLASS} mt-1 border border-ui-border bg-ui-subtle` : MENU_ITEM_CLASS}
-            >
-              <item.icon aria-hidden="true" className={`h-4 w-4 shrink-0 ${item.highlight ? 'text-amber-500' : 'text-ui-secondary'}`} />
-              <span className="min-w-0 flex-1 truncate">{item.name}</span>
-              {item.badge && (
-                <span className="shrink-0 rounded bg-ui-action px-1.5 text-[10px] font-semibold leading-4 text-ui-on-action">{item.badge}</span>
-              )}
-            </Link>
-          ))}
+          {extensionItems.map((item) => {
+            const className = item.highlight ? `${MENU_ITEM_CLASS} mt-1 border border-ui-border bg-ui-subtle` : MENU_ITEM_CLASS;
+            const body = (
+              <>
+                <item.icon aria-hidden="true" className={`h-4 w-4 shrink-0 ${item.highlight ? 'text-amber-500' : 'text-ui-secondary'}`} />
+                <span className="min-w-0 flex-1 truncate text-left">{item.name}</span>
+                {item.badge && (item.badgeTone === 'pro'
+                  ? <ProBadge label={item.badge} />
+                  : <span className={ACTION_BADGE_CLASS}>{item.badge}</span>)}
+              </>
+            );
+            return item.dialog ? (
+              <button
+                key={item.id}
+                type="button"
+                role="menuitem"
+                aria-haspopup="dialog"
+                onClick={() => { close(); setDialogItem(item); }}
+                className={className}
+              >
+                {body}
+              </button>
+            ) : (
+              <Link key={item.id} to={item.href} role="menuitem" onClick={() => { close(); onNavigate?.(); }} className={className}>
+                {body}
+              </Link>
+            );
+          })}
           <div className={MENU_SEPARATOR_CLASS} role="separator" />
           {update && (
             <button type="button" role="menuitem" className={MENU_ITEM_CLASS} onClick={() => { close(); update.onClick(); }}>
@@ -115,5 +156,20 @@ export default function AccountMenu({
         </>
       )}
     </HeaderMenu>
+    {/* On the document body: the sidebar is a containing block for fixed boxes, and would hold the dialog in it. */}
+    {Dialog && dialogItem && createPortal(
+      <LazyLoadErrorBoundary mode="overlay">
+        <Suspense fallback={null}>
+          <Dialog
+            onClose={() => {
+              setDialogItem(null);
+              onNavigate?.();
+            }}
+          />
+        </Suspense>
+      </LazyLoadErrorBoundary>,
+      document.body,
+    )}
+    </>
   );
 }
