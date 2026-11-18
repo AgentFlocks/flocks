@@ -10,6 +10,13 @@ Differences from the syslog manager:
   a UDP/TCP socket bind.  "binding/listening" is replaced by
   "connecting/running"; a connection failure (broker unreachable, auth error)
   is surfaced the same way a bind failure is.
+* Opt-in ``inputs._kafka_batching`` groups up to ``batchsize`` records into
+  one real workflow execution; ``maxparallel`` limits concurrent batch runs.
+  A partial batch flushes after ``batch_timeout_ms`` of input inactivity
+  (default 5000 ms). Even a batch of one has a list payload. Workflows receive
+  ``_kafka_delivery_ids`` aligned with that list for per-record idempotency;
+  batch IDs can change when replay regroups records after an idle flush.
+  Ordinary triggers keep one-record delivery.
 * Backpressure uses a *blocking* ``queue.put`` instead of ``put_nowait``+drop.
   Offsets are committed explicitly after successful workflow completion and
   persistence, never past an unfinished message in the same partition. A crash
@@ -95,8 +102,19 @@ _RECOVERABLE_OWNERSHIP_ERRORS = frozenset({
 })
 
 
+def _kafka_batch_settings(inputs: Dict[str, Any]) -> tuple[int, int]:
+    """Batching is opt-in; ordinary Kafka triggers keep one-record delivery."""
+    if not (inputs or {}).get("_kafka_batching"):
+        return 1, 0
+    size = max(1, min(1000, int(inputs.get("batchsize") or 20)))
+    wait_ms = max(1, min(5000, int(inputs.get("batch_timeout_ms") or 5000)))
+    return size, wait_ms
+
+
 def _worker_count_for_trigger(trigger: TriggerDefinition) -> int:
-    return min(_MAX_CONCURRENT_EXECUTIONS, max(1, int(trigger.concurrency.maxParallel)))
+    inputs = trigger.inputs or {}
+    workers = inputs.get("maxparallel") if inputs.get("_kafka_batching") else None
+    return min(_MAX_CONCURRENT_EXECUTIONS, max(1, int(workers or trigger.concurrency.maxParallel)))
 
 
 def _queue_size_for_trigger(trigger: TriggerDefinition) -> int:
@@ -122,6 +140,13 @@ class _QueuedKafkaMessage:
     raw_value: Optional[bytes]
     size_bytes: int
     delivery: Optional[_KafkaDelivery] = None
+
+
+@dataclass(frozen=True)
+class _QueuedKafkaBatch:
+    messages: tuple[_QueuedKafkaMessage, ...]
+    sequence: int
+    generation: str
 
 
 class _KafkaGenerationStopped(Exception):
@@ -282,6 +307,34 @@ class _KafkaOffsetTracker:
             if not self.closed and not self.abort.is_set():
                 for _ in prefix:
                     pending.popleft()
+                    self._slots.release()
+
+
+    async def complete_many(self, deliveries: Iterable[_KafkaDelivery]) -> None:
+        """Acknowledge a successful batch, committing one completed prefix per partition."""
+        items = tuple(deliveries)
+        async with self._commit_lock:
+            for item in items:
+                self._check_partition_owner(item.partition, item.epoch)
+            for item in items:
+                item.completed = True
+            prefixes = {}
+            for partition in {item.partition for item in items}:
+                prefix = []
+                for item in self._pending.get(partition, ()):
+                    if not item.completed:
+                        break
+                    prefix.append(item)
+                if prefix:
+                    prefixes[partition] = prefix
+            if not prefixes:
+                return
+            await self.consumer.commit({partition: prefix[-1].offset + 1 for partition, prefix in prefixes.items()})
+            for item in items:
+                self._check_partition_owner(item.partition, item.epoch)
+            for partition, prefix in prefixes.items():
+                for _ in prefix:
+                    self._pending[partition].popleft()
                     self._slots.release()
 
 
@@ -808,6 +861,8 @@ class KafkaManager:
         configured_inputs: Dict[str, Any], topic: str,
     ) -> tuple[asyncio.Queue, asyncio.Event]:
         queue: asyncio.Queue = asyncio.Queue(maxsize=_queue_size_for_trigger(trigger))
+        queue._kafka_batch_settings = _kafka_batch_settings(configured_inputs)
+        queue._kafka_batch_generation = uuid.uuid4().hex
         abort = asyncio.Event()
         cancel = threading.Event()
         self._queues[workflow_id] = queue
@@ -977,7 +1032,8 @@ class KafkaManager:
         tracker = _KafkaOffsetTracker(
             consumer,
             abort,
-            max_pending=queue.maxsize + max(1, len(self._worker_pools.get(workflow_id, ()))),
+            max_pending=(queue.maxsize + max(1, len(self._worker_pools.get(workflow_id, ()))))
+            * getattr(queue, "_kafka_batch_settings", (1, 0))[0],
         )
         manager = self
         cancel_event = self._generation_cancel_events.get(workflow_id) or threading.Event()
@@ -1134,12 +1190,43 @@ class KafkaManager:
             # before the message can wait for queue/acknowledgement capacity.
             return message, partition, tracker.epoch_for(partition)
 
+        async def _fetch_guarded() -> Any:
+            return await _until_aborted(_fetch(), abort)
+
+        batch_size, batch_wait_ms = getattr(queue, "_kafka_batch_settings", (1, 0))
+        batch_items = []
+        batch_sequence = 0
+        batch_deadline = None
+        batch_fetch = None
+
+        async def flush_batch() -> None:
+            nonlocal batch_items, batch_sequence, batch_deadline
+            batch = _QueuedKafkaBatch(tuple(batch_items), batch_sequence, queue._kafka_batch_generation)
+            await _until_aborted(queue.put(batch), abort)
+            batch_items = []
+            batch_sequence += 1
+            batch_deadline = None
+
         try:
             while not abort.is_set():
                 delivery = None
                 try:
-                    msg, partition, epoch = await _until_aborted(_fetch(), abort)
+                    if batch_fetch is None:
+                        batch_fetch = asyncio.create_task(_fetch_guarded())
+                    if batch_items:
+                        remaining = max(0.001, batch_deadline - asyncio.get_running_loop().time())
+                        # An idle-tail flush must never cancel a fetch: getone may
+                        # already have advanced the consumer's local position.
+                        msg, partition, epoch = await asyncio.wait_for(asyncio.shield(batch_fetch), remaining)
+                    else:
+                        msg, partition, epoch = await batch_fetch
+                    batch_fetch = None
+                except asyncio.TimeoutError:
+                    if batch_items:
+                        await flush_batch()
+                    continue
                 except _KafkaAssignmentChanged:
+                    batch_fetch = None
                     continue
                 raw_value = msg.value
                 await _until_aborted(tracker.wait_for_slot(), abort)
@@ -1149,8 +1236,15 @@ class KafkaManager:
                     size_bytes=len(raw_value) if raw_value is not None else 0,
                     delivery=delivery,
                 )
-                # Blocking put applies backpressure instead of dropping messages.
-                await _until_aborted(queue.put(queued), abort)
+                # Aggregate in the single reader, so concurrent workers cannot split a batch.
+                if batch_wait_ms == 0:
+                    await _until_aborted(queue.put(queued), abort)
+                else:
+                    batch_items.append(queued)
+                    # Flush an idle tail; capacity waits must not prematurely split a backlog.
+                    batch_deadline = asyncio.get_running_loop().time() + batch_wait_ms / 1000
+                    if len(batch_items) >= batch_size:
+                        await flush_batch()
         except _KafkaGenerationStopped:
             pass
         except asyncio.CancelledError:
@@ -1162,6 +1256,9 @@ class KafkaManager:
                 {"workflow_id": workflow_id, **_delivery_error_diagnostics(exc)},
             )
         finally:
+            if batch_fetch is not None:
+                batch_fetch.cancel()
+                await asyncio.gather(batch_fetch, return_exceptions=True)
             await _finish_cleanup(shutdown())
 
     async def _worker_loop(
@@ -1202,9 +1299,31 @@ class KafkaManager:
             except asyncio.CancelledError:
                 _unexpected_cancel()
                 return
-            delivery = msg.delivery if isinstance(msg, _QueuedKafkaMessage) else None
+            batch = msg if isinstance(msg, _QueuedKafkaBatch) else None
+            deliveries = [item.delivery for item in batch.messages if item.delivery is not None] if batch else []
+            delivery = deliveries[0] if deliveries else (msg.delivery if isinstance(msg, _QueuedKafkaMessage) else None)
+            batch_inputs = dict(configured_inputs)
+            if batch:
+                # Batch membership can change on replay. Expose record identities
+                # directly to workflows so deduplication survives regrouping.
+                batch_inputs.update(
+                    _kafka_batch_seq=batch.sequence,
+                    _kafka_batch_generation=batch.generation,
+                    _kafka_delivery_ids=[item.delivery_id for item in deliveries],
+                )
+                message_diagnostics = {
+                    **(delivery.diagnostics() if delivery is not None else {}),
+                    "batchSize": len(batch.messages),
+                    "batchOffsets": [item.diagnostics() for item in deliveries],
+                }
+                delivery_id = "kafka-batch:" + hashlib.sha256("|".join(item.delivery_id for item in deliveries).encode()).hexdigest()
+            else:
+                message_diagnostics = delivery.diagnostics() if delivery is not None else None
+                delivery_id = delivery.delivery_id if delivery is not None else None
             try:
-                if isinstance(msg, _QueuedKafkaMessage):
+                if batch:
+                    msg = [_decode_message(item.raw_value) for item in batch.messages]
+                elif isinstance(msg, _QueuedKafkaMessage):
                     msg = _decode_message(msg.raw_value)
 
                 async def _dispatch() -> None:
@@ -1213,12 +1332,12 @@ class KafkaManager:
                         workflow_plan,
                         msg,
                         next(iter(trigger.mapping or {}), "kafka_message"),
-                        configured_inputs,
-                        trigger=trigger,
+                        batch_inputs,
+                        trigger=trigger.model_copy(update={"inputs": batch_inputs}) if batch else trigger,
                         source=source,
                         generation_cancel_event=run_cancel_event,
-                        delivery_id=delivery.delivery_id if delivery is not None else None,
-                        kafka_metadata=delivery.diagnostics() if delivery is not None else None,
+                        delivery_id=delivery_id,
+                        kafka_metadata=message_diagnostics,
                     )
                     if isinstance(outcome, _KafkaDispatchOutcome) and not outcome.acknowledged:
                         raise _KafkaDeliveryError(
@@ -1238,7 +1357,7 @@ class KafkaManager:
                 )
                 if delivery is not None:
                     await self._retry_delivery(
-                        lambda: delivery.tracker.complete(delivery),
+                        lambda: delivery.tracker.complete_many(deliveries) if batch else delivery.tracker.complete(delivery),
                         workflow_id=workflow_id,
                         abort=abort,
                         cancel=run_cancel_event,
