@@ -1523,7 +1523,8 @@ def test_start_backend_reports_started_after_probe_succeeds(monkeypatch, tmp_pat
     service_manager._start_backend_process(service_manager.ServiceConfig(), console)
 
     backend_env = spawn_calls[0]["kwargs"]["env"]
-    assert backend_env["_FLOCKS_WEBUI_HOST"] == "127.0.0.1"
+    # The default bind: every interface (service_config.DEFAULT_SERVICE_HOST).
+    assert backend_env["_FLOCKS_WEBUI_HOST"] == "0.0.0.0"
     assert backend_env["_FLOCKS_WEBUI_PORT"] == "5173"
     assert not paths.backend_pid.exists()
     assert backend_env["FLOCKS_CONSOLE_BASE_URL"] == service_manager.DEFAULT_FLOCKS_CONSOLE_BASE_URL

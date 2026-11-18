@@ -845,10 +845,12 @@ def _should_log_request(path: str, status_code: int) -> bool:
 #      ``_FLOCKS_WEBUI_*`` origin inferred from the current CLI launch.
 #   2. Explicit ``server.cors`` in flocks.json → append user-configured
 #      origins without discarding the runtime ones.
-# We deliberately do NOT auto-whitelist wildcard binds such as ``0.0.0.0``:
-# matching ``[^/]+:<port>`` would accept every host on that port, effectively
-# disabling CORS.  Remote deployments that bind to wildcard hosts must keep
-# using explicit ``server.cors`` entries or start with a concrete IP/hostname.
+# We deliberately do NOT auto-whitelist every host for wildcard binds such as
+# ``0.0.0.0`` (the default): matching ``[^/]+:<port>`` would accept every host
+# on that port, effectively disabling CORS.  A wildcard bind gets this
+# machine's loopback origins, as a ``127.0.0.1`` bind does; remote deployments
+# that need other origins keep using explicit ``server.cors`` entries or start
+# with a concrete IP/hostname.
 #
 # Config is read lazily on the first request via
 # :class:`_DeferredCORSMiddleware` so that importing ``app`` in an async
@@ -869,9 +871,12 @@ def _format_host_for_url(host: str) -> str:
 
 
 def _append_origin(origins: list[str], host: str, port: str) -> None:
-    if not host or not port or host in _WILDCARD_HOSTS:
+    if not host or not port:
         return
-    hosts = sorted(_LOOPBACK_ORIGIN_HOSTS) if host in _LOOPBACK_ORIGIN_HOSTS else [host]
+    # A wildcard bind serves this machine as well: its loopback origins, never
+    # "any host on the port".
+    local = host in _LOOPBACK_ORIGIN_HOSTS or host in _WILDCARD_HOSTS
+    hosts = sorted(_LOOPBACK_ORIGIN_HOSTS) if local else [host]
     for candidate_host in hosts:
         origin = f"http://{_format_host_for_url(candidate_host)}:{port}"
         if origin not in origins:

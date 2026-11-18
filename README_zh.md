@@ -124,8 +124,8 @@ flocks stop
 ```
 
 默认服务地址：
-- Flocks WebUI：`http://127.0.0.1:5173`
-- 远程访问可通过 `flocks start --host <ip>` 配置
+- Flocks WebUI：本机 `http://127.0.0.1:5173`；服务默认监听所有网卡（`0.0.0.0:5173`），别的机器用 `http://<本机 IP>:5173` 打开
+- 只想本机访问：`flocks start --host 127.0.0.1`（或设 `FLOCKS_HOST=127.0.0.1`）
 
 更多 CLI 命令使用 `flocks --help`
 
@@ -209,10 +209,13 @@ sudo chown -R <uid>:<gid> ~/.flocks
 ```
 
 ### 4.3 远程访问 Flocks 服务
+`flocks start` 默认监听所有网卡（`0.0.0.0`），别的机器直接用 `http://<本机 IP>:5173` 打开（开了防火墙的要放行这个端口）。只想听某一个地址：
 ```bash
-flocks start --host 0.0.0.0
+flocks start --host 127.0.0.1   # 只允许本机访问
 ```
 若从虚拟机远程访问失败，请将 host 指定为虚拟机的 IP。
+
+第一个管理员只能在这台机器上创建：在这台机器的浏览器里打开 `http://127.0.0.1:5173`，或者在这台机器上执行 `flocks admin generate-one-time-password`，再从任意机器用 `admin` 和输出的一次性密码登录（首次登录会要求改密码）。
 
 WebUI 与 API 共用同一个服务地址和端口，API 请求使用同源 `/api` 路径。这样浏览器 Cookie 与 SSE 保持在同一源，适用于局域网访问与反向代理场景。
 
@@ -229,7 +232,7 @@ flocks start --server-host 0.0.0.0 --webui-host 0.0.0.0
 
 初次部署：
 
-1. 打开 WebUI，按提示完成 **bootstrap-admin**，创建唯一的 `admin` 账号。
+1. 在运行 Flocks 的这台机器上打开 WebUI，按提示完成 **bootstrap-admin**，创建唯一的 `admin` 账号；从别的机器访问时，先在服务器上执行 `flocks admin generate-one-time-password`，再用 `admin` 和输出的密码登录。
 2. WebUI 会自动写入 `flocks_session` Cookie，浏览器侧无需额外配置。
 
 非浏览器客户端（TUI / SDK / 脚本）：
