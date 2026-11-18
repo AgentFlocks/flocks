@@ -403,6 +403,233 @@ class TestToolInfoResponse:
         )
 
 
+class TestServiceEnabledFlag:
+    """``service_enabled`` tells a client why a tool is off and cannot be opened.
+
+    Regression for INC-F5C08C1C: the status switch of a tool whose API
+    service is disabled did nothing visible, because the refused PATCH
+    answers 200 with ``enabled=false`` and nothing said why.
+    """
+
+    def test_refused_enable_reports_the_disabled_service(self, tool_client):
+        client, enabled_tool, _ = tool_client
+        _set_service(enabled=False)
+        name = enabled_tool.info.name
+
+        before = client.get(f"/api/tools/{name}").json()
+        assert (before["enabled"], before["service_enabled"]) == (False, False)
+
+        res = client.patch(f"/api/tools/{name}", json={"enabled": True})
+        assert res.status_code == 200, res.text
+        body = res.json()
+        # The gate itself is unchanged: the tool stays off ...
+        assert body["enabled"] is False
+        # ... and the answer now carries the reason.
+        assert body["service_enabled"] is False
+
+    def test_follows_the_service_flag(self, tool_client):
+        client, enabled_tool, _ = tool_client
+        name = enabled_tool.info.name
+
+        # No api_services entry at all counts as off, exactly like the gate.
+        body = client.get(f"/api/tools/{name}").json()
+        assert (body["enabled"], body["service_enabled"]) == (False, False)
+
+        _set_service(enabled=True)
+        body = client.get(f"/api/tools/{name}").json()
+        assert (body["enabled"], body["service_enabled"]) == (True, True)
+
+        _set_service(enabled=False)
+        body = client.get(f"/api/tools/{name}").json()
+        assert (body["enabled"], body["service_enabled"]) == (False, False)
+
+    def test_list_rows_carry_the_flag(self, tool_client):
+        client, enabled_tool, disabled_tool = tool_client
+        _set_service(enabled=False)
+
+        rows = {row["name"]: row for row in client.get("/api/tools/page").json()["items"]}
+        assert rows[enabled_tool.info.name]["service_enabled"] is False
+        assert rows[enabled_tool.info.name]["enabled"] is False
+        listed = {row["name"]: row for row in client.get("/api/tools").json()}
+        assert listed[disabled_tool.info.name]["service_enabled"] is False
+
+        # The paged list is served from a snapshot: a service change must show.
+        _set_service(enabled=True)
+        rows = {row["name"]: row for row in client.get("/api/tools/page").json()["items"]}
+        assert rows[enabled_tool.info.name]["service_enabled"] is True
+        assert rows[enabled_tool.info.name]["enabled"] is True
+        assert rows[disabled_tool.info.name]["service_enabled"] is True
+        assert rows[disabled_tool.info.name]["enabled"] is False
+
+    def test_null_without_an_owning_service(self, tool_client):
+        client, _, _ = tool_client
+
+        async def handler(ctx: ToolContext) -> ToolResult:
+            return ToolResult(success=True, output="ok")
+
+        ToolRegistry.register(Tool(
+            info=ToolInfo(
+                name="plain_tool_test",
+                description="a tool no service gates",
+                category=ToolCategory.CUSTOM,
+                enabled=True,
+            ),
+            handler=handler,
+        ))
+
+        body = client.get("/api/tools/plain_tool_test").json()
+        assert (body["enabled"], body["service_enabled"]) == (True, None)
+        assert body["service_integration_type"] is None
+        body = client.patch("/api/tools/plain_tool_test", json={"enabled": False}).json()
+        assert (body["enabled"], body["service_enabled"]) == (False, None)
+        body = client.patch("/api/tools/plain_tool_test", json={"enabled": True}).json()
+        assert (body["enabled"], body["service_enabled"]) == (True, None)
+        rows = {row["name"]: row for row in client.get("/api/tools/page").json()["items"]}
+        assert rows["plain_tool_test"]["service_enabled"] is None
+
+    def test_provider_gate_is_reported_for_other_sources(self, tool_client):
+        """The gate keys on ``provider`` whatever the source; report it there too.
+
+        A YAML plugin tool with a provider is not an api/device tool, yet the
+        registry forces it off while the provider's service is off and PATCH
+        refuses to open it. Without the flag it would be the same dead switch.
+        """
+        client, _, _ = tool_client
+        tool = _stub_api_tool("yaml_plugin_tool_test", enabled=True)
+        tool.info.source = "plugin_yaml"
+        ToolRegistry.register(tool)
+        _set_service(enabled=False)
+        name = tool.info.name
+
+        body = client.get(f"/api/tools/{name}").json()
+        assert body["source"] == "plugin_yaml"
+        assert (body["enabled"], body["service_enabled"]) == (False, False)
+        body = client.patch(f"/api/tools/{name}", json={"enabled": True}).json()
+        assert (body["enabled"], body["service_enabled"]) == (False, False)
+
+        _set_service(enabled=True)
+        body = client.get(f"/api/tools/{name}").json()
+        assert (body["enabled"], body["service_enabled"]) == (True, True)
+
+
+    def test_reports_where_the_owning_service_is_managed(self, tool_client, tmp_path, monkeypatch):
+        """A device plugin installed under ``tools/api`` loads as an ``api`` tool.
+
+        Its service is still managed on the device page: the API service list
+        reports ``integration_type: device`` and the API tab leaves it out.
+        The tool response has to carry the same answer, or a client that goes
+        by ``source`` sends the user to a tab that cannot show the service.
+        """
+        from types import SimpleNamespace
+
+        from flocks.server.routes import provider as provider_routes
+        from flocks.server.routes.tool import _invalidate_tool_summary_cache
+
+        client, enabled_tool, _ = tool_client
+        _set_service(enabled=False)
+        name = enabled_tool.info.name
+        provider_yaml = tmp_path / "plugins" / "tools" / "api" / "legacy_device" / "_provider.yaml"
+        provider_yaml.parent.mkdir(parents=True)
+        descriptor = SimpleNamespace(
+            service_id=_TEST_SERVICE_ID,
+            version=None,
+            storage_key=_TEST_SERVICE_ID,
+            provider_yaml=provider_yaml,
+        )
+        monkeypatch.setattr(
+            provider_routes,
+            "_find_api_service_descriptor",
+            lambda provider_id: descriptor if provider_id == _TEST_SERVICE_ID else None,
+        )
+
+        def declared(integration_type):
+            lines = [f"name: {_TEST_SERVICE_ID}"]
+            if integration_type is not None:
+                lines.append(f"integration_type: {integration_type}")
+            provider_yaml.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            provider_routes._clear_api_service_summary_metadata_cache()
+            _invalidate_tool_summary_cache()
+            detail = client.get(f"/api/tools/{name}").json()
+            rows = {row["name"]: row for row in client.get("/api/tools/page").json()["items"]}
+            listed = {row["name"]: row for row in client.get("/api/tools").json()}
+            assert detail["source"] == "api"
+            assert detail["service_enabled"] is False
+            return (
+                detail["service_integration_type"],
+                rows[name]["service_integration_type"],
+                listed[name]["service_integration_type"],
+            )
+
+        try:
+            assert declared("device") == ("device", "device", "device")
+            # The refused enable carries it too: that answer is what the drawer renders.
+            body = client.patch(f"/api/tools/{name}", json={"enabled": True}).json()
+            assert (body["enabled"], body["service_integration_type"]) == (False, "device")
+            assert declared('" Device "') == ("device", "device", "device")
+            assert declared("api") == ("api", "api", "api")
+            assert declared(None) == (None, None, None)
+        finally:
+            provider_routes._clear_api_service_summary_metadata_cache()
+
+    def test_unreadable_service_metadata_does_not_break_the_tool_list(self, tool_client, monkeypatch):
+        from flocks.server.routes import provider as provider_routes
+        from flocks.server.routes.tool import _invalidate_tool_summary_cache
+
+        client, enabled_tool, _ = tool_client
+        _set_service(enabled=False)
+
+        def broken(provider_id):
+            raise ValueError("corrupt metadata")
+
+        monkeypatch.setattr(provider_routes, "_load_api_service_summary_metadata_data", broken)
+        _invalidate_tool_summary_cache()
+
+        page = client.get("/api/tools/page")
+        assert page.status_code == 200, page.text
+        rows = {row["name"]: row for row in page.json()["items"]}
+        assert rows[enabled_tool.info.name]["service_enabled"] is False
+        assert rows[enabled_tool.info.name]["service_integration_type"] is None
+        detail = client.get(f"/api/tools/{enabled_tool.info.name}")
+        assert detail.status_code == 200, detail.text
+
+    def test_list_reads_each_service_once_not_once_per_tool(self, tool_client, monkeypatch):
+        """``get_api_service_raw`` re-reads and parses flocks.json on every call.
+
+        One list response builds a row per tool; the service facts for those
+        rows must cost one lookup per service, however many tools share it.
+        """
+        from flocks.config.config_writer import ConfigWriter
+        from flocks.server.routes.tool import _invalidate_tool_summary_cache
+
+        client, _, _ = tool_client
+        _set_service(enabled=True)
+        calls: list[str] = []
+        original = ConfigWriter.get_api_service_raw.__func__
+
+        def counting(cls, service_id):
+            calls.append(service_id)
+            return original(cls, service_id)
+
+        monkeypatch.setattr(ConfigWriter, "get_api_service_raw", classmethod(counting))
+
+        def reads(path: str) -> int:
+            _invalidate_tool_summary_cache()
+            calls.clear()
+            assert client.get(path).status_code == 200
+            return len(calls)
+
+        paths = ("/api/tools/page", "/api/tools")
+        for path in paths:
+            reads(path)  # the first lookup also fills the service metadata cache
+        few = {path: reads(path) for path in paths}
+        for idx in range(10):
+            ToolRegistry.register(_stub_api_tool(f"bulk_tool_test_{idx}", enabled=True))
+        many = {path: reads(path) for path in paths}
+
+        assert all(count > 0 for count in few.values()), few
+        assert many == few, (few, many)
+
+
 class TestUpdateTool:
     def test_manual_reenable_clears_repeated_failure_count(self, tool_client):
         client, enabled_tool, _ = tool_client

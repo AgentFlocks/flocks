@@ -130,6 +130,14 @@ async def test_bounded_queue_drops_excess_on_full() -> None:
 
 
 def test_trigger_concurrency_config_is_honored_with_safety_caps() -> None:
+    default = TriggerDefinition(type="syslog")
+    assert syslog_manager._worker_count_for_trigger(default) == 1
+    assert syslog_manager._queue_size_for_trigger(default) == 100
+
+    at_limit = TriggerDefinition(type="syslog", concurrency={"maxParallel": 20, "queueSize": 5000})
+    assert syslog_manager._worker_count_for_trigger(at_limit) == 20
+    assert syslog_manager._queue_size_for_trigger(at_limit) == 5000
+
     trigger = TriggerDefinition.model_validate(
         {
             "id": "syslog-limited",
@@ -147,8 +155,8 @@ def test_trigger_concurrency_config_is_honored_with_safety_caps() -> None:
             "concurrency": {"maxParallel": 999, "queueSize": 999_999},
         }
     )
-    assert syslog_manager._worker_count_for_trigger(oversized) == syslog_manager._MAX_CONCURRENT_EXECUTIONS
-    assert syslog_manager._queue_size_for_trigger(oversized) == syslog_manager._MAX_QUEUE_SIZE
+    assert syslog_manager._worker_count_for_trigger(oversized) == 20
+    assert syslog_manager._queue_size_for_trigger(oversized) == 5000
 
 
 @pytest.mark.asyncio

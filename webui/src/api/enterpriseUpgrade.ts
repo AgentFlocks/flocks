@@ -111,6 +111,46 @@ export interface LicenceApplicationForm {
   notes?: string | null;
 }
 
+/**
+ * The application handed to whoever issues licences when Console cannot be reached from here
+ * (flocks.updater.enterprise_application.offline_application): the form, and the machine a licence
+ * issued for it is bound to.
+ */
+export interface OfflineApplication {
+  format: string;
+  product: string;
+  license_type: 'poc' | 'commercial';
+  company: string;
+  applicant_name: string;
+  applicant_email: string;
+  applicant_phone: string;
+  sales_rep_name: string | null;
+  notes: string | null;
+  replaces_license_id: string | null;
+  /**
+   * 32 hex digits, what the licence is bound to: the machine-id digest, the device id of a host without a
+   * machine id; null on a host that keeps neither (the licence then cannot be bound).
+   */
+  machine: string | null;
+  /** 'machine-id' or 'devid': which fingerprint machine is. */
+  machine_kind: string | null;
+  /** The device id where it can be read, beside machine, for Console's records. */
+  devid?: string | null;
+  install_id: string | null;
+  hostname: string | null;
+  platform: string;
+  flocks_version: string;
+  applied_by: string;
+  created_at: string;
+}
+
+/** A licence file imported on this machine. */
+export interface ImportedLicence {
+  license_id: string;
+  license_status: string | null;
+  expires_at: string | number | null;
+}
+
 /** What a sync with Console came to (flocks.updater.enterprise_application.sync_licence). */
 export interface LicenceSync {
   /** The licence's terms are not what they were before it. */
@@ -150,6 +190,14 @@ export const enterpriseUpgradeApi = {
 
   withdraw: async (requestId: string): Promise<LicenceApplication> =>
     (await client.post(`/api/enterprise-upgrade/applications/${encodeURIComponent(requestId)}/withdraw`)).data.application,
+
+  /** The application file for an offline application; nothing is sent to Console. */
+  offlineApplication: async (form: LicenceApplicationForm): Promise<OfflineApplication> =>
+    (await client.post('/api/enterprise-upgrade/applications/offline', form)).data.application,
+
+  /** Writes a licence file sent back for an offline application on this machine; its situation after it. */
+  importLicence: async (content: string): Promise<{ licence: ImportedLicence; situation: EnterpriseSituation }> =>
+    (await client.post('/api/enterprise-upgrade/licence/import', { content })).data,
 
   /** Writes the approved licence on this machine; the machine's situation after it. */
   take: async (requestId: string): Promise<{ application: LicenceApplication; situation: EnterpriseSituation }> =>

@@ -61,8 +61,11 @@ export function useProtectedHubUpdate() {
           if (response?.data?.backupPath && mounted.current) setBackupPath(response.data.backupPath);
           return true;
         } catch (error) {
-          const conflict = error as { response?: { status?: number; data?: { detail?: { code?: string; plan?: HubUpdatePlan } } } };
-          const detail = conflict.response?.data?.detail;
+          // The service's exception handler sends the route's `detail` under `message`
+          // ({ error, message }); plain FastAPI would send it under `detail`.
+          type Refusal = { code?: string; plan?: HubUpdatePlan };
+          const conflict = error as { response?: { status?: number; data?: { message?: Refusal; detail?: Refusal } } };
+          const detail = conflict.response?.data?.message ?? conflict.response?.data?.detail;
           if (conflict.response?.status === 409 && detail?.code === 'hub_update_confirmation_required' && detail.plan) {
             current = detail.plan;
             continue;

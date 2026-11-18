@@ -4,6 +4,8 @@ Local account authentication routes.
 
 from __future__ import annotations
 
+import ipaddress
+import os
 import threading
 import time
 from typing import Any
@@ -15,8 +17,10 @@ from pydantic import BaseModel, Field
 
 from flocks.auth.service import AuthService, TEMP_PASSWORD_TTL_HOURS
 from flocks.console.login import ConsoleLoginService
+from flocks.utils.log import Log
 from flocks.server.auth import (
     clear_session_cookie,
+    is_local_request,
     require_admin,
     require_user,
     set_session_cookie,
@@ -24,6 +28,7 @@ from flocks.server.auth import (
 )
 
 router = APIRouter()
+log = Log.create(service="server.routes.auth")
 
 _LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
 _LOGIN_LOCKOUT_SECONDS = 15 * 60
@@ -225,6 +230,13 @@ def _console_return_url(request: Request, value: str) -> str:
 
 class BootstrapStatusResponse(BaseModel):
     bootstrapped: bool
+    # Whether this browser may create the first administrator: only one on this
+    # machine may (bootstrap_admin). Others are told to use
+    # `flocks admin generate-one-time-password` on the machine.
+    setup_allowed: bool = True
+    # For those others: where a browser on the machine reaches the service, when
+    # loopback reaches it at all (_local_setup_url).
+    local_url: str | None = None
 
 
 class BootstrapAdminRequest(BaseModel):
@@ -297,14 +309,69 @@ class ConsoleLoginSessionResponse(BaseModel):
     updated_at: str | None = None
 
 
+def _local_setup_url() -> str | None:
+    """Where a browser on this machine reaches the service: loopback in the
+    family it listens on (``::`` takes no IPv4), from what ``flocks serve`` was
+    started with. None when loopback does not reach it (it listens on one
+    interface's address) or the address is unknown."""
+    port = os.environ.get("_FLOCKS_SERVER_PORT", "").strip()
+    if not port.isdigit():
+        return None
+    host = os.environ.get("_FLOCKS_SERVER_HOST", "").strip().strip("[]")
+    if host in {"0.0.0.0", "localhost"}:
+        return f"http://127.0.0.1:{port}"
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if address == ipaddress.ip_address("::"):
+        return f"http://[::1]:{port}"
+    if address.is_loopback:
+        # Bound to one loopback address (127.0.0.2 too): that one.
+        return f"http://{address}:{port}" if address.version == 4 else f"http://[{address}]:{port}"
+    return None
+
+
+def _remote_bootstrap_refused() -> str:
+    local_url = _local_setup_url()
+    browser = f"在这台机器的浏览器里打开 {local_url}，或者" if local_url else ""
+    return (
+        "为了安全，第一个管理员只能在运行 Flocks 的这台机器上创建："
+        f"{browser}在这台机器上执行 flocks admin generate-one-time-password，"
+        "再用 admin 和输出的一次性密码登录"
+    )
+
+
+async def _adopt_legacy_sessions(admin_user_id: str) -> None:
+    """Sessions from before the first account go to the first administrator.
+
+    The server does it at startup and the setup page right after creating the
+    administrator; one created by ``flocks admin generate-one-time-password``
+    while the server runs (no account at startup) gets them at its first
+    sign-in. A marker makes it a no-op once done; it never stands in the way of
+    signing in.
+    """
+    try:
+        await AuthService.migrate_legacy_sessions_to_admin(admin_user_id)
+    except Exception as exc:
+        log.warn("auth.login.adopt_legacy_sessions_failed", {"error": str(exc)})
+
+
 @router.get("/bootstrap-status", response_model=BootstrapStatusResponse, summary="获取本地账号初始化状态")
-async def bootstrap_status() -> BootstrapStatusResponse:
-    status_obj = await AuthService.get_bootstrap_status()
+async def bootstrap_status(request: Request) -> BootstrapStatusResponse:
+    status_obj = dict(await AuthService.get_bootstrap_status())
+    bootstrapped = bool(status_obj.get("bootstrapped"))
+    status_obj["setup_allowed"] = not bootstrapped and is_local_request(request)
+    status_obj["local_url"] = None if bootstrapped or status_obj["setup_allowed"] else _local_setup_url()
     return BootstrapStatusResponse(**status_obj)
 
 
 @router.post("/bootstrap-admin", response_model=MeResponse, summary="初始化管理员账号")
 async def bootstrap_admin(payload: BootstrapAdminRequest, response: Response, request: Request) -> MeResponse:
+    # The service listens on every interface by default: until an administrator
+    # exists, whoever reaches the page first would become it.
+    if not is_local_request(request):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_remote_bootstrap_refused())
     try:
         await AuthService.bootstrap_admin(payload.username, payload.password)
         user, session_id = await AuthService.login(
@@ -353,6 +420,8 @@ async def login(payload: LoginRequest, response: Response, request: Request) -> 
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     _login_rate_limiter.record_success(username=payload.username, ip=ip)
+    if user.role == "admin":
+        await _adopt_legacy_sessions(user.id)
     set_session_cookie(response, session_id, secure=should_use_secure_cookie(request))
     await _emit_auth_audit(
         "account.login",
@@ -462,6 +531,25 @@ async def console_login_session(request: Request) -> ConsoleLoginSessionResponse
         account_name=account_name,
         updated_at=session.get("updated_at"),
     )
+
+
+class ConsoleConnectivityResponse(BaseModel):
+    configured: bool
+    online: bool
+    console_host: str = ""
+    checked_at: str
+
+
+@router.get(
+    "/console-login/connectivity",
+    response_model=ConsoleConnectivityResponse,
+    summary="这台机器现在连不连得上 Console：授权页据此给在线或离线的授权方式",
+)
+async def console_login_connectivity(request: Request, refresh: bool = False) -> ConsoleConnectivityResponse:
+    require_admin(request)
+    from flocks.console.connectivity import console_connectivity
+
+    return ConsoleConnectivityResponse(**await console_connectivity(refresh=refresh))
 
 
 @router.post("/console-login/logout", summary="退出 console 云账号登录")

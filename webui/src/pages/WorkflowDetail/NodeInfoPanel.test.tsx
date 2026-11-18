@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import NodeInfoPanel from './NodeInfoPanel';
+import { backendError } from '@/test/helpers';
 
 const { workflowAPI } = vi.hoisted(() => ({
   workflowAPI: {
@@ -316,6 +317,48 @@ describe('NodeInfoPanel', () => {
     expect(await screen.findByText('执行成功')).toBeInTheDocument();
     expect(screen.getAllByTestId('copy-button')).toHaveLength(4);
     expect(screen.getByText(/done/)).toBeInTheDocument();
+  });
+
+  function renderNode() {
+    render(
+      <NodeInfoPanel
+        node={workflow.workflowJson.nodes[0]}
+        workflow={workflow}
+        latestExecution={null}
+        onClose={() => {}}
+        onSaved={() => {}}
+      />
+    );
+  }
+
+  it('says why a single node run was refused instead of the bare status code', async () => {
+    const user = userEvent.setup();
+    workflowAPI.runNode.mockRejectedValue(backendError(409, '工作流正在运行，不能单独执行节点'));
+    renderNode();
+
+    await user.click(screen.getByRole('button', { name: '执行节点' }));
+
+    expect(await screen.findByText('工作流正在运行，不能单独执行节点')).toBeInTheDocument();
+    expect(screen.queryByText(/status code 409/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['the route refuses the save', backendError(403, '只有管理员可以修改工作流')],
+    // The one answer of the service that does carry `detail`: a write to a workflow the
+    // deployment manages (managed_workflow_read_only_handler in flocks/server/app.py).
+    ['the workflow is managed by the deployment', Object.assign(new Error('Request failed with status code 403'), {
+      response: { status: 403, data: { detail: '该工作流由部署统一管理，不能修改' } },
+    })],
+  ])('says why a node could not be saved when %s', async (_name, error) => {
+    const user = userEvent.setup();
+    workflowAPI.update.mockRejectedValue(error);
+    renderNode();
+
+    await user.click(screen.getByRole('button', { name: '保存节点' }));
+
+    const reason = (error as unknown as { response: { data: { detail?: string; message?: string } } }).response.data;
+    expect(await screen.findByText(reason.detail ?? reason.message ?? '')).toBeInTheDocument();
+    expect(screen.queryByText(/status code 403/)).not.toBeInTheDocument();
   });
 
   it('opens the expanded code editor and keeps code in sync', async () => {

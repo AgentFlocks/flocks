@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Wrench,
@@ -49,7 +50,7 @@ import { useToast } from '@/components/common/Toast';
 import { useToolPage } from '@/hooks/useTools';
 import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-groups/GroupNav';
 import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
-import { assertGroupItemsEditable, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import { assertGroupItemsEditable, saveGroupItems, type GroupSelection, groupNoun } from '@/components/plugin-groups/groupView';
 import { useAuth } from '@/contexts/AuthContext';
 import { usePluginViewMode } from '@/hooks/usePluginViewMode';
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
@@ -60,7 +61,7 @@ import { mcpAPI, MCPServer } from '@/api/mcp';
 import { providerAPI } from '@/api/provider';
 import client from '@/api/client';
 import type { MCPServerDetail, MCPCredentials, MCPCredentialInput, MCPCatalogEntry, MCPCatalogCategory } from '@/types';
-import { MCPSheet, APISheet, GenerateToolSheet, MCPFormFields, buildMCPFormDataFromConfig } from './ToolSheets';
+import { MCPSheet, APISheet, GenerateToolSheet, MCPFormFields, buildMCPFormDataFromConfig, mcpTestFailure, mcpTestOutcome, type MCPTestResult } from './ToolSheets';
 import type { MCPFormData, ConnStatus as MCPConnStatus } from './ToolSheets';
 import MCPTabContent from './components/MCPTabContent';
 import APITabContent from './components/APITabContent';
@@ -195,6 +196,10 @@ export default function ToolPage() {
   const [serviceRefreshKey, setServiceRefreshKey] = useState(0);
   const [showAPISheet, setShowAPISheet] = useState(false);
   const [showGenerateSheet, setShowGenerateSheet] = useState(false);
+  // One-shot request to open a service's detail panel on the API tab; the
+  // nonce tells two requests for the same service apart.
+  const [apiServiceFocus, setApiServiceFocus] = useState<{ id: string; nonce: number } | null>(null);
+  const apiServiceFocusSeq = useRef(0);
   // Sort: default by 类别 (source) MCP -> API -> 内置
   const [sort, setSort] = useState<SortState>({ field: 'source', dir: 'asc' });
   const [filters, setFilters] = useState<ColumnFilters>(EMPTY_FILTERS);
@@ -350,7 +355,7 @@ export default function ToolPage() {
   const readOnlyReason = user?.role === 'admin' ? undefined : t('pluginGroups:readOnly.admin');
   const asGroupItem = (tool: Tool) => ({
     key: tool.name, name: tool.name, group: tool.group,
-    readOnlyReason: tool.group_readonly ? t('pluginGroups:readOnly.system') : readOnlyReason,
+    readOnlyReason: tool.group_readonly ? t('pluginGroups:readOnly.system', groupNoun(t, 'tool')) : readOnlyReason,
   });
   const toolGroupItems = tools.map(asGroupItem);
   const toolGroupDrag = useGroupDrag(toolGroupItems, toast.warning);
@@ -378,7 +383,7 @@ export default function ToolPage() {
   };
   const moveToolGroup = async (key: string, group: string | null) => {
     const { data } = await toolAPI.get(key);
-    await saveGroupItems([asGroupItem(data)], group, saveToolGroup, reloadToolGroups, t);
+    await saveGroupItems([asGroupItem(data)], group, saveToolGroup, reloadToolGroups, t, false, 'tool');
   };
   const ensureNewToolGroup = async (name: string) => {
     // Query-independent native facets include names hidden by search, columns or tabs.
@@ -396,12 +401,12 @@ export default function ToolPage() {
     // Audit the entire native group, including members hidden by query, columns,
     // tabs or pagination. Counts and the loaded 25 rows cannot prove writability.
     const wholeGroup = await listAllToolPages({ group: from, sortBy: toolPageParams.sortBy, sortDir: toolPageParams.sortDir }, { requireComplete: true });
-    assertGroupItemsEditable(wholeGroup.map(asGroupItem), t);
+    assertGroupItemsEditable(wholeGroup.map(asGroupItem), t, 'tool');
     // Keep the existing write scope explicit in the single native confirmation.
     const members = hasToolInventoryFilters
       ? await listAllToolPages({ ...toolPageParams, group: from }, { requireComplete: true })
       : wholeGroup;
-    await saveGroupItems(members.map(asGroupItem), to, saveToolGroup, reloadToolGroups, t, true);
+    await saveGroupItems(members.map(asGroupItem), to, saveToolGroup, reloadToolGroups, t, true, 'tool');
   };
   const selectToolGroup = useCallback((name: GroupSelection) => {
     setToolGroup(name);
@@ -409,7 +414,7 @@ export default function ToolPage() {
   }, []);
   // A failed first request has no facets, not an authoritative empty inventory.
   // Do not let it clear the selected group and silently fall back to All.
-  const toolGroupNav = toolFacets.group ? <GroupNav preferenceKey={`tools.${activeTab}`} {...nativeGroupNav} items={toolGroupItems}
+  const toolGroupNav = toolFacets.group ? <GroupNav itemKind="tool" preferenceKey={`tools.${activeTab}`} {...nativeGroupNav} items={toolGroupItems}
     selection={toolGroup} onSelect={selectToolGroup} onMove={moveToolGroup} onCreate={createToolGroup} onRename={changeToolGroup}
     onDelete={(name) => changeToolGroup(name, null)} {...toolGroupDrag} /> : null;
 
@@ -478,6 +483,8 @@ export default function ToolPage() {
 
   const handleTabChange = (tab: TabKey) => {
     setActiveTab(tab);
+    // A stale request must not reopen the panel when the API tab remounts.
+    setApiServiceFocus(null);
     selectToolGroup(null);
     setCurrentPage(1);
     setSearchQuery('');
@@ -542,6 +549,16 @@ export default function ToolPage() {
     } finally {
       setTesting(false);
     }
+  };
+
+  // A tool whose API service is off cannot be switched on from its own
+  // drawer: take the user to the service, where it is enabled and configured.
+  const openApiService = (serviceId: string) => {
+    setSelectedTool(null);
+    setTestResult(null);
+    handleTabChange('api');
+    apiServiceFocusSeq.current += 1;
+    setApiServiceFocus({ id: serviceId, nonce: apiServiceFocusSeq.current });
   };
 
   const openDetail = (tool: Tool) => {
@@ -748,6 +765,7 @@ export default function ToolPage() {
             refreshKey={serviceRefreshKey}
             onSelectTool={openDetail}
             onRefreshTools={refreshToolDataAfterMutation}
+            focusService={apiServiceFocus}
             catalogEntries={apiCatalogEntries}
             catalogCategories={catalogCategories}
             catalogLoading={catalogLoading}
@@ -882,10 +900,13 @@ export default function ToolPage() {
               ...(updated ? {
                 enabled_customized: updated.enabled_customized,
                 enabled_default: updated.enabled_default,
+                service_enabled: updated.service_enabled,
+                service_integration_type: updated.service_integration_type,
               } : {}),
             } : prev);
             void refreshToolDataAfterMutation();
           }}
+          onOpenApiService={openApiService}
         />
       )}
 
@@ -1138,7 +1159,7 @@ function LegacyMCPTabContent({
       await fetchServers();
       onRefreshTools();
     } catch (err: any) {
-      alert(t('alert.removeFailed', { error: err.response?.data?.detail ?? err.message }));
+      alert(t('alert.removeFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     }
   };
 
@@ -1246,7 +1267,7 @@ function LegacyMCPTabContent({
       onConfiguredChange(entryId);
       setCredModalEntry(null);
     } catch (err: any) {
-      alert(t('alert.configFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.configFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
       setInstalling(null);
       return;
     }
@@ -1260,7 +1281,7 @@ function LegacyMCPTabContent({
         alert(t('alert.mcpConfiguredDisabled', { name: entryName }));
       }
     } catch (err: any) {
-      alert(t('alert.connectFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.connectFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setInstalling(null);
     }
@@ -1276,7 +1297,7 @@ function LegacyMCPTabContent({
       shouldConnect = installRes.data?.config?.enabled !== false;
       onConfiguredChange(entry.id);
     } catch (err: any) {
-      alert(t('alert.configFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.configFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
       setInstalling(null);
       return;
     }
@@ -1290,7 +1311,7 @@ function LegacyMCPTabContent({
         alert(t('alert.mcpConfiguredDisabled', { name: entry.name }));
       }
     } catch (err: any) {
-      alert(t('alert.connectFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.connectFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setInstalling(null);
     }
@@ -1601,7 +1622,7 @@ function MCPServerDetailPanel({
   const [serverDetail, setServerDetail] = useState<MCPServerDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
   const [testingConnection, setTestingConnection] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string; latency?: number; tools_count?: number } | null>(null);
+  const [testResult, setTestResult] = useState<MCPTestResult | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
@@ -1626,22 +1647,14 @@ function MCPServerDetailPanel({
     try {
       const res = await mcpAPI.testCredentials(server.name);
       const data = res.data;
-      setTestResult({
-        success: data.success ?? false,
-        message: data.message ?? (data.success ? t('alert.connectionOk') : t('detail.testFailed')),
-        latency: data.latency_ms,
-        tools_count: data.tools_count,
-      });
+      setTestResult(mcpTestOutcome({ ...data, message: data.message ?? (data.success ? t('alert.connectionOk') : undefined) }, t));
       if (data.success) {
         const detailRes = await mcpAPI.get(server.name);
         setServerDetail(detailRes.data);
         await onRefresh();
       }
-    } catch (err: any) {
-      setTestResult({
-        success: false,
-        message: err.response?.data?.detail ?? err.message ?? t('detail.testFailed'),
-      });
+    } catch (err: unknown) {
+      setTestResult(mcpTestFailure(err, t));
     } finally {
       setTestingConnection(false);
     }
@@ -1694,7 +1707,8 @@ function MCPServerDetailPanel({
                 ? 'testing'
                 : testResult?.success === true
                   ? 'connected'
-                  : testResult?.success === false
+                  // A request the service refused never tried the connection.
+                  : testResult?.success === false && !testResult.refused
                     ? 'failed'
                     : server.status === 'connected'
                       ? 'connected'
@@ -1703,7 +1717,7 @@ function MCPServerDetailPanel({
                 <MCPFormFields
                   formData={detailFormData}
                   connStatus={mcpConnStatus}
-                  testResult={testResult ? { success: testResult.success, message: testResult.message, tools_count: testResult.tools_count } : null}
+                  testResult={testResult}
                   onTestConnection={handleTestConnection}
                   isTesting={testingConnection}
                 />
@@ -1846,7 +1860,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
       const res = await toolAPI.test(tool.name, params);
       setTestResult({ success: res.data.success, data: res.data.output, error: res.data.error });
     } catch (err: any) {
-      setTestResult({ success: false, error: err.response?.data?.detail ?? err.message });
+      setTestResult({ success: false, error: extractErrorMessage(err, t('alert.unknownError')) });
     } finally {
       setTesting(false);
     }
@@ -2370,7 +2384,7 @@ function LegacyAPITabContent({
       onConfiguredChange(entryId);
       setCredModalEntry(null);
     } catch (err: any) {
-      alert(t('alert.configFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.configFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
       setInstalling(null);
       return;
     }
@@ -2384,7 +2398,7 @@ function LegacyAPITabContent({
         alert(t('alert.mcpConfiguredDisabled', { name: entryName }));
       }
     } catch (err: any) {
-      alert(t('alert.connectFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.connectFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setInstalling(null);
     }
@@ -2400,7 +2414,7 @@ function LegacyAPITabContent({
       shouldConnect = installRes.data?.config?.enabled !== false;
       onConfiguredChange(entry.id);
     } catch (err: any) {
-      alert(t('alert.configFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.configFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
       setInstalling(null);
       return;
     }
@@ -2414,7 +2428,7 @@ function LegacyAPITabContent({
         alert(t('alert.mcpConfiguredDisabled', { name: entry.name }));
       }
     } catch (err: any) {
-      alert(t('alert.connectFailed', { error: err.response?.data?.detail || err.message }));
+      alert(t('alert.connectFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setInstalling(null);
     }
@@ -3725,6 +3739,7 @@ export function ToolDetailDrawer({
   onTest,
   onDelete,
   onEnabledChange,
+  onOpenApiService,
 }: {
   tool: Tool;
   testParams: string;
@@ -3735,10 +3750,14 @@ export function ToolDetailDrawer({
   onTest: () => void;
   onDelete?: (name: string) => Promise<void>;
   onEnabledChange?: (name: string, enabled: boolean, updated?: Tool) => void;
+  /** Open the API service that owns this tool (its detail panel on the API tab). */
+  onOpenApiService?: (serviceId: string) => void;
 }) {
   const { t, i18n } = useTranslation('tool');
   const [section, setSection] = useState<'info' | 'test'>('info');
   const [enabled, setEnabled] = useState(tool.enabled);
+  const [serviceEnabled, setServiceEnabled] = useState(tool.service_enabled);
+  const [serviceIntegrationType, setServiceIntegrationType] = useState(tool.service_integration_type);
   const [customized, setCustomized] = useState<boolean>(!!tool.enabled_customized);
   const [enabledDefault, setEnabledDefault] = useState<boolean>(
     tool.enabled_default ?? tool.enabled
@@ -3757,9 +3776,36 @@ export function ToolDetailDrawer({
 
   useEffect(() => {
     setEnabled(tool.enabled);
+    setServiceEnabled(tool.service_enabled);
+    setServiceIntegrationType(tool.service_integration_type);
     setCustomized(!!tool.enabled_customized);
     setEnabledDefault(tool.enabled_default ?? tool.enabled);
-  }, [tool.enabled, tool.enabled_customized, tool.enabled_default]);
+  }, [tool.enabled, tool.service_enabled, tool.service_integration_type, tool.enabled_customized, tool.enabled_default]);
+
+  // The answer to a toggle or a reset is the newest state of the tool: take
+  // every field the drawer shows from it, in one place, and hand it to the
+  // parent so its copy cannot sync a stale one back.
+  const applyUpdatedTool = (updated: Tool) => {
+    setEnabled(updated.enabled);
+    setServiceEnabled(updated.service_enabled);
+    setServiceIntegrationType(updated.service_integration_type);
+    setCustomized(!!updated.enabled_customized);
+    setEnabledDefault(updated.enabled_default ?? updated.enabled);
+    onEnabledChange?.(tool.name, updated.enabled, updated);
+  };
+
+  // The backend never opens a tool whose API service is off (it answers 200
+  // with enabled=false), so say why instead of offering a switch that cannot
+  // turn on. Switching off stays possible.
+  const serviceBlocked = serviceEnabled === false;
+  const enableLocked = serviceBlocked && !enabled;
+  const serviceName = tool.source_name ?? '';
+  // Where the service is enabled follows its own integration_type, the same
+  // field the API tab filters on. `source` only says which plugin directory
+  // the tool was loaded from: a device plugin installed under tools/api is an
+  // "api" tool whose service the API tab does not list.
+  const serviceOnDevicePage = serviceIntegrationType === 'device';
+  const serviceOnApiTab = !serviceOnDevicePage && (tool.source === 'api' || tool.source === 'device');
 
   useEffect(() => {
     if (testResult?.metadata?.disabled === true) {
@@ -3777,15 +3823,17 @@ export function ToolDetailDrawer({
 
 
   const handleToggleEnabled = async () => {
-    if (toggling) return;
+    if (toggling || enableLocked) return;
     const next = !enabled;
     setToggling(true);
     try {
       const { data: updated } = await toolAPI.setEnabled(tool.name, next);
-      setEnabled(updated.enabled);
-      setCustomized(!!updated.enabled_customized);
-      setEnabledDefault(updated.enabled_default ?? updated.enabled);
-      onEnabledChange?.(tool.name, updated.enabled, updated);
+      applyUpdatedTool(updated);
+      // A refused enable must never look like a click that did nothing: the
+      // service notice below covers the known reason, this covers any other.
+      if (next && !updated.enabled && updated.service_enabled !== false) {
+        alert(t('toolDetail.enableNotApplied'));
+      }
     } catch (err: unknown) {
       // state was never flipped, so nothing to revert; surface the reason (e.g. 403 仅管理员可执行该操作)
       alert(extractErrorMessage(err, t('alert.unknownError')));
@@ -3799,10 +3847,7 @@ export function ToolDetailDrawer({
     setResetting(true);
     try {
       const { data: updated } = await toolAPI.resetSetting(tool.name);
-      setEnabled(updated.enabled);
-      setCustomized(!!updated.enabled_customized);
-      setEnabledDefault(updated.enabled_default ?? updated.enabled);
-      onEnabledChange?.(tool.name, updated.enabled, updated);
+      applyUpdatedTool(updated);
     } catch (err: unknown) {
       alert(extractErrorMessage(err, t('alert.unknownError')));
     } finally {
@@ -3901,9 +3946,14 @@ export function ToolDetailDrawer({
                   <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.status')}</label>
                   <div className="flex items-center gap-2 flex-wrap">
                     <button
+                      type="button"
+                      role="switch"
+                      aria-checked={enabled}
+                      aria-label={t('toolDetail.status')}
+                      aria-describedby={serviceBlocked ? 'tool-service-disabled-notice' : undefined}
                       onClick={handleToggleEnabled}
-                      disabled={toggling}
-                      className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none disabled:opacity-50 ${enabled ? 'bg-slate-700' : 'bg-gray-200'}`}
+                      disabled={toggling || enableLocked}
+                      className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 ${enabled ? 'bg-slate-700' : 'bg-gray-200'}`}
                     >
                       <span
                         className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${enabled ? 'translate-x-5' : 'translate-x-0'}`}
@@ -3935,6 +3985,39 @@ export function ToolDetailDrawer({
                       </>
                     )}
                   </div>
+                  {serviceBlocked && (
+                    <div
+                      id="tool-service-disabled-notice"
+                      role="note"
+                      className="mt-2 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800"
+                    >
+                      <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+                      <div className="min-w-0">
+                        <p className="break-words [overflow-wrap:anywhere]">
+                          {t(serviceOnDevicePage ? 'toolDetail.serviceDisabledDevice' : 'toolDetail.serviceDisabledApi', { service: serviceName })}
+                        </p>
+                        {serviceOnDevicePage ? (
+                          <Link
+                            to="/devices"
+                            // The tool page stays mounted while another page is shown:
+                            // close the drawer so it is not still open on the way back.
+                            onClick={onClose}
+                            className="mt-1 inline-flex items-center gap-0.5 font-medium underline underline-offset-2 hover:text-amber-900"
+                          >
+                            {t('toolDetail.goToDevices')}<ChevronRight className="h-4 w-4" />
+                          </Link>
+                        ) : serviceOnApiTab && serviceName && onOpenApiService ? (
+                          <button
+                            type="button"
+                            onClick={() => onOpenApiService(serviceName)}
+                            className="mt-1 inline-flex items-center gap-0.5 font-medium underline underline-offset-2 hover:text-amber-900"
+                          >
+                            {t('toolDetail.goToApiService')}<ChevronRight className="h-4 w-4" />
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  )}
                 </div>
                 {tool.requires_confirmation && (
                   <div>

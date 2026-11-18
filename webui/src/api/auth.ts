@@ -2,6 +2,10 @@ import client from './client';
 
 export interface BootstrapStatus {
   bootstrapped: boolean;
+  /** Whether this browser may create the first administrator (only one on the server's own machine). */
+  setup_allowed?: boolean;
+  /** Where a browser on that machine reaches the service, when loopback reaches it. */
+  local_url?: string | null;
 }
 
 export interface LocalUser {
@@ -31,6 +35,16 @@ export interface ConsoleLoginFinishResult {
   logged_in: boolean;
   account_name?: string | null;
   updated_at?: string | null;
+}
+
+/** Whether this install reaches Console now (flocks.console.connectivity): what the licence pages offer. */
+export interface ConsoleConnectivity {
+  /** A Console address is set at all. */
+  configured: boolean;
+  /** Console answered just now (or within half a minute). */
+  online: boolean;
+  console_host: string;
+  checked_at: string;
 }
 
 export interface ConsoleLoginSessionStatus {
@@ -101,5 +115,13 @@ export const authApi = {
 
   logoutConsoleLogin: async (): Promise<void> => {
     await client.post('/api/auth/console-login/logout');
+  },
+
+  /** Whether Console can be reached from here; `refresh` asks it now rather than from the last half minute. */
+  consoleConnectivity: async (refresh = false): Promise<ConsoleConnectivity> => {
+    const response = await client.get('/api/auth/console-login/connectivity', {
+      params: refresh ? { refresh: true } : undefined,
+    });
+    return response.data;
   },
 };

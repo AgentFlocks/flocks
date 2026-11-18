@@ -26,11 +26,12 @@ import {
   type UpgradeHandoffProgress,
 } from '@/api/update';
 import { checkRestartReadiness } from '@/utils/restartPolling';
+import { formatProductVersion } from '@/utils/productVersion';
 import UpgradeHandoffSteps, { useHandoffFailureMessage } from './UpgradeHandoffSteps';
 import UpgradeFailureDetails, { failureOfEnterpriseUpgrade, failureOfReleaseUpdate, type UpgradeFailure } from './UpgradeFailureDetails';
 import { ENTERPRISE_UPDATE_CHANNEL, UPDATE_DISMISSED_KEY, buildUpdateDismissalKey } from '@/utils/updateDismissal';
 import { withReleaseUpdate, type ReleaseUpdateSource } from '@/utils/releaseUpdate';
-import { extractErrorMessage } from '@/utils/error';
+import { extractErrorMessage, isServiceRefusal } from '@/utils/error';
 import { ENTERPRISE_UPGRADE_PAGE, EnterpriseUpgradeRefused, enterpriseUpgradeApi, enterpriseVersionInfo, type EnterpriseUpgradeState } from '@/api/enterpriseUpgrade';
 
 // ------------------------------------------------------------------ //
@@ -44,10 +45,9 @@ const ENTERPRISE_FAILED_STAGE: Record<string, UpdateProgress['stage']> = { downl
 
 export { UPDATE_DISMISSED_KEY };
 
+// Versions on screen are written one way: v<year>.<month>.<day>.<build> (utils/productVersion).
 function formatUpdateVersion(version?: string | null): string {
-  const raw = (version || '').trim();
-  if (!raw) return '—';
-  return /^\d/.test(raw) ? `v${raw}` : raw;
+  return formatProductVersion(version) ?? '—';
 }
 
 function clampPercent(value?: number | null): number | null {
@@ -118,6 +118,10 @@ export default function UpdateModal({
   // Where a failed upgrade stopped, when what failed said; `error` is the plain text of the rest.
   const [failure, setFailure] = useState<UpgradeFailure | null>(null);
   const [failedStage, setFailedStage] = useState<UpdateProgress['stage'] | null>(null);
+  // A release update that ended with the release not coming up: asked for again as usual it is
+  // refused, so the administrator may confirm a retry of that update (its outcome id), and is confirming it.
+  const [retryRequestId, setRetryRequestId] = useState<string | null>(null);
+  const [confirmingRetry, setConfirmingRetry] = useState(false);
   const [installLog, setInstallLog] = useState<string | null>(null);
   const lastStageRef = useRef<UpdateProgress['stage'] | null>(null);
   const [restarting, setRestarting] = useState(false);
@@ -253,14 +257,15 @@ export default function UpdateModal({
           return;
         }
         if (outcome.state === 'failed' || outcome.state === 'stalled' || outcome.state === 'unknown') {
+          setRetryRequestId(outcome.state === 'failed' && outcome.retryable === true && outcome.id ? outcome.id : null);
           unlock(failureOfReleaseUpdate(outcome, t('upgradeFailed')));
           return;
         }
       } catch (e: any) {
-        // Out of reach, or the proxy's answer while the service restarts: keep asking.
-        // The service's own refusal (signed out, say) will not change.
-        const code = e?.response?.status;
-        if (typeof code === 'number' && code >= 400 && code < 500) {
+        // Out of reach, or a proxy answering for the service while it restarts (a 502 or 503 page
+        // on most, a 404 on some): keep asking. The service's own refusal (signed out, say)
+        // comes in its own JSON and will not change.
+        if (isServiceRefusal(e)) {
           unlock({ reason: extractErrorMessage(e, t('upgradeFailed')) });
           return;
         }
@@ -359,7 +364,7 @@ export default function UpdateModal({
     }
   };
 
-  const handleUpgrade = useCallback(async () => {
+  const handleUpgrade = useCallback(async (retryOf?: string) => {
     if (!info?.has_update || !canUpgrade || info.update_allowed === false) return;
     // The way the shown version came: a background check must not change what this button does.
     if (info.channel === ENTERPRISE_UPDATE_CHANNEL) {
@@ -372,6 +377,8 @@ export default function UpdateModal({
     setError(null);
     setFailure(null);
     setFailedStage(null);
+    setRetryRequestId(null);
+    setConfirmingRetry(false);
     lastStageRef.current = null;
 
     const viaRelease = info.deploy_mode === 'managed' ? releaseUpdate : undefined;
@@ -401,7 +408,7 @@ export default function UpdateModal({
         }
       };
       if (viaRelease) {
-        await viaRelease.start(onProgress);
+        await viaRelease.start(onProgress, retryOf ? { retryOf } : undefined);
       } else {
         await applyUpdate(info.latest_version!, onProgress, i18n.language, channel);
       }
@@ -651,6 +658,40 @@ export default function UpdateModal({
                 </span>
               )}
 
+              {!isBusy && retryRequestId && (
+                <div className="w-full rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-800" data-testid="retry-rolled-back-release">
+                  <p className="[overflow-wrap:anywhere]">{t('retryReleaseHint')}</p>
+                  <div className="mt-2 flex justify-end gap-2">
+                    {confirmingRetry ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmingRetry(false)}
+                          className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-200 hover:bg-gray-50 rounded-lg"
+                        >
+                          {t('retryReleaseCancel')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleUpgrade(retryRequestId)}
+                          className="px-3 py-1.5 text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-lg"
+                        >
+                          {t('retryReleaseConfirm')}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmingRetry(true)}
+                        className="px-3 py-1.5 text-xs font-medium text-amber-800 bg-white border border-amber-300 hover:bg-amber-100 rounded-lg"
+                      >
+                        {t('retryRelease')}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {!isBusy && error && (
                 <button
                   onClick={safeClose}
@@ -788,7 +829,7 @@ export default function UpdateModal({
             )}
 
             {canUpgrade && info?.has_update && info.update_allowed !== false && (
-              <NoticePrimaryAction onClick={handleUpgrade} className="ml-auto">
+              <NoticePrimaryAction onClick={() => void handleUpgrade()} className="ml-auto">
                 <ArrowUpCircle className="w-3.5 h-3.5" />
                 {enterpriseShown && !enterprise?.canStart ? t('enterpriseOpenPage') : t('confirmAction')}
               </NoticePrimaryAction>

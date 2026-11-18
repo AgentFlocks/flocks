@@ -176,6 +176,8 @@ export interface EntitySheetProps {
   rexComposerTextareaMaxHeight?: number;
   /** Optional element rendered on the left side of the form-tab footer (e.g. delete button) */
   footerLeft?: React.ReactNode;
+  /** Edit mode the viewer may only look at: "{{entityType}}详情" title, no save/cancel (the header still closes). */
+  readOnly?: boolean;
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -224,6 +226,7 @@ export default function EntitySheet({
   rexComposerTextareaMinHeight,
   rexComposerTextareaMaxHeight,
   footerLeft,
+  readOnly = false,
 }: EntitySheetProps) {
   const { t } = useTranslation('common');
   const supportsVision = useDefaultModelVision();
@@ -234,9 +237,13 @@ export default function EntitySheet({
   const title =
     mode === 'create'
       ? t('entity.createTitle', { entityType })
-      : entityName
-        ? t('entity.editTitleWithName', { entityType, entityName })
-        : t('entity.editTitle', { entityType });
+      : readOnly
+        ? entityName
+          ? t('entity.viewTitleWithName', { entityType, entityName })
+          : t('entity.viewTitle', { entityType })
+        : entityName
+          ? t('entity.editTitleWithName', { entityType, entityName })
+          : t('entity.editTitle', { entityType });
   const defaultSubmitLabel = mode === 'create' ? t('entity.defaultCreate') : t('entity.defaultSave');
   const effectiveDefaultTestPrompt = defaultTestPrompt ?? t('entity.defaultTestPrompt', { defaultValue: 'Hello, please introduce yourself.' });
 
@@ -767,8 +774,8 @@ export default function EntitySheet({
           )}
         </div>
 
-        {/* ── Footer ── */}
-        {(!showTabs || activeTab === 'form') && (
+        {/* ── Footer ── (a read-only sheet with nothing on the left has none) */}
+        {(!showTabs || activeTab === 'form') && !(readOnly && !footerLeft && !(onRunTest && !hideTest)) && (
           <div className="flex-shrink-0 border-t border-gray-200 bg-white px-6 py-4 max-md:px-4">
             <div className="flex items-center justify-between gap-3 max-md:flex-wrap">
               {/* Left: custom footer element and/or test button */}
@@ -785,14 +792,16 @@ export default function EntitySheet({
                 )}
               </div>
 
-              <SubmitButtons
-                onClose={onClose}
-                onSubmit={onSubmit}
-                submitDisabled={submitDisabled}
-                submitLoading={submitLoading}
-                submitLabel={submitLabel ?? defaultSubmitLabel}
-                cancelLabel={t('entity.cancelButton')}
-              />
+              {!readOnly && (
+                <SubmitButtons
+                  onClose={onClose}
+                  onSubmit={onSubmit}
+                  submitDisabled={submitDisabled}
+                  submitLoading={submitLoading}
+                  submitLabel={submitLabel ?? defaultSubmitLabel}
+                  cancelLabel={t('entity.cancelButton')}
+                />
+              )}
             </div>
           </div>
         )}

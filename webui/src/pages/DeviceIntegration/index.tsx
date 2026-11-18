@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { lazy, Suspense, useState, useEffect, useCallback, useContext, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
@@ -7,6 +7,7 @@ import {
   Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog, Sparkles,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
+import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import GuideInfoIcon from '@/components/common/GuideInfoIcon';
@@ -25,6 +26,7 @@ import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
 import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
 import { usePluginViewMode, type PluginViewMode } from '@/hooks/usePluginViewMode';
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
+import { extractServerMessage } from '@/utils/error';
 
 // ============================================================================
 // Constants
@@ -46,9 +48,7 @@ function SessionChatFallback() {
 /** Pull the backend's human-readable error detail (e.g. "机房名称已存在")
  *  out of an axios error, falling back to a generic message. */
 function errDetail(err: unknown, fallback: string): string {
-  return (
-    (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || fallback
-  );
+  return extractServerMessage(err) || fallback;
 }
 
 // ============================================================================
@@ -2002,6 +2002,14 @@ export default function DeviceIntegrationPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [panel, setPanel] = useState<PanelMode>(null);
   const lastRefreshRef = useRef(0);
+  // Syncs still running; a resume never queues another full sync behind them.
+  const syncInFlightRef = useRef(0);
+  // The window came back while this tab was hidden: refresh once it is shown.
+  const resumePendingRef = useRef(false);
+  // Hidden keep-alive tabs stay mounted and keep receiving window events.
+  const paneActive = useContext(PaneActiveContext);
+  const paneActiveRef = useRef(paneActive);
+  paneActiveRef.current = paneActive;
   const rexStatusPollRef = useRef<number | null>(null);
   // null = "全部机房" aggregate view; string = specific group id
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
@@ -2066,20 +2074,20 @@ export default function DeviceIntegrationPage() {
   const loadBusinessItems = async () => (await deviceAPI.list()).data.map(asBusinessItem);
   const moveBusinessGroup = async (key: string, group: string | null) => {
     const inventory = await loadBusinessItems();
-    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveBusinessGroup, reloadBusinessDevices, t);
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveBusinessGroup, reloadBusinessDevices, t, false, 'device');
   };
   const createBusinessGroup = async (key: string, group: string) => {
     const inventory = await loadBusinessItems();
     if (inventory.some((item) => matchesGroup(item.group, group))) throw new Error(t('pluginGroups:validation.duplicate'));
-    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveBusinessGroup, reloadBusinessDevices, t);
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveBusinessGroup, reloadBusinessDevices, t, false, 'device');
   };
   const changeBusinessGroup = async (from: string, to: string | null) => {
     const inventory = await loadBusinessItems();
     if (to !== null && inventory.some((item) => matchesGroup(item.group, to))) throw new Error(t('pluginGroups:validation.duplicate'));
-    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveBusinessGroup, reloadBusinessDevices, t, true);
+    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveBusinessGroup, reloadBusinessDevices, t, true, 'device');
   };
   const businessNav: GroupNavProps = {
-    preferenceKey: 'device', inventoryComplete: !loading && !refreshing, ...deriveGroupNav(businessItems), items: businessItems,
+    preferenceKey: 'device', itemKind: 'device', inventoryComplete: !loading && !refreshing, ...deriveGroupNav(businessItems), items: businessItems,
     selection: businessGroup, onSelect: setBusinessGroup, onMove: moveBusinessGroup, onCreate: createBusinessGroup,
     onRename: changeBusinessGroup, onDelete: (name) => changeBusinessGroup(name, null), ...businessDrag,
   };
@@ -2092,13 +2100,18 @@ export default function DeviceIntegrationPage() {
   ): Promise<DeviceTemplate[]> => {
     if (!silent) setLoading(true);
     else setRefreshing(true);
+    if (syncDeviceInstances) syncInFlightRef.current += 1;
     try {
       if (syncDeviceInstances) {
         await deviceAPI.sync({ refresh: refreshTemplates });
       }
       const [devRes, tplRes, grpRes] = await Promise.all([
         deviceAPI.list(),
-        refreshTemplates ? deviceAPI.listTemplates({ refresh: true }) : deviceAPI.listTemplates(),
+        // A forced sync has just rebuilt the backend template index (a full
+        // plugin reload); read that result instead of rebuilding it again.
+        refreshTemplates && !syncDeviceInstances
+          ? deviceAPI.listTemplates({ refresh: true })
+          : deviceAPI.listTemplates(),
         deviceAPI.listGroups(),
       ]);
       const nextTemplates = tplRes.data || [];
@@ -2110,6 +2123,7 @@ export default function DeviceIntegrationPage() {
       toast.error(t('toast.loadFailed'));
       return [];
     } finally {
+      if (syncDeviceInstances) syncInFlightRef.current -= 1;
       setLoading(false);
       setRefreshing(false);
     }
@@ -2117,12 +2131,31 @@ export default function DeviceIntegrationPage() {
 
   useEffect(() => { void fetchData(); }, [fetchData]);
 
-  const refreshOnResume = useCallback(() => {
+  // Coming back to the window picks up plugin changes made elsewhere with one
+  // forced sync, but only on the tab on screen: a hidden keep-alive tab just
+  // remembers it and refreshes once it is shown again.
+  const refreshOnResume = useCallback((deferred = false) => {
+    if (document.visibilityState === 'hidden') return;
+    if (!paneActiveRef.current) {
+      resumePendingRef.current = true;
+      return;
+    }
+    // The running sync is already bringing fresh data; never stack another.
+    if (syncInFlightRef.current > 0) {
+      resumePendingRef.current = false;
+      return;
+    }
     const now = Date.now();
-    if (now - lastRefreshRef.current < 1000) return;
+    // focus and visibilitychange arrive together; a deferred refresh is one call.
+    if (!deferred && now - lastRefreshRef.current < 1000) return;
+    resumePendingRef.current = false;
     lastRefreshRef.current = now;
     void fetchData(true, true, true);
   }, [fetchData]);
+
+  useEffect(() => {
+    if (paneActive && resumePendingRef.current) refreshOnResume(true);
+  }, [paneActive, refreshOnResume]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {

@@ -467,3 +467,38 @@ async def test_service_api_key_is_redacted_for_non_admin(monkeypatch: pytest.Mon
     assert all("apiKey" not in item for item in listed)
     # In-process callers without a request keep the full record.
     assert (await workflow_module.get_workflow_service("w"))["apiKey"] == "secret-key"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["post", "put"])
+async def test_trigger_save_preserves_omitted_fields_and_applies_explicit_resets(
+    client: AsyncClient, quiet_trigger_runtime: None, method: str,
+) -> None:
+    trigger = {
+        "id": "alerts", "type": "kafka", "enabled": True,
+        "source": {"inputTopic": "alerts"},
+        "concurrency": {"policy": "queue", "maxParallel": 6, "queueSize": 1000},
+        "filter": {"expr": "$.body.severity == 'high'"},
+        "inputs": {"region": "east"},
+    }
+    path = _write_workflow("wf-save-fields", _wf_json(triggers=[trigger]))
+    endpoint = "/api/workflow/wf-save-fields/triggers" + ("/alerts" if method == "put" else "")
+
+    # The unified API and old config forms share the same save semantics.
+    response = await client.request(method, endpoint, json={"id": "alerts", "type": "kafka", "enabled": False})
+    assert response.status_code == 200, response.text
+    saved = json.loads((path / "workflow.json").read_text())["triggers"][0]
+    assert saved["enabled"] is False
+    for field in ("source", "concurrency", "filter", "inputs"):
+        assert saved[field] == trigger[field]
+
+    # Explicit reset values must still take effect, rather than inheriting old values.
+    response = await client.request(method, endpoint, json={
+        "id": "alerts", "type": "kafka", "concurrency": {}, "filter": None, "inputs": {},
+    })
+    assert response.status_code == 200, response.text
+    saved = json.loads((path / "workflow.json").read_text())["triggers"][0]
+    assert saved["concurrency"] == {"policy": "allow", "maxParallel": 1, "queueSize": 100}
+    assert saved.get("filter") is None
+    assert saved["inputs"] == {}
+    assert saved["enabled"] is False

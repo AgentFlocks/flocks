@@ -11,11 +11,19 @@ class ServiceConfigError(ValueError):
     """Raised when service configuration input is invalid."""
 
 
+# Where the WebUI/API listens when neither the command line nor the
+# environment says: every IPv4 interface, so other machines reach the page at
+# http://<this machine's address>:5173. ``--host 127.0.0.1`` (or FLOCKS_HOST)
+# keeps it on this machine. The first administrator can still only be created
+# from this machine (flocks.server.auth.is_local_request).
+DEFAULT_SERVICE_HOST = "0.0.0.0"
+
+
 @dataclass(frozen=True)
 class ServiceConfig:
-    backend_host: str = "127.0.0.1"
+    backend_host: str = DEFAULT_SERVICE_HOST
     backend_port: int = 5173
-    frontend_host: str = "127.0.0.1"
+    frontend_host: str = DEFAULT_SERVICE_HOST
     frontend_port: int = 5173
     legacy_backend_host: str | None = "127.0.0.1"
     legacy_backend_port: int | None = 8000
@@ -152,7 +160,7 @@ def build_service_config(
     webui_port: int | None = None,
     default_server_host: str,
     default_server_port: int,
-    default_webui_host: str = "127.0.0.1",
+    default_webui_host: str = DEFAULT_SERVICE_HOST,
     default_webui_port: int = 5173,
 ) -> ServiceConfig:
     """Build service config from CLI values, environment, and defaults.

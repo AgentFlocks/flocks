@@ -167,6 +167,119 @@ async def test_url_install_rejects_plain_http_and_internal(monkeypatch: pytest.M
     assert r1.success is False and "must use https" in r1.error
     r2 = await SkillInstaller._install_from_url("https://169.254.169.254/latest/meta-data/", "global")
     assert r2.success is False and "Blocked request to internal" in r2.error
+    # plain http stays refused for anything but this machine's loopback
+    r3 = await SkillInstaller._install_from_url("http://10.0.0.5/SKILL.md", "global")
+    assert r3.success is False and "must use https" in r3.error
+    r4 = await SkillInstaller._install_from_url("ftp://127.0.0.1/SKILL.md", "global")
+    assert r4.success is False and "must use https" in r4.error
+    # a name that only starts like 127.0.0.1 is not this machine
+    r5 = await SkillInstaller._install_from_url("http://127.0.0.1%25.attacker.example/SKILL.md", "global")
+    assert r5.success is False and "must use https" in r5.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proxy", [None, "http://proxy.invalid:3128"])
+async def test_url_install_from_loopback_over_plain_http(
+    client: AsyncClient, skills_root: Path, monkeypatch: pytest.MonkeyPatch, proxy
+):
+    """本机回环上的 http 地址可以直接装技能（11-17 用户要求不拦 localhost / 127.0.0.1）；
+    环境里配了代理也直连本机，不经代理。"""
+    import http.server
+    import threading
+
+    from flocks.skill import installer as installer_mod
+
+    monkeypatch.setattr(installer_mod, "_resolve_install_root", lambda scope: skills_root)
+    monkeypatch.delenv("FLOCKS_WEBFETCH_ALLOW_INTERNAL", raising=False)
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    if proxy:
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            monkeypatch.setenv(name, proxy)
+    body = "---\nname: loopback-skill\ndescription: d\n---\n\nserved locally\n".encode()
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        resp = await client.post(
+            "/api/skills/install", json={"source": f"http://127.0.0.1:{port}/SKILL.md"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert "served locally" in (skills_root / "loopback-skill" / "SKILL.md").read_text()
+        again = await client.post(
+            "/api/skills/install",
+            json={"source": f"http://localhost:{port}/SKILL.md", "overwrite": True},
+        )
+        assert again.status_code == 200, again.text
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost"])
+async def test_url_install_from_loopback_https_keeps_the_environment_ca(
+    client: AsyncClient, skills_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str
+):
+    """本机 https 服务用私有 CA 签的证书、CA 由 SSL_CERT_FILE 给出：直连本机时照样认这个 CA，环境代理照样不走。"""
+    import http.server
+    import ssl
+    import threading
+
+    from flocks.skill import installer as installer_mod
+    from tests.provider.tls_helpers import make_ca, make_server
+
+    monkeypatch.setattr(installer_mod, "_resolve_install_root", lambda scope: skills_root)
+    monkeypatch.delenv("FLOCKS_WEBFETCH_ALLOW_INTERNAL", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    for name in ("NO_PROXY", "no_proxy", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://proxy.invalid:3128")
+    ca = make_ca()
+    server_cred = make_server(issuer=ca)
+    (tmp_path / "ca.pem").write_text(ca.cert_pem)
+    (tmp_path / "server.crt").write_text(server_cred.cert_pem)
+    (tmp_path / "server.key").write_text(server_cred.key_pem)
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "ca.pem"))
+    body = "---\nname: tls-loopback-skill\ndescription: d\n---\n\nserved over https\n".encode()
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(tmp_path / "server.crt"), str(tmp_path / "server.key"))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        resp = await client.post("/api/skills/install", json={"source": f"https://{host}:{port}/SKILL.md"})
+        assert resp.status_code == 200, resp.text
+        assert "served over https" in (skills_root / "tls-loopback-skill" / "SKILL.md").read_text()
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 @pytest.mark.asyncio

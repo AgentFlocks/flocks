@@ -488,7 +488,7 @@ describe('Tools native group attributes and original view preservation', () => {
     expect(dataTransfer.setData).not.toHaveBeenCalled();
     fireEvent.click(within(nativeRow('tool_00')).getByRole('button', { name: zhGroups.editGroup }));
     expect(mocks.toastWarning).toHaveBeenCalledTimes(2);
-    expect(mocks.toastWarning).toHaveBeenLastCalledWith(zhGroups.readOnly.system);
+    expect(mocks.toastWarning).toHaveBeenLastCalledWith('内置工具的分组不能修改。');
     expect(mocks.get).not.toHaveBeenCalled();
     expect(mocks.patch).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: '重命名分组 Alpha' })).toBeDisabled();
@@ -514,7 +514,7 @@ describe('Tools native group attributes and original view preservation', () => {
       fireEvent.change(screen.getByRole('combobox'), { target: { value: 'tool_00' } });
     }
     fireEvent.click(screen.getByRole('button', { name: '保存' }));
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(zhGroups.errors.readOnlyMembers.replace('{{items}}', 'tool_00')));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('以下工具的分组不能修改：tool_00'));
     expect(mocks.patch).not.toHaveBeenCalled();
   });
 
@@ -603,7 +603,8 @@ describe('Tools native group attributes and original view preservation', () => {
     await mount();
     fireEvent.click(screen.getByRole('button', { name: '删除分组 Alpha' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('tool_02: read-only filesystem'));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('已保存 29 个，失败 1 个。'));
+    expect(screen.getByRole('alert')).toHaveTextContent('tool_02：read-only filesystem');
     expect(mocks.patch).toHaveBeenCalledTimes(30);
     expect(screen.getByRole('button', { name: 'Alpha 1' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '未分组 30' })).toBeInTheDocument();

@@ -14,6 +14,7 @@ import pytest
 from flocks.config.config import Config, ConfigInfo
 from flocks.config.config_writer import ConfigWriter
 from flocks.provider.provider import Provider
+from tests.provider.tls_helpers import describe_verify, make_ca
 
 
 @pytest.fixture
@@ -127,8 +128,8 @@ async def test_id_only_lists_block_known_non_chat_families_without_blocking_audi
     ("options", "trust_env_var", "expected"),
     [
         ({}, None, {"verify": True, "trust_env": True}),
-        ({"verify_ssl": False}, None, {"verify": False, "trust_env": True}),
-        ({"ssl_verify": "false"}, None, {"verify": False, "trust_env": True}),
+        ({"verify_ssl": False}, None, {"verify": "no-verify", "trust_env": True}),
+        ({"ssl_verify": "false"}, None, {"verify": "no-verify", "trust_env": True}),
         ({"trust_env": False}, None, {"verify": True, "trust_env": False}),
         ({}, "0", {"verify": True, "trust_env": False}),
         ({"trust_env": True}, "0", {"verify": True, "trust_env": True}),
@@ -149,7 +150,91 @@ async def test_discovery_connects_the_way_the_providers_own_client_does(
     result = await discovery_runtime.module.discover_models("openai-compatible", api_key="key")
 
     assert result["status"] == "success"
-    assert {name: upstream.options[0][name] for name in expected} == expected
+    assert {name: describe_verify(upstream.options[0][name]) if name == "verify" else upstream.options[0][name] for name in expected} == expected
+
+
+@pytest.mark.asyncio
+async def test_unsaved_tls_settings_replace_the_stored_ones(discovery_runtime, upstream):
+    """A form checks a gateway with SSL settings it has not saved yet."""
+    save_provider(
+        discovery_runtime, "openai-compatible", options={"baseURL": "https://gateway.test/v1", "ssl_verify": False}
+    )
+
+    result = await discovery_runtime.module.discover_models("openai-compatible", api_key="key")
+    assert result["status"] == "success"
+    assert describe_verify(upstream.options[-1]["verify"]) == "no-verify"
+
+    result = await discovery_runtime.module.discover_models(
+        "openai-compatible", api_key="key", tls_overrides={"verify_ssl": True}
+    )
+    assert result["status"] == "success"
+    assert upstream.options[-1]["verify"] is True
+
+    result = await discovery_runtime.module.discover_models(
+        "openai-compatible", api_key="key", base_url="https://other.test/v1", tls_overrides={"verify_ssl": False}
+    )
+    assert result["status"] == "success"
+    assert describe_verify(upstream.options[-1]["verify"]) == "no-verify"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch_key", ["verify_ssl", "ssl_verify"])
+async def test_sending_only_the_switch_keeps_the_stored_ca_cert(switch_key, discovery_runtime, upstream):
+    """The edit form sends only what changed: turning the checks back on must not drop the saved CA."""
+    import ssl
+
+    import certifi
+
+    ca = make_ca()
+    save_provider(
+        discovery_runtime,
+        "openai-compatible",
+        options={"baseURL": "https://gateway.test/v1", switch_key: False, "ca_cert": ca.cert_pem},
+    )
+
+    result = await discovery_runtime.module.discover_models(
+        "openai-compatible", api_key="key", tls_overrides={"verify_ssl": True}
+    )
+
+    assert result["status"] == "success"
+    verify = upstream.options[-1]["verify"]
+    assert isinstance(verify, ssl.SSLContext) and verify.verify_mode == ssl.CERT_REQUIRED
+    default_cas = ssl.create_default_context(cafile=certifi.where()).cert_store_stats()["x509_ca"]
+    assert verify.cert_store_stats()["x509_ca"] == default_cas + 1
+
+
+@pytest.mark.asyncio
+async def test_a_ca_cert_that_does_not_load_is_reported_without_a_request(discovery_runtime, upstream):
+    save_provider(discovery_runtime, "openai-compatible", options={"baseURL": "https://gateway.test/v1"})
+
+    result = await discovery_runtime.module.discover_models(
+        "openai-compatible", api_key="key", tls_overrides={"ca_cert": "relative/ca.pem"}
+    )
+
+    assert (result["status"], result["code"]) == ("error", "invalid_ca_cert")
+    assert "绝对路径" in result["message"]
+    assert upstream.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        ("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate", "tls_certificate_failed"),
+        ("[SSL: SSLV3_ALERT_HANDSHAKE_FAILURE] ssl/tls alert handshake failure", "tls_handshake_failed"),
+        ("[Errno 61] Connection refused", "connection_error"),
+    ],
+)
+async def test_tls_failures_are_told_apart_from_other_connection_errors(message, code, discovery_runtime, upstream):
+    save_provider(discovery_runtime, "openai-compatible", options={"baseURL": "https://gateway.test/v1"})
+
+    def fail(request):
+        raise httpx.ConnectError(message, request=request)
+
+    upstream.handler = fail
+    result = await discovery_runtime.module.discover_models("openai-compatible", api_key="key")
+
+    assert (result["status"], result["code"]) == ("error", code)
 
 
 @pytest.mark.asyncio
@@ -602,6 +687,27 @@ async def test_non_http_url_is_rejected_without_network(discovery_runtime, upstr
     assert result["status"] == "error"
     assert result["code"] == "invalid_base_url"
     assert not upstream.requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base_url", ["http://a..b/v1", "http://" + "x" * 64 + ".example.com/v1"])
+async def test_host_name_the_resolver_cannot_encode_is_an_invalid_url(base_url, discovery_runtime, monkeypatch):
+    # v0.21 #27: these used to escape the resolver check as UnicodeError and
+    # answer 500 "Internal server error". The real resolver check runs here
+    # (the upstream fixture stubs it); the transport only records requests.
+    requests = []
+    real_client = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(200, json={"data": []}))
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(discovery_runtime.module.httpx, "AsyncClient", factory)
+    result = await discovery_runtime.module.discover_models("openai-compatible", api_key="sk-test", base_url=base_url)  # secret-guard: allow 误报：测试用假 key
+
+    assert result["status"] == "error"
+    assert result["code"] == "invalid_base_url"
+    assert not requests
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,7 @@ from flocks.provider.sdk.openai_base import (
     ThinkTagExtractor,
     apply_openai_token_limit,
     build_reasoning_metadata,
+    chat_fallback_tool_call_chunks,
     create_openai_http_client,
     create_chat_completion_with_fallbacks,
     _coerce_bool,
@@ -35,9 +36,12 @@ from flocks.provider.sdk.openai_base import (
     extract_reasoning_details,
     format_openai_content,
     format_openai_messages,
+    message_reasoning,
+    message_tool_call_chunks,
     resolve_openai_token_limit,
     resolve_verify_ssl,
 )
+from flocks.provider.tls import httpx_verify
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.openai_compatible")
@@ -46,6 +50,7 @@ log = Log.create(service="provider.openai_compatible")
 class OpenAICompatibleProvider(BaseProvider):
     """OpenAI Compatible API provider"""
 
+    SUPPORTS_TLS_SETTINGS = True
     _MINIMAX_EMPTY_RESPONSE_RETRY_DELAY_SECONDS = 3
     
     def __init__(self):
@@ -109,7 +114,7 @@ class OpenAICompatibleProvider(BaseProvider):
                     trust_env = _coerce_bool(custom_settings.get("trust_env"), trust_env)
                 http_client = create_openai_http_client(
                     trust_env=trust_env,
-                    verify=verify_ssl,
+                    verify=httpx_verify(custom_settings, trust_env=trust_env),
                     timeout=DEFAULT_HTTP_TIMEOUT,
                     custom_settings=custom_settings,
                 )
@@ -230,18 +235,26 @@ class OpenAICompatibleProvider(BaseProvider):
         )
 
         # Format response
+        if not response.choices:
+            # Worded like openai_base so the session retries it as transient.
+            raise ValueError(f"OpenAI-compatible API returned empty choices. model={model_id}")
         choice = response.choices[0]
         msg = getattr(choice, "message", None)
         if msg is None:
             raise ValueError(
                 f"OpenAI-compatible API returned choice with null message. model={model_id}"
             )
+        reasoning, reasoning_source, reasoning_details = message_reasoning(msg)
         return ChatResponse(
             id=response.id,
             model=response.model,
             content=msg.content or "",
             finish_reason=choice.finish_reason,
             usage=_normalize_stream_usage(response.usage, response_id=response.id) or {},
+            tool_calls=message_tool_call_chunks(msg),
+            reasoning=reasoning,
+            reasoning_source=reasoning_source,
+            reasoning_details=reasoning_details,
         )
     
     async def chat_stream(
@@ -507,6 +520,16 @@ class OpenAICompatibleProvider(BaseProvider):
                     has_tools=bool(tools),
                 )
                 fallback = await self.chat(model_id, messages, **kwargs)
+                if fallback.tool_calls:
+                    self.log.warn("openai_compatible.stream.empty_response_recovered_tool_calls", {
+                        "model": model_id,
+                        "tool_calls": len(fallback.tool_calls),
+                    })
+                    for chunk in chat_fallback_tool_call_chunks(
+                        fallback, provider_id=self.id, model_id=model_id,
+                    ):
+                        yield chunk
+                    return
                 fallback_content = fallback.content or ""
                 self.log.debug("openai_compatible.minimax_empty_response_fallback_result", {
                     "model": model_id,
@@ -553,7 +576,11 @@ class OpenAICompatibleProvider(BaseProvider):
                         "error": str(exc),
                     })
 
-            if tools:
+            # Only MiniMax keeps its tool-less last resort. Other models asked to
+            # act with no tools write their calls as text or say they have none;
+            # the empty-response error below is retryable, so the turn is
+            # retried with its tools instead.
+            if tools and minimax_empty_response_target:
                 self.log.warn("openai_compatible.stream.retry_without_tools", {
                     "model": model_id,
                     "reason": str(fallback_error) if fallback_error else "empty_fallback_content",
@@ -630,5 +657,5 @@ class OpenAICompatibleProvider(BaseProvider):
                 )
             raise ValueError(
                 f"OpenAI-compatible API returned an empty streaming response and empty fallback response. "
-                f"model={model_id}"
+                f"model={model_id}, tools_declared={bool(tools)}"
             )

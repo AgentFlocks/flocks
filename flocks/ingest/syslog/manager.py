@@ -42,11 +42,9 @@ from flocks.workflow.triggers.models import (
 log = Log.create(service="syslog.manager")
 
 
-# Maximum concurrent workflow executions per workflow to avoid FD exhaustion and SQLite write contention
-_MAX_CONCURRENT_EXECUTIONS = 8
-# Maximum number of buffered syslog messages per workflow; excess messages are dropped with a warning.
-# Increased from 200 to 1000 to absorb larger inbound bursts before the worker pool catches up.
-_MAX_QUEUE_SIZE = 1000
+# Per-workflow resource limits; excess syslog messages are dropped on overflow.
+_MAX_CONCURRENT_EXECUTIONS = 20
+_MAX_QUEUE_SIZE = 5000
 # Maximum time we wait for the listener to either bind successfully or fail
 # during ``restart_workflow``.  Any value <0.5s makes the call too aggressive
 # under busy event-loops; anything >5s would make the HTTP save endpoint feel

@@ -48,6 +48,7 @@ import pytest_asyncio
 
 from flocks.storage.storage import Storage
 from flocks.updater import enterprise, enterprise_application as application
+from flocks.updater.machine_fingerprint import MachineNames
 
 _REMEMBER = application._remember
 
@@ -134,7 +135,7 @@ def approved(request_id: str = "req_1", license_id: str = "lic_1") -> dict:
 
 async def test_ea1_an_application_goes_to_console_and_its_id_is_kept(machine: Path, monkeypatch: pytest.MonkeyPatch):
     seen = console(monkeypatch, lambda r: httpx.Response(200, json={"request_id": "req_1", "status": "pending"}))
-    monkeypatch.setattr(application, "machine_fingerprint", lambda: "0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(application, "machine_names", lambda: MachineNames("0123456789abcdef0123456789abcdef", "machine-id", "a6d4534ba1eb061f2eb21438bdaec761"))
     sent = await application.apply(dict(FORM), "admin")
     assert sent["request_id"] == "req_1" and sent["status"] == "pending" and sent["company"] == "Acme"
     body = json.loads(seen[0].content)
@@ -143,8 +144,11 @@ async def test_ea1_an_application_goes_to_console_and_its_id_is_kept(machine: Pa
     # The machine is the node: Console holds one open application per node.
     assert (body["node_id"], body["fingerprint"], body["install_id"], body["passport_uid"]) == ("inst-1", "fp-1", "inst-1", "pp-1")
     assert body["form_data"]["applied_by"] == "admin" and body["idempotency_key"] == body["form_data"]["idempotency_key"]
-    # Console binds the licence it issues to the host the application came from.
+    # Console binds the licence it issues to the host the application came from, by the machine-id digest every
+    # enterprise core reads; the device id goes beside it for Console's records.
     assert body["form_data"]["machine"] == "0123456789abcdef0123456789abcdef"
+    assert body["form_data"]["machine_kind"] == "machine-id"
+    assert body["form_data"]["devid"] == "a6d4534ba1eb061f2eb21438bdaec761"
     assert await Storage.get("console:upgrade_request_pending") is None
     assert body["company_name"] == "Acme" and body["contact_email"] == "li@acme.example"
     assert body["form_data"]["license_type"] == "poc" and body["form_data"]["applicant_phone"] == "+86 138 0000 0000"
@@ -185,18 +189,19 @@ async def test_ea1b_none_while_the_hosts_identifier_cannot_be_read(machine: Path
     seen = console(monkeypatch, lambda r: httpx.Response(200, json={"request_id": "req_1", "status": "pending"}))
     from flocks.updater.machine_fingerprint import MachineIdUnreadable
 
-    def unreadable() -> str:
+    def unreadable() -> MachineNames:
         raise MachineIdUnreadable("ioreg 没有给出 IOPlatformUUID（退出码 1）")
 
-    monkeypatch.setattr(application, "machine_fingerprint", unreadable)
+    monkeypatch.setattr(application, "machine_names", unreadable)
     with pytest.raises(enterprise.EnterpriseUpgradeError, match="读不到这台机器的标识"):
         await application.apply(dict(FORM), "admin")
     assert seen == [] and await Storage.get("console:upgrade_request_pending") is None
 
     # A host that keeps none (a container without /etc/machine-id) applies, and Console shows it.
-    monkeypatch.setattr(application, "machine_fingerprint", lambda: "")
+    monkeypatch.setattr(application, "machine_names", lambda: MachineNames("", "", ""))
     await application.apply(dict(FORM), "admin")
-    assert json.loads(seen[0].content)["form_data"]["machine"] is None
+    sent = json.loads(seen[0].content)["form_data"]
+    assert sent["machine"] is None and sent["machine_kind"] is None and sent["devid"] is None
 
 
 async def test_ea2_the_listing(machine: Path, monkeypatch: pytest.MonkeyPatch):
@@ -454,7 +459,7 @@ def _lapsed_licence(root: Path) -> Path:
 async def test_ea7_a_machine_whose_licence_is_over_applies_again(machine: Path, monkeypatch: pytest.MonkeyPatch):
     licence = _lapsed_licence(machine)
     seen = console(monkeypatch, lambda r: httpx.Response(200, json={"request_id": "req_7", "status": "pending"}))
-    monkeypatch.setattr(application, "machine_fingerprint", lambda: "0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(application, "machine_names", lambda: MachineNames("0123456789abcdef0123456789abcdef", "machine-id", "a6d4534ba1eb061f2eb21438bdaec761"))
 
     sent = await application.apply(dict(FORM), "admin")
 
@@ -521,7 +526,7 @@ async def test_ea7c_the_token_already_on_the_machine_stands_in_nothings_way(mach
     assert (await application.applications())["items"][0]["can_take"] is False
 
     # It was never going to be taken: a new application goes through.
-    monkeypatch.setattr(application, "machine_fingerprint", lambda: "0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(application, "machine_names", lambda: MachineNames("0123456789abcdef0123456789abcdef", "machine-id", "a6d4534ba1eb061f2eb21438bdaec761"))
     assert (await application.apply(dict(FORM), "admin"))["request_id"] == "req_10"
 
     # Taking it all the same changes nothing on the machine, and Console hears of it if it had not.
@@ -551,7 +556,7 @@ async def test_ea7d_a_licence_renewed_at_console_comes_over_another_no_longer_va
         return httpx.Response(200, json=other)
 
     console(monkeypatch, answer)
-    monkeypatch.setattr(application, "machine_fingerprint", lambda: "0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(application, "machine_names", lambda: MachineNames("0123456789abcdef0123456789abcdef", "machine-id", "a6d4534ba1eb061f2eb21438bdaec761"))
     assert (await application.apply(dict(FORM), "admin"))["request_id"] == "req_10"
 
     await application.take("req_9")
@@ -663,7 +668,7 @@ async def test_ea7h_a_token_a_patch_revoked_does_not_offer_itself_by_its_own_dat
     assert (await application.applications())["items"][0]["can_take"] is False
 
     console(monkeypatch, lambda r: httpx.Response(200, json={"request_id": "req_10", "status": "pending"}))
-    monkeypatch.setattr(application, "machine_fingerprint", lambda: "0123456789abcdef0123456789abcdef")
+    monkeypatch.setattr(application, "machine_names", lambda: MachineNames("0123456789abcdef0123456789abcdef", "machine-id", "a6d4534ba1eb061f2eb21438bdaec761"))
     assert (await application.apply(dict(FORM), "admin"))["request_id"] == "req_10"
 
 

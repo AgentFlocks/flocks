@@ -1,6 +1,6 @@
 import type { ReleaseUpdateSource } from '@/utils/releaseUpdate';
 import type { ComponentType } from 'react';
-import { ArrowUpCircle, Crown, type LucideIcon } from 'lucide-react';
+import { Crown, KeyRound, type LucideIcon } from 'lucide-react';
 
 /**
  * Build-time WebUI extension registry.
@@ -56,6 +56,23 @@ export interface ExtensionNavItem {
   highlight?: boolean;
   /** `accountMenu` entries only: short tag at the end of the row (e.g. `NEW`). */
   badge?: string;
+  /**
+   * `accountMenu` entries only: how the tag is drawn. `action` (default) in the product's action colour,
+   * `pro` as the enterprise edition's gold PRO mark.
+   */
+  badgeTone?: 'action' | 'pro';
+  /**
+   * `accountMenu` entries only: open this component in a dialog over the current page instead of
+   * following `href`. It is given `onClose`; `href` stays the page the dialog may send people on to.
+   */
+  dialog?: ExtensionDialog;
+}
+
+/** A dialog an account-menu entry opens (see {@link ExtensionNavItem.dialog}). */
+export interface ExtensionDialog {
+  load: () => Promise<{ default: ComponentType<{ onClose: () => void }> }>;
+  /** i18n namespaces to preload before the dialog renders. */
+  i18nNamespaces?: string[];
 }
 
 export interface ExtensionSettingsGate {
@@ -177,7 +194,9 @@ const registry: WebUIExtensionRegistry = {
   ],
   navItems: [
     {
-      // Where it has always been: the account menu's framed row with the PRO tag.
+      // Where it has always been: the account menu's framed row, with no tag here: the gold PRO mark
+      // says an install runs the enterprise edition. It opens the quick licence dialog (apply, or import
+      // a licence file) over the page; a machine that has a licence goes on to the Flocks Pro page.
       id: 'flockspro-upgrade',
       href: '/settings/flockspro',
       labelKey: 'flocksproUpgrade',
@@ -186,15 +205,18 @@ const registry: WebUIExtensionRegistry = {
       placement: 'accountMenu',
       order: 0,
       highlight: true,
-      badge: 'PRO',
+      dialog: {
+        load: () => import('../pages/FlocksproUpgrade/QuickDialog'),
+        i18nNamespaces: ['flockspro'],
+      },
     },
   ],
   settingsSections: [
     {
       id: 'flockspro',
       group: 'system',
-      labelKey: 'flocksproUpgrade',
-      icon: ArrowUpCircle,
+      labelKey: 'flocksproLicence',
+      icon: KeyRound,
       adminOnly: true,
       order: 40,
       load: () => import('../pages/FlocksproUpgrade'),
@@ -204,8 +226,14 @@ const registry: WebUIExtensionRegistry = {
   slots: [],
   i18n: {
     // The labels are drawn before any page chunk loads: plain objects into `nav`.
-    'en-US': { nav: { flocksproUpgrade: 'Flocks Pro' }, flockspro: () => import('../locales/en-US/flockspro.json') },
-    'zh-CN': { nav: { flocksproUpgrade: 'Flocks Pro' }, flockspro: () => import('../locales/zh-CN/flockspro.json') },
+    'en-US': {
+      nav: { flocksproUpgrade: 'Flocks Pro', flocksproLicence: 'Flocks Pro licence' },
+      flockspro: () => import('../locales/en-US/flockspro.json'),
+    },
+    'zh-CN': {
+      nav: { flocksproUpgrade: 'Flocks Pro', flocksproLicence: 'Flocks Pro 授权' },
+      flockspro: () => import('../locales/zh-CN/flockspro.json'),
+    },
   },
 };
 

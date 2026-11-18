@@ -98,6 +98,8 @@ REPLACEABLE_MODULES: frozenset[str] = frozenset({
     "flocks.workflow.execution_store",
     "flocks.workflow.poller_manager",
     "flocks.workflow.ownership",
+    # What the alert operations suite writes and reads (its files hold no database code).
+    "flocks.workflow.soc_store",
     # Syslog listeners: one per workflow among the processes sharing the data.
     "flocks.ingest.syslog.manager",
     # Memory index and notes shared between nodes.

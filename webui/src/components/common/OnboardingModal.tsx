@@ -26,6 +26,7 @@ import {
 } from '@/api/onboarding';
 import type { CatalogProvider } from '@/types';
 import { getDefaultThreatBookRegion, THREATBOOK_REGION_CONFIG } from '@/constants/threatbook';
+import { extractErrorMessage, extractServerMessage } from '@/utils/error';
 
 const MODEL_KEY_LINK = 'https://portal.agentflocks.com';
 
@@ -751,7 +752,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       onClose();
       if (destination) navigate(destination);
     } catch (err: any) {
-      setStartStatus({ tone: 'error', message: err?.response?.data?.detail || t('onboarding.bootstrap.saveError') });
+      setStartStatus({ tone: 'error', message: extractServerMessage(err) || t('onboarding.bootstrap.saveError') });
     } finally {
       setDraftSaving(false);
     }
@@ -764,7 +765,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       if (!showPrimaryConfiguredDetails) await onboardingAPI.saveDraft({ model: buildPrimaryPayload() });
       setStep('intel');
     } catch (err: any) {
-      setStartStatus({ tone: 'error', message: err?.response?.data?.detail || t('onboarding.bootstrap.saveError') });
+      setStartStatus({ tone: 'error', message: extractServerMessage(err) || t('onboarding.bootstrap.saveError') });
     } finally {
       setDraftSaving(false);
     }
@@ -823,7 +824,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       } catch (err: any) {
         setPrimaryStatus({
           tone: 'error',
-          message: err?.response?.data?.detail || err?.message || t('onboarding.bootstrap.revealModelKeyError'),
+          message: extractErrorMessage(err, t('onboarding.bootstrap.revealModelKeyError')),
         });
         return;
       } finally {
@@ -851,7 +852,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       } catch (err: any) {
         setIntelStatus({
           tone: 'error',
-          message: err?.response?.data?.detail || err?.message || t('onboarding.bootstrap.revealIntelKeyError'),
+          message: extractErrorMessage(err, t('onboarding.bootstrap.revealIntelKeyError')),
         });
         return;
       } finally {

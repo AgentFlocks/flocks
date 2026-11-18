@@ -20,6 +20,11 @@ Case list (编号 | 场景):
       ended (exit status, log), also after this server is gone
   EU5b a finished install the enterprise edition has since gone back from (its downgrade record is
        newer) is no upgrade any more: the page does not say it is installed
+  EU5i an install whose exit status never came back (the Windows installer writes it last, from a
+       console window that can hold it there or be closed on it) is finished once the installer's
+       own record of this run says done; an earlier run's record, one still switching the machine
+       over, one that does not read or a run that did not note what was there say nothing, and an
+       exit status that did come back keeps the last word
   EU6 the whole of it: a systemd machine ends with root's command for the downloaded file, an
       account's own install with the installer running; one at a time
   EU7 what the enterprise edition's downgrades kept aside is listed from its record (when, still
@@ -775,6 +780,100 @@ def test_eu5f_a_process_gone_without_an_exit_code_is_not_given_its_last_line_for
     assert state["recovery"] == "unknown"
 
 
+def _installers_record(machine: Path, record_id: str, phase: str, **fields) -> Path:
+    """The record install-managed leaves in the open edition's data (installation-result.json)."""
+    path = machine / "run" / "installation-result.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = {"title": "企业版升级未完成", "message": "原 SQLite 数据和原安装已保留，可以继续使用。"}
+    path.write_text(json.dumps({
+        "version": 1, "id": record_id, "phase": phase, "recovery": "unchanged",
+        "updated_at": "2026-11-12T02:25:33Z", "detail": "",
+        "messages": {"zh-CN": text, "en-US": text}, **fields,
+    }), encoding="utf-8")
+    return path
+
+
+def test_eu5i_an_install_the_installer_recorded_done_is_finished_without_its_exit_status(machine: Path):
+    """INC-E6D264C2: the enterprise edition served, and the page went on saying installing: the
+    installer never got to write its exit status, and nothing else was asked."""
+    # The installer is still there as far as anyone can tell, and has left no exit status.
+    running = {"phase": "installing", "pid": os.getpid(), "log": "", "version": "2026.11.9", "prior_result": "an-earlier-run"}
+    enterprise._write_state(running)
+    assert enterprise.read_state()["phase"] == "installing"
+    # The record that was there before this run, whatever it says: another run's.
+    _installers_record(machine, "an-earlier-run", "done")
+    assert enterprise.read_state()["phase"] == "installing"
+    # This run's, while it switches the machine over.
+    _installers_record(machine, "this-run-started", "running")
+    assert enterprise.read_state()["phase"] == "installing"
+    # And once the release it put in place serves.
+    _installers_record(machine, "this-run-ended", "done")
+    state = enterprise.read_state()
+    assert state["phase"] == "finished" and "exit_code" not in state and "reason" not in state
+    assert enterprise.situation()["upgrade"]["phase"] == "finished"
+    # Gone since or not (its window closed, the machine restarted): it finished.
+    enterprise._write_state({**running, "pid": 2**22 + 12345})
+    assert enterprise.read_state()["phase"] == "finished"
+    # A machine with no record before the run.
+    enterprise._write_state({**running, "prior_result": None})
+    assert enterprise.read_state()["phase"] == "finished"
+
+
+def test_eu5i_a_record_that_says_nothing_of_this_run_ends_nothing(machine: Path):
+    running = {"phase": "installing", "pid": os.getpid(), "log": "", "prior_result": "an-earlier-run"}
+    gone = {**running, "pid": 2**22 + 12345}
+    result = _installers_record(machine, "this-run", "done")
+    # A run that did not note which record was there before it, or could not read it then: the
+    # record may be that one.
+    for noted in ({}, {"prior_result": "unreadable"}):
+        enterprise._write_state({key: value for key, value in running.items() if key != "prior_result"} | noted)
+        assert enterprise.read_state()["phase"] == "installing"
+    # A record that does not read.
+    result.write_text("not json", encoding="utf-8")
+    enterprise._write_state(running)
+    assert enterprise.read_state()["phase"] == "installing"
+    enterprise._write_state(gone)
+    state = enterprise.read_state()
+    assert state["phase"] == "failed" and state["recovery"] == "unknown"
+    # One that says it failed: the installer has yet to say how it ended; gone without, it failed
+    # as the record says.
+    _installers_record(machine, "this-run", "failed", recovery="restored", detail="the core did not come up")
+    enterprise._write_state(running)
+    assert enterprise.read_state()["phase"] == "installing"
+    enterprise._write_state(gone)
+    state = enterprise.read_state()
+    assert state["phase"] == "failed" and state["recovery"] == "restored" and state["reason"] == "the core did not come up"
+
+
+def test_eu5i_an_exit_status_that_came_back_keeps_the_last_word(machine: Path):
+    enterprise._write_state({"phase": "installing", "pid": os.getpid(), "log": "", "prior_result": "an-earlier-run"})
+    _installers_record(machine, "this-run", "done")
+    exit_file = enterprise.work_dir() / "exit-status"
+    exit_file.write_text("3\n", encoding="utf-8")
+    state = enterprise.read_state()
+    assert state["phase"] == "failed" and state["exit_code"] == 3
+    exit_file.write_text("0\n", encoding="utf-8")
+    state = enterprise.read_state()
+    assert state["phase"] == "finished" and state["exit_code"] == 0
+    # One being written this moment reads as none yet.
+    exit_file.write_text("", encoding="utf-8")
+    assert enterprise.read_state()["phase"] == "finished"
+
+
+def test_eu5i_an_install_finished_by_its_record_that_went_back_is_no_upgrade_any_more(machine: Path):
+    enterprise._write_state({"phase": "installing", "pid": 2**22 + 12345, "version": "2026.11.9", "log": "", "prior_result": None})
+    started = time.time() - 100
+    os.utime(enterprise._state_file(), (started, started))
+    _installers_record(machine, "this-run", "done")
+    assert enterprise.read_state()["phase"] == "finished"
+    record = machine / enterprise.DOWNGRADE_RECORD
+    record.write_text('{"version": 1, "kept": []}', encoding="utf-8")
+    os.utime(record, (started - 50, started - 50))  # a downgrade before this install
+    assert enterprise.read_state()["phase"] == "finished"
+    os.utime(record, (started + 50, started + 50))  # and one after it
+    assert enterprise.read_state() is None
+
+
 def test_eu5g_a_run_from_the_terminal_failed_at_the_install(machine: Path):
     enterprise.work_dir().mkdir(parents=True, exist_ok=True)
     (enterprise.work_dir() / "exit-status").write_text("1\n", encoding="utf-8")
@@ -1070,6 +1169,27 @@ def test_eu8_the_page_starts_the_windows_installer_from_a_process_gone_at_once(w
     # How it ended is the installer's word: its exit status, where the page reads it.
     Path(exit_file).write_text("0\n")
     assert enterprise.read_state()["phase"] == "finished"
+
+
+def test_eu8_the_windows_installer_held_in_its_window_is_finished_by_its_record(windows: Path, monkeypatch: pytest.MonkeyPatch):
+    """The page's run on Windows: the installer it started waits on the elevated one, whose window
+    holds it after the release serves. No exit status, and the process is there."""
+    asked: list[int] = []
+    monkeypatch.setattr(enterprise, "_windows_pid_alive", lambda pid: asked.append(pid) or True)
+    work = enterprise.work_dir()
+    work.mkdir(parents=True, exist_ok=True)
+    log_file = work / "install.log"
+    log_file.write_text("\n== 2026-11-12T10:21:07+0800 flockspro-2026.11.9-windows-amd64.exe\n安装要管理员权限，正在请求（请在弹出的确认框里点「是」）...\n", encoding="utf-8")
+    enterprise._write_state({"phase": "installing", "pid": 31337, "release_id": "2026.11.9-windows-amd64", "version": "2026.11.9",
+                             "log": str(log_file), "prior_result": None})
+    state = enterprise.read_state()
+    assert state["phase"] == "installing" and asked == [31337]
+    _installers_record(windows, "2026-11-12T02:25:33.5Z-1a2b3c4d", "done")
+    state = enterprise.read_state()
+    assert state["phase"] == "finished" and "exit_code" not in state
+    assert "安装要管理员权限，正在请求（请在弹出的确认框里点「是」）..." in state["log_tail"]
+    # Nobody asks after the process once the record says how the run ended.
+    assert asked == [31337]
 
 
 def test_eu8_a_run_is_looked_at_without_os_kill_on_windows(windows: Path, monkeypatch: pytest.MonkeyPatch):

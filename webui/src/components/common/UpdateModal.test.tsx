@@ -1002,6 +1002,47 @@ describe('UpdateModal on a release its own core installs', () => {
     expect(screen.queryByText('stageLabels.error')).not.toBeInTheDocument();
   });
 
+  it('offers to retry a release that did not come up, and asks the source for it only once confirmed', async () => {
+    const start = vi.fn((onProgress: (progress: unknown) => void) => {
+      onProgress({ stage: 'restarting', message: '', success: null, progress_token: 'managed:abc' }); // secret-guard: allow (the test's own request id)
+      return Promise.resolve();
+    });
+    const outcome = vi.fn().mockResolvedValue({
+      id: 'abc', state: 'failed', detail: 'release r2 was rolled back before (x); pass the retry option to try it again',
+      failed_step: 'start', recovery: 'unchanged', retryable: true,
+    });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={managed} channel="flockspro" releaseUpdate={{ status: vi.fn(), start, outcome: outcome as never }} onClose={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(await screen.findByTestId('retry-rolled-back-release')).toBeInTheDocument();
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start.mock.calls[0][1]).toBeUndefined();
+    // One click only asks for the confirmation; cancelling it starts nothing.
+    await user.click(screen.getByRole('button', { name: 'retryRelease' }));
+    await user.click(screen.getByRole('button', { name: 'retryReleaseCancel' }));
+    expect(start).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole('button', { name: 'retryRelease' }));
+    await user.click(screen.getByRole('button', { name: 'retryReleaseConfirm' }));
+    expect(start).toHaveBeenCalledTimes(2);
+    // The retry names the update it was confirmed on, so the source can refuse it once another replaced it.
+    expect(start.mock.calls[1][1]).toEqual({ retryOf: 'abc' });
+  });
+
+  it('offers no retry for a failure that was not the release coming up', async () => {
+    const start = vi.fn((onProgress: (progress: unknown) => void) => {
+      onProgress({ stage: 'restarting', message: '', success: null, progress_token: 'managed:abc' }); // secret-guard: allow (the test's own request id)
+      return Promise.resolve();
+    });
+    const outcome = vi.fn().mockResolvedValue({ state: 'failed', detail: 'does not verify', failed_step: 'bundle', recovery: 'unchanged' });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<UpdateModal initialInfo={managed} channel="flockspro" releaseUpdate={{ status: vi.fn(), start, outcome: outcome as never }} onClose={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'confirmAction' }));
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(await screen.findByTestId('upgrade-failure')).toBeInTheDocument();
+    expect(screen.queryByTestId('retry-rolled-back-release')).not.toBeInTheDocument();
+  });
+
   it('stops at the service refusing the question, which will not change', async () => {
     const outcome = vi.fn().mockRejectedValue({ response: { status: 401, data: { detail: '请重新登录' } } });
     await started(outcome);
@@ -1009,6 +1050,27 @@ describe('UpdateModal on a release its own core installs', () => {
     expect(await screen.findByText('请重新登录')).toBeInTheDocument();
     await vi.advanceTimersByTimeAsync(4_000);
     expect(outcome).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps asking when a proxy answers 404 for the service while it restarts', async () => {
+    // nginx's own page, as a gateway set up that way sends it for a service it cannot reach: not this service's JSON.
+    const proxyPage = '<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n';
+    const proxyAnswer = { response: { status: 404, data: proxyPage }, message: 'Request failed with status code 404' };
+    const outcome = vi.fn()
+      .mockResolvedValueOnce({ state: 'running' })
+      .mockRejectedValueOnce(proxyAnswer)
+      .mockRejectedValueOnce(proxyAnswer)
+      .mockResolvedValue({ state: 'done' });
+    await started(outcome);
+    await vi.advanceTimersByTimeAsync(1_500);
+    for (let asked = 0; asked < 2; asked += 1) {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(location.reload).not.toHaveBeenCalled();
+    }
+    expect(screen.queryByText('Request failed with status code 404')).not.toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(outcome).toHaveBeenCalledTimes(4);
+    expect(location.reload).toHaveBeenCalledTimes(1);
   });
 
   it('says what stopped it before it was handed over', async () => {

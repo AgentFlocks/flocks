@@ -39,8 +39,9 @@ def installation_result_path() -> Path:
     return root / "run" / "installation-result.json"
 
 
-def installation_result_id() -> str | None:
-    """The id of the record there is, whatever it says (each one the installer writes has its own);
+def installation_result_mark() -> tuple[str, str] | None:
+    """The id and the phase of the record there is, whatever else it says (each one the installer
+    writes has its own id: running as it starts to switch the machine over, then done or failed);
     None when there is none. Raises when there is one that cannot be read."""
     path = installation_result_path()
     try:
@@ -49,7 +50,16 @@ def installation_result_id() -> str | None:
         return None
     with os.fdopen(descriptor, "rb") as stream:
         record = json.loads(stream.read(MAX_RECORD_BYTES + 1))
-    return str(record.get("id")) if isinstance(record, dict) else ""
+    if not isinstance(record, dict):
+        return "", ""
+    return str(record.get("id")), str(record.get("phase") or "")
+
+
+def installation_result_id() -> str | None:
+    """The id of the record there is, whatever it says; None when there is none. Raises when there
+    is one that cannot be read."""
+    mark = installation_result_mark()
+    return None if mark is None else mark[0]
 
 
 def source_upgrade_notice_path() -> Path:

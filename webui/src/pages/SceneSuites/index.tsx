@@ -44,6 +44,7 @@ const TEXT = {
     empty: '还没有可用的场景套件',
     loadFailed: '加载场景套件失败',
     actionFailed: '操作失败',
+    uninstallFailed: '{name}卸载失败，请重试；如仍失败，请联系管理员。',
     installed_ok: '安装完成，场景已启用',
     installedEnableFailed: '安装已完成，但启用失败。请点击“启用”重试。',
     updatedEnableFailed: '更新已完成，但启用失败。请点击“启用”重试。',
@@ -82,6 +83,7 @@ const TEXT = {
     empty: 'No scene suite is available yet',
     loadFailed: 'Failed to load scene suites',
     actionFailed: 'Action failed',
+    uninstallFailed: 'Could not uninstall {name}. Try again; if it still fails, contact your administrator.',
     installed_ok: 'Installed and enabled',
     installedEnableFailed: 'Installed, but enabling failed. Click Enable to retry.',
     updatedEnableFailed: 'Updated, but enabling failed. Click Enable to retry.',
@@ -242,7 +244,10 @@ export default function SceneSuitesPage() {
         setInstallProgress((current) => failSuiteInstallProgress(current, progressEntry(suite), detail || text.actionFailed));
       }
       toast.error(
-        installed ? text.installedEnableFailed : updated ? text.updatedEnableFailed : `${text.actionFailed}: ${suiteName(suite, zh)}`,
+        installed ? text.installedEnableFailed
+          : updated ? text.updatedEnableFailed
+            : action === 'uninstall' ? text.uninstallFailed.replace('{name}', suiteName(suite, zh))
+              : `${text.actionFailed}: ${suiteName(suite, zh)}`,
         detail,
       );
     } finally {

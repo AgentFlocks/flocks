@@ -517,6 +517,372 @@ class TestWeComReconnectWatchdog:
 
 
 # ------------------------------------------------------------------
+# connection status: what the channel page shows when WeCom fails
+# ------------------------------------------------------------------
+
+def _scripted_ws_client(script):
+    """A WSClient stand-in whose connect() replays SDK events: [(event, *args), ...]."""
+
+    class FakeWSClient:
+        last_instance = None
+
+        def __init__(self, *args, **kwargs):
+            self.handlers = {}
+            self.disconnect = AsyncMock()
+            FakeWSClient.last_instance = self
+
+        def on(self, event, handler):
+            self.handlers[event] = handler
+
+        async def connect(self):
+            for event, *args in script:
+                self.handlers[event](*args)
+
+    return FakeWSClient
+
+
+class TestWeComConnectionStatus:
+    AUTH_REFUSED = Exception("Authentication failed: invalid secret (code: 40058)")
+    REPLACED = "New connection established, server disconnected this connection"
+
+    def test_connection_is_self_managed(self):
+        # Connected only once WeCom accepts the credentials, not when start() runs.
+        assert WeComChannel().capabilities().self_managed_connection is True
+
+    async def test_refused_credentials_end_start_with_the_reason(self):
+        FakeWSClient = _scripted_ws_client([("error", self.AUTH_REFUSED)])
+        ch = WeComChannel()
+        config = {"botId": "bot-1", "secret": "wrong-secret"}
+
+        with patch("wecom_aibot_sdk.WSClient", FakeWSClient):
+            with pytest.raises(RuntimeError, match="鉴权失败") as raised:
+                await asyncio.wait_for(ch.start(config, AsyncMock(), asyncio.Event()), timeout=5)
+
+        assert "Bot ID 和 Secret" in str(raised.value)
+        assert "企业微信错误码 40058" in str(raised.value)
+        # What the server said stays in the server log, not in the status.
+        assert "invalid secret" not in str(raised.value)
+        assert ch.status.connected is False
+        assert ch.status.last_error == str(raised.value)
+        assert ch.status.error_count == 1
+        FakeWSClient.last_instance.disconnect.assert_awaited_once()
+
+    async def test_connection_replaced_elsewhere_ends_start_with_the_reason(self):
+        FakeWSClient = _scripted_ws_client([("authenticated",), ("disconnected", self.REPLACED)])
+        ch = WeComChannel()
+        config = {"botId": "bot-1", "secret": "secret-1"}
+
+        with patch("wecom_aibot_sdk.WSClient", FakeWSClient):
+            with pytest.raises(RuntimeError, match="别处建立了新的长连接") as raised:
+                await asyncio.wait_for(ch.start(config, AsyncMock(), asyncio.Event()), timeout=5)
+
+        assert "停掉其他正在使用这个机器人的服务" in str(raised.value)
+        assert ch.status.connected is False
+        assert ch.status.last_error == str(raised.value)
+
+    async def test_reconnect_timeout_names_the_last_error(self):
+        FakeWSClient = _scripted_ws_client([
+            ("error", ConnectionRefusedError(61, "Connect call failed ('127.0.0.1', 9)")),
+            ("reconnecting", 1),
+        ])
+        ch = WeComChannel()
+        config = {
+            "botId": "bot-1",
+            "secret": "secret-1",
+            "websocketUrl": "ws://127.0.0.1:9",
+            "reconnectTimeoutSeconds": 0.01,
+        }
+
+        with patch("wecom_aibot_sdk.WSClient", FakeWSClient):
+            with pytest.raises(RuntimeError, match="reconnect timed out") as raised:
+                await asyncio.wait_for(ch.start(config, AsyncMock(), asyncio.Event()), timeout=5)
+
+        message = str(raised.value)
+        assert "最近一次错误" in message
+        assert "ws://127.0.0.1:9" in message
+        assert "错误类型 ConnectionRefusedError，errno 61" in message
+        assert "Connect call failed" not in message
+        assert "ConnectionRefusedError" in (ch.status.last_error or "")
+
+    TOKEN_URL = "wss://bot:pa55word@gw.example.com:8443/ws/path-token-abc?token=SECRET123#frag"  # secret-guard: allow (synthetic test credential)
+    URL_SECRETS = ("SECRET123", "path-token-abc", "pa55word", "#frag")
+
+    async def test_status_keeps_credentials_in_the_address_out(self):
+        # The channel status is readable by every signed-in user; a custom
+        # address may carry a token. Only scheme, host and port are shown.
+        FakeWSClient = _scripted_ws_client([
+            ("error", ValueError(f"{self.TOKEN_URL} isn't a valid URI")),
+            ("error", OSError("connect to gw.example.com:8443/ws/path-token-abc?token=SECRET123 failed")),
+            ("reconnecting", 1),
+        ])
+        ch = WeComChannel()
+        config = {
+            "botId": "bot-1",
+            "secret": "secret-1",
+            "websocketUrl": self.TOKEN_URL,
+            "reconnectTimeoutSeconds": 0.01,
+        }
+
+        with patch("wecom_aibot_sdk.WSClient", FakeWSClient):
+            with pytest.raises(RuntimeError, match="reconnect timed out") as raised:
+                await asyncio.wait_for(ch.start(config, AsyncMock(), asyncio.Event()), timeout=5)
+
+        for shown in (str(raised.value), ch.status.last_error or ""):
+            assert "wss://gw.example.com:8443" in shown
+            for secret in self.URL_SECRETS:
+                assert secret not in shown
+
+    async def test_reconnect_timeout_without_error_shows_only_the_host(self):
+        FakeWSClient = _scripted_ws_client([("disconnected", "socket closed")])
+        ch = WeComChannel()
+        config = {
+            "botId": "bot-1",
+            "secret": "secret-1",
+            "websocketUrl": self.TOKEN_URL,
+            "reconnectTimeoutSeconds": 0.01,
+        }
+
+        with patch("wecom_aibot_sdk.WSClient", FakeWSClient):
+            with pytest.raises(RuntimeError, match="reconnect timed out") as raised:
+                await asyncio.wait_for(ch.start(config, AsyncMock(), asyncio.Event()), timeout=5)
+
+        assert "wss://gw.example.com:8443" in str(raised.value)
+        for secret in self.URL_SECRETS:
+            assert secret not in str(raised.value)
+
+    @pytest.mark.parametrize(
+        ("configured", "raw_error", "secrets"),
+        [
+            # websockets' redirect check names the target, which keeps only some of the parameters.
+            (
+                "wss://gw.example/ws/path-token?token=SECRET123&region=cn",  # secret-guard: allow (synthetic test credential)
+                "cannot follow redirect to ws://gw.example/ws/path-token?token=SECRET123",
+                ("SECRET123", "path-token"),
+            ),
+            # A parameter value on its own, outside any address.
+            (
+                "wss://gw.example/ws?token=SECRET123&region=cn",  # secret-guard: allow (synthetic test credential)
+                "server refused credential SECRET123",
+                ("SECRET123",),
+            ),
+            # Percent-encoded in the configured address, decoded (or encoded) in the error.
+            (
+                "wss://gw.example/ws?token=a%2Fb%2Bc12345",  # secret-guard: allow (synthetic test credential)
+                "rejected a/b+c12345 (sent as a%2Fb%2Bc12345)",
+                ("a/b+c12345", "a%2Fb%2Bc12345"),
+            ),
+            # User info, in an address the error rewrote with an explicit port.
+            (
+                "wss://bot:pa55word@gw.example/ws",  # secret-guard: allow (synthetic test credential)
+                "InvalidURI: wss://bot:pa55word@gw.example:443/ws is not valid",  # secret-guard: allow (synthetic)
+                ("pa55word", "bot:pa55word"),
+            ),
+            # A quote inside the credential: an address pattern would stop there and miss the rest.
+            (
+                "wss://bot:ab'LONGSECRET123456@gw.example/ws",  # secret-guard: allow (synthetic test credential)
+                "cannot follow redirect to ws://bot:ab'LONGSECRET123456@gw.example/ws",  # secret-guard: allow (synthetic)
+                ("LONGSECRET123456",),
+            ),
+            (
+                "wss://gw.example/ws?token=ab%27LONGSECRET123456",  # secret-guard: allow (synthetic test credential)
+                "cannot follow redirect to ws://gw.example/ws?token=ab'LONGSECRET123456",  # secret-guard: allow (synthetic)
+                ("LONGSECRET123456",),
+            ),
+        ],
+    )
+    def test_error_text_loses_credentials_of_the_address(self, configured, raw_error, secrets):
+        from flocks.channel.builtin.wecom.channel import _describe_sdk_error
+
+        shown = _describe_sdk_error(RuntimeError(raw_error), configured)
+
+        assert "wss://gw.example" in shown
+        for secret in secrets:
+            assert secret not in shown
+
+    def test_status_gives_type_and_codes_never_the_error_text(self):
+        from flocks.channel.builtin.wecom.channel import _describe_sdk_error
+
+        class InvalidStatus(Exception):
+            # Shaped like websockets.exceptions.InvalidStatus: the code sits on the response.
+            def __init__(self):
+                super().__init__("server rejected WebSocket connection: HTTP 403 body=whatever-the-proxy-said")
+                self.response = types.SimpleNamespace(status_code=403)
+
+        shown = _describe_sdk_error(InvalidStatus(), "wss://gw.example/ws")
+        assert "错误类型 InvalidStatus，HTTP 403" in shown
+        assert "whatever-the-proxy-said" not in shown
+
+        refused = _describe_sdk_error(
+            Exception("Authentication failed: echoed wss://gw.example/ws?token=ECHOED (code: 40058)"),
+            "wss://gw.example/ws",
+        )
+        assert "企业微信错误码 40058" in refused
+        assert "ECHOED" not in refused
+        assert "wecom.ws.error" in refused  # where the full error is
+
+    @staticmethod
+    def _cert_failure():
+        import ssl
+
+        # As the ssl module raises it when no root certificate vouches for the server's.
+        error = ssl.SSLCertVerificationError(
+            1,
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+            "unable to get local issuer certificate (_ssl.c:1010)",
+        )
+        error.verify_code = 20
+        error.verify_message = "unable to get local issuer certificate"
+        return error
+
+    def test_certificate_failure_points_at_root_certificates_not_the_network(self):
+        from flocks.channel.builtin.wecom.channel import _describe_sdk_error
+
+        shown = _describe_sdk_error(self._cert_failure(), "wss://openws.work.weixin.qq.com")
+
+        assert "（wss://openws.work.weixin.qq.com）时证书校验没通过" in shown
+        assert "ca-certificates" in shown
+        assert "根证书加进系统信任" in shown
+        assert "错误类型 SSLCertVerificationError，errno 1，证书校验错误码 20" in shown
+        assert "wecom.ws.error" in shown
+        # Not the hint for an address the server cannot reach.
+        assert "请确认服务器能访问这个地址" not in shown
+        assert "检查代理设置" not in shown
+        assert "_ssl.c" not in shown
+
+    def test_certificate_failure_is_found_behind_a_wrapping_error(self):
+        from flocks.channel.builtin.wecom.channel import _describe_sdk_error
+
+        try:
+            try:
+                raise self._cert_failure()
+            except Exception as cause:
+                raise RuntimeError("websocket connect failed") from cause
+        except RuntimeError as wrapped:
+            shown = _describe_sdk_error(wrapped, "wss://gw.example/ws")
+
+        assert "时证书校验没通过" in shown
+        assert "错误类型 SSLCertVerificationError" in shown
+        assert "websocket connect failed" not in shown
+
+    def test_other_ssl_errors_keep_the_reachability_hint(self):
+        import ssl
+
+        from flocks.channel.builtin.wecom.channel import _describe_sdk_error
+
+        shown = _describe_sdk_error(ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number"), "wss://gw.example/ws")
+
+        assert "证书校验没通过" not in shown
+        assert "请确认服务器能访问这个地址" in shown
+        assert "错误类型 SSLError" in shown
+
+    async def test_reconnect_timeout_names_the_certificate_failure(self):
+        ch = WeComChannel()
+        client = object()
+        ch._ws_client = client
+
+        ch._handle_error(self._cert_failure(), client=client)
+        assert "证书校验没通过" in (ch.status.last_error or "")
+        assert not ch._failure_event.is_set()  # the SDK keeps retrying; a fixed trust store recovers
+
+        message = ch._reconnect_timeout_message()
+        assert message.startswith("WeCom reconnect timed out after")
+        assert "证书校验没通过" in message
+        assert "检查代理设置" not in message
+
+    @pytest.mark.parametrize(
+        ("url", "shown"),
+        [
+            ("wss://openws.work.weixin.qq.com", "wss://openws.work.weixin.qq.com"),
+            ("ws://[::1]:9/path?k=v", "ws://[::1]:9"),
+            ("wss://user:pw@host.example/x", "wss://host.example"),
+            ("wss://host.example:99999/x", "自定义地址"),
+            ("openws.work.weixin.qq.com/ws", "自定义地址"),
+        ],
+    )
+    def test_shown_address_is_scheme_host_and_port(self, url, shown):
+        from flocks.channel.builtin.wecom.channel import _shown_ws_url
+
+        assert _shown_ws_url(url) == shown
+
+    async def test_transient_connection_error_shows_until_authenticated(self):
+        ch = WeComChannel()
+        client = object()
+        ch._ws_client = client
+
+        ch._handle_error(OSError("network is unreachable"), client=client)
+        assert ch.status.connected is False
+        assert "错误类型 OSError" in (ch.status.last_error or "")
+        assert "network is unreachable" not in (ch.status.last_error or "")
+        assert not ch._failure_event.is_set()
+
+        ch._handle_authenticated(client=client)
+        assert ch.status.connected is True
+        assert ch.status.last_error is None
+
+    async def test_events_from_a_replaced_client_are_ignored(self):
+        ch = WeComChannel()
+        old_client, new_client = object(), object()
+        ch._ws_client = new_client
+
+        ch._handle_error(self.AUTH_REFUSED, client=old_client)
+        ch._handle_disconnected(self.REPLACED, client=old_client)
+        ch._handle_authenticated(client=old_client)
+
+        assert not ch._failure_event.is_set()
+        assert ch.status.connected is False
+        assert ch.status.last_error is None
+
+    async def test_gateway_marks_connected_only_after_authentication(self):
+        from flocks.channel.gateway.manager import GatewayManager
+
+        FakeWSClient = _scripted_ws_client([])  # connected socket, no answer to the subscribe yet
+        ch = WeComChannel()
+        abort_event = asyncio.Event()
+
+        with patch("wecom_aibot_sdk.WSClient", FakeWSClient):
+            task = asyncio.create_task(GatewayManager()._run_with_reconnect(
+                channel_id="wecom",
+                plugin=ch,
+                config={"botId": "bot-1", "secret": "secret-1"},
+                on_message=AsyncMock(),
+                abort_event=abort_event,
+            ))
+            # The gateway pre-marks channels that are not self-managed after 0.5 s.
+            await asyncio.sleep(0.7)
+            assert ch.status.connected is False
+
+            FakeWSClient.last_instance.handlers["authenticated"]()
+            assert ch.status.connected is True
+
+            abort_event.set()
+            await asyncio.wait_for(task, timeout=5)
+
+    async def test_gateway_shows_refused_credentials_while_waiting_to_retry(self):
+        from flocks.channel.gateway.manager import GatewayManager
+
+        FakeWSClient = _scripted_ws_client([("error", self.AUTH_REFUSED)])
+        ch = WeComChannel()
+        abort_event = asyncio.Event()
+
+        with patch("wecom_aibot_sdk.WSClient", FakeWSClient):
+            task = asyncio.create_task(GatewayManager()._run_with_reconnect(
+                channel_id="wecom",
+                plugin=ch,
+                config={"botId": "bot-1", "secret": "wrong-secret"},
+                on_message=AsyncMock(),
+                abort_event=abort_event,
+            ))
+            await asyncio.sleep(0.2)  # first attempt failed; the gateway waits before retrying
+
+            assert ch.status.connected is False
+            assert "鉴权失败" in (ch.status.last_error or "")
+            assert ch.status.error_count == 1
+
+            abort_event.set()
+            await asyncio.wait_for(task, timeout=5)
+
+
+# ------------------------------------------------------------------
 # normalize_target
 # ------------------------------------------------------------------
 

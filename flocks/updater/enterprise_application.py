@@ -22,6 +22,11 @@ Python package wrote it.
 A licence no longer valid is no licence here: the machine may apply again, and the licence taken
 replaces the old one. One Console renewed needs none of that: a sync with Console brings the renewal
 into the file (sync_licence), as the hourly heartbeat does.
+
+A machine that cannot reach Console applies offline: the page hands it an application to send to
+whoever issues licences (offline_application: the form, and the machine the licence is to be bound to),
+and imports the licence file they send back (import_licence: the license.json Console's offline issue
+downloads, or the bare token), written where taking an approved application writes it.
 """
 
 from __future__ import annotations
@@ -29,6 +34,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import platform
+import re
 import shutil
 import tempfile
 import time
@@ -39,11 +46,18 @@ from uuid import uuid4
 
 import httpx
 
-from flocks.console.previous_licence import find_licence_file, licence_token
+from flocks.console.previous_licence import (
+    LICENCE_FILE_LOCK,
+    find_licence_file,
+    licence_token,
+    moment,
+    terms_in_force,
+    token_header,
+)
 from flocks.storage.storage import Storage
 from flocks.updater import enterprise
 from flocks.updater.enterprise import EnterpriseUpgradeError
-from flocks.updater.machine_fingerprint import MachineIdUnreadable, machine_fingerprint
+from flocks.updater.machine_fingerprint import MachineIdUnreadable, machine_fingerprints, machine_names
 from flocks.utils.log import Log
 
 log = Log.create(service="updater.enterprise_application")
@@ -275,7 +289,7 @@ async def _apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
             raise EnterpriseUpgradeError("已经有一份申请在审核或等着启用，处理完再申请")
     base, session = _console_base(), await _console_session()
     try:
-        machine = await asyncio.to_thread(machine_fingerprint)
+        machine, machine_kind, devid = await asyncio.to_thread(machine_names)
     except MachineIdUnreadable as exc:
         # Sent without it, the licence would not be bound to this machine although it could be.
         raise EnterpriseUpgradeError(f"读不到这台机器的标识，先处理好再申请：{exc}") from exc
@@ -304,8 +318,12 @@ async def _apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
         "applied_by": applied_by,
         # The host as the enterprise core names it: Console binds the licence it issues to it, and the
         # core runs on that licence on this machine only. None for a host that keeps no identifier,
-        # which Console shows the operator.
+        # which Console shows the operator. machine_kind says which fingerprint it is, for whoever
+        # reviews: the machine-id digest, which every enterprise core reads, or the device id of a
+        # host that keeps no machine id. devid is the device id beside it, for Console's records.
         "machine": machine or None,
+        "machine_kind": machine_kind or None,
+        "devid": devid or None,
     }
     payload = {
         # The machine, as Console knows it from the sign-in: Console holds one open application
@@ -454,18 +472,20 @@ async def _take(request_id: str) -> dict[str, Any]:
     # This very token on the machine already (taken twice, or a retry): the file stands, with the
     # patches it has gathered; Console still hears of it below.
     if token != held_token:
-        now = int(time.time())
-        _keep_replaced_licence(licence_file(), now)
-        _write_licence(licence_file(), {
-            "license_id": issued,
-            "key": token,
-            "payload": {},
-            "patches": [],
-            "activated_at": now,
-            "install_id": session.get("install_id"),
-            "fingerprint": session.get("fingerprint"),
-            "request_id": request_id,
-        })
+        # Under the lock the heartbeat writes under: it must not put the file it read back over this one.
+        with LICENCE_FILE_LOCK:
+            now = int(time.time())
+            _keep_replaced_licence(licence_file(), now)
+            _write_licence(licence_file(), {
+                "license_id": issued,
+                "key": token,
+                "payload": {},
+                "patches": [],
+                "activated_at": now,
+                "install_id": session.get("install_id"),
+                "fingerprint": session.get("fingerprint"),
+                "request_id": request_id,
+            })
         log.info("enterprise.licence_taken", {"request_id": request_id, "license_id": issued})
     if _status(record) == "approved":
         try:
@@ -525,3 +545,171 @@ async def _sync_licence() -> dict[str, bool]:
     changed = after is not None and any(before.get(term) != after.get(term) for term in terms)
     log.info("enterprise.licence_synced", {"license_id": before["license_id"], "changed": changed})
     return {"changed": changed}
+
+
+#: A licence file is a few kilobytes; anything far bigger is not one.
+MAX_LICENCE_CHARS = 256 * 1024
+#: The bare token, as an operator may copy it out of Console instead of downloading the file.
+_BARE_TOKEN = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$")
+#: What the application file says it is, for whoever reads it.
+OFFLINE_APPLICATION_FORMAT = "flocks-licence-application/1"
+
+
+def _licence_document(content: str) -> dict[str, Any]:
+    """The licence file as sent: the license.json Console's offline issue downloads, or its bare token."""
+    text = content.strip().lstrip("\ufeff")
+    if not text:
+        raise EnterpriseUpgradeError("授权文件是空的")
+    if len(text) > MAX_LICENCE_CHARS:
+        raise EnterpriseUpgradeError("这不是授权文件：内容太大")
+    if _BARE_TOKEN.match(text):
+        return {"key": text}
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise EnterpriseUpgradeError("这不是授权文件：内容既不是 JSON，也不是授权令牌") from exc
+    if not isinstance(data, dict):
+        raise EnterpriseUpgradeError("这不是授权文件：内容不是 JSON 对象")
+    return data
+
+
+async def import_licence(content: str) -> dict[str, Any]:
+    """Write a licence file sent back for an offline application on this machine, after the checks that
+    can be made here; the enterprise core verifies its signature when the machine moves."""
+    async with _lock:
+        return await _import_licence(content)
+
+
+async def _import_licence(content: str) -> dict[str, Any]:
+    if not enterprise.available():
+        raise EnterpriseUpgradeError("这台机器已经是企业版：授权在企业版的 Flocks Pro 页导入")
+    data = _licence_document(content)
+    token, claims = licence_token(data)
+    if not token:
+        raise EnterpriseUpgradeError("这个文件里没有授权令牌，不是 Console 签发的授权文件")
+    header = token_header(token) or {}
+    if str(header.get("alg") or "").upper() != "ES256":
+        raise EnterpriseUpgradeError("授权令牌不是 Console 签发的格式")
+    issued = str(claims.get("license_id") or "").strip()
+    if not issued:
+        raise EnterpriseUpgradeError("授权令牌里没有授权编号")
+    named = str(data.get("license_id") or "").strip()
+    if named and named != issued:
+        raise EnterpriseUpgradeError(f"文件写的授权编号 {named} 和令牌里的 {issued} 对不上")
+    payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+    # The core takes the file's payload only as a copy of the token's own (go/internal/license/legacy.go).
+    if payload and payload != claims:
+        raise EnterpriseUpgradeError("文件里的 payload 和授权令牌对不上，文件可能被改过")
+    patches = [item for item in data.get("patches") or [] if isinstance(item, str)] if isinstance(data.get("patches"), list) else []
+    record = {"license_id": issued, "key": token, "payload": payload, "patches": patches}  # secret-guard: allow 误报：key 字段存的是上传文件里的令牌变量
+    # A token bound to another machine is refused before anything is written, the same token already on
+    # this machine too (a data directory moved from that machine, say).
+    machine = str(claims.get("machine") or "").strip().lower()
+    if machine:
+        ours = await asyncio.to_thread(machine_fingerprints)
+        # A host whose fingerprints cannot be read now is not refused here: the core judges the binding.
+        if ours and machine not in ours:
+            raise EnterpriseUpgradeError("这份授权绑定的是另一台机器：请用这台机器的申请信息重新申请")
+    again = await asyncio.to_thread(_import_again, token, patches)
+    if again is not None:
+        # This very token is on the machine already (imported twice, or taken before): the file stands, with
+        # the patches it has gathered and the ones it lacked, and is judged as it now is -- a renewal it holds
+        # keeps an expired token good, a revocation it holds keeps it revoked.
+        _refuse_if_lapsed(again)
+        log.info("enterprise.licence_imported_again", {"license_id": issued})
+        return _imported(again, issued)
+    _refuse_if_lapsed(record)
+    standing = await asyncio.to_thread(enterprise.standing_licence_id)
+    if standing and standing != issued:
+        raise EnterpriseUpgradeError(f"这台机器已经有授权 {standing}，不覆盖；它失效后再导入新的")
+    with LICENCE_FILE_LOCK:
+        now = int(time.time())
+        path = licence_file()
+        _keep_replaced_licence(path, now)
+        _write_licence(path, {
+            **record,
+            "activated_at": now,
+            "imported_at": now,
+            # What the file says of the install it was issued for; the core holds a bound token to it.
+            **{field: data[field] for field in ("install_id", "fingerprint", "request_id") if data.get(field)},
+        })
+    log.info("enterprise.licence_imported", {"license_id": issued})
+    return _imported(record, issued)
+
+
+def _import_again(token: str, patches: list[str]) -> dict[str, Any] | None:
+    """The file holding *token*, with the patches it lacked added (and written), read and written under the
+    lock the heartbeat writes under; None when the file on the machine holds another token, or none."""
+    with LICENCE_FILE_LOCK:
+        found = find_licence_file()
+        if not found or licence_token(found[1])[0] != token:
+            return None
+        path, held = found
+        known = [item for item in held.get("patches") or [] if isinstance(item, str)]
+        fresh = [item for item in patches if item not in known]
+        merged = {**held, "patches": known + fresh}
+        if fresh:
+            _write_licence(path, merged)
+        return merged
+
+
+def _licence_terms(record: dict[str, Any]) -> tuple[Any, Any]:
+    """A licence file's status and expiry as the core holds it to them: the token's, or the patch's in force."""
+    claims = licence_token(record)[1]
+    terms = {**claims, **terms_in_force(record)}
+    return terms.get("status"), terms.get("expires_at")
+
+
+def _refuse_if_lapsed(record: dict[str, Any]) -> None:
+    status, expires_at = _licence_terms(record)
+    state = str(status or "").strip().lower()
+    if state in enterprise.LAPSED_STATUSES:
+        said = {"revoked": "已吊销", "expired": "已过期", "superseded": "已被新的授权替换"}[state]
+        raise EnterpriseUpgradeError(f"这份授权{said}，不能导入；请重新申请")
+    if enterprise.licence_lapsed(status, expires_at):
+        ended = datetime.fromtimestamp(moment(expires_at) or 0, UTC).astimezone().strftime("%Y-%m-%d")
+        raise EnterpriseUpgradeError(f"这份授权已在 {ended} 到期，不能导入；续期后重新下载授权文件，或者重新申请")
+
+
+def _imported(record: dict[str, Any], issued: str) -> dict[str, Any]:
+    status, expires_at = _licence_terms(record)
+    return {"license_id": issued, "license_status": status, "expires_at": expires_at}
+
+
+async def offline_application(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
+    """The application to hand to whoever issues licences when Console cannot be reached from here: the
+    form, and the machine a licence issued for it is to be bound to. Nothing is sent or kept."""
+    if not enterprise.available():
+        raise EnterpriseUpgradeError("这台机器不能在这里申请：它已经是企业版，或者不是 Linux / macOS / Windows")
+    if await asyncio.to_thread(enterprise.standing_licence_id):
+        raise EnterpriseUpgradeError("这台机器已经有企业版授权，直接升级即可")
+    try:
+        machine, machine_kind, devid = await asyncio.to_thread(machine_names)
+    except MachineIdUnreadable as exc:
+        raise EnterpriseUpgradeError(f"读不到这台机器的标识，先处理好再申请：{exc}") from exc
+    from flocks import __version__
+    from flocks.console.login import ConsoleLoginService
+
+    return {
+        "format": OFFLINE_APPLICATION_FORMAT,
+        "product": "Flocks Pro",
+        "license_type": form["license_type"],
+        "company": form["company"],
+        "applicant_name": form["applicant_name"],
+        "applicant_email": form["applicant_email"],
+        "applicant_phone": form["applicant_phone"],
+        "sales_rep_name": form.get("sales_rep_name") or None,
+        "notes": form.get("notes") or None,
+        "replaces_license_id": enterprise.previous_licence_id() or None,
+        # Console's offline issue binds the licence to this fingerprint (32 hex digits), and keeps the
+        # device id beside it for its records.
+        "machine": machine or None,
+        "machine_kind": machine_kind or None,
+        "devid": devid or None,
+        "install_id": await ConsoleLoginService._get_install_id(),
+        "hostname": platform.node() or None,
+        "platform": enterprise.platform_id(),
+        "flocks_version": __version__,
+        "applied_by": applied_by,
+        "created_at": datetime.now(UTC).isoformat(),
+    }

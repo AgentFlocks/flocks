@@ -203,7 +203,8 @@ function FilesTab() {
 
   // Upload / new-dir state
   const [uploading, setUploading] = useState(false);
-  const [newDir, setNewDir] = useState<{ show: boolean; name: string }>({ show: false, name: '' });
+  // `error` stays under the name field; the input stays open so the name can be fixed.
+  const [newDir, setNewDir] = useState<{ show: boolean; name: string; error?: string }>({ show: false, name: '' });
   const [dragOver, setDragOver] = useState(false);
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
 
@@ -345,13 +346,25 @@ function FilesTab() {
 
   const handleCreateDir = useCallback(async () => {
     const name = newDir.name.trim();
-    if (!name) return;
+    if (!name) {
+      setNewDir((d) => ({ ...d, error: t('files.dirNameRequired') }));
+      return;
+    }
     const path = currentPath ? `${currentPath}/${name}` : name;
     try {
-      await workspaceAPI.createDir(path);
+      const res = await workspaceAPI.createDir(path);
+      // The endpoint is idempotent: an existing directory comes back as created: false.
+      if (res.data?.created === false) {
+        setNewDir((d) => ({ ...d, error: t('files.dirNameExists') }));
+        return;
+      }
       setNewDir({ show: false, name: '' });
       loadDir(currentPath);
     } catch (e: any) {
+      if (e?.response?.status === 409) {
+        setNewDir((d) => ({ ...d, error: t('files.dirNameTakenByFile') }));
+        return;
+      }
       toastError(t('files.toast.createDirFailed'), extractErrorMessage(e));
     }
   }, [newDir.name, currentPath, loadDir, toastError, t]);
@@ -446,12 +459,15 @@ function FilesTab() {
         </div>
 
         {newDir.show && (
-          <div className="flex items-center gap-2 px-4 py-2 bg-slate-50 border-b border-slate-100">
+          <div className="px-4 py-2 bg-slate-50 border-b border-slate-100">
+          <div className="flex items-center gap-2">
             <FolderPlus className="w-4 h-4 text-slate-600 flex-shrink-0" />
             <input
               autoFocus
               value={newDir.name}
-              onChange={(e) => setNewDir((d) => ({ ...d, name: e.target.value }))}
+              onChange={(e) => setNewDir((d) => ({ ...d, name: e.target.value, error: undefined }))}
+              aria-invalid={newDir.error ? true : undefined}
+              aria-describedby={newDir.error ? 'workspace-new-dir-error' : undefined}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') handleCreateDir();
                 if (e.key === 'Escape') setNewDir({ show: false, name: '' });
@@ -463,6 +479,8 @@ function FilesTab() {
             <button onClick={() => setNewDir({ show: false, name: '' })} className="text-gray-400 hover:text-gray-600">
               <X className="w-4 h-4" />
             </button>
+          </div>
+          {newDir.error && <p id="workspace-new-dir-error" role="alert" className="mt-1 pl-6 text-xs text-red-600">{newDir.error}</p>}
           </div>
         )}
 

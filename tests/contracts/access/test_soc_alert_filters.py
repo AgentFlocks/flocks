@@ -27,18 +27,13 @@ def soc_query(tmp_path, monkeypatch, request):
     spec = importlib.util.spec_from_file_location("soc_filter_test", path)
     ops = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ops)
+    # The contract names the platform's SOC alert store; here that is this SQLite file.
+    from flocks.workflow.soc_store import _paths
+
     db = tmp_path / "soc.db"
-    monkeypatch.setattr(
-        ops,
-        "_sqlite_settings",
-        lambda: {
-            "db_path": db,
-            "table": "alert_records",
-            "record_column": "record_json",
-            "date_column": "asset_date",
-            "event_time_column": "event_time",
-        },
-    )
+    monkeypatch.setattr(_paths, "SOC_DB", db)
+    monkeypatch.delenv("FLOCKS_SOC_ALERTS_SQLITE_DB", raising=False)
+    monkeypatch.delenv("FLOCKS_SOC_ALERTS_CONFIG", raising=False)
 
     jsonl = tmp_path / "jsonl"
     if request.param == "jsonl":

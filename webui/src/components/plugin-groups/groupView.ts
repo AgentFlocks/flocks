@@ -18,6 +18,13 @@ export interface GroupNavEntry {
 
 /** null is All; the empty string is Ungrouped. Neither is a group name. */
 export type GroupSelection = string | null;
+/** What a page groups; messages name it ("拖动智能体到分组") instead of the generic "plugin". */
+export type GroupItemKind = 'plugin' | 'agent' | 'skill' | 'workflow' | 'tool' | 'mcp' | 'api' | 'device';
+/** `{{noun}}` / `{{nouns}}` for pluginGroups messages that name the grouped items. */
+export const groupNoun = (t: TFunction, kind: GroupItemKind = 'plugin') => ({
+  noun: t(`pluginGroups:noun.${kind}`),
+  nouns: t(`pluginGroups:nouns.${kind}`),
+});
 export const groupItemLabel = (item: GroupNavItem): string => item.name === item.key ? item.name : `${item.name} (${item.key})`;
 export const groupName = (value?: string | null): string => value?.trim() ?? '';
 
@@ -61,10 +68,26 @@ export function orderGroupNames(names: string[], saved: unknown): string[] {
  */
 export class GroupActionCancelled extends Error {}
 
-export function assertGroupItemsEditable(items: readonly GroupNavItem[], t: TFunction): void {
+/** A batch that did not fully succeed: `message` is for people, `details` keeps the server's own words. */
+export class GroupSaveError extends Error {
+  constructor(message: string, readonly details = '') {
+    super(message);
+    this.name = 'GroupSaveError';
+  }
+}
+
+/** Server failures said in the user's words; anything else is shown as the server said it. */
+function groupFailureReason(raw: string, t: TFunction, kind: GroupItemKind): string {
+  // flocks.tool.nofollow: the file (or a link on its way) is no longer the one checked before writing.
+  if (/changed after it was checked/i.test(raw)) return t('pluginGroups:errors.changedAfterCheck');
+  return raw || t('pluginGroups:errors.write', groupNoun(t, kind));
+}
+
+export function assertGroupItemsEditable(items: readonly GroupNavItem[], t: TFunction, kind: GroupItemKind = 'plugin'): void {
   const readOnly = items.filter((item) => item.readOnlyReason);
   if (readOnly.length) {
     throw new Error(t('pluginGroups:errors.readOnlyMembers', {
+      ...groupNoun(t, kind),
       items: readOnly.map(groupItemLabel).join(', '),
     }));
   }
@@ -77,14 +100,17 @@ export async function saveGroupItems(
   reload: () => Promise<unknown>,
   t: TFunction,
   confirmScope = false,
+  kind: GroupItemKind = 'plugin',
 ): Promise<void> {
-  if (!items.length) throw new Error(t('pluginGroups:errors.missing'));
-  assertGroupItemsEditable(items, t);
+  const nouns = groupNoun(t, kind);
+  if (!items.length) throw new Error(t('pluginGroups:errors.missing', nouns));
+  assertGroupItemsEditable(items, t, kind);
   if (confirmScope) {
     const target = group === null ? t('pluginGroups:ungrouped') : groupLabel(group, t);
     const confirmed = await requestConfirm({
       title: t('pluginGroups:confirmScopeTitle', { group: target }),
       description: t('pluginGroups:confirmScope', {
+        ...nouns,
         count: items.length,
         group: target,
         items: items.map(groupItemLabel).join(', '),
@@ -95,13 +121,18 @@ export async function saveGroupItems(
   }
 
   const failures: string[] = [];
-  const succeeded: string[] = [];
+  // The server's own words (with paths) for the technical details, only where they were reworded.
+  const details: string[] = [];
+  let succeeded = 0;
   for (const item of items) {
     try {
       await save(item.key, group);
-      succeeded.push(groupItemLabel(item));
+      succeeded += 1;
     } catch (error) {
-      failures.push(`${groupItemLabel(item)}: ${extractErrorMessage(error, t('pluginGroups:errors.write'))}`);
+      const raw = extractErrorMessage(error, '');
+      const reason = groupFailureReason(raw, t, kind);
+      failures.push(t('pluginGroups:errors.failedItem', { item: groupItemLabel(item), reason }));
+      if (raw && raw !== reason) details.push(`${groupItemLabel(item)}: ${raw}`);
     }
   }
   let refreshError = '';
@@ -109,11 +140,8 @@ export async function saveGroupItems(
     refreshError = `${t('pluginGroups:errors.refresh')} ${extractErrorMessage(error, '')}`;
   }
   if (failures.length || refreshError) {
-    throw new Error([
-      t('pluginGroups:errors.partial', { succeeded: succeeded.length, failed: failures.length }),
-      succeeded.length ? `${t('pluginGroups:errors.succeededItems')} ${succeeded.join(', ')}` : '',
-      ...(failures.length ? [t('pluginGroups:errors.failedItems'), ...failures] : []),
-      refreshError,
-    ].filter(Boolean).join('\n'));
+    const summary = t('pluginGroups:errors.partial', { succeeded, failed: failures.length });
+    const body = [...failures, refreshError].filter(Boolean).join('\n');
+    throw new GroupSaveError(body ? `${summary}\n\n${body}` : summary, details.join('\n'));
   }
 }

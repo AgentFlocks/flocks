@@ -1,7 +1,27 @@
 {
   "title": "Groups",
   "navigation": "Filter by group",
-  "countsDescription": "Drag a plugin onto a group to move it.",
+  "countsDescription": "Drag {{nouns}} onto a group.",
+  "noun": {
+    "plugin": "plugin",
+    "agent": "agent",
+    "skill": "skill",
+    "workflow": "workflow",
+    "tool": "tool",
+    "mcp": "MCP service",
+    "api": "API service",
+    "device": "device"
+  },
+  "nouns": {
+    "plugin": "plugins",
+    "agent": "agents",
+    "skill": "skills",
+    "workflow": "workflows",
+    "tool": "tools",
+    "mcp": "MCP services",
+    "api": "API services",
+    "device": "devices"
+  },
   "defaultNames": {
     "平台集成": "Platform Integrations",
     "安全研判": "Security Analysis",
@@ -37,7 +57,7 @@
   "saved": "Group changes saved.",
   "cancel": "Cancel",
   "close": "Close",
-  "confirmScope": "Move these {{count}} plugins to “{{group}}”?\n{{items}}\nNo plugins will be deleted.",
+  "confirmScope": "Move these {{count}} {{nouns}} to “{{group}}”?\n{{items}}\nNo {{nouns}} will be deleted.",
   "confirmScopeTitle": "Move to “{{group}}”",
   "confirmScopeAction": "Move",
   "dialog": {
@@ -45,30 +65,34 @@
     "renameTitle": "Rename group",
     "moveTitle": "Edit group for {{name}}",
     "name": "Group name",
-    "firstPlugin": "First editable plugin",
-    "choosePlugin": "Choose a plugin",
+    "nameHint": "1–32 characters, not counting leading/trailing spaces; no control characters.",
+    "firstPlugin": "First editable {{noun}}",
+    "choosePlugin": "Select {{noun}}",
     "destination": "Destination group"
   },
   "validation": {
-    "length": "Use 1–32 characters, excluding leading/trailing spaces and control characters.",
     "duplicate": "A group with this name already exists. Choose another name.",
-    "firstPlugin": "Choose an editable plugin."
+    "required": "Enter a group name.",
+    "tooLong": "Group names can be at most 32 characters.",
+    "controlChars": "Group names cannot contain control characters.",
+    "firstPlugin": "Choose an editable {{noun}}."
   },
   "readOnly": {
-    "system": "The group of a built-in plugin cannot be changed.",
+    "system": "The group of a built-in {{noun}} cannot be changed.",
     "builtinSkill": "The group of a built-in skill cannot be changed.",
     "externalSkill": "Skills from external directories (such as ~/.claude/skills) cannot be regrouped here.",
     "admin": "You do not have permission to change groups.",
     "catalog": "Install or configure this service first.",
-    "noEditable": "No plugins are available for grouping."
+    "noEditable": "No {{nouns}} can be grouped yet."
   },
   "errors": {
-    "missing": "This plugin or group is unavailable. Refresh and try again.",
-    "readOnlyMembers": "Groups cannot be changed for these plugins: {{items}}",
-    "write": "Could not save this plugin’s group.",
+    "missing": "This {{noun}} or group is unavailable. Refresh and try again.",
+    "readOnlyMembers": "Groups cannot be changed for these {{nouns}}: {{items}}",
+    "write": "Could not save this {{noun}}’s group.",
     "partial": "Saved {{succeeded}}; failed {{failed}}.",
-    "succeededItems": "Saved plugins:",
-    "failedItems": "Failed plugins:",
+    "failedItem": "{{item}}: {{reason}}",
+    "changedAfterCheck": "It changed after it was checked. Refresh and try again.",
+    "details": "Technical details",
     "refresh": "Could not refresh the list. Refresh and try again."
   },
   "drag": {

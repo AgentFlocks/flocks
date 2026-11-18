@@ -21,7 +21,7 @@ from uuid import uuid4
 import httpx
 
 from flocks import __version__
-from flocks.console.previous_licence import find_licence_file, licence_id_of, licence_token
+from flocks.console.previous_licence import LICENCE_FILE_LOCK, find_licence_file, licence_id_of, licence_token
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -86,19 +86,22 @@ def keep_previous_licence_current(data: dict[str, Any]) -> None:
     patch in its answer) reaches the file whether the package is there or not: the Flocks Pro page
     reads it, and the enterprise core takes it when the machine moves. An extension that reports for
     itself has this among what it does, and a machine with no such licence has nothing here."""
-    found = find_licence_file()
-    if found is None:
-        return
-    path, state = found
-    now = int(datetime.now(UTC).timestamp())
-    state["last_sync_at"] = now
-    state["last_heartbeat_ok_at"] = now
-    patch = data.get("license_patch") or data.get("latest_patch")
-    if isinstance(patch, str) and patch:
-        patches = state.get("patches") if isinstance(state.get("patches"), list) else []
-        if patch not in patches:
-            state["patches"] = [*patches, patch]
-    _write_private_json(path, state)
+    # Read and written back under the lock an import or a licence taken holds too: a copy read before
+    # their write would put back what they replaced, or drop the patches they added.
+    with LICENCE_FILE_LOCK:
+        found = find_licence_file()
+        if found is None:
+            return
+        path, state = found
+        now = int(datetime.now(UTC).timestamp())
+        state["last_sync_at"] = now
+        state["last_heartbeat_ok_at"] = now
+        patch = data.get("license_patch") or data.get("latest_patch")
+        if isinstance(patch, str) and patch:
+            patches = state.get("patches") if isinstance(state.get("patches"), list) else []
+            if patch not in patches:
+                state["patches"] = [*patches, patch]
+        _write_private_json(path, state)
     revoked = data.get("revoked_license_ids")
     if isinstance(revoked, list):
         _write_private_json(path.with_name("revocation.json"), {"revoked_license_ids": sorted({str(item) for item in revoked})})

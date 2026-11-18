@@ -3493,6 +3493,30 @@ def _validate_trigger_definitions(triggers: List[TriggerDefinition]) -> None:
         _validate_schedule_trigger_source(trigger)
 
 
+async def _save_trigger_definition(
+    workflow_id: str,
+    workflow_data: Dict[str, Any],
+    triggers: List[TriggerDefinition],
+    trigger: TriggerDefinition,
+) -> tuple[TriggerDefinition, Dict[str, Any]]:
+    """Apply supplied fields to the stored definition, then validate and persist once.
+
+    A form or API client that omits a trigger field must not reset it to a
+    model default. Explicit values (including empty mappings) still replace it.
+    """
+    current = next((item for item in triggers if item.id == trigger.id), None)
+    if current is not None:
+        trigger = TriggerDefinition.model_validate({
+            **current.model_dump(),
+            **trigger.model_dump(exclude_unset=True),
+        })
+    trigger = _merge_trigger_secrets(trigger, current)
+    updated = _replace_or_append_trigger(triggers, trigger)
+    _validate_trigger_definitions(updated)
+    persisted = await _persist_workflow_triggers(workflow_id, workflow_data, updated)
+    return trigger, persisted
+
+
 @router.get("/workflow/{workflow_id}/triggers")
 async def list_workflow_triggers(workflow_id: str):
     """List unified triggers for a workflow with runtime status."""
@@ -3525,10 +3549,7 @@ async def create_workflow_trigger(workflow_id: str, trigger: TriggerDefinition):
     if not data:
         raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
     existing = await _get_workflow_trigger_defs(workflow_id, data)
-    trigger = _merge_trigger_secrets(trigger, next((item for item in existing if item.id == trigger.id), None))
-    updated = _replace_or_append_trigger(existing, trigger)
-    _validate_trigger_definitions(updated)
-    persisted = await _persist_workflow_triggers(workflow_id, data, updated)
+    trigger, persisted = await _save_trigger_definition(workflow_id, data, existing, trigger)
     await default_trigger_runtime.restart_workflow(workflow_id, persisted.get("workflowJson") or {})
     status = await default_trigger_runtime.get_trigger_status(workflow_id, trigger)
     return TriggerSaveResponse(trigger=_trigger_to_api_dict(trigger), status=status)
@@ -3543,11 +3564,10 @@ async def update_workflow_trigger(workflow_id: str, trigger_id: str, trigger: Tr
     if not data:
         raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
     existing = await _get_workflow_trigger_defs(workflow_id, data)
-    current = _find_trigger_or_404(existing, trigger_id)
-    updated_trigger = _merge_trigger_secrets(trigger.model_copy(update={"id": trigger_id}), current)
-    updated = _replace_or_append_trigger(existing, updated_trigger)
-    _validate_trigger_definitions(updated)
-    persisted = await _persist_workflow_triggers(workflow_id, data, updated)
+    _find_trigger_or_404(existing, trigger_id)
+    updated_trigger, persisted = await _save_trigger_definition(
+        workflow_id, data, existing, trigger.model_copy(update={"id": trigger_id}),
+    )
     await default_trigger_runtime.restart_workflow(workflow_id, persisted.get("workflowJson") or {})
     status = await default_trigger_runtime.get_trigger_status(workflow_id, updated_trigger)
     return TriggerSaveResponse(trigger=_trigger_to_api_dict(updated_trigger), status=status)
@@ -3920,53 +3940,14 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
         if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
-        if req.enabled:
-            try:
-                validate_workflow_python(data.get("workflowJson") or {})
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        config = {
-            "workflowId": workflow_id,
-            "enabled": req.enabled,
-            "inputBroker": req.inputBroker,
-            "inputTopic": req.inputTopic,
-            "inputGroupId": req.inputGroupId,
-            "inputKey": req.inputKey,
-            "autoOffsetReset": req.autoOffsetReset,
-            "inputs": _strip_execution_only_comments(req.inputs),
-            "updatedAt": int(time.time() * 1000),
-        }
-        await WorkflowStore.put_config(workflow_id, config, kind="workflow_kafka_config")
+        config = req.model_dump(by_alias=True)
+        config["inputs"] = _strip_execution_only_comments(req.inputs)
+        config["updatedAt"] = int(time.time() * 1000)
         triggers = await _get_workflow_trigger_defs(workflow_id, data)
-        unified_trigger = TriggerDefinition.model_validate(
-            {
-                "id": _legacy_singleton_trigger_id(triggers, "kafka"),
-                "type": "kafka",
-                "enabled": req.enabled,
-                "source": {
-                    "inputBroker": req.inputBroker or "",
-                    "inputTopic": req.inputTopic or "",
-                    "inputGroupId": req.inputGroupId or "",
-                    "autoOffsetReset": req.autoOffsetReset,
-                },
-                "mapping": {
-                    req.inputKey or "kafka_message": "$.body",
-                },
-                "inputs": _strip_execution_only_comments(req.inputs),
-                "updatedAt": config["updatedAt"],
-            }
-        )
-        updated_triggers = _replace_or_append_trigger(triggers, unified_trigger)
-        _validate_trigger_type_constraints(updated_triggers)
-        await _persist_workflow_triggers(
-            workflow_id,
-            data,
-            updated_triggers,
-        )
-
-        from flocks.ingest.kafka.manager import default_manager as _kafka_default_manager
-
-        status = await _kafka_default_manager.restart_workflow(workflow_id)
+        trigger = legacy_kafka_trigger_from_config(config)
+        trigger = trigger.model_copy(update={"id": _legacy_singleton_trigger_id(triggers, "kafka")})
+        trigger, _ = await _save_trigger_definition(workflow_id, data, triggers, trigger)
+        status = await _sync_trigger_legacy_state(workflow_id, trigger)
         state = (status or {}).get("state")
         if req.enabled and state == "failed":
             err = (status or {}).get("error") or "consumer_connect_failed"
@@ -4029,66 +4010,13 @@ async def save_workflow_poller_config(workflow_id: str, req: WorkflowPollerConfi
         if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
-        if req.enabled:
-            try:
-                validate_workflow_python(data.get("workflowJson") or {})
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        cron_expression = (req.cronExpression or "").strip()
-        if cron_expression:
-            # Validate before anything is persisted; a bad expression must not
-            # leave an enabled config behind that fails on every restart.
-            _validate_cron_expression(cron_expression)
-        trigger_source: Dict[str, Any]
-        if cron_expression:
-            trigger_source = {
-                "mode": "cron",
-                "intervalSeconds": req.intervalSeconds,
-                "cron": cron_expression,
-            }
-        else:
-            trigger_source = {
-                "mode": "interval",
-                "intervalSeconds": req.intervalSeconds,
-            }
-
-        config = {
-            "workflowId": workflow_id,
-            "enabled": req.enabled,
-            "intervalSeconds": req.intervalSeconds,
-            "cronExpression": cron_expression or None,
-            "timeoutSeconds": req.timeoutSeconds,
-            "noOverlap": req.noOverlap,
-            "inputs": req.inputs,
-            "updatedAt": int(time.time() * 1000),
-        }
-        await WorkflowStore.put_config(workflow_id, config, kind="workflow_poller_config")
+        config = req.model_dump(by_alias=True)
+        config["updatedAt"] = int(time.time() * 1000)
         triggers = await _get_workflow_trigger_defs(workflow_id, data)
-        unified_trigger = TriggerDefinition.model_validate(
-            {
-                "id": _legacy_singleton_trigger_id(triggers, "schedule"),
-                "type": "schedule",
-                "enabled": req.enabled,
-                "source": trigger_source,
-                "runtime": {
-                    "timeoutSeconds": req.timeoutSeconds,
-                    "noOverlap": req.noOverlap,
-                },
-                "inputs": req.inputs,
-                "updatedAt": config["updatedAt"],
-            }
-        )
-        updated_triggers = _replace_or_append_trigger(triggers, unified_trigger)
-        _validate_trigger_type_constraints(updated_triggers)
-        await _persist_workflow_triggers(
-            workflow_id,
-            data,
-            updated_triggers,
-        )
-
-        from flocks.workflow.poller_manager import default_manager as _poller_default_manager
-
-        poller_status = await _poller_default_manager.restart_workflow(workflow_id)
+        trigger = legacy_schedule_trigger_from_config(config)
+        trigger = trigger.model_copy(update={"id": _legacy_singleton_trigger_id(triggers, "schedule")})
+        trigger, _ = await _save_trigger_definition(workflow_id, data, triggers, trigger)
+        poller_status = await _sync_trigger_legacy_state(workflow_id, trigger)
         if req.enabled and (poller_status or {}).get("state") == "failed":
             err = (poller_status or {}).get("error") or "poller_start_failed"
             raise HTTPException(
@@ -4170,51 +4098,13 @@ async def save_syslog_config(workflow_id: str, req: SyslogConfigRequest):
         if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
-        if req.enabled:
-            try:
-                validate_workflow_python(data.get("workflowJson") or {})
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        config = {
-            "workflowId": workflow_id,
-            "enabled": req.enabled,
-            "protocol": req.protocol,
-            "host": req.host,
-            "port": req.port,
-            "format": req.msg_format,
-            "inputKey": req.input_key,
-            "updatedAt": int(time.time() * 1000),
-        }
-        await WorkflowStore.put_config(workflow_id, config, kind="workflow_syslog_config")
+        config = req.model_dump(by_alias=True)
+        config["updatedAt"] = int(time.time() * 1000)
         triggers = await _get_workflow_trigger_defs(workflow_id, data)
-        unified_trigger = TriggerDefinition.model_validate(
-            {
-                "id": _legacy_singleton_trigger_id(triggers, "syslog"),
-                "type": "syslog",
-                "enabled": req.enabled,
-                "source": {
-                    "protocol": req.protocol,
-                    "host": req.host,
-                    "port": req.port,
-                    "format": req.msg_format,
-                },
-                "mapping": {
-                    req.input_key or "syslog_message": "$.body",
-                },
-                "updatedAt": config["updatedAt"],
-            }
-        )
-        updated_triggers = _replace_or_append_trigger(triggers, unified_trigger)
-        _validate_trigger_type_constraints(updated_triggers)
-        await _persist_workflow_triggers(
-            workflow_id,
-            data,
-            updated_triggers,
-        )
-
-        from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager
-
-        status = await _syslog_default_manager.restart_workflow(workflow_id)
+        trigger = legacy_syslog_trigger_from_config(config)
+        trigger = trigger.model_copy(update={"id": _legacy_singleton_trigger_id(triggers, "syslog")})
+        trigger, _ = await _save_trigger_definition(workflow_id, data, triggers, trigger)
+        status = await _sync_trigger_legacy_state(workflow_id, trigger)
         state = (status or {}).get("state")
         if req.enabled and state == "failed":
             err = (status or {}).get("error") or "listener_bind_failed"

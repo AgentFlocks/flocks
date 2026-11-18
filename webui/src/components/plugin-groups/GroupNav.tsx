@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode
 import { GripVertical, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useOptionalToast } from '@/components/common/Toast';
-import { GroupActionCancelled, groupItemLabel, groupLabel, groupName, orderGroupNames, type GroupNavEntry, type GroupNavItem, type GroupSelection } from './groupView';
+import { GroupActionCancelled, GroupSaveError, groupItemLabel, groupLabel, groupName, groupNoun, orderGroupNames, type GroupItemKind, type GroupNavEntry, type GroupNavItem, type GroupSelection } from './groupView';
 
 const RESOURCE_MIME = 'application/x-flocks-visible-plugin';
 const ORDER_MIME = 'application/x-flocks-group-order';
@@ -104,6 +104,8 @@ export interface GroupNavProps {
   clearMovingItem?: () => void;
   /** Accept only a gesture started by this page's currently mounted resource. */
   consumeResourceDrag?: (token: string) => GroupNavItem | undefined;
+  /** What this page groups, so messages say "智能体" or "工作流" instead of "插件". */
+  itemKind?: GroupItemKind;
   className?: string;
 }
 
@@ -155,9 +157,10 @@ function GroupDialog({ titleId, onClose, busy, children }: {
 /** Prop-driven native-group navigation. Only dialogs, feedback and personal order live here. */
 export default function GroupNav({
   preferenceKey, groups, total, ungroupedCount, inventoryComplete = false, items, selection, onSelect,
-  onMove, onCreate, onRename, onDelete, movingItem, clearMovingItem, consumeResourceDrag, className = '',
+  onMove, onCreate, onRename, onDelete, movingItem, clearMovingItem, consumeResourceDrag, itemKind = 'plugin', className = '',
 }: GroupNavProps) {
   const { t } = useTranslation('pluginGroups');
+  const nouns = groupNoun(t, itemKind);
   const toast = useOptionalToast();
   const dialogTitleId = useId();
   const [dialog, setDialog] = useState<Dialog>(null);
@@ -169,6 +172,8 @@ export default function GroupNav({
   const orderSequence = useRef(0);
   // Success/cancel feedback is a top-right toast; failures stay in place until the next action.
   const [error, setError] = useState('');
+  // The server's own words behind a reworded failure, folded away under "技术详情".
+  const [errorDetails, setErrorDetails] = useState('');
   const names = groups.filter((entry) => entry.count > 0 && entry.name).map((entry) => entry.name);
   const storageKey = `flocks:plugin-group-order:${preferenceKey}`;
   const [personalOrder, setPersonalOrder] = useState(() => ({ key: storageKey, value: readOrder(storageKey) }));
@@ -202,6 +207,7 @@ export default function GroupNav({
     busyRef.current = true;
     setBusy(true);
     setError('');
+    setErrorDetails('');
     try {
       await action();
       if (close) { setDialog(null); clearMovingItem?.(); }
@@ -211,14 +217,17 @@ export default function GroupNav({
         // The user just declined the confirmation; nothing else to report.
         setDialog(null);
         clearMovingItem?.();
-      } else setError(err instanceof Error ? err.message : String(err));
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+        setErrorDetails(err instanceof GroupSaveError ? err.details : '');
+      }
     } finally {
       busyRef.current = false;
       setBusy(false);
     }
   };
 
-  const openCreate = (key = '') => { setName(''); setError(''); setDialog({ kind: 'create', key }); };
+  const openCreate = (key = '') => { setName(''); setError(''); setErrorDetails(''); setDialog({ kind: 'create', key }); };
   const dropProps = (target?: string, orderTarget?: string): HTMLAttributes<HTMLElement> => ({
     onDragOver: (event) => {
       if (event.dataTransfer.types.includes(RESOURCE_MIME) || (orderTarget && event.dataTransfer.types.includes(ORDER_MIME))) event.preventDefault();
@@ -244,16 +253,26 @@ export default function GroupNav({
   const submit = () => {
     if (!dialog) return;
     const next = name.trim();
-    if (!next || [...next].length > 32 || /[\u0000-\u001f\u007f]/.test(next)) { setError(t('validation.length')); return; }
+    setErrorDetails('');
+    if (!next) { setError(t('validation.required')); return; }
+    if ([...next].length > 32) { setError(t('validation.tooLong')); return; }
+    if (/[\u0000-\u001f\u007f]/.test(next)) { setError(t('validation.controlChars')); return; }
     if (names.includes(next)) { setError(t('validation.duplicate')); return; }
     if (dialog.kind === 'rename') { void run(() => onRename(dialog.name, next)); return; }
     const first = editableItems.find((item) => item.key === dialog.key);
-    if (!first) { setError(t('validation.firstPlugin')); return; }
+    if (!first) { setError(t('validation.firstPlugin', nouns)); return; }
     void run(() => (onCreate ?? onMove)(first.key, next));
   };
 
   const modalOpen = !!dialog || !!movingItem;
-  const closeModal = () => { if (!busy) { setDialog(null); clearMovingItem?.(); setError(''); } };
+  const closeModal = () => { if (!busy) { setDialog(null); clearMovingItem?.(); setError(''); setErrorDetails(''); } };
+  const errorBlock = (className: string) => error && <div role="alert" className={`${className} text-xs text-red-600`}>
+    <p className="whitespace-pre-wrap">{error}</p>
+    {errorDetails && <details className="mt-1 text-gray-500">
+      <summary className="cursor-pointer select-none">{t('errors.details')}</summary>
+      <pre className="mt-1 whitespace-pre-wrap break-all font-mono text-[11px]">{errorDetails}</pre>
+    </details>}
+  </div>;
   const navigationButton = (value: GroupSelection, label: string, count: number) => (
     <button type="button" title={label} onClick={() => onSelect(value)} aria-pressed={selection === value} aria-current={selection === value ? 'page' : undefined}
       className={`flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-xs ${selection === value ? 'bg-slate-100 font-medium text-slate-800' : 'text-gray-600 hover:bg-gray-50'}`}>
@@ -266,10 +285,11 @@ export default function GroupNav({
       <div className="mb-2 flex items-center justify-between gap-2 px-2">
         <h2 className="text-xs font-semibold text-gray-600">{t('title')}</h2>
         <button type="button" {...dropProps()} onClick={() => openCreate()} disabled={busy || !editableItems.length}
-          title={!editableItems.length ? t('readOnly.noEditable') : t('create')} aria-label={t('create')}
+          title={!editableItems.length ? t('readOnly.noEditable', nouns) : t('create')} aria-label={t('create')}
           className="rounded p-1 text-gray-500 hover:bg-gray-100 disabled:opacity-40"><Plus className="h-4 w-4" /></button>
       </div>
-      <p className="mb-2 px-2 text-[11px] leading-4 text-gray-400">{t('countsDescription')}</p>
+      {/* The drag hint only once something can be dragged; until then say there is nothing to group. */}
+      <p className="mb-2 px-2 text-[11px] leading-4 text-gray-400">{editableItems.length ? t('countsDescription', nouns) : t('readOnly.noEditable', nouns)}</p>
       <nav className="space-y-0.5 max-md:max-h-48 max-md:overflow-y-auto">
         <div className="flex">{navigationButton(null, t('all'), total)}</div>
         {ordered.map((group) => {
@@ -294,7 +314,7 @@ export default function GroupNav({
               }}><GripVertical className="h-3 w-3" /></button>
             {navigationButton(group, label, entry.count)}
             <button type="button" disabled={busy || !!entry.readOnlyReason} title={entry.readOnlyReason || t('rename')}
-              aria-label={t('renameNamed', { name: label })} onClick={() => { setName(group); setError(''); setDialog({ kind: 'rename', name: group }); }}
+              aria-label={t('renameNamed', { name: label })} onClick={() => { setName(group); setError(''); setErrorDetails(''); setDialog({ kind: 'rename', name: group }); }}
               className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><Pencil className="h-3 w-3" /></button>
             <button type="button" disabled={busy || !!entry.readOnlyReason} title={entry.readOnlyReason || t('delete')}
               aria-label={t('deleteNamed', { name: label })} onClick={() => void run(() => onDelete(group))}
@@ -303,7 +323,7 @@ export default function GroupNav({
         })}
         <div className="flex" {...dropProps('')}>{navigationButton('', t('ungrouped'), ungroupedCount)}</div>
       </nav>
-      {error && !modalOpen && <p role="alert" className="mt-3 whitespace-pre-wrap px-2 text-xs text-red-600">{error}</p>}
+      {!modalOpen && errorBlock('mt-3 px-2')}
       {modalOpen && <GroupDialog key={dialog?.kind ?? 'move'} titleId={dialogTitleId} onClose={closeModal} busy={busy}>
           <div className="mb-3 flex items-center justify-between">
             <h3 id={dialogTitleId} className="text-sm font-semibold">{dialog ? t(`dialog.${dialog.kind}Title`) : t('dialog.moveTitle', { name: movingItem?.name })}</h3>
@@ -314,10 +334,11 @@ export default function GroupNav({
               <input value={name} onChange={(event) => setName(event.target.value)} disabled={busy}
                 className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm" />
             </label>
-            {dialog.kind === 'create' && <label className="mt-3 block text-xs text-gray-600">{t('dialog.firstPlugin')}
+            <p className="mt-1 text-[11px] text-gray-400">{t('dialog.nameHint')}</p>
+            {dialog.kind === 'create' && <label className="mt-3 block text-xs text-gray-600">{t('dialog.firstPlugin', nouns)}
               <select value={dialog.key} onChange={(event) => setDialog({ kind: 'create', key: event.target.value })} disabled={busy}
                 className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm">
-                <option value="">{t('dialog.choosePlugin')}</option>
+                <option value="">{t('dialog.choosePlugin', nouns)}</option>
                 {editableItems.map((item) => <option key={item.key} value={item.key}>{groupItemLabel(item)}</option>)}
               </select>
             </label>}
@@ -328,7 +349,7 @@ export default function GroupNav({
               {ordered.map((group) => <option key={group} value={group}>{groupLabel(group, t)}</option>)}
             </select>
           </label>}
-          {error && <p role="alert" className="mt-3 whitespace-pre-wrap text-xs text-red-600">{error}</p>}
+          {errorBlock('mt-3')}
           <div className="mt-5 flex items-center justify-end gap-2">
             {!dialog && movingItem && <button type="button" onClick={() => openCreate(movingItem.key)} disabled={busy} className="mr-auto text-xs text-gray-600">{t('create')}</button>}
             <button type="button" onClick={closeModal} disabled={busy} className="rounded border px-3 py-1.5 text-xs">{t('cancel')}</button>

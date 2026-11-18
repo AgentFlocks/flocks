@@ -145,10 +145,11 @@
 
 ## 6. 输出与副作用
 
-默认 SOC DB：
+默认 SOC DB：平台的告警库，由 Flocks 的数据库设置决定，工作流里不配置库地址。
 
 ```text
-~/.flocks/data/soc.db
+SQLite：数据目录下的 soc.db（默认 ~/.flocks/data/soc.db）
+PostgreSQL：共享库里的 alert_records 表
 ```
 
 可选 JSONL：

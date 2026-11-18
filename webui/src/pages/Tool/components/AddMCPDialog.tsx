@@ -5,6 +5,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import client from '@/api/client';
 import { useToast } from '@/components/common/Toast';
+import { extractErrorMessage } from '@/utils/error';
 
 interface AddMCPDialogProps {
   onClose: () => void;
@@ -51,7 +52,7 @@ export default function AddMCPDialog({ onClose, onSuccess, onSwitchToChat }: Add
       onClose();
       onSuccess();
     } catch (err: any) {
-      toast.error(t('alert.addFailed', { error: err.response?.data?.detail || err.message }));
+      toast.error(t('alert.addFailed', { error: extractErrorMessage(err, t('alert.unknownError')) }));
     } finally {
       setSubmitting(false);
     }

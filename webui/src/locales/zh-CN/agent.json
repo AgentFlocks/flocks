@@ -68,7 +68,8 @@
     "loadingSkills": "加载 Skill 列表...",
     "primaryModeLabel": "Primary（主 Agent）",
     "subagentModeLabel": "Subagent（子 Agent）",
-    "nativeReadOnlyMessage": "内置 Agent 仅支持修改模型、温度，以及子 Agent 的启用状态，其他配置由系统维护",
+    "nativeReadOnlyMessage": "{{name}} 主 Agent 仅支持修改模型和温度。",
+    "nativeSubagentReadOnlyMessage": "内置子 Agent {{name}} 仅支持修改模型和温度。",
     "rexAssistWrite": "Rex 协助编写",
     "color": "颜色",
     "colorOptional": "（可选）"
@@ -132,7 +133,8 @@
     "emptyStateTitle": "暂无编辑对话",
     "guidePanelTitle": "Rex 辅助修改",
     "guidePanelDesc": "选择一个编辑入口，Rex 会基于当前 Agent 配置，引导你调整 Prompt、职责边界、工具权限和参数。",
-    "nativeGuidePanelDesc": "这是内置 Agent，只支持保存模型和温度；Rex 会围绕模型选择、温度策略和验证方式引导修改。",
+    "nativeGuidePanelDesc": "{{name}} 主 Agent 仅支持修改模型和温度；Rex 会围绕模型选择、温度策略和验证方式引导修改。",
+    "nativeSubagentGuidePanelDesc": "内置子 Agent {{name}} 仅支持修改模型和温度；Rex 会围绕模型选择、温度策略和验证方式引导修改。",
     "guideSectionTitle": "编辑引导",
     "caseSectionTitle": "编辑案例",
     "guideActions": [

@@ -7,6 +7,10 @@ import type { LocalUser } from '@/api/auth';
 export interface AuthContextValue {
   loading: boolean;
   bootstrapped: boolean | null;
+  /** False when this browser is not on the server's machine: the first administrator is created there. */
+  setupAllowed: boolean;
+  /** Where a browser on the server's machine opens the page, when loopback reaches it. */
+  localSetupUrl: string | null;
   error: string | null;
   user: LocalUser | null;
   refresh: () => Promise<void>;

@@ -1938,8 +1938,8 @@ function activitySourceBadge(event) {
   return {
     label: '告警记录',
     title: event.alert?.sourceType
-      ? `来源：soc.db 告警记录 · ${String(event.alert.sourceType).toUpperCase()}`
-      : '来源：soc.db 告警记录',
+      ? `来源：告警库记录 · ${String(event.alert.sourceType).toUpperCase()}`
+      : '来源：告警库记录',
   };
 }
 

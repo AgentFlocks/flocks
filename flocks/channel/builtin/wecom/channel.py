@@ -3,7 +3,10 @@ WeCom (企业微信) ChannelPlugin implementation.
 
 Uses the ``wecom-aibot-sdk`` package to maintain a WebSocket long-connection
 to ``wss://openws.work.weixin.qq.com``.  The SDK handles authentication,
-heartbeat keep-alive, and exponential-backoff reconnection internally.
+heartbeat keep-alive, and exponential-backoff reconnection internally; what it
+does not recover from (refused credentials, the server dropping the connection
+for a newer one) ends start() with a readable reason, which the gateway shows
+in the channel status and retries with backoff.
 
 Reference implementation:
     https://github.com/WecomTeam/wecom-openclaw-plugin
@@ -14,8 +17,10 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import ssl
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Optional
+from urllib.parse import urlsplit
 
 from flocks.channel.base import (
     ChannelCapabilities,
@@ -33,6 +38,117 @@ log = Log.create(service="channel.wecom")
 _FRAME_CACHE_MAX = 500
 _DEFAULT_RECONNECT_TIMEOUT_SECONDS = 60.0
 _LEADING_MENTION_RE = re.compile(r"^\s*(?:@\S+(?:\s+|$))+")
+# Shown in error messages when no websocketUrl is configured; the SDK's own default.
+_FALLBACK_WS_URL = "wss://openws.work.weixin.qq.com"
+# The SDK reports a refused subscribe frame as a plain Exception starting with
+# this text (wecom_aibot_sdk.ws ``_handle_frame``), and raises
+# WSAuthFailureError once it gives up retrying.
+_AUTH_FAILURE_PREFIX = "Authentication failed"
+# Reason the SDK passes to "disconnected" when the server drops this connection
+# because the same bot opened another one (its ``disconnected_event``).
+_REPLACED_BY_NEW_CONNECTION_PREFIX = "New connection established"
+
+
+def _is_auth_failure(error: BaseException) -> bool:
+    return type(error).__name__ == "WSAuthFailureError" or str(error).startswith(_AUTH_FAILURE_PREFIX)
+
+
+def _shown_ws_url(url: str) -> str:
+    """The WebSocket address as status messages show it: scheme, host and port only.
+
+    A custom websocketUrl (or the {env:…}/{secret:…} it came from) may carry a
+    token in its user info, path or query, and the channel status is readable
+    by every signed-in user.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return "自定义地址"
+    if not parts.scheme or not host:
+        return "自定义地址"
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{parts.scheme}://{host}" + (f":{port}" if port else "")
+
+
+# The code the SDK appends to a refused subscribe ("… (code: 40058)").
+_AUTH_ERRCODE_RE = re.compile(r"\(code: (-?\d+)\)\s*$")
+_SEE_SERVER_LOG = "详细报错见服务端日志 wecom.ws.error。"
+
+
+def _error_facts(error: BaseException) -> str:
+    """What the status may say about an SDK error: its type and numeric codes, never its text.
+
+    The text can quote an address (a redirect target, an invalid URI) with the
+    credentials it carries, or whatever a custom server sent back, and the
+    channel status is readable by every signed-in user. The full error is
+    logged on the server (``wecom.ws.error``) only.
+    """
+    facts = [f"错误类型 {type(error).__name__}"]
+    errno = getattr(error, "errno", None)
+    if isinstance(errno, int):
+        facts.append(f"errno {errno}")
+    # websockets' InvalidStatus carries the response; older InvalidStatusCode the code itself.
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    if status is None:
+        status = getattr(error, "status_code", None)
+    if isinstance(status, int):
+        facts.append(f"HTTP {status}")
+    return "，".join(facts)
+
+
+def _cert_verification_error(error: BaseException) -> Optional[ssl.SSLCertVerificationError]:
+    """The failed certificate check behind *error* (itself, or what it was raised from), if any."""
+    seen: set[int] = set()
+    current: Optional[BaseException] = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _describe_sdk_error(error: BaseException, ws_url: str) -> str:
+    """What the channel status shows for an SDK ``error`` event: the cause, then type and codes only."""
+    if _is_auth_failure(error):
+        match = _AUTH_ERRCODE_RE.search(str(error))
+        facts = f"企业微信错误码 {match.group(1)}" if match else _error_facts(error)
+        return (
+            "企业微信机器人鉴权失败：请在企业微信管理后台核对智能机器人的 Bot ID 和 Secret，"
+            "Secret 重置过的要在这里重新填写并保存。"
+            f"{facts}，{_SEE_SERVER_LOG}"
+        )
+    cert_error = _cert_verification_error(error)
+    if cert_error is not None:
+        # The address answered: the network and the proxy are not what to check.
+        facts = _error_facts(cert_error)
+        verify_code = getattr(cert_error, "verify_code", None)
+        if isinstance(verify_code, int):
+            facts += f"，证书校验错误码 {verify_code}"
+        return (
+            f"连接企业微信长连接服务（{_shown_ws_url(ws_url)}）时证书校验没通过："
+            "这台服务器信任的根证书验证不了对方的证书。请确认系统装了根证书包（ca-certificates）；"
+            "网络里有会替换 HTTPS 证书的代理或安全设备的，要把它的根证书加进系统信任。"
+            f"{facts}，{_SEE_SERVER_LOG}"
+        )
+    return (
+        f"连接企业微信长连接服务（{_shown_ws_url(ws_url)}）出错：请确认服务器能访问这个地址，"
+        "需要走代理的检查代理设置。"
+        f"{_error_facts(error)}，{_SEE_SERVER_LOG}"
+    )
+
+
+def _describe_replaced_connection(reason: str) -> Optional[str]:
+    """The status message when the server dropped this connection for a newer one, else None."""
+    if not reason.startswith(_REPLACED_BY_NEW_CONNECTION_PREFIX):
+        return None
+    return (
+        "企业微信服务端断开了这个连接：同一个机器人在别处建立了新的长连接（一个 Bot ID 同时只能保持一个连接）。"
+        "请停掉其他正在使用这个机器人的服务（比如升级前的旧版本），再点「重启连接」。"
+    )
 
 
 class _WeComSdkLogger:
@@ -85,6 +201,13 @@ class WeComChannel(ChannelPlugin):
         self._reconnect_timeout_seconds = _DEFAULT_RECONNECT_TIMEOUT_SECONDS
         self._reconnect_timeout_event = asyncio.Event()
         self._reconnect_watchdog_task: asyncio.Task[None] | None = None
+        self._ws_url = _FALLBACK_WS_URL
+        # Set when the SDK will not recover on its own (refused credentials, a
+        # newer connection took over): start() fails with this message so the
+        # gateway shows it and retries with backoff.
+        self._failure_event = asyncio.Event()
+        self._failure_message = ""
+        self._last_error_message: Optional[str] = None
 
     def meta(self) -> ChannelMeta:
         return ChannelMeta(
@@ -93,10 +216,13 @@ class WeComChannel(ChannelPlugin):
         )
 
     def capabilities(self) -> ChannelCapabilities:
+        # Connected only once WeCom accepts the bot's credentials
+        # (_handle_authenticated), not as soon as start() is running.
         return ChannelCapabilities(
             chat_types=[ChatType.DIRECT, ChatType.GROUP],
             media=True, threads=False, reactions=False,
             edit=False, rich_text=True,
+            self_managed_connection=True,
         )
 
     def validate_config(self, config: dict) -> Optional[str]:
@@ -130,6 +256,9 @@ class WeComChannel(ChannelPlugin):
         if error:
             raise ValueError(error)
         self._reconnect_timeout_event = asyncio.Event()
+        self._failure_event = asyncio.Event()
+        self._failure_message = ""
+        self._last_error_message = None
         self._cancel_reconnect_watchdog()
 
         try:
@@ -141,7 +270,8 @@ class WeComChannel(ChannelPlugin):
             )
 
         ws_url = config.get("websocketUrl", "")
-        self._ws_client = WSClient(
+        self._ws_url = ws_url or _FALLBACK_WS_URL
+        client = WSClient(
             bot_id=config["botId"],
             secret=config["secret"],
             **({"ws_url": ws_url} if ws_url else {}),
@@ -151,22 +281,25 @@ class WeComChannel(ChannelPlugin):
             plug_version="1.0.0",  # 企微服务端用于下发 MCP Server URL 时的版本校验
             logger=_WeComSdkLogger(),
         )
+        self._ws_client = client
 
-        self._ws_client.on("authenticated", self._handle_authenticated)
-        self._ws_client.on("disconnected", self._handle_disconnected)
-        self._ws_client.on("reconnecting", self._handle_reconnecting)
-        self._ws_client.on("error", self._handle_error)
+        # Each handler knows which client raised the event: one that has been
+        # replaced (a restart) must not change the status of the next one.
+        client.on("authenticated", lambda: self._handle_authenticated(client=client))
+        client.on("disconnected", lambda reason="": self._handle_disconnected(reason, client=client))
+        client.on("reconnecting", lambda attempt=0: self._handle_reconnecting(attempt, client=client))
+        client.on("error", lambda error: self._handle_error(error, client=client))
 
         handler = self._make_message_handler(on_message)
         # 监听通用 message 事件（SDK 对所有消息类型都会触发此事件）
         # 同时保留各类型事件作为备用，handler 内部有去重保护
-        self._ws_client.on("message", handler)
+        client.on("message", handler)
         for event in ("message.text", "message.image", "message.mixed",
                        "message.voice", "message.file"):
-            self._ws_client.on(event, handler)
+            client.on(event, handler)
 
         log.info("wecom.ws.connecting", {"bot_id": config["botId"]})
-        await self._ws_client.connect()
+        await client.connect()
 
         try:
             await self._wait_until_stopped(abort_event)
@@ -329,38 +462,84 @@ class WeComChannel(ChannelPlugin):
             abort_event.wait() if abort_event else asyncio.Event().wait()
         )
         reconnect_waiter = asyncio.create_task(self._reconnect_timeout_event.wait())
+        failure_waiter = asyncio.create_task(self._failure_event.wait())
         done, pending = await asyncio.wait(
-            {abort_waiter, reconnect_waiter},
+            {abort_waiter, reconnect_waiter, failure_waiter},
             return_when=asyncio.FIRST_COMPLETED,
         )
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
 
+        if failure_waiter in done and self._failure_event.is_set():
+            raise RuntimeError(self._failure_message)
         if reconnect_waiter in done and self._reconnect_timeout_event.is_set():
-            raise RuntimeError(
-                "WeCom reconnect timed out after "
-                f"{self._reconnect_timeout_seconds:.1f}s"
-            )
+            raise RuntimeError(self._reconnect_timeout_message())
 
-    def _handle_authenticated(self) -> None:
+    def _reconnect_timeout_message(self) -> str:
+        head = f"WeCom reconnect timed out after {self._reconnect_timeout_seconds:.1f}s"
+        if self._last_error_message:
+            return f"{head}。最近一次错误：{self._last_error_message}"
+        return (
+            f"{head}：断开后没能重新连上企业微信长连接服务（{_shown_ws_url(self._ws_url)}），"
+            "请确认服务器能访问这个地址，需要走代理的检查代理设置。"
+        )
+
+    def _is_stale(self, client: Any) -> bool:
+        """True for an event raised by a client this channel no longer runs."""
+        return client is not None and client is not self._ws_client
+
+    def _fail(self, message: str) -> None:
+        """End this connection attempt: start() raises *message*, which the status shows."""
+        self.mark_disconnected(message)
+        self._failure_message = message
+        self._failure_event.set()
+
+    def _handle_authenticated(self, client: Any = None) -> None:
+        if self._is_stale(client):
+            return
         self.mark_connected()
+        self._last_error_message = None
         self._reconnect_timeout_event.clear()
         self._cancel_reconnect_watchdog()
         log.info("wecom.ws.authenticated")
 
-    def _handle_disconnected(self, reason: str) -> None:
+    def _handle_disconnected(self, reason: str, client: Any = None) -> None:
+        if self._is_stale(client):
+            return
+        reason = str(reason)
+        replaced = None if self._intentional_disconnect else _describe_replaced_connection(reason)
+        if replaced:
+            # The SDK stops reconnecting after this: the server would drop a new
+            # connection again while the other one is up.
+            log.warning("wecom.ws.replaced", {"reason": reason})
+            self._fail(replaced)
+            return
         self.mark_disconnected()
         log.warning("wecom.ws.disconnected", {"reason": reason})
         self._start_reconnect_watchdog(reason=f"disconnected:{reason}")
 
-    def _handle_reconnecting(self, attempt: int) -> None:
+    def _handle_reconnecting(self, attempt: int, client: Any = None) -> None:
+        if self._is_stale(client):
+            return
         self.mark_disconnected()
         log.info("wecom.ws.reconnecting", {"attempt": attempt})
         self._start_reconnect_watchdog(reason=f"reconnecting:{attempt}")
 
-    def _handle_error(self, error: Exception) -> None:
+    def _handle_error(self, error: Exception, client: Any = None) -> None:
         log.error("wecom.ws.error", {"error": str(error)})
+        if self._is_stale(client) or self._intentional_disconnect:
+            return
+        message = _describe_sdk_error(error, self._ws_url)
+        self._last_error_message = message
+        if _is_auth_failure(error):
+            # After a refused subscribe frame the SDK closes the socket itself,
+            # and as a clean close ends its receive loop it never tries again.
+            self._fail(message)
+            return
+        # Connection-level errors: the SDK keeps reconnecting; the status says why
+        # until it is back (or the reconnect watchdog gives up).
+        self.mark_disconnected(message)
 
     def _start_reconnect_watchdog(self, reason: str) -> None:
         if self._intentional_disconnect or self._ws_client is None:

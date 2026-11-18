@@ -121,7 +121,7 @@
     "testing": "测试中",
     "success": "成功",
     "failed": "失败",
-    "configAdminOnly": "模型配置仅管理员可修改",
+    "configAdminOnly": "模型配置仅管理员可修改。",
     "noModelsMember": "请联系管理员添加模型"
   },
   "status": {
@@ -166,7 +166,7 @@
     "providerType": "Provider 类型",
     "baseUrl": "Base URL",
     "baseUrlOptional": "（可选，留空用默认）",
-    "baseUrlRequired": "请填写 Base URL",
+    "baseUrlRequired": "请输入 API 代理 URL。",
     "threatbookIoNodeNotice": "国际节点（threatbook.io）尚未上线，暂使用国内节点（threatbook.cn）。",
     "apiKey": "API Key",
     "ollamaNoKey": "（Ollama 通常不需要）",
@@ -237,7 +237,17 @@
     "retry": "重试",
     "compatCreateFirst": "OpenAI-compatible Provider 需要先创建，创建后可在配置弹窗中测试连接",
     "providerNameHint": "用于创建独立的 OpenAI-compatible Provider 实例，不会覆盖已有配置。",
-    "close": "关闭"
+    "close": "关闭",
+    "tls": {
+      "title": "SSL 证书",
+      "verify": "校验 SSL 证书",
+      "verifyHint": "内网网关用自签名证书或内部 CA 签发的证书时，可以在下面填 CA 证书，或者关闭校验。",
+      "caCert": "CA 证书",
+      "optional": "（可选）",
+      "caCertPlaceholder": "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----\n或服务器上的证书路径，例如 /etc/pki/ca-trust/source/anchors/corp-ca.pem",
+      "caCertHint": "粘贴 PEM 格式的 CA 证书（可以多张），或者填服务器上证书文件的绝对路径。系统自带的根证书照常信任。",
+      "disabledWarning": "已关闭证书校验：不再核对网关证书，同时兼容旧版 TLS（RSA 密钥交换、TLS 1.0/1.1 等）。只建议对内网里可信的网关这样设置。"
+    }
   },
   "wizard": {
     "providerSaved": "Provider 已保存",
@@ -277,6 +287,7 @@
     "importing": "正在新增…",
     "empty": "服务未返回模型，可重新获取或手动添加。",
     "failed": "未能获取模型，请检查上方提示后重试，也可手动添加。",
+    "requestFailed": "获取模型列表失败，请检查 API 代理 URL 和网络后重试；仍失败请联系管理员。",
     "importSummary": "新增 {{added}} 个，已存在 {{skipped}} 个，失败 {{failed}} 个。",
     "retryFailed": "重试失败项",
     "importPartial": "凭据已保存，部分模型新增失败，请查看结果并重试。",
@@ -296,9 +307,9 @@
       "models_discovered": "已获取模型列表，请选择要新增的模型。",
       "catalog_fallback": "该服务不提供模型列表接口，展示内置推荐目录。",
       "discovery_unsupported": "该服务暂不支持获取模型列表，可手动添加。",
-      "missing_base_url": "请先填写 Base URL。",
+      "missing_base_url": "请输入 API 代理 URL。",
       "missing_credentials": "请先填写所需凭据。",
-      "invalid_base_url": "Base URL 格式有误，请检查完整地址。",
+      "invalid_base_url": "API 代理 URL 格式不正确，请输入完整地址。",
       "authentication_failed": "凭据校验失败，请检查 API Key。",
       "permission_denied": "当前凭据无权获取模型列表，请检查账号权限。",
       "rate_limited": "服务请求过于频繁，请稍后重试。",
@@ -307,7 +318,10 @@
       "connection_error": "无法连接模型服务，请检查地址和网络。",
       "invalid_response": "服务返回的模型列表格式无法识别。",
       "response_too_large": "服务返回内容过大，请缩小返回范围或手动添加。",
-      "redirect_not_allowed": "服务返回了重定向，为保护凭据未自动跳转。请填写最终服务地址后重试。"
+      "redirect_not_allowed": "服务返回了重定向，为保护凭据未自动跳转。请填写最终服务地址后重试。",
+      "tls_certificate_failed": "SSL 证书校验失败：网关用的是自签名或内部 CA 签发的证书。请在「SSL 证书」里填 CA 证书，或者关闭「校验 SSL 证书」。",
+      "tls_handshake_failed": "TLS 握手失败：网关的 TLS 版本或加密套件较旧，或者地址的 http/https 写错了。确认地址无误后，可以关闭「校验 SSL 证书」来兼容旧版 TLS。",
+      "invalid_ca_cert": "CA 证书无法加载，请检查证书内容或路径。"
     },
     "reviewSelection": "查看获取结果",
     "invertVisible": "反选筛选结果",
@@ -416,10 +430,11 @@
     "inventorySaveFailedAfterCredentials": "连接信息已保存，模型列表保存失败：{{error}}。请检查后重试。",
     "saving": "正在保存…",
     "checkKey": "检查连接",
-    "checkKeyHint": "检查 API Key 是否有效。",
-    "checkModelListHint": "通过获取服务端模型列表验证 API Key。",
+    "checkKeyHint": "检查连接配置是否可用。",
+    "checkModelListHint": "通过获取模型列表检查连接配置是否可用。",
     "check": "检查",
     "checkingKey": "检查中…",
+    "checkFailed": "连接检查失败，请检查 API 代理 URL 和网络后重试；仍失败请联系管理员。",
     "keyUnverified": "该服务暂无法独立验证 Key。",
     "supports_tools": "工具调用",
     "supports_vision": "视觉",
@@ -429,9 +444,9 @@
       "models_discovered": "已获取模型列表，请选择要新增的模型。",
       "catalog_fallback": "该服务暂无法独立验证 Key。",
       "discovery_unsupported": "该服务暂无法独立验证 Key。",
-      "missing_base_url": "请先填写 Base URL。",
+      "missing_base_url": "请输入 API 代理 URL。",
       "missing_credentials": "请先填写所需凭据。",
-      "invalid_base_url": "Base URL 格式有误，请检查完整地址。",
+      "invalid_base_url": "API 代理 URL 格式不正确，请输入完整地址。",
       "authentication_failed": "凭据校验失败，请检查 API Key。",
       "permission_denied": "凭据权限不足，无法验证 Key。",
       "rate_limited": "服务请求过于频繁，请稍后重试。",
@@ -443,7 +458,10 @@
       "redirect_not_allowed": "服务返回了重定向，为保护凭据未自动跳转。请填写最终服务地址后重试。",
       "key_valid": "Key 有效。",
       "model_list_verified": "已成功获取模型列表，Key 验证通过。",
-      "key_check_unsupported": "该服务暂无法独立验证 Key。"
+      "key_check_unsupported": "该服务暂无法独立验证 Key。",
+      "tls_certificate_failed": "SSL 证书校验失败：网关用的是自签名或内部 CA 签发的证书。请在「SSL 证书」里填 CA 证书，或者关闭「校验 SSL 证书」。",
+      "tls_handshake_failed": "TLS 握手失败：网关的 TLS 版本或加密套件较旧，或者地址的 http/https 写错了。确认地址无误后，可以关闭「校验 SSL 证书」来兼容旧版 TLS。",
+      "invalid_ca_cert": "CA 证书无法加载，请检查证书内容或路径。"
     }
   }
 }

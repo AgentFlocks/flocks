@@ -201,6 +201,10 @@ class ChatResponse(BaseModel):
     usage: Dict[str, Any]
     tool_calls: Optional[List[Dict[str, Any]]] = None
     reasoning: Optional[str] = None
+    # Where the reasoning came from and its structured form, so a reply replayed
+    # into a stream keeps what the next tool round must send back.
+    reasoning_source: Optional[str] = None
+    reasoning_details: Optional[List[Dict[str, Any]]] = None
 
 
 class ToolCallInfo(BaseModel):
@@ -1197,6 +1201,11 @@ class BaseProvider:
     # Subclasses set this to their catalog.json ID to enable metadata enrichment
     # in get_model_definitions(). Leave empty for providers without a catalog entry.
     CATALOG_ID: str = ""
+
+    # True when the provider's HTTP client follows the ``verify_ssl`` and
+    # ``ca_cert`` options (flocks.provider.tls); the model settings page offers
+    # those settings only then.
+    SUPPORTS_TLS_SETTINGS: bool = False
 
     # Per-event-loop SDK client cache; see LoopBoundClientSlot.
     _client = LoopBoundClientSlot()

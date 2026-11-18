@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useProtectedHubUpdate } from './useProtectedHubUpdate';
+import { backendError } from '@/test/helpers';
 
 const { hubAPI, done, error } = vi.hoisted(() => ({
   hubAPI: { previewUpdate: vi.fn(), update: vi.fn() }, done: vi.fn(), error: vi.fn(),
@@ -90,10 +91,17 @@ describe('protected Hub updates', () => {
     expect(screen.getByRole('status')).toHaveTextContent('/data/hub/backups/snapshot');
   });
 
-  it('requests confirmation again when files change after preview', async () => {
-    hubAPI.update.mockRejectedValueOnce({ response: { status: 409, data: { detail: {
-      code: 'hub_update_confirmation_required', plan: { ...changedPlan, token: 'second' },
-    } } } });
+  it.each([
+    // What the service sends: its exception handler puts the route's `detail` under `message`
+    // (hub_update_plugin in flocks/server/routes/hub.py raises it as an HTTPException).
+    ['the exception handler sends it', backendError(409, {
+      code: 'hub_update_confirmation_required', plan: { ...changedPlan, token: 'second' }, // secret-guard: allow (the test's own plan token)
+    })],
+    ['it arrives under detail', { response: { status: 409, data: { detail: {
+      code: 'hub_update_confirmation_required', plan: { ...changedPlan, token: 'second' }, // secret-guard: allow (the test's own plan token)
+    } } } }],
+  ])('requests confirmation again when files change after preview, as %s', async (_name, conflict) => {
+    hubAPI.update.mockRejectedValueOnce(conflict);
     render(<Harness />);
     await userEvent.click(screen.getByRole('button', { name: '更新' }));
     await userEvent.click(await screen.findByRole('button', { name: '备份并覆盖更新' }));

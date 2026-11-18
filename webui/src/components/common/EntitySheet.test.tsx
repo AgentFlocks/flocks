@@ -54,6 +54,7 @@ const entityTranslations: Record<string, string> = {
   'entity.createTitle': '创建 {{entityType}}',
   'entity.editTitle': '编辑 {{entityType}}',
   'entity.editTitleWithName': '编辑 {{entityType}}：{{entityName}}',
+  'entity.viewTitleWithName': '{{entityType}}详情：{{entityName}}',
   'entity.defaultCreate': '创建',
   'entity.defaultSave': '保存',
   'entity.tabDetails': '详情',
@@ -445,6 +446,26 @@ describe('EntitySheet', () => {
       );
 
       expect(screen.getByText('编辑 Agent：test-agent')).toBeInTheDocument();
+    });
+  });
+
+  describe('Read-only view', () => {
+    it('titles the sheet as details and offers no save or cancel, only the close button', async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      const onSubmit = vi.fn();
+      render(
+        <EntitySheet {...defaultProps} mode="edit" entityType="模型" entityName="DeepSeek-V4.1-Flash-1017" readOnly hideRex hideTest onClose={onClose} onSubmit={onSubmit}>
+          <div>Form content</div>
+        </EntitySheet>,
+      );
+
+      expect(screen.getByText('模型详情：DeepSeek-V4.1-Flash-1017')).toBeInTheDocument();
+      expect(screen.queryByText('保存')).not.toBeInTheDocument();
+      expect(screen.queryByText('取消')).not.toBeInTheDocument();
+      await user.click(document.querySelectorAll('button')[0]);
+      expect(onClose).toHaveBeenCalled();
+      expect(onSubmit).not.toHaveBeenCalled();
     });
   });
 

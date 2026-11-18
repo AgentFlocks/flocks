@@ -3,6 +3,7 @@ import { RefreshCw, ChevronDown, ScrollText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import { logsAPI, type LogFileInfo, type LogContentResponse } from '@/api/logs';
+import { extractErrorMessage } from '@/utils/error';
 
 export default function SystemLogPage() {
   const { t } = useTranslation('tool');
@@ -34,7 +35,7 @@ export default function SystemLogPage() {
       setLogContent(res.data);
       setSelectedFile(res.data?.filename || null);
     } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Failed to load logs');
+      setError(extractErrorMessage(err, 'Failed to load logs'));
       setLogContent(null);
     } finally {
       setLoading(false);

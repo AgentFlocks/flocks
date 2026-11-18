@@ -63,11 +63,17 @@ async def _api_get(base_url: str, endpoint: str) -> dict:
     """Simple GET against the iLink API with a short timeout."""
     import aiohttp
 
+    from urllib.parse import urlparse
+
+    from flocks.tool.web.webfetch import is_loopback_host
+
     url = f"{base_url.rstrip('/')}/{endpoint}"
     timeout = aiohttp.ClientTimeout(total=QR_TIMEOUT_MS / 1000)
     connector = aiohttp.TCPConnector(ssl=_make_ssl_ctx())
+    # An iLink relay on this machine's loopback is reached directly: through
+    # a proxy from the environment, 127.0.0.1 would be the proxy host's own.
     async with aiohttp.ClientSession(
-        trust_env=True, connector=connector
+        trust_env=not is_loopback_host(urlparse(url).hostname), connector=connector
     ) as session:
         async with session.get(
             url, headers=_login_headers(), timeout=timeout

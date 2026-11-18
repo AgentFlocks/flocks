@@ -23,7 +23,7 @@ import os
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from flocks.utils.log import Log
 from flocks.config.config import Config, ConfigInfo
@@ -231,6 +231,29 @@ def _apply_enabled_agents(
     allowed = set(enabled_agents)
     for name in [key for key in agents if key not in allowed]:
         del agents[name]
+
+
+def _delegation_candidates(
+    agents: Dict[str, AgentInfo],
+    registered: Dict[str, AgentInfo],
+    managed_names: Iterable[str],
+    enabled_agents: Optional[List[str]],
+) -> Dict[str, AgentInfo]:
+    """The agents an orchestrator's prompt may offer for delegation.
+
+    The loaded agents and the runtime-registered ones (Agent.register), merged
+    the way the registry merges them: not over a managed name, and within the
+    configured allowlist. ``delegate_task`` accepts a registered delegatable
+    agent, so the prompt that tells the orchestrator whom to delegate to has to
+    name it as well.
+    """
+    reserved = set(managed_names)
+    candidates = dict(agents)
+    for name, info in registered.items():
+        if name not in reserved:
+            candidates[name] = info
+    _apply_enabled_agents(candidates, enabled_agents)
+    return candidates
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +500,11 @@ class Agent:
         _apply_enabled_agents(result, cfg.enabled_agents)
 
         # ── ④ Phase-2 dynamic prompts ──────────────────────────────────────
-        available_agents = _build_available_agents(result)
+        # Runtime-registered agents are merged below, after the prompts are
+        # built; as delegation candidates they are counted already.
+        available_agents = _build_available_agents(
+            _delegation_candidates(result, Agent._custom_agents, managed_names, cfg.enabled_agents)
+        )
         inject_dynamic_prompts(
             result,
             available_agents,

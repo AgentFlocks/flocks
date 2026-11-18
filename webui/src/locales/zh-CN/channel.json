@@ -78,6 +78,13 @@
   "restartHint": "手动停止并重新建立长连接",
   "restartSuccess": "{{channel}} 已重启",
   "restartFailed": "重启失败",
+  "secretInput": {
+    "saved": "已保存",
+    "savedPlaceholder": "已保存，输入新值可替换",
+    "envPlaceholder": "取自环境变量 {{name}}，输入新值可替换",
+    "filePlaceholder": "取自文件 {{name}}，输入新值可替换",
+    "savedTitle": "已保存在服务器上，页面不显示原值。输入新值后保存即可替换；留空保存则保持不变。"
+  },
   "security": {
     "defaultAgent": "默认 Agent",
     "defaultAgentHint": "必须为可见 Agent 之一；未设置时按系统默认",
@@ -89,7 +96,7 @@
     "visibleAgentsSelectedCount": "{{first}}、{{second}} 等 {{count}} 个",
     "visibleAgentsNoOptions": "暂无可选 Agent",
     "permissionMode": "权限模式",
-    "permissionModeHint": "该 channel session 的默认权限模式；Session 页面也可以单独调整。",
+    "permissionModeHint": "设置通道会话的默认权限模式，也可在会话中单独调整。",
     "permissionModeReadonly": "readonly",
     "permissionModeRequireConfirm": "require-confirm",
     "permissionModeAutoConfirmAll": "auto-allow-all"

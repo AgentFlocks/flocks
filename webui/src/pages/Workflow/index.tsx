@@ -25,7 +25,7 @@ import {
 } from '@/api/workflow';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-groups/GroupNav';
-import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection, groupNoun } from '@/components/plugin-groups/groupView';
 import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
 import { usePluginViewMode, type PluginViewMode } from '@/hooks/usePluginViewMode';
 import { workflowAPI } from '@/api/workflow';
@@ -97,7 +97,7 @@ export default function WorkflowPage() {
   const [groupSelection, setGroupSelection] = useState<GroupSelection>(null);
   const asGroupItem = (workflow: WorkflowSummary) => ({
     key: workflow.id, name: getWorkflowDisplayName(workflow, i18n?.language), group: workflow.group,
-    readOnlyReason: workflow.group_readonly ? t('pluginGroups:readOnly.system') : undefined,
+    readOnlyReason: workflow.group_readonly ? t('pluginGroups:readOnly.system', groupNoun(t, 'workflow')) : undefined,
   });
   const groupItems = workflows.map(asGroupItem);
   const { warning } = useToast();
@@ -107,17 +107,17 @@ export default function WorkflowPage() {
   const loadGroupItems = async () => (await workflowAPI.listSummaries()).data.map(asGroupItem);
   const moveGroup = async (key: string, group: string | null) => {
     const inventory = await loadGroupItems();
-    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t);
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t, false, 'workflow');
   };
   const createGroup = async (key: string, group: string) => {
     const inventory = await loadGroupItems();
     if (inventory.some((item) => matchesGroup(item.group, group))) throw new Error(t('pluginGroups:validation.duplicate'));
-    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t);
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t, false, 'workflow');
   };
   const changeGroup = async (from: string, to: string | null) => {
     const inventory = await loadGroupItems();
     if (to !== null && inventory.some((item) => matchesGroup(item.group, to))) throw new Error(t('pluginGroups:validation.duplicate'));
-    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveGroup, reloadGroups, t, true);
+    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveGroup, reloadGroups, t, true, 'workflow');
   };
 
   const openFreshCreate = () => {
@@ -224,7 +224,7 @@ export default function WorkflowPage() {
         className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-4 md:flex-row max-md:px-0"
         style={{ scrollbarGutter: 'stable' }}
       >
-        <GroupNav inventoryComplete={!loading && !error} preferenceKey="workflow" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
+        <GroupNav itemKind="workflow" inventoryComplete={!loading && !error} preferenceKey="workflow" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
         <div className="min-w-0 flex-1 space-y-6">
         {workflows.length === 0 ? (
           <EmptyState

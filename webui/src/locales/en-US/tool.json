@@ -143,7 +143,7 @@
     "api": {
       "emptyStateTitle": "No setup conversation yet",
       "guidePanelTitle": "Rex Assisted Setup",
-      "guidePanelDesc": "Choose a guide or case. Rex will load the tool-builder skill, confirm API docs, auth, and output shape, then generate a YAML tool.",
+      "guidePanelDesc": "Choose a guide or case. Rex will confirm the API docs, authentication and output format, then generate the tool.",
       "guideSectionTitle": "Setup Guides",
       "caseSectionTitle": "Setup Cases",
       "guideActions": [
@@ -184,7 +184,7 @@
     "local": {
       "emptyStateTitle": "No creation conversation yet",
       "guidePanelTitle": "Rex Assisted Creation",
-      "guidePanelDesc": "Choose a guide or case. Rex will load the tool-builder skill, confirm inputs, outputs, implementation, and smoke tests, then generate a local Python tool.",
+      "guidePanelDesc": "Choose a guide or case. Rex will confirm the inputs and outputs, implementation and smoke tests, then generate a local Python tool.",
       "guideSectionTitle": "Creation Guides",
       "caseSectionTitle": "Creation Cases",
       "guideActions": [
@@ -269,7 +269,14 @@
     "startCommandRequired": "Please enter start command",
     "serviceUrlRequired": "Please enter service URL",
     "chatPrompt": "Help me connect an MCP service named \"{{name}}\"",
-    "chatSubtitle": "Let Rex help you connect MCP services via chat"
+    "chatSubtitle": "Let Rex help you connect MCP services via chat",
+    "errors": {
+      "nameRequired": "Enter a service name.",
+      "commandRequired": "Enter a start command.",
+      "urlRequired": "Enter the service URL.",
+      "urlScheme": "The service URL must start with http:// or https://.",
+      "invalidHeaders": "Enter a valid JSON object."
+    }
   },
 
   "addAPI": {
@@ -543,6 +550,11 @@
     "enabled": "Enabled",
     "disabled": "Disabled",
     "updating": "Updating…",
+    "serviceDisabledApi": "The API service \"{{service}}\" that owns this tool is disabled, so the tool cannot be enabled on its own. Enable the service under API Integrations first.",
+    "serviceDisabledDevice": "The device plugin \"{{service}}\" that owns this tool has no enabled device, so the tool cannot be enabled on its own. Add or enable a device in Device Integration first.",
+    "goToApiService": "Enable the service",
+    "goToDevices": "Go to Device Integration",
+    "enableNotApplied": "The tool was not enabled. Check whether the service that owns it is enabled.",
     "noDescription": "No description"
   },
 
@@ -641,7 +653,7 @@
     "addFailed": "Add failed: {{error}}",
     "mcpNameRequired": "Please enter MCP service name",
     "apiKeyRequired": "Please enter API Key",
-    "invalidHeaders": "Extra headers must be a valid JSON object",
+    "invalidHeaders": "Enter a valid JSON object.",
     "credSaved": "Credentials saved",
     "saveFailed": "Save failed: {{error}}",
     "testFailed": "Test failed: {{error}}",
@@ -701,6 +713,7 @@
     "mcpHintDesc": "Switch to the \"Workbench\" tab, tell Rex what MCP service you want to connect, and it will automatically complete the configuration.",
     "connSuccess": "Connected",
     "connFailed": "Connection Failed",
+    "mcpConnectFailed": "Could not connect to the MCP service. Check the service URL, the service status and the network, then try again; if it still fails, contact your administrator.",
     "addFailedTitle": "Add Failed"
   },
 

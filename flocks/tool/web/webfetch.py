@@ -31,10 +31,11 @@ DEFAULT_TIMEOUT = 30  # seconds
 MAX_TIMEOUT = 120  # seconds
 MAX_REDIRECTS = 5
 
-# SSRF guard: webfetch must not reach loopback / private / link-local / reserved
-# networks (including the cloud metadata endpoint 169.254.169.254). Operators can
-# allow specific internal hosts/IPs for local testing via a comma-separated env
-# list, e.g. FLOCKS_WEBFETCH_ALLOW_INTERNAL="127.0.0.1,localhost".
+# SSRF guard: webfetch must not reach private / link-local / reserved networks
+# (including the cloud metadata endpoint 169.254.169.254). This machine's own
+# loopback (localhost, 127.0.0.0/8, ::1) stays reachable: local services and
+# proxies listen there. Operators can allow specific internal hosts/IPs via a
+# comma-separated env list, e.g. FLOCKS_WEBFETCH_ALLOW_INTERNAL="10.0.0.5,intranet.example".
 _ALLOW_INTERNAL_ENV = "FLOCKS_WEBFETCH_ALLOW_INTERNAL"
 
 
@@ -43,14 +44,40 @@ def _internal_allowlist() -> set[str]:
     return {token.strip().lower() for token in raw.split(",") if token.strip()}
 
 
+def _is_loopback_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """127.0.0.0/8 or ::1, also written as an IPv4-mapped IPv6 address."""
+    if addr.is_loopback:
+        return True
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped is not None and mapped.is_loopback
+
+
+def is_loopback_host(host: Optional[str]) -> bool:
+    """Whether *host* names this machine's loopback: ``localhost``,
+    ``*.localhost``, 127.0.0.0/8 or ``::1`` (bracketed or not, an IPv6 zone
+    included). Anything else with a ``%`` in it is a name, not an address
+    (``127.0.0.1%25.example.com``)."""
+    normalized = (host or "").strip().lower().rstrip(".")
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return True
+    try:
+        addr = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return _is_loopback_address(addr)
+
+
 def _ip_is_internal(ip: str) -> bool:
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return False
+    if _is_loopback_address(addr):
+        return False
     return (
         addr.is_private
-        or addr.is_loopback
         or addr.is_link_local
         or addr.is_reserved
         or addr.is_multicast
@@ -62,9 +89,10 @@ def _ssrf_error(url: str) -> Optional[str]:
     """Return an error message if *url* resolves to an internal address.
 
     DNS-resolves the host and rejects the request when any resolved address is
-    loopback/private/link-local/reserved, so a public hostname that points at an
-    internal IP (DNS rebinding) is also caught. Returns None when the target is
-    allowed. Resolution failures return None so the request fails naturally with
+    private/link-local/reserved, so a public hostname that points at an internal
+    IP (DNS rebinding) is also caught; loopback addresses are allowed. Returns
+    None when the target is allowed. Resolution failures return None so the
+    request fails naturally with
     the normal "Request failed" path rather than being masked as an SSRF block.
     """
     parsed = urlparse(url)
@@ -91,7 +119,7 @@ def _ssrf_error(url: str) -> Optional[str]:
         if _ip_is_internal(ip):
             return (
                 f"Blocked request to internal or reserved address ({ip}). "
-                "webfetch does not allow access to loopback, private, link-local, "
+                "webfetch does not allow access to private, link-local, "
                 "or metadata networks."
             )
     return None

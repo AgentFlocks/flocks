@@ -10,6 +10,8 @@ export interface ReleaseUpdateStatus {
 
 /** Where an update handed over at the restarting stage stands. */
 export interface ReleaseUpdateOutcome {
+  /** The request the update was handed over as: what a confirmed retry of it names. */
+  id?: string | null;
   state: string;
   detail?: string | null;
   /** Once it has failed: the step it stopped at, how the machine was left, the log. */
@@ -17,6 +19,16 @@ export interface ReleaseUpdateOutcome {
   recovery?: string | null;
   log?: string | null;
   log_tail?: string[] | null;
+  /** The release did not come up: asked for again as usual it is refused, so a retry may be offered. */
+  retryable?: boolean | null;
+}
+
+/**
+ * How an update starts. retryOf: the outcome id of an update whose release did not come up, which the
+ * administrator confirmed trying again (the source refuses it once another update replaced that one).
+ */
+export interface ReleaseUpdateStartOptions {
+  retryOf?: string;
 }
 
 /**
@@ -25,7 +37,7 @@ export interface ReleaseUpdateOutcome {
  */
 export interface ReleaseUpdateSource {
   status: () => Promise<ReleaseUpdateStatus>;
-  start: (onProgress: (progress: UpdateProgress) => void) => Promise<void>;
+  start: (onProgress: (progress: UpdateProgress) => void, options?: ReleaseUpdateStartOptions) => Promise<void>;
   /**
    * The release is installed apart from this service, which stays up until the install restarts it:
    * that it answers says nothing of how the update went. This does, by the restarting stage's token.

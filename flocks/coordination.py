@@ -4,7 +4,9 @@ Questions whose answer depends on the database backend, answered here for the ru
 The runtime keeps its data in SQLite and runs in one process, so each question
 here has that answer: no other process is running a session, a shared value is
 simply the stored one, and a WebUI page or a workflow gets no direct database
-handle.
+handle.  What they do get is the SOC suite's data service
+(``flocks.workflow.soc_store``), which the suite's pages read and its triage
+workflow writes through.
 
 Another database backend replaces this module as a whole (see
 ``flocks.db_backend``) with its own answers.  Callers ask here instead of
@@ -46,13 +48,26 @@ def page_api_database() -> Any:
     return None
 
 
-def workflow_services(cancel_checker: Optional[Callable[[], bool]]) -> dict[str, Any]:
-    """Objects a backend hands workflow python nodes by name, next to ``tool`` and ``llm``: none here.
+def page_api_services() -> dict[str, Any]:
+    """``ctx.services`` for a WebUI page's API handlers, by name.
 
-    Each lists the methods a node may call (``exposed_methods``) and may set a
-    time limit, in seconds, for a call from an isolated node (``rpc_timeout_s``).
+    ``soc``: what the SOC pages read their figures through.
     """
-    return {}
+    from flocks.workflow import soc_store
+
+    return {"soc": soc_store.page_service()}
+
+
+def workflow_services(cancel_checker: Optional[Callable[[], bool]]) -> dict[str, Any]:
+    """Objects a backend hands workflow python nodes by name, next to ``tool`` and ``llm``.
+
+    ``soc``: what the triage workflow writes alerts through.  Each lists the
+    methods a node may call (``exposed_methods``) and may set a time limit, in
+    seconds, for a call from an isolated node (``rpc_timeout_s``).
+    """
+    from flocks.workflow.soc_store import SOCWriteCapability
+
+    return {"soc": SOCWriteCapability(cancel_checker)}
 
 
 def is_unique_violation(exc: BaseException) -> bool:
@@ -67,6 +82,7 @@ def is_unique_violation(exc: BaseException) -> bool:
 __all__ = [
     "is_unique_violation",
     "page_api_database",
+    "page_api_services",
     "sessions_running_elsewhere",
     "shared_setdefault",
     "workflow_services",

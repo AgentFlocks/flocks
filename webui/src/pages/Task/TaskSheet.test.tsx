@@ -378,6 +378,39 @@ describe('TaskSheet', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('cron 不是五字段时在表达式下方提示，不提交、不弹失败', async () => {
+    const user = userEvent.setup();
+    render(<TaskSheet defaultScheduleKind="recurring" onClose={vi.fn()} onSaved={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText('输入任务标题'), '六字段');
+    await user.type(screen.getByPlaceholderText('0 9 * * 1-5'), '0 0 6 * * *');
+    await user.click(screen.getByRole('button', { name: '提交' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('form.cronInvalid');
+    expect(mocks.createScheduler).not.toHaveBeenCalled();
+    expect(mocks.toastError).not.toHaveBeenCalled();
+    expect(screen.getByPlaceholderText('0 9 * * 1-5')).toHaveValue('0 0 6 * * *');
+
+    await user.type(screen.getByPlaceholderText('0 9 * * 1-5'), '{backspace}{backspace}');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('服务端判 cron 无效时同样提示在表达式下方并保留输入', async () => {
+    const user = userEvent.setup();
+    mocks.createScheduler.mockRejectedValueOnce({
+      response: { status: 400, data: { error: 'HTTPException', message: "Invalid cron expression: '99 * * * *' is not a valid 5-field cron." } },
+    });
+    render(<TaskSheet defaultScheduleKind="recurring" onClose={vi.fn()} onSaved={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText('输入任务标题'), '无效分钟');
+    await user.type(screen.getByPlaceholderText('0 9 * * 1-5'), '99 * * * *');
+    await user.click(screen.getByRole('button', { name: '提交' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('form.cronInvalid');
+    expect(mocks.toastError).not.toHaveBeenCalled();
+    expect(screen.getByPlaceholderText('0 9 * * 1-5')).toHaveValue('99 * * * *');
+  });
+
   it('创建 workflow 定时任务时提交 JSON 参数到 context', async () => {
     const user = userEvent.setup();
 
