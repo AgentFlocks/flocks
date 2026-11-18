@@ -792,6 +792,38 @@ class SessionLoop:
             })
 
     @classmethod
+    async def _mark_session_activity(cls, callbacks: "LoopCallbacks", session: SessionInfo) -> None:
+        """Record activity on *session* (``time.updated``, which session lists sort
+        by, newest first) and tell clients its record changed.
+
+        Without the event a list already on screen kept its order: ``Session.touch``
+        only writes storage, and the WebUI history refreshes on ``session.*``
+        events. Announced only when the touch wrote (not for a session archived
+        meanwhile), and only for a session the session lists show: not a
+        sub-agent session, nor one they leave out (category ``test``, or
+        ``hideFromSessionManager`` -- an agent's test run), whose turns would
+        otherwise put it into lists that never had it. A failure is logged,
+        never raised: the run goes on either way.
+        """
+        try:
+            # Session.touch, keeping what was written: the Pro edition's Session,
+            # which takes this one's place, has a touch that returns nothing.
+            touched = await Session.update(session.project_id, session.id)
+        except Exception as exc:
+            log.warn("loop.session_touch_failed", {"session_id": session.id, "error": str(exc)})
+            return
+        if touched is None or not callbacks.event_publish_callback:
+            return
+        from flocks.server.routes.session import _is_hidden_from_session_manager
+
+        if touched.parent_id or touched.category == "test" or _is_hidden_from_session_manager(touched):
+            return
+        try:
+            await callbacks.event_publish_callback("session.updated", {"id": session.id})
+        except Exception as exc:
+            log.debug("loop.session_updated.publish_failed", {"session_id": session.id, "error": str(exc)})
+
+    @classmethod
     async def _publish_session_notice(
         cls,
         callbacks: "LoopCallbacks",
@@ -1133,6 +1165,9 @@ class SessionLoop:
                 })
         
             await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "busy")
+            # A session continued from the history is the latest activity now:
+            # session lists (newest activity first) put it on top as it starts.
+            await cls._mark_session_activity(callbacks or LoopCallbacks(), session)
             # Run loop iteration
             from flocks.session.agent_inbox import AgentInbox
             while True:
@@ -1193,8 +1228,8 @@ class SessionLoop:
                 if can_publish_idle:
                     await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "idle")
             
-                    # Touch session (update timestamp)
-                    await Session.touch(session.project_id, session_id)
+                    # Touch session (update timestamp), and say so: lists re-sort.
+                    await cls._mark_session_activity(callbacks or LoopCallbacks(), session)
 
                     # Publish idle event
                     try:
