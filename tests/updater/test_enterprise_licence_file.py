@@ -19,8 +19,8 @@ Case list (编号 | 场景):
       no patch is lost
   LF11 the same token again, bound to another machine (a data directory moved here): refused before
       anything is written, the patches it brings too
-  OA1 the offline application carries the form and the machine a licence is to be bound to; nothing
-      goes to Console and nothing is kept
+  OA1 the offline application carries the form and the machine a licence is to be bound to (the machine-id
+      digest), the device id beside it; nothing goes to Console and nothing is kept
   OA2 no offline application while the machine has a licence, while the host's identifier cannot be
       read, or on an install the enterprise core runs
 """
@@ -39,7 +39,7 @@ import pytest
 
 from flocks.storage.storage import Storage
 from flocks.updater import enterprise, enterprise_application as application
-from flocks.updater.machine_fingerprint import MachineIdUnreadable
+from flocks.updater.machine_fingerprint import MachineIdUnreadable, MachineNames
 
 pytestmark = pytest.mark.asyncio
 
@@ -72,7 +72,7 @@ def machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(enterprise, "_previous_status", lambda: {})
     # This host goes by two fingerprints: its device id and the digest of its identifier.
     monkeypatch.setattr(application, "machine_fingerprints", lambda: {OURS, LEGACY})
-    monkeypatch.setattr(application, "machine_identity", lambda: (OURS, "devid"))
+    monkeypatch.setattr(application, "machine_names", lambda: MachineNames(LEGACY, "machine-id", OURS))
     yield root
     enterprise.detect_deploy_mode.cache_clear()
 
@@ -215,8 +215,9 @@ async def test_oa1_the_offline_application_carries_the_form_and_this_machine(mac
     document = await application.offline_application(dict(FORM), "admin")
     assert document["format"] == application.OFFLINE_APPLICATION_FORMAT and document["product"] == "Flocks Pro"
     assert {key: document[key] for key in FORM} == FORM
-    # Console's offline issue binds the licence to this fingerprint.
-    assert (document["machine"], document["machine_kind"]) == (OURS, "devid")
+    # Console's offline issue binds the licence to the machine-id digest, which every enterprise core reads, and
+    # keeps the device id beside it.
+    assert (document["machine"], document["machine_kind"], document["devid"]) == (LEGACY, "machine-id", OURS)
     assert document["install_id"] and document["platform"] == enterprise.platform_id() and document["flocks_version"]
     assert document["applied_by"] == "admin" and document["replaces_license_id"] is None
     # Nothing kept: there is nothing at Console to follow.
@@ -229,10 +230,10 @@ async def test_oa2_no_offline_application_where_there_should_be_none(machine: Pa
         await application.offline_application(dict(FORM), "admin")
     kept(machine).unlink()
 
-    def unreadable() -> tuple[str, str]:
+    def unreadable() -> MachineNames:
         raise MachineIdUnreadable("ioreg 没有给出 IOPlatformUUID（退出码 1）")
 
-    monkeypatch.setattr(application, "machine_identity", unreadable)
+    monkeypatch.setattr(application, "machine_names", unreadable)
     with pytest.raises(enterprise.EnterpriseUpgradeError, match="读不到这台机器的标识"):
         await application.offline_application(dict(FORM), "admin")
 

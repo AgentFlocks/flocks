@@ -127,9 +127,15 @@ export interface OfflineApplication {
   sales_rep_name: string | null;
   notes: string | null;
   replaces_license_id: string | null;
-  /** 32 hex digits; null on a host that keeps no identifier (the licence then cannot be bound). */
+  /**
+   * 32 hex digits, what the licence is bound to: the machine-id digest, the device id of a host without a
+   * machine id; null on a host that keeps neither (the licence then cannot be bound).
+   */
   machine: string | null;
+  /** 'machine-id' or 'devid': which fingerprint machine is. */
   machine_kind: string | null;
+  /** The device id where it can be read, beside machine, for Console's records. */
+  devid?: string | null;
   install_id: string | null;
   hostname: string | null;
   platform: string;

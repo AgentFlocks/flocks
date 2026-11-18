@@ -1,24 +1,29 @@
 """
 This machine, as the enterprise core names it.
 
-The enterprise core (flockspro ``go/internal/activation``) names the host by its device id where it can read
-it: the fingerprint the company's other products license hosts by, computed as the company's libdevid computes
-it on its default path -- the MD5 of the device type ``flocks`` and the host's SMBIOS system UUID as dmidecode
-prints it, in lower case (on an AWS Xen host, its board asset tag or hypervisor UUID), in hex
-(``flockspro go/internal/devid``).
-Where it cannot read that, it names the host by a digest of the identifier the operating system keeps for it, the
-way every request did before the device id. An application for a licence sends the same fingerprint, so Console
-can bind the licence it issues to the machine the application came from; the core holds a licence bound to
-either of a host's fingerprints to that host, so licences issued before the device id keep working there.
+The enterprise core (flockspro ``go/internal/activation``) knows a host by two fingerprints, and holds a licence
+bound to either to that host:
+
+- the digest of the identifier the operating system keeps for it (/etc/machine-id, the Mac's platform UUID), the
+  way every core has named it since licences were first bound to a machine;
+- its device id, where it can be read: the fingerprint the company's other products license hosts by, computed
+  as the company's libdevid computes it on its default path -- the MD5 of the device type ``flocks`` and the
+  host's SMBIOS system UUID as dmidecode prints it, in lower case (on an AWS Xen host, its board asset tag or
+  hypervisor UUID), in hex (``flockspro go/internal/devid``).
+
+An application names the digest for the licence to be bound to wherever the host keeps an identifier, as the
+core's own request does: an enterprise core from before the device id knows the host by the digest alone, and
+so does one run by an account that cannot read the device id (on Linux only root may read the SMBIOS table, and
+a core under an account of its own reads it only from a record root made). Bound to the device id, the licence
+would be another host's to those. The device id goes beside it (``devid``), for Console's records. Only a host
+that keeps no identifier (a container without /etc/machine-id) is named by its device id, where it has one.
 
 Both are 32 lower-case hex digits, the shape Console takes. The raw identifiers never leave this module.
 
-On Linux only root may read the SMBIOS table: a process without root has no device id and names the host by
-the digest, as the core run by its service account does unless root recorded the device id for it. A host
-that keeps no identifier (a container without /etc/machine-id) has no fingerprint, and Console shows the
-operator that the licence cannot be bound. One whose identifier cannot be read now (a file it may not read,
-ioreg failing) raises ``MachineIdUnreadable`` instead: an application then waits until it can be read, rather
-than go out as one that cannot be bound by accident.
+A host that keeps neither has no fingerprint, and Console shows the operator that the licence cannot be bound.
+One whose identifier cannot be read now (a file it may not read, ioreg failing) raises ``MachineIdUnreadable``
+instead: an application then waits until it can be read, rather than go out as one that cannot be bound by
+accident -- or bound to the device id, which the core may not read.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 #: Keeps this digest apart from any other hash of the same machine id (the core's machineDomain).
 _DOMAIN = b"flocks-machine/1\x00"
@@ -146,6 +152,9 @@ def _linux_machine_id() -> str:
             continue
         except OSError as exc:
             raise MachineIdUnreadable(f"读不了 {path}：{exc}") from exc
+        except UnicodeDecodeError as exc:
+            # A damaged file names no host this module can digest as the core does: it cannot be read.
+            raise MachineIdUnreadable(f"{path} 的内容不是文本，机器标识读不出来：{exc}") from exc
         if text:
             return text
     return ""
@@ -167,26 +176,43 @@ def _platform_uuid() -> str:
     return match.group(1)
 
 
-def machine_identity() -> tuple[str, str]:
-    """This host's fingerprint and what it is (``KIND_DEVID`` or ``KIND_MACHINE_ID``): the device id where it
-    can be read, else the machine-id digest; ("", "") where the host keeps no identifier. Raises
-    ``MachineIdUnreadable`` when the device id cannot be read and the machine id there cannot be either.
-    Blocking (ioreg runs up to 10 seconds): call it off the event loop."""
+class MachineNames(NamedTuple):
+    """This host as an application names it: the fingerprint a licence is bound to and which one it is
+    (``KIND_MACHINE_ID`` or ``KIND_DEVID``), and the device id beside it where it can be read ("" where not)."""
+
+    fingerprint: str
+    kind: str
+    devid: str
+
+
+def _device_id_of_platform_uuid(uuid: str) -> str:
+    """A Mac's device id: its platform UUID stands in for the SMBIOS one, as in the core, in the lower case
+    libdevid hashes a UUID in (ioreg prints it in upper); "" for a placeholder."""
+    return "" if uuid.strip() in _PLACEHOLDER_UUIDS else device_id_of(uuid.lower())
+
+
+def machine_names() -> MachineNames:
+    """This host's fingerprint for a licence, what it is, and its device id: the machine-id digest wherever the
+    host keeps an identifier, else the device id where it can be read; ("", "", "") where neither. Raises
+    ``MachineIdUnreadable`` when the host keeps an identifier that cannot be read now. Blocking (ioreg runs up
+    to 10 seconds): call it off the event loop."""
     if sys.platform.startswith("linux"):
         device = _linux_device_id()
-        if device:
-            return device, KIND_DEVID
         digest = fingerprint_of(_linux_machine_id())
-        return (digest, KIND_MACHINE_ID) if digest else ("", "")
+        if digest:
+            return MachineNames(digest, KIND_MACHINE_ID, device)
+        return MachineNames(device, KIND_DEVID, device) if device else MachineNames("", "", "")
     if sys.platform == "darwin":
-        # A Mac keeps no SMBIOS table a process can read: its platform UUID stands in, as in the core, in
-        # the lower case libdevid hashes a UUID in (ioreg prints it in upper).
         uuid = _platform_uuid()
-        if uuid.strip() not in _PLACEHOLDER_UUIDS:
-            return device_id_of(uuid.lower()), KIND_DEVID
-        return fingerprint_of(uuid), KIND_MACHINE_ID
+        return MachineNames(fingerprint_of(uuid), KIND_MACHINE_ID, _device_id_of_platform_uuid(uuid))
     # Windows and the rest: applications from here go out unbound, as they always have.
-    return "", ""
+    return MachineNames("", "", "")
+
+
+def machine_identity() -> tuple[str, str]:
+    """This host's fingerprint for a licence and what it is (``machine_names``)."""
+    names = machine_names()
+    return names.fingerprint, names.kind
 
 
 def machine_fingerprints() -> set[str]:
@@ -205,8 +231,8 @@ def machine_fingerprints() -> set[str]:
             uuid = _platform_uuid()
         except MachineIdUnreadable:
             uuid = ""
-        if uuid.strip() and uuid.strip() not in _PLACEHOLDER_UUIDS:
-            found.add(device_id_of(uuid.lower()))
+        if uuid.strip():
+            found.add(_device_id_of_platform_uuid(uuid))
         found.add(fingerprint_of(uuid))
     return {item for item in found if item}
 
