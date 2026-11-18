@@ -57,7 +57,7 @@ from flocks.console.previous_licence import (
 from flocks.storage.storage import Storage
 from flocks.updater import enterprise
 from flocks.updater.enterprise import EnterpriseUpgradeError
-from flocks.updater.machine_fingerprint import MachineIdUnreadable, machine_fingerprints, machine_identity
+from flocks.updater.machine_fingerprint import MachineIdUnreadable, machine_fingerprints, machine_names
 from flocks.utils.log import Log
 
 log = Log.create(service="updater.enterprise_application")
@@ -289,7 +289,7 @@ async def _apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
             raise EnterpriseUpgradeError("已经有一份申请在审核或等着启用，处理完再申请")
     base, session = _console_base(), await _console_session()
     try:
-        machine, machine_kind = await asyncio.to_thread(machine_identity)
+        machine, machine_kind, devid = await asyncio.to_thread(machine_names)
     except MachineIdUnreadable as exc:
         # Sent without it, the licence would not be bound to this machine although it could be.
         raise EnterpriseUpgradeError(f"读不到这台机器的标识，先处理好再申请：{exc}") from exc
@@ -319,9 +319,11 @@ async def _apply(form: dict[str, Any], applied_by: str) -> dict[str, Any]:
         # The host as the enterprise core names it: Console binds the licence it issues to it, and the
         # core runs on that licence on this machine only. None for a host that keeps no identifier,
         # which Console shows the operator. machine_kind says which fingerprint it is, for whoever
-        # reviews: the device id, or the machine-id digest where the device id cannot be read.
+        # reviews: the machine-id digest, which every enterprise core reads, or the device id of a
+        # host that keeps no machine id. devid is the device id beside it, for Console's records.
         "machine": machine or None,
         "machine_kind": machine_kind or None,
+        "devid": devid or None,
     }
     payload = {
         # The machine, as Console knows it from the sign-in: Console holds one open application
@@ -682,7 +684,7 @@ async def offline_application(form: dict[str, Any], applied_by: str) -> dict[str
     if await asyncio.to_thread(enterprise.standing_licence_id):
         raise EnterpriseUpgradeError("这台机器已经有企业版授权，直接升级即可")
     try:
-        machine, machine_kind = await asyncio.to_thread(machine_identity)
+        machine, machine_kind, devid = await asyncio.to_thread(machine_names)
     except MachineIdUnreadable as exc:
         raise EnterpriseUpgradeError(f"读不到这台机器的标识，先处理好再申请：{exc}") from exc
     from flocks import __version__
@@ -699,9 +701,11 @@ async def offline_application(form: dict[str, Any], applied_by: str) -> dict[str
         "sales_rep_name": form.get("sales_rep_name") or None,
         "notes": form.get("notes") or None,
         "replaces_license_id": enterprise.previous_licence_id() or None,
-        # Console's offline issue binds the licence to this fingerprint (32 hex digits).
+        # Console's offline issue binds the licence to this fingerprint (32 hex digits), and keeps the
+        # device id beside it for its records.
         "machine": machine or None,
         "machine_kind": machine_kind or None,
+        "devid": devid or None,
         "install_id": await ConsoleLoginService._get_install_id(),
         "hostname": platform.node() or None,
         "platform": enterprise.platform_id(),

@@ -7,12 +7,16 @@ Case list (编号 | 场景):
       printed on a Linux VM (in lower case), real UUIDs put in its SMBIOS table among them; UUIDs format as
       dmidecode prints them, in lower case; the SMBIOS table walk finds the type 1 UUID and stops at a table cut
       short -- the same cases as flockspro go/internal/devid
-  MF3 on Linux a readable SMBIOS table with the host's UUID gives the device id; without root (no table), or a
-      UUID the firmware leaves unset, the machine id gives the digest, from /etc/machine-id, then the D-Bus copy;
-      none when neither has one; one that cannot be read is MachineIdUnreadable, not none
-  MF4 an AWS Xen host hashes its board asset tag, else its hypervisor UUID, which any account may read
-  MF5 on macOS the platform UUID ioreg reports gives the device id; ioreg not running, failing or naming none
-      is MachineIdUnreadable (every Mac has one)
+  MF3 on Linux the machine id gives the fingerprint a licence is bound to, the digest, from /etc/machine-id,
+      then the D-Bus copy, whether or not the SMBIOS table can be read; the device id from a readable table
+      (root) goes beside it, none without root or for a UUID the firmware leaves unset; a host without a
+      machine id is named by its device id, by nothing when it has neither; a machine id that cannot be read
+      (a file it may not read, one that is not text) is MachineIdUnreadable, not none, even with the device
+      id there, which still counts among the host's fingerprints
+  MF4 an AWS Xen host's device id hashes its board asset tag, else its hypervisor UUID, which any account may
+      read; it names the host only where there is no machine id
+  MF5 on macOS the platform UUID ioreg reports gives the digest, its device id beside it; ioreg not running,
+      failing or naming none is MachineIdUnreadable (every Mac has one)
   MF6 elsewhere (Windows) the host is not named: applications go out unbound, as before
 """
 
@@ -90,33 +94,55 @@ def _table(uuid: bytes) -> bytes:
 def test_mf3_linux(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     paths = _linux(monkeypatch, tmp_path)
     # No SMBIOS table to read (no root here) and no machine id: nothing names the host.
+    assert mf.machine_names() == ("", "", "")
     assert mf.machine_identity() == ("", "")
     paths["dbus"].write_text("ABC\n")
-    assert mf.machine_identity() == (mf.fingerprint_of("abc"), mf.KIND_MACHINE_ID)
+    assert mf.machine_names() == (mf.fingerprint_of("abc"), mf.KIND_MACHINE_ID, "")
     paths["etc"].write_text("\n")
     assert mf.machine_fingerprint() == mf.fingerprint_of("abc"), "an empty machine-id falls through to the D-Bus copy"
     paths["etc"].write_text("def\n")
     assert mf.machine_identity() == (mf.fingerprint_of("def"), mf.KIND_MACHINE_ID)
 
-    # SMBIOS 3.0 entry point (version at bytes 7 and 8), and the table root may read.
+    # SMBIOS 3.0 entry point (version at bytes 7 and 8), and the table root may read: the digest still names
+    # the host, the device id goes beside it.
     uuid = bytes([0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88])
     paths["entry"].write_bytes(b"_SM3_" + bytes([0x18, 0x18, 3, 2]) + bytes(15))
     paths["table"].write_bytes(_table(uuid))
-    assert mf.machine_identity() == (mf.device_id_of("78563412-bc9a-f0de-1122-334455667788"), mf.KIND_DEVID)
+    device = mf.device_id_of("78563412-bc9a-f0de-1122-334455667788")
+    assert mf.machine_names() == (mf.fingerprint_of("def"), mf.KIND_MACHINE_ID, device)
+    assert mf.machine_identity() == (mf.fingerprint_of("def"), mf.KIND_MACHINE_ID)
+    assert mf.machine_fingerprints() == {mf.fingerprint_of("def"), device}
     # A 32-bit entry point of SMBIOS 2.4: the UUID as the firmware has it.
     paths["entry"].write_bytes(b"_SM_" + bytes([0, 0x1F, 2, 4]) + bytes(23))
-    assert mf.machine_fingerprint() == mf.device_id_of("12345678-9abc-def0-1122-334455667788")
-    # A UUID the firmware leaves unset names no host: the digest does.
+    assert mf.machine_names().devid == mf.device_id_of("12345678-9abc-def0-1122-334455667788")
+    # A UUID the firmware leaves unset is no device id.
     paths["table"].write_bytes(_table(bytes(16)))
-    assert mf.machine_identity() == (mf.fingerprint_of("def"), mf.KIND_MACHINE_ID)
+    assert mf.machine_names() == (mf.fingerprint_of("def"), mf.KIND_MACHINE_ID, "")
     paths["table"].write_bytes(_table(uuid))
+    # A host without a machine id is named by its device id.
+    paths["etc"].unlink()
+    paths["dbus"].unlink()
+    device = mf.device_id_of("12345678-9abc-def0-1122-334455667788")
+    assert mf.machine_names() == (device, mf.KIND_DEVID, device)
+    paths["etc"].write_text("def\n")
 
     def unreadable(self, *args, **kwargs):
         raise PermissionError(13, "Permission denied")
 
-    # The machine id is not read when the device id is there; without it, it must be.
+    # A machine id file that is not text cannot be read either: said as such, not as a crash, and the device id
+    # still counts among the host's fingerprints.
+    paths["etc"].write_bytes(b"\xff\xfe not utf-8\n")
+    with pytest.raises(mf.MachineIdUnreadable, match="不是文本"):
+        mf.machine_names()
+    assert mf.machine_fingerprints() == {device}
+    paths["etc"].write_text("def\n")
+
+    # A machine id that cannot be read is no host without one: the device id does not stand in for it, a core
+    # that cannot read the device id would not know the host by it.
     monkeypatch.setattr(Path, "read_text", unreadable)
-    assert mf.machine_identity()[1] == mf.KIND_DEVID
+    with pytest.raises(mf.MachineIdUnreadable, match="Permission denied"):
+        mf.machine_names()
+    assert mf.machine_fingerprints() == {device}
     paths["table"].unlink()
     with pytest.raises(mf.MachineIdUnreadable, match="Permission denied"):
         mf.machine_fingerprint()
@@ -128,6 +154,9 @@ def test_mf4_an_aws_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert mf.machine_identity() == (mf.device_id_of("ec2e1916-9099-7caf-fd21-012345abcdef"), mf.KIND_DEVID)
     paths["tag"].write_text("i-0abc\n")
     assert mf.machine_identity() == (mf.device_id_of("i-0abc"), mf.KIND_DEVID)
+    paths["etc"].write_text("abc\n")
+    assert mf.machine_names() == (mf.fingerprint_of("abc"), mf.KIND_MACHINE_ID, mf.device_id_of("i-0abc"))
+    paths["etc"].unlink()
     paths["hypervisor"].write_text("4c4c4544-0035-3010-8030-b4c04f4b4b32\n")
     assert mf.machine_identity() == ("", ""), "a hypervisor UUID that is no EC2 one is no AWS host"
 
@@ -141,7 +170,8 @@ def test_mf5_macos_reads_the_platform_uuid(monkeypatch: pytest.MonkeyPatch):
         return subprocess.CompletedProcess(args, 0, stdout='  "IOPlatformUUID" = "1A2B-3C4D"\n', stderr="")
 
     monkeypatch.setattr(mf.subprocess, "run", run)
-    assert mf.machine_identity() == (mf.device_id_of("1a2b-3c4d"), mf.KIND_DEVID)
+    assert mf.machine_names() == (mf.fingerprint_of("1A2B-3C4D"), mf.KIND_MACHINE_ID, mf.device_id_of("1a2b-3c4d"))
+    assert mf.fingerprint_of("1A2B-3C4D") == mf.fingerprint_of("1a2b-3c4d"), "the core digests the id in lower case"
     assert calls == [["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"]]
 
     monkeypatch.setattr(mf.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="nothing", stderr=""))
@@ -163,3 +193,4 @@ def test_mf5_macos_reads_the_platform_uuid(monkeypatch: pytest.MonkeyPatch):
 def test_mf6_elsewhere_the_host_is_not_named(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mf.sys, "platform", "win32")
     assert mf.machine_identity() == ("", "")
+    assert mf.machine_names() == ("", "", "")
