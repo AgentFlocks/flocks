@@ -592,13 +592,31 @@ class LocalAuthBackend:
         username: str = "admin",
     ) -> str:
         user_info = await cls.get_user_by_username(username)
+        temp_password = secrets.token_urlsafe(12)
+        expires = (_utc_now() + timedelta(hours=cls._temp_password_ttl_hours)).isoformat()
         if not user_info:
-            raise ValueError("管理员账号不存在")
+            if await cls.has_users():
+                raise ValueError("管理员账号不存在")
+            # No account at all yet: the first administrator, for a machine
+            # nobody opens the page on (the setup page only creates it for a
+            # browser on this machine, see routes/auth.bootstrap_admin).
+            user = await cls._create_user_internal(
+                username=username,
+                password=temp_password,
+                role="admin",
+                must_reset_password=True,
+                temp_expires_at=expires,
+                only_if_no_users=True,
+            )
+            try:
+                await cls.migrate_legacy_sessions_to_admin(user.id)
+            except Exception as exc:
+                # The account stands; the server's startup migration retries.
+                log.warn("auth.temp_admin.migrate_legacy_sessions_failed", {"error": str(exc)})
+            return temp_password
         user, _, _ = user_info
         if user.role != "admin":
             raise ValueError("目标账号不是管理员")
-        temp_password = secrets.token_urlsafe(12)
-        expires = (_utc_now() + timedelta(hours=cls._temp_password_ttl_hours)).isoformat()
         await cls.set_password(
             target_user_id=user.id,
             new_password=temp_password,

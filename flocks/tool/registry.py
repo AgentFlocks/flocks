@@ -15,11 +15,25 @@ import sys
 import threading
 import time
 from concurrent.futures import TimeoutError as FuturesTimeoutError
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Mapping, Optional, Set
+from typing import (
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Set,
+)
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_core import PydanticCustomError
@@ -1020,6 +1034,17 @@ class Tool:
             )
 
 
+class _RegistryState(NamedTuple):
+    """What a registry read needs: the live attributes, or a reload's copy of them."""
+
+    tools: Mapping[str, Tool]
+    enabled_defaults: Mapping[str, bool]
+    dynamic_tools_by_module: Mapping[str, List[str]]
+    revision: int
+    # Thread that published a reload copy; 0 for the live registry.
+    owner: int = 0
+
+
 class ToolRegistry:
     """
     Tool Registry - manages tool registration and execution
@@ -1089,9 +1114,26 @@ class ToolRegistry:
     _config_state_token: Optional[tuple[str, int, int, int]] = None
     _failure_state: Dict[str, Dict[str, Any]] = {}
     _failure_disable_threshold: int = 3
+    # Guards _failure_state only: tool calls touch it after every run, and
+    # they must not queue behind a reload holding _refresh_lock.
+    _failure_lock = threading.Lock()
     _init_lock = threading.Lock()
     _refresh_lock = threading.RLock()
     _initializing_thread_id: Optional[int] = None
+    # A plugin or dynamic tool reload holds _refresh_lock while it re-reads
+    # every source, which takes seconds (minutes on a slow machine). Reads on
+    # other threads use this copy of the registry as it was before the reload
+    # instead of waiting for it; see _reading. Set and cleared under the lock.
+    _reload_view: Optional[_RegistryState] = None
+    # How long a read waits on _refresh_lock before looking again for a
+    # reload's copy: a reload publishes it just after taking the lock.
+    _READ_WAIT_SLICE_SECONDS = 0.05
+    # The plugin files the last plugin load read, when it reported no error
+    # (_plugin_sources_fingerprint); refresh_plugin_tools_if_changed skips a
+    # reload that would read the same files again. None after a failed or
+    # partial load, so asking again retries it.
+    _plugin_sources_stamp: Optional[tuple] = None
+    _PLUGIN_SOURCES_MAX_DEPTH = 8
 
     # Snapshot of every tool's factory-default ``enabled`` flag — captured
     # in :meth:`register` at the moment the tool object is handed to the
@@ -1110,6 +1152,107 @@ class ToolRegistry:
     #   • :meth:`_unregister_plugin_tools` → pop  (avoids stale defaults
     #     leaking across ``refresh_plugin_tools`` cycles).
     _enabled_defaults: Dict[str, bool] = {}
+
+    @classmethod
+    def _foreign_reload_view(cls) -> Optional[_RegistryState]:
+        """The copy published by a reload running on another thread, if any."""
+        view = cls._reload_view
+        if view is not None and view.owner != threading.get_ident():
+            return view
+        return None
+
+    @classmethod
+    def _lock_or_reload_view(cls) -> Optional[_RegistryState]:
+        """Take ``_refresh_lock``, unless another thread's reload holds it.
+
+        Returns None once the caller holds the lock, or the reload's copy of
+        the registry without taking it. Request handlers and tool calls read
+        the registry on the event loop: waiting out a reload there stops every
+        request on the server until it ends.
+        """
+        lock = cls._refresh_lock
+        while True:
+            view = cls._foreign_reload_view()
+            if view is not None:
+                return view
+            if lock.acquire(timeout=cls._READ_WAIT_SLICE_SECONDS):
+                return None
+
+    @classmethod
+    @contextmanager
+    def _reading(cls) -> Iterator[_RegistryState]:
+        """Read one consistent registry state without waiting for a reload.
+
+        Outside a reload this is the live registry under ``_refresh_lock``, as
+        before. While another thread reloads, it is the registry as it was
+        before that reload began: a reload unregisters every plugin tool and
+        loads them again one by one, so the live dicts are incomplete until it
+        ends. The reloading thread itself reads the live registry.
+        """
+        view = cls._lock_or_reload_view()
+        if view is not None:
+            yield view
+            return
+        try:
+            yield _RegistryState(
+                tools=cls._tools,
+                enabled_defaults=cls._enabled_defaults,
+                dynamic_tools_by_module=cls._dynamic_tools_by_module,
+                revision=cls._revision,
+            )
+        finally:
+            cls._refresh_lock.release()
+
+    @classmethod
+    @asynccontextmanager
+    async def write_lock(cls) -> AsyncIterator[None]:
+        """Hold ``_refresh_lock`` for a short write made on the event loop.
+
+        A reload holds the lock for seconds, and blocking on it on the event
+        loop stops every request on the server; this waits for it
+        asynchronously instead. The body must not await: the lock then
+        belongs to the loop's thread, which every coroutine shares.
+
+        The registry is initialized first: init() holds _init_lock and takes
+        this lock to register each tool, so initializing from inside the
+        block (get() does on first use) would wait on it the other way round.
+        """
+        if not cls._initialized and cls._initializing_thread_id != threading.get_ident():
+            await cls.init_async()
+        while not cls._refresh_lock.acquire(blocking=False):
+            await asyncio.sleep(cls._READ_WAIT_SLICE_SECONDS)
+        try:
+            yield
+        finally:
+            cls._refresh_lock.release()
+
+    @classmethod
+    @contextmanager
+    def _publishing_reload_view(cls) -> Iterator[None]:
+        """Let other threads read the pre-reload registry while the caller reloads.
+
+        The caller holds ``_refresh_lock`` for the whole reload. The copy is
+        shallow: tools keep their identity, so a tool's ``info`` is the same
+        object in the copy and in the live registry.
+        """
+        if cls._reload_view is not None:
+            # A reload inside our own reload: the outer copy stays in force.
+            yield
+            return
+        cls._reload_view = _RegistryState(
+            tools=dict(cls._tools),
+            enabled_defaults=dict(cls._enabled_defaults),
+            dynamic_tools_by_module={
+                module_name: list(tool_names)
+                for module_name, tool_names in cls._dynamic_tools_by_module.items()
+            },
+            revision=cls._revision,
+            owner=threading.get_ident(),
+        )
+        try:
+            yield
+        finally:
+            cls._reload_view = None
 
     @classmethod
     def _core_definition_paths(cls) -> List[Path]:
@@ -1223,8 +1366,8 @@ class ToolRegistry:
         """
         cls._ensure_initialized()
         cls._sync_configured_enabled_states()
-        with cls._refresh_lock:
-            return cls._revision
+        with cls._reading() as state:
+            return state.revision
 
     @classmethod
     def _current_config_state_token(cls) -> tuple[str, int, int, int]:
@@ -1253,7 +1396,13 @@ class ToolRegistry:
         except Exception:
             return
 
-        with cls._refresh_lock:
+        if token == cls._config_state_token:
+            return
+        if cls._lock_or_reload_view() is not None:
+            # Another thread is reloading and holds the lock until it ends;
+            # the first read after the reload applies the changed config.
+            return
+        try:
             if token == cls._config_state_token:
                 return
 
@@ -1279,6 +1428,8 @@ class ToolRegistry:
                     cls._reset_failure_state(name)
             if changed_names:
                 cls._bump_revision("config_enabled_state_sync")
+        finally:
+            cls._refresh_lock.release()
 
     @classmethod
     def _bump_revision(cls, reason: str) -> None:
@@ -1367,16 +1518,16 @@ class ToolRegistry:
         """Get a tool by name"""
         cls._ensure_initialized()
         cls._sync_configured_enabled_states()
-        with cls._refresh_lock:
-            return cls._tools.get(name)
+        with cls._reading() as state:
+            return state.tools.get(name)
 
     @classmethod
     def list_tools(cls, category: Optional[ToolCategory] = None) -> List[ToolInfo]:
         """List all registered tools, optionally filtered by category"""
         cls._ensure_initialized()
         cls._sync_configured_enabled_states()
-        with cls._refresh_lock:
-            tools = list(cls._tools.values())
+        with cls._reading() as state:
+            tools = list(state.tools.values())
             if category:
                 tools = [t for t in tools if t.info.category == category]
             return [t.info for t in tools]
@@ -1437,7 +1588,13 @@ class ToolRegistry:
                     error=denial_reason,
                 )
 
-        tool = cls.get(tool_name)
+        # Which tool runs, and whether it may, is decided on the registry as it
+        # stands with the config applied, as before: a running reload is waited
+        # out here, without blocking the event loop. Only listings read the
+        # pre-reload copy; a call must not run a tool the reload or a config
+        # change written meanwhile switched off.
+        async with cls.write_lock():
+            tool = cls.get(tool_name)
         if not tool:
             return ToolResult(
                 success=False,
@@ -1520,7 +1677,6 @@ class ToolRegistry:
                 success=False,
                 error=f"Tool is disabled: {tool_name}"
             )
-
         if device_id:
             # Per-device tool enable gate: a device instance may carry a
             # disabled override independent of the shared global tool state.
@@ -1570,7 +1726,12 @@ class ToolRegistry:
                     # them would switch the tool off for everyone after three.
                     disabled = False
                 elif await cls._failure_auto_disable_enabled():
-                    disabled = cls._record_failure(tool, kwargs, result.error)
+                    # Counted on the loop with the registry lock, as before, so
+                    # the config write stays in line with the other config
+                    # writers here; a running reload is waited out without
+                    # blocking the loop, and the count sees what happened meanwhile.
+                    async with cls.write_lock():
+                        disabled = cls._record_failure(tool, kwargs, result.error)
                 else:
                     cls._reset_failure_state(tool_name)
                     disabled = False
@@ -1694,25 +1855,25 @@ class ToolRegistry:
     def all_tool_ids(cls) -> List[str]:
         """Get all registered tool IDs"""
         cls._ensure_initialized()
-        with cls._refresh_lock:
-            return list(cls._tools.keys())
+        with cls._reading() as state:
+            return list(state.tools.keys())
 
     @classmethod
     def snapshot_identity(cls) -> tuple[int, tuple[str, ...]]:
         """Return a revision/tool-id identity from one consistent registry state."""
         cls._ensure_initialized()
         cls._sync_configured_enabled_states()
-        with cls._refresh_lock:
-            return cls._revision, tuple(cls._tools.keys())
+        with cls._reading() as state:
+            return state.revision, tuple(state.tools.keys())
 
     @classmethod
     def get_dynamic_tools_by_module(cls) -> Dict[str, List[str]]:
         """Return a copy of the dynamic-module → tool-names mapping."""
         cls._ensure_initialized()
-        with cls._refresh_lock:
+        with cls._reading() as state:
             return {
                 module_name: list(tool_names)
-                for module_name, tool_names in cls._dynamic_tools_by_module.items()
+                for module_name, tool_names in state.dynamic_tools_by_module.items()
             }
 
     @classmethod
@@ -1751,7 +1912,9 @@ class ToolRegistry:
                 cls._register_builtin_tools()
                 cls._register_dynamic_tools()
                 cls._register_plugin_extension_point()
+                sources = cls._plugin_sources_fingerprint()
                 cls._plugin_load_errors = cls._load_plugin_tools()
+                cls._plugin_sources_stamp = None if cls._plugin_load_errors else sources
                 cls._initialized = True
                 log.debug("tool_registry.initialized", {"count": len(cls._tools)})
             finally:
@@ -2013,8 +2176,8 @@ class ToolRegistry:
         (e.g. dynamic tools registered after init).  Callers should fall
         back to the live ``ToolInfo.enabled`` in that case.
         """
-        with cls._refresh_lock:
-            return cls._enabled_defaults.get(name)
+        with cls._reading() as state:
+            return state.enabled_defaults.get(name)
 
     @classmethod
     def _apply_tool_settings(cls) -> None:
@@ -2334,6 +2497,79 @@ class ToolRegistry:
         cls._watcher.start()
 
     @classmethod
+    def _plugin_source_roots(cls) -> List[str]:
+        """The plugin roots a plugin load reads from (the ones the file watcher watches)."""
+        from flocks.config.config import get_user_plugins_root
+        from flocks.plugin.loader import PluginLoader
+
+        return sorted({
+            str(PluginLoader._plugin_root),
+            str(get_user_plugins_root()),
+            str(Path.cwd() / ".flocks" / "plugins"),
+        })
+
+    @classmethod
+    def _plugin_sources_fingerprint(cls) -> tuple:
+        """Path, size, mtime and inode of every file under the plugin roots.
+
+        A plugin load reads tool files, the handler scripts and
+        ``_provider.yaml`` files beside them and Python plugin modules, all
+        under these roots. Directories are followed through symlinks, as the
+        loader does, to a bounded depth; ``__pycache__`` is left out.
+
+        It also runs the ``flocks.plugins`` entry points of installed
+        packages: installing, removing or upgrading a package changes its
+        site-packages directory, whose mtime is part of the fingerprint.
+        """
+        entries: list = []
+        for path in sys.path:
+            if not path or os.path.basename(os.path.normpath(path)) not in ("site-packages", "dist-packages"):
+                continue
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            entries.append((path, -1, stat.st_mtime_ns, stat.st_ino))
+        for root in cls._plugin_source_roots():
+            pending = [(root, 0)]
+            while pending:
+                directory, depth = pending.pop()
+                try:
+                    with os.scandir(directory) as scan:
+                        children = list(scan)
+                except OSError:
+                    continue
+                for child in children:
+                    try:
+                        if child.is_dir():
+                            if child.name != "__pycache__" and depth < cls._PLUGIN_SOURCES_MAX_DEPTH:
+                                pending.append((child.path, depth + 1))
+                            continue
+                        stat = child.stat()
+                    except OSError:
+                        continue
+                    entries.append((child.path, stat.st_size, stat.st_mtime_ns, stat.st_ino))
+        entries.sort()
+        return tuple(entries)
+
+    @classmethod
+    def refresh_plugin_tools_if_changed(cls) -> bool:
+        """Reload plugin tools unless no plugin file changed since the last clean load.
+
+        For callers that reload only to pick up changes made elsewhere, such
+        as the device page each time the window comes back. A reload re-reads
+        every source and runs the plugin entry points again, which takes
+        seconds of CPU; with nothing changed it rebuilds what is there. A load
+        that reported an error is never current, so asking again retries it.
+        Returns whether a reload ran.
+        """
+        stamp = cls._plugin_sources_stamp
+        if stamp is not None and stamp == cls._plugin_sources_fingerprint():
+            return False
+        cls.refresh_plugin_tools()
+        return True
+
+    @classmethod
     def refresh_plugin_tools(cls, changed_path: Optional[Path] = None) -> List[str]:
         """Reload plugin tools (YAML + Python) from disk.
 
@@ -2341,9 +2577,15 @@ class ToolRegistry:
         correctly removed from the registry. When a Hub operation supplies
         ``changed_path``, source failures outside that path are isolated and
         do not block the operation; failures inside it still roll back.
+
+        Other threads keep reading the registry as it was before the reload
+        until it ends (``_publishing_reload_view``); only writers wait.
         """
         cls._ensure_initialized()
-        with cls._refresh_lock:
+        with cls._refresh_lock, cls._publishing_reload_view():
+            # Taken before reading, so a file changed during the load still
+            # counts as changed next time.
+            sources = cls._plugin_sources_fingerprint()
             tools_before = cls._tools.copy()
             defaults_before = cls._enabled_defaults.copy()
             plugin_names_before = list(cls._plugin_tool_names)
@@ -2403,17 +2645,20 @@ class ToolRegistry:
                     cls._finalize_plugin_tools_load()
 
                 cls._plugin_load_errors = load_errors
+                cls._plugin_sources_stamp = None if load_errors else sources
                 cls._bump_revision("plugin_refresh")
                 return cls.all_tool_ids()
             except Exception:
                 _restore_snapshot()
+                # The files no longer match the restored registry.
+                cls._plugin_sources_stamp = None
                 raise
 
     @classmethod
     def refresh_dynamic_tools(cls) -> List[str]:
         """Reload dynamically generated tools and return tool ids."""
         cls._ensure_initialized()
-        with cls._refresh_lock:
+        with cls._refresh_lock, cls._publishing_reload_view():
             tools_before = cls._tools.copy()
             defaults_before = cls._enabled_defaults.copy()
             dynamic_modules_before = cls._dynamic_modules.copy()
@@ -2448,7 +2693,7 @@ class ToolRegistry:
     @classmethod
     def _reset_failure_state(cls, tool_name: str) -> None:
         """Reset failure tracking for a tool after success."""
-        with cls._refresh_lock:
+        with cls._failure_lock:
             cls._failure_state.pop(tool_name, None)
 
     @classmethod
@@ -2514,7 +2759,7 @@ class ToolRegistry:
 
         tool_name = tool.info.name
         key = cls._failure_key(tool_name, params, error)
-        with cls._refresh_lock:
+        with cls._failure_lock:
             state = cls._failure_state.get(tool_name, {"key": None, "count": 0})
 
             if state.get("key") == key:
@@ -2523,27 +2768,34 @@ class ToolRegistry:
                 state = {"key": key, "count": 1}
 
             cls._failure_state[tool_name] = state
+            count = state["count"]
 
-            if state["count"] >= cls._failure_disable_threshold and tool.info.enabled:
-                tool.info.enabled = False
-                try:
-                    from flocks.config.config_writer import ConfigWriter
+        if count < cls._failure_disable_threshold:
+            return False
+        # Switching the tool off is an enabled-state change like any other:
+        # under _refresh_lock, so it waits for a running reload rather than
+        # being undone by that reload's rollback. (_refresh_lock before
+        # _failure_lock, the order _sync_configured_enabled_states takes them.)
+        with cls._refresh_lock:
+            if not tool.info.enabled:
+                return False
+            tool.info.enabled = False
+            try:
+                from flocks.config.config_writer import ConfigWriter
 
-                    ConfigWriter.set_tool_setting(tool_name, {"enabled": False})
-                except Exception as exc:
-                    log.warn("tool.disabled.repeated_error.persist_failed", {
-                        "tool": tool_name,
-                        "error": str(exc),
-                    })
-                cls._bump_revision("failure_auto_disable")
-                log.warn("tool.disabled.repeated_error", {
+                ConfigWriter.set_tool_setting(tool_name, {"enabled": False})
+            except Exception as exc:
+                log.warn("tool.disabled.repeated_error.persist_failed", {
                     "tool": tool_name,
-                    "count": state["count"],
-                    "error": error,
+                    "error": str(exc),
                 })
-                return True
-
-        return False
+            cls._bump_revision("failure_auto_disable")
+        log.warn("tool.disabled.repeated_error", {
+            "tool": tool_name,
+            "count": count,
+            "error": error,
+        })
+        return True
 
     @classmethod
     def _generated_tools_dirs(cls) -> List[Path]:
@@ -2730,7 +2982,6 @@ class ToolFileWatcher:
         self._observer: Optional[object] = None
         self._debounce_timer: Optional[threading.Timer] = None
         self._lock = threading.Lock()
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # ---- public ----
 
@@ -2747,13 +2998,6 @@ class ToolFileWatcher:
                 {"msg": "watchdog not installed, tool file watcher disabled"},
             )
             return
-
-        # Capture the running event loop so _do_refresh can safely schedule
-        # back onto it from the watchdog daemon thread.
-        try:
-            self._loop = asyncio.get_event_loop()
-        except RuntimeError:
-            self._loop = None
 
         watch_dirs = self._collect_watch_dirs()
         if not watch_dirs:
@@ -2823,12 +3067,11 @@ class ToolFileWatcher:
             self._debounce_timer.start()
 
     def _do_refresh(self) -> None:
-        # Schedule onto the asyncio event loop thread to avoid concurrent
-        # modification of _tools while request handlers may be reading it.
-        if self._loop is not None and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._run_refresh)
-        else:
-            self._run_refresh()
+        # On the debounce timer's own thread. A reload takes seconds: run on
+        # the event loop it held up every request on the server until it
+        # ended. Readers meanwhile get the registry as it was before the
+        # reload (ToolRegistry._reading) and writers take the lock.
+        self._run_refresh()
 
     def _run_refresh(self) -> None:
         try:

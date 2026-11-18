@@ -1162,13 +1162,17 @@ class SkillInstaller:
                 error="httpx is required to download skills. Run: uv add httpx",
             )
 
-        # Only https (plain http is allowed just for hosts explicitly allow-listed
-        # for local testing) and never internal / link-local / metadata targets.
+        # Only https -- plain http is allowed for this machine's loopback, which
+        # never leaves the host, and for hosts explicitly allow-listed for local
+        # testing -- and never internal / link-local / metadata targets.
         from urllib.parse import urlparse
-        from flocks.tool.web.webfetch import _internal_allowlist, _ssrf_error
+        from flocks.tool.web.webfetch import _internal_allowlist, _ssrf_error, is_loopback_host
 
         parsed = urlparse(url)
-        if parsed.scheme.lower() != "https" and (parsed.hostname or "").lower() not in _internal_allowlist():
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        plain_http_ok = scheme == "http" and (host in _internal_allowlist() or is_loopback_host(host))
+        if scheme != "https" and not plain_http_ok:
             return SkillInstallResult(
                 success=False,
                 error=f"Skill source URL must use https:// (got {parsed.scheme}://): {url}",
@@ -1178,7 +1182,16 @@ class SkillInstaller:
             return SkillInstallResult(success=False, error=ssrf_error)
 
         try:
-            async with httpx.AsyncClient(timeout=_NETWORK_TIMEOUT_SEC, follow_redirects=True) as client:
+            # This machine's loopback is reached directly: through a proxy from
+            # the environment, 127.0.0.1 would be the proxy host's own. A
+            # transport of our own leaves the environment's proxies out but
+            # still reads its CA settings (SSL_CERT_FILE / SSL_CERT_DIR).
+            direct = httpx.AsyncHTTPTransport() if is_loopback_host(host) else None
+            async with httpx.AsyncClient(
+                timeout=_NETWORK_TIMEOUT_SEC,
+                follow_redirects=True,
+                transport=direct,
+            ) as client:
                 resp = await client.get(url)
                 if resp.status_code != 200:
                     return SkillInstallResult(

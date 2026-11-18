@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { __resetAgentsResourceForTesting } from '@/hooks/useAgents';
 import AgentPage from './index';
+import { backendError } from '@/test/helpers';
 
 const { listMock, refreshMock, deleteMock, setDelegatableMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
@@ -14,7 +15,8 @@ const { listMock, refreshMock, deleteMock, setDelegatableMock } = vi.hoisted(() 
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) => ({
+    // A failure alert carries its reason as the `detail` value; show it so a test can read it.
+    t: (key: string, options?: Record<string, unknown>) => (typeof options?.detail === 'string' ? `${key}: ${options.detail}` : undefined) ?? ({
       pageTitle: 'AI Agents',
       pageDescription: '管理和配置 AI Agent',
       totalCount: '共 2 个 Agent',
@@ -163,6 +165,24 @@ describe('AgentPage protected prompts', () => {
     fireEvent.click(sealedSwitch);
     expect(within(screen.getByTestId('agent-card-open-sub')).getByRole('switch')).toBeEnabled();
     expect(setDelegatableMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentPage delegation switch', () => {
+  it('says why delegation could not be changed instead of the bare status code', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    try {
+      listMock.mockResolvedValue({ data: [makeAgent({ name: 'open-sub', mode: 'subagent', delegatable: false })] });
+      setDelegatableMock.mockRejectedValue(backendError(403, '只有管理员可以修改委派设置'));
+      render(<AgentPage />);
+
+      fireEvent.click(within(await screen.findByTestId('agent-card-open-sub')).getByRole('switch'));
+
+      await waitFor(() => expect(alertSpy).toHaveBeenCalledWith('error.updateFailed: 只有管理员可以修改委派设置'));
+      expect(setDelegatableMock).toHaveBeenCalledWith('open-sub', true);
+    } finally {
+      alertSpy.mockRestore();
+    }
   });
 });
 

@@ -34,6 +34,24 @@ export function renderWithRouter(
 }
 
 // ---------------------------------------------------------------------------
+// Backend error factory
+// ---------------------------------------------------------------------------
+
+/**
+ * An axios rejection carrying the body the backend's exception handler sends for an
+ * `HTTPException`: `{ error: 'HTTPException', message: <detail> }`. There is no `detail`
+ * field in it, and `err.message` is only axios's own "Request failed with status code N".
+ *
+ * `message` is whatever the route passed as `detail`: text, or an object such as
+ * `{ code, message }`.
+ */
+export function backendError(status: number, message: unknown): Error {
+  return Object.assign(new Error(`Request failed with status code ${status}`), {
+    response: { status, data: { error: 'HTTPException', message } },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Async wait helpers
 // ---------------------------------------------------------------------------
 

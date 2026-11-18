@@ -14,7 +14,7 @@ import { buildGuidedCreateGroups } from '@/components/common/GuidedCreatePanel';
 import { useRexComposerControls } from '@/components/common/useRexComposerControls';
 import client from '@/api/client';
 import { mcpAPI } from '@/api/mcp';
-import { extractErrorMessage } from '@/utils/error';
+import { extractErrorMessage, isServiceRefusal } from '@/utils/error';
 
 // ─── MCPSheet ─────────────────────────────────────────────────────────────────
 
@@ -81,6 +81,67 @@ export function getMCPFormError(formData: MCPFormData): 'invalidHeaders' | null 
   } catch {
     return 'invalidHeaders';
   }
+}
+
+export type MCPFieldErrorCode = 'nameRequired' | 'commandRequired' | 'urlRequired' | 'urlScheme' | 'invalidHeaders';
+export type MCPFieldErrors = Partial<Record<'name' | 'command' | 'url' | 'headersText', MCPFieldErrorCode>>;
+
+/**
+ * What the form can tell before asking the server, answered under each field.
+ * The server checks the address the same way (flocks.server.routes.mcp).
+ */
+export function getMCPFieldErrors(formData: MCPFormData): MCPFieldErrors {
+  const errors: MCPFieldErrors = {};
+  if (!formData.name.trim()) errors.name = 'nameRequired';
+  if (formData.connType === 'stdio') {
+    if (!formData.command.trim()) errors.command = 'commandRequired';
+    return errors;
+  }
+  const url = formData.url.trim();
+  if (!url) errors.url = 'urlRequired';
+  else if (!/^https?:\/\//i.test(url)) errors.url = 'urlScheme';
+  if (getMCPFormError(formData) === 'invalidHeaders') errors.headersText = 'invalidHeaders';
+  return errors;
+}
+
+/** Drop the errors of the fields a change touched (switching the type re-asks for its own fields). */
+export function clearMCPFieldErrors(errors: MCPFieldErrors, fields: Partial<MCPFormData>): MCPFieldErrors {
+  const next = { ...errors };
+  for (const key of Object.keys(fields)) delete next[key as keyof MCPFieldErrors];
+  if ('connType' in fields) { delete next.command; delete next.url; delete next.headersText; }
+  return next;
+}
+
+export interface MCPTestResult {
+  success: boolean;
+  message: string;
+  /** The server's own diagnosis of a failed connection, kept under the readable message. */
+  detail?: string;
+  /** The server refused the request (4xx) before trying to connect. */
+  refused?: boolean;
+  latency?: number;
+  tools_count?: number;
+}
+
+/** A failed connection said in the user's words; a refused request (4xx) is shown as the server said it. */
+export function mcpTestFailure(err: unknown, t: (key: string) => string): MCPTestResult {
+  const raw = extractErrorMessage(err, '');
+  if (isServiceRefusal(err) && raw) return { success: false, message: raw, refused: true };
+  return { success: false, message: t('sheet.mcpConnectFailed'), detail: raw || undefined };
+}
+
+export function mcpTestOutcome(
+  data: { success?: boolean; message?: string; latency_ms?: number; tools_count?: number },
+  t: (key: string) => string,
+): MCPTestResult {
+  const success = data.success ?? false;
+  return {
+    success,
+    message: success ? (data.message ?? t('sheet.connSuccess')) : t('sheet.mcpConnectFailed'),
+    detail: success ? undefined : data.message || undefined,
+    latency: data.latency_ms,
+    tools_count: data.tools_count,
+  };
 }
 
 export function buildMCPConfigFromForm(formData: MCPFormData): Record<string, any> {
@@ -250,9 +311,11 @@ interface MCPFormFieldsProps {
   onChange?: (fields: Partial<MCPFormData>) => void;
   disabledFields?: Partial<Record<keyof MCPFormData, boolean>>;
   connStatus: ConnStatus;
-  testResult: { success: boolean; message: string; tools_count?: number } | null;
+  testResult: MCPTestResult | null;
   onTestConnection: () => void;
   isTesting: boolean;
+  /** Messages for the fields the user still has to fix (see getMCPFieldErrors). */
+  fieldErrors?: MCPFieldErrors;
 }
 
 export function MCPFormFields({
@@ -263,9 +326,13 @@ export function MCPFormFields({
   testResult,
   onTestConnection,
   isTesting,
+  fieldErrors,
 }: MCPFormFieldsProps) {
   const { t } = useTranslation('tool');
   const readOnly = !onChange;
+  const fieldError = (field: keyof MCPFieldErrors) => fieldErrors?.[field]
+    ? <p role="alert" className="mt-1 text-xs text-red-600">{t(`addMCP.errors.${fieldErrors[field]}`)}</p>
+    : null;
   const baseInputClass =
     'w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-red-500';
 
@@ -290,8 +357,10 @@ export function MCPFormFields({
           onChange={isFieldReadOnly('name') ? undefined : (e) => update({ name: e.target.value })}
           readOnly={isFieldReadOnly('name')}
           placeholder={t('addMCP.serviceNamePlaceholder')}
+          aria-invalid={fieldErrors?.name ? true : undefined}
           className={inputClassFor('name')}
         />
+        {fieldError('name')}
       </div>
 
       {/* 连接方式 */}
@@ -336,8 +405,10 @@ export function MCPFormFields({
               onChange={isFieldReadOnly('command') ? undefined : (e) => update({ command: e.target.value })}
               readOnly={isFieldReadOnly('command')}
               placeholder={t('addMCP.startCommandPlaceholder')}
+              aria-invalid={fieldErrors?.command ? true : undefined}
               className={inputClassFor('command', 'font-mono')}
             />
+            {fieldError('command')}
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('addMCP.commandArgs')}</label>
@@ -368,6 +439,7 @@ export function MCPFormFields({
                 onChange={isFieldReadOnly('url') ? undefined : (e) => update({ url: e.target.value })}
                 readOnly={isFieldReadOnly('url')}
                 placeholder={t('addMCP.serviceUrlPlaceholder')}
+                aria-invalid={fieldErrors?.url ? true : undefined}
                 className={`${inputClassFor('url', 'font-mono')} flex-1 min-w-0`}
               />
               <button
@@ -383,6 +455,7 @@ export function MCPFormFields({
                 )}
               </button>
             </div>
+            {fieldError('url')}
           </div>
 
           <div>
@@ -490,9 +563,10 @@ export function MCPFormFields({
               readOnly={isFieldReadOnly('headersText')}
               placeholder={t('addMCP.extraHeadersPlaceholder')}
               rows={4}
+              aria-invalid={fieldErrors?.headersText ? true : undefined}
               className={inputClassFor('headersText', 'font-mono')}
             />
-            {!readOnly && <p className="mt-1 text-xs text-gray-500">{t('addMCP.extraHeadersHint')}</p>}
+            {fieldError('headersText') ?? (!readOnly && <p className="mt-1 text-xs text-gray-500">{t('addMCP.extraHeadersHint')}</p>)}
           </div>
         </div>
       )}
@@ -522,7 +596,10 @@ export function MCPFormFields({
             ? <CheckCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
             : <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
           }
-          <span>{testResult.message}</span>
+          <div className="min-w-0">
+            <p>{testResult.message}</p>
+            {testResult.detail && <p className="mt-1 break-all font-mono text-xs opacity-80">{testResult.detail}</p>}
+          </div>
         </div>
       )}
 
@@ -561,22 +638,20 @@ export function MCPSheet({ onClose, onSaved, onRefresh }: MCPSheetProps) {
   });
   const [submitting, setSubmitting] = useState(false);
   const [connStatus, setConnStatus] = useState<ConnStatus>('idle');
-  const [testResult, setTestResult] = useState<{
-    success: boolean;
-    message: string;
-    tools_count?: number;
-  } | null>(null);
+  const [testResult, setTestResult] = useState<MCPTestResult | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<MCPFieldErrors>({});
 
   const canSubmit = !!(formData.name.trim() &&
     (formData.connType === 'stdio' ? formData.command.trim() : formData.url.trim()));
-  const formError = getMCPFormError(formData);
+  const validate = () => {
+    const errors = getMCPFieldErrors(formData);
+    setFieldErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
 
   const handleSubmit = async () => {
     if (!canSubmit || submitting) return;
-    if (formError === 'invalidHeaders') {
-      alert(t('alert.invalidHeaders'));
-      return;
-    }
+    if (!validate()) return;
     try {
       setSubmitting(true);
       await client.post('/api/mcp', { name: formData.name, config: buildMCPConfigFromForm(formData) });
@@ -590,38 +665,29 @@ export function MCPSheet({ onClose, onSaved, onRefresh }: MCPSheetProps) {
 
   const update = (fields: Partial<MCPFormData>) => {
     setFormData(prev => ({ ...prev, ...fields }));
-    // 表单变化时重置测试状态
-    if (connStatus !== 'idle') {
-      setConnStatus('idle');
-      setTestResult(null);
-    }
+    setFieldErrors(prev => clearMCPFieldErrors(prev, fields));
+    // 表单变化时重置测试状态（被拒绝的请求状态是 idle，结果同样要清掉）
+    setTestResult(null);
+    if (connStatus !== 'idle') setConnStatus('idle');
   };
 
   /** 仅测试连接，不保存到配置 */
   const handleTestConnection = async () => {
-    if (!canSubmit || connStatus === 'testing') return;
-    if (formError === 'invalidHeaders') {
-      alert(t('alert.invalidHeaders'));
-      return;
-    }
+    if (connStatus === 'testing') return;
+    // Missing or malformed fields are answered under the field: no connection was tried.
+    if (!validate()) return;
     setTestResult(null);
     setConnStatus('testing');
     try {
       const res = await mcpAPI.test(formData.name, buildMCPConfigFromForm(formData));
-      const data = res.data;
-      const success = data.success ?? false;
-      setConnStatus(success ? 'tested' : 'failed');
-      setTestResult({
-        success,
-        message: data.message ?? (success ? t('sheet.connSuccess') : t('sheet.connFailed')),
-        tools_count: data.tools_count,
-      });
-    } catch (err: any) {
-      setConnStatus('failed');
-      setTestResult({
-        success: false,
-        message: err.response?.data?.detail ?? err.message ?? t('detail.testFailed'),
-      });
+      const outcome = mcpTestOutcome(res.data, t);
+      setConnStatus(outcome.success ? 'tested' : 'failed');
+      setTestResult(outcome);
+    } catch (err: unknown) {
+      const outcome = mcpTestFailure(err, t);
+      // A refused request never reached the service: no "connection failed" badge.
+      setConnStatus(outcome.refused ? 'idle' : 'failed');
+      setTestResult(outcome);
     }
   };
 
@@ -655,6 +721,7 @@ export function MCPSheet({ onClose, onSaved, onRefresh }: MCPSheetProps) {
         testResult={testResult}
         onTestConnection={handleTestConnection}
         isTesting={isTesting}
+        fieldErrors={fieldErrors}
       />
       {/* 测试后展示工具数/资源数（与详情页样式一致） */}
       {testResult?.tools_count != null && (

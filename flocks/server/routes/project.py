@@ -60,6 +60,22 @@ class FolderBrowserResponse(BaseModel):
     parent: Optional[str]
     roots: List[FolderEntry]
     entries: List[FolderEntry]
+    # The requested directory does not exist yet: ``path`` is its nearest
+    # existing ancestor, not the directory that was asked for.
+    missing: bool = False
+
+
+# How many levels above a missing directory the folder picker looks for one
+# that exists; one ``stat`` per level, so the request stays cheap for any path.
+_NEAREST_ANCESTOR_LEVELS = 32
+
+
+def _nearest_existing_ancestor(path: Path) -> Path:
+    """Return the closest existing ancestor of *path*, or raise FileNotFoundError."""
+    for candidate in (path, *path.parents[:_NEAREST_ANCESTOR_LEVELS]):
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(path)
 
 
 async def _list_project_summaries(user: AuthUser, search: Optional[str]) -> List[ProjectInfo]:
@@ -198,7 +214,14 @@ async def get_current_project(request: Request, project_id: Optional[str] = Quer
 
 
 @router.get("/folders", response_model=FolderBrowserResponse, summary="Browse project folders")
-async def browse_project_folders(request: Request, path: Optional[str] = Query(None)):
+async def browse_project_folders(
+    request: Request,
+    path: Optional[str] = Query(None),
+    nearest: bool = Query(
+        False,
+        description="List the nearest existing ancestor when the directory does not exist yet",
+    ),
+):
     """List directories under configured roots without exposing file contents."""
     from flocks.utils.http_file_read_guard import http_private_path_is_blocked, require_http_private_path_access
 
@@ -206,10 +229,24 @@ async def browse_project_folders(request: Request, path: Optional[str] = Query(N
     roots = Project.allowed_roots()
     if not roots:
         raise HTTPException(status_code=400, detail="No project roots are available")
+    if path and "\x00" in path:
+        # pathlib reports a NUL byte differently per platform (a ValueError, or
+        # an OSError that reads like a missing directory): refuse it up front.
+        raise HTTPException(status_code=400, detail="Directory does not exist")
 
+    missing = False
     try:
         if path:
-            current = Path(path).expanduser().resolve(strict=True)
+            requested = Path(path).expanduser()
+            try:
+                current = requested.resolve(strict=True)
+            except (OSError, RuntimeError):
+                # A project directory is created on save, so the picker can be
+                # opened on one that is not there yet: show what exists above it.
+                if not nearest or not requested.is_absolute():
+                    raise
+                current = _nearest_existing_ancestor(requested).resolve(strict=True)
+                missing = True
         else:
             home = Path.home().resolve(strict=True)
             current = (
@@ -261,6 +298,7 @@ async def browse_project_folders(request: Request, path: Optional[str] = Query(N
         parent=parent_value,
         roots=[FolderEntry(name=root.name or str(root), path=str(root)) for root in roots],
         entries=entries,
+        missing=missing,
     )
 
 

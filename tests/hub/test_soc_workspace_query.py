@@ -22,8 +22,13 @@ def workspace_tool(tmp_path, monkeypatch):
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
+    # The tool holds no database code: it reads through the platform's SOC store.
+    from flocks.workflow.soc_store import _paths
+
     module.SOC_DB = tmp_path / "soc.db"
     module.WORKFLOW_DB = tmp_path / "workflow.db"
+    monkeypatch.setattr(_paths, "SOC_DB", module.SOC_DB)
+    monkeypatch.setattr(_paths, "WORKFLOW_DB", module.WORKFLOW_DB)
     return module
 
 
@@ -129,7 +134,7 @@ def test_unreadable_time_filters_are_rejected(workspace_tool, bad):
     with pytest.raises(ValueError, match="startTime"):
         workspace_tool._page_query_params({"startTime": bad})
     with pytest.raises(ValueError, match="startTime"):
-        workspace_tool._alert_where({"startTime": bad})
+        workspace_tool._alert_criteria({"startTime": bad})
 
 
 def test_numeric_json_fields_filter_like_their_text(workspace_tool, soc_time_rows):
@@ -147,7 +152,7 @@ def test_numeric_json_fields_filter_like_their_text(workspace_tool, soc_time_row
 
 
 async def test_the_dashboard_page_answers_through_the_tool(workspace_tool, monkeypatch):
-    """The dashboard's handler is a coroutine function: the tool must wait for it."""
+    """The tool hands the page's handler the SOC data service the page runtime would."""
     from flocks.tool.registry import ToolContext
 
     monkeypatch.setattr(
@@ -157,3 +162,31 @@ async def test_the_dashboard_page_answers_through_the_tool(workspace_tool, monke
     assert result.success, result.error
     payload = json.loads(result.output) if isinstance(result.output, str) else result.output
     assert payload["page"] == "dashboard" and "error" not in payload
+
+
+async def test_the_tool_asks_the_store_nothing_on_the_event_loop(workspace_tool, soc_time_rows, monkeypatch):
+    """A store may be a database whose synchronous queries refuse the event loop (PostgreSQL's do)."""
+    import asyncio
+
+    from flocks.tool.registry import ToolContext
+
+    store = workspace_tool._alert_store()
+
+    def off_the_loop(function):
+        def call(*args, **kwargs):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return function(*args, **kwargs)
+            raise AssertionError(f"{function.__name__} was called on the event loop")
+
+        return call
+
+    for name in ("search", "source_info", "record_fields", "latest_date", "workflow_runs"):
+        monkeypatch.setattr(store, name, off_the_loop(getattr(store, name)))
+
+    result = await workspace_tool.soc_workspace_query(ToolContext(session_id="s", message_id="m"), page="alerts")
+
+    assert result.success, result.error
+    assert result.metadata["soc_db"] == str(workspace_tool.SOC_DB)
+    assert result.metadata["workflow_db"] == str(workspace_tool.WORKFLOW_DB)

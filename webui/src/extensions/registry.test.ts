@@ -16,7 +16,7 @@ describe('default WebUI extension registry', () => {
     expect(registry.settingsSections.map((s) => [s.id, s.group, s.adminOnly])).toEqual([['flockspro', 'system', true]]);
     expect(registry.slots).toEqual([]);
     expect(Object.keys(registry.i18n).sort()).toEqual(['en-US', 'zh-CN']);
-    expect(registry.i18n['zh-CN'].nav).toEqual({ flocksproUpgrade: 'Flocks Pro' });
+    expect(registry.i18n['zh-CN'].nav).toEqual({ flocksproUpgrade: 'Flocks Pro', flocksproLicence: 'Flocks Pro 授权' });
     expect(registry.updateChannel).toBeUndefined();
   });
 

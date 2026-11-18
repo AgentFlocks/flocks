@@ -4,6 +4,7 @@ Shared execution logic for direct slash commands.
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
@@ -290,7 +291,7 @@ async def run_direct_command(
             return DirectCommandResult(handled=True, text=build_tools_catalog_summary())
 
         if args == "refresh":
-            ToolRegistry.refresh_dynamic_tools()
+            await asyncio.to_thread(ToolRegistry.refresh_dynamic_tools)
             summary = build_tools_catalog_summary()
             text = "Dynamic tools refreshed. Current summary:\n\n" + summary.split("\n", 1)[1]
             return DirectCommandResult(handled=True, text=text)

@@ -78,6 +78,13 @@
   "restartHint": "Manually stop and re-establish the long connection",
   "restartSuccess": "{{channel}} restarted",
   "restartFailed": "Restart failed",
+  "secretInput": {
+    "saved": "Saved",
+    "savedPlaceholder": "Saved. Type a new value to replace it",
+    "envPlaceholder": "From environment variable {{name}}. Type a new value to replace it",
+    "filePlaceholder": "From file {{name}}. Type a new value to replace it",
+    "savedTitle": "Stored on the server and not shown here. Type a new value and save to replace it; leave it empty to keep it."
+  },
   "security": {
     "defaultAgent": "Default Agent",
     "defaultAgentHint": "Must be one of visible agents; falls back to system default when unset",
@@ -89,7 +96,7 @@
     "visibleAgentsSelectedCount": "{{first}}, {{second}}, and {{count}} selected",
     "visibleAgentsNoOptions": "No agents available",
     "permissionMode": "Permission Mode",
-    "permissionModeHint": "Default permission mode for this channel session; it can also be changed from the Session page.",
+    "permissionModeHint": "Default permission mode for this channel’s sessions; each session can also be adjusted on its own.",
     "permissionModeReadonly": "readonly",
     "permissionModeRequireConfirm": "require-confirm",
     "permissionModeAutoConfirmAll": "auto-allow-all"

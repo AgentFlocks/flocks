@@ -42,6 +42,7 @@ from flocks.cli.commands import (
 )
 from flocks.cli.commands.update import update_command
 from flocks.cli.service_config import (
+    DEFAULT_SERVICE_HOST,
     ServiceConfig,
     ServiceConfigError,
     build_service_config,
@@ -353,7 +354,7 @@ def _service_config(
         webui_port=webui_port,
         default_server_host=default_server_host or global_config.server_host,
         default_server_port=default_server_port or global_config.server_port,
-        default_webui_host=default_webui_host or "127.0.0.1",
+        default_webui_host=default_webui_host or DEFAULT_SERVICE_HOST,
         default_webui_port=default_webui_port or 5173,
     )
 
@@ -418,7 +419,7 @@ def start(
         "--skip-webui-build",
         help="Skip WebUI static asset build before starting Flocks service",
     ),
-    host: Optional[str] = typer.Option(None, "--host", "-h", help="Public service host"),
+    host: Optional[str] = typer.Option(None, "--host", "-h", help="Public service host (default 0.0.0.0, all interfaces; 127.0.0.1 keeps it on this machine)"),
     port: Optional[int] = typer.Option(None, "--port", "-p", help="Public service port", **_PORT_OPTION_KWARGS),
     server_host: Optional[str] = typer.Option(None, "--server-host", help="Backend server host"),
     server_port: Optional[int] = typer.Option(None, "--server-port", help="Backend server port", **_PORT_OPTION_KWARGS),
@@ -470,7 +471,7 @@ def restart(
         "--skip-webui-build",
         help="Skip WebUI static asset build before starting Flocks service",
     ),
-    host: Optional[str] = typer.Option(None, "--host", "-h", help="Public service host"),
+    host: Optional[str] = typer.Option(None, "--host", "-h", help="Public service host (default: where the running service listens, else 0.0.0.0)"),
     port: Optional[int] = typer.Option(None, "--port", "-p", help="Public service port", **_PORT_OPTION_KWARGS),
     server_host: Optional[str] = typer.Option(None, "--server-host", help="Backend server host"),
     server_port: Optional[int] = typer.Option(None, "--server-port", help="Backend server port", **_PORT_OPTION_KWARGS),
@@ -561,6 +562,8 @@ def serve(
     import uvicorn
 
     os.environ["_FLOCKS_SERVER_PORT"] = str(port)
+    # Where it listens, for the first-administrator page (routes/auth._local_setup_url).
+    os.environ["_FLOCKS_SERVER_HOST"] = host
     # One id per service launch, inherited by all uvicorn workers/reload children.
     os.environ["_FLOCKS_SERVICE_BOOT_ID"] = secrets_lib.token_hex(16)
     apply_console_default()
@@ -599,9 +602,9 @@ def serve(
 
 @app.command(name="service-daemon", hidden=True)
 def service_daemon(
-    server_host: str = typer.Option("127.0.0.1", "--server-host", help="Backend server host"),
+    server_host: str = typer.Option(DEFAULT_SERVICE_HOST, "--server-host", help="Backend server host"),
     server_port: int = typer.Option(5173, "--server-port", help="Public service port"),
-    webui_host: str = typer.Option("127.0.0.1", "--webui-host", help="WebUI host"),
+    webui_host: str = typer.Option(DEFAULT_SERVICE_HOST, "--webui-host", help="WebUI host"),
     webui_port: int = typer.Option(5173, "--webui-port", help="WebUI port"),
     legacy_server_host: Optional[str] = typer.Option(None, "--legacy-server-host", help="Legacy backend host"),
     legacy_server_port: Optional[int] = typer.Option(8000, "--legacy-server-port", help="Legacy backend port"),

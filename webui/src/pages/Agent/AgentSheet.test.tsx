@@ -1,8 +1,9 @@
-import { render } from '@testing-library/react';
+import { act, render } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 import AgentSheet from './AgentSheet';
-import type { Agent } from '@/api/agent';
+import { agentAPI, type Agent } from '@/api/agent';
+import { backendError } from '@/test/helpers';
 
 const {
   capturedEntitySheetProps,
@@ -111,6 +112,7 @@ vi.mock('react-i18next', () => ({
         'edit.guidePanelTitle': 'Rex 辅助修改',
         'edit.guidePanelDesc': '编辑描述',
         'edit.nativeGuidePanelDesc': '内置编辑描述',
+        'edit.nativeSubagentGuidePanelDesc': '内置子 Agent 编辑描述',
         'edit.nativeGuideActions': [
           {
             label: '检查模型策略',
@@ -134,6 +136,8 @@ vi.mock('react-i18next', () => ({
         'common:entity.defaultTestPrompt': '你好，请介绍一下你自己以及你的主要功能。',
         'sheet.done': '完成',
       };
+      // A failure alert carries its reason as the `detail` value; show it so a test can read it.
+      if (typeof params?.detail === 'string') return `${key}: ${params.detail}`;
       const fallback = params?.defaultValue;
       return translations[key] ?? (typeof fallback === 'string' ? fallback : key);
     },
@@ -231,6 +235,18 @@ describe('AgentSheet', () => {
     expect(props.rexSystemContext).toContain('Skills：agent-builder');
   });
 
+  it('names the primary agent when it is the built-in one being edited', () => {
+    render(
+      <AgentSheet
+        agent={makeAgent({ name: 'rex', native: true, mode: 'primary' })}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    expect(capturedEntitySheetProps.at(-1).rexGuidePanelDesc).toBe('内置编辑描述');
+  });
+
   it('uses a model and temperature guide when editing a native agent', () => {
     render(
       <AgentSheet
@@ -249,7 +265,8 @@ describe('AgentSheet', () => {
     const props = capturedEntitySheetProps.at(-1);
     expect(props.mode).toBe('edit');
     expect(props.initialTab).toBe('rex');
-    expect(props.rexGuidePanelDesc).toBe('内置编辑描述');
+    // A built-in subagent and the primary agent say the same scope in their own words.
+    expect(props.rexGuidePanelDesc).toBe('内置子 Agent 编辑描述');
     expect(props.rexGuideGroups).toEqual([
       {
         title: '编辑引导',
@@ -283,5 +300,21 @@ describe('AgentSheet', () => {
     expect(props.rexSystemContext).toContain('只能保存模型和温度');
     expect(props.rexSystemContext).toContain('不要建议提取或覆盖这些字段');
     expect(props.rexWelcomeMessage).toContain('当前只支持保存模型和温度');
+  });
+
+  it('says why an agent could not be saved instead of the bare status code', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    try {
+      vi.mocked(agentAPI.update).mockRejectedValueOnce(backendError(403, '该 Agent 的提示词受保护，不能修改'));
+      const onSaved = vi.fn();
+      render(<AgentSheet agent={makeAgent()} onClose={vi.fn()} onSaved={onSaved} />);
+
+      await act(async () => { await capturedEntitySheetProps.at(-1).onSubmit(); });
+
+      expect(alertSpy).toHaveBeenCalledWith('error.updateFailed: 该 Agent 的提示词受保护，不能修改');
+      expect(onSaved).not.toHaveBeenCalled();
+    } finally {
+      alertSpy.mockRestore();
+    }
   });
 });

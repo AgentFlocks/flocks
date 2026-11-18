@@ -10,6 +10,7 @@ import EmptyState from '@/components/common/EmptyState';
 import { mcpAPI, MCPServer } from '@/api/mcp';
 import type { MCPCatalogEntry, MCPCatalogCategory } from '@/types';
 import { getCatalogDescription } from '@/utils/mcpCatalog';
+import { extractErrorMessage } from '@/utils/error';
 
 type TabType = 'servers' | 'catalog';
 
@@ -284,7 +285,7 @@ function CatalogTab() {
         alert(installMessage);
       }
     } catch (err: any) {
-      alert(`${t('catalog.installFailed')}: ${err.response?.data?.detail || err.message}`);
+      alert(`${t('catalog.installFailed')}: ${extractErrorMessage(err, '')}`);
     } finally {
       setInstalling(null);
     }

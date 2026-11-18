@@ -135,7 +135,7 @@ async def pipeline(monkeypatch):  # noqa: ANN001
     monkeypatch.setattr(kafka_manager, "_REBALANCE_RECOVERY_DELAY_S", 0.01)
 
     async def start(  # noqa: ANN202
-        broker, *, workers=3, filter_spec=None, reset_policy="earliest", expected_state="running",
+        broker, *, workers=3, filter_spec=None, reset_policy="earliest", expected_state="running", batchsize=None, batch_timeout_ms=40,
     ):  # noqa: ANN001
         monkeypatch.setitem(
             sys.modules,
@@ -167,7 +167,7 @@ async def pipeline(monkeypatch):  # noqa: ANN001
                 "type": "kafka",
                 "enabled": True,
                 "mapping": {"kafka_message": "$.body"},
-                "inputs": {"tool_context_required": False},
+                "inputs": {"tool_context_required": False, **({"_kafka_batching": True, "batchsize": batchsize, "batch_timeout_ms": batch_timeout_ms, "maxparallel": workers} if batchsize is not None else {})},
                 "concurrency": {"maxParallel": workers, "queueSize": 8},
                 **({"filter": filter_spec} if filter_spec else {}),
             }],
@@ -423,7 +423,11 @@ async def test_offset_waits_for_successful_terminal_record_persistence(pipeline,
     release.set()
     await eventually(lambda: broker.committed.get(Partition("alerts", 0)) == 1)
     assert persisted[0]["status"] == "success"
-    assert executions[0]["inputs"]["_flocks"]["trigger"]["deliveryId"] == "kafka:alerts:0:0"
+    inputs = executions[0]["inputs"]
+    assert inputs["_flocks"]["trigger"]["deliveryId"] == "kafka:alerts:0:0"
+    assert inputs["kafka_message"] == {"partition": 0, "offset": 0}
+    assert "_kafka_delivery_ids" not in inputs
+    assert "_kafka_batch_seq" not in inputs
 
 
 @pytest.mark.asyncio
@@ -1066,3 +1070,222 @@ async def test_unexpected_fetch_cancellation_fails_instead_of_silently_hanging(p
     await eventually(lambda: manager.get_consumer_status("delivery-test")["state"] == "failed")
     assert manager.get_consumer_status("delivery-test")["error_code"] == "fetch_cancelled"
     assert not broker.commit_attempts
+
+
+@pytest.mark.asyncio
+async def test_batch_twenty_is_one_dispatch_and_one_durable_ack(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, offset) for offset in range(10000)])
+    calls = []
+
+    async def dispatch(wid, plan, message, key, inputs, **kwargs):
+        calls.append((message, inputs, kwargs))
+        return acknowledge()
+
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    await start(broker, workers=2, batchsize=20, batch_timeout_ms=5000)
+    await eventually(lambda: broker.committed.get(Partition("alerts", 0)) == 10000, timeout=10)
+    assert [len(call[0]) for call in calls] == [20] * 500
+    assert [call[1]["_kafka_batch_seq"] for call in calls] == list(range(500))
+    assert [call[2]["trigger"].inputs["_kafka_batch_seq"] for call in calls] == list(range(500))
+    assert len({call[2]["trigger"].inputs["_kafka_batch_generation"] for call in calls}) == 1
+    assert len({call[2]["delivery_id"] for call in calls}) == 500
+    assert all(call[2]["kafka_metadata"]["batchSize"] == 20 for call in calls)
+    assert len(broker.commit_attempts) <= 500
+
+
+@pytest.mark.asyncio
+async def test_later_batch_cannot_commit_past_unfinished_first_batch(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, offset) for offset in range(40)])
+    release = asyncio.Event()
+    later_done = asyncio.Event()
+
+    async def dispatch(wid, plan, message, *args, **kwargs):
+        if message[0]["offset"] == 0:
+            await release.wait()
+        else:
+            later_done.set()
+        return acknowledge()
+
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    await start(broker, workers=2, batchsize=20)
+    await eventually(later_done.is_set)
+    assert broker.commit_attempts == []
+    release.set()
+    await eventually(lambda: broker.committed.get(Partition("alerts", 0)) == 40)
+    assert broker.commit_attempts == [{Partition("alerts", 0): 40}]
+
+
+@pytest.mark.asyncio
+async def test_partial_batch_flushes_on_timeout_without_losing_records(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, offset) for offset in range(25)])
+    sizes = []
+
+    async def dispatch(wid, plan, message, *args, **kwargs):
+        sizes.append(len(message))
+        return acknowledge()
+
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    await start(broker, workers=2, batchsize=20)
+    await eventually(lambda: broker.committed.get(Partition("alerts", 0)) == 25)
+    assert sizes == [20, 5]
+
+
+@pytest.mark.asyncio
+async def test_failed_batch_never_commits_its_records(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, offset) for offset in range(20)])
+    calls = []
+
+    async def dispatch(wid, plan, message, *args, **kwargs):
+        calls.append(kwargs["delivery_id"])
+        raise RuntimeError("batch persistence failed")
+
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    await start(broker, workers=2, batchsize=20)
+    await eventually(lambda: manager.get_consumer_status("delivery-test")["state"] == "failed")
+    assert len(calls) == kafka_manager._DELIVERY_MAX_ATTEMPTS
+    assert len(set(calls)) == 1
+    assert broker.commit_attempts == []
+
+
+@pytest.mark.asyncio
+async def test_backpressure_keeps_full_batches_while_the_broker_has_data(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, offset) for offset in range(260)])
+    sizes = []
+
+    async def dispatch(wid, plan, message, *args, **kwargs):
+        sizes.append(len(message))
+        await asyncio.sleep(.06)  # Longer than the 40 ms idle-tail timeout.
+        return acknowledge()
+
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    await start(broker, workers=2, batchsize=20)
+    await eventually(lambda: broker.committed.get(Partition("alerts", 0)) == 260)
+    assert sizes == [20] * 13
+
+
+@pytest.mark.asyncio
+async def test_idle_flush_does_not_cancel_a_fetch_that_already_advanced_position(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, offset) for offset in range(20)])
+    fetch = broker.Consumer.getone
+    observed = []
+
+    async def slow_fetch(consumer):
+        item = await fetch(consumer)
+        if item.offset == 1:
+            await asyncio.sleep(.08)  # The first record's 40 ms flush expires here.
+        return item
+
+    async def dispatch(wid, plan, message, *args, **kwargs):
+        observed.extend(item["offset"] for item in message)
+        return acknowledge()
+
+    monkeypatch.setattr(broker.Consumer, "getone", slow_fetch)
+    monkeypatch.setattr(manager, "_trigger_workflow", dispatch)
+    await start(broker, workers=2, batchsize=20)
+    await eventually(lambda: broker.committed.get(Partition("alerts", 0)) == 20)
+    assert sorted(observed) == list(range(20))
+
+
+@pytest.mark.parametrize("batchsize", [1, 20])
+@pytest.mark.asyncio
+async def test_batch_inputs_reach_workflow_and_wait_for_persistence(pipeline, monkeypatch, batchsize):
+    _, start = pipeline
+    records = [record(0, 0), record(1, 0), record(0, 1)]
+    broker = Broker(records)
+    saving = asyncio.Event()
+    release = asyncio.Event()
+
+    async def persist(data):
+        saving.set()
+        await release.wait()
+
+    executions, persisted = mock_execution(monkeypatch, persist=persist)
+    await start(broker, workers=1, batchsize=batchsize)
+    try:
+        await asyncio.wait_for(saving.wait(), 3)
+        assert broker.commit_attempts == []
+    finally:
+        release.set()
+    await eventually(lambda: broker.committed == {
+        Partition("alerts", 0): 2, Partition("alerts", 1): 1,
+    })
+    assert len(executions) == len(persisted) == (3 if batchsize == 1 else 1)
+    observed = []
+    for sequence, execution in enumerate(executions):
+        inputs = execution["inputs"]
+        messages = inputs["kafka_message"]
+        assert isinstance(messages, list)
+        assert inputs["_kafka_batch_seq"] == sequence
+        assert inputs["_kafka_batch_generation"]
+        assert inputs["_kafka_delivery_ids"] == [
+            f"kafka:alerts:{item['partition']}:{item['offset']}" for item in messages
+        ]
+        observed.extend(messages)
+    assert observed == [json.loads(item.value) for item in records]
+
+
+@pytest.mark.asyncio
+async def test_record_ids_allow_deduplication_when_replay_regroups_a_partial_batch(pipeline, monkeypatch):
+    manager, start = pipeline
+    broker = Broker([record(0, offset) for offset in range(20)])
+    original_fetch = broker.Consumer.getone
+    first_generation = True
+    effects = []
+    seen = set()
+
+    async def fetch(consumer):
+        item = await original_fetch(consumer)
+        if first_generation and item.offset == 1:
+            # Force an idle flush of [0]; restart will fetch [0..19] together.
+            await asyncio.Event().wait()
+        return item
+
+    async def persist(data):
+        if first_generation:
+            raise RuntimeError("business effects succeeded but persistence failed")
+
+    executions, persisted = mock_execution(monkeypatch, persist=persist)
+    original_run = kafka_manager.run_workflow
+
+    def run(**kwargs):
+        inputs = kwargs["inputs"]
+        messages = inputs["kafka_message"]
+        identities = inputs["_kafka_delivery_ids"]
+        assert len(messages) == len(identities)
+        for message, identity in zip(messages, identities):
+            if identity not in seen:
+                effects.append(message["offset"])
+                seen.add(identity)
+        return original_run(**kwargs)
+
+    monkeypatch.setattr(broker.Consumer, "getone", fetch)
+    monkeypatch.setattr(kafka_manager, "run_workflow", run)
+    await start(broker, workers=1, batchsize=20)
+    await eventually(lambda: manager.get_consumer_status("delivery-test")["state"] == "failed")
+    assert len(executions) == kafka_manager._DELIVERY_MAX_ATTEMPTS
+    assert all(
+        execution["inputs"]["kafka_message"] == [{"partition": 0, "offset": 0}]
+        for execution in executions
+    )
+    first_inputs = executions[0]["inputs"]
+    assert first_inputs["_kafka_delivery_ids"] == ["kafka:alerts:0:0"]
+    assert effects == [0]
+    assert broker.commit_attempts == []
+    assert persisted == []
+
+    first_generation = False
+    await start(broker, workers=1, batchsize=20)
+    await eventually(lambda: broker.committed.get(Partition("alerts", 0)) == 20)
+    replay_inputs = executions[-1]["inputs"]
+    assert len(replay_inputs["kafka_message"]) == 20
+    assert replay_inputs["_kafka_delivery_ids"] == [f"kafka:alerts:0:{offset}" for offset in range(20)]
+    assert replay_inputs["_kafka_batch_generation"] != first_inputs["_kafka_batch_generation"]
+    assert replay_inputs["_flocks"]["trigger"]["deliveryId"] != first_inputs["_flocks"]["trigger"]["deliveryId"]
+    assert effects == list(range(20))
+    assert len(persisted) == 1

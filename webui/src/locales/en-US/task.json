@@ -187,6 +187,7 @@
     "recurring": "Recurring",
     "selectFrequency": "Select frequency",
     "customOption": "Custom...",
+    "cronInvalid": "Invalid cron expression. Use five fields (minute hour day month weekday), e.g. 0 6 * * * runs daily at 06:00 in the selected timezone. Six-field cron and shortcuts such as @daily are not supported.",
     "customCronLabel": "Custom Cron Expression",
     "timezoneLabel": "Timezone",
     "timezoneShanghai": "Asia/Shanghai (Beijing Time UTC+8)",

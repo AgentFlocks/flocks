@@ -359,8 +359,13 @@ class Project:
         return os.path.normcase(str(worktree))
 
     @staticmethod
-    def _path_status(worktree: str) -> Literal["available", "missing", "unreadable"]:
-        path = Path(worktree)
+    def _directory_access(path: Path) -> Literal["available", "missing", "unreadable"]:
+        """Whether the account running Flocks can open ``path`` as a directory.
+
+        ``missing`` means nothing reachable is a directory there; ``unreadable``
+        that this account may not reach or list it, whether it exists or not.
+        """
+
         try:
             if not path.is_dir():
                 return "missing"
@@ -371,7 +376,21 @@ class Project:
             return "unreadable"
         if not os.access(path, os.R_OK | os.X_OK):
             return "unreadable"
+        # os.access only reads permission bits; on Windows it ignores the access
+        # list, so a service account left out of a folder's ACL passes it. Opening
+        # the folder for listing is the check the system itself makes.
+        try:
+            with os.scandir(path):
+                pass
+        except (FileNotFoundError, NotADirectoryError):
+            return "missing"
+        except OSError:
+            return "unreadable"
         return "available"
+
+    @classmethod
+    def _path_status(cls, worktree: str) -> Literal["available", "missing", "unreadable"]:
+        return cls._directory_access(Path(worktree))
 
     @staticmethod
     def _detect_vcs(worktree: str) -> Optional[str]:
@@ -424,7 +443,13 @@ class Project:
         requested_path = Path(os.path.abspath(requested_path))
         roots = cls.allowed_roots(default_worktree)
 
-        if create_if_missing and not requested_path.exists():
+        try:
+            needs_creation = create_if_missing and not requested_path.exists()
+        except PermissionError:
+            # It may exist: this account cannot reach it. Reported below as
+            # such; creating it would fail the same way.
+            needs_creation = False
+        if needs_creation:
             ancestor = requested_path
             missing_parts: List[str] = []
             while not ancestor.exists() and ancestor != ancestor.parent:
@@ -444,15 +469,34 @@ class Project:
 
         try:
             path = requested_path.resolve(strict=True)
+            readable = True
+        except PermissionError:
+            # A parent denies search, or on Windows the folder's access list
+            # leaves this account out: the folder may well exist, so this is a
+            # permission to grant, not a path to correct.
+            readable = False
+            try:
+                path = requested_path.resolve(strict=False)
+            except (OSError, RuntimeError):
+                path = requested_path
         except (OSError, RuntimeError) as exc:
             raise ValueError("Project directory does not exist") from exc
-        if not path.is_dir():
-            raise ValueError("Project path must be a directory")
-        if not os.access(path, os.R_OK | os.X_OK):
-            raise ValueError("Project directory is not readable")
+        if readable:
+            access = cls._directory_access(path)
+            if access == "missing":
+                raise ValueError("Project path must be a directory")
+            readable = access == "available"
 
-        if roots and not any(path == root or path.is_relative_to(root) for root in roots):
+        # The allowed roots and this account's access are separate settings
+        # (FLOCKS_PROJECT_ROOTS; the folder's permissions or ACL), each fixed
+        # by an administrator: name every one that is missing.
+        allowed = not roots or any(path == root or path.is_relative_to(root) for root in roots)
+        if not allowed and not readable:
+            raise ValueError("Project directory is outside the allowed roots and is not readable")
+        if not allowed:
             raise ValueError("Project directory is outside the allowed roots")
+        if not readable:
+            raise ValueError("Project directory is not readable")
         return os.path.normcase(str(path))
 
     @classmethod

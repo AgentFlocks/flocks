@@ -714,7 +714,12 @@ class PluginLoader:
             return
 
         try:
-            raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+            # Every plugin reload parses every tool file: use libyaml when it is
+            # there (the same SafeConstructor, several times faster).
+            raw = yaml.load(
+                yaml_path.read_text(encoding="utf-8"),
+                Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader),
+            )
         except Exception as e:
             log.error("plugin.yaml_parse_failed", {"path": str(yaml_path), "error": str(e)})
             cls._record_load_error(_error_source_path(str(yaml_path), yaml_path.parent), e)

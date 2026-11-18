@@ -8,10 +8,14 @@ Subclasses only need to define class attributes and get_models().
 """
 
 import os
-from typing import Any, AsyncIterator, Dict, List, Optional
+import ssl
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 import httpx
 
+# ``_coerce_bool`` and ``resolve_verify_ssl`` keep being imported from here.
+from flocks.provider.tls import coerce_bool as _coerce_bool
+from flocks.provider.tls import httpx_verify, resolve_verify_ssl
 from flocks.provider.provider import (
     BaseProvider,
     ChatMessage,
@@ -132,11 +136,15 @@ def response_size_limit_hook(max_bytes: int):
 def create_openai_http_client(
     *,
     trust_env: bool,
-    verify: bool,
+    verify: Union[bool, ssl.SSLContext],
     timeout: httpx.Timeout = DEFAULT_HTTP_TIMEOUT,
     custom_settings: Any = None,
 ) -> httpx.AsyncClient:
-    """Build the shared OpenAI-compatible client with an ingress size cap."""
+    """Build the shared OpenAI-compatible client with an ingress size cap.
+
+    *verify* is what :func:`flocks.provider.tls.httpx_verify` gives for the
+    provider's options.
+    """
     max_response_bytes = resolve_max_response_bytes(custom_settings)
     return httpx.AsyncClient(
         trust_env=trust_env,
@@ -404,29 +412,6 @@ def format_openai_messages(
             d["name"] = m.name
         formatted.append(d)
     return formatted
-
-
-def _coerce_bool(value: Any, default: bool) -> bool:
-    """Coerce loosely-typed config values to bool."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return default
-
-
-def resolve_verify_ssl(custom_settings: Any, default: bool = True) -> bool:
-    """Resolve the SSL verification flag from provider custom settings."""
-    if not isinstance(custom_settings, dict):
-        return default
-
-    if "verify_ssl" in custom_settings:
-        return _coerce_bool(custom_settings.get("verify_ssl"), default)
-    if "ssl_verify" in custom_settings:
-        return _coerce_bool(custom_settings.get("ssl_verify"), default)
-    return default
 
 
 def _normalize_stream_usage(raw_usage: Any, *, response_id: Any = None) -> Optional[Dict[str, Any]]:
@@ -855,6 +840,87 @@ def extract_reasoning_details(delta) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
+def message_tool_call_chunks(message: Any) -> Optional[List[Dict[str, Any]]]:
+    """A non-streaming message's tool calls, shaped like streamed tool-call deltas."""
+    calls: List[Dict[str, Any]] = []
+    for call in getattr(message, "tool_calls", None) or []:
+        function = getattr(call, "function", None)
+        name = getattr(function, "name", None)
+        if not isinstance(name, str) or not name:
+            continue
+        arguments = getattr(function, "arguments", None)
+        call_id = getattr(call, "id", None)
+        calls.append({
+            "index": len(calls),
+            # The tool-call accumulator mints an id when the provider gave none.
+            "id": call_id if isinstance(call_id, str) and call_id else None,
+            "type": "function",
+            # Kept as sent: an empty or partial string may be a cut-off call.
+            "function": {"name": name, "arguments": arguments if isinstance(arguments, str) else ""},
+        })
+    return calls or None
+
+
+def message_reasoning(
+    message: Any,
+) -> tuple[Optional[str], Optional[str], Optional[List[Dict[str, Any]]]]:
+    """Reasoning text, the field it came from, and structured reasoning details."""
+    reasoning, source = extract_reasoning_content_with_source(message)
+    if not isinstance(reasoning, str) or not reasoning:
+        reasoning, source = None, None
+    details = [item for item in extract_reasoning_details(message) or [] if isinstance(item, dict)]
+    return reasoning, source if isinstance(source, str) else None, details or None
+
+
+def chat_fallback_tool_call_chunks(
+    response: ChatResponse,
+    *,
+    provider_id: str,
+    model_id: str,
+) -> List[StreamChunk]:
+    """Replay a non-streaming answer that made tool calls as stream chunks.
+
+    The empty-stream fallback kept only ``content``: an answer made of tool
+    calls alone (content null) counted as empty, and the request was then sent
+    again without its tools, so the model reported it had none.
+    """
+    chunks: List[StreamChunk] = []
+    # As the streaming path does: details alone (e.g. encrypted reasoning) still
+    # make a reasoning chunk, since the next tool round has to send them back.
+    if response.reasoning is not None or response.reasoning_details:
+        chunks.append(StreamChunk(
+            event_type="reasoning",
+            reasoning=response.reasoning or "",
+            finish_reason=None,
+            metadata=build_reasoning_metadata(
+                provider_id=provider_id,
+                model_id=model_id,
+                reasoning_content=response.reasoning,
+                reasoning_source=response.reasoning_source,
+                reasoning_details=response.reasoning_details,
+            ),
+        ))
+    if response.content:
+        chunks.append(StreamChunk(delta=response.content, finish_reason=None))
+    finish_reason = response.finish_reason or "tool_calls"
+    truncated = finish_reason in ("length", "max_tokens")
+    tool_calls = []
+    for call in response.tool_calls or []:
+        function = dict(call.get("function") or {})
+        if not truncated and not function.get("arguments"):
+            # A finished answer with no arguments is a call without parameters.
+            # A cut-off one stays empty so the accumulator refuses to run it.
+            function["arguments"] = "{}"
+        tool_calls.append({**call, "function": function})
+    chunks.append(StreamChunk(
+        delta="",
+        finish_reason=finish_reason,
+        tool_calls=tool_calls,
+        usage=response.usage or None,
+    ))
+    return chunks
+
+
 def build_reasoning_metadata(
     *,
     provider_id: str,
@@ -922,6 +988,7 @@ class OpenAIBaseProvider(BaseProvider):
     ALLOW_NO_API_KEY: bool = False
     PREFER_MAX_COMPLETION_TOKENS: bool = False
     NO_API_KEY_PLACEHOLDER: str = "not-needed"
+    SUPPORTS_TLS_SETTINGS = True
 
     def __init__(self, provider_id: str, name: str):
         super().__init__(provider_id=provider_id, name=name)
@@ -987,7 +1054,7 @@ class OpenAIBaseProvider(BaseProvider):
             timeout = DEFAULT_HTTP_TIMEOUT
             http_client = create_openai_http_client(
                 trust_env=trust_env,
-                verify=verify_ssl,
+                verify=httpx_verify(custom_settings, trust_env=trust_env),
                 timeout=timeout,
                 custom_settings=custom_settings,
             )
@@ -1115,12 +1182,17 @@ class OpenAIBaseProvider(BaseProvider):
                 f"{self.name} API returned choice with null message. "
                 f"model={model_id}, detail={err_detail}"
             )
+        reasoning, reasoning_source, reasoning_details = message_reasoning(msg)
         return ChatResponse(
             id=response.id,
             model=response.model,
             content=msg.content or "",
             finish_reason=choice.finish_reason or "stop",
             usage=normalize_usage(response.usage, response_id=response.id) or {},
+            tool_calls=message_tool_call_chunks(msg),
+            reasoning=reasoning,
+            reasoning_source=reasoning_source,
+            reasoning_details=reasoning_details,
         )
 
     async def chat_stream(
@@ -1406,6 +1478,16 @@ class OpenAIBaseProvider(BaseProvider):
             fallback_error: Optional[Exception] = None
             try:
                 fallback = await self.chat(model_id, messages, **kwargs)
+                if fallback.tool_calls:
+                    log.warn("openai_base.stream.empty_response_recovered_tool_calls", {
+                        "model": model_id,
+                        "tool_calls": len(fallback.tool_calls),
+                    })
+                    for chunk in chat_fallback_tool_call_chunks(
+                        fallback, provider_id=self.id, model_id=model_id,
+                    ):
+                        yield chunk
+                    return
                 fallback_content = fallback.content or ""
                 if fallback_content:
                     yield StreamChunk(
@@ -1417,30 +1499,12 @@ class OpenAIBaseProvider(BaseProvider):
             except Exception as exc:
                 fallback_error = exc
 
-            if kwargs.get("tools"):
-                log.warn("openai_base.stream.retry_without_tools", {
-                    "model": model_id,
-                    "reason": str(fallback_error) if fallback_error else "empty_fallback_content",
-                })
-                no_tool_kwargs = dict(kwargs)
-                no_tool_kwargs.pop("tools", None)
-                try:
-                    fallback = await self.chat(model_id, messages, **no_tool_kwargs)
-                    fallback_content = fallback.content or ""
-                    if fallback_content:
-                        yield StreamChunk(
-                            delta=fallback_content,
-                            finish_reason=fallback.finish_reason or "stop",
-                            usage=fallback.usage or None,
-                        )
-                        return
-                except Exception as exc:
-                    if fallback_error is None:
-                        fallback_error = exc
-
+            # Not retried without the tools: a model asked to act with none
+            # writes its calls as text or says it has no tools. The empty
+            # response error is retryable, so the turn is retried with them.
             if fallback_error:
                 raise fallback_error
             raise ValueError(
                 f"{self.name} API returned an empty streaming response and empty fallback response. "
-                f"model={model_id}"
+                f"model={model_id}, tools_declared={bool(kwargs.get('tools'))}"
             )

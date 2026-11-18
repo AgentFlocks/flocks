@@ -68,7 +68,8 @@
     "loadingSkills": "Loading skills...",
     "primaryModeLabel": "Primary (Primary Agent)",
     "subagentModeLabel": "Subagent (Sub-Agent)",
-    "nativeReadOnlyMessage": "Built-in agents only support editing the model, temperature, and sub-agent enabled state; other settings are maintained by the system",
+    "nativeReadOnlyMessage": "The {{name}} primary agent supports changing only its model and temperature.",
+    "nativeSubagentReadOnlyMessage": "The built-in subagent {{name}} supports changing only its model and temperature.",
     "rexAssistWrite": "Rex Assist Writing",
     "color": "Color",
     "colorOptional": "(Optional)"
@@ -132,7 +133,8 @@
     "emptyStateTitle": "No editing conversation yet",
     "guidePanelTitle": "Rex Assisted Editing",
     "guidePanelDesc": "Choose an editing entry. Rex will use the current Agent configuration to guide prompt, responsibility, permission, and parameter changes.",
-    "nativeGuidePanelDesc": "This is a built-in Agent. Only model and temperature can be saved, so Rex will guide model choice, temperature strategy, and validation.",
+    "nativeGuidePanelDesc": "The {{name}} primary agent supports changing only its model and temperature; Rex guides the change through model choice, temperature and how to verify it.",
+    "nativeSubagentGuidePanelDesc": "The built-in subagent {{name}} supports changing only its model and temperature; Rex guides the change through model choice, temperature and how to verify it.",
     "guideSectionTitle": "Editing Guides",
     "caseSectionTitle": "Editing Cases",
     "guideActions": [

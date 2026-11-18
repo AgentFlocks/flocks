@@ -14,6 +14,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from typer.testing import CliRunner
 
 from flocks.config.config import Config
@@ -380,11 +382,30 @@ class TestCommandLinePortConfiguration:
 
         config = cli_main._service_config()
 
-        assert config.backend_host == "127.0.0.1"
+        # Every interface by default; the legacy backend it cleans up stays where it was.
+        assert config.backend_host == "0.0.0.0"
         assert config.backend_port == 5173
-        assert config.frontend_host == "127.0.0.1"
+        assert config.frontend_host == "0.0.0.0"
         assert config.frontend_port == 5173
+        assert config.legacy_backend_host == "127.0.0.1"
         assert config.legacy_backend_port == 8000
+        assert config.backend_url == "http://127.0.0.1:5173"
+
+    @pytest.mark.parametrize("via", ["cli", "env"])
+    def test_service_config_loopback_host_keeps_it_on_this_machine(self, monkeypatch, via):
+        """``--host 127.0.0.1`` / ``FLOCKS_HOST=127.0.0.1`` still listen on loopback only."""
+        for name in ("FLOCKS_HOST", "FLOCKS_PORT", "FLOCKS_PUBLIC_HOST", "FLOCKS_PUBLIC_PORT",
+                     "FLOCKS_SERVER_HOST", "FLOCKS_SERVER_PORT", "FLOCKS_WEBUI_HOST", "FLOCKS_WEBUI_PORT"):
+            monkeypatch.delenv(name, raising=False)
+        Config._global_config = None
+        if via == "env":
+            monkeypatch.setenv("FLOCKS_HOST", "127.0.0.1")
+            config = cli_main._service_config()
+        else:
+            config = cli_main._service_config(host="127.0.0.1")
+
+        assert config.backend_host == config.frontend_host == "127.0.0.1"
+        assert config.backend_port == 5173
 
     def test_service_config_prefers_public_values(self, monkeypatch):
         """Test unified public values override legacy CLI and environment values."""

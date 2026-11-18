@@ -641,9 +641,13 @@ class WebUIPageApiRuntime:
         return JSONResponse(content=result)
 
     def _create_context(self, page_id: str, user: Any, secrets: frozenset[str] = frozenset()) -> Any:
+        from flocks import coordination
         from flocks.coordination import page_api_database
 
         logger = Log.create(service=f"webui-page-api:{page_id}")
+        # A backend written before pages were handed services has none to give.
+        page_api_services = getattr(coordination, "page_api_services", None)
+        services = page_api_services() if page_api_services is not None else {}
         return SimpleNamespace(
             page_id=page_id,
             user=user,
@@ -652,6 +656,11 @@ class WebUIPageApiRuntime:
             cache=None,
             # A direct database handle, from a backend that offers pages one; None otherwise.
             database=page_api_database(),
+            # What the backend hands pages by name: ``ctx.services.soc`` is the SOC suite's data.
+            services=SimpleNamespace(**{
+                name: service for name, service in services.items()
+                if isinstance(name, str) and name.isidentifier()
+            }),
         )
 
     async def _mark_failed(self, page_id: str, error: str) -> None:

@@ -16,6 +16,7 @@ import {
 } from '@/api/workflow';
 import CopyButton from '@/components/common/CopyButton';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
+import { extractErrorMessage } from '@/utils/error';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -452,7 +453,7 @@ function NodeRunSection({
         node_id: node.id,
         outputs: {},
         stdout: '',
-        error: error?.response?.data?.detail || error?.message || t('detail.nodeInfo.runNodeFailed'),
+        error: extractErrorMessage(error, t('detail.nodeInfo.runNodeFailed')),
         success: false,
       });
     } finally {
@@ -638,7 +639,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
       setSavedOk(true); onSaved(res.data);
       setTimeout(() => setSavedOk(false), 2500);
     } catch (e: any) {
-      setSaveErr(e?.response?.data?.detail || e?.message || t('detail.nodeInfo.saveFailed'));
+      setSaveErr(extractErrorMessage(e, t('detail.nodeInfo.saveFailed')));
     } finally {
       setSaving(false);
     }

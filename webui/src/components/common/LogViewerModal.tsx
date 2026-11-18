@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { X, RefreshCw, ChevronDown, FileText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { logsAPI, type LogFileInfo, type LogContentResponse } from '@/api/logs';
+import { extractErrorMessage } from '@/utils/error';
 
 interface LogViewerModalProps {
   open: boolean;
@@ -37,7 +38,7 @@ export default function LogViewerModal({ open, onClose }: LogViewerModalProps) {
       setLogContent(res.data);
       setSelectedFile(res.data?.filename || null);
     } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Failed to load logs');
+      setError(extractErrorMessage(err, 'Failed to load logs'));
       setLogContent(null);
     } finally {
       setLoading(false);

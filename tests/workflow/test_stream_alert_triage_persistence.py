@@ -36,7 +36,33 @@ def _load_dedup_code() -> str:
     return next(node["code"] for node in workflow["nodes"] if node["id"] == "load_dedup_file")
 
 
+# Writing the alert store is the platform's job now (flocks.workflow.soc_store);
+# the workflow only hands its alerts to the ``soc`` service.  These are the
+# functions that moved there with the SQLite store.
+_STORE_FUNCTIONS = frozenset({
+    "_ensure_soc_db_schema",
+    "_event_time_value",
+    "_asset_date_value",
+    "_source_type_value",
+    "_record_id_value",
+    "_stable_row_id",
+    "_load_existing_soc_rows",
+    "_merge_triage_record",
+    "_triage_write_soc_db",
+})
+
+
 def _load_functions(*names: str) -> dict[str, object]:
+    namespace = _load_workflow_functions(*(name for name in names if name not in _STORE_FUNCTIONS))
+    from flocks.workflow.soc_store import triage
+
+    for name in names:
+        if name in _STORE_FUNCTIONS:
+            namespace[name] = getattr(triage, name)
+    return namespace
+
+
+def _load_workflow_functions(*names: str) -> dict[str, object]:
     tree = ast.parse(_concurrent_triage_code())
     body = [
         node
@@ -234,8 +260,97 @@ def test_soc_db_persistence_uses_filtered_first_seen_alerts() -> None:
     ]
 
     assert len(write_calls) == 1
-    assert isinstance(write_calls[0].args[1], ast.Name)
-    assert write_calls[0].args[1].id == "first_seen_soc_alerts"
+    assert isinstance(write_calls[0].args[0], ast.Name)
+    assert write_calls[0].args[0].id == "first_seen_soc_alerts"
+
+
+def test_workflow_hands_alerts_to_the_soc_service_in_bounded_batches() -> None:
+    """The node opens no database: it sends batches to ``soc.write_alerts`` and adds the answers up."""
+    functions = _load_workflow_functions("_triage_write_soc_db")
+    calls: list[tuple[int, str, str]] = []
+
+    class FakeSoc:
+        def write_alerts(self, alerts, run_id, source_file=""):
+            calls.append((len(alerts), run_id, source_file))
+            return {"backend": "anywhere", "path": "the/alert/store", "table": "alert_records",
+                    "rows": len(alerts), "inserted_rows": len(alerts) - 1, "updated_rows": 1, "unchanged_rows": 0}
+
+    functions["soc"] = FakeSoc()
+    functions["inputs"] = {"loaded_files": ["/source/batch.jsonl"]}
+    alerts = [{"dedup_key": f"key-{index}", "is_duplicate": False} for index in range(450)]
+
+    result = functions["_triage_write_soc_db"](alerts, 42)
+
+    assert calls == [(200, "42", "/source/batch.jsonl"), (200, "42", "/source/batch.jsonl"), (50, "42", "/source/batch.jsonl")]
+    assert result == {"backend": "anywhere", "path": "the/alert/store", "table": "alert_records",
+                      "rows": 450, "inserted_rows": 447, "updated_rows": 3, "unchanged_rows": 0}
+
+
+def test_workflow_batches_by_bytes_and_sends_an_oversized_alert_alone() -> None:
+    functions = _load_workflow_functions("_triage_write_soc_db")
+    sizes: list[int] = []
+
+    class FakeSoc:
+        def write_alerts(self, alerts, run_id, source_file=""):
+            sizes.append(len(alerts))
+            return {"rows": len(alerts)}
+
+    functions["soc"] = FakeSoc()
+    functions["inputs"] = {}
+    megabyte = "x" * (1024 * 1024)
+    alerts = [
+        {"dedup_key": "a", "payload": megabyte},
+        {"dedup_key": "b", "payload": megabyte},  # a + b would pass 2 MiB
+        {"dedup_key": "huge", "payload": megabyte * 3},  # larger than a batch on its own
+        {"dedup_key": "c"},
+    ]
+
+    result = functions["_triage_write_soc_db"](alerts, "run")
+
+    assert sizes == [1, 1, 1, 1]
+    assert result["rows"] == 4
+
+
+def test_workflow_node_writes_the_sqlite_store_through_the_soc_service(tmp_path: Path, monkeypatch) -> None:
+    """End to end on this backend: the node's code, the service a node gets, the SQLite alert store."""
+    from flocks.coordination import workflow_services
+    from flocks.workflow.soc_store import _paths
+
+    db_path = tmp_path / "data" / "soc.db"
+    monkeypatch.setattr(_paths, "SOC_DB", db_path)
+    functions = _load_workflow_functions("_triage_write_soc_db")
+    functions["soc"] = workflow_services(lambda: False)["soc"]
+    functions["inputs"] = {"loaded_files": ["/source/batch.jsonl"]}
+    alerts = [
+        {"dedup_key": "first", "is_duplicate": False, "id": "1", "time": 1784026800},
+        {"dedup_key": "second", "is_duplicate": False, "id": "2", "time": 1784026801},
+    ]
+
+    first = functions["_triage_write_soc_db"](alerts, "run-1")
+    again = functions["_triage_write_soc_db"](alerts[:1], "run-2")
+
+    assert (first["backend"], first["path"], first["table"]) == ("sqlite", str(db_path), "alert_records")
+    assert (first["rows"], first["inserted_rows"], first["updated_rows"]) == (2, 2, 0)
+    assert (again["rows"], again["inserted_rows"], again["updated_rows"]) == (1, 0, 1)
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT dedup_key, source_file, json_extract(record_json, '$._triage_run_id') "
+            "FROM alert_records ORDER BY event_time"
+        ).fetchall()
+    assert rows == [("first", "/source/batch.jsonl", "run-2"), ("second", "/source/batch.jsonl", "run-1")]
+
+
+def test_soc_service_refuses_a_cancelled_workflow(tmp_path: Path, monkeypatch) -> None:
+    from flocks.coordination import workflow_services
+    from flocks.workflow.soc_store import _paths
+
+    monkeypatch.setattr(_paths, "SOC_DB", tmp_path / "soc.db")
+    service = workflow_services(lambda: True)["soc"]
+
+    assert service.exposed_methods == ("write_alerts",)
+    with pytest.raises(RuntimeError, match="cancelled"):
+        service.write_alerts([{"dedup_key": "first", "is_duplicate": False}], "run")
+    assert not (tmp_path / "soc.db").exists()
 
 
 def test_apply_triage_fields_preserves_original_alert_fields() -> None:

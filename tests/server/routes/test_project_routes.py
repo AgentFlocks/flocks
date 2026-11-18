@@ -539,6 +539,34 @@ async def test_project_list_reports_unreachable_worktree_as_unreadable(
     assert fetched.json()["pathStatus"] == "unreadable"
 
 
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="needs POSIX directory search permission enforced for this account",
+)
+@pytest.mark.asyncio
+async def test_create_project_reports_unreachable_directory_as_not_readable(
+    client: AsyncClient,
+    tmp_path: Path,
+):
+    """INC-61BE1F94: a folder the service account cannot reach is a permission to
+    grant, not a missing directory, and never a 500 carrying the server's path."""
+
+    parent = tmp_path / "svc-denied"
+    worktree = parent / "repo"
+    worktree.mkdir(parents=True)
+    parent.chmod(0o600)
+    try:
+        response = await client.post(
+            "/api/project",
+            json={"name": "Denied", "worktree": str(worktree)},
+        )
+    finally:
+        parent.chmod(0o700)
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST, response.text
+    assert response.json()["message"] == "Project directory is not readable"
+
+
 @pytest.mark.asyncio
 async def test_folder_browser_starts_at_home_when_path_is_omitted(
     client: AsyncClient,
@@ -579,6 +607,95 @@ async def test_folder_browser_lists_directories_and_blocks_outside_root(
         params={"path": str(escape_link)},
     )
     assert escaped_listing.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.asyncio
+async def test_folder_browser_opens_on_nearest_existing_ancestor_of_a_directory_not_created_yet(
+    client: AsyncClient,
+    tmp_path: Path,
+):
+    # INC-14B4A77C: the folder dialog fills in "<root>/<name>", which is only
+    # created on save, and its Browse button asks for that directory.
+    parent = tmp_path / "parent"
+    (parent / "child").mkdir(parents=True)
+    not_created = parent / "new-folder" / "src"
+
+    strict = await client.get("/api/project/folders", params={"path": str(not_created)})
+    assert strict.status_code == status.HTTP_400_BAD_REQUEST
+
+    response = await client.get(
+        "/api/project/folders",
+        params={"path": str(not_created), "nearest": "true"},
+    )
+
+    assert response.status_code == status.HTTP_200_OK, response.text
+    payload = response.json()
+    assert payload["missing"] is True
+    assert payload["path"] == str(parent.resolve())
+    assert payload["parent"] == str(tmp_path.resolve())
+    assert {entry["name"] for entry in payload["entries"]} == {"child"}
+    assert not not_created.exists() and not not_created.parent.exists()
+
+    existing = await client.get(
+        "/api/project/folders",
+        params={"path": str(parent), "nearest": "true"},
+    )
+    assert existing.status_code == status.HTTP_200_OK, existing.text
+    assert existing.json()["missing"] is False
+    assert existing.json()["path"] == str(parent.resolve())
+
+    default = await client.get("/api/project/folders", params={"nearest": "true"})
+    assert default.status_code == status.HTTP_200_OK, default.text
+    assert default.json()["missing"] is False
+
+
+@pytest.mark.asyncio
+async def test_folder_browser_nearest_ancestor_stays_inside_the_allowed_roots(
+    client: AsyncClient,
+    tmp_path: Path,
+):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    (parent / "notes.txt").write_text("a file")
+    escape_link = parent / "escape"
+    escape_link.symlink_to(Path.home(), target_is_directory=True)
+
+    async def browse(path: str):
+        return await client.get("/api/project/folders", params={"path": path, "nearest": "true"})
+
+    # Nothing outside the roots is listed, whether or not the directory exists.
+    outside = await browse(str(Path.home() / "inc-14b4a77c-not-created" / "src"))
+    assert outside.status_code == status.HTTP_403_FORBIDDEN
+    through_link = await browse(str(escape_link / "inc-14b4a77c-not-created"))
+    assert through_link.status_code == status.HTTP_403_FORBIDDEN
+    # A file cannot become a project directory, and neither can a path below one.
+    assert (await browse(str(parent / "notes.txt"))).status_code == status.HTTP_400_BAD_REQUEST
+    assert (await browse(str(parent / "notes.txt" / "below"))).status_code == status.HTTP_400_BAD_REQUEST
+    # Only an absolute path has ancestors worth offering.
+    assert (await browse("inc-14b4a77c-relative/new")).status_code == status.HTTP_400_BAD_REQUEST
+    # The climb is bounded: a directory far below anything that exists is not looked for.
+    from flocks.server.routes.project import _NEAREST_ANCESTOR_LEVELS
+
+    within_reach = parent.joinpath(*["new"] * _NEAREST_ANCESTOR_LEVELS)
+    reached = await browse(str(within_reach))
+    assert reached.status_code == status.HTTP_200_OK, reached.text
+    assert reached.json()["path"] == str(parent.resolve())
+    assert (await browse(str(within_reach / "new"))).status_code == status.HTTP_400_BAD_REQUEST
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nearest", ["false", "true"])
+async def test_folder_browser_rejects_a_path_with_a_nul_byte(
+    client: AsyncClient,
+    tmp_path: Path,
+    nearest: str,
+):
+    response = await client.get(
+        "/api/project/folders",
+        params={"path": f"{tmp_path}/a\x00b", "nearest": nearest},
+    )
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
 
 
 @pytest.mark.asyncio

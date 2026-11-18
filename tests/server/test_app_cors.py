@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from flocks.server import app as app_module
 
 
@@ -35,6 +37,24 @@ def test_read_cors_config_ignores_localhost_and_wildcard_runtime_hosts(monkeypat
     config_file = tmp_path / "missing.json"
     monkeypatch.setattr(app_module.Config, "get_config_file", lambda: config_file)
     monkeypatch.setenv("_FLOCKS_WEBUI_HOST", "127.0.0.1")
+    monkeypatch.setenv("_FLOCKS_WEBUI_PORT", "5173")
+
+    allow_origins, allow_origin_regex = app_module._read_cors_config()
+
+    assert allow_origins == [
+        "http://127.0.0.1:5173",
+        "http://[::1]:5173",
+        "http://localhost:5173",
+    ]
+    assert allow_origin_regex is None
+
+
+@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::"])
+def test_read_cors_config_wildcard_bind_allows_only_loopback_origins(monkeypatch, tmp_path, wildcard) -> None:
+    """``flocks start`` binds 0.0.0.0 by default: this machine's origins, not every host."""
+    config_file = tmp_path / "missing.json"
+    monkeypatch.setattr(app_module.Config, "get_config_file", lambda: config_file)
+    monkeypatch.setenv("_FLOCKS_WEBUI_HOST", wildcard)
     monkeypatch.setenv("_FLOCKS_WEBUI_PORT", "5173")
 
     allow_origins, allow_origin_regex = app_module._read_cors_config()

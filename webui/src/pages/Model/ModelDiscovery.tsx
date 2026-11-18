@@ -2,13 +2,14 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2, Pencil, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
 import { providerAPI } from '@/api/provider';
-import { extractErrorMessage } from '@/utils/error';
+import { extractErrorMessage, extractServerMessage } from '@/utils/error';
 import type {
   DiscoveredModel,
   InventoryModelInput,
   ModelInventoryDraft,
   ModelImportInput,
   ModelImportResult,
+  ProviderConnectionInput,
 } from '@/types';
 
 export function toModelImport(model: DiscoveredModel): ModelImportInput {
@@ -196,7 +197,7 @@ function ModelEditor({
 
 interface Props {
   providerId: string;
-  credentials?: { api_key?: string; base_url?: string };
+  credentials?: ProviderConnectionInput;
   mode: 'stage' | 'import';
   newInstance?: boolean;
   existingModelIds?: string[];
@@ -251,7 +252,9 @@ export default function ModelDiscovery({
   deletedRef.current = deleted;
   const apiKey = credentials?.api_key,
     baseUrl = credentials?.base_url;
-  const previousConnection = useRef({ providerId, apiKey, baseUrl });
+  // Unsaved SSL settings change the connection as much as the address does.
+  const tls = `${credentials?.verify_ssl ?? ''}|${credentials?.ca_cert ?? ''}`;
+  const previousConnection = useRef({ providerId, apiKey, baseUrl, tls });
 
   useEffect(() => {
     const version = ++request.current;
@@ -289,10 +292,10 @@ export default function ModelDiscovery({
 
   useEffect(() => {
     const previous = previousConnection.current;
-    previousConnection.current = { providerId, apiKey, baseUrl };
+    previousConnection.current = { providerId, apiKey, baseUrl, tls };
     if (
       previous.providerId !== providerId ||
-      (previous.apiKey === apiKey && previous.baseUrl === baseUrl) ||
+      (previous.apiKey === apiKey && previous.baseUrl === baseUrl && previous.tls === tls) ||
       !loaded
     )
       return;
@@ -305,7 +308,7 @@ export default function ModelDiscovery({
     setRows((current) => current.filter((row) => row.existing));
     // Saved-model edits, switches, and explicit deletions belong to this
     // provider, even when the credentials for the next discovery change.
-  }, [providerId, apiKey, baseUrl, loaded]);
+  }, [providerId, apiKey, baseUrl, tls, loaded]);
 
   useEffect(() => {
     if (!shouldLoad || lastInventoryKey.current === inventoryKey) return;
@@ -419,7 +422,8 @@ export default function ModelDiscovery({
       setDirty(true);
       if (response.data.source === 'catalog') setNotice(t('compact.catalogNotice'));
     } catch (reason) {
-      if (version === request.current) setError(extractErrorMessage(reason));
+      // A refusal says what to fix; a server failure ("Internal server error") or a lost request does not.
+      if (version === request.current) setError(extractServerMessage(reason) || t('discovery.requestFailed'));
     } finally {
       if (version === request.current) setLoading(false);
     }

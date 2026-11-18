@@ -447,22 +447,24 @@ class WeixinQrStartRequest(BaseModel):
 
 
 def _resolve_ilink_base_url(raw: Optional[str]) -> str:
-    """Accept only a public https iLink endpoint.
+    """Accept a public https iLink endpoint, or one on this machine's loopback.
 
     The value is fetched server-side; an arbitrary URL would turn this route
-    into a probe of the internal network.
+    into a probe of the internal network. Loopback (a local relay or mock of
+    iLink) is allowed, over plain http too since it never leaves the host.
     """
     from flocks.channel.builtin.weixin.config import ILINK_BASE_URL
+    from flocks.tool.web.webfetch import is_loopback_host
 
     base_url = (raw or "").strip()
     if not base_url:
         return ILINK_BASE_URL
     parsed = urlparse(base_url)
     host = (parsed.hostname or "").strip().lower()
+    if parsed.scheme in ("http", "https") and host and is_loopback_host(host):
+        return base_url.rstrip("/")
     if parsed.scheme != "https" or not host:
         raise HTTPException(status_code=422, detail="baseUrl must be an https URL")
-    if host == "localhost" or host.endswith(".localhost"):
-        raise HTTPException(status_code=422, detail="baseUrl must not point at a local address")
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:

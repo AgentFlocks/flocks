@@ -3,6 +3,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from tests.provider.tls_helpers import assert_no_verify_context
+
 from flocks.provider.provider import ChatMessage, ProviderConfig
 from flocks.provider.sdk.openai import OpenAIProvider
 
@@ -37,7 +39,7 @@ class TestOpenAIProviderConfiguration:
         assert mock_http_client.call_count == 1
         kwargs = mock_http_client.call_args.kwargs
         assert kwargs["trust_env"] is True
-        assert kwargs["verify"] is False
+        assert_no_verify_context(kwargs["verify"])
         timeout_arg = kwargs["timeout"]
         assert getattr(timeout_arg, "connect", None) == 30.0
         assert getattr(timeout_arg, "read", None) == 180.0

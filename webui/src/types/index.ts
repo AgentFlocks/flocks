@@ -240,6 +240,17 @@ export interface Tool {
   enabled_default?: boolean;
   /** True when a user setting is recorded in flocks.json `tool_settings`. */
   enabled_customized?: boolean;
+  /**
+   * Enabled flag of the API service that gates this tool; null or absent when
+   * no service does. While false the tool cannot be switched on by itself.
+   */
+  service_enabled?: boolean | null;
+  /**
+   * integration_type of that service, as the API service list reports it.
+   * 'device' means it is managed on the Device Integration page and is not
+   * listed on the API tab, whatever `source` says.
+   */
+  service_integration_type?: string | null;
   requires_confirmation: boolean;
 }
 
@@ -453,9 +464,28 @@ export interface ProviderCredentials {
   fields?: Record<string, string | undefined>;
   secret_ids?: Record<string, string>;
   has_credential: boolean;
+  /** LLM providers: false when certificate checks are off (they are on by default). */
+  verify_ssl?: boolean | null;
+  /** LLM providers: extra trusted CA, as PEM text or a path on the server. */
+  ca_cert?: string | null;
+  /** Whether this provider's client follows `verify_ssl` / `ca_cert`. */
+  tls_configurable?: boolean;
 }
 
-export interface ProviderCredentialInput {
+/** SSL settings of an LLM provider in a request; omitted ones stay as saved. */
+export interface ProviderTlsInput {
+  verify_ssl?: boolean;
+  /** PEM text or an absolute path on the server; empty removes it. */
+  ca_cert?: string;
+}
+
+/** What a connection check sends: unsaved form values in place of the saved ones. */
+export interface ProviderConnectionInput extends ProviderTlsInput {
+  api_key?: string;
+  base_url?: string;
+}
+
+export interface ProviderCredentialInput extends ProviderTlsInput {
   secret_id?: string;
   api_key?: string;
   secret?: string;
@@ -669,7 +699,7 @@ export interface UsageStats {
 }
 
 /** Custom provider creation */
-export interface CustomProviderCreate {
+export interface CustomProviderCreate extends ProviderTlsInput {
   name: string;
   base_url: string;
   api_key?: string;
@@ -741,6 +771,8 @@ export interface CatalogProvider {
   model_count: number;
   models: CatalogModel[];
   allow_multiple?: boolean;
+  /** Whether the add dialog offers the SSL certificate settings. */
+  tls_configurable?: boolean;
 }
 
 export interface CatalogCredentialSchema {

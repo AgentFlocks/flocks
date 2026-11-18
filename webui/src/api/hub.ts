@@ -1,4 +1,5 @@
 import client, { getApiBase } from './client';
+import { extractServerMessage } from '@/utils/error';
 
 export type HubPluginType = 'skill' | 'agent' | 'tool' | 'device' | 'workflow' | 'webui' | 'component';
 export type HubPluginState =
@@ -233,8 +234,8 @@ export const hubAPI = {
       })
         .then(async (res) => {
           if (!res.ok || !res.body) {
-            const payload = await res.json().catch(() => null) as { detail?: unknown } | null;
-            reject(new Error(typeof payload?.detail === 'string' ? payload.detail : `HTTP ${res.status}`));
+            const payload: unknown = await res.json().catch(() => null);
+            reject(new Error(extractServerMessage({ response: { data: payload } }) ?? `HTTP ${res.status}`));
             return;
           }
 

@@ -786,7 +786,9 @@ def test_coordination_answers_for_one_process():
 
     assert asyncio.run(coordination.sessions_running_elsewhere()) == []
     assert coordination.page_api_database() is None
-    assert coordination.workflow_services(lambda: False) == {}
+    # The SOC suite's data service: what its triage workflow writes and its pages read through.
+    assert set(coordination.workflow_services(lambda: False)) == {"soc"}
+    assert set(coordination.page_api_services()) == {"soc"}
 
 
 def test_coordination_recognises_a_duplicate_key_on_either_database():

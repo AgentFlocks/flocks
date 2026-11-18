@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { ArrowUp, FolderOpen, HardDrive, Loader2, X } from 'lucide-react';
 import apiClient from '@/api/client';
 import { useToast } from '@/components/common/Toast';
+import { extractErrorMessage } from '@/utils/error';
 
 export interface ProjectFolderSummary {
   id: string;
@@ -22,11 +23,19 @@ interface FolderBrowserResponse {
   parent: string | null;
   roots: FolderEntry[];
   entries: FolderEntry[];
+  /** The requested directory does not exist yet; `path` is its nearest existing ancestor. */
+  missing?: boolean;
 }
 
 export function pathBasename(path: string): string {
   const parts = path.replace(/[\\/]+$/, '').split(/[\\/]/);
   return parts[parts.length - 1] || path;
+}
+
+/** Append `name` to a server path with the separator that path uses, so a Windows root does not read `C:\Users\me/name`. */
+export function joinFolderPath(root: string, name: string): string {
+  const separator = /^(?:[A-Za-z]:|\\\\)/.test(root) ? '\\' : '/';
+  return `${root.replace(/[\\/]+$/, '')}${separator}${name}`;
 }
 
 interface ProjectFolderDialogProps {
@@ -54,21 +63,28 @@ export default function ProjectFolderDialog({ mode, project, onClose, onSaved }:
   const [browser, setBrowser] = useState<FolderBrowserResponse | null>(null);
   const [browserLoading, setBrowserLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // A missing name or directory is answered under its field, not as a failed save.
+  const [nameError, setNameError] = useState('');
+  const [pathError, setPathError] = useState('');
   const requestIdRef = useRef(0);
 
   const loadBrowser = useCallback(async (path?: string) => {
     const requestId = ++requestIdRef.current;
     setBrowserLoading(true);
     try {
-      const response = await apiClient.get('/api/project/folders', { params: { path: path?.trim() || undefined } });
+      // `nearest`: the directory may only be created on save, so the picker opens on what exists above it.
+      const response = await apiClient.get('/api/project/folders', { params: { path: path?.trim() || undefined, nearest: true } });
       if (requestId !== requestIdRef.current) return;
       const next = response.data as FolderBrowserResponse;
       setBrowser(next);
+      // The listing stands in for a directory that is not there yet: nothing was picked, keep what is typed.
+      if (next.missing) return;
       setWorktree(next.path);
       setWorktreeEdited(true);
+      setPathError('');
       if (!nameEdited) setName(pathBasename(next.path));
-    } catch (err: any) {
-      if (requestId === requestIdRef.current) toast.error(t('history.folderBrowseFailed'), err?.message);
+    } catch (err: unknown) {
+      if (requestId === requestIdRef.current) toast.error(t('history.folderBrowseFailed'), extractErrorMessage(err, ''));
     } finally {
       if (requestId === requestIdRef.current) setBrowserLoading(false);
     }
@@ -92,8 +108,13 @@ export default function ProjectFolderDialog({ mode, project, onClose, onSaved }:
   useEffect(() => {
     if (mode !== 'create' || worktreeEdited || !defaultRoot) return;
     const folderName = name.trim().replace(/[\\/]+/g, '-');
-    setWorktree(folderName ? `${defaultRoot.replace(/[\\/]+$/, '')}/${folderName}` : '');
+    setWorktree(folderName ? joinFolderPath(defaultRoot, folderName) : '');
   }, [defaultRoot, mode, name, worktreeEdited]);
+
+  // A field filled in for the user (the directory follows the name, a picked
+  // directory names the folder) no longer lacks a value.
+  useEffect(() => { if (name.trim()) setNameError(''); }, [name]);
+  useEffect(() => { if (worktree.trim()) setPathError(''); }, [worktree]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -107,23 +128,19 @@ export default function ProjectFolderDialog({ mode, project, onClose, onSaved }:
     if (submitting) return;
     const nextName = name.trim();
     const nextWorktree = worktree.trim();
-    if (!nextName) {
-      toast.error(t('history.folderSaveFailed'), t('history.folderNameEmpty'));
-      return;
-    }
-    if (mode === 'create' && !nextWorktree) {
-      toast.error(t('history.folderSaveFailed'), t('history.folderPathEmpty'));
-      return;
-    }
+    const missingName = nextName ? '' : t('history.folderNameEmpty');
+    const missingPath = mode === 'create' && !nextWorktree ? t('history.folderPathEmpty') : '';
+    setNameError(missingName);
+    setPathError(missingPath);
+    if (missingName || missingPath) return;
     setSubmitting(true);
     try {
       const response = mode === 'create'
         ? await apiClient.post('/api/project', { name: nextName, worktree: nextWorktree })
         : await apiClient.patch(`/api/project/${project?.id}`, { name: nextName });
       onSaved(response.data as ProjectFolderSummary);
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      toast.error(t('history.folderSaveFailed'), typeof detail === 'string' ? detail : err?.message);
+    } catch (err: unknown) {
+      toast.error(t(mode === 'create' ? 'history.folderCreateFailed' : 'history.folderRenameFailed'), extractErrorMessage(err, ''));
     } finally {
       setSubmitting(false);
     }
@@ -154,9 +171,12 @@ export default function ProjectFolderDialog({ mode, project, onClose, onSaved }:
               maxLength={80}
               disabled={submitting}
               placeholder={t('history.folderNamePlaceholder')}
-              onChange={(event) => { setName(event.target.value); setNameEdited(true); }}
+              onChange={(event) => { setName(event.target.value); setNameEdited(true); setNameError(''); }}
+              aria-invalid={nameError ? true : undefined}
+              aria-describedby={nameError ? 'project-folder-name-error' : undefined}
               className={inputClass}
             />
+            {nameError && <p id="project-folder-name-error" className="mt-1.5 text-xs text-red-600 dark:text-red-400">{nameError}</p>}
           </div>
           {mode === 'create' && (
             <div>
@@ -172,8 +192,11 @@ export default function ProjectFolderDialog({ mode, project, onClose, onSaved }:
                     setBrowserLoading(false);
                     setWorktree(event.target.value);
                     setWorktreeEdited(true);
+                    setPathError('');
                     if (!nameEdited) setName(pathBasename(event.target.value));
                   }}
+                  aria-invalid={pathError ? true : undefined}
+                  aria-describedby={pathError ? 'project-folder-path-error' : undefined}
                   className={`${inputClass} min-w-0 flex-1 font-mono text-xs`}
                 />
                 <button
@@ -186,7 +209,9 @@ export default function ProjectFolderDialog({ mode, project, onClose, onSaved }:
                   {t('history.chooseFolder')}
                 </button>
               </div>
-              <p className="mt-1.5 text-xs text-zinc-400">{t('history.folderPathHint')}</p>
+              {pathError
+                ? <p id="project-folder-path-error" className="mt-1.5 text-xs text-red-600 dark:text-red-400">{pathError}</p>
+                : <p className="mt-1.5 text-xs text-zinc-400">{t('history.folderPathHint')}</p>}
               {browser && (
                 <div className="mt-2 overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
                   <div className="flex items-center gap-1 border-b border-zinc-100 bg-zinc-50 px-2 py-1.5 dark:border-zinc-800 dark:bg-zinc-950">

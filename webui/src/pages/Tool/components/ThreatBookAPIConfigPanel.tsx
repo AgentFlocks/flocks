@@ -16,6 +16,7 @@ import {
   type ThreatBookRegion,
 } from "@/constants/threatbook";
 import type { ProviderCredentials } from "@/types";
+import { extractErrorMessage } from "@/utils/error";
 
 interface Props {
   serviceName: string;
@@ -101,10 +102,10 @@ export default function ThreatBookAPIConfigPanel({
       } catch (error: any) {
         setResult({
           success: false,
-          message:
-            error.response?.data?.detail ||
-            error.message ||
+          message: extractErrorMessage(
+            error,
             t("detail.threatbookApi.revealFailed"),
+          ),
         });
         return;
       } finally {
@@ -165,10 +166,10 @@ export default function ThreatBookAPIConfigPanel({
     } catch (error: any) {
       setResult({
         success: false,
-        message:
-          error.response?.data?.detail ||
-          error.message ||
+        message: extractErrorMessage(
+          error,
           t("detail.threatbookApi.saveFailed"),
+        ),
       });
       onTestResult?.(serviceName, { status: "error" });
     } finally {
@@ -184,10 +185,10 @@ export default function ThreatBookAPIConfigPanel({
     } catch (error: any) {
       setResult({
         success: false,
-        message:
-          error.response?.data?.detail ||
-          error.message ||
+        message: extractErrorMessage(
+          error,
           t("detail.threatbookApi.testFailed"),
+        ),
       });
       onTestResult?.(serviceName, { status: "error" });
     } finally {

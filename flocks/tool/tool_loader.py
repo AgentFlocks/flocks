@@ -89,7 +89,11 @@ def _load_provider_config(yaml_path: Path) -> Optional[Dict[str, Any]]:
     if not provider_file.is_file():
         return None
     try:
-        data = yaml.safe_load(provider_file.read_text(encoding="utf-8"))
+        # Read once per tool on every plugin reload: libyaml when available.
+        data = yaml.load(
+            provider_file.read_text(encoding="utf-8"),
+            Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader),
+        )
         return data if isinstance(data, dict) else None
     except Exception as e:
         log.warn("tool.provider.load_failed", {

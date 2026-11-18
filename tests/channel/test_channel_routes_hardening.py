@@ -66,12 +66,45 @@ def test_record_inbound_and_bind_reject_unknown_channel(client):
     assert r.status_code == 404
 
 
-@pytest.mark.parametrize("base_url", ["http://127.0.0.1:5173", "https://localhost", "https://10.0.0.1", "ftp://x"])
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://example.com", "https://10.0.0.1", "https://192.168.1.1", "https://[fd00::1]", "ftp://x", "ftp://127.0.0.1",
+        "http://127.0.0.1%25.attacker.example",
+    ],
+)
 def test_weixin_qr_rejects_non_public_base_url(client, base_url):
     r = client.post("/api/channel/weixin/qr-login/start", json={"baseUrl": base_url})
     assert r.status_code == 422, r.text
     r = client.get("/api/channel/weixin/qr-login/status", params={"qrcode": "abc", "baseUrl": base_url})
     assert r.status_code == 422, r.text
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://127.0.0.1:5173", "https://localhost", "http://localhost:8080/", "http://[::1]:9000"],
+)
+def test_weixin_qr_accepts_loopback_base_url(client, monkeypatch, base_url):
+    """本机回环上的 iLink 地址（本地中转、联调桩）放行，http 也可以。"""
+    from flocks.channel.builtin.weixin import qr_login
+
+    seen: list[str] = []
+
+    async def _start(*, base_url):
+        seen.append(base_url)
+        return {"qrcode_value": "v", "qrcode_url": "u"}
+
+    async def _poll(*, qrcode_value, base_url):
+        seen.append(base_url)
+        return {"status": "waiting"}
+
+    monkeypatch.setattr(qr_login, "start_qr_login", _start)
+    monkeypatch.setattr(qr_login, "poll_qr_status", _poll)
+    r = client.post("/api/channel/weixin/qr-login/start", json={"baseUrl": base_url})
+    assert r.status_code == 200, r.text
+    r = client.get("/api/channel/weixin/qr-login/status", params={"qrcode": "abc", "baseUrl": base_url})
+    assert r.status_code == 200, r.text
+    assert seen == [base_url.rstrip("/")] * 2
 
 
 def test_whatsapp_paths_must_stay_inside_flocks_root(client, tmp_path, monkeypatch):
@@ -138,3 +171,40 @@ def test_session_send_refuses_other_users_session(monkeypatch):
     client = TestClient(app, raise_server_exceptions=False)
     r = client.post("/api/channel/session-send", json={"session_id": "ses_other", "text": "x"})
     assert r.status_code == 403, r.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proxy", [None, "http://proxy.invalid:3128"])
+async def test_weixin_qr_login_reaches_a_loopback_ilink_directly(monkeypatch, proxy):
+    """本机回环上的 iLink 中转直连，环境里配了代理也不经代理。"""
+    import http.server
+    import threading
+
+    from flocks.channel.builtin.weixin import qr_login
+
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    if proxy:
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            monkeypatch.setenv(name, proxy)
+    body = json.dumps({"qrcode": "abc123", "qrcode_img_content": "https://liteapp.weixin.qq.com/q/x"}).encode()
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        result = await qr_login.start_qr_login(base_url=f"http://127.0.0.1:{server.server_address[1]}")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert result == {"qrcode_value": "abc123", "qrcode_url": "https://liteapp.weixin.qq.com/q/x"}

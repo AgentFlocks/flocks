@@ -72,7 +72,26 @@ describe("ProductNameProvider", () => {
     );
     expect(screen.getByTestId("display-name")).toHaveTextContent("Acme SOC");
     expect(screen.getByTestId("configured-name")).toHaveTextContent("Acme SOC");
-    expect(screen.getByTestId("logo-url")).toHaveTextContent("none");
+    // A custom name alone keeps the Flocks logo; only an uploaded favicon replaces it.
+    expect(screen.getByTestId("logo-url")).toHaveTextContent("/favicon.svg");
+  });
+
+  it("uses the uploaded favicon as the logo", async () => {
+    uiConfigApi.getDisplay.mockResolvedValue({
+      displayName: "Acme SOC",
+      configuredDisplayName: "Acme SOC",
+      faviconUrl: "/api/config/ui-favicon?v=42",
+    });
+
+    render(
+      <ProductNameProvider>
+        <ProductNames />
+      </ProductNameProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("logo-url")).toHaveTextContent("/api/config/ui-favicon?v=42"),
+    );
   });
 
   it("falls back to the default name when the display config cannot be loaded", async () => {

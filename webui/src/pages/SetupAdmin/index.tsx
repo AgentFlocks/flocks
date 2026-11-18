@@ -3,10 +3,49 @@ import { useTranslation } from 'react-i18next';
 import { useAuth } from '@/contexts/AuthContext';
 import PasswordInput from '@/components/common/PasswordInput';
 import AuthLayout from '@/components/layout/AuthLayout';
+import { useProductName } from '@/contexts/ProductNameContext';
+
+const CODE_CLASS = 'rounded bg-gray-100 px-1.5 py-0.5 text-gray-700 dark:bg-[#46515e] dark:text-[#d7dee8]';
+
+/** The first administrator is created on the server's own machine; other browsers are told how. */
+function RemoteSetupNotice({ localUrl, onRefresh }: { localUrl: string | null; onRefresh: () => void }) {
+  const { t } = useTranslation('auth');
+  const { productName } = useProductName();
+  return (
+    <div className="w-full max-w-lg bg-white border border-gray-200 rounded-xl p-6 shadow-sm space-y-4 dark:border-[#4a5563] dark:bg-[#303842] dark:shadow-xl dark:shadow-black/20">
+      <div>
+        <h1 className="text-xl font-semibold text-gray-900 dark:text-[#d7dee8]">{t('setup.title')}</h1>
+        <p className="text-sm text-gray-500 mt-1 dark:text-[#b8c2cc]">{t('setup.remoteDescription', { productName })}</p>
+      </div>
+      <ol className="list-decimal pl-5 space-y-3 text-sm text-gray-700 dark:text-[#d7dee8]">
+        {localUrl && (
+          <li>
+            {t('setup.remoteLocalBrowser')}
+            {' '}
+            <code className={CODE_CLASS}>{localUrl}</code>
+          </li>
+        )}
+        <li>
+          {t(localUrl ? 'setup.remoteCommandOr' : 'setup.remoteCommand')}
+          {' '}
+          <code className={CODE_CLASS}>flocks admin generate-one-time-password</code>
+          {t('setup.remoteCommandAfter')}
+        </li>
+      </ol>
+      <button
+        type="button"
+        onClick={onRefresh}
+        className="w-full bg-slate-900 text-white rounded-lg py-2.5 font-medium hover:bg-slate-800 dark:bg-[#46515e] dark:hover:bg-[#5a6573]"
+      >
+        {t('setup.remoteRefresh')}
+      </button>
+    </div>
+  );
+}
 
 export default function SetupAdminPage() {
   const { t } = useTranslation('auth');
-  const { bootstrapAdmin } = useAuth();
+  const { bootstrapAdmin, setupAllowed, localSetupUrl, refresh } = useAuth();
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -34,6 +73,14 @@ export default function SetupAdminPage() {
       setSubmitting(false);
     }
   };
+
+  if (!setupAllowed) {
+    return (
+      <AuthLayout>
+        <RemoteSetupNotice localUrl={localSetupUrl} onRefresh={() => void refresh()} />
+      </AuthLayout>
+    );
+  }
 
   return (
     <AuthLayout>

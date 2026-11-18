@@ -53,6 +53,7 @@ const NotificationModal = lazyLayoutComponent(() => import('@/components/common/
 const TokenPolicyNotice = lazyLayoutComponent(() => import('@/components/common/TokenPolicyNotice'), ['notification']);
 import { DEFAULT_UPDATE_CHANNEL, checkUpdate, getCurrentRelease, noteOlderBackend, type VersionInfo } from '@/api/update';
 import { enterpriseUpgradeApi, enterpriseVersionInfo } from '@/api/enterpriseUpgrade';
+import { isServiceRefusal } from '@/utils/error';
 import { withReleaseUpdate } from '@/utils/releaseUpdate';
 import type { EnterpriseUpdate } from '@/components/common/UpdateModal';
 import {
@@ -64,6 +65,7 @@ import {
 import registry, { type ExtensionNavItem } from '@ext/registry';
 import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
+import { formatProductVersion } from '@/utils/productVersion';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import { BackendStatusBanner } from '@/components/common/BackendStatusBanner';
 import { InstallationResultBanner } from '@/components/common/InstallationResultBanner';
@@ -143,11 +145,8 @@ interface LayoutProps {
   contentRoutes?: RouteObject[];
 }
 
-function formatUpdateVersion(version?: string | null): string | null {
-  const raw = (version || '').trim();
-  if (!raw) return null;
-  return /^([a-z]+-)?v/i.test(raw) ? raw : `v${raw}`;
-}
+// Versions on screen are written one way: v<year>.<month>.<day>.<build> (utils/productVersion).
+const formatUpdateVersion = formatProductVersion;
 
 function currentProductVersion(info: VersionInfo): string | null {
   return info.current_version || null;
@@ -188,7 +187,9 @@ function buildUpdateNotification(
     return {
       id: `whats-new-${info.channel}-${releaseKey}`,
       kind: 'whats_new',
-      title: isZh ? `${productName} ${bundleVersion} 更新内容` : `What's new in ${productName} ${bundleVersion}`,
+      title: isZh
+        ? `${productName} ${formatProductVersion(bundleVersion)} 更新内容`
+        : `What's new in ${productName} ${formatProductVersion(bundleVersion)}`,
       summary,
       body: releaseNotes,
       highlights: [],
@@ -318,6 +319,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       icon: item.icon,
       highlight: item.highlight,
       badge: item.badge,
+      badgeTone: item.badgeTone,
+      dialog: item.dialog,
     });
     const visible = registry.navItems
       .filter((item) => !item.adminOnly || user?.role === 'admin')
@@ -389,7 +392,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const findEnterpriseUpdate = useCallback(async () => {
     if (registry.updateChannel) return null;
     const situation = await enterpriseUpgradeApi.situation().catch((err) => {
-      if (err?.response?.status === 404) noteOlderBackend();
+      // Its own 404 for the question: on some proxies a service that is restarting is a 404 too.
+      if (err?.response?.status === 404 && isServiceRefusal(err)) noteOlderBackend();
       return undefined;
     });
     setEnterpriseRead(true);

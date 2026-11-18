@@ -174,20 +174,24 @@ def generate_one_time_password(
 ):
     """
     Generate a one-time admin password on this host
-    (must be changed on first login).
+    (must be changed on first login). With no account yet, this creates the
+    first administrator, for a machine nobody opens the setup page on.
     """
 
-    async def _run() -> str:
+    async def _run() -> Tuple[str, bool]:
         await AuthService.use_installed_backend()
         await AuthService.init()
-        return await AuthService.generate_admin_temp_password(username=username)
+        first = not await AuthService.has_users()
+        return await AuthService.generate_admin_temp_password(username=username), first
 
     try:
-        temp_password = asyncio.run(_run())
+        temp_password, created = asyncio.run(_run())
     except Exception as exc:
         console.print(f"[red]Failed to generate one-time password: {exc}[/red]")
         raise typer.Exit(1) from exc
 
+    if created:
+        console.print(f"[green]Created the first administrator account: {username}[/green]")
     console.print(
         f"[yellow]One-time admin password generated "
         f"(valid for {TEMP_PASSWORD_TTL_HOURS} hours, password change required on first login)[/yellow]"

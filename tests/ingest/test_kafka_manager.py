@@ -223,6 +223,14 @@ async def test_worker_decodes_queued_raw_message(monkeypatch: pytest.MonkeyPatch
 
 
 def test_trigger_concurrency_config_is_honored_with_safety_caps() -> None:
+    default = TriggerDefinition(type="kafka")
+    assert kafka_manager._worker_count_for_trigger(default) == 1
+    assert kafka_manager._queue_size_for_trigger(default) == 100
+
+    at_limit = TriggerDefinition(type="kafka", concurrency={"maxParallel": 20, "queueSize": 5000})
+    assert kafka_manager._worker_count_for_trigger(at_limit) == 20
+    assert kafka_manager._queue_size_for_trigger(at_limit) == 5000
+
     trigger = TriggerDefinition.model_validate(
         {
             "id": "kafka-limited",
@@ -240,8 +248,8 @@ def test_trigger_concurrency_config_is_honored_with_safety_caps() -> None:
             "concurrency": {"maxParallel": 999, "queueSize": 999_999},
         }
     )
-    assert kafka_manager._worker_count_for_trigger(oversized) == kafka_manager._MAX_CONCURRENT_EXECUTIONS
-    assert kafka_manager._queue_size_for_trigger(oversized) == kafka_manager._MAX_QUEUE_SIZE
+    assert kafka_manager._worker_count_for_trigger(oversized) == 20
+    assert kafka_manager._queue_size_for_trigger(oversized) == 5000
 
 
 @pytest.mark.asyncio

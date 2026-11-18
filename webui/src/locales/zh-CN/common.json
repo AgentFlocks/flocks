@@ -114,6 +114,8 @@
     "createTitle": "创建 {{entityType}}",
     "editTitle": "编辑 {{entityType}}",
     "editTitleWithName": "编辑 {{entityType}}：{{entityName}}",
+    "viewTitle": "{{entityType}}详情",
+    "viewTitleWithName": "{{entityType}}详情：{{entityName}}",
     "defaultCreate": "创建",
     "defaultSave": "保存",
     "tabDetails": "详情",

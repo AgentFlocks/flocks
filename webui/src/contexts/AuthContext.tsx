@@ -6,6 +6,8 @@ import { AuthContext, type AuthContextValue } from './authState';
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [bootstrapped, setBootstrapped] = useState<boolean | null>(null);
+  const [setupAllowed, setSetupAllowed] = useState(true);
+  const [localSetupUrl, setLocalSetupUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<LocalUser | null>(null);
 
@@ -14,6 +16,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const status = await authApi.bootstrapStatus();
       setBootstrapped(status.bootstrapped);
+      setSetupAllowed(status.setup_allowed !== false);
+      setLocalSetupUrl(status.local_url ?? null);
       setError(null);
       if (!status.bootstrapped) {
         setUser(null);
@@ -93,6 +97,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<AuthContextValue>(() => ({
     loading,
     bootstrapped,
+    setupAllowed,
+    localSetupUrl,
     error,
     user,
     refresh,
@@ -100,7 +106,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     bootstrapAdmin,
     logout,
     changePassword,
-  }), [loading, bootstrapped, error, user, refresh, login, bootstrapAdmin, logout, changePassword]);
+  }), [loading, bootstrapped, setupAllowed, localSetupUrl, error, user, refresh, login, bootstrapAdmin, logout, changePassword]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

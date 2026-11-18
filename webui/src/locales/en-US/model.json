@@ -166,7 +166,7 @@
     "providerType": "Provider Type",
     "baseUrl": "Base URL",
     "baseUrlOptional": "(optional, leave empty for default)",
-    "baseUrlRequired": "Please enter Base URL",
+    "baseUrlRequired": "Enter the API proxy URL.",
     "threatbookIoNodeNotice": "The international node (threatbook.io) is not yet available. The China node (threatbook.cn) is used for now.",
     "apiKey": "API Key",
     "ollamaNoKey": "(Ollama usually doesn't need this)",
@@ -237,7 +237,17 @@
     "retry": "Retry",
     "compatCreateFirst": "OpenAI-compatible providers must be created first; test the connection from the configuration dialog afterwards",
     "providerNameHint": "Creates a separate OpenAI-compatible provider instance; existing configurations are not overwritten.",
-    "close": "Close"
+    "close": "Close",
+    "tls": {
+      "title": "SSL certificate",
+      "verify": "Verify SSL certificate",
+      "verifyHint": "If an internal gateway uses a self-signed certificate or one issued by an internal CA, add the CA certificate below or turn verification off.",
+      "caCert": "CA certificate",
+      "optional": "(optional)",
+      "caCertPlaceholder": "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----\nor a path on the server, e.g. /etc/pki/ca-trust/source/anchors/corp-ca.pem",
+      "caCertHint": "Paste one or more CA certificates in PEM format, or enter the absolute path of a certificate file on the server. The system's root certificates stay trusted.",
+      "disabledWarning": "Certificate verification is off: the gateway's certificate is not checked, and older TLS (RSA key exchange, TLS 1.0/1.1, …) is accepted. Only do this for trusted gateways on your internal network."
+    }
   },
   "wizard": {
     "providerSaved": "Provider Saved",
@@ -277,6 +287,7 @@
     "importing": "Adding…",
     "empty": "The service returned no models. Fetch again or add a model manually.",
     "failed": "Could not fetch models. Review the message above, then retry or add a model manually.",
+    "requestFailed": "Could not fetch the model list. Check the API proxy URL and the network, then try again; if it still fails, contact your administrator.",
     "importSummary": "Added {{added}}, already present {{skipped}}, failed {{failed}}.",
     "retryFailed": "Retry failed models",
     "importPartial": "Credentials saved. Some models could not be added; review the results and retry.",
@@ -296,9 +307,9 @@
       "models_discovered": "Select the models you want to add.",
       "catalog_fallback": "This service does not expose a model list. Showing built-in recommendations.",
       "discovery_unsupported": "Model discovery is not available for this service. Add models manually.",
-      "missing_base_url": "Enter the Base URL first.",
+      "missing_base_url": "Enter the API proxy URL.",
       "missing_credentials": "Enter the required credentials first.",
-      "invalid_base_url": "Check that the Base URL is a valid, complete URL.",
+      "invalid_base_url": "The API proxy URL is not valid. Enter the full address.",
       "authentication_failed": "Authentication failed. Check your API key.",
       "permission_denied": "Your credentials do not have permission to list models.",
       "rate_limited": "Too many requests. Try again later.",
@@ -307,7 +318,10 @@
       "connection_error": "Could not connect. Check the service address and network.",
       "invalid_response": "The model list response could not be recognized.",
       "response_too_large": "The service response is too large. Reduce the returned list or add models manually.",
-      "redirect_not_allowed": "The service returned a redirect. To protect credentials, it was not followed. Enter the final service URL and retry."
+      "redirect_not_allowed": "The service returned a redirect. To protect credentials, it was not followed. Enter the final service URL and retry.",
+      "tls_certificate_failed": "SSL certificate verification failed: the gateway uses a self-signed certificate or one issued by an internal CA. Add the CA certificate under SSL certificate, or turn off Verify SSL certificate.",
+      "tls_handshake_failed": "TLS handshake failed: the gateway uses an old TLS version or cipher suite, or the address has the wrong http/https scheme. Once the address is right, turning off Verify SSL certificate also accepts older TLS.",
+      "invalid_ca_cert": "The CA certificate could not be loaded. Check its content or path."
     },
     "reviewSelection": "Review fetched models",
     "invertVisible": "Invert filtered selection",
@@ -416,10 +430,11 @@
     "inventorySaveFailedAfterCredentials": "Connection information was saved, but the model list was not saved: {{error}}. Check and retry.",
     "saving": "Saving…",
     "checkKey": "Check connection",
-    "checkKeyHint": "Check whether the API key is valid.",
-    "checkModelListHint": "Verify the API key by fetching the live model list.",
+    "checkKeyHint": "Check whether the connection settings work.",
+    "checkModelListHint": "Check whether the connection settings work by fetching the model list.",
     "check": "Check",
     "checkingKey": "Checking…",
+    "checkFailed": "The connection check failed. Check the API proxy URL and the network, then try again; if it still fails, contact your administrator.",
     "keyUnverified": "This service cannot independently verify the key.",
     "supports_tools": "Tools",
     "supports_vision": "Vision",
@@ -429,9 +444,9 @@
       "models_discovered": "Select the models you want to add.",
       "catalog_fallback": "This service cannot independently verify the key.",
       "discovery_unsupported": "This service cannot independently verify the key.",
-      "missing_base_url": "Enter the Base URL first.",
+      "missing_base_url": "Enter the API proxy URL.",
       "missing_credentials": "Enter the required credentials first.",
-      "invalid_base_url": "Check that the Base URL is a valid, complete URL.",
+      "invalid_base_url": "The API proxy URL is not valid. Enter the full address.",
       "authentication_failed": "Authentication failed. Check your API key.",
       "permission_denied": "Insufficient permissions to verify the key.",
       "rate_limited": "Too many requests. Try again later.",
@@ -443,7 +458,10 @@
       "redirect_not_allowed": "The service returned a redirect. To protect credentials, it was not followed. Enter the final service URL and retry.",
       "key_valid": "The key is valid.",
       "model_list_verified": "Model list fetched successfully. Key verification passed.",
-      "key_check_unsupported": "This service cannot independently verify the key."
+      "key_check_unsupported": "This service cannot independently verify the key.",
+      "tls_certificate_failed": "SSL certificate verification failed: the gateway uses a self-signed certificate or one issued by an internal CA. Add the CA certificate under SSL certificate, or turn off Verify SSL certificate.",
+      "tls_handshake_failed": "TLS handshake failed: the gateway uses an old TLS version or cipher suite, or the address has the wrong http/https scheme. Once the address is right, turning off Verify SSL certificate also accepts older TLS.",
+      "invalid_ca_cert": "The CA certificate could not be loaded. Check its content or path."
     }
   }
 }

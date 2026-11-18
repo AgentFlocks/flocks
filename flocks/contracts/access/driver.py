@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import sqlite3
@@ -21,6 +22,10 @@ MAX_SCAN_ROWS = 50_000
 MAX_SCAN_BYTES = 32 * 1024 * 1024
 MAX_SCAN_SECONDS = 30
 SOURCE_ROW_ID_FIELD = "__flocks_source_row_id"
+#: The SOC suite's alert store, wherever the database backend keeps it
+#: (``flocks.workflow.soc_store``): the suite's contract names this kind and no
+#: file, table or database of its own.
+SOC_ALERTS_ADAPTER_KIND = "builtin-soc-alerts"
 
 
 class DriverProxy:
@@ -34,12 +39,14 @@ class DriverProxy:
 
     def execute(self, plan: QueryPlan) -> DriverResult:
         self._validate_plan(plan)
+        if plan.binding.adapter_kind == SOC_ALERTS_ADAPTER_KIND:
+            return self._sqlite_executor.execute(_soc_alerts_plan(plan))
         if plan.binding.adapter_kind == "builtin-sqlite-json":
             return self._sqlite_executor.execute(plan)
         return self._jsonl_executor.execute(plan)
 
     def _validate_plan(self, plan: QueryPlan) -> None:
-        if plan.binding.adapter_kind not in {"builtin-jsonl", "builtin-sqlite-json"}:
+        if plan.binding.adapter_kind not in {"builtin-jsonl", "builtin-sqlite-json", SOC_ALERTS_ADAPTER_KIND}:
             raise ContractRuntimeError(
                 "adapter_sandbox_unavailable",
                 status_code=400,
@@ -57,6 +64,25 @@ class DriverProxy:
                 user_message="WebUI contract data source cannot provide required fields.",
                 admin_message=f"Driver projection contains unavailable fields: {sorted(missing)}",
         )
+
+
+def _soc_alerts_plan(plan: QueryPlan) -> QueryPlan:
+    """The plan against the SOC alert store: here, JSON records in a SQLite file."""
+    from flocks.workflow.soc_store import alerts
+
+    options = dict(plan.binding.driver_options)
+    source = alerts.contract_source(options)
+    for name in ("settings", "settingsDir"):
+        options.pop(name, None)
+    db_path = Path(source.pop("db_path"))
+    binding = dataclasses.replace(
+        plan.binding,
+        adapter_kind="builtin-sqlite-json",
+        source_root=db_path,
+        driver_allowlist_roots=(db_path.parent,),
+        driver_options={**options, **source},
+    )
+    return dataclasses.replace(plan, binding=binding)
 
 
 class SqliteJsonDriverExecutor:

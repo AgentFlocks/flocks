@@ -179,6 +179,29 @@ async def take_licence(request: Request, request_id: str = _REQUEST_ID) -> dict[
     return {"application": application, "situation": await asyncio.to_thread(enterprise.situation)}
 
 
+@router.post("/applications/offline", summary="离线申请：生成交给授权方的申请信息（表单和这台机器的标识），不发给 Console")
+async def offline_application(form: ApplicationForm, user=Depends(_administrator)) -> dict[str, Any]:
+    try:
+        return {"application": await enterprise_application.offline_application(form.model_dump(), user.username)}
+    except enterprise.EnterpriseUpgradeError as exc:
+        raise _refused(exc) from exc
+
+
+class LicenceFile(BaseModel):
+    """A licence file's text: the license.json Console's offline issue downloads, or the bare token."""
+
+    content: str = Field(min_length=1, max_length=enterprise_application.MAX_LICENCE_CHARS)
+
+
+@router.post("/licence/import", summary="导入授权文件：写进这台机器，之后可以升级到企业版")
+async def import_licence(payload: LicenceFile, _user=Depends(_administrator)) -> dict[str, Any]:
+    try:
+        licence = await enterprise_application.import_licence(payload.content)
+    except enterprise.EnterpriseUpgradeError as exc:
+        raise _refused(exc) from exc
+    return {"licence": licence, "situation": await asyncio.to_thread(enterprise.situation)}
+
+
 @router.post("/licence/sync", summary="向 Console 同步这台机器的授权：续期、额度变更落到本机")
 async def sync_licence(request: Request) -> dict[str, Any]:
     require_admin(request)

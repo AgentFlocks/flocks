@@ -3,6 +3,8 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import AdminUsersPage from './index';
+import { authApi } from '@/api/auth';
+import { backendError } from '@/test/helpers';
 
 const logout = vi.fn(() => Promise.resolve());
 vi.mock('@/contexts/AuthContext', () => ({
@@ -12,7 +14,8 @@ vi.mock('@/api/auth', () => ({
   authApi: { resetPassword: vi.fn(() => Promise.resolve({ success: true, temporary_password: 'OTP-1234-5678', must_reset_password: true })) },
 }));
 vi.mock('@/components/common/ConfirmDialog', () => ({ useConfirm: () => () => Promise.resolve(true) }));
-vi.mock('@/components/common/Toast', () => ({ useToast: () => ({ success: vi.fn(), error: vi.fn() }) }));
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+vi.mock('@/components/common/Toast', () => ({ useToast: () => toast }));
 vi.mock('@/components/common/CopyButton', () => ({ default: () => <button type="button">copy</button> }));
 vi.mock('@/components/common/PageHeader', () => ({ default: ({ title, actions }: any) => <div><h1>{title}</h1>{actions}</div> }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k, i18n: { language: 'zh-CN' } }) }));
@@ -33,5 +36,16 @@ describe('AdminUsersPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'admin.resetDialogDone' }));
     await waitFor(() => expect(logout).toHaveBeenCalledTimes(1));
     expect(screen.queryByText('OTP-1234-5678')).not.toBeInTheDocument();
+  });
+
+  it('says why the password reset was refused instead of the bare status code', async () => {
+    logout.mockClear();
+    vi.mocked(authApi.resetPassword).mockRejectedValueOnce(backendError(429, '重置过于频繁，请 10 分钟后再试'));
+    render(<AdminUsersPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'admin.resetAction' }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('admin.resetFailedToast', '重置过于频繁，请 10 分钟后再试'));
+    expect(logout).not.toHaveBeenCalled();
   });
 });

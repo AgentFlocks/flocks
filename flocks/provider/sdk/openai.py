@@ -30,6 +30,7 @@ from flocks.provider.sdk.openai_base import (
     raise_if_response_body_unsafe,
     resolve_verify_ssl,
 )
+from flocks.provider.tls import httpx_verify
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.openai")
@@ -58,6 +59,7 @@ class OpenAIProvider(BaseProvider):
     """OpenAI (GPT) provider with tool support."""
 
     CATALOG_ID = "openai"
+    SUPPORTS_TLS_SETTINGS = True
 
     def __init__(self):
         super().__init__(provider_id="openai", name="OpenAI")
@@ -100,7 +102,7 @@ class OpenAIProvider(BaseProvider):
                 verify_ssl = resolve_verify_ssl(cfg_settings, default=True)
                 http_client = create_openai_http_client(
                     trust_env=trust_env,
-                    verify=verify_ssl,
+                    verify=httpx_verify(cfg_settings, trust_env=trust_env),
                     timeout=DEFAULT_HTTP_TIMEOUT,
                     custom_settings=cfg_settings,
                 )

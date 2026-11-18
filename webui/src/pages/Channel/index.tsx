@@ -21,6 +21,7 @@ import {
   Loader2,
   RotateCcw,
   ExternalLink,
+  Lock,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
@@ -657,23 +658,65 @@ function HostInput({
   );
 }
 
+// Admins read the config with each stored credential written as where it is kept
+// ({secret:…} in .secret.json, {env:…}, {file:…}), never as the credential itself.
+const CONFIG_REFERENCE_RE = /^\{(secret|env|file):([^{}]+)\}$/;
+
 function SecretInput({
   value,
   onChange,
   placeholder,
 }: {
   value: string;
-  onChange: (v: string) => void;
+  // undefined once the field is empty: an empty credential field is never
+  // sent, so the stored credential stays. Holds for every caller, the accounts
+  // nested under a channel included (an empty string there would overwrite it).
+  onChange: (v: string | undefined) => void;
   placeholder?: string;
 }) {
+  const { t } = useTranslation('channel');
   const [show, setShow] = useState(false);
+  // Typing replaces the stored credential. Nothing here remembers it, as one
+  // input can be reused for another field (the email auth modes).
+  const reference = CONFIG_REFERENCE_RE.exec(value ?? '');
+  const emit = (typed: string) => onChange(typed === '' ? undefined : typed);
+
+  if (reference) {
+    const [, kind, name] = reference;
+    const hint =
+      kind === 'env'
+        ? t('secretInput.envPlaceholder', { name })
+        : kind === 'file'
+          ? t('secretInput.filePlaceholder', { name })
+          : t('secretInput.savedPlaceholder');
+    return (
+      <div className="relative" title={t('secretInput.savedTitle')}>
+        <input
+          type="password"
+          value=""
+          onChange={(e) => emit(e.target.value)}
+          placeholder={hint}
+          autoComplete="new-password"
+          className="w-full px-3 py-1.5 pr-20 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
+        />
+        <span className="pointer-events-none absolute inset-y-0 right-0 pr-2.5 flex items-center">
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs font-medium text-green-700 bg-green-50 rounded">
+            <Lock className="w-3 h-3" />
+            {t('secretInput.saved')}
+          </span>
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div className="relative">
       <input
         type={show ? 'text' : 'password'}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => emit(e.target.value)}
         placeholder={placeholder}
+        autoComplete="new-password"
         className="w-full px-3 py-1.5 pr-9 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
       />
       <button
@@ -1775,7 +1818,7 @@ function TelegramPanel({ config, agentOptions, onChange, onRefresh }: TelegramPa
       setPairingState('done');
       setTimeout(() => setPairingState('idle'), 3000);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail ?? err?.message ?? '';
+      const detail = extractErrorMessage(err, '');
       toast.error(t('telegram.pairingError'), detail);
       setPairingState('idle');
     }
@@ -2242,8 +2285,9 @@ function EmailPanel({ config, agentOptions, onChange }: EmailPanelProps) {
             ]}
           />
         </FieldRow>
+        {/* Keyed: the two credentials must not share one input's state. */}
         {authMode === 'xoauth2' ? (
-          <FieldRow label={t('email.accessToken')} required hint={t('email.accessTokenHint')}>
+          <FieldRow key="accessToken" label={t('email.accessToken')} required hint={t('email.accessTokenHint')}>
             <SecretInput
               value={config.accessToken ?? ''}
               onChange={(v) => set('accessToken', v || undefined)}
@@ -2251,7 +2295,7 @@ function EmailPanel({ config, agentOptions, onChange }: EmailPanelProps) {
             />
           </FieldRow>
         ) : (
-          <FieldRow label={t('email.password')} required hint={t('email.passwordHint')}>
+          <FieldRow key="password" label={t('email.password')} required hint={t('email.passwordHint')}>
             <SecretInput
               value={config.password ?? ''}
               onChange={(v) => set('password', v || undefined)}
@@ -2531,7 +2575,7 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
         }
       }, 1500);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail ?? err?.message ?? '';
+      const detail = extractErrorMessage(err, '');
       setQrError(detail);
       setQrPhase('error');
     }
@@ -2893,7 +2937,7 @@ function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: Weixi
         }
       }, 2000);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail ?? err?.message ?? '';
+      const detail = extractErrorMessage(err, '');
       setQrError(detail);
       setQrPhase('error');
     }
@@ -3147,6 +3191,9 @@ function DetailHeader({
   const { t } = useTranslation('channel');
   const isConnected = status?.connected === true;
   const isInGateway = status !== undefined;
+  // Same reading as the status panel and the channel list: a failure waiting
+  // for its retry is an error, not "connecting".
+  const hasError = Boolean(status?.last_error);
   const isEnabled = config.enabled;
   const isBusy = savePhase !== 'idle';
 
@@ -3174,6 +3221,11 @@ function DetailHeader({
             <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-green-100 text-green-700 rounded-full">
               <Wifi className="w-3 h-3" />
               {t('status.running')}
+            </span>
+          ) : isInGateway && hasError ? (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-red-50 text-red-700 rounded-full">
+              <AlertTriangle className="w-3 h-3" />
+              {t('connection.error')}
             </span>
           ) : isInGateway ? (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700 rounded-full">

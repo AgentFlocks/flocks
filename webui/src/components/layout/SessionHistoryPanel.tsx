@@ -38,6 +38,7 @@ import { exportSessionJson } from '@/utils/sessionExport';
 import ProjectFolderDialog, { pathBasename, type ProjectFolderSummary } from './ProjectFolderDialog';
 import { announceProjectsChanged, onProjectsChanged } from '@/utils/projectEvents';
 import { requestClock } from '@/utils/sharedRequest';
+import { extractErrorMessage } from '@/utils/error';
 
 // Sessions outside any registered folder are grouped as "未分类".
 const UNGROUPED_ID = 'tasks';
@@ -230,8 +231,8 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
   });
   const compactCount = HISTORY_PAGE_SIZE;
 
-  // The open session can sort past the loaded pages; read it on its own so it stays listed
-  // (and its folder is known) without loading every older page.
+  // The open session may be older than the loaded pages, or newly created while
+  // their refresh is pending. Read it separately so either case stays reachable.
   const [olderOpenSession, setOlderOpenSession] = useState<Session | null>(null);
   // Bumped by refreshes so a renamed or moved open session is read again.
   const [olderOpenSessionVersion, setOlderOpenSessionVersion] = useState(0);
@@ -255,10 +256,16 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
       cancelled = true;
     };
   }, [olderOpenSessionVersion, openSessionInPage, selectedSessionId]);
-  const listedSessions = useMemo(
-    () => (olderOpenSession && !sessions.some((session) => session.id === olderOpenSession.id) ? [...sessions, olderOpenSession] : sessions),
-    [olderOpenSession, sessions],
-  );
+  const listedSessions = useMemo(() => {
+    if (!olderOpenSession || olderOpenSession.id !== selectedSessionId
+      || sessions.some((session) => session.id === olderOpenSession.id)) return sessions;
+    // A missing row is not necessarily old. Match the API's newest-activity-first
+    // order before grouping, so a new session does not jump from the bottom to
+    // the top when the pending list response arrives. Copy before sorting.
+    return [...sessions, olderOpenSession].sort(
+      (a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0),
+    );
+  }, [olderOpenSession, selectedSessionId, sessions]);
   // Handlers that await a confirmation read the list as it is afterwards, not as it was when they started.
   const listedSessionsRef = useRef(listedSessions);
   listedSessionsRef.current = listedSessions;
@@ -445,7 +452,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
       void refreshAll();
       openSession(created.id);
     } catch (err: any) {
-      toast.error(t('history.createSessionFailed'), err?.response?.data?.detail ?? err?.message);
+      toast.error(t('history.createSessionFailed'), extractErrorMessage(err, ''));
     } finally {
       setCreatingIn(null);
     }
@@ -493,8 +500,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
       toast.success(t('history.moved', { folder: folderLabel(folder) }));
       void refreshAll();
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      toast.error(t('history.moveFailed'), typeof detail === 'string' ? detail : err?.message);
+      toast.error(t('history.moveFailed'), extractErrorMessage(err, ''));
     }
   };
 
@@ -576,8 +582,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
       announceProjectsChanged('sidebar');
       void refreshAll();
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      toast.error(t('history.removeFolderFailed'), typeof detail === 'string' ? detail : err?.message);
+      toast.error(t('history.removeFolderFailed'), extractErrorMessage(err, ''));
     }
   };
 
@@ -642,8 +647,7 @@ export default function SessionHistoryPanel({ collapsed, onExpandSidebar, onNavi
       announceProjectsChanged('sidebar');
       void refreshAll();
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      toast.error(t('history.deleteFolderFailed'), typeof detail === 'string' ? detail : err?.message);
+      toast.error(t('history.deleteFolderFailed'), extractErrorMessage(err, ''));
     }
   };
 

@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import OverviewTab from './tabs/OverviewTab';
+import type { LatestExecutionChange } from './tabs/RunTab';
 import ChatTab, { type WorkflowChatLaunchRequest } from './tabs/ChatTab';
 import IntegrationTab from './tabs/IntegrationTab';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
@@ -74,7 +75,7 @@ interface RightPanelProps {
   chatLaunchRequest?: WorkflowChatLaunchRequest | null;
   onChatLaunchRequestHandled?: (id: number) => void;
   onActiveTabChange?: (tab: RightPanelTabId) => void;
-  onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
+  onLatestExecutionChange?: LatestExecutionChange;
   onExecutionSettled?: () => void;
   onWorkflowUpdated?: (updated: Workflow) => void;
   onFirstMessageSent?: () => void;

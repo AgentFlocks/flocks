@@ -2,12 +2,12 @@ import { useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Workflow, WorkflowExecution } from '@/api/workflow';
 import { Calendar, User, Tag, Activity, Clock, CheckCircle, XCircle, Layers, ChevronDown, ChevronRight, FileText } from 'lucide-react';
-import RunTab from './RunTab';
+import RunTab, { type LatestExecutionChange } from './RunTab';
 
 interface OverviewTabProps {
   workflow: Workflow;
   latestExecution?: WorkflowExecution | null;
-  onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
+  onLatestExecutionChange?: LatestExecutionChange;
   onExecutionSettled?: () => void;
   focusExecutionId?: string;
 }

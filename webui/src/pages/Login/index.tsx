@@ -13,11 +13,19 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Empty fields are answered under each field; the server only judges filled-in credentials.
+  const [fieldErrors, setFieldErrors] = useState<{ username?: string; password?: string }>({});
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSubmitting(true);
+    const missing = {
+      username: username.trim() ? undefined : t('login.usernameRequired'),
+      password: password ? undefined : t('login.passwordRequired'),
+    };
+    setFieldErrors(missing);
     setError(null);
+    if (missing.username || missing.password) return;
+    setSubmitting(true);
     try {
       await login(username, password);
     } catch (err: any) {
@@ -36,6 +44,7 @@ export default function LoginPage() {
     <AuthLayout>
       <form
         onSubmit={onSubmit}
+        noValidate
         className="w-full max-w-md bg-white border border-gray-200 rounded-xl p-6 shadow-sm space-y-4 dark:border-[#4a5563] dark:bg-[#303842] dark:shadow-xl dark:shadow-black/20"
       >
         <div>
@@ -46,22 +55,32 @@ export default function LoginPage() {
           <label className="text-sm text-gray-700 block mb-1 dark:text-[#d7dee8]">{t('fields.username')}</label>
           <input
             value={username}
-            onChange={(e) => setUsername(e.target.value)}
+            onChange={(e) => { setUsername(e.target.value); setFieldErrors((prev) => ({ ...prev, username: undefined })); }}
             className="w-full border border-gray-300 rounded-lg px-3 py-2 outline-none focus:border-blue-500 dark:border-[#4a5563] dark:bg-[#252c35] dark:text-[#d7dee8] dark:placeholder:text-[#9aa7b4] dark:focus:border-[#539bf5]"
             placeholder={t('fields.usernamePlaceholder')}
             autoComplete="username"
             required
+            aria-invalid={fieldErrors.username ? true : undefined}
+            aria-describedby={fieldErrors.username ? 'login-username-error' : undefined}
           />
+          {fieldErrors.username && (
+            <p id="login-username-error" className="mt-1 text-xs text-red-600 dark:text-red-300">{fieldErrors.username}</p>
+          )}
         </div>
         <div>
           <label className="text-sm text-gray-700 block mb-1 dark:text-[#d7dee8]">{t('fields.password')}</label>
           <PasswordInput
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(e) => { setPassword(e.target.value); setFieldErrors((prev) => ({ ...prev, password: undefined })); }}
             placeholder={t('fields.passwordPlaceholder')}
             autoComplete="current-password"
             required
+            aria-invalid={fieldErrors.password ? true : undefined}
+            aria-describedby={fieldErrors.password ? 'login-password-error' : undefined}
           />
+          {fieldErrors.password && (
+            <p id="login-password-error" className="mt-1 text-xs text-red-600 dark:text-red-300">{fieldErrors.password}</p>
+          )}
         </div>
         {error && (
           <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 dark:border-red-400/30 dark:bg-red-500/15 dark:text-red-200">

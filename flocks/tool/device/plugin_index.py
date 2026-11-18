@@ -7,6 +7,7 @@ frontend catalog. The only source of device identity is plugin metadata in
 from __future__ import annotations
 
 import re
+import threading
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -31,23 +32,48 @@ log = Log.create(service="device.plugin-index")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _SAFE_SERVICE_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _template_cache: Optional[list[DeviceTemplate]] = None
+# Bumped on every clear so a rebuild that started before the clear never
+# stores its older result over it.
+_template_cache_epoch = 0
+_template_cache_lock = threading.Lock()
+
+# Serializes create_custom_device_template's check-then-write.
+_custom_template_lock = threading.Lock()
+
+# Forced runtime refreshes are coalesced, see _refresh_device_plugin_runtime.
+_runtime_refresh_cond = threading.Condition()
+_runtime_refresh_owner: Optional[int] = None
+_runtime_refresh_started = 0
+_runtime_refresh_finished = 0
 
 
 def clear_device_template_cache() -> None:
     """Clear the in-process device template cache after plugin changes."""
-    global _template_cache
-    _template_cache = None
+    global _template_cache, _template_cache_epoch
+    with _template_cache_lock:
+        _template_cache = None
+        _template_cache_epoch += 1
 
 
 def list_device_templates(*, refresh: bool = False) -> list[DeviceTemplate]:
     """Return device templates from Hub catalog plus local descriptor discovery."""
     global _template_cache
-    if _template_cache is not None and not refresh:
-        return list(_template_cache)
-
     if refresh:
         _refresh_device_plugin_runtime()
 
+    with _template_cache_lock:
+        if _template_cache is not None:
+            return list(_template_cache)
+        epoch = _template_cache_epoch
+
+    templates = _build_device_templates()
+    with _template_cache_lock:
+        if _template_cache_epoch == epoch:
+            _template_cache = templates
+    return list(templates)
+
+
+def _build_device_templates() -> list[DeviceTemplate]:
     by_key: dict[str, DeviceTemplate] = {}
     tool_counts = _device_tool_counts()
     for entry in hub_catalog.list_catalog(plugin_type="device"):
@@ -112,9 +138,7 @@ def list_device_templates(*, refresh: bool = False) -> list[DeviceTemplate]:
             tool_counts=tool_counts,
         )
 
-    templates = sorted(by_key.values(), key=_sort_key)
-    _template_cache = templates
-    return list(templates)
+    return sorted(by_key.values(), key=_sort_key)
 
 
 def create_custom_device_template(body: CustomDeviceTemplateCreate) -> DeviceTemplate:
@@ -149,20 +173,26 @@ def create_custom_device_template(body: CustomDeviceTemplateCreate) -> DeviceTem
         validated_tools.append((tool_name, tool.model_dump(exclude_none=True)))
 
     provider_yaml = _custom_provider_yaml(body)
-    target.mkdir(parents=True, exist_ok=True)
-    _write_yaml(target / "_provider.yaml", provider_yaml)
-    for tool_name, tool_data in validated_tools:
-        _write_yaml(target / f"{tool_name}.yaml", _custom_tool_yaml(tool_data, service_id))
+    # Requests run this on worker threads: the existence check, the files and
+    # the install record are one step, or two requests for the same id both
+    # pass the check and write over each other.
+    with _custom_template_lock:
+        if target.exists() and hub_local.has_install_payload("device", target):
+            raise FileExistsError(f"device plugin '{plugin_id}' already exists")
+        target.mkdir(parents=True, exist_ok=True)
+        _write_yaml(target / "_provider.yaml", provider_yaml)
+        for tool_name, tool_data in validated_tools:
+            _write_yaml(target / f"{tool_name}.yaml", _custom_tool_yaml(tool_data, service_id))
 
-    record = hub_local.make_record(
-        plugin_type="device",
-        plugin_id=plugin_id,
-        version=body.version or "0.0.0",
-        source="custom",
-        install_path=target,
-        scope="global",
-    )
-    hub_local.save_installed_record(record)
+        record = hub_local.make_record(
+            plugin_type="device",
+            plugin_id=plugin_id,
+            version=body.version or "0.0.0",
+            source="custom",
+            install_path=target,
+            scope="global",
+        )
+        hub_local.save_installed_record(record)
 
     _refresh_device_plugin_runtime()
 
@@ -173,13 +203,80 @@ def create_custom_device_template(body: CustomDeviceTemplateCreate) -> DeviceTem
 
 
 def _refresh_device_plugin_runtime() -> None:
-    """Refresh both device descriptors and runtime tool registrations."""
-    clear_device_template_cache()
-    discover_api_service_descriptors(refresh=True)
+    """Refresh both device descriptors and runtime tool registrations.
+
+    A refresh reloads every plugin tool and can take many seconds, and the
+    device page, Hub actions and custom templates all ask for one. Overlapping
+    callers share the work instead of queuing a reload each: a caller returns
+    once a reload that started after it asked has finished (so a change it made
+    just before is picked up), and every caller arriving while a reload runs
+    shares the next one. Any number of overlapping requests costs at most two
+    reloads.
+    """
+    global _runtime_refresh_owner, _runtime_refresh_started, _runtime_refresh_finished
+    me = threading.get_ident()
+    with _runtime_refresh_cond:
+        if _runtime_refresh_owner == me:
+            # Asked again from inside our own reload: waiting would deadlock.
+            run = None
+        else:
+            wanted = _runtime_refresh_started + 1
+            while _runtime_refresh_finished < wanted and _runtime_refresh_owner is not None:
+                _runtime_refresh_cond.wait()
+            if _runtime_refresh_finished >= wanted:
+                return
+            _runtime_refresh_owner = me
+            _runtime_refresh_started += 1
+            run = _runtime_refresh_started
+    if run is None:
+        _reload_device_plugin_runtime()
+        return
+
+    reloaded = False
     try:
-        ToolRegistry.refresh_plugin_tools()
-    except Exception as exc:  # pragma: no cover - defensive runtime isolation
+        reloaded = _reload_device_plugin_runtime()
+    finally:
+        with _runtime_refresh_cond:
+            _runtime_refresh_owner = None
+            if reloaded:
+                _runtime_refresh_finished = run
+            # A failed reload counts for nobody: the next waiter runs its own.
+            _runtime_refresh_cond.notify_all()
+
+
+def _reload_device_plugin_runtime() -> bool:
+    """Reload descriptors and plugin tools, then swap in a rebuilt template index.
+
+    Returns False when the tool reload failed. The index is rebuilt here, while
+    the caller still owns the reload: building it reads the tool registry, whose
+    lock the next queued reload would otherwise hold, keeping this reload's
+    callers waiting for that one too. Readers keep the previous index during the
+    reload instead of rebuilding from a half-reloaded registry.
+    """
+    global _template_cache, _template_cache_epoch
+    with _template_cache_lock:
+        epoch = _template_cache_epoch
+    discover_api_service_descriptors(refresh=True)
+    reloaded = True
+    try:
+        # The page asks on every return to the window; with no plugin file
+        # changed since the last clean load the registry is already current.
+        ToolRegistry.refresh_plugin_tools_if_changed()
+    except Exception as exc:  # defensive runtime isolation: log, keep serving
         log.warn("device.templates.tool_refresh_failed", {"error": str(exc)})
+        reloaded = False
+    try:
+        templates = _build_device_templates()
+    except Exception:
+        clear_device_template_cache()  # the registry moved on; never keep the old index
+        raise
+    with _template_cache_lock:
+        # A clear during the reload (Hub install, file watcher) may postdate our
+        # scan: leave the index empty for the next reader to rebuild then.
+        _template_cache = templates if _template_cache_epoch == epoch else None
+        # Builds started before or during the reload must not overwrite this one.
+        _template_cache_epoch += 1
+    return reloaded
 
 
 def _template_from_plugin_root(

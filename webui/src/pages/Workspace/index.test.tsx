@@ -826,6 +826,50 @@ describe('WorkspacePage', () => {
     expect(screen.getByText('8 B')).toBeInTheDocument();
   });
 
+  it('新建目录名称为空时在输入框下方提示，不请求服务端', async () => {
+    mocks.list.mockResolvedValue({ data: [] });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByTitle('New directory'));
+    await user.type(screen.getByPlaceholderText('Folder name'), '   ');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent('files.dirNameRequired');
+    expect(mocks.createDir).not.toHaveBeenCalled();
+    await user.type(screen.getByPlaceholderText('Folder name'), 'reports');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('同名目录已存在时保留输入并提示改名', async () => {
+    mocks.list.mockResolvedValue({ data: [] });
+    mocks.createDir.mockResolvedValue({ data: { path: 'reports', created: false } });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByTitle('New directory'));
+    await user.type(screen.getByPlaceholderText('Folder name'), 'reports');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('files.dirNameExists');
+    expect(screen.getByPlaceholderText('Folder name')).toHaveValue('reports');
+    expect(mocks.toastError).not.toHaveBeenCalled();
+  });
+
+  it('同名文件占用时提示改名，不弹失败 toast', async () => {
+    mocks.list.mockResolvedValue({ data: [] });
+    mocks.createDir.mockRejectedValue({ response: { status: 409, data: { detail: 'A file already exists at: notes' } } });
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByTitle('New directory'));
+    await user.type(screen.getByPlaceholderText('Folder name'), 'notes');
+    await user.click(screen.getByRole('button', { name: 'Create' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('files.dirNameTakenByFile');
+    expect(mocks.toastError).not.toHaveBeenCalled();
+  });
+
   it('新建目录失败时 toast 展示服务端 message（HTTPException 错误体）', async () => {
     mocks.list.mockResolvedValue({ data: [] });
     mocks.createDir.mockRejectedValue({

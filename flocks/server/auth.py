@@ -5,6 +5,7 @@ FastAPI auth dependencies and cookie helpers.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import os
 import re
 from collections.abc import Awaitable, Callable, Mapping
@@ -166,6 +167,36 @@ def get_request_ip(request: Request) -> Optional[str]:
     if request.client:
         return request.client.host
     return None
+
+
+# A request that went through a proxy says so; a browser on this machine
+# talking to the service sends none of these.
+_PROXY_HEADERS = ("x-forwarded-for", "forwarded", "x-real-ip")
+
+
+def is_local_request(request: HTTPConnection) -> bool:
+    """Whether the peer is a loopback address, i.e. a browser on this machine.
+
+    The service listens on every interface by default, and until the first
+    administrator exists anyone who reaches the page could become it; that
+    first step is kept to this machine. A request carrying a forwarding header
+    is not local, whoever its peer: a reverse proxy on this machine connects
+    from loopback (127.0.0.1, ::1, ::ffff:127.0.0.1) for clients elsewhere,
+    and uvicorn resolves X-Forwarded-For only for the peers it trusts (by
+    default 127.0.0.1 alone). A proxy that sends no such header cannot be told
+    from a local browser. A name that is no IP address (the test client's
+    "testclient") is not local.
+    """
+    if any(request.headers.get(name) is not None for name in _PROXY_HEADERS):
+        return False
+    host = request.client.host if request.client else ""
+    try:
+        address = ipaddress.ip_address(host or "")
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback
 
 
 def get_request_user_agent(request: Request) -> Optional[str]:

@@ -54,6 +54,22 @@ describe('hubAPI.installStream', () => {
       .rejects.toThrow('该套件需要授权后才能安装');
   });
 
+  it.each([
+    // The service's exception handler puts the route's `detail` under `message`; there is no `detail`.
+    ['a refusal', 403, '该套件需要授权后才能安装', '该套件需要授权后才能安装'],
+    ['a structured refusal', 409, { code: 'hub_guided_install', message: '该插件通过 Rex 会话安装' }, '该插件通过 Rex 会话安装'],
+  ])('says why the service rejected an install before streaming: %s', async (_name, status, message, expected) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status,
+      json: async () => ({ error: 'HTTPException', message }),
+    }));
+
+    const { hubAPI } = await import('./hub');
+
+    await expect(hubAPI.installStream('component', 'pro-scene', vi.fn())).rejects.toThrow(expected);
+  });
+
   it('falls back to the HTTP status for a non-JSON error response', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: false,

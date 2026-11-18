@@ -30,6 +30,17 @@ from flocks.provider.credential import (
     is_unsendable_header_error,
 )
 from flocks.provider.provider import BaseProvider, Provider, ModelInfo as ProviderModelInfo
+from flocks.provider.tls import (
+    CA_CERT_KEY,
+    LEGACY_VERIFY_SSL_KEY,
+    MAX_CA_CERT_CHARS,
+    VERIFY_SSL_KEY,
+    CACertError,
+    classify_tls_error,
+    resolve_verify_ssl,
+    tls_error_hint,
+    validate_ca_cert,
+)
 from flocks.security.secrets import SecretManager
 from flocks.server.auth import get_request_ip, get_request_user_agent, require_admin, require_user
 from flocks.server.config_mutation import serialized_config_mutation
@@ -806,6 +817,8 @@ async def get_provider_catalog():
         # Propagate allow_multiple flag (only openai-compatible has it)
         if raw.get("allow_multiple"):
             provider_data["allow_multiple"] = True
+        # Whether the add dialog offers the SSL certificate settings.
+        provider_data["tls_configurable"] = _provider_tls_configurable(provider_id, raw.get("npm"))
 
         providers.append(provider_data)
 
@@ -1595,7 +1608,8 @@ async def update_api_service(provider_id: str, request: APIServiceUpdateRequest)
         statuses = await _read_api_service_status_cache()
         matched_count = 0
         if request.enabled is not None:
-            matched_count = _set_api_service_tools_enabled(provider_id, request.enabled)
+            async with ToolRegistry.write_lock():
+                matched_count = _set_api_service_tools_enabled(provider_id, request.enabled)
             if request.enabled:
                 status_payload = statuses.get(provider_id, {})
                 if status_payload.get("status") == "disabled":
@@ -1699,6 +1713,7 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
     """
     from flocks.hub.installer import uninstall_plugin
     from flocks.security import get_secret_manager
+    from flocks.tool.registry import ToolRegistry
 
     try:
         if _is_api_service_builtin(provider_id):
@@ -1736,7 +1751,8 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
             statuses.pop(provider_id, None)
             await _write_api_service_status_cache(statuses)
 
-        matched_count = _set_api_service_tools_enabled(provider_id, False)
+        async with ToolRegistry.write_lock():
+            matched_count = _set_api_service_tools_enabled(provider_id, False)
 
         uninstalled_plugin = False
         if backing_plugin is not None:
@@ -1861,6 +1877,18 @@ class ProviderCredentialRequest(BaseModel):
     fields: Optional[Dict[str, Optional[str]]] = Field(None, description="Dynamic service credential fields")
     provider_name: Optional[str] = Field(None, description="Display name for the provider")
     skip_catalog_bootstrap: bool = Field(False, description="Keep the model inventory explicitly managed instead of adding catalog defaults")
+    verify_ssl: Optional[bool] = Field(
+        None,
+        description=(
+            "LLM providers: check the server certificate (default). False turns the checks off "
+            "and accepts older TLS handshakes; omitted leaves the setting unchanged."
+        ),
+    )
+    ca_cert: Optional[str] = Field(
+        None,
+        max_length=MAX_CA_CERT_CHARS,
+        description="LLM providers: CA certificate in PEM, or its absolute path on the server; empty removes it, omitted leaves it unchanged.",
+    )
 
 
 class ProviderCredentialResponse(BaseModel):
@@ -1875,6 +1903,11 @@ class ProviderCredentialResponse(BaseModel):
     fields: Optional[Dict[str, Optional[str]]] = None
     secret_ids: Optional[Dict[str, str]] = None
     has_credential: bool
+    # LLM providers only: the TLS settings (flocks.provider.tls) and whether
+    # this provider's client follows them.
+    verify_ssl: Optional[bool] = None
+    ca_cert: Optional[str] = None
+    tls_configurable: bool = False
 
 
 def _load_llm_provider_credentials(
@@ -1895,15 +1928,18 @@ def _load_llm_provider_credentials(
         api_key = _get_inline_provider_api_key(provider_id)
 
     base_url = None
+    options: Dict[str, Any] = {}
     raw_provider = ConfigWriter.get_provider_raw(provider_id)
     if raw_provider:
-        options = raw_provider.get("options", {})
+        raw_options = raw_provider.get("options")
+        options = raw_options if isinstance(raw_options, dict) else {}
         base_url = options.get("baseURL") or options.get("base_url")
     if not base_url:
         base_url = secrets.get(f"{provider_id}_base_url")
 
     is_placeholder = _is_placeholder_api_key(api_key)
     ui_api_key = None if is_placeholder else api_key
+    ca_cert = options.get(CA_CERT_KEY)
 
     return ProviderCredentialResponse(
         secret_id=secret_id if api_key else None,
@@ -1911,7 +1947,67 @@ def _load_llm_provider_credentials(
         api_key_masked=SecretManager.mask(ui_api_key) if ui_api_key else None,
         base_url=base_url,
         has_credential=bool(api_key),
+        verify_ssl=resolve_verify_ssl(options),
+        ca_cert=(ca_cert.strip() or None) if isinstance(ca_cert, str) else None,
+        tls_configurable=_provider_tls_configurable(provider_id, (raw_provider or {}).get("npm")),
     )
+
+
+# npm packages whose providers are built on a client that follows the TLS
+# settings (flocks.provider.tls), for providers not registered yet.
+_TLS_CONFIGURABLE_NPMS = frozenset({
+    "@ai-sdk/openai-compatible",
+    "@ai-sdk/cherry",
+    "@ai-sdk/openai",
+    "@ai-sdk/anthropic",
+    "@ai-sdk/azure",
+})
+
+
+def _provider_tls_configurable(provider_id: str, npm: Optional[str] = None) -> bool:
+    """Whether ``verify_ssl`` / ``ca_cert`` reach this provider's HTTP client."""
+    provider = Provider._providers.get(provider_id)
+    if provider is not None:
+        return bool(getattr(provider, "SUPPORTS_TLS_SETTINGS", False))
+    if npm is None:
+        try:
+            from flocks.provider.model_catalog import get_raw_catalog
+
+            npm = (get_raw_catalog().get(provider_id) or {}).get("npm")
+        except Exception:
+            npm = None
+    return npm in _TLS_CONFIGURABLE_NPMS
+
+
+def _requested_tls_options(request: "ProviderCredentialRequest") -> Optional[Dict[str, Any]]:
+    """The TLS options a credentials request sets, checked; ``None`` when it sets none.
+
+    ``verify_ssl`` true and an empty ``ca_cert`` remove the keys, so a provider
+    left at the defaults keeps no TLS options at all.
+    """
+    if request.verify_ssl is None and request.ca_cert is None:
+        return None
+    updates: Dict[str, Any] = {}
+    if request.verify_ssl is not None:
+        updates[VERIFY_SSL_KEY] = None if request.verify_ssl else False
+    if request.ca_cert is not None:
+        try:
+            updates[CA_CERT_KEY] = validate_ca_cert(request.ca_cert)
+        except CACertError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return updates
+
+
+def _merge_tls_options(options: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(options)
+    if VERIFY_SSL_KEY in updates:
+        merged.pop(LEGACY_VERIFY_SSL_KEY, None)
+    for key, value in updates.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    return merged
 
 
 @router.get(
@@ -2020,6 +2116,12 @@ async def set_provider_credentials(
             # Unknown id and nothing to update: refuse before touching
             # .secret.json / flocks.json so no bogus provider is persisted.
             raise HTTPException(status_code=404, detail=f"Unknown provider: {provider_id}")
+        tls_updates = _requested_tls_options(request)
+        if tls_updates is not None:
+            await _ensure_provider_initialized()
+            raw_for_npm = ConfigWriter.get_provider_raw(provider_id) or {}
+            if not _provider_tls_configurable(provider_id, raw_for_npm.get("npm")):
+                raise HTTPException(status_code=400, detail="该模型服务不支持 SSL 证书设置。")
         secrets = get_secret_manager()
         secret_id = request.secret_id or f"{provider_id}_llm_key"
         effective_api_key = (request.api_key or "").strip()
@@ -2117,6 +2219,14 @@ async def set_provider_credentials(
                 )
             if request.skip_catalog_bootstrap:
                 ConfigWriter.update_provider_field(provider_id, "model_sync", "manual")
+            if tls_updates is not None:
+                current = ConfigWriter.get_provider_raw(provider_id) or {}
+                current_options = current.get("options")
+                ConfigWriter.update_provider_field(
+                    provider_id,
+                    "options",
+                    _merge_tls_options(current_options if isinstance(current_options, dict) else {}, tls_updates),
+                )
         else:
             # Provider not yet in flocks.json — create a minimal entry, but only
             # for ids the system actually knows (catalog / registered SDK
@@ -2171,6 +2281,8 @@ async def set_provider_credentials(
                 config_dict["model_sync"] = "manual"
             if request.provider_name:
                 config_dict["name"] = request.provider_name
+            if tls_updates is not None:
+                config_dict["options"] = _merge_tls_options(config_dict.get("options") or {}, tls_updates)
             ConfigWriter.add_provider(provider_id, config_dict)
 
         # Config.get() caches resolved secret values. Invalidate it after
@@ -2190,6 +2302,8 @@ async def set_provider_credentials(
                     effective_base_url = raw.get("options", {}).get("baseURL")
 
             custom_settings = _get_provider_custom_settings(provider)
+            if tls_updates is not None:
+                custom_settings = _merge_tls_options(custom_settings, tls_updates)
             provider.configure(ProviderConfig(
                 provider_id=provider_id,
                 api_key=effective_api_key,
@@ -2730,6 +2844,9 @@ def _credential_test_error_code(error: Exception) -> str:
         return "authentication_failed"
     if isinstance(error, (APITimeoutError, httpx.TimeoutException, TimeoutError)):
         return "connection_timeout"
+    tls_code = classify_tls_error(error)
+    if tls_code:
+        return tls_code
     if isinstance(error, (APIConnectionError, httpx.TransportError)):
         return "connection_error"
     status_code = getattr(error, "status_code", None)
@@ -2785,7 +2902,24 @@ def _without_credential(text: str, api_key: Optional[str]) -> str:
 def _credential_test_error_text(error: Exception, api_key: Optional[str]) -> str:
     if is_unsendable_header_error(error):
         return UNSENDABLE_HEADER_MESSAGE
+    hint = tls_error_hint(error)
+    if hint:
+        # The SDK says only "Connection error."; name the TLS cause and what to change.
+        return _without_credential(f"{hint}（{_tls_root_text(error)}）", api_key)
     return _without_credential(str(error), api_key)
+
+
+def _tls_root_text(error: BaseException) -> str:
+    """The innermost message of *error*'s cause chain, e.g. the OpenSSL reason."""
+    seen = set()
+    current: Optional[BaseException] = error
+    text = str(error)
+    while current is not None and id(current) not in seen and len(seen) < 16:
+        seen.add(id(current))
+        if str(current):
+            text = str(current)
+        current = current.__cause__ or current.__context__
+    return text[:300]
 
 
 async def _test_provider_credentials_impl(

@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 
 import ModelPage from './index';
-import { renderWithRouter } from '@/test/helpers';
+import { backendError, renderWithRouter } from '@/test/helpers';
 
 const mocks = vi.hoisted(() => ({
   toast: {
@@ -143,6 +143,7 @@ vi.mock('@/components/common/EntitySheet', () => ({
     submitLabel,
     onSubmit,
     onClose,
+    readOnly,
   }: {
     open?: boolean;
     children?: React.ReactNode;
@@ -150,13 +151,14 @@ vi.mock('@/components/common/EntitySheet', () => ({
     submitLabel?: React.ReactNode;
     onSubmit?: () => void;
     onClose?: () => void;
+    readOnly?: boolean;
   }) => open ? (
-    <div data-testid="entity-sheet">
+    <div data-testid="entity-sheet" data-read-only={readOnly ? 'true' : undefined}>
       <div>{children}</div>
       <button type="button" aria-label="Close sheet" onClick={onClose}>Close</button>
-      <button type="button" disabled={submitDisabled} onClick={onSubmit}>
+      {!readOnly && <button type="button" disabled={submitDisabled} onClick={onSubmit}>
         {submitLabel}
-      </button>
+      </button>}
     </div>
   ) : null,
 }));
@@ -291,6 +293,7 @@ describe('ModelPage add provider dialog', () => {
             model_count: 0,
             models: [],
             allow_multiple: true,
+            tls_configurable: true,
           },
         ],
       },
@@ -411,8 +414,56 @@ describe('ModelPage add provider dialog', () => {
         api_key: 'not-needed',
         description: 'Compatible endpoint',
         skip_catalog_bootstrap: true,
+        verify_ssl: true,
+        ca_cert: '',
       });
     });
+  });
+
+  it('creates an internal gateway with its certificate checks off', async () => {
+    const user = userEvent.setup();
+    renderWithRouter(<ModelPage />);
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await user.click(await screen.findByRole('button', { name: /OpenAI Compatible/i }));
+    await user.type(screen.getByPlaceholderText('e.g. SiliconFlow, LM Studio, My API'), 'Corp GW');
+    const baseUrlInput = screen.getByPlaceholderText('https://api.example.com/v1');
+    await user.clear(baseUrlInput);
+    await user.type(baseUrlInput, 'https://llm-gw.corp.internal/v1');
+
+    await user.click(screen.getByRole('switch', { name: 'form.tls.verify' }));
+    await user.click(screen.getByRole('button', { name: 'Save Provider' }));
+
+    await waitFor(() => expect(mocks.createProvider).toHaveBeenCalledWith({
+      name: 'Corp GW',
+      base_url: 'https://llm-gw.corp.internal/v1',
+      api_key: 'not-needed', // secret-guard: allow (test value)
+      description: 'Compatible endpoint',
+      skip_catalog_bootstrap: true,
+      verify_ssl: false,
+      ca_cert: '',
+    }));
+  });
+
+  it('checks a new gateway with its own SSL settings, not those saved for another gateway', async () => {
+    const user = userEvent.setup();
+    renderWithRouter(<ModelPage />);
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await user.click(await screen.findByRole('button', { name: /OpenAI Compatible/i }));
+    const baseUrlInput = screen.getByPlaceholderText('https://api.example.com/v1');
+    await user.clear(baseUrlInput);
+    await user.type(baseUrlInput, 'https://llm-gw2.corp.internal/v1');
+    await user.click(screen.getByRole('button', { name: 'compact.check' }));
+    await waitFor(() => expect(mocks.checkKey).toHaveBeenCalledWith('openai-compatible', expect.objectContaining({
+      base_url: 'https://llm-gw2.corp.internal/v1', verify_ssl: true, ca_cert: '',
+    })));
+  });
+
+  it('offers no SSL settings for a provider whose client ignores them', async () => {
+    const user = userEvent.setup();
+    renderWithRouter(<ModelPage />);
+    await user.click(screen.getByRole('button', { name: 'Add Provider' }));
+    await user.click(await screen.findByRole('button', { name: /ThreatBook-cn-llm/i }));
+    expect(screen.queryByRole('switch', { name: 'form.tls.verify' })).not.toBeInTheDocument();
   });
 
   it('shows why the backend refused the API key instead of the HTTP status', async () => {
@@ -666,6 +717,68 @@ describe('ModelPage configure provider dialog', () => {
     await waitFor(() => expect(mocks.saveModelInventory).toHaveBeenCalledWith('openai', { models: [expect.objectContaining({ id: 'gpt-4o', context_window: null, max_output_tokens: 8192, edited: true })], deleted: [] }));
   });
 
+  it('keeps the SSL settings away from a provider whose client ignores them', async () => {
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' });
+    expect(screen.queryByRole('switch', { name: 'form.tls.verify' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalledTimes(1));
+    expect(mocks.setCredentials.mock.calls[0][1]).not.toHaveProperty('verify_ssl');
+    expect(mocks.setCredentials.mock.calls[0][1]).not.toHaveProperty('ca_cert');
+  });
+
+  it('checks the gateway with unsaved SSL settings and saves only what changed', async () => {
+    mocks.revealCredentials.mockResolvedValue({
+      data: {
+        secret_id: 'openai_llm_key', // secret-guard: allow (test value)
+        api_key: 'sk-existing-secret-1234', // secret-guard: allow (test value)
+        api_key_masked: 'sk-***1234', // secret-guard: allow (test value)
+        base_url: 'https://gateway.internal/v1',
+        has_credential: true,
+        verify_ssl: true,
+        ca_cert: '{env:CORP_CA}',
+        tls_configurable: true,
+      },
+    });
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' });
+    const verify = screen.getByRole('switch', { name: 'form.tls.verify' });
+    expect(verify).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByLabelText(/form\.tls\.caCert/)).toHaveValue('{env:CORP_CA}');
+
+    await user.click(screen.getByRole('button', { name: 'compact.check' }));
+    expect(mocks.checkKey).toHaveBeenLastCalledWith('openai', { api_key: 'sk-existing-secret-1234', base_url: 'https://gateway.internal/v1' }); // secret-guard: allow (test value)
+
+    await user.click(verify);
+    expect(screen.getByRole('note')).toHaveTextContent('form.tls.disabledWarning');
+    await user.click(screen.getByRole('button', { name: 'compact.check' }));
+    expect(mocks.checkKey).toHaveBeenLastCalledWith('openai', {
+      api_key: 'sk-existing-secret-1234', base_url: 'https://gateway.internal/v1', verify_ssl: false, // secret-guard: allow (test value)
+    });
+
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalledTimes(1));
+    const saved = mocks.setCredentials.mock.calls[0][1];
+    expect(saved).toMatchObject({ verify_ssl: false });
+    expect(saved).not.toHaveProperty('ca_cert');
+  });
+
+  it('saves a pasted CA certificate', async () => {
+    mocks.revealCredentials.mockResolvedValue({
+      data: {
+        secret_id: 'openai_llm_key', api_key: 'sk-existing-secret-1234', api_key_masked: 'sk-***1234', // secret-guard: allow (test value)
+        base_url: 'https://gateway.internal/v1', has_credential: true, verify_ssl: true, ca_cert: null, tls_configurable: true,
+      },
+    });
+    const user = userEvent.setup(); await openConfigureDialog(user);
+    await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' });
+    await user.type(screen.getByLabelText(/form\.tls\.caCert/), '/etc/pki/corp-ca.pem');
+    await user.click(screen.getByRole('button', { name: 'compact.save' }));
+    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalledTimes(1));
+    expect(mocks.setCredentials.mock.calls[0][1]).toMatchObject({ ca_cert: '/etc/pki/corp-ca.pem' });
+    expect(mocks.setCredentials.mock.calls[0][1]).not.toHaveProperty('verify_ssl');
+  });
+
   it('saves without the key the dialog opened with, so a key rotated meanwhile is kept', async () => {
     const user = userEvent.setup(); await openConfigureDialog(user);
     await screen.findByRole('switch', { name: 'compact.enableModel gpt-4o' });
@@ -739,6 +852,37 @@ describe('ModelPage configure provider dialog', () => {
     await user.click(sheet.getByRole('tab', { name: 'discovery.manual' }));
     expect(sheet.getByText('form.modelId')).toBeVisible();
     expect(mocks.setCredentials).not.toHaveBeenCalled();
+  });
+
+  async function submitHandTypedModel(user: ReturnType<typeof userEvent.setup>) {
+    renderWithRouter(<ModelPage />);
+    const sheet = await openAddModelDialog(user);
+    await user.click(sheet.getByRole('tab', { name: 'discovery.manual' }));
+    await user.type(sheet.getByPlaceholderText('model-id'), 'dup-model');
+    await user.type(sheet.getByPlaceholderText('model-name'), 'Dup Model');
+    await user.click(sheet.getByRole('button', { name: 'form.addModelBtn' }));
+    return sheet;
+  }
+
+  it('says why a hand-typed model was refused instead of the bare status code', async () => {
+    mocks.createDefinition.mockRejectedValue(backendError(409, '模型 dup-model 已存在'));
+    const user = userEvent.setup(); await submitHandTypedModel(user);
+    await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledWith('operationFailed', '模型 dup-model 已存在'));
+  });
+
+  it('says why the check of a hand-typed model failed, and keeps its own wording when the service gives no reason', async () => {
+    mocks.createDefinition.mockResolvedValue({ data: { id: 'dup-model' } });
+    mocks.testCredentials.mockRejectedValue(backendError(502, '上游模型服务拒绝了这个模型'));
+    const user = userEvent.setup(); const sheet = await submitHandTypedModel(user);
+    expect(await sheet.findByText('上游模型服务拒绝了这个模型')).toBeInTheDocument();
+  });
+
+  it('does not show the transport error for a failed check the service gave no reason for', async () => {
+    mocks.createDefinition.mockResolvedValue({ data: { id: 'dup-model' } });
+    mocks.testCredentials.mockRejectedValue(new Error('Network Error'));
+    const user = userEvent.setup(); const sheet = await submitHandTypedModel(user);
+    expect(await sheet.findByText('Request failed')).toBeInTheDocument();
+    expect(sheet.queryByText('Network Error')).not.toBeInTheDocument();
   });
 });
 
@@ -845,9 +989,10 @@ describe('ModelPage member access', () => {
     const sheet = await screen.findByTestId('entity-sheet');
     expect(within(sheet).getByText('detail.configAdminOnly')).toBeInTheDocument();
     expect(within(sheet).getByRole('group')).toBeDisabled();
-    const save = within(sheet).getByRole('button', { name: 'Save' });
-    expect(save).toBeDisabled();
-    await user.click(save);
+    // A details view: no save or cancel, the sheet still closes.
+    expect(sheet).toHaveAttribute('data-read-only', 'true');
+    expect(within(sheet).queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
+    expect(within(sheet).getByRole('button', { name: 'Close sheet' })).toBeInTheDocument();
     expect(mocks.createDefinition).not.toHaveBeenCalled();
     expect(mocks.updateModelSettings).not.toHaveBeenCalled();
   });

@@ -6,7 +6,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import GroupNav, { useGroupDrag } from './GroupNav';
 import PluginGroupButton from './PluginGroupButton';
 import { ToastProvider, useToast } from '@/components/common/Toast';
-import { deriveGroupNav, type GroupNavItem, type GroupSelection } from './groupView';
+import { deriveGroupNav, GroupSaveError, type GroupNavItem, type GroupSelection } from './groupView';
 import messages from '@/locales/en-US/pluginGroups.json';
 import zhMessages from '@/locales/zh-CN/pluginGroups.json';
 
@@ -102,10 +102,10 @@ describe('pure native GroupNav', () => {
   });
 
   it('only shows a short drag hint, without permanent readonly or implementation explanations', async () => {
-    await mount([{ key: 'builtin', name: 'Built-in', group: 'Fixed', readOnlyReason: messages.readOnly.system }]);
+    await mount([{ key: 'custom', name: 'Custom' }, { key: 'builtin', name: 'Built-in', group: 'Fixed', readOnlyReason: 'The group of a built-in plugin cannot be changed.' }]);
     const sidebar = screen.getByRole('complementary');
-    expect(within(sidebar).getByText(messages.countsDescription)).toBeInTheDocument();
-    expect(sidebar).not.toHaveTextContent(messages.readOnly.system);
+    expect(within(sidebar).getByText('Drag plugins onto a group.')).toBeInTheDocument();
+    expect(sidebar).not.toHaveTextContent('The group of a built-in plugin cannot be changed.');
     expect(sidebar).not.toHaveTextContent(/derived|administrators|personal|native group/i);
     expect(notify).not.toHaveBeenCalled();
   });
@@ -151,6 +151,50 @@ describe('pure native GroupNav', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
+  it('names what the page groups and only shows the drag hint once something can be grouped', async () => {
+    const i18n = createInstance();
+    await i18n.use(initReactI18next).init({ lng: 'zh-CN', resources: { 'zh-CN': { pluginGroups: zhMessages } }, interpolation: { escapeValue: false } });
+    const props = { preferenceKey: 'kinds', selection: null, onSelect: vi.fn(), onMove: move, onRename: rename, onDelete: remove, total: 1, ungroupedCount: 1, groups: [] };
+    const { rerender } = render(<I18nextProvider i18n={i18n}><GroupNav {...props} itemKind="agent" items={[{ key: 'a', name: 'A' }]} /></I18nextProvider>);
+    expect(screen.getByText('拖动智能体到分组。')).toBeInTheDocument();
+    rerender(<I18nextProvider i18n={i18n}><GroupNav {...props} itemKind="device" items={[]} /></I18nextProvider>);
+    expect(screen.getByText('暂无可分组设备。')).toBeInTheDocument();
+    expect(screen.queryByText(/拖动/)).not.toBeInTheDocument();
+    rerender(<I18nextProvider i18n={i18n}><GroupNav {...props} itemKind="mcp" items={[{ key: 'm', name: 'M', readOnlyReason: 'fixed' }]} /></I18nextProvider>);
+    expect(screen.getByText('暂无可分组 MCP 服务。')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '新建分组' })).toBeDisabled();
+  });
+
+  it('says which rule an invalid group name breaks', async () => {
+    await mount([{ key: 'a', name: 'Alpha' }]);
+    fireEvent.click(screen.getByRole('button', { name: 'New group' }));
+    const input = screen.getByRole('textbox', { name: 'Group name' });
+    expect(screen.getByText(messages.dialog.nameHint)).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '   ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(screen.getByRole('alert')).toHaveTextContent(messages.validation.required);
+    fireEvent.change(input, { target: { value: 'x'.repeat(33) } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(screen.getByRole('alert')).toHaveTextContent(messages.validation.tooLong);
+    fireEvent.change(input, { target: { value: 'a\u0007b' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(screen.getByRole('alert')).toHaveTextContent(messages.validation.controlChars);
+    expect(move).not.toHaveBeenCalled();
+  });
+
+  it('keeps the server wording of a reworded failure under technical details', async () => {
+    move.mockRejectedValueOnce(new GroupSaveError('Saved 0; failed 1.\n\nAlpha (a): It changed after it was checked. Refresh and try again.', 'Alpha (a): /srv/x changed after it was checked'));
+    await mount([{ key: 'a', name: 'Alpha', group: 'Ops' }, { key: 'b', name: 'Beta', group: 'Ops' }]);
+    fireEvent.keyDown(screen.getByTestId('a'), { key: 'm', altKey: true });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Destination group' }), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('It changed after it was checked. Refresh and try again.');
+    const details = within(alert).getByText('Technical details');
+    expect(details.closest('details')).not.toHaveAttribute('open');
+    expect(within(alert).getByText('Alpha (a): /srv/x changed after it was checked')).toBeInTheDocument();
+  });
+
   it('only clears a missing selection for an authoritative unfiltered inventory', async () => {
     const i18n = createInstance();
     await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { pluginGroups: messages } } });
@@ -172,7 +216,7 @@ describe('pure native GroupNav', () => {
     fireEvent.click(screen.getByRole('button', { name: 'New group' }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Group name' }), { target: { value: '  Ops  ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    expect(screen.getByRole('alert')).toHaveTextContent(messages.validation.firstPlugin);
+    expect(screen.getByRole('alert')).toHaveTextContent('Choose an editable plugin.');
     expect(move).not.toHaveBeenCalled();
     expect(localStorage.length).toBe(0);
     const select = screen.getByRole('combobox', { name: 'First editable plugin' });
