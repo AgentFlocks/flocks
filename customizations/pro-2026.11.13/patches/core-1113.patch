@@ -134282,10 +134282,10 @@ index 00000000..2775a09e
 +});
 diff --git a/webui/src/pages/Knowledge/index.tsx b/webui/src/pages/Knowledge/index.tsx
 new file mode 100644
-index 00000000..96c151d7
+index 00000000..30edc3a0
 --- /dev/null
 +++ b/webui/src/pages/Knowledge/index.tsx
-@@ -0,0 +1,704 @@
+@@ -0,0 +1,702 @@
 +import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 +import { useSearchParams } from 'react-router-dom';
 +import {
@@ -134446,7 +134446,6 @@ index 00000000..96c151d7
 +                : <span className="w-3.5 shrink-0" />}
 +              <FileTypeIcon node={node} />
 +              <span className="min-w-0 flex-1"><span className="block truncate">{node.name}</span>{node.description && <span className="block truncate text-[10px] font-normal text-zinc-400">{t('knowledge.memoryProjectHint', { defaultValue: '项目经验与上下文' })}</span>}</span>
-+              {node.example && <span className="shrink-0 rounded bg-sky-50 px-1.5 py-0.5 text-[10px] text-sky-700 dark:bg-sky-950 dark:text-sky-300">{t('knowledge.memoryExample', { defaultValue: '示例补录' })}</span>}
 +              {source === 'outputs' && node.root !== 'personal' && (
 +                <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
 +                  {t(`knowledge.rootLabels.${node.root}`)}
@@ -134959,7 +134958,6 @@ index 00000000..96c151d7
 +                  </div>}
 +                </div>
 +              )}
-+              {selected.example && <p className="border-b border-sky-100 bg-sky-50 px-5 py-2 text-xs text-sky-800 dark:border-sky-900 dark:bg-sky-950/30 dark:text-sky-300">{t('knowledge.memoryExampleNotice', { defaultValue: '示例补录：非真实会话记录，仅用于页面展示；同日真实记忆优先显示。' })}</p>}
 +              {contentTruncated && (
 +                <div className="border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-700 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
 +                  {t('knowledge.preview.truncated', { limit: formatBytes(previewLimit) })}

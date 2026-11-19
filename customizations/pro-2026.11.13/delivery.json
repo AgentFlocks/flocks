@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.12",
+  "packageVersion": "1.15.13",
   "target": "2026.11.13-linux-amd64",
-  "status": "Digital employees, team skills and workflows classified by business purpose; accepted on local 5173; remote Linux pending",
+  "status": "UI acceptance approved for release using isolated example records on local 5173. Remote Linux verification pending.",
   "developmentSource": {
     "repository": "AgentFlocks/flocksdev",
-    "branch": "codex/workflow-business-groups",
-    "commit": "c2b8026f31743a57443e14638a49ebc79014205a",
+    "branch": "codex/memory-labels",
+    "commit": "f9a5aef1ddb3b9ffd057d9f1bbe0f287503c2ac0",
     "baseline": "2bc02382874a226ef63d20cab3734220ad752225"
   },
   "deploymentMode": "source-overlay",
-  "archive": "releases/flocks-customizations-1.15.12-pro-2026.11.13-full.tar.gz",
-  "sha256": "aadd55595f150ef342fa09e2512f5af429bb73a848684d33cad8aefcc99e13a5",
+  "archive": "releases/flocks-customizations-1.15.13-pro-2026.11.13-full.tar.gz",
+  "sha256": "f968f62974900decfbf921a6b3e0a4ff8b025ee4d554fdb12eda60520fe901e0",
   "payloadFiles": 586,
   "validation": "verification.json",
   "limits": [
-    "Local 5173 uses approved 11.13 enhanced Core on native Mac Pro11.12.2.",
+    "5173 ran 11.18.3. The real memory list returned HTTP 404. Browser checks used isolated fixtures.",
     "Remote Linux requires user Gitee sync and bash update-flocks.sh."
   ],
   "installerProtocol": 2,
   "updater": "../update-flocks.sh",
   "updaterSha256": "215d5370a5d9cebf98c1574ac622610d31b0cd983169465a29eb5afbf0b1bdae",
-  "validationScope": "148 agent/skill/route, 27 group navigation and 27 installer regressions; paired Pro builds; actual 5173 agent and skill groups, membership, refresh, source filter and workflow regression; unchanged user definitions/configs.",
-  "offlineRepositoryArchive": "releases/flocks-update-1.15.12.zip",
-  "offlineRepositoryArchiveSha256": "66e0ffeb02ec8a23bae910102198f122d47da8d8b76256b6232b847582265a51"
+  "validationScope": "Paired production build, 50 knowledge page tests, example selection regression, archive hashes and non-frontend payload equality.",
+  "offlineRepositoryArchive": "releases/flocks-update-1.15.13.zip",
+  "offlineRepositoryArchiveSha256": "0c706c14e5c4cf8b9ead6755845e9926fa79dd276b6dcd20945105b7671da333"
 }

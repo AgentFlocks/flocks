@@ -17,6 +17,9 @@ def prepare(core,pro):
         (pro,'git@github.com:AgentFlocks/flockspro.git',profile['proCommit'])):
         destination.parent.mkdir(parents=True,exist_ok=True)
         subprocess.run(['git','clone','--filter=blob:none','--no-checkout',repository,str(destination)],check=True)
+        if destination == core and profile.get('sourceBundle'):
+            subprocess.run(['git', '-C', str(core), 'fetch', str(ROOT / profile['sourceBundle']),
+                            'refs/heads/' + profile['developmentBranch']], check=True)
         checkout = ['checkout','-b',profile['developmentBranch'],commit] if destination == core else ['checkout','--detach',commit]
         subprocess.run(['git','-C',str(destination),*checkout],check=True)
     subprocess.run(['git','-C',str(core),'merge-base','--is-ancestor',profile['coreCommit'],profile['sourceCommit']],check=True)
