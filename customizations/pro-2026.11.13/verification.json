@@ -1,8 +1,9 @@
 {
-  "packageVersion": "1.15.13",
+  "schemaVersion": 1,
+  "packageVersion": "1.15.14",
   "target": {
     "schemaVersion": 1,
-    "packageVersion": "1.15.13",
+    "packageVersion": "1.15.14",
     "developmentBranch": "codex/memory-labels",
     "sourceRepository": "AgentFlocks/flocksdev",
     "sourceCommit": "f9a5aef1ddb3b9ffd057d9f1bbe0f287503c2ac0",
@@ -15,24 +16,89 @@
     "coreCommit": "2bc02382874a226ef63d20cab3734220ad752225",
     "protection": "native",
     "frontendSources": {
-      "flocks": "14d913c33d0c077f1e6128f1a7b9a23a34cad80e489b95f0b8c12a30034473a8",
+      "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
       "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
     },
-    "previousCustomization": "1.15.12",
+    "previousCustomization": "1.15.13",
     "sourceBundle": "patches/memory-labels.bundle"
   },
+  "scope": "Correct original release frontend source hash without changing any 1.15.13 payload bytes; enforce pinned baseline hashes during future builds.",
   "checks": {
-    "knowledgePageTests": 50,
-    "exampleFileSelectionWithoutBadgeOrNotice": "passed",
-    "pairedProProductionBuild": "passed",
-    "baselinePatchTreeEquivalence": "passed"
+    "installerTests": 29,
+    "originalCoreHashComputedFromPinnedCommit": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
+    "enhancedCoreHashIndependentlyVerified": "14d913c33d0c077f1e6128f1a7b9a23a34cad80e489b95f0b8c12a30034473a8",
+    "payloadIdenticalTo11513": true,
+    "productionFrontendReusedWithoutChanges": true
+  },
+  "linuxIsolatedAcceptance": {
+    "target": "2026.11.13-linux-amd64",
+    "environment": "Disposable linux/amd64 Docker container; copied managed install and customization state; seed volumes mounted read-only; no business data or service started.",
+    "originalProUpgradeVerify": "passed before and after operations",
+    "operations": [
+      "upgrade preflight from 1.15.0",
+      "upgrade to 1.15.14",
+      "repeat check already-applied",
+      "repeat apply",
+      "status",
+      "rollback-update to exact previous state",
+      "restore original",
+      "fresh preflight",
+      "fresh apply",
+      "repeat check and apply",
+      "restore original"
+    ],
+    "result": "passed",
+    "nativeBinaryUnchanged": true
   },
   "local5173Acceptance": {
     "date": "2026-11-19",
-    "hostRelease": "2026.11.18.3-darwin-arm64",
-    "frontend": "1.15.13 production assets loaded in an isolated browser session",
-    "result": "User accepted the fixture-based UI verification for release. Both daily examples opened without a badge or notice; refresh and file switching passed.",
-    "liveData": "Authenticated GET /api/knowledge/memory returned HTTP 404; live memory records could not be verified."
+    "url": "http://127.0.0.1:5173",
+    "actualNativeRelease": "2026.11.12.2-darwin-arm64",
+    "result": "passed read-only installer preflight on real running installation and original backup",
+    "installedVersion": "1.15.12",
+    "candidateVersion": "1.15.14",
+    "runtimeAndStateUnchanged": true,
+    "health": "healthy",
+    "platformAdaptation": "Temporary native release profile and signed before-hashes only; Linux delivered package is not modified.",
+    "limits": "Installer preflight only; no service restart or frontend redeployment."
   },
-  "remoteLinuxAcceptance": "pending"
+  "previousFrontendValidation11513": {
+    "packageVersion": "1.15.13",
+    "target": {
+      "schemaVersion": 1,
+      "packageVersion": "1.15.13",
+      "developmentBranch": "codex/memory-labels",
+      "sourceRepository": "AgentFlocks/flocksdev",
+      "sourceCommit": "f9a5aef1ddb3b9ffd057d9f1bbe0f287503c2ac0",
+      "deploymentMode": "source-overlay",
+      "installerProtocol": 2,
+      "edition": "flockspro",
+      "releaseId": "2026.11.13-linux-amd64",
+      "version": "2026.11.13",
+      "proCommit": "c16ed13499b3ca721e3549893d5507c506bc2c58",
+      "coreCommit": "2bc02382874a226ef63d20cab3734220ad752225",
+      "protection": "native",
+      "frontendSources": {
+        "flocks": "14d913c33d0c077f1e6128f1a7b9a23a34cad80e489b95f0b8c12a30034473a8",
+        "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
+      },
+      "previousCustomization": "1.15.12",
+      "sourceBundle": "patches/memory-labels.bundle"
+    },
+    "checks": {
+      "knowledgePageTests": 50,
+      "exampleFileSelectionWithoutBadgeOrNotice": "passed",
+      "pairedProProductionBuild": "passed",
+      "baselinePatchTreeEquivalence": "passed"
+    },
+    "local5173Acceptance": {
+      "date": "2026-11-19",
+      "hostRelease": "2026.11.18.3-darwin-arm64",
+      "frontend": "1.15.13 production assets loaded in an isolated browser session",
+      "result": "User accepted the fixture-based UI verification for release. Both daily examples opened without a badge or notice; refresh and file switching passed.",
+      "liveData": "Authenticated GET /api/knowledge/memory returned HTTP 404; live memory records could not be verified."
+    },
+    "remoteLinuxAcceptance": "pending"
+  },
+  "remoteLinuxAcceptance": "pending user Gitee sync, bash update-flocks.sh and returned output"
 }

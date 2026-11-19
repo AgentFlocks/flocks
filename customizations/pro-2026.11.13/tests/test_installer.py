@@ -437,7 +437,8 @@ def build_sources(tmp_path,monkeypatch):
     profile={'packageVersion':'fixture','version':'2026.11.12.2','coreCommit':builder.git(core,'rev-parse','HEAD').decode().strip(),
              'proCommit':builder.git(pro,'rev-parse','HEAD').decode().strip(),
              'developmentBranch':'zw_dev','deploymentMode':'source-overlay',
-             'frontendSources':{'flockspro':builder.source_hash(pro,'webui-overlay')}}
+             'frontendSources':{'flocks':builder.source_hash(core,'webui'),
+                                'flockspro':builder.source_hash(pro,'webui-overlay')}}
     (root/'target-profile.json').write_text(json.dumps(profile))
     for name in ('README.md','apply.py','apply.sh','update-flocks.py'):
         (root/name).write_text('fixture\n')
@@ -457,6 +458,49 @@ def test_build_refuses_stale_frontend_sources(build_sources):
     with pytest.raises(ValueError,match='frontend sources changed'):
         builder.build(core,pro,frontend)
     assert not (root/'.work/package').exists()
+
+
+def test_enhanced_frontend_hash_cannot_replace_original_baseline(build_sources):
+    builder,root,core,pro,frontend=build_sources
+    path=root/'target-profile.json'
+    profile=json.loads(path.read_text())
+    original=profile['frontendSources']['flocks']
+    (core/'webui/entry.ts').write_text('export const enhancement = true;\n')
+    subprocess.run(['git','-C',str(core),'add','webui/entry.ts'],check=True)
+    subprocess.run(['git','-C',str(core),'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','frontend enhancement'],check=True)
+    enhanced=builder.source_hash(core,'webui')
+    assert enhanced != original
+    manifest_path=frontend/'flocks-webui-manifest.json'
+    manifest=json.loads(manifest_path.read_text())
+    manifest['repositories']['flocks'].update(sha=builder.git(core,'rev-parse','HEAD').decode().strip(),webui_source_sha256=enhanced)
+    manifest_path.write_text(json.dumps(manifest))
+    profile['frontendSources']['flocks']=enhanced
+    path.write_text(json.dumps(profile))
+    with pytest.raises(ValueError,match='Original flocks frontend source hash'):
+        builder.build(core,pro,frontend)
+    assert not (root/'.work/package').exists()
+    profile['frontendSources']['flocks']=original
+    path.write_text(json.dumps(profile))
+    builder.build(core,pro,frontend)
+    assert list((root/'releases').glob('*.tar.gz'))
+
+
+def test_delivery_profile_accepts_original_1113_webui_manifest(tmp_path):
+    # These are the original release values, independent of package profile
+    # fields, so accidentally copying an enhanced hash cannot mask a failure.
+    runtime=tmp_path/'runtime'
+    (runtime/'webui-dist').mkdir(parents=True)
+    manifest={'repositories':{
+        'flocks':{'sha':'2bc02382874a226ef63d20cab3734220ad752225','dirty':False,
+                  'webui_source_sha256':'d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6'},
+        'flockspro':{'sha':'c16ed13499b3ca721e3549893d5507c506bc2c58','dirty':False,
+                     'webui_source_sha256':'729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c'}}}
+    (runtime/'webui-dist/flocks-webui-manifest.json').write_text(json.dumps(manifest))
+    profile=json.loads((Path(__file__).resolve().parents[1]/'target-profile.json').read_text())
+    installer.check_pair(runtime,profile)
+    profile['frontendSources']['flocks']='14d913c33d0c077f1e6128f1a7b9a23a34cad80e489b95f0b8c12a30034473a8'
+    with pytest.raises(installer.Refusal,match='Unexpected original Pro WebUI source: flocks'):
+        installer.check_pair(runtime,profile)
 
 
 def test_build_includes_committed_customization_branch_runtime_source(build_sources):

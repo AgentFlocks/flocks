@@ -36,6 +36,22 @@ def source_hash(root, scope):
     return digest.hexdigest()
 
 
+def committed_source_hash(root, revision, scope):
+    """Hash a pinned original tree independently of the enhanced worktree."""
+    digest = hashlib.sha256()
+    entries = git(root, 'ls-tree', '-rz', revision, '--', scope).split(b'\0')
+    for entry in sorted(filter(None, entries), key=lambda item: item.split(b'\t', 1)[1]):
+        metadata, name = entry.split(b'\t', 1)
+        mode, kind, object_id = metadata.split()
+        if kind != b'blob':
+            raise ValueError('Unsupported entry in original frontend source tree')
+        data = git(root, 'cat-file', 'blob', object_id.decode())
+        digest.update(name + b'\0')
+        digest.update(b'symlink\0' + data if mode == b'120000' else b'file\0' + bytes.fromhex(sha(data)))
+        digest.update(b'\0')
+    return digest.hexdigest()
+
+
 def build(core,pro,frontend):
     profile=json.loads((ROOT/'target-profile.json').read_text())
     base=profile['coreCommit']
@@ -49,6 +65,12 @@ def build(core,pro,frontend):
         raise ValueError('Build from the declared customization development branch')
     if git(pro,'rev-parse','HEAD').decode().strip()!=profile['proCommit']:
         raise ValueError('Source commits do not match the verified target')
+    for name, source, revision, scope in (
+        ('flocks', core, base, 'webui'),
+        ('flockspro', pro, profile['proCommit'], 'webui-overlay'),
+    ):
+        if profile['frontendSources'].get(name) != committed_source_hash(source, revision, scope):
+            raise ValueError(f'Original {name} frontend source hash must match the pinned release baseline')
     built=json.loads((frontend/'flocks-webui-manifest.json').read_text())
     if built['edition']!='flockspro' or built['repositories']['flockspro']['webui_source_sha256']!=profile['frontendSources']['flockspro']:
         raise ValueError('Frontend must be built with the matching Pro extension registry')

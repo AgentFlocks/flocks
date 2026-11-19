@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "packageVersion": "1.15.13",
+  "packageVersion": "1.15.14",
   "developmentBranch": "codex/memory-labels",
   "sourceRepository": "AgentFlocks/flocksdev",
   "sourceCommit": "f9a5aef1ddb3b9ffd057d9f1bbe0f287503c2ac0",
@@ -13,9 +13,9 @@
   "coreCommit": "2bc02382874a226ef63d20cab3734220ad752225",
   "protection": "native",
   "frontendSources": {
-    "flocks": "14d913c33d0c077f1e6128f1a7b9a23a34cad80e489b95f0b8c12a30034473a8",
+    "flocks": "d3c44767bea5abb94295d7b00d9a48085a6ae80ee61774434ec819e2ae85f1e6",
     "flockspro": "729e8548cc3dd6f6557620a9fb8d942d75edb781e4b1f32e87b13fb48c17414c"
   },
-  "previousCustomization": "1.15.12",
+  "previousCustomization": "1.15.13",
   "sourceBundle": "patches/memory-labels.bundle"
 }
