@@ -159,3 +159,126 @@ async def test_create_custom_model_defaults_reasoning_on(
     assert raw is not None
     assert raw["models"]["custom-reasoning-default"]["supports_reasoning"] is True
     assert Provider._models["custom-reasoning-default"].capabilities.supports_reasoning is True
+
+
+# ==================== auto-promote first model to default LLM ====================
+# Regression: a user adding a model from the model-management page (not the
+# onboarding wizard) ends up with a configured provider but no default LLM.
+# /api/onboarding/status then reports completed=False and the WebUI re-opens
+# the setup wizard on every login. create_model now promotes the FIRST model
+# to default when no default exists and the provider already has credentials.
+
+
+class _StubSecretManager:
+    def __init__(self, values):
+        self._values = values
+
+    def get(self, key):
+        return self._values.get(key)
+
+    def has(self, key):
+        return key in self._values
+
+
+@pytest.fixture
+def _credential_stub(monkeypatch):
+    """Stub the SecretManager exactly where credential.get_api_key resolves it.
+
+    credential.get_api_key does `from flocks.security import get_secret_manager`
+    at call time, so the name lives in the flocks.security __init__ namespace
+    (not the flocks.security.secrets submodule).
+    """
+    import flocks.security as security_module
+
+    return lambda values: monkeypatch.setattr(
+        security_module, "get_secret_manager", lambda: _StubSecretManager(values)
+    )
+
+
+async def _create_model(client, model_id="first-model"):
+    response = await client.post(
+        "/api/custom/models/custom-tb-inner",
+        json={
+            "model_id": model_id,
+            "name": model_id,
+            "context_window": 32768,
+            "max_output_tokens": 4096,
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+@pytest.mark.asyncio
+async def test_first_model_auto_becomes_default_when_credential_exists(
+    client: AsyncClient, temp_custom_provider_project, _credential_stub
+):
+    from flocks.config.config_writer import ConfigWriter
+
+    _credential_stub({"custom-tb-inner_llm_key": "sk-test-first"})
+
+    await _create_model(client)
+
+    default = ConfigWriter.get_default_model("llm")
+    assert default == {"provider_id": "custom-tb-inner", "model_id": "first-model"}
+
+
+@pytest.mark.asyncio
+async def test_first_model_with_inline_api_key_auto_becomes_default(
+    client: AsyncClient, temp_custom_provider_project, _credential_stub
+):
+    from flocks.config.config_writer import ConfigWriter
+
+    # No secret, but flocks.json holds a plain-text inline apiKey.
+    _credential_stub({})
+    ConfigWriter.update_provider_field("custom-tb-inner", "options.apiKey", "sk-inline-test")
+
+    await _create_model(client)
+
+    default = ConfigWriter.get_default_model("llm")
+    assert default == {"provider_id": "custom-tb-inner", "model_id": "first-model"}
+
+
+@pytest.mark.asyncio
+async def test_first_model_without_credential_does_not_become_default(
+    client: AsyncClient, temp_custom_provider_project, _credential_stub
+):
+    from flocks.config.config_writer import ConfigWriter
+
+    # Secret reference in config, but the secret value is absent -> no credential.
+    _credential_stub({})
+
+    await _create_model(client)
+
+    assert ConfigWriter.get_default_model("llm") is None
+
+
+@pytest.mark.asyncio
+async def test_second_model_does_not_override_existing_default(
+    client: AsyncClient, temp_custom_provider_project, _credential_stub
+):
+    from flocks.config.config_writer import ConfigWriter
+
+    _credential_stub({"custom-tb-inner_llm_key": "sk-test-second"})
+
+    await _create_model(client, model_id="first-model")
+    await _create_model(client, model_id="second-model")
+
+    default = ConfigWriter.get_default_model("llm")
+    assert default == {"provider_id": "custom-tb-inner", "model_id": "first-model"}
+
+
+@pytest.mark.asyncio
+async def test_create_model_does_not_override_an_existing_default_from_another_provider(
+    client: AsyncClient, temp_custom_provider_project, _credential_stub
+):
+    from flocks.config.config_writer import ConfigWriter
+
+    _credential_stub({"custom-tb-inner_llm_key": "sk-test-override"})
+    # A default from a different provider (e.g. configured via onboarding) must be kept.
+    ConfigWriter.set_default_model("llm", "threatbook-cn-llm", "qwen3-max")
+
+    await _create_model(client)
+
+    default = ConfigWriter.get_default_model("llm")
+    assert default == {"provider_id": "threatbook-cn-llm", "model_id": "qwen3-max"}
